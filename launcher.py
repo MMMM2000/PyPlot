@@ -5,6 +5,8 @@ import sys
 import os
 import time
 import logging
+import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
 from importlib import import_module
@@ -89,6 +91,41 @@ def _schedule_theme_application(app: QtWidgets.QApplication) -> None:
             LOGGER.warning("Failed to apply app theme", exc_info=True)
 
     QtCore.QTimer.singleShot(0, _apply_theme)
+
+
+def _crash_log_path() -> Path:
+    return Path(__file__).resolve().parent / "logs" / "crash_log.txt"
+
+
+def _append_crash_log(message: str) -> None:
+    try:
+        from plotting.shared.logfiles import append_text_with_rotation
+    except Exception:
+        return
+    try:
+        append_text_with_rotation(
+            _crash_log_path(),
+            message,
+            max_bytes=1_000_000,
+            backup_count=5,
+        )
+    except Exception:
+        pass
+
+
+def _install_crash_log_hook() -> None:
+    previous_hook = sys.excepthook
+
+    def _hook(exc_type: type[BaseException], exc_value: BaseException, exc_tb: Any) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            previous_hook(exc_type, exc_value, exc_tb)
+            return
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        trace = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        _append_crash_log(f"[{timestamp}] Unhandled exception\n{trace}\n")
+        previous_hook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _hook
 
 
 @lru_cache(maxsize=1)

@@ -255,6 +255,8 @@ def test_graph_option_apply_refreshes_open_graphs() -> None:
                 **window.GRAPH_OPTION_DEFAULTS,
                 "figure_width": 9.0,
                 "figure_height": 4.5,
+                "figure_width_auto": False,
+                "figure_height_auto": False,
                 "line_width": 2.2,
                 "legend_columns": 2,
             }

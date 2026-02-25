@@ -8019,15 +8019,18 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def _set_tree_item_text(
         self,
         item: QtWidgets.QTreeWidgetItem,
-        *,
-        name: str,
+        name: str | None = None,
         details: str = "",
         name_tooltip: str | None = None,
         details_tooltip: str | None = None,
     ) -> None:
-        item.setText(0, str(name))
+        # Backward-compatible signature:
+        # older call sites may pass `name` positionally while newer code uses
+        # keywords for readability.
+        text_name = str(item.text(0) if name is None else name)
+        item.setText(0, text_name)
         item.setText(1, str(details))
-        item.setToolTip(0, name_tooltip if name_tooltip is not None else str(name))
+        item.setToolTip(0, name_tooltip if name_tooltip is not None else text_name)
         item.setToolTip(1, details_tooltip if details_tooltip is not None else str(details))
 
     def _ensure_data_root(self) -> QtWidgets.QTreeWidgetItem:

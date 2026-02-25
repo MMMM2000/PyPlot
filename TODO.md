@@ -19,14 +19,7 @@
 - Origin exports: verify line/symbol styles and graph titles mirror PyPlot across plugins (VSM hysteresis, VSM temp scan, DMA iso-stress, FMR).
 
 ## In Progress
-- Verify launcher `Plotting` recency sort after the new open-order fallback (especially stale settings migration where old timestamps/order values exist).
-- Re-check macOS maximized graph rendering for bottom-edge clipping/scrollbars after MDI frame-compensation + canvas shrink-to-fit changes.
-- Verify shared Graph formatting dialog flow on macOS after replacing popovers (toolbar button + double-click should always open the movable window and focus the right section).
-- Investigate intermittent PyPlot macOS hard aborts where no fresh traceback appears in `logs/message_log.txt`/`logs/crash_log.txt`; capture native macOS crash report for the latest repro.
-- Validate FMR automatic forward/back sweep alignment on representative measurement sets and tune default behavior if over/under-correcting.
-- Shared graph formatting follow-ups: axis value-factor formulas (for example `10^-3`) with optional unit-label reflection, sticky apply buttons, and per-session remembered Save Graph format.
-- Improve Project Explorer readability (elide/column sizing/tooltips/path compaction) so large imported sets stay scan-friendly.
-- Align Current Annealing default graph sizing/label style with the shared PyPlot formatting baseline.
+
 
 ## Done
 - Current Annealing Logger: add configurable start current (default 10 mA) for supplies with higher minimum output.

@@ -2584,19 +2584,38 @@ class VSMPlotter(PyPlotWindow):
 
     def _choose_folder(self) -> None:
         start_dir = str(self._default_source_directory())
-        directory = QtWidgets.QFileDialog.getExistingDirectory(
+        directories = self._select_directories(
             self,
-            "Select folder with VSM files",
-            start_dir,
+            title="Select folder(s) with VSM files",
+            start_dir=Path(start_dir),
         )
-        if not directory:
+        if not directories:
             return
-        paths = _find_vsm_files(Path(directory))
-        if paths:
-            self.path_edit.setText(";".join(str(path) for path in paths))
-        else:
-            self.path_edit.setText(directory)
-        self._remember_source_directory(Path(directory))
+
+        seen: set[Path] = set()
+        paths: list[Path] = []
+        for raw_directory in directories:
+            directory = Path(raw_directory)
+            for path in _find_vsm_files(directory):
+                resolved = path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                paths.append(resolved)
+
+        if not paths:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No VSM files were found in the selected folder(s).",
+            )
+            self.path_edit.setText(";".join(directories))
+            self._remember_source_directory(Path(directories[0]))
+            self._save_settings()
+            return
+
+        self.path_edit.setText(";".join(str(path) for path in paths))
+        self._remember_source_directory(Path(directories[0]))
         self._load_measurements(show_warning=False)
         self._save_settings()
 

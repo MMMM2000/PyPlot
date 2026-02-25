@@ -83,6 +83,8 @@ def test_graph_option_defaults_apply_figure_size_to_new_plot_tabs() -> None:
             {
                 "figure_width": 8.4,
                 "figure_height": 5.6,
+                "figure_width_auto": False,
+                "figure_height_auto": False,
             }
         )
 

@@ -41,6 +41,10 @@ from plotting.plugins import (
 
 LOGGER = logging.getLogger(__name__)
 
+MM_PER_INCH = 25.4
+DEFAULT_PAPER_WIDTH_MM = 85.0
+DEFAULT_FIGURE_ASPECT_RATIO = 1.5
+
 
 def _builtin_plugin_factories() -> Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]]:
     """Create factories for each registered built-in plugin class."""
@@ -67,8 +71,12 @@ class PyPlotWorkbench(PyPlotWindow):
         "tick_font": 10,
         "line_width": 1.5,
         "marker_size": 6.0,
-        "figure_width": 7.5,
-        "figure_height": 5.0,
+        "figure_width": DEFAULT_PAPER_WIDTH_MM / MM_PER_INCH,
+        "figure_height": (DEFAULT_PAPER_WIDTH_MM / MM_PER_INCH) / DEFAULT_FIGURE_ASPECT_RATIO,
+        "figure_width_auto": False,
+        "figure_height_auto": True,
+        "figure_aspect_mode": "auto",
+        "figure_aspect_ratio": DEFAULT_FIGURE_ASPECT_RATIO,
         "legend_location": "best",
         "legend_font_size": 10,
         "legend_columns": 1,
@@ -410,15 +418,30 @@ class PyPlotWorkbench(PyPlotWindow):
         defaults = dict(self.GRAPH_OPTION_DEFAULTS)
         source = payload if isinstance(payload, dict) else {}
         choices = {value for _, value in self._legend_location_choices()}
+        figure_aspect_choices = {"auto", "custom"}
         cleaned: Dict[str, Any] = {}
         for key, default in defaults.items():
             value = source.get(key, default)
+            if key == "figure_width" and "figure_width" not in source and "figure_width_mm" in source:
+                try:
+                    value = float(source.get("figure_width_mm")) / MM_PER_INCH
+                except Exception:
+                    value = default
+            if key == "figure_height" and "figure_height" not in source and "figure_height_mm" in source:
+                try:
+                    value = float(source.get("figure_height_mm")) / MM_PER_INCH
+                except Exception:
+                    value = default
             if isinstance(default, bool):
                 cleaned[key] = bool(value)
                 continue
             if key == "legend_location":
                 token = str(value).strip().lower()
                 cleaned[key] = token if token in choices else str(default)
+                continue
+            if key == "figure_aspect_mode":
+                token = str(value).strip().lower()
+                cleaned[key] = token if token in figure_aspect_choices else str(default)
                 continue
             if isinstance(default, int):
                 try:
@@ -443,9 +466,11 @@ class PyPlotWorkbench(PyPlotWindow):
                 elif key == "marker_size":
                     parsed = max(0.1, min(parsed, 30.0))
                 elif key == "figure_width":
-                    parsed = max(1.0, min(parsed, 40.0))
+                    parsed = max(0.5, min(parsed, 20.0))
                 elif key == "figure_height":
-                    parsed = max(1.0, min(parsed, 30.0))
+                    parsed = max(0.5, min(parsed, 20.0))
+                elif key == "figure_aspect_ratio":
+                    parsed = max(0.2, min(parsed, 20.0))
                 cleaned[key] = parsed
                 continue
             cleaned[key] = value
@@ -530,7 +555,11 @@ class PyPlotWorkbench(PyPlotWindow):
             elif isinstance(widget, QtWidgets.QSpinBox):
                 widget.setValue(int(value))
             elif isinstance(widget, QtWidgets.QDoubleSpinBox):
-                widget.setValue(float(value))
+                if key in {"figure_width", "figure_height"}:
+                    widget.setValue(float(value) * MM_PER_INCH)
+                else:
+                    widget.setValue(float(value))
+        self._sync_graph_option_figure_controls(widgets)
 
     def _graph_options_from_widgets(
         self,
@@ -546,8 +575,31 @@ class PyPlotWorkbench(PyPlotWindow):
             elif isinstance(widget, QtWidgets.QSpinBox):
                 payload[key] = int(widget.value())
             elif isinstance(widget, QtWidgets.QDoubleSpinBox):
-                payload[key] = float(widget.value())
+                if key in {"figure_width", "figure_height"}:
+                    payload[key] = float(widget.value()) / MM_PER_INCH
+                else:
+                    payload[key] = float(widget.value())
         return self._clean_graph_option_payload(payload)
+
+    @staticmethod
+    def _sync_graph_option_figure_controls(widgets: Dict[str, QtWidgets.QWidget]) -> None:
+        width_spin = widgets.get("figure_width")
+        height_spin = widgets.get("figure_height")
+        width_auto = widgets.get("figure_width_auto")
+        height_auto = widgets.get("figure_height_auto")
+        figure_aspect_mode = widgets.get("figure_aspect_mode")
+        figure_aspect_ratio = widgets.get("figure_aspect_ratio")
+        if isinstance(width_spin, QtWidgets.QDoubleSpinBox) and isinstance(width_auto, QtWidgets.QCheckBox):
+            width_spin.setEnabled(not width_auto.isChecked())
+        if isinstance(height_spin, QtWidgets.QDoubleSpinBox) and isinstance(height_auto, QtWidgets.QCheckBox):
+            height_spin.setEnabled(not height_auto.isChecked())
+        mode = (
+            str(figure_aspect_mode.currentData())
+            if isinstance(figure_aspect_mode, QtWidgets.QComboBox)
+            else "auto"
+        )
+        if isinstance(figure_aspect_ratio, QtWidgets.QDoubleSpinBox):
+            figure_aspect_ratio.setEnabled(mode == "custom")
 
     def _build_graph_options_widgets(
         self,
@@ -580,15 +632,44 @@ class PyPlotWorkbench(PyPlotWindow):
         marker_size_spin.setRange(0.1, 30.0)
         marker_size_spin.setSingleStep(0.2)
         figure_width_spin = QtWidgets.QDoubleSpinBox(parent)
-        figure_width_spin.setRange(1.0, 40.0)
-        figure_width_spin.setSingleStep(0.2)
+        figure_width_spin.setRange(10.0, 600.0)
+        figure_width_spin.setSingleStep(1.0)
+        figure_width_spin.setDecimals(1)
         figure_height_spin = QtWidgets.QDoubleSpinBox(parent)
-        figure_height_spin.setRange(1.0, 30.0)
-        figure_height_spin.setSingleStep(0.2)
+        figure_height_spin.setRange(10.0, 600.0)
+        figure_height_spin.setSingleStep(1.0)
+        figure_height_spin.setDecimals(1)
+        figure_width_auto_cb = QtWidgets.QCheckBox("auto", parent)
+        figure_height_auto_cb = QtWidgets.QCheckBox("auto", parent)
+        figure_aspect_mode_combo = QtWidgets.QComboBox(parent)
+        figure_aspect_mode_combo.addItem("Auto", "auto")
+        figure_aspect_mode_combo.addItem("Custom", "custom")
+        figure_aspect_ratio_spin = QtWidgets.QDoubleSpinBox(parent)
+        figure_aspect_ratio_spin.setRange(0.2, 20.0)
+        figure_aspect_ratio_spin.setSingleStep(0.05)
+        figure_aspect_ratio_spin.setDecimals(3)
+        figure_aspect_ratio_spin.setValue(DEFAULT_FIGURE_ASPECT_RATIO)
+
+        figure_width_row = QtWidgets.QWidget(parent)
+        figure_width_layout = QtWidgets.QHBoxLayout(figure_width_row)
+        figure_width_layout.setContentsMargins(0, 0, 0, 0)
+        figure_width_layout.setSpacing(6)
+        figure_width_layout.addWidget(figure_width_spin, 1)
+        figure_width_layout.addWidget(figure_width_auto_cb, 0)
+
+        figure_height_row = QtWidgets.QWidget(parent)
+        figure_height_layout = QtWidgets.QHBoxLayout(figure_height_row)
+        figure_height_layout.setContentsMargins(0, 0, 0, 0)
+        figure_height_layout.setSpacing(6)
+        figure_height_layout.addWidget(figure_height_spin, 1)
+        figure_height_layout.addWidget(figure_height_auto_cb, 0)
+
         form.addRow("Line width:", line_width_spin)
         form.addRow("Marker size:", marker_size_spin)
-        form.addRow("Figure width (in):", figure_width_spin)
-        form.addRow("Figure height (in):", figure_height_spin)
+        form.addRow("Figure width (mm):", figure_width_row)
+        form.addRow("Figure height (mm):", figure_height_row)
+        form.addRow("Figure aspect:", figure_aspect_mode_combo)
+        form.addRow("Aspect ratio (W/H):", figure_aspect_ratio_spin)
 
         legend_location_combo = QtWidgets.QComboBox(parent)
         for label, token in self._legend_location_choices():
@@ -610,7 +691,7 @@ class PyPlotWorkbench(PyPlotWindow):
         form.addRow(legend_text_follow_colors_cb)
         form.addRow(legend_draggable_cb)
 
-        return {
+        widgets = {
             "show_grid": show_grid_cb,
             "show_legend": show_legend_cb,
             "title_font": title_font_spin,
@@ -620,6 +701,10 @@ class PyPlotWorkbench(PyPlotWindow):
             "marker_size": marker_size_spin,
             "figure_width": figure_width_spin,
             "figure_height": figure_height_spin,
+            "figure_width_auto": figure_width_auto_cb,
+            "figure_height_auto": figure_height_auto_cb,
+            "figure_aspect_mode": figure_aspect_mode_combo,
+            "figure_aspect_ratio": figure_aspect_ratio_spin,
             "legend_location": legend_location_combo,
             "legend_font_size": legend_font_size_spin,
             "legend_columns": legend_columns_spin,
@@ -627,6 +712,17 @@ class PyPlotWorkbench(PyPlotWindow):
             "legend_text_follow_colors": legend_text_follow_colors_cb,
             "legend_draggable": legend_draggable_cb,
         }
+        figure_width_auto_cb.toggled.connect(
+            lambda _checked=False, _widgets=widgets: self._sync_graph_option_figure_controls(_widgets)
+        )
+        figure_height_auto_cb.toggled.connect(
+            lambda _checked=False, _widgets=widgets: self._sync_graph_option_figure_controls(_widgets)
+        )
+        figure_aspect_mode_combo.currentIndexChanged.connect(
+            lambda _index=0, _widgets=widgets: self._sync_graph_option_figure_controls(_widgets)
+        )
+        self._sync_graph_option_figure_controls(widgets)
+        return widgets
 
     def _apply_graph_option_defaults_to_controls(self, plugin_name: str | None = None) -> None:
         if not self._graph_format_controls:
@@ -642,6 +738,10 @@ class PyPlotWorkbench(PyPlotWindow):
             "marker_size": "marker_size_spin",
             "figure_width": "figure_width_spin",
             "figure_height": "figure_height_spin",
+            "figure_width_auto": "figure_width_auto_cb",
+            "figure_height_auto": "figure_height_auto_cb",
+            "figure_aspect_mode": "figure_aspect_mode_combo",
+            "figure_aspect_ratio": "figure_aspect_ratio_spin",
             "legend_location": "legend_location_combo",
             "legend_font_size": "legend_font_spin",
             "legend_columns": "legend_columns_spin",
@@ -817,28 +917,99 @@ class PyPlotWorkbench(PyPlotWindow):
         reset_btn.clicked.connect(_reset_defaults)
         dialog.exec()
 
+    @staticmethod
+    def _figure_ratio_from_figure(figure: Any) -> float | None:
+        if figure is None:
+            return None
+        try:
+            size = figure.get_size_inches()
+        except Exception:
+            return None
+        if size is None or not hasattr(size, "__len__") or len(size) < 2:
+            return None
+        try:
+            width = float(size[0])
+            height = float(size[1])
+        except Exception:
+            return None
+        if not math.isfinite(width) or not math.isfinite(height) or width <= 0.0 or height <= 0.0:
+            return None
+        return width / height
+
+    def _resolve_figure_size_inches(
+        self,
+        *,
+        figure: Any,
+        width_in: float,
+        height_in: float,
+        width_auto: bool,
+        height_auto: bool,
+        aspect_mode: str,
+        aspect_ratio: float,
+    ) -> tuple[float, float]:
+        fallback_width_in = float(DEFAULT_PAPER_WIDTH_MM / MM_PER_INCH)
+        fallback_ratio = float(DEFAULT_FIGURE_ASPECT_RATIO)
+        width = float(width_in) if math.isfinite(width_in) and width_in > 0.0 else fallback_width_in
+        height = float(height_in) if math.isfinite(height_in) and height_in > 0.0 else fallback_width_in / fallback_ratio
+        current_ratio = self._figure_ratio_from_figure(figure)
+        ratio = (
+            float(aspect_ratio)
+            if str(aspect_mode).strip().lower() == "custom"
+            and math.isfinite(aspect_ratio)
+            and aspect_ratio > 0.0
+            else (current_ratio if current_ratio is not None else fallback_ratio)
+        )
+        if not math.isfinite(ratio) or ratio <= 0.0:
+            ratio = fallback_ratio
+
+        if width_auto and height_auto:
+            width = fallback_width_in
+            height = width / ratio
+        elif width_auto:
+            width = max(0.5, height * ratio)
+        elif height_auto:
+            height = max(0.5, width / ratio)
+
+        width = max(0.5, min(width, 20.0))
+        height = max(0.5, min(height, 20.0))
+        return width, height
+
     def _apply_graph_options_to_axes(self, axes: Any, *, plugin_name: str | None) -> None:
         if axes is None:
             return
         options = self._effective_graph_options(plugin_name)
         figure = getattr(axes, "figure", None)
         try:
-            figure_width = float(options.get("figure_width", 7.5))
+            figure_width = float(options.get("figure_width", self.GRAPH_OPTION_DEFAULTS["figure_width"]))
         except Exception:
-            figure_width = 7.5
+            figure_width = float(self.GRAPH_OPTION_DEFAULTS["figure_width"])
         try:
-            figure_height = float(options.get("figure_height", 5.0))
+            figure_height = float(options.get("figure_height", self.GRAPH_OPTION_DEFAULTS["figure_height"]))
         except Exception:
-            figure_height = 5.0
-        if not math.isfinite(figure_width) or figure_width <= 0.0:
-            figure_width = 7.5
-        if not math.isfinite(figure_height) or figure_height <= 0.0:
-            figure_height = 5.0
+            figure_height = float(self.GRAPH_OPTION_DEFAULTS["figure_height"])
+        figure_width_auto = bool(options.get("figure_width_auto", self.GRAPH_OPTION_DEFAULTS["figure_width_auto"]))
+        figure_height_auto = bool(options.get("figure_height_auto", self.GRAPH_OPTION_DEFAULTS["figure_height_auto"]))
+        figure_aspect_mode = str(options.get("figure_aspect_mode", self.GRAPH_OPTION_DEFAULTS["figure_aspect_mode"]))
+        try:
+            figure_aspect_ratio = float(
+                options.get("figure_aspect_ratio", self.GRAPH_OPTION_DEFAULTS["figure_aspect_ratio"])
+            )
+        except Exception:
+            figure_aspect_ratio = float(self.GRAPH_OPTION_DEFAULTS["figure_aspect_ratio"])
+        figure_width, figure_height = self._resolve_figure_size_inches(
+            figure=figure,
+            width_in=figure_width,
+            height_in=figure_height,
+            width_auto=figure_width_auto,
+            height_auto=figure_height_auto,
+            aspect_mode=figure_aspect_mode,
+            aspect_ratio=figure_aspect_ratio,
+        )
         if figure is not None:
             try:
                 figure.set_size_inches(
-                    max(1.0, figure_width),
-                    max(1.0, figure_height),
+                    figure_width,
+                    figure_height,
                     forward=True,
                 )
             except Exception:
@@ -1691,15 +1862,46 @@ class PyPlotWorkbench(PyPlotWindow):
         text_form.addRow("Marker size:", marker_size_spin)
 
         figure_width_spin = QtWidgets.QDoubleSpinBox(axes_tab)
-        figure_width_spin.setRange(1.0, 40.0)
-        figure_width_spin.setSingleStep(0.2)
-        figure_width_spin.setValue(6.0)
+        figure_width_spin.setRange(10.0, 600.0)
+        figure_width_spin.setSingleStep(1.0)
+        figure_width_spin.setDecimals(1)
+        figure_width_spin.setValue(float(DEFAULT_PAPER_WIDTH_MM))
         figure_height_spin = QtWidgets.QDoubleSpinBox(axes_tab)
-        figure_height_spin.setRange(1.0, 30.0)
-        figure_height_spin.setSingleStep(0.2)
-        figure_height_spin.setValue(4.0)
-        axes_form.addRow("Figure width (in):", figure_width_spin)
-        axes_form.addRow("Figure height (in):", figure_height_spin)
+        figure_height_spin.setRange(10.0, 600.0)
+        figure_height_spin.setSingleStep(1.0)
+        figure_height_spin.setDecimals(1)
+        figure_height_spin.setValue(float(DEFAULT_PAPER_WIDTH_MM / DEFAULT_FIGURE_ASPECT_RATIO))
+        figure_width_auto_cb = QtWidgets.QCheckBox("auto", axes_tab)
+        figure_height_auto_cb = QtWidgets.QCheckBox("auto", axes_tab)
+        figure_width_auto_cb.setChecked(False)
+        figure_height_auto_cb.setChecked(True)
+        figure_aspect_mode_combo = QtWidgets.QComboBox(axes_tab)
+        figure_aspect_mode_combo.addItem("Auto", "auto")
+        figure_aspect_mode_combo.addItem("Custom", "custom")
+        figure_aspect_ratio_spin = QtWidgets.QDoubleSpinBox(axes_tab)
+        figure_aspect_ratio_spin.setRange(0.2, 20.0)
+        figure_aspect_ratio_spin.setSingleStep(0.05)
+        figure_aspect_ratio_spin.setDecimals(3)
+        figure_aspect_ratio_spin.setValue(float(DEFAULT_FIGURE_ASPECT_RATIO))
+
+        figure_width_row = QtWidgets.QWidget(axes_tab)
+        figure_width_layout = QtWidgets.QHBoxLayout(figure_width_row)
+        figure_width_layout.setContentsMargins(0, 0, 0, 0)
+        figure_width_layout.setSpacing(6)
+        figure_width_layout.addWidget(figure_width_spin, 1)
+        figure_width_layout.addWidget(figure_width_auto_cb, 0)
+
+        figure_height_row = QtWidgets.QWidget(axes_tab)
+        figure_height_layout = QtWidgets.QHBoxLayout(figure_height_row)
+        figure_height_layout.setContentsMargins(0, 0, 0, 0)
+        figure_height_layout.setSpacing(6)
+        figure_height_layout.addWidget(figure_height_spin, 1)
+        figure_height_layout.addWidget(figure_height_auto_cb, 0)
+
+        axes_form.addRow("Figure width (mm):", figure_width_row)
+        axes_form.addRow("Figure height (mm):", figure_height_row)
+        axes_form.addRow("Figure aspect:", figure_aspect_mode_combo)
+        axes_form.addRow("Aspect ratio (W/H):", figure_aspect_ratio_spin)
 
         axes_aspect_combo = QtWidgets.QComboBox(axes_tab)
         axes_aspect_combo.addItem("Auto", "auto")
@@ -1711,6 +1913,9 @@ class PyPlotWorkbench(PyPlotWindow):
         axes_aspect_ratio_spin.setDecimals(3)
         axes_aspect_ratio_spin.setValue(1.0)
         axes_aspect_combo.currentIndexChanged.connect(self._sync_aspect_controls)
+        figure_width_auto_cb.toggled.connect(self._sync_aspect_controls)
+        figure_height_auto_cb.toggled.connect(self._sync_aspect_controls)
+        figure_aspect_mode_combo.currentIndexChanged.connect(self._sync_aspect_controls)
         axes_form.addRow("Axes aspect:", axes_aspect_combo)
         axes_form.addRow("Aspect ratio (Y/X):", axes_aspect_ratio_spin)
 
@@ -1880,6 +2085,10 @@ class PyPlotWorkbench(PyPlotWindow):
             "marker_size_spin": marker_size_spin,
             "figure_width_spin": figure_width_spin,
             "figure_height_spin": figure_height_spin,
+            "figure_width_auto_cb": figure_width_auto_cb,
+            "figure_height_auto_cb": figure_height_auto_cb,
+            "figure_aspect_mode_combo": figure_aspect_mode_combo,
+            "figure_aspect_ratio_spin": figure_aspect_ratio_spin,
             "axes_aspect_combo": axes_aspect_combo,
             "axes_aspect_ratio_spin": axes_aspect_ratio_spin,
             "x_scale_combo": x_scale_combo,
@@ -2224,6 +2433,24 @@ class PyPlotWorkbench(PyPlotWindow):
     def _sync_aspect_controls(self) -> None:
         if self._graph_format_updating:
             return
+        figure_width_spin = self._control_widget("figure_width_spin")
+        figure_height_spin = self._control_widget("figure_height_spin")
+        figure_width_auto_cb = self._control_widget("figure_width_auto_cb")
+        figure_height_auto_cb = self._control_widget("figure_height_auto_cb")
+        figure_aspect_mode_combo = self._control_widget("figure_aspect_mode_combo")
+        figure_aspect_ratio_spin = self._control_widget("figure_aspect_ratio_spin")
+        if isinstance(figure_width_spin, QtWidgets.QDoubleSpinBox) and isinstance(figure_width_auto_cb, QtWidgets.QCheckBox):
+            figure_width_spin.setEnabled(not figure_width_auto_cb.isChecked())
+        if isinstance(figure_height_spin, QtWidgets.QDoubleSpinBox) and isinstance(figure_height_auto_cb, QtWidgets.QCheckBox):
+            figure_height_spin.setEnabled(not figure_height_auto_cb.isChecked())
+        figure_mode = (
+            str(figure_aspect_mode_combo.currentData())
+            if isinstance(figure_aspect_mode_combo, QtWidgets.QComboBox)
+            else "auto"
+        )
+        if isinstance(figure_aspect_ratio_spin, QtWidgets.QDoubleSpinBox):
+            figure_aspect_ratio_spin.setEnabled(figure_mode == "custom")
+
         mode_widget = self._control_widget("axes_aspect_combo")
         ratio_widget = self._control_widget("axes_aspect_ratio_spin")
         mode = (
@@ -2376,6 +2603,10 @@ class PyPlotWorkbench(PyPlotWindow):
         marker_size_spin = self._control_widget("marker_size_spin")
         figure_width_spin = self._control_widget("figure_width_spin")
         figure_height_spin = self._control_widget("figure_height_spin")
+        figure_width_auto_cb = self._control_widget("figure_width_auto_cb")
+        figure_height_auto_cb = self._control_widget("figure_height_auto_cb")
+        figure_aspect_mode_combo = self._control_widget("figure_aspect_mode_combo")
+        figure_aspect_ratio_spin = self._control_widget("figure_aspect_ratio_spin")
         axes_aspect_combo = self._control_widget("axes_aspect_combo")
         axes_aspect_ratio_spin = self._control_widget("axes_aspect_ratio_spin")
         x_scale_combo = self._control_widget("x_scale_combo")
@@ -2475,6 +2706,8 @@ class PyPlotWorkbench(PyPlotWindow):
             if isinstance(marker_size_spin, QtWidgets.QDoubleSpinBox):
                 marker_size_spin.setValue(max(0.1, marker_size))
 
+            plugin_name = self._plugin_name_for_axes(axes)
+            graph_options = self._effective_graph_options(plugin_name)
             figure = getattr(axes, "figure", None)
             try:
                 size_inches = figure.get_size_inches() if figure is not None else None
@@ -2491,9 +2724,26 @@ class PyPlotWorkbench(PyPlotWindow):
                 except Exception:
                     width_in = height_in = None
                 if isinstance(figure_width_spin, QtWidgets.QDoubleSpinBox) and width_in:
-                    figure_width_spin.setValue(max(1.0, width_in))
+                    figure_width_spin.setValue(max(10.0, width_in * MM_PER_INCH))
                 if isinstance(figure_height_spin, QtWidgets.QDoubleSpinBox) and height_in:
-                    figure_height_spin.setValue(max(1.0, height_in))
+                    figure_height_spin.setValue(max(10.0, height_in * MM_PER_INCH))
+            if isinstance(figure_width_auto_cb, QtWidgets.QCheckBox):
+                figure_width_auto_cb.setChecked(bool(graph_options.get("figure_width_auto", False)))
+            if isinstance(figure_height_auto_cb, QtWidgets.QCheckBox):
+                figure_height_auto_cb.setChecked(bool(graph_options.get("figure_height_auto", True)))
+            if isinstance(figure_aspect_mode_combo, QtWidgets.QComboBox):
+                mode = str(graph_options.get("figure_aspect_mode", "auto"))
+                index = figure_aspect_mode_combo.findData(mode)
+                if index >= 0:
+                    figure_aspect_mode_combo.setCurrentIndex(index)
+            if isinstance(figure_aspect_ratio_spin, QtWidgets.QDoubleSpinBox):
+                try:
+                    ratio = float(graph_options.get("figure_aspect_ratio", DEFAULT_FIGURE_ASPECT_RATIO))
+                except Exception:
+                    ratio = float(DEFAULT_FIGURE_ASPECT_RATIO)
+                if not math.isfinite(ratio) or ratio <= 0:
+                    ratio = float(DEFAULT_FIGURE_ASPECT_RATIO)
+                figure_aspect_ratio_spin.setValue(max(0.2, min(ratio, 20.0)))
 
             aspect_mode, aspect_ratio = self._axes_aspect_from_axes(axes)
             if isinstance(axes_aspect_combo, QtWidgets.QComboBox):
@@ -2584,7 +2834,6 @@ class PyPlotWorkbench(PyPlotWindow):
                 legend = axes.get_legend()
             except Exception:
                 legend = None
-            plugin_name = self._plugin_name_for_axes(axes)
             legend_state = self._legend_state_snapshot(legend, plugin_name=plugin_name)
             if isinstance(show_legend_cb, QtWidgets.QCheckBox):
                 show_legend_cb.setChecked(bool(legend_state.get("visible", True)))
@@ -2743,6 +2992,10 @@ class PyPlotWorkbench(PyPlotWindow):
         marker_size_spin = self._control_widget("marker_size_spin")
         figure_width_spin = self._control_widget("figure_width_spin")
         figure_height_spin = self._control_widget("figure_height_spin")
+        figure_width_auto_cb = self._control_widget("figure_width_auto_cb")
+        figure_height_auto_cb = self._control_widget("figure_height_auto_cb")
+        figure_aspect_mode_combo = self._control_widget("figure_aspect_mode_combo")
+        figure_aspect_ratio_spin = self._control_widget("figure_aspect_ratio_spin")
         axes_aspect_combo = self._control_widget("axes_aspect_combo")
         axes_aspect_ratio_spin = self._control_widget("axes_aspect_ratio_spin")
         x_scale_combo = self._control_widget("x_scale_combo")
@@ -2805,15 +3058,37 @@ class PyPlotWorkbench(PyPlotWindow):
             if isinstance(marker_size_spin, QtWidgets.QDoubleSpinBox)
             else 6.0
         )
-        figure_width = (
+        figure_width_mm = (
             float(figure_width_spin.value())
             if isinstance(figure_width_spin, QtWidgets.QDoubleSpinBox)
-            else 6.0
+            else float(DEFAULT_PAPER_WIDTH_MM)
         )
-        figure_height = (
+        figure_height_mm = (
             float(figure_height_spin.value())
             if isinstance(figure_height_spin, QtWidgets.QDoubleSpinBox)
-            else 4.0
+            else float(DEFAULT_PAPER_WIDTH_MM / DEFAULT_FIGURE_ASPECT_RATIO)
+        )
+        figure_width = float(figure_width_mm / MM_PER_INCH)
+        figure_height = float(figure_height_mm / MM_PER_INCH)
+        figure_width_auto = (
+            bool(figure_width_auto_cb.isChecked())
+            if isinstance(figure_width_auto_cb, QtWidgets.QCheckBox)
+            else False
+        )
+        figure_height_auto = (
+            bool(figure_height_auto_cb.isChecked())
+            if isinstance(figure_height_auto_cb, QtWidgets.QCheckBox)
+            else True
+        )
+        figure_aspect_mode = (
+            str(figure_aspect_mode_combo.currentData())
+            if isinstance(figure_aspect_mode_combo, QtWidgets.QComboBox)
+            else "auto"
+        )
+        figure_aspect_ratio = (
+            float(figure_aspect_ratio_spin.value())
+            if isinstance(figure_aspect_ratio_spin, QtWidgets.QDoubleSpinBox)
+            else float(DEFAULT_FIGURE_ASPECT_RATIO)
         )
         axes_aspect_mode = (
             str(axes_aspect_combo.currentData())
@@ -2958,11 +3233,25 @@ class PyPlotWorkbench(PyPlotWindow):
                 "Y tick increment must be a positive number when using 'By increment'.",
             )
             return
-        if figure_width <= 0 or figure_height <= 0:
+        if not figure_width_auto and figure_width <= 0:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Graph formatting",
-                "Figure width and height must be positive.",
+                "Figure width must be positive.",
+            )
+            return
+        if not figure_height_auto and figure_height <= 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Graph formatting",
+                "Figure height must be positive.",
+            )
+            return
+        if figure_aspect_mode == "custom" and figure_aspect_ratio <= 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Graph formatting",
+                "Figure custom aspect ratio must be positive.",
             )
             return
         if axes_aspect_mode == "custom" and axes_aspect_ratio <= 0:
@@ -2988,11 +3277,21 @@ class PyPlotWorkbench(PyPlotWindow):
                 if not sibling_axes:
                     sibling_axes = [axes]
 
+                resolved_figure_width, resolved_figure_height = self._resolve_figure_size_inches(
+                    figure=figure,
+                    width_in=figure_width,
+                    height_in=figure_height,
+                    width_auto=figure_width_auto,
+                    height_auto=figure_height_auto,
+                    aspect_mode=figure_aspect_mode,
+                    aspect_ratio=figure_aspect_ratio,
+                )
+
                 if figure is not None:
                     try:
                         figure.set_size_inches(
-                            max(1.0, figure_width),
-                            max(1.0, figure_height),
+                            resolved_figure_width,
+                            resolved_figure_height,
                             forward=True,
                         )
                     except Exception:
@@ -3144,7 +3443,7 @@ class PyPlotWorkbench(PyPlotWindow):
                             sub = None
                         if sub is not None:
                             try:
-                                aspect = float(figure_width) / float(figure_height)
+                                aspect = float(resolved_figure_width) / float(resolved_figure_height)
                             except Exception:
                                 aspect = 0.0
                             if math.isfinite(aspect) and aspect > 0.0:
@@ -3170,8 +3469,8 @@ class PyPlotWorkbench(PyPlotWindow):
                                 dpi = float(getattr(figure, "dpi", 100.0) or 100.0) if figure is not None else 100.0
                             except Exception:
                                 dpi = 100.0
-                            target_w = int(max(360.0, figure_width * dpi + 48.0))
-                            target_h = int(max(260.0, figure_height * dpi + 72.0))
+                            target_w = int(max(360.0, resolved_figure_width * dpi + 48.0))
+                            target_h = int(max(260.0, resolved_figure_height * dpi + 72.0))
                             fitted = False
                             fitter = getattr(self.tab_widget, "_fit_subwindow", None)
                             if callable(fitter):

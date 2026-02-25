@@ -403,11 +403,15 @@ def test_apply_graph_format_sets_figure_dimensions_and_axes_aspect() -> None:
         controls = window._graph_format_controls
         assert isinstance(controls.get("figure_width_spin"), QtWidgets.QDoubleSpinBox)
         assert isinstance(controls.get("figure_height_spin"), QtWidgets.QDoubleSpinBox)
+        assert isinstance(controls.get("figure_width_auto_cb"), QtWidgets.QCheckBox)
+        assert isinstance(controls.get("figure_height_auto_cb"), QtWidgets.QCheckBox)
         assert isinstance(controls.get("axes_aspect_combo"), QtWidgets.QComboBox)
         assert isinstance(controls.get("axes_aspect_ratio_spin"), QtWidgets.QDoubleSpinBox)
 
-        controls["figure_width_spin"].setValue(8.0)
-        controls["figure_height_spin"].setValue(5.0)
+        controls["figure_width_auto_cb"].setChecked(False)
+        controls["figure_height_auto_cb"].setChecked(False)
+        controls["figure_width_spin"].setValue(203.2)  # 8.0 in
+        controls["figure_height_spin"].setValue(127.0)  # 5.0 in
         controls["axes_aspect_combo"].setCurrentIndex(
             controls["axes_aspect_combo"].findData("custom")
         )
