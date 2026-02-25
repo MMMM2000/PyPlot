@@ -47,6 +47,7 @@ OriginC/OC??Tmp*/
 
 # Local runtime logs
 logs/*.txt
+logs/*.txt.*
 !logs/.gitkeep
 
 # Local per-worktree scratch notes

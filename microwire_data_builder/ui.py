@@ -48,6 +48,7 @@ from plotting.shared.utils import (
     format_annealing_title,
     developer_options,
 )
+from plotting.shared.logfiles import append_text_with_rotation, open_rotating_text_log
 
 from .storage import MiniDatabaseData, MiniDatabaseStore
 
@@ -21879,8 +21880,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             path.parent.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             level_name = logging.getLevelName(int(level))
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(f"{timestamp} [{level_name}] {message}\n")
+            append_text_with_rotation(path, f"{timestamp} [{level_name}] {message}\n")
         except Exception as exc:
             self._log_capture_faulted = True
             self._log_capture_enabled = False
@@ -21904,8 +21904,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._crash_handlers_installed = True
         crash_path = self._resolve_crash_log_path()
         try:
-            crash_path.parent.mkdir(parents=True, exist_ok=True)
-            self._crash_log_handle = crash_path.open("a", encoding="utf-8")
+            self._crash_log_handle = open_rotating_text_log(crash_path)
         except Exception:
             self._crash_log_handle = None
             return

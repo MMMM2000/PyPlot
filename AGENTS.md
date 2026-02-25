@@ -21,7 +21,7 @@
 - Run `launcher.py` as a smoke check when practical, or note if skipped.
 - For graph-generation changes, always create real output graphs and visually verify results before finishing.
 - Apply that visual verification rule to both Matplotlib graphs and Origin-exported graphs, and continue iterating until output is correct.
-- When visual verification is requested, include the final validated screenshots in chat before cleanup.
+- When visual verification is requested, report the final validated screenshot file paths in the response before cleanup (in-chat image rendering may be unavailable).
 - Remove temporary PNG artifacts created only for test/debug verification after you finish validating the output.
 - Remove temporary visual-check artifacts (for example probe dumps, one-off summaries, and debug folders in `logs/`) once validation is complete.
 

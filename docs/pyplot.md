@@ -83,6 +83,7 @@ Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph forma
 
 - The **Message Log** dock records plug-in output, path skips, and Origin export diagnostics. Toggle it via the dock switcher on the left edge whenever you need to inspect warnings.
 - Project Explorer/Object Manager activation errors (for example, stale item references) are now captured in the Message Log instead of hard-aborting the app.
+- Workspace log files under `logs/` now auto-rotate at ~1 MiB with numbered backups (`.1` ... `.5`) so long sessions do not grow `message_log.txt` / `crash_log.txt` without bound.
 
 ## Extending / Debugging
 

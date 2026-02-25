@@ -74,6 +74,7 @@ from plotting.shared.readability import (
     create_readability_group,
     sync_readability,
 )
+from plotting.shared.logfiles import append_text_with_rotation
 
 
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
@@ -7945,8 +7946,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             path.parent.mkdir(parents=True, exist_ok=True)
             level_name = "ERROR" if level == "error" else "INFO"
             timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(f"{timestamp} [{level_name}] {message}\n")
+            append_text_with_rotation(path, f"{timestamp} [{level_name}] {message}\n")
         except Exception as exc:
             self._log_capture_faulted = True
             self._log_capture_enabled = False
