@@ -7973,13 +7973,18 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         tail = "/".join(parts[-max_parts:])
         return f".../{tail}"
 
-    @staticmethod
     def _select_directories(
-        parent: QtWidgets.QWidget | None,
+        self,
+        parent: QtWidgets.QWidget | None = None,
         *,
         title: str,
         start_dir: Path | str,
     ) -> list[str]:
+        # Backward compatible with both invocation styles:
+        #   self._select_directories(self, title=..., start_dir=...)
+        #   self._select_directories(title=..., start_dir=...)
+        if parent is None and isinstance(self, QtWidgets.QWidget):
+            parent = self
         selected: list[str] = []
         seen: set[str] = set()
         current_dir = Path(start_dir)

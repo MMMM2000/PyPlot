@@ -2052,6 +2052,8 @@ class VSMPlotter(PyPlotWindow):
         plottable = sum(1 for m in self.measurements if m.temperature is not None and m.angle is not None)
         candidate_columns: List[str]
         common_columns: Dict[str, int] | None = None
+        plottable_column_counts: Dict[str, int] = {}
+        plottable_column_order: Dict[str, int] = {}
         for measurement in self.measurements:
             column_set = {col for col in measurement.data.columns if pd.api.types.is_numeric_dtype(measurement.data[col])}
             if common_columns is None:
@@ -2586,6 +2588,11 @@ class VSMPlotter(PyPlotWindow):
         self._load_measurements(show_warning=False)
         self._save_settings()
 
+    def _import_data_from_files(self) -> None:
+        # Route shared "Import data…" action through the plugin loader so
+        # measurements/worksheet tabs/plot enablement stay in sync.
+        self._choose_files()
+
     def _choose_folder(self) -> None:
         start_dir = str(self._default_source_directory())
         directories = self._select_directories(
@@ -2622,6 +2629,11 @@ class VSMPlotter(PyPlotWindow):
         self._remember_source_directory(Path(directories[0]))
         self._load_measurements(show_warning=False)
         self._save_settings()
+
+    def _import_data_from_folder(self) -> None:
+        # Route shared "Import data…" action through the plugin loader so
+        # measurements/worksheet tabs/plot enablement stay in sync.
+        self._choose_folder()
 
     def _handle_manual_path_entry(self) -> None:
         text = self.path_edit.text().strip()
@@ -3500,6 +3512,8 @@ class VSMPlotter(PyPlotWindow):
         total_loaded = 0
         plottable = 0
         common_columns: Dict[str, int] | None = None
+        plottable_column_counts: Dict[str, int] = {}
+        plottable_column_order: Dict[str, int] = {}
         for path in paths:
             if not path.exists():
                 self._append_log(f"Skipping missing file: {path}")
@@ -3556,11 +3570,21 @@ class VSMPlotter(PyPlotWindow):
                     self._append_log(f"{path.name}: using recovered metadata ({details}).")
                 else:
                     self._append_log(f"{path.name}: {details}.")
-            column_set = {col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])}
+            numeric_column_names = [
+                col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])
+            ]
+            column_set = set(numeric_column_names)
             if common_columns is None:
                 common_columns = {col: idx for idx, col in enumerate(df.columns) if col in column_set}
             else:
                 common_columns = {col: idx for col, idx in common_columns.items() if col in column_set}
+            if temperature is not None and angle is not None:
+                for index, label in enumerate(df.columns):
+                    if label not in column_set:
+                        continue
+                    plottable_column_counts[label] = plottable_column_counts.get(label, 0) + 1
+                    if label not in plottable_column_order:
+                        plottable_column_order[label] = index
 
         if total_loaded == 0:
             QtWidgets.QMessageBox.information(
@@ -3595,7 +3619,19 @@ class VSMPlotter(PyPlotWindow):
             )
 
         candidate_columns: List[str]
-        if common_columns:
+        if plottable_column_counts:
+            candidate_columns = [
+                label
+                for label, _ in sorted(
+                    plottable_column_counts.items(),
+                    key=lambda item: (
+                        -item[1],
+                        plottable_column_order.get(item[0], 10_000),
+                        str(item[0]).lower(),
+                    ),
+                )
+            ]
+        elif common_columns:
             candidate_columns = list(common_columns.keys())
         elif self.measurements:
             candidate_columns = list(self.measurements[0].data.columns)

@@ -140,6 +140,31 @@ def test_select_directories_cancel_returns_empty(monkeypatch, tmp_path: Path) ->
     assert selected == []
 
 
+def test_select_directories_accepts_bound_parent_argument(monkeypatch, tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        def _fake_get_existing_directory(*_args, **_kwargs) -> str:
+            return ""
+
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getExistingDirectory",
+            _fake_get_existing_directory,
+        )
+
+        selected = window._select_directories(
+            window,
+            title="Import Data Folder(s)",
+            start_dir=tmp_path,
+        )
+
+        assert selected == []
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_import_data_from_folder_uses_plugin_scoped_start_dir(tmp_path: Path) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
