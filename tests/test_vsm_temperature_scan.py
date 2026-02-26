@@ -69,6 +69,10 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
     class _FakeLabel:
         def __init__(self) -> None:
             self.text = ""
+            self._ints: dict[str, int] = {}
+
+        def set_int(self, key: str, value: int) -> None:
+            self._ints[key] = int(value)
 
     class _FakeAxis:
         def __init__(self) -> None:
@@ -95,11 +99,17 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
             self._axes: dict[str, _FakeAxis] = {}
             self.axis_calls: list[str] = []
             self._plot_count = 0
+            self._legend = _FakeLabel()
 
         def axis(self, axis_name: str) -> _FakeAxis:
             assert isinstance(axis_name, str), "plot_origin must use named axes (x/y/x2/y2)"
             self.axis_calls.append(axis_name)
             return self._axes.setdefault(axis_name, _FakeAxis())
+
+        def label(self, label_name: str) -> _FakeLabel | None:
+            if label_name == "Legend":
+                return self._legend
+            return None
 
         def add_plot(self, _sheet: object, *, coly: int, colx: int) -> _FakePlot:
             _ = coly, colx
@@ -231,3 +241,175 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
     assert {"x", "y", "x2"}.issubset(set(layer.axis_calls))
     assert layer._axes["x"].label.text == "Temperature [°C]"
     assert "[emu]" in layer._axes["y"].label.text
+    assert "\\l(" in layer._legend.text
+
+
+def test_plot_origin_combines_legend_entries_for_dual_axis(monkeypatch) -> None:
+    class _FakeLabel:
+        def __init__(self) -> None:
+            self.text = ""
+            self._ints: dict[str, int] = {}
+
+        def set_int(self, key: str, value: int) -> None:
+            self._ints[key] = int(value)
+
+    class _FakeAxis:
+        def __init__(self) -> None:
+            self.label = _FakeLabel()
+            self.title = ""
+
+    class _FakePlot:
+        def __init__(self, index: int) -> None:
+            self.index = index + 1
+            self.legend = ""
+            self.color = ""
+
+            class _Symbol:
+                def __init__(self) -> None:
+                    self.color = ""
+
+            self.symbol = _Symbol()
+
+    class _FakeLayer:
+        def __init__(self) -> None:
+            self._axes: dict[str, _FakeAxis] = {}
+            self._plot_count = 0
+            self._legend = _FakeLabel()
+
+        def axis(self, axis_name: str) -> _FakeAxis:
+            return self._axes.setdefault(axis_name, _FakeAxis())
+
+        def label(self, label_name: str) -> _FakeLabel | None:
+            if label_name == "Legend":
+                return self._legend
+            return None
+
+        def add_plot(self, _sheet: object, *, coly: int, colx: int) -> _FakePlot:
+            _ = coly, colx
+            plot = _FakePlot(self._plot_count)
+            self._plot_count += 1
+            return plot
+
+        def lt_exec(self, _cmd: str) -> None:
+            return
+
+        def rescale(self) -> None:
+            return
+
+        def set_int(self, _key: str, _value: int) -> None:
+            return
+
+    class _FakeColumn:
+        def __init__(self) -> None:
+            self.LongName = ""
+            self.Units = ""
+            self.Comment = ""
+            self.Type = 0
+
+    class _FakeColumns:
+        def __init__(self) -> None:
+            self._columns: dict[int, _FakeColumn] = {}
+
+        def __call__(self, index: int) -> _FakeColumn:
+            return self._columns.setdefault(index, _FakeColumn())
+
+    class _FakeSheetObj:
+        def __init__(self) -> None:
+            self.Columns = _FakeColumns()
+
+    class _FakeSheet:
+        def __init__(self) -> None:
+            self.name = ""
+            self.obj = _FakeSheetObj()
+
+        def from_list(self, *_args, **_kwargs) -> None:
+            return
+
+        def cols_axis(self, _roles: str) -> None:
+            return
+
+        def header_rows(self, _rows: str) -> None:
+            return
+
+    class _FakeBook(list):
+        def __init__(self) -> None:
+            super().__init__([_FakeSheet()])
+            self.lname = ""
+
+        def add_sheet(self) -> _FakeSheet:
+            sheet = _FakeSheet()
+            self.append(sheet)
+            return sheet
+
+        def activate(self) -> None:
+            return
+
+    class _FakeGraph(list):
+        def __init__(self) -> None:
+            super().__init__([_FakeLayer()])
+            self.title_meta: str | None = None
+            self.lname = ""
+            self.name = ""
+            self.lt_commands: list[str] = []
+
+        def set_str(self, key: str, value: str) -> None:
+            if key == "title":
+                self.title_meta = value
+
+        def add_layer(self) -> _FakeLayer:
+            layer = _FakeLayer()
+            self.append(layer)
+            return layer
+
+        def lt_exec(self, cmd: str) -> None:
+            self.lt_commands.append(cmd)
+
+        def activate(self) -> None:
+            return
+
+    class _FakeOrigin:
+        def __init__(self) -> None:
+            self.graphs: list[_FakeGraph] = []
+
+        def new_book(self, _kind: str) -> _FakeBook:
+            return _FakeBook()
+
+        def new_graph(self, template: str | None = None) -> _FakeGraph:
+            _ = template
+            graph = _FakeGraph()
+            self.graphs.append(graph)
+            return graph
+
+        def lt_exec(self, _command: str) -> None:
+            return
+
+    fake_origin = _FakeOrigin()
+
+    @contextlib.contextmanager
+    def _fake_origin_session(*, keep_open: bool = False):
+        _ = keep_open
+        yield fake_origin
+
+    monkeypatch.setattr(module, "op", object())
+    monkeypatch.setattr(module, "origin_session", _fake_origin_session)
+
+    processor = module.VSMTemperatureScanProcessor()
+    frame = pd.DataFrame(
+        {
+            "temperature": [30.0, 40.0, 50.0, 30.0, 40.0, 50.0],
+            "field": [10000.0, 10000.0, 10000.0, 50.0, 50.0, 50.0],
+            "signal": [2.0e-4, 1.9e-4, 1.8e-4, 1.0e-4, 0.9e-4, 0.8e-4],
+            "section_index": [0, 0, 0, 0, 0, 0],
+        }
+    )
+    entry = module.VSMEntry(path=Path("scan_dual.txt"), sample="Sample", dataframe=frame)
+    processor.plot_origin([entry])
+
+    assert fake_origin.graphs
+    graph = fake_origin.graphs[0]
+    assert len(graph) >= 2
+    primary = graph[0]
+    secondary = graph[1]
+    assert "\\L(1." in primary._legend.text
+    assert "\\L(2." in primary._legend.text
+    assert secondary._legend.text == ""

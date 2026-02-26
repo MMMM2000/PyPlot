@@ -1147,7 +1147,14 @@ class PyPlotWorkbench(PyPlotWindow):
             except Exception:
                 pass
         arrange = getattr(self.tab_widget, "_arrange_subwindows", None)
-        if callable(arrange):
+        arrangement_mode_getter = getattr(self.tab_widget, "arrangement_mode", None)
+        arrangement_mode = "cascade"
+        if callable(arrangement_mode_getter):
+            try:
+                arrangement_mode = str(arrangement_mode_getter() or "cascade").strip().lower()
+            except Exception:
+                arrangement_mode = "cascade"
+        if callable(arrange) and arrangement_mode in {"tile_vertical", "tile_horizontal"}:
             try:
                 QtCore.QTimer.singleShot(0, arrange)
             except Exception:
@@ -3485,7 +3492,14 @@ class PyPlotWorkbench(PyPlotWindow):
                                 except Exception:
                                     pass
                             arrange = getattr(self.tab_widget, "_arrange_subwindows", None)
-                            if callable(arrange):
+                            arrangement_mode_getter = getattr(self.tab_widget, "arrangement_mode", None)
+                            arrangement_mode = "cascade"
+                            if callable(arrangement_mode_getter):
+                                try:
+                                    arrangement_mode = str(arrangement_mode_getter() or "cascade").strip().lower()
+                                except Exception:
+                                    arrangement_mode = "cascade"
+                            if callable(arrange) and arrangement_mode in {"tile_vertical", "tile_horizontal"}:
                                 try:
                                     QtCore.QTimer.singleShot(0, arrange)
                                 except Exception:
@@ -3523,9 +3537,20 @@ class PyPlotWorkbench(PyPlotWindow):
         tight_layout = getattr(figure, "tight_layout", None)
         if callable(tight_layout) and not constrained_layout:
             try:
-                tight_layout(pad=1.0)
+                axes_count = 0
+                try:
+                    axes_count = len(getattr(figure, "axes", []))
+                except Exception:
+                    axes_count = 0
+                if axes_count > 1:
+                    tight_layout(pad=1.1, rect=(0.08, 0.10, 0.92, 0.90))
+                else:
+                    tight_layout(pad=1.0, rect=(0.06, 0.08, 0.96, 0.92))
             except Exception:
-                pass
+                try:
+                    tight_layout(pad=1.0)
+                except Exception:
+                    pass
         canvas = getattr(figure, "canvas", None)
         if canvas is None:
             return

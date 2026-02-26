@@ -14,13 +14,16 @@ class _Label:
         self.text = ""
         self.show = False
         self._ints: dict[str, int] = {}
-        self._floats: dict[str, float] = {}
+        self._floats: dict[str, float] = {"x": 173.0}
 
     def set_int(self, key: str, value: int) -> None:
         self._ints[key] = int(value)
 
     def set_float(self, key: str, value: float) -> None:
         self._floats[key] = float(value)
+
+    def get_float(self, key: str) -> float:
+        return float(self._floats.get(key, 0.0))
 
 
 class _Axis:
@@ -32,6 +35,7 @@ class _Layer:
     def __init__(self, *, with_title_label: bool = True) -> None:
         self._axis = {"x": _Axis(), "y": _Axis(), "x2": _Axis(), "y2": _Axis()}
         self._title = _Label() if with_title_label else None
+        self._yr = _Label()
         self.commands: list[str] = []
 
     def axis(self, name: str) -> Any:
@@ -40,6 +44,8 @@ class _Layer:
     def label(self, name: str) -> Any:
         if name in {"Title", "title", "py_title"}:
             return self._title
+        if name in {"yr", "YR", "Yr"}:
+            return self._yr
         return None
 
     def lt_exec(self, command: str) -> bool:
@@ -96,7 +102,17 @@ def test_set_origin_axis_title_falls_back_to_ltalk_when_axis_missing() -> None:
     layer._axis["x"] = None
     set_origin_axis_title(layer, "x", 'T "axis"')
     assert layer.commands
-    assert layer.commands[-1] == 'label -s -xb "T ""axis""";'
+    assert 'label -s -xb "T ""axis""";' in layer.commands
+    assert "layer.x.color = color(black);" in layer.commands
+
+
+def test_set_origin_axis_title_clamps_right_label_position() -> None:
+    layer = _Layer()
+    layer._yr.set_float("x", 173.0)
+    set_origin_axis_title(layer, "y2", "Magnetization (50 Oe) [emu]")
+    assert layer.axis("y2").label.text == "Magnetization (50 Oe) [emu]"
+    assert layer._yr.get_float("x") == 130.0
+    assert "layer.y2.color = color(black);" in layer.commands
 
 
 def test_set_origin_graph_title_sets_title_label_and_graph_names() -> None:

@@ -767,10 +767,69 @@ class VSMTemperatureScanProcessor:
         legend = self._origin_legend_label(layer)
         if legend is None or not entries:
             return
+        filtered: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        for index, label in entries:
+            text = str(label).strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            filtered.append((int(index), text))
+        if not filtered:
+            return
         try:
-            legend.text = "\n".join(f"\\l({index}) {label}" for index, label in entries)
+            legend.text = "\n".join(
+                f"\\l({index if index > 0 else index + 1}) {label}"
+                for index, label in filtered
+            )
         except Exception:
             pass
+
+    def _set_origin_combined_legend(
+        self,
+        layer: Any,
+        entries: list[tuple[int, int, str]],
+    ) -> None:
+        legend = self._origin_legend_label(layer)
+        if legend is None or not entries:
+            return
+        lines: list[str] = []
+        seen: set[str] = set()
+        for layer_index, plot_index, label in entries:
+            text = str(label).strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            lidx = int(layer_index) if int(layer_index) > 0 else 1
+            pidx = int(plot_index) if int(plot_index) > 0 else int(plot_index) + 1
+            lines.append(f"\\L({lidx}.{pidx}) {text}")
+        if not lines:
+            return
+        try:
+            legend.text = "\n".join(lines)
+        except Exception:
+            pass
+
+    def _hide_origin_legend(self, layer: Any) -> None:
+        legend = self._origin_legend_label(layer)
+        if legend is None:
+            return
+        try:
+            legend.text = ""
+        except Exception:
+            pass
+        set_int = getattr(legend, "set_int", None)
+        if callable(set_int):
+            try:
+                set_int("show", 0)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ Matplotlib plotting
     def plot_matplotlib(self, dataset: list[VSMEntry]) -> None:
@@ -1253,6 +1312,7 @@ class VSMTemperatureScanProcessor:
                 _set_origin_graph_title(origin, graph, graph_title)
                 unique_fields: list[float] = self.field_axis_order([field for field, _, _, _ in column_pairs])
                 layer_map: Dict[float, Any] = {}
+                layer_number_map: Dict[float, int] = {}
                 existing_layers = len(graph)
                 for idx, field_value in enumerate(unique_fields):
                     if idx == 0:
@@ -1262,6 +1322,7 @@ class VSMTemperatureScanProcessor:
                     else:
                         layer = graph.add_layer()
                     layer_map[field_value] = layer
+                    layer_number_map[field_value] = idx + 1
                 axis_base = "Magnetization" if len({round(val, 6) for val in unique_fields}) > 1 else None
                 layer_fields: Dict[Any, list[float]] = {}
                 for field_value, layer in layer_map.items():
@@ -1278,6 +1339,7 @@ class VSMTemperatureScanProcessor:
                         self._axis_label_for_fields(layer_values, base=axis_base),
                     )
                 legend_entries: dict[Any, list[tuple[int, str]]] = {}
+                combined_legend_entries: list[tuple[int, int, str]] = []
                 for field_value, base_col, legend_text, color in column_pairs:
                     layer = layer_map.get(field_value, graph[0])
                     plot_obj = cast(Any, layer.add_plot(data_sheet, coly=base_col + 1, colx=base_col))
@@ -1301,8 +1363,23 @@ class VSMTemperatureScanProcessor:
                         dataset_index = getattr(plot_obj, "index", None)
                         if isinstance(dataset_index, int):
                             legend_entries.setdefault(layer, []).append((dataset_index, legend_text))
-                for layer, entries in legend_entries.items():
-                    self._set_origin_legend(layer, entries)
+                            combined_legend_entries.append(
+                                (
+                                    int(layer_number_map.get(field_value, 1)),
+                                    int(dataset_index),
+                                    legend_text,
+                                )
+                            )
+                if len(layer_map) > 1 and combined_legend_entries:
+                    primary_layer = graph[0]
+                    self._set_origin_combined_legend(primary_layer, combined_legend_entries)
+                    for layer in layer_map.values():
+                        if layer is primary_layer:
+                            continue
+                        self._hide_origin_legend(layer)
+                else:
+                    for layer, entries in legend_entries.items():
+                        self._set_origin_legend(layer, entries)
                 for layer in layer_map.values():
                     _style_origin_layer(layer, graph_title)
     
@@ -1372,6 +1449,7 @@ class VSMTemperatureScanProcessor:
                     _set_origin_graph_title(origin, smooth_graph, smooth_title)
                     s_unique: list[float] = self.field_axis_order([field for field, _, _, _ in smooth_pairs])
                     s_layer_map: Dict[float, Any] = {}
+                    s_layer_number_map: Dict[float, int] = {}
                     s_existing = len(smooth_graph)
                     for idx, field_value in enumerate(s_unique):
                         if idx == 0:
@@ -1381,6 +1459,7 @@ class VSMTemperatureScanProcessor:
                         else:
                             layer = smooth_graph.add_layer()
                         s_layer_map[field_value] = layer
+                        s_layer_number_map[field_value] = idx + 1
                     axis_base = "Magnetization" if len({round(val, 6) for val in s_unique}) > 1 else None
                     s_layer_fields: Dict[Any, list[float]] = {}
                     for field_value, layer in s_layer_map.items():
@@ -1397,6 +1476,7 @@ class VSMTemperatureScanProcessor:
                             self._axis_label_for_fields(layer_values, base=axis_base),
                         )
                     legend_entries = {}
+                    combined_legend_entries = []
                     for field_value, base_col, legend_text, color in smooth_pairs:
                         layer = s_layer_map.get(field_value, smooth_graph[0])
                         plot_obj = cast(Any, layer.add_plot(smooth_sheet, coly=base_col + 1, colx=base_col))
@@ -1420,8 +1500,23 @@ class VSMTemperatureScanProcessor:
                             dataset_index = getattr(plot_obj, "index", None)
                             if isinstance(dataset_index, int):
                                 legend_entries.setdefault(layer, []).append((dataset_index, legend_text))
-                    for layer, entries in legend_entries.items():
-                        self._set_origin_legend(layer, entries)
+                                combined_legend_entries.append(
+                                    (
+                                        int(s_layer_number_map.get(field_value, 1)),
+                                        int(dataset_index),
+                                        legend_text,
+                                    )
+                                )
+                    if len(s_layer_map) > 1 and combined_legend_entries:
+                        primary_layer = smooth_graph[0]
+                        self._set_origin_combined_legend(primary_layer, combined_legend_entries)
+                        for layer in s_layer_map.values():
+                            if layer is primary_layer:
+                                continue
+                            self._hide_origin_legend(layer)
+                    else:
+                        for layer, entries in legend_entries.items():
+                            self._set_origin_legend(layer, entries)
                     for layer in s_layer_map.values():
                         _style_origin_layer(layer, smooth_title)
     

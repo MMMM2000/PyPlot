@@ -138,3 +138,68 @@ def test_select_directories_cancel_returns_empty(monkeypatch, tmp_path: Path) ->
     )
 
     assert selected == []
+
+
+def test_import_data_from_folder_uses_plugin_scoped_start_dir(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    plugin_name = "VSM Hysteresis Loops"
+    start_dir = tmp_path / "plugin_start"
+    start_dir.mkdir()
+    captured: dict[str, Path] = {}
+    try:
+        window._current_plotter_name = plugin_name  # noqa: SLF001 - test hook
+        window._plugin_last_directories[plugin_name] = start_dir  # noqa: SLF001 - test hook
+
+        def _fake_select(
+            _parent: QtWidgets.QWidget | None,
+            *,
+            title: str,
+            start_dir: Path | str,
+        ) -> list[str]:
+            _ = title
+            captured["start_dir"] = Path(start_dir)
+            return []
+
+        window._select_directories = _fake_select  # type: ignore[assignment]
+        window._import_data_from_folder()
+
+        assert captured.get("start_dir") == start_dir
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_compact_path_text_accepts_bound_call_signature(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        path = tmp_path / "one" / "two" / "three"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+        direct = window._compact_path_text(path, max_parts=2)  # noqa: SLF001 - test hook
+        bound_like = PyPlotWorkbench._compact_path_text(window, path, max_parts=2)
+
+        assert direct == bound_like
+        assert "two/three" in direct
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_import_paths_vsm_hys_file_registers_without_type_error(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        source = tmp_path / "202602250001-Hys-00.VSM-HYS-DATA"
+        source.write_text("Header\n1\t2\t3\n", encoding="utf-8")
+
+        window._import_paths([source])  # noqa: SLF001 - exercise import registration path
+
+        assert window._workbooks  # noqa: SLF001 - workbook created from import
+        assert window._worksheets  # noqa: SLF001 - worksheet created from import
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001 - avoid close prompt in headless tests
+        window.close()
+        app.processEvents()

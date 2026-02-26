@@ -372,6 +372,7 @@ def set_origin_graph_title(
 def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
     """Set an axis title using object API with LabTalk fallback."""
 
+    key = str(axis_name).lower()
     axis_obj = None
     axis_method = getattr(layer, "axis", None)
     if callable(axis_method):
@@ -379,41 +380,88 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
             axis_obj = axis_method(axis_name)
         except Exception:
             axis_obj = None
+    title_set = False
     if axis_obj is not None:
         label_obj = getattr(axis_obj, "label", None)
         if label_obj is not None and hasattr(label_obj, "text"):
             try:
                 label_obj.text = title
-                return
+                title_set = True
             except Exception:
                 pass
-        for attr in ("title", "text"):
-            if hasattr(axis_obj, attr):
-                try:
-                    setattr(axis_obj, attr, title)
-                    return
-                except Exception:
-                    continue
+        if not title_set:
+            for attr in ("title", "text"):
+                if hasattr(axis_obj, attr):
+                    try:
+                        setattr(axis_obj, attr, title)
+                        title_set = True
+                        break
+                    except Exception:
+                        continue
 
-    safe_title = escape_origin_text(title)
-    key = str(axis_name).lower()
-    cmd: str | None
-    if key == "x":
-        cmd = f'label -s -xb "{safe_title}";'
-    elif key == "y":
-        cmd = f'label -s -yl "{safe_title}";'
-    elif key == "x2":
-        cmd = f'label -s -xt "{safe_title}";'
-    elif key == "y2":
-        cmd = f'label -s -yr "{safe_title}";'
-    else:
-        cmd = None
-    if cmd is None:
-        return
+    cmd: str | None = None
+    if not title_set:
+        safe_title = escape_origin_text(title)
+        if key == "x":
+            cmd = f'label -s -xb "{safe_title}";'
+        elif key == "y":
+            cmd = f'label -s -yl "{safe_title}";'
+        elif key == "x2":
+            cmd = f'label -s -xt "{safe_title}";'
+        elif key == "y2":
+            cmd = f'label -s -yr "{safe_title}";'
+        else:
+            cmd = None
+        if cmd is None:
+            return
     activate_origin_layer(layer)
     lt_exec = getattr(layer, "lt_exec", None)
-    if callable(lt_exec):
+    if callable(lt_exec) and cmd is not None:
         origin_lt_exec(lt_exec, cmd)
+    if callable(lt_exec):
+        # Keep axis text neutral/consistent in shared exports instead of inheriting
+        # the first curve color for each layer.
+        if key in {"x", "y", "x2", "y2"}:
+            origin_lt_exec(lt_exec, f"layer.{key}.color = color(black);")
+        if key == "y2":
+            origin_lt_exec(lt_exec, "layer.y2.showlabel = 1;")
+    if key != "y2":
+        return
+
+    # On Origin "doubley" templates the right-axis title can be placed outside
+    # the export frame; clamp it inward so the text remains visible.
+    label_getter = getattr(layer, "label", None)
+    if not callable(label_getter):
+        return
+    right_label = None
+    for token in ("yr", "YR", "Yr"):
+        try:
+            right_label = label_getter(token)
+        except Exception:
+            right_label = None
+        if right_label is not None:
+            break
+    if right_label is None:
+        return
+    set_int = getattr(right_label, "set_int", None)
+    if callable(set_int):
+        try:
+            set_int("show", 1)
+        except Exception:
+            pass
+    get_float = getattr(right_label, "get_float", None)
+    set_float = getattr(right_label, "set_float", None)
+    if not callable(set_float):
+        return
+    try:
+        current_x = float(get_float("x")) if callable(get_float) else 130.0
+    except Exception:
+        current_x = 130.0
+    if current_x > 130.0:
+        try:
+            set_float("x", 130.0)
+        except Exception:
+            pass
 
 
 __all__ = [

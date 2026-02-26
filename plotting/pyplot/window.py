@@ -7184,6 +7184,32 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 return candidate
         return Path.home()
 
+    def _data_dialog_start_directory(self) -> Path:
+        chooser = getattr(self, "_dialog_start_directory", None)
+        if callable(chooser):
+            try:
+                candidate = chooser()
+            except Exception:
+                candidate = None
+            if isinstance(candidate, Path):
+                try:
+                    if candidate.exists():
+                        return candidate
+                except Exception:
+                    pass
+            elif isinstance(candidate, str) and candidate:
+                try:
+                    path_candidate = Path(candidate)
+                except Exception:
+                    path_candidate = None
+                if isinstance(path_candidate, Path):
+                    try:
+                        if path_candidate.exists():
+                            return path_candidate
+                    except Exception:
+                        pass
+        return self._project_dialog_start_directory()
+
     def _update_project_title(self) -> None:
         title = self._base_title
         if self._project_path is not None:
@@ -7375,7 +7401,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     # ------------------------------------------------------------------ data import helpers
     def _import_data_from_files(self) -> None:
-        start_dir = self._project_dialog_start_directory()
+        start_dir = self._data_dialog_start_directory()
         filters = [
             "Data files (" + " ".join(f"*{ext}" for ext in self.SUPPORTED_IMPORT_EXTENSIONS) + ")",
             "All files (*)",
@@ -7392,7 +7418,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._import_paths(Path(path) for path in paths)
 
     def _import_data_from_folder(self) -> None:
-        start_dir = self._project_dialog_start_directory()
+        start_dir = self._data_dialog_start_directory()
         directories = self._select_directories(
             self,
             title="Import Data Folder(s)",
@@ -7503,6 +7529,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         target = resolved if resolved.is_dir() else resolved.parent
         if target is None or not target.exists():
             return
+        remember_paths = getattr(self, "_remember_directory_from_paths", None)
+        if callable(remember_paths):
+            try:
+                remember_paths([target])
+            except Exception:
+                pass
         self.settings.setValue(self._project_settings_key("last_path"), str(target))
 
     def _persist_import_sources(self, sources: Iterable[Path | str]) -> None:
@@ -7915,13 +7947,23 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 pass
 
     @staticmethod
-    def _compact_path_text(path: Path | str | None, *, max_parts: int = 2) -> str:
-        if path is None:
+    def _compact_path_text(
+        path_or_self: Path | str | None | Any,
+        path: Path | str | None = None,
+        *,
+        max_parts: int = 2,
+    ) -> str:
+        # Backward compatible with both static-style calls:
+        #   _compact_path_text(path, max_parts=2)
+        # and accidentally bound calls:
+        #   self._compact_path_text(path, max_parts=2)
+        candidate_input = path_or_self if path is None else path
+        if candidate_input is None:
             return ""
         try:
-            candidate = Path(path)
+            candidate = Path(candidate_input)
         except Exception:
-            return str(path)
+            return str(candidate_input)
         try:
             parts = list(candidate.parts)
         except Exception:
