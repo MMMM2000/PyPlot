@@ -18,7 +18,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
 
     _METHOD_EXCLUDES = {"__init__", "_selected_paths", "_create_dock_widget", "_create_dock_switcher"}
     requires_imported_data = True
-    uses_shared_plot_workbooks = False
+    uses_shared_plot_workbooks = True
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
@@ -88,31 +88,6 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         axes_layout.addRow("Y axis:", host.y_axis_combo)
         layout.addWidget(axes_section)
 
-        appearance_section, appearance_layout = window_module.create_toolbar_section(
-            "Appearance",
-            parent=container,
-        )
-        host.style_combo = QtWidgets.QComboBox(appearance_section)
-        host.style_combo.addItem("Line", "line")
-        host.style_combo.addItem("Line + symbols", "line_markers")
-        appearance_layout.addWidget(QtWidgets.QLabel("Matplotlib style", appearance_section))
-        appearance_layout.addWidget(host.style_combo)
-
-        host.dark_mode_checkbox = QtWidgets.QCheckBox("Dark plot theme", appearance_section)
-        host.dark_mode_checkbox.setToolTip(
-            "Render Matplotlib plots using a dark background theme."
-        )
-        appearance_layout.addWidget(host.dark_mode_checkbox)
-
-        host.field_direction_button = QtWidgets.QPushButton("Highlight field direction", appearance_section)
-        host.field_direction_button.setCheckable(True)
-        host.field_direction_button.setToolTip(
-            "Use solid lines for increasing magnetic field and dashed lines for decreasing segments."
-        )
-        appearance_layout.addWidget(host.field_direction_button)
-        appearance_layout.addStretch(1)
-        layout.addWidget(appearance_section)
-
         overlay_section, overlay_layout = window_module.create_toolbar_section(
             "Angle overlays",
             parent=container,
@@ -170,14 +145,6 @@ class VSMHysteresisPlugin(PyPlotPlugin):
             host.x_axis_combo.currentTextChanged.connect(lambda _: host._store_axis_selection())
         if hasattr(host, "y_axis_combo") and callable(getattr(host, "_store_axis_selection", None)):
             host.y_axis_combo.currentTextChanged.connect(lambda _: host._store_axis_selection())
-        if hasattr(host, "style_combo") and callable(getattr(host, "_restyle_plots", None)):
-            host.style_combo.currentIndexChanged.connect(lambda _: host._restyle_plots())
-        if hasattr(host, "dark_mode_checkbox") and callable(getattr(host, "_restyle_plots", None)):
-            host.dark_mode_checkbox.toggled.connect(lambda _: host._restyle_plots())
-        if hasattr(host, "field_direction_button") and callable(
-            getattr(host, "_handle_field_direction_toggle", None)
-        ):
-            host.field_direction_button.toggled.connect(host._handle_field_direction_toggle)
         if hasattr(host, "angle_overlay_list") and callable(
             getattr(host, "_update_overlay_button_state", None)
         ):
@@ -234,10 +201,6 @@ class VSMHysteresisPlugin(PyPlotPlugin):
     def export_txt(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
         super().export_txt()
-
-    def open_origin(self) -> None:  # type: ignore[override]
-        self._ensure_initialized()
-        self.host._open_origin_prompt()
 
     # UI state ------------------------------------------------------
     def update_ui(self) -> None:  # type: ignore[override]
@@ -392,10 +355,15 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         if getattr(host, "_vsm_methods_bound", False):
             return
         vsm = self._vsm()
-        for name, func in inspect.getmembers(vsm.VSMPlotter, inspect.isfunction):
+        # Bind only methods defined on VSMPlotter itself. Inherited PyPlotWindow
+        # callables (including staticmethods) already exist on the host and
+        # rebinding them can break signatures and shared behavior.
+        for name, member in vsm.VSMPlotter.__dict__.items():
             if name in self._METHOD_EXCLUDES:
                 continue
-            setattr(host, name, types.MethodType(func, host))
+            if not inspect.isfunction(member):
+                continue
+            setattr(host, name, types.MethodType(member, host))
         host._vsm_methods_bound = True
 
 

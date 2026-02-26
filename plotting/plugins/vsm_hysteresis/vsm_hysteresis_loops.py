@@ -2423,16 +2423,20 @@ class VSMPlotter(PyPlotWindow):
                 self._last_source_dir = None
 
         style_value = self.settings.value("plot_style", "line")
-        if isinstance(style_value, str):
+        if isinstance(style_value, str) and hasattr(self, "style_combo"):
             index = self.style_combo.findData(style_value)
             if index >= 0:
                 self.style_combo.setCurrentIndex(index)
 
         dark_value = self.settings.value("plot_dark_mode", False)
-        if isinstance(dark_value, bool):
-            self.dark_mode_checkbox.setChecked(dark_value)
-        elif dark_value is not None:
-            self.dark_mode_checkbox.setChecked(bool(dark_value))
+        dark_enabled = bool(dark_value) if dark_value is not None else False
+        if hasattr(self, "dark_mode_checkbox"):
+            self.dark_mode_checkbox.setChecked(dark_enabled)
+        elif hasattr(self, "_dark_mode_enabled"):
+            try:
+                self._dark_mode_enabled = dark_enabled
+            except Exception:
+                pass
 
         suppress_window = bool(getattr(self, "_suppress_window_persistence", False))
         maximized_preference = bool(self.settings.value("window_maximized", False))
@@ -2485,8 +2489,8 @@ class VSMPlotter(PyPlotWindow):
 
     def _save_settings(self) -> None:
         self.settings.setValue("sources", self.path_edit.text())
-        self.settings.setValue("plot_style", self.style_combo.currentData())
-        self.settings.setValue("plot_dark_mode", self.dark_mode_checkbox.isChecked())
+        self.settings.setValue("plot_style", self._plot_style_token())
+        self.settings.setValue("plot_dark_mode", self._plot_dark_enabled())
         if self.last_export_path:
             self.settings.setValue("last_export_path", str(self.last_export_path))
         if self._last_source_dir:
@@ -3338,59 +3342,14 @@ class VSMPlotter(PyPlotWindow):
         axes: Any,
         descriptor: TabDescriptor | None = None,
     ) -> None:
-        self._canvas_by_tab[tab] = canvas
-        self._axes_by_tab[tab] = axes
-        try:
-            tab.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
-                QtWidgets.QSizePolicy.Policy.Expanding,
-            )
-        except Exception:
-            pass
-        try:
-            tab.setMinimumSize(0, 0)
-        except Exception:
-            pass
-        try:
-            canvas.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
-                QtWidgets.QSizePolicy.Policy.Expanding,
-            )
-        except Exception:
-            pass
-        try:
-            canvas.setMinimumSize(0, 0)
-        except Exception:
-            pass
         if descriptor is not None:
             descriptor.metadata.setdefault(_BASE_Y_LABEL_KEY, descriptor.y_label)
             descriptor.metadata.setdefault(_BASE_TITLE_KEY, descriptor.title)
-            self._tab_descriptors[tab] = descriptor
+        PyPlotWindow._register_plot_tab(self, tab, canvas, axes, descriptor)
+        if descriptor is not None:
             if self._field_direction_enabled:
                 self._apply_direction_split_to_descriptor(descriptor)
             self._refresh_descriptor_legend(descriptor, force_layout=True)
-            self._ensure_graph_tree_item(tab, descriptor)
-            if not self._history.is_replaying:
-                info_holder: Dict[str, Any] = {"info": None}
-
-                def _undo_creation() -> None:
-                    info_holder["info"] = self._remove_tab_internal(tab)
-
-                def _redo_creation() -> None:
-                    info = info_holder.get("info")
-                    if info is not None:
-                        self._restore_tab_from_info(info)
-
-                title = descriptor.root_label or descriptor.title or "Plot"
-                self._record_history_action(
-                    f"Add tab {title}",
-                    undo=_undo_creation,
-                    redo=_redo_creation,
-                )
-        self._update_save_graph_enabled()
-        self._update_normalize_enabled()
-        if self.tab_widget.currentWidget() is tab:
-            self._rebuild_object_manager_for_tab(tab)
         # VSM plots are the primary work product in this window; use the full
         # MDI viewport width instead of the default half-width slot.
         fitter = getattr(self.tab_widget, "_fit_subwindow", None)
@@ -3405,42 +3364,16 @@ class VSMPlotter(PyPlotWindow):
                     fitter(subwindow, use_half_width=False, preferred_width=None)
                 except Exception:
                     pass
-        self._update_tab_buttons()
 
     def _clear_tab_list(self, tabs: List[QtWidgets.QWidget]) -> None:
-        for tab in tabs:
-            index = self.tab_widget.indexOf(tab)
-            if index >= 0:
-                self.tab_widget.removeTab(index)
-            self._canvas_by_tab.pop(tab, None)
-            self._axes_by_tab.pop(tab, None)
-            descriptor = self._tab_descriptors.pop(tab, None)
-            if descriptor is not None:
-                item = self._graph_tree_items.pop(tab, None)
-                if item is not None:
-                    parent = item.parent()
-                    if parent is not None:
-                        parent.removeChild(item)
-                    else:
-                        index = self.project_tree.indexOfTopLevelItem(item)
-                        if index >= 0:
-                            self.project_tree.takeTopLevelItem(index)
-            for key in [key for key in self._object_items.keys() if key[0] is tab]:
-                self._object_items.pop(key, None)
-            key = self._tab_to_worksheet_key.pop(tab, None)
-            if key is not None:
-                self._worksheet_tabs_open.pop(key, None)
-                self._update_worksheet_item_state(key)
-            self._hidden_tabs.discard(tab)
+        PyPlotWindow._clear_tab_list(self, list(tabs))
         tabs.clear()
-        self._update_save_graph_enabled()
-        self._update_normalize_enabled()
-        self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
-
-        if not self._tab_descriptors:
-            self.export_button.setEnabled(False)
-            self.open_origin_button.setEnabled(False)
-        self._update_tab_buttons()
+        sync_shared = getattr(self, "_sync_shared_action_states", None)
+        if callable(sync_shared):
+            try:
+                sync_shared()
+            except Exception:
+                pass
 
     def _update_save_graph_enabled(self, *_: object) -> None:
         current = self.tab_widget.currentWidget()
@@ -4162,6 +4095,12 @@ class VSMPlotter(PyPlotWindow):
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
         self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
+        sync_shared = getattr(self, "_sync_shared_action_states", None)
+        if callable(sync_shared):
+            try:
+                sync_shared()
+            except Exception:
+                pass
 
         if not self._tab_descriptors:
             self.export_button.setEnabled(False)
@@ -4215,24 +4154,51 @@ class VSMPlotter(PyPlotWindow):
         return lookup
 
     def _line_style_kwargs(self) -> Dict[str, Any]:
-        style = None
+        style = self._plot_style_token()
+        if style == "line_markers":
+            return {"linestyle": "-", "marker": "o", "markersize": 4}
+        return {"linestyle": "-"}
+
+    def _plot_style_token(self) -> str:
         try:
             combo = self.style_combo
         except Exception:
             combo = None
         if combo is not None:
             try:
-                style = combo.currentData()
+                token = combo.currentData()
             except Exception:
-                style = None
-        if style == "line_markers":
-            return {"linestyle": "-", "marker": "o", "markersize": 4}
-        return {"linestyle": "-"}
+                token = None
+            if isinstance(token, str) and token:
+                return token
+        return "line"
+
+    def _plot_dark_enabled(self) -> bool:
+        try:
+            toggle = self.dark_mode_checkbox
+        except Exception:
+            toggle = None
+        if toggle is not None:
+            try:
+                return bool(toggle.isChecked())
+            except Exception:
+                pass
+        try:
+            return bool(self._dark_mode_enabled)
+        except Exception:
+            return False
 
     def _apply_plot_theme(self, axes: Any) -> None:
         """Apply the current light/dark theme to ``axes``."""
 
-        dark = self.dark_mode_checkbox.isChecked()
+        dark = self._plot_dark_enabled()
+        apply_dark_mode = getattr(self, "_apply_dark_mode_to_axes", None)
+        if callable(apply_dark_mode):
+            try:
+                apply_dark_mode(axes, dark)
+                return
+            except Exception:
+                pass
         if dark:
             bg = "#121212"
             fg = "#f0f0f0"
@@ -4272,7 +4238,7 @@ class VSMPlotter(PyPlotWindow):
 
         if legend is None:
             return
-        dark = self.dark_mode_checkbox.isChecked()
+        dark = self._plot_dark_enabled()
         fg = "#f0f0f0" if dark else "#202020"
         bg = "#1e1e1e" if dark else "#ffffff"
 
@@ -4781,7 +4747,7 @@ class VSMPlotter(PyPlotWindow):
             break
 
     def _after_tab_removed(self, info: Any) -> None:  # type: ignore[override]
-        super()._after_tab_removed(info)
+        PyPlotWindow._after_tab_removed(self, info)
 
         tab = getattr(info, "tab", None)
         descriptor = getattr(info, "descriptor", None)
@@ -4822,6 +4788,12 @@ class VSMPlotter(PyPlotWindow):
         if not self._tab_descriptors:
             self.open_origin_button.setEnabled(False)
         self.export_button.setEnabled(False)
+        sync_shared = getattr(self, "_sync_shared_action_states", None)
+        if callable(sync_shared):
+            try:
+                sync_shared()
+            except Exception:
+                pass
 
         axes = getattr(info, "axes", None)
         legend = None
@@ -4834,7 +4806,7 @@ class VSMPlotter(PyPlotWindow):
                 pass
 
     def _after_tab_restored(self, info: Any) -> None:  # type: ignore[override]
-        super()._after_tab_restored(info)
+        PyPlotWindow._after_tab_restored(self, info)
         descriptor = getattr(info, "descriptor", None)
         tab = getattr(info, "tab", None)
         extra = getattr(info, "extra", {})
@@ -4877,6 +4849,12 @@ class VSMPlotter(PyPlotWindow):
                 self.export_button.setEnabled(bool(extra["export_enabled_before"]))
             if "origin_enabled_before" in extra:
                 self.open_origin_button.setEnabled(bool(extra["origin_enabled_before"]))
+        sync_shared = getattr(self, "_sync_shared_action_states", None)
+        if callable(sync_shared):
+            try:
+                sync_shared()
+            except Exception:
+                pass
 
     def _plot_angle_overlays(self) -> None:
         if not self._last_prepared_groups or not self._last_axes:
@@ -6424,7 +6402,11 @@ class VSMPlotter(PyPlotWindow):
             QtCore.QEvent.Type.FocusIn,
         }:
             self._clear_log_alert()
-        return super().eventFilter(obj, event)
+        try:
+            return super().eventFilter(obj, event)
+        except TypeError:
+            # Method may be rebound onto PyPlotWorkbench (not a VSMPlotter subclass).
+            return bool(PyPlotWindow.eventFilter(self, obj, event))
 
     def _handle_log_visibility(self, visible: bool) -> None:
         if visible:

@@ -5,8 +5,16 @@ import sys
 from pathlib import Path
 
 from PyQt6 import QtWidgets
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 
+from plotting.plugins.base import PyPlotPlugin
 from plotting.pyplot.app import PyPlotWorkbench
+from plotting.pyplot.window import (
+    TOOLBAR_SECTION_PROPERTY,
+    GraphLineState,
+    TabDescriptor,
+)
 
 
 def _ensure_app() -> QtWidgets.QApplication:
@@ -17,6 +25,17 @@ def _ensure_app() -> QtWidgets.QApplication:
     return app
 
 
+def _iter_toolbar_sections(widget: QtWidgets.QWidget | None) -> list[str]:
+    if widget is None:
+        return []
+    sections: list[str] = []
+    for child in widget.findChildren(QtWidgets.QWidget):
+        title = child.property(TOOLBAR_SECTION_PROPERTY)
+        if isinstance(title, str) and title.strip():
+            sections.append(title.strip())
+    return sections
+
+
 def test_set_tree_item_text_updates_item() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
@@ -25,6 +44,65 @@ def test_set_tree_item_text_updates_item() -> None:
         window._set_tree_item_text(item, name="Sample", details="Details")
         assert item.text(0) == "Sample"
         assert item.text(1) == "Details"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_hysteresis_uses_shared_controls_and_origin_routing() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        plugin = window._current_plugin  # noqa: SLF001 - test hook
+        assert isinstance(plugin, PyPlotPlugin)
+        assert plugin.uses_shared_plot_workbooks is True
+        assert type(plugin).open_origin is PyPlotPlugin.open_origin
+        sections = _iter_toolbar_sections(plugin.settings_widget())
+        assert "Appearance" not in sections
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_hysteresis_register_plot_tab_enables_shared_open_origin() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        fig = Figure(figsize=(4, 3))
+        ax = fig.add_subplot(111)
+        line, = ax.plot([0.0, 1.0], [0.0, 1.0], label="0°")
+        canvas = FigureCanvas(fig)
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(canvas)
+        window.tab_widget.addTab(tab, "120 °C")
+        window.tab_widget.setCurrentWidget(tab)
+
+        descriptor = TabDescriptor(
+            kind="temperature",
+            title="120 °C",
+            root_label="120 °C",
+            x_label="Field [Oe]",
+            y_label="Moment [emu]",
+            canvas=canvas,
+            axes=ax,
+            lines={
+                ("angle", 0.0): GraphLineState(
+                    key=("angle", 0.0),
+                    label="0°",
+                    line=line,
+                    base_x=[0.0, 1.0],
+                    base_y=[0.0, 1.0],
+                    full_x=[0.0, 1.0],
+                    full_y=[0.0, 1.0],
+                )
+            },
+            metadata={"plugin": "VSM Hysteresis Loops"},
+        )
+        window._register_plot_tab(tab, canvas, ax, descriptor)
+        window._sync_shared_action_states()  # noqa: SLF001
+        assert window.open_origin_button.isEnabled()
     finally:
         window.close()
         app.processEvents()
