@@ -1397,15 +1397,16 @@ class VSMTemperatureScanProcessor:
                             )
                         )
                 if len(layer_map) > 1 and combined_legend_entries:
-                    primary_layer = graph[0]
+                    primary_field = unique_fields[0]
+                    primary_layer = layer_map.get(primary_field, graph[0])
                     self._set_origin_combined_legend(primary_layer, combined_legend_entries)
                     combined_ok = False
                     combined_label = self._origin_legend_label(primary_layer)
                     if combined_label is not None:
                         combined_ok = bool(str(getattr(combined_label, "text", "") or "").strip())
                     if combined_ok:
-                        for layer in layer_map.values():
-                            if layer is primary_layer:
+                        for field_value, layer in layer_map.items():
+                            if round(float(field_value), 6) == round(float(primary_field), 6):
                                 continue
                             self._hide_origin_legend(layer)
                     else:
@@ -1544,15 +1545,16 @@ class VSMTemperatureScanProcessor:
                                 )
                             )
                     if len(s_layer_map) > 1 and combined_legend_entries:
-                        primary_layer = smooth_graph[0]
+                        primary_field = s_unique[0]
+                        primary_layer = s_layer_map.get(primary_field, smooth_graph[0])
                         self._set_origin_combined_legend(primary_layer, combined_legend_entries)
                         combined_ok = False
                         combined_label = self._origin_legend_label(primary_layer)
                         if combined_label is not None:
                             combined_ok = bool(str(getattr(combined_label, "text", "") or "").strip())
                         if combined_ok:
-                            for layer in s_layer_map.values():
-                                if layer is primary_layer:
+                            for field_value, layer in s_layer_map.items():
+                                if round(float(field_value), 6) == round(float(primary_field), 6):
                                     continue
                                 self._hide_origin_legend(layer)
                         else:

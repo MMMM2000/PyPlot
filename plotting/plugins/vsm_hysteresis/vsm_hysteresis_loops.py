@@ -6369,9 +6369,10 @@ class VSMPlotter(PyPlotWindow):
             set_float = getattr(legend_label, "set_float", None)
             set_int = getattr(legend_label, "set_int", None)
             get_float = getattr(layer, "get_float", None)
+            legend_entries_count = len(plot_pairs)
             if callable(set_float):
                 try:
-                    set_float("fsize", 9.0)
+                    set_float("fsize", 7.5 if legend_entries_count > 12 else 9.0)
                 except Exception:
                     pass
             if callable(set_int):
@@ -6392,14 +6393,20 @@ class VSMPlotter(PyPlotWindow):
                     x_span = x_to - x_from
                     y_span = y_to - y_from
                     if x_span > 0 and y_span > 0:
+                        if legend_entries_count > 12:
+                            target_x = x_from + (x_span * 0.70)
+                            target_y = y_from + (y_span * 0.62)
+                        else:
+                            target_x = x_from + (x_span * 0.72)
+                            target_y = y_to - (y_span * 0.02)
                         try:
                             # Use a conservative in-frame anchor so long legends
                             # remain visible even if horizontal alignment is ignored.
-                            set_float("x", x_from + (x_span * 0.72))
+                            set_float("x", target_x)
                         except Exception:
                             pass
                         try:
-                            set_float("y", y_to - (y_span * 0.02))
+                            set_float("y", target_y)
                         except Exception:
                             pass
 

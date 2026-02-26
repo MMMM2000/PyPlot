@@ -469,7 +469,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         return
 
     # Keep titles just outside axes (not inside data area) while avoiding export clipping.
-    offset = x_span * 0.08
+    offset = x_span * 0.04
     target_x = (x_from - offset) if key == "y" else (x_to + offset)
     target_y = (y_from + y_to) / 2.0
 
