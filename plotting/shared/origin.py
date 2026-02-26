@@ -425,43 +425,62 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
             origin_lt_exec(lt_exec, f"layer.{key}.color = color(black);")
         if key == "y2":
             origin_lt_exec(lt_exec, "layer.y2.showlabel = 1;")
-    if key != "y2":
+    if key not in {"y", "y2"}:
         return
 
-    # On Origin "doubley" templates the right-axis title can be placed outside
-    # the export frame; clamp it inward so the text remains visible.
+    label_tokens = ("yl", "YL", "Yl") if key == "y" else ("yr", "YR", "Yr")
     label_getter = getattr(layer, "label", None)
     if not callable(label_getter):
         return
-    right_label = None
-    for token in ("yr", "YR", "Yr"):
+    axis_label = None
+    for token in label_tokens:
         try:
-            right_label = label_getter(token)
+            axis_label = label_getter(token)
         except Exception:
-            right_label = None
-        if right_label is not None:
+            axis_label = None
+        if axis_label is not None:
             break
-    if right_label is None:
+    if axis_label is None:
         return
-    set_int = getattr(right_label, "set_int", None)
+
+    set_int = getattr(axis_label, "set_int", None)
     if callable(set_int):
         try:
             set_int("show", 1)
         except Exception:
             pass
-    get_float = getattr(right_label, "get_float", None)
-    set_float = getattr(right_label, "set_float", None)
-    if not callable(set_float):
+
+    set_float = getattr(axis_label, "set_float", None)
+    layer_get_float = getattr(layer, "get_float", None)
+    if not callable(set_float) or not callable(layer_get_float):
         return
     try:
-        current_x = float(get_float("x")) if callable(get_float) else 130.0
+        x_from = float(layer_get_float("x.from"))
+        x_to = float(layer_get_float("x.to"))
+        y_from = float(layer_get_float("y.from"))
+        y_to = float(layer_get_float("y.to"))
     except Exception:
-        current_x = 130.0
-    if current_x > 130.0:
-        try:
-            set_float("x", 130.0)
-        except Exception:
-            pass
+        return
+    if not all(math.isfinite(value) for value in (x_from, x_to, y_from, y_to)):
+        return
+    x_span = x_to - x_from
+    y_span = y_to - y_from
+    if x_span <= 0.0 or y_span <= 0.0:
+        return
+
+    # Keep titles just outside axes (not inside data area) while avoiding export clipping.
+    offset = x_span * 0.08
+    target_x = (x_from - offset) if key == "y" else (x_to + offset)
+    target_y = (y_from + y_to) / 2.0
+
+    try:
+        set_float("x", target_x)
+    except Exception:
+        pass
+    try:
+        set_float("y", target_y)
+    except Exception:
+        pass
 
 
 __all__ = [

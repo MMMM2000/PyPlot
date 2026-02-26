@@ -755,12 +755,36 @@ class VSMTemperatureScanProcessor:
         label_method = getattr(layer, "label", None)
         if not callable(label_method):
             return None
-        try:
-            legend = label_method("Legend")
-        except Exception:
-            legend = None
+        legend = None
+        for token in ("Legend", "legend"):
+            try:
+                legend = label_method(token)
+            except Exception:
+                legend = None
+            if legend is not None and hasattr(legend, "text"):
+                break
+        if legend is None or not hasattr(legend, "text"):
+            lt_exec = getattr(layer, "lt_exec", None)
+            if callable(lt_exec):
+                try:
+                    lt_exec("legend;")
+                except Exception:
+                    pass
+            for token in ("Legend", "legend"):
+                try:
+                    legend = label_method(token)
+                except Exception:
+                    legend = None
+                if legend is not None and hasattr(legend, "text"):
+                    break
         if legend is None or not hasattr(legend, "text"):
             return None
+        set_int = getattr(legend, "set_int", None)
+        if callable(set_int):
+            try:
+                set_int("show", 1)
+            except Exception:
+                pass
         return cast(Any, legend)
 
     def _set_origin_legend(self, layer: Any, entries: list[tuple[int, str]]) -> None:
@@ -1328,6 +1352,7 @@ class VSMTemperatureScanProcessor:
                 for field_value, layer in layer_map.items():
                     layer_fields.setdefault(layer, []).append(field_value)
                 for layer, layer_values in layer_fields.items():
+                    y_axis_name = _visible_axis_for_title(layer, "y")
                     _set_origin_axis_title(
                         layer,
                         _visible_axis_for_title(layer, "x"),
@@ -1335,11 +1360,12 @@ class VSMTemperatureScanProcessor:
                     )
                     _set_origin_axis_title(
                         layer,
-                        _visible_axis_for_title(layer, "y"),
+                        y_axis_name,
                         self._axis_label_for_fields(layer_values, base=axis_base),
                     )
                 legend_entries: dict[Any, list[tuple[int, str]]] = {}
                 combined_legend_entries: list[tuple[int, int, str]] = []
+                layer_plot_counts: dict[Any, int] = {}
                 for field_value, base_col, legend_text, color in column_pairs:
                     layer = layer_map.get(field_value, graph[0])
                     plot_obj = cast(Any, layer.add_plot(data_sheet, coly=base_col + 1, colx=base_col))
@@ -1360,23 +1386,31 @@ class VSMTemperatureScanProcessor:
                             show_markers=bool(style.get("show_markers", False)),
                             marker_size=cast(float | None, style.get("marker_size")),
                         )
-                        dataset_index = getattr(plot_obj, "index", None)
-                        if isinstance(dataset_index, int):
-                            legend_entries.setdefault(layer, []).append((dataset_index, legend_text))
-                            combined_legend_entries.append(
-                                (
-                                    int(layer_number_map.get(field_value, 1)),
-                                    int(dataset_index),
-                                    legend_text,
-                                )
+                        plot_number = layer_plot_counts.get(layer, 0) + 1
+                        layer_plot_counts[layer] = plot_number
+                        legend_entries.setdefault(layer, []).append((plot_number, legend_text))
+                        combined_legend_entries.append(
+                            (
+                                int(layer_number_map.get(field_value, 1)),
+                                int(plot_number),
+                                legend_text,
                             )
+                        )
                 if len(layer_map) > 1 and combined_legend_entries:
                     primary_layer = graph[0]
                     self._set_origin_combined_legend(primary_layer, combined_legend_entries)
-                    for layer in layer_map.values():
-                        if layer is primary_layer:
-                            continue
-                        self._hide_origin_legend(layer)
+                    combined_ok = False
+                    combined_label = self._origin_legend_label(primary_layer)
+                    if combined_label is not None:
+                        combined_ok = bool(str(getattr(combined_label, "text", "") or "").strip())
+                    if combined_ok:
+                        for layer in layer_map.values():
+                            if layer is primary_layer:
+                                continue
+                            self._hide_origin_legend(layer)
+                    else:
+                        for layer, entries in legend_entries.items():
+                            self._set_origin_legend(layer, entries)
                 else:
                     for layer, entries in legend_entries.items():
                         self._set_origin_legend(layer, entries)
@@ -1465,6 +1499,7 @@ class VSMTemperatureScanProcessor:
                     for field_value, layer in s_layer_map.items():
                         s_layer_fields.setdefault(layer, []).append(field_value)
                     for layer, layer_values in s_layer_fields.items():
+                        y_axis_name = _visible_axis_for_title(layer, "y")
                         _set_origin_axis_title(
                             layer,
                             _visible_axis_for_title(layer, "x"),
@@ -1472,11 +1507,12 @@ class VSMTemperatureScanProcessor:
                         )
                         _set_origin_axis_title(
                             layer,
-                            _visible_axis_for_title(layer, "y"),
+                            y_axis_name,
                             self._axis_label_for_fields(layer_values, base=axis_base),
                         )
                     legend_entries = {}
                     combined_legend_entries = []
+                    layer_plot_counts = {}
                     for field_value, base_col, legend_text, color in smooth_pairs:
                         layer = s_layer_map.get(field_value, smooth_graph[0])
                         plot_obj = cast(Any, layer.add_plot(smooth_sheet, coly=base_col + 1, colx=base_col))
@@ -1497,23 +1533,31 @@ class VSMTemperatureScanProcessor:
                                 show_markers=bool(style.get("show_markers", False)),
                                 marker_size=cast(float | None, style.get("marker_size")),
                             )
-                            dataset_index = getattr(plot_obj, "index", None)
-                            if isinstance(dataset_index, int):
-                                legend_entries.setdefault(layer, []).append((dataset_index, legend_text))
-                                combined_legend_entries.append(
-                                    (
-                                        int(s_layer_number_map.get(field_value, 1)),
-                                        int(dataset_index),
-                                        legend_text,
-                                    )
+                            plot_number = layer_plot_counts.get(layer, 0) + 1
+                            layer_plot_counts[layer] = plot_number
+                            legend_entries.setdefault(layer, []).append((plot_number, legend_text))
+                            combined_legend_entries.append(
+                                (
+                                    int(s_layer_number_map.get(field_value, 1)),
+                                    int(plot_number),
+                                    legend_text,
                                 )
+                            )
                     if len(s_layer_map) > 1 and combined_legend_entries:
                         primary_layer = smooth_graph[0]
                         self._set_origin_combined_legend(primary_layer, combined_legend_entries)
-                        for layer in s_layer_map.values():
-                            if layer is primary_layer:
-                                continue
-                            self._hide_origin_legend(layer)
+                        combined_ok = False
+                        combined_label = self._origin_legend_label(primary_layer)
+                        if combined_label is not None:
+                            combined_ok = bool(str(getattr(combined_label, "text", "") or "").strip())
+                        if combined_ok:
+                            for layer in s_layer_map.values():
+                                if layer is primary_layer:
+                                    continue
+                                self._hide_origin_legend(layer)
+                        else:
+                            for layer, entries in legend_entries.items():
+                                self._set_origin_legend(layer, entries)
                     else:
                         for layer, entries in legend_entries.items():
                             self._set_origin_legend(layer, entries)
@@ -1583,6 +1627,7 @@ class VSMTemperatureScanProcessor:
                     _set_origin_axis_title(layer, "x", x_axis_label)
                     _set_origin_axis_title(layer, "y", derivative_axis_label)
                     legend_entries = {}
+                    legend_plot_count = 0
                     for field_value, base_col, legend_text, color in derivative_column_pairs:
                         plot_obj = cast(Any, layer.add_plot(deriv_sheet, coly=base_col + 1, colx=base_col))
                         if plot_obj is not None:
@@ -1602,9 +1647,8 @@ class VSMTemperatureScanProcessor:
                                 show_markers=bool(style.get("show_markers", False)),
                                 marker_size=cast(float | None, style.get("marker_size")),
                             )
-                            dataset_index = getattr(plot_obj, "index", None)
-                            if isinstance(dataset_index, int):
-                                legend_entries.setdefault(layer, []).append((dataset_index, legend_text))
+                            legend_plot_count += 1
+                            legend_entries.setdefault(layer, []).append((legend_plot_count, legend_text))
                     try:
                         self._set_origin_legend(layer, legend_entries.get(layer, []))
                     except Exception:
@@ -1674,6 +1718,7 @@ class VSMTemperatureScanProcessor:
                         _set_origin_axis_title(layer, "x", x_axis_label)
                         _set_origin_axis_title(layer, "y", derivative_axis_label)
                         legend_entries = {}
+                        legend_plot_count = 0
                         for field_value, base_col, legend_text, color in derivative_sm_pairs:
                             plot_obj = cast(Any, layer.add_plot(deriv_sm_sheet, coly=base_col + 1, colx=base_col))
                             if plot_obj is not None:
@@ -1693,9 +1738,8 @@ class VSMTemperatureScanProcessor:
                                     show_markers=bool(style.get("show_markers", False)),
                                     marker_size=cast(float | None, style.get("marker_size")),
                                 )
-                                dataset_index = getattr(plot_obj, "index", None)
-                                if isinstance(dataset_index, int):
-                                    legend_entries.setdefault(layer, []).append((dataset_index, legend_text))
+                                legend_plot_count += 1
+                                legend_entries.setdefault(layer, []).append((legend_plot_count, legend_text))
                         try:
                             self._set_origin_legend(layer, legend_entries.get(layer, []))
                         except Exception:

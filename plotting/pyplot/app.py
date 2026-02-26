@@ -1383,6 +1383,13 @@ class PyPlotWorkbench(PyPlotWindow):
     def _plugin_has_loaded_data(self, plugin: PyPlotPlugin | None) -> bool:
         if plugin is None:
             return False
+        checker = getattr(plugin, "has_loaded_data", None)
+        if callable(checker):
+            try:
+                if bool(checker()):
+                    return True
+            except Exception:
+                LOGGER.debug("Plugin has_loaded_data() failed for %s", plugin.name, exc_info=True)
         for attr in ("_data", "_dataset"):
             data = getattr(plugin, attr, None)
             if data is None:

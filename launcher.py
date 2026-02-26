@@ -974,6 +974,12 @@ def main(argv: list[str] | None = None) -> None:
     # returned engine == 0". Clear it so the default (e.g. 'windows') is used.
     if os.environ.get("QT_QPA_PLATFORM", "").lower() in {"offscreen", "minimal", "headless"}:
         os.environ.pop("QT_QPA_PLATFORM", None)
+    # External Qt distributions (e.g., conda/other apps) can inject plugin-path
+    # variables that point to incompatible binaries and cause startup errors:
+    # "no Qt platform plugin could be initialized".
+    for env_key in ("QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH"):
+        if os.environ.get(env_key):
+            os.environ.pop(env_key, None)
 
     app = QtWidgets.QApplication([argv_list[0], *qt_args])
     app.setQuitOnLastWindowClosed(False)

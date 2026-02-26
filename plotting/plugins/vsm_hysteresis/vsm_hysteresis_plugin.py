@@ -259,6 +259,13 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         if hasattr(host, "_update_project_actions"):
             host._update_project_actions()
 
+    def has_loaded_data(self) -> bool:
+        measurements = getattr(self.host, "measurements", None)
+        if isinstance(measurements, list) and measurements:
+            return True
+        worksheets = getattr(self.host, "_worksheets", None)
+        return isinstance(worksheets, dict) and bool(worksheets)
+
     # Internal helpers ---------------------------------------------
     def _ensure_initialized(self) -> None:
         if self._initialized:

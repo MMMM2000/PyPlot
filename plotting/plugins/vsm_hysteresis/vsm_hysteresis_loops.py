@@ -2582,7 +2582,20 @@ class VSMPlotter(PyPlotWindow):
         )
         if not files:
             return
-        self.path_edit.setText(";".join(files))
+        selected_text = ";".join(files)
+        self.path_edit.setText(selected_text)
+        apply_path_text = getattr(self, "_apply_path_text", None)
+        if callable(apply_path_text):
+            try:
+                apply_path_text(selected_text)
+            except Exception:
+                pass
+        update_actions = getattr(self, "_update_action_states", None)
+        if callable(update_actions):
+            try:
+                update_actions()
+            except Exception:
+                pass
         first = Path(files[0])
         self._remember_source_directory(first.parent if first.is_file() else first)
         self._load_measurements(show_warning=False)
@@ -2620,12 +2633,38 @@ class VSMPlotter(PyPlotWindow):
                 "VSM Hysteresis Loops",
                 "No VSM files were found in the selected folder(s).",
             )
-            self.path_edit.setText(";".join(directories))
+            selected_text = ";".join(directories)
+            self.path_edit.setText(selected_text)
+            apply_path_text = getattr(self, "_apply_path_text", None)
+            if callable(apply_path_text):
+                try:
+                    apply_path_text(selected_text)
+                except Exception:
+                    pass
+            update_actions = getattr(self, "_update_action_states", None)
+            if callable(update_actions):
+                try:
+                    update_actions()
+                except Exception:
+                    pass
             self._remember_source_directory(Path(directories[0]))
             self._save_settings()
             return
 
-        self.path_edit.setText(";".join(str(path) for path in paths))
+        selected_text = ";".join(str(path) for path in paths)
+        self.path_edit.setText(selected_text)
+        apply_path_text = getattr(self, "_apply_path_text", None)
+        if callable(apply_path_text):
+            try:
+                apply_path_text(selected_text)
+            except Exception:
+                pass
+        update_actions = getattr(self, "_update_action_states", None)
+        if callable(update_actions):
+            try:
+                update_actions()
+            except Exception:
+                pass
         self._remember_source_directory(Path(directories[0]))
         self._load_measurements(show_warning=False)
         self._save_settings()
@@ -2639,6 +2678,12 @@ class VSMPlotter(PyPlotWindow):
         text = self.path_edit.text().strip()
         if not text:
             return
+        apply_path_text = getattr(self, "_apply_path_text", None)
+        if callable(apply_path_text):
+            try:
+                apply_path_text(text)
+            except Exception:
+                pass
         first = Path(text.split(";")[0])
         if first.exists():
             self._remember_source_directory(first)
@@ -3675,27 +3720,60 @@ class VSMPlotter(PyPlotWindow):
                 stored_x = None
                 stored_y = None
 
+        def _column_has_variation(label: str) -> bool:
+            for measurement in self.measurements:
+                if measurement.temperature is None or measurement.angle is None:
+                    continue
+                if label not in measurement.data.columns:
+                    continue
+                series = pd.to_numeric(measurement.data[label], errors="coerce").dropna()
+                if series.empty:
+                    continue
+                try:
+                    spread = float(series.max() - series.min())
+                except Exception:
+                    continue
+                if not math.isfinite(spread):
+                    continue
+                if spread > 1e-12:
+                    return True
+            return False
+
         def _choose(
             preferences: Iterable[str],
             combo: QtWidgets.QComboBox,
             stored: str | None,
             *,
             avoid_raw: bool = False,
+            prefer_varying: bool = False,
         ) -> None:
+            def _accept(label: str) -> bool:
+                lowered = label.lower()
+                if avoid_raw and "raw applied field" in lowered:
+                    return False
+                if prefer_varying and not _column_has_variation(label):
+                    return False
+                return True
+
             stored_text = stored if stored in numeric_labels else None
-            if stored_text and avoid_raw and "raw applied field" in stored_text.lower():
+            if stored_text and not _accept(stored_text):
                 stored_text = None
             if stored_text:
                 combo.setCurrentText(stored_text)
                 return
             for pref in preferences:
-                matches = [label for label in numeric_labels if pref.lower() in label.lower()]
-                if avoid_raw:
-                    non_raw = [label for label in matches if "raw" not in label.lower()]
-                    if non_raw:
-                        matches = non_raw
+                matches = [
+                    label
+                    for label in numeric_labels
+                    if pref.lower() in label.lower() and _accept(label)
+                ]
                 if matches:
                     combo.setCurrentText(matches[0])
+                    return
+            if prefer_varying:
+                varying = [label for label in numeric_labels if _accept(label)]
+                if varying:
+                    combo.setCurrentText(varying[0])
                     return
             if combo.count():
                 combo.setCurrentIndex(0)
@@ -3705,7 +3783,13 @@ class VSMPlotter(PyPlotWindow):
             combo.clear()
             combo.addItems(numeric_labels)
             combo.blockSignals(False)
-        _choose(preferred_x, self.x_axis_combo, stored_x, avoid_raw=True)
+        _choose(
+            preferred_x,
+            self.x_axis_combo,
+            stored_x,
+            avoid_raw=True,
+            prefer_varying=True,
+        )
         _choose(preferred_y, self.y_axis_combo, stored_y)
         # Guard against stale settings selecting the same column for both axes.
         x_selected = self.x_axis_combo.currentText().strip()
@@ -6277,6 +6361,47 @@ class VSMPlotter(PyPlotWindow):
             origin_any.lt_exec("legend;")
         except Exception:
             pass
+        try:
+            legend_label = layer.label("Legend")
+        except Exception:
+            legend_label = None
+        if legend_label is not None:
+            set_float = getattr(legend_label, "set_float", None)
+            set_int = getattr(legend_label, "set_int", None)
+            get_float = getattr(layer, "get_float", None)
+            if callable(set_float):
+                try:
+                    set_float("fsize", 9.0)
+                except Exception:
+                    pass
+            if callable(set_int):
+                for key, value in (("show", 1), ("horzalign", 2), ("vertalign", 2)):
+                    try:
+                        set_int(key, int(value))
+                    except Exception:
+                        continue
+            if callable(set_float) and callable(get_float):
+                try:
+                    x_from = float(get_float("x.from"))
+                    x_to = float(get_float("x.to"))
+                    y_from = float(get_float("y.from"))
+                    y_to = float(get_float("y.to"))
+                except Exception:
+                    x_from = x_to = y_from = y_to = math.nan
+                if all(math.isfinite(value) for value in (x_from, x_to, y_from, y_to)):
+                    x_span = x_to - x_from
+                    y_span = y_to - y_from
+                    if x_span > 0 and y_span > 0:
+                        try:
+                            # Use a conservative in-frame anchor so long legends
+                            # remain visible even if horizontal alignment is ignored.
+                            set_float("x", x_from + (x_span * 0.72))
+                        except Exception:
+                            pass
+                        try:
+                            set_float("y", y_to - (y_span * 0.02))
+                        except Exception:
+                            pass
 
         try:
             layer.rescale()
