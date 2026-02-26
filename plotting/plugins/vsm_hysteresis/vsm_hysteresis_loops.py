@@ -33,7 +33,11 @@ from plotting.pyplot.window import (
     OBJECT_TREE_STATE_ROLE,
 )
 from plotting.shared.utils import ensure_app_theme, format_annealing_title
-from plotting.shared.origin import origin_session
+from plotting.shared.origin import (
+    origin_session,
+    set_origin_axis_title,
+    set_origin_graph_title,
+)
 
 HEADER_COLUMN_RE = re.compile(r"Column\s+\d+\s*:\s*(.+)")
 WHITESPACE_RE = re.compile(r"[_\s]+")
@@ -3279,6 +3283,28 @@ class VSMPlotter(PyPlotWindow):
     ) -> None:
         self._canvas_by_tab[tab] = canvas
         self._axes_by_tab[tab] = axes
+        try:
+            tab.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
+        except Exception:
+            pass
+        try:
+            tab.setMinimumSize(0, 0)
+        except Exception:
+            pass
+        try:
+            canvas.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
+        except Exception:
+            pass
+        try:
+            canvas.setMinimumSize(0, 0)
+        except Exception:
+            pass
         if descriptor is not None:
             descriptor.metadata.setdefault(_BASE_Y_LABEL_KEY, descriptor.y_label)
             descriptor.metadata.setdefault(_BASE_TITLE_KEY, descriptor.title)
@@ -3308,6 +3334,20 @@ class VSMPlotter(PyPlotWindow):
         self._update_normalize_enabled()
         if self.tab_widget.currentWidget() is tab:
             self._rebuild_object_manager_for_tab(tab)
+        # VSM plots are the primary work product in this window; use the full
+        # MDI viewport width instead of the default half-width slot.
+        fitter = getattr(self.tab_widget, "_fit_subwindow", None)
+        subwindow_for = getattr(self.tab_widget, "_subwindow_for", None)
+        if callable(fitter) and callable(subwindow_for):
+            try:
+                subwindow = subwindow_for(tab)
+            except Exception:
+                subwindow = None
+            if subwindow is not None:
+                try:
+                    fitter(subwindow, use_half_width=False, preferred_width=None)
+                except Exception:
+                    pass
         self._update_tab_buttons()
 
     def _clear_tab_list(self, tabs: List[QtWidgets.QWidget]) -> None:
@@ -3594,6 +3634,10 @@ class VSMPlotter(PyPlotWindow):
             ):
                 stored_x = None
                 stored_y = None
+            # Avoid restoring diagnostic time/temperature defaults for loop plots.
+            if "time" in stored_x_lower and "temp" in stored_y_lower:
+                stored_x = None
+                stored_y = None
 
         def _choose(
             preferences: Iterable[str],
@@ -3627,6 +3671,27 @@ class VSMPlotter(PyPlotWindow):
             combo.blockSignals(False)
         _choose(preferred_x, self.x_axis_combo, stored_x, avoid_raw=True)
         _choose(preferred_y, self.y_axis_combo, stored_y)
+        # Guard against stale settings selecting the same column for both axes.
+        x_selected = self.x_axis_combo.currentText().strip()
+        y_selected = self.y_axis_combo.currentText().strip()
+        if x_selected and y_selected and x_selected == y_selected:
+            replacement: str | None = None
+            for pref in preferred_y:
+                matches = [
+                    label
+                    for label in numeric_labels
+                    if pref.lower() in label.lower() and label != x_selected
+                ]
+                if matches:
+                    replacement = matches[0]
+                    break
+            if replacement is None:
+                for label in numeric_labels:
+                    if label != x_selected:
+                        replacement = label
+                        break
+            if replacement is not None:
+                self.y_axis_combo.setCurrentText(replacement)
         self._store_axis_selection()
 
     # ------------------------------------------------------------------ plotting helpers
@@ -3652,6 +3717,13 @@ class VSMPlotter(PyPlotWindow):
         y_axis = self.y_axis_combo.currentText()
         if not x_axis or not y_axis:
             QtWidgets.QMessageBox.warning(self, "VSM Hysteresis Loops", "Select X and Y axes for plotting.")
+            return
+        if x_axis == y_axis:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "VSM Hysteresis Loops",
+                "Select different X and Y axes for plotting.",
+            )
             return
 
         self.open_origin_button.setEnabled(False)
@@ -5888,6 +5960,30 @@ class VSMPlotter(PyPlotWindow):
             if legend is None:
                 self._refresh_tab_legend(tab_state)
 
+        fitter = getattr(self.tab_widget, "_fit_subwindow", None)
+        subwindow_for = getattr(self.tab_widget, "_subwindow_for", None)
+        if callable(fitter) and callable(subwindow_for):
+            for tab in list(self._temperature_tab_widgets):
+                try:
+                    subwindow = subwindow_for(tab)
+                except Exception:
+                    subwindow = None
+                if subwindow is None:
+                    continue
+                try:
+                    fitter(subwindow, use_half_width=False, preferred_width=None)
+                except Exception:
+                    pass
+                try:
+                    QtCore.QTimer.singleShot(
+                        0,
+                        lambda s=subwindow, f=fitter: f(
+                            s, use_half_width=False, preferred_width=None
+                        ),
+                    )
+                except Exception:
+                    pass
+
         self._append_log("Finished generating Matplotlib hysteresis plots.")
         try:
             self._ensure_window_visibility()
@@ -6127,24 +6223,24 @@ class VSMPlotter(PyPlotWindow):
         except Exception:
             pass
 
-        safe_x = self._escape_origin_text(x_axis)
-        safe_y = self._escape_origin_text(y_axis)
         if sample_label:
             title_text = f"{sample_label} — {temperature:g} °C"
         else:
-            title_text = f"{y_axis} vs {x_axis} at {temperature:g} °C"
-        safe_title = self._escape_origin_text(title_text)
-
-        for command in (
-            f'lab -xb "{safe_x}";',
-            f'lab -yl "{safe_y}";',
-            f'title -s "{safe_title}";',
-            'legend;'
-        ):
-            try:
-                origin_any.lt_exec(command)
-            except Exception:
-                pass
+            title_text = f"{temperature:g} °C"
+        try:
+            set_origin_axis_title(layer, "x", x_axis)
+            set_origin_axis_title(layer, "y", y_axis)
+        except Exception:
+            pass
+        try:
+            set_origin_graph_title(origin_any, graph, layer, title_text)
+            graph.name = self._origin_graph_short_name(temperature, sample_label)
+        except Exception:
+            pass
+        try:
+            origin_any.lt_exec("legend;")
+        except Exception:
+            pass
 
         try:
             layer.rescale()

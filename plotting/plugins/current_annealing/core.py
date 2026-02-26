@@ -16,7 +16,11 @@ from matplotlib.lines import Line2D
 from .burnthrough import trim_burnthrough_glitch
 from plotting.shared.backends import wants_matplotlib, wants_origin
 from plotting.shared.utils import save_figure, show_plots, schedule_origin_release
-from plotting.shared.origin import origin_session, hide_origin_workbook
+from plotting.shared.origin import (
+    origin_session,
+    hide_origin_workbook,
+    set_origin_graph_title as shared_set_origin_graph_title,
+)
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.toolkit import format_annealing_title
 
@@ -43,8 +47,9 @@ SHOW_TITLE = True
 # Relax figure count warning for batch plotting inside PyPlot tabs
 plt.rcParams["figure.max_open_warning"] = 0
 
-ORIGIN_MODES: Tuple[str, str] = ("experimental", "simple")
-ORIGIN_MODE: str = ORIGIN_MODES[1]
+# Origin export is intentionally fixed to direction-separated traces.
+ORIGIN_MODES: Tuple[str, ...] = ("directional",)
+ORIGIN_MODE: str = ORIGIN_MODES[0]
 
 
 _SUBSCRIPT_PATTERN = re.compile(r"([A-Z][a-z])(\d+)")
@@ -60,6 +65,10 @@ def _format_origin_annotation(text: str) -> str:
         return f"{element}\\-({digits})"
 
     return _SUBSCRIPT_PATTERN.sub(_sub, formatted)
+
+
+def _escape_ltalk_text(text: str) -> str:
+    return str(text).replace('"', '""')
 
 
 def load_file(path: str) -> pd.DataFrame:
@@ -196,10 +205,11 @@ def _direction_profile(currents: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int
 
 
 def _normalise_origin_mode(mode: str | None) -> str:
-    if not mode:
+    # Backwards compatibility: older projects may persist "experimental"/"simple".
+    normalised = str(mode or "").strip().lower()
+    if normalised in {"directional", "experimental", "split"}:
         return ORIGIN_MODES[0]
-    normalised = str(mode).lower()
-    return normalised if normalised in ORIGIN_MODES else ORIGIN_MODES[0]
+    return ORIGIN_MODES[0]
 
 
 def _clear_layer(layer: Any) -> None:
@@ -245,20 +255,48 @@ def _legend_label(layer: Any) -> Any | None:
     return cast(Any, legend)
 
 
-def _set_graph_title(layer: Any, text: str) -> None:
+def _set_graph_title(
+    layer: Any,
+    text: str,
+    *,
+    graph: Any | None = None,
+    origin_any: Any | None = None,
+) -> None:
+    if graph is not None:
+        try:
+            shared_set_origin_graph_title(origin_any, graph, layer, text)
+            return
+        except Exception:
+            pass
+    applied = False
     label_method = getattr(layer, "label", None)
     if not callable(label_method):
-        return
-    try:
-        title_label = label_method("Title")
-    except Exception:
         title_label = None
-    if title_label is None or not hasattr(title_label, "text"):
-        return
-    try:
-        cast(Any, title_label).text = text
-    except Exception:
-        pass
+    else:
+        try:
+            title_label = label_method("Title")
+        except Exception:
+            title_label = None
+    if title_label is not None and hasattr(title_label, "text"):
+        try:
+            cast(Any, title_label).text = text
+            _set_visibility(title_label, True)
+            applied = True
+        except Exception:
+            pass
+    # Fallback for templates where the Title label object is not exposed.
+    cmd = f'title -s "{_escape_ltalk_text(text)}";'
+    for target in (graph, layer, origin_any):
+        exec_lt = getattr(target, "lt_exec", None) if target is not None else None
+        if not callable(exec_lt):
+            continue
+        try:
+            exec_lt(cmd)
+            applied = True
+            break
+        except Exception:
+            continue
+    _ = applied
 
 
 def _assign_long_name(target: Any | None, name: str) -> None:
@@ -517,7 +555,7 @@ def _plot_origin_simple(
     graph: Any | None,
     layer: Any | None,
     legend_label: str,
-    display_label: str,
+    line_label: str,
 ) -> None:
     if worksheet is None or graph is None or layer is None:
         return
@@ -533,10 +571,10 @@ def _plot_origin_simple(
         plot_any.symbol_size = 4
         plot_any.symbol_edge_color = color
         plot_any.symbol_fill_color = color
-        plot_any.legend = display_label
+        plot_any.legend = line_label
     except Exception:
         try:
-            plot_any.legend = display_label
+            plot_any.legend = line_label
         except Exception:
             pass
     dataset_index = getattr(plot_any, 'index', None)
@@ -545,7 +583,7 @@ def _plot_origin_simple(
     legend = _legend_label(layer)
     if legend is not None:
         try:
-            legend.text = f"\\l({dataset_index}) {display_label}"
+            legend.text = f"\\l({dataset_index}) {line_label}"
         except Exception:
             pass
     try:
@@ -567,7 +605,6 @@ def _plot_origin_experimental(
     currents: np.ndarray,
     resistances: np.ndarray,
     legend_label: str,
-    display_label: str | None = None,
 ) -> None:
     if graph is None or layer is None:
         return
@@ -578,7 +615,7 @@ def _plot_origin_experimental(
             graph,
             layer,
             legend_label,
-            display_label or legend_label,
+            "Current trace",
         )
         return
     _, segments = _direction_profile(currents)
@@ -589,7 +626,7 @@ def _plot_origin_experimental(
             graph,
             layer,
             legend_label,
-            display_label or legend_label,
+            "Current trace",
         )
         return
 
@@ -703,15 +740,13 @@ def _plot_origin_experimental(
             graph,
             layer,
             legend_label,
-            display_label or legend_label,
+            "Current trace",
         )
         return
 
     legend = _legend_label(layer)
     if legend is not None and legend_entries:
         lines = []
-        if display_label:
-            lines.append(display_label)
         lines.extend(f"\\l({idx}) {text}" for idx, text in legend_entries if text)
         try:
             legend.text = "\n".join(lines)
@@ -888,26 +923,22 @@ def plot_one_origin(
 
     display_label = _format_origin_annotation(legend_label)
     _apply_axis_labels(layer, "Current (mA)", "Resistance (Ω)")
-    _set_graph_title(layer, display_label)
+    _set_graph_title(layer, display_label, graph=graph, origin_any=origin_any)
     _assign_long_name(graph, legend_label)
     _assign_long_name(workbook, legend_label)
 
-    resolved_mode = _normalise_origin_mode(mode if mode is not None else ORIGIN_MODE)
-    if resolved_mode == "simple":
-        _plot_origin_simple(workbook, worksheet, graph, layer, legend_label, display_label)
-        hide_origin_workbook(origin_any, workbook, graph)
-    else:
-        _plot_origin_experimental(
-            origin_any,
-            workbook,
-            worksheet,
-            graph,
-            layer,
-            currents,
-            resistances,
-            legend_label,
-            display_label,
-        )
+    _ = _normalise_origin_mode(mode if mode is not None else ORIGIN_MODE)
+    _plot_origin_experimental(
+        origin_any,
+        workbook,
+        worksheet,
+        graph,
+        layer,
+        currents,
+        resistances,
+        legend_label,
+    )
+    hide_origin_workbook(origin_any, workbook, graph)
 
     _apply_origin_readability(layer, graph)
 
@@ -927,7 +958,6 @@ def main(files: List[str], backend: str = BACKEND) -> None:
         apply_readability_fonts()
     use_matplotlib = wants_matplotlib(backend)
     use_origin = wants_origin(backend)
-    origin_mode = _normalise_origin_mode(ORIGIN_MODE)
     keep_open = bool(use_matplotlib and SHOW_PLOTS)
     prev_interactive = plt.isinteractive()
     if use_matplotlib and not SHOW_PLOTS:
@@ -975,7 +1005,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
 
             if use_origin:
                 try:
-                    plot_one_origin(df, title, Path(path).name, mode=origin_mode)
+                    plot_one_origin(df, title, Path(path).name)
                 except Exception as e:
                     print(f"Origin plot failed for {title}: {e}")
 

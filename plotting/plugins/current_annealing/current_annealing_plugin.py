@@ -28,14 +28,12 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
     requires_imported_data = True
     auto_load_on_import = True
-    uses_shared_plot_workbooks = False
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
         self._data_by_file: dict[str, pd.DataFrame] = {}
         self._loaded_files: list[str] = []
         self._plot_tabs: list[QtWidgets.QWidget] = []
-        self._origin_mode_combo: QtWidgets.QComboBox | None = None
         self._workbook_keys: dict[str, str] = {}
         self._panel_widget: QtWidgets.QWidget | None = None
 
@@ -90,24 +88,18 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             parent=container,
             layout_factory=_form_layout,
         )
-        origin_combo = QtWidgets.QComboBox(origin_section)
-        for mode in anneal_core.ORIGIN_MODES:
-            label = "Experimental (directional)" if mode == "experimental" else "Simple (single trace)"
-            origin_combo.addItem(label, mode)
-        index = origin_combo.findData(anneal_core.ORIGIN_MODE)
-        origin_combo.setCurrentIndex(index if index >= 0 else 0)
-        self._origin_mode_combo = origin_combo
-        origin_layout.addRow("Mode:", origin_combo)
+        origin_note = QtWidgets.QLabel(
+            "Uses shared PyPlot Origin export (direction-separated traces, shared title placement).",
+            origin_section,
+        )
+        origin_note.setWordWrap(True)
+        origin_layout.addRow(origin_note)
         layout.addWidget(origin_section)
         layout.addStretch(1)
         self._settings_widget = container
         return container
 
     def _apply_settings_to_core(self) -> None:
-        if isinstance(self._origin_mode_combo, QtWidgets.QComboBox):
-            mode = self._origin_mode_combo.currentData()
-            if isinstance(mode, str) and mode:
-                anneal_core.ORIGIN_MODE = mode
         anneal_core.SHOW_PLOTS = False
         anneal_core.BACKEND = "matplotlib"
 
@@ -207,7 +199,6 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 metadata={
                     "source_file": path_str,
                     "saved_path": "",
-                    "origin_mode": anneal_core.ORIGIN_MODE,
                 },
             )
             self.host.tab_widget.addTab(tab, Path(path_str).name)
@@ -227,17 +218,16 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
-        def _task() -> None:
-            self._apply_settings_to_core()
-            anneal_core.SHOW_PLOTS = False
-            anneal_core.main(self._loaded_files, backend="origin")
-
-        self.run_origin_export(
-            ready=bool(self._loaded_files),
-            missing_message="Load current annealing data before exporting to Origin.",
-            task=_task,
-            success_log="Sent current annealing plots to Origin.",
-        )
+        if not self._plot_tabs and self._data_by_file:
+            self.generate()
+        if not self._plot_tabs:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Generate at least one graph before exporting to Origin.",
+            )
+            return
+        super().open_origin()
 
     def update_ui(self) -> None:
         has_data = bool(self._data_by_file)
@@ -247,7 +237,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             can_save_graph=bool(self._plot_tabs),
             can_normalize=False,
             can_export_txt=False,
-            can_open_origin=has_data,
+            can_open_origin=has_data or bool(self._plot_tabs),
             can_popout=bool(self._plot_tabs),
         )
 

@@ -67,6 +67,8 @@ from plotting.shared.origin import (
     origin_session,
     schedule_origin_release,
     release_origin,
+    set_origin_axis_title as shared_set_origin_axis_title,
+    set_origin_graph_title as shared_set_origin_graph_title,
 )
 from plotting.shared.readability import (
     apply_readability,
@@ -3780,33 +3782,15 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 pass
 
     def _set_origin_axis_title(self, layer: Any, axis_name: str, title: str) -> None:
-        command = self._origin_axis_label_command(axis_name, title)
-        if not command:
-            return
-        self._activate_origin_layer(layer)
-        lt_exec = getattr(layer, "lt_exec", None)
-        if self._origin_lt_exec(lt_exec, command):
-            return
-        axis_obj = None
-        axis_method = getattr(layer, "axis", None)
-        if callable(axis_method):
-            try:
-                axis_obj = axis_method(axis_name)
-            except Exception:
-                axis_obj = None
-        if axis_obj is not None:
-            label_obj = getattr(axis_obj, "label", None)
-            if label_obj is not None and hasattr(label_obj, "text"):
-                try:
-                    label_obj.text = title
-                    return
-                except Exception:
-                    pass
-            if hasattr(axis_obj, "title"):
-                try:
-                    axis_obj.title = title
-                except Exception:
-                    pass
+        try:
+            shared_set_origin_axis_title(layer, axis_name, title)
+        except Exception:
+            command = self._origin_axis_label_command(axis_name, title)
+            if not command:
+                return
+            self._activate_origin_layer(layer)
+            lt_exec = getattr(layer, "lt_exec", None)
+            self._origin_lt_exec(lt_exec, command)
 
     def _set_origin_graph_title(
         self,
@@ -3815,23 +3799,15 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         primary_layer: Any,
         title: str,
     ) -> None:
-        safe_title = self._escape_origin_text(title)
         try:
-            graph.lname = title
+            shared_set_origin_graph_title(origin_any, graph, primary_layer, title)
         except Exception:
-            pass
-        try:
-            graph.name = self._origin_safe_token(title, fallback="Graph")[:13]
-        except Exception:
-            pass
-        # Always set graph title from the primary layer context. Running these
-        # commands from worksheet/root context can misparse text as math.
-        self._activate_origin_layer(primary_layer)
-        layer_lt_exec = getattr(primary_layer, "lt_exec", None)
-        if callable(layer_lt_exec):
-            self._origin_lt_exec(layer_lt_exec, f'label -s -n title "{safe_title}";')
+            safe_title = self._escape_origin_text(title)
+            self._activate_origin_layer(primary_layer)
+            layer_lt_exec = getattr(primary_layer, "lt_exec", None)
+            if callable(layer_lt_exec):
+                self._origin_lt_exec(layer_lt_exec, f'label -s -n title "{safe_title}";')
 
-        # Prefer object API to finalize text/properties after LT creation.
         label_getter = getattr(primary_layer, "label", None)
         if callable(label_getter):
             for label_name in ("Title", "title", "py_title"):
@@ -3842,33 +3818,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 if title_label is None:
                     continue
                 try:
-                    title_label.text = title
-                    self._position_origin_title_label(title_label, layer=primary_layer)
                     self._append_log(
                         f"Origin title snapshot ({title}) via {label_name}: "
                         f"{self._origin_title_label_snapshot(title_label)}"
                     )
-                    return
+                    break
                 except Exception:
                     continue
-
-        # Last resort: manual text object near the top center.
-        add_label = getattr(primary_layer, "add_label", None)
-        if callable(add_label):
-            try:
-                manual = add_label(title)
-            except Exception:
-                manual = None
-            if manual is not None:
-                self._position_origin_title_label(manual, layer=primary_layer)
-                try:
-                    manual.name = "py_title"
-                except Exception:
-                    pass
-                self._append_log(
-                    f"Origin title snapshot ({title}) via manual: "
-                    f"{self._origin_title_label_snapshot(manual)}"
-                )
 
     @staticmethod
     def _origin_title_xy(layer: Any) -> tuple[float, float] | None:
@@ -3892,7 +3848,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         # attachment modes do not render title labels in exported PNGs reliably.
         # Position the title above the plot box (not inside it), while staying
         # close enough to avoid clipping at the page edge.
-        return ((x_from + x_to) / 2.0, y_to + (y_span * 0.24))
+        return ((x_from + x_to) / 2.0, y_to + (y_span * 0.03))
 
     def _position_origin_title_label(self, label_obj: Any, *, layer: Any | None = None) -> None:
         if label_obj is None:

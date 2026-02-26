@@ -23,9 +23,17 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     op = None
 try:
-    from plotting.shared.origin import origin_session
+    from plotting.shared.origin import (
+        origin_session,
+        set_origin_axis_title as _shared_set_origin_axis_title,
+        set_origin_graph_title as _shared_set_origin_graph_title,
+        escape_origin_text as _shared_escape_origin_text,
+    )
 except Exception:  # pragma: no cover - optional dependency
     origin_session = None  # type: ignore
+    _shared_set_origin_axis_title = None  # type: ignore
+    _shared_set_origin_graph_title = None  # type: ignore
+    _shared_escape_origin_text = None  # type: ignore
 
 
 @dataclass
@@ -1061,65 +1069,53 @@ class VSMTemperatureScanProcessor:
         x_axis_label = "Temperature [°C]"
         derivative_axis_label = "d(Signal X)/dT [emu/°C]"
 
-        def _escape_origin_text(text: str) -> str:
-            return str(text).replace("\\", "\\\\").replace('"', "'")
-
         def _set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
-            axis_obj = None
-            axis_method = getattr(layer, "axis", None)
-            if callable(axis_method):
-                try:
-                    axis_obj = axis_method(axis_name)
-                except Exception:
-                    axis_obj = None
-            if axis_obj is not None:
-                label_obj = getattr(axis_obj, "label", None)
-                if label_obj is not None and hasattr(label_obj, "text"):
-                    try:
-                        label_obj.text = title
-                        return
-                    except Exception:
-                        pass
-                for attr in ("title", "text"):
-                    if not hasattr(axis_obj, attr):
-                        continue
-                    try:
-                        setattr(axis_obj, attr, title)
-                        return
-                    except Exception:
-                        continue
-            safe_title = _escape_origin_text(title)
+            if callable(_shared_set_origin_axis_title):
+                _shared_set_origin_axis_title(layer, axis_name, title)
+                return
             key = str(axis_name).lower()
-            lt_axis = key if key in {"x", "y", "x2", "y2"} else "x"
+            safe_title = str(title).replace('"', "''")
+            if key == "x":
+                cmd = f'label -s -xb "{safe_title}";'
+            elif key == "y":
+                cmd = f'label -s -yl "{safe_title}";'
+            elif key == "x2":
+                cmd = f'label -s -xt "{safe_title}";'
+            elif key == "y2":
+                cmd = f'label -s -yr "{safe_title}";'
+            else:
+                return
             try:
-                layer.lt_exec(f'layer.{lt_axis}.title$="{safe_title}";')
+                layer.lt_exec(cmd)
             except Exception:
                 pass
 
         def _set_origin_graph_title(origin_any: Any, graph: Any, title: str) -> None:
-            safe_title = _escape_origin_text(title)
             try:
                 graph.set_str("title", title)
             except Exception:
                 pass
+            primary_layer = None
+            try:
+                primary_layer = graph[0]
+            except Exception:
+                primary_layer = None
+            if callable(_shared_set_origin_graph_title) and primary_layer is not None:
+                _shared_set_origin_graph_title(origin_any, graph, primary_layer, title)
+            else:
+                safe_title = (
+                    _shared_escape_origin_text(title)
+                    if callable(_shared_escape_origin_text)
+                    else str(title).replace('"', "''")
+                )
+                graph_lt_exec = getattr(graph, "lt_exec", None)
+                if callable(graph_lt_exec):
+                    try:
+                        graph_lt_exec(f'title -s "{safe_title}";')
+                    except Exception:
+                        pass
             try:
                 graph.name = self._origin_graph_name(title)
-            except Exception:
-                pass
-            try:
-                graph.lname = title
-            except Exception:
-                pass
-            graph_lt_exec = getattr(graph, "lt_exec", None)
-            if callable(graph_lt_exec):
-                try:
-                    graph_lt_exec(f'title -s "{safe_title}";')
-                    return
-                except Exception:
-                    pass
-            try:
-                graph.activate()
-                origin_any.lt_exec(f'title -s "{safe_title}";')
             except Exception:
                 pass
 
@@ -1149,7 +1145,11 @@ class VSMTemperatureScanProcessor:
                 setattr(axis_top, "showlabels", False)
             except Exception:
                 try:
-                    safe_title = _escape_origin_text(title)
+                    safe_title = (
+                        _shared_escape_origin_text(title)
+                        if callable(_shared_escape_origin_text)
+                        else str(title).replace('"', "''")
+                    )
                     layer.lt_exec(f'layer.x2.title$="{safe_title}"; layer.x2.showlabels=0;')
                 except Exception:
                     pass
@@ -1221,9 +1221,14 @@ class VSMTemperatureScanProcessor:
                     pass
 
                 graphs: list[Any] = []
-                graph = origin.new_graph(template="doubley")
-                graphs.append(graph)
                 fields = [item.series.field for item in prepared]
+                template = (
+                    "doubley"
+                    if len({round(float(value), 6) for value in fields}) > 1
+                    else "line"
+                )
+                graph = origin.new_graph(template=template)
+                graphs.append(graph)
                 graph_title = self._plot_title(entry.sample, "VSM Temperature Scan", fields)
                 _set_origin_graph_title(origin, graph, graph_title)
                 unique_fields: list[float] = self.field_axis_order([field for field, _, _, _ in column_pairs])
@@ -1332,7 +1337,12 @@ class VSMTemperatureScanProcessor:
                         smooth_sheet.header_rows("LUC")
                     except Exception:
                         pass
-                    smooth_graph = origin.new_graph(template="doubley")
+                    smooth_template = (
+                        "doubley"
+                        if len({round(float(value), 6) for value in fields}) > 1
+                        else "line"
+                    )
+                    smooth_graph = origin.new_graph(template=smooth_template)
                     graphs.append(smooth_graph)
                     smooth_title = self._plot_title(entry.sample, "Smoothed Signal X", fields)
                     _set_origin_graph_title(origin, smooth_graph, smooth_title)
@@ -1442,7 +1452,7 @@ class VSMTemperatureScanProcessor:
                         deriv_sheet.header_rows("LUC")
                     except Exception:
                         pass
-                    deriv_graph = origin.new_graph()
+                    deriv_graph = origin.new_graph(template="line")
                     graphs.append(deriv_graph)
                     deriv_title = self._plot_title(entry.sample, "d(Signal X)/dT", fields)
                     _set_origin_graph_title(origin, deriv_graph, deriv_title)
@@ -1533,7 +1543,7 @@ class VSMTemperatureScanProcessor:
                                 deriv_sm_sheet.header_rows("LUC")
                             except Exception:
                                 pass
-                        deriv_sm_graph = origin.new_graph()
+                        deriv_sm_graph = origin.new_graph(template="line")
                         graphs.append(deriv_sm_graph)
                         deriv_sm_title = self._plot_title(entry.sample, "Smoothed d(Signal X)/dT", fields)
                         _set_origin_graph_title(origin, deriv_sm_graph, deriv_sm_title)

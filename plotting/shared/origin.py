@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import re
+import math
 import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, cast
 
 from PyQt6 import QtWidgets
+
+_ORIGIN_TOKEN_RE = re.compile(r"[^0-9A-Za-z_]")
 
 
 def _ensure_origin_sdk_on_path() -> None:
@@ -175,4 +179,254 @@ def hide_origin_workbook(origin: Any | None, workbook: Any | None, graph: Any | 
             return
 
 
-__all__ = ["origin_session", "release_origin", "schedule_origin_release", "hide_origin_workbook"]
+def escape_origin_text(text: str) -> str:
+    """Escape text for use in LabTalk string literals."""
+
+    return str(text).replace('"', '""')
+
+
+def origin_lt_exec(executor: Any, command: str) -> bool:
+    """Execute a LabTalk command, returning True on a non-failing result."""
+
+    if not callable(executor):
+        return False
+    try:
+        result = executor(command)
+    except Exception:
+        return False
+    if result is False:
+        return False
+    if isinstance(result, (int, float)) and result == 0:
+        return False
+    return True
+
+
+def activate_origin_layer(layer: Any) -> None:
+    """Best-effort activation of the layer hosting graph labels/axes."""
+
+    if layer is None:
+        return
+    activator = getattr(layer, "activate", None)
+    if callable(activator):
+        try:
+            activator()
+            return
+        except Exception:
+            pass
+    graph = getattr(layer, "graph", None)
+    activator = getattr(graph, "activate", None)
+    if callable(activator):
+        try:
+            activator()
+        except Exception:
+            pass
+
+
+def origin_safe_token(text: str, *, fallback: str = "Graph", max_len: int | None = None) -> str:
+    """Return an Origin-safe short token for graph/page names."""
+
+    cleaned = _ORIGIN_TOKEN_RE.sub("_", str(text).strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    if not cleaned:
+        cleaned = fallback
+    if cleaned and cleaned[0].isdigit():
+        cleaned = f"{fallback}_{cleaned}"
+    if max_len is not None and max_len > 0:
+        cleaned = cleaned[:max_len]
+    return cleaned
+
+
+def origin_title_xy(layer: Any) -> tuple[float, float] | None:
+    """Compute a centered title position above the plot area in data coords."""
+
+    get_float = getattr(layer, "get_float", None)
+    if not callable(get_float):
+        return None
+    try:
+        x_from = float(get_float("x.from"))
+        x_to = float(get_float("x.to"))
+        y_from = float(get_float("y.from"))
+        y_to = float(get_float("y.to"))
+    except Exception:
+        return None
+    values = (x_from, x_to, y_from, y_to)
+    if not all(math.isfinite(value) for value in values):
+        return None
+    x_span = x_to - x_from
+    y_span = y_to - y_from
+    if x_span <= 0.0 or y_span <= 0.0:
+        return None
+    # Keep the title close to the top edge of the plotting range; large offsets
+    # can push it outside the exported page area on some Origin templates.
+    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.03))
+
+
+def position_origin_title_label(
+    label_obj: Any,
+    *,
+    layer: Any | None = None,
+    font_size: float = 22.0,
+) -> None:
+    """Style and position an Origin text label as a graph title."""
+
+    if label_obj is None:
+        return
+    if hasattr(label_obj, "show"):
+        try:
+            label_obj.show = True
+        except Exception:
+            pass
+    set_int = getattr(label_obj, "set_int", None)
+    if callable(set_int):
+        for key, value in (
+            ("show", 1),
+            ("attach", 0),
+            ("horzalign", 1),
+            ("vertalign", 2),
+        ):
+            try:
+                set_int(key, int(value))
+            except Exception:
+                continue
+    target_x = 50.0
+    target_y = 108.0
+    if layer is not None:
+        computed = origin_title_xy(layer)
+        if computed is not None:
+            target_x, target_y = computed
+    set_float = getattr(label_obj, "set_float", None)
+    if callable(set_float):
+        for key, value in (
+            ("x", target_x),
+            ("y", target_y),
+            ("fsize", float(font_size)),
+        ):
+            try:
+                set_float(key, float(value))
+            except Exception:
+                continue
+
+
+def set_origin_graph_title(
+    origin_any: Any,
+    graph: Any,
+    primary_layer: Any,
+    title: str,
+) -> None:
+    """Set a graph title with robust placement across Origin templates."""
+
+    safe_title = escape_origin_text(title)
+    try:
+        graph.lname = title
+    except Exception:
+        pass
+    try:
+        graph.name = origin_safe_token(title, fallback="Graph", max_len=13)
+    except Exception:
+        pass
+
+    activate_origin_layer(primary_layer)
+    layer_lt_exec = getattr(primary_layer, "lt_exec", None)
+    if callable(layer_lt_exec):
+        origin_lt_exec(layer_lt_exec, f'label -s -n title "{safe_title}";')
+
+    label_getter = getattr(primary_layer, "label", None)
+    if callable(label_getter):
+        for label_name in ("Title", "title", "py_title"):
+            try:
+                title_label = label_getter(label_name)
+            except Exception:
+                title_label = None
+            if title_label is None:
+                continue
+            try:
+                title_label.text = title
+            except Exception:
+                continue
+            position_origin_title_label(title_label, layer=primary_layer)
+            return
+
+    add_label = getattr(primary_layer, "add_label", None)
+    if callable(add_label):
+        try:
+            manual = add_label(title)
+        except Exception:
+            manual = None
+        if manual is not None:
+            position_origin_title_label(manual, layer=primary_layer)
+            try:
+                manual.name = "py_title"
+            except Exception:
+                pass
+            return
+
+    graph_lt_exec = getattr(graph, "lt_exec", None)
+    if callable(graph_lt_exec):
+        if origin_lt_exec(graph_lt_exec, f'title -s "{safe_title}";'):
+            return
+    origin_exec = getattr(origin_any, "lt_exec", None)
+    if callable(origin_exec):
+        origin_lt_exec(origin_exec, f'title -s "{safe_title}";')
+
+
+def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
+    """Set an axis title using object API with LabTalk fallback."""
+
+    axis_obj = None
+    axis_method = getattr(layer, "axis", None)
+    if callable(axis_method):
+        try:
+            axis_obj = axis_method(axis_name)
+        except Exception:
+            axis_obj = None
+    if axis_obj is not None:
+        label_obj = getattr(axis_obj, "label", None)
+        if label_obj is not None and hasattr(label_obj, "text"):
+            try:
+                label_obj.text = title
+                return
+            except Exception:
+                pass
+        for attr in ("title", "text"):
+            if hasattr(axis_obj, attr):
+                try:
+                    setattr(axis_obj, attr, title)
+                    return
+                except Exception:
+                    continue
+
+    safe_title = escape_origin_text(title)
+    key = str(axis_name).lower()
+    cmd: str | None
+    if key == "x":
+        cmd = f'label -s -xb "{safe_title}";'
+    elif key == "y":
+        cmd = f'label -s -yl "{safe_title}";'
+    elif key == "x2":
+        cmd = f'label -s -xt "{safe_title}";'
+    elif key == "y2":
+        cmd = f'label -s -yr "{safe_title}";'
+    else:
+        cmd = None
+    if cmd is None:
+        return
+    activate_origin_layer(layer)
+    lt_exec = getattr(layer, "lt_exec", None)
+    if callable(lt_exec):
+        origin_lt_exec(lt_exec, cmd)
+
+
+__all__ = [
+    "origin_session",
+    "release_origin",
+    "schedule_origin_release",
+    "hide_origin_workbook",
+    "escape_origin_text",
+    "origin_lt_exec",
+    "activate_origin_layer",
+    "origin_safe_token",
+    "origin_title_xy",
+    "position_origin_title_label",
+    "set_origin_graph_title",
+    "set_origin_axis_title",
+]
