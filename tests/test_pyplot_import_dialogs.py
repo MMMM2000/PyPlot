@@ -79,3 +79,62 @@ def test_import_data_from_folder_forwards_multiple_directories(tmp_path: Path) -
     finally:
         window.close()
         app.processEvents()
+
+
+def test_select_directories_native_dialog_loop(monkeypatch, tmp_path: Path) -> None:
+    dir_one = tmp_path / "folder_one"
+    dir_two = tmp_path / "folder_two"
+    dir_one.mkdir()
+    dir_two.mkdir()
+
+    picks = iter([str(dir_one), str(dir_two)])
+    answers = iter(
+        [
+            QtWidgets.QMessageBox.StandardButton.Yes,
+            QtWidgets.QMessageBox.StandardButton.No,
+        ]
+    )
+
+    def _fake_get_existing_directory(*_args, **_kwargs) -> str:
+        return next(picks, "")
+
+    def _fake_question(*_args, **_kwargs) -> QtWidgets.QMessageBox.StandardButton:
+        return next(answers, QtWidgets.QMessageBox.StandardButton.No)
+
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getExistingDirectory",
+        _fake_get_existing_directory,
+    )
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "question",
+        _fake_question,
+    )
+
+    selected = PyPlotWorkbench._select_directories(
+        None,
+        title="Import Data Folder(s)",
+        start_dir=tmp_path,
+    )
+
+    assert selected == [str(dir_one.resolve()), str(dir_two.resolve())]
+
+
+def test_select_directories_cancel_returns_empty(monkeypatch, tmp_path: Path) -> None:
+    def _fake_get_existing_directory(*_args, **_kwargs) -> str:
+        return ""
+
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getExistingDirectory",
+        _fake_get_existing_directory,
+    )
+
+    selected = PyPlotWorkbench._select_directories(
+        None,
+        title="Import Data Folder(s)",
+        start_dir=tmp_path,
+    )
+
+    assert selected == []

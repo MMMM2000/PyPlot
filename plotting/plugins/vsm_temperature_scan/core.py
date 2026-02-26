@@ -1090,6 +1090,26 @@ class VSMTemperatureScanProcessor:
             except Exception:
                 pass
 
+        def _visible_axis_for_title(layer: Any, axis_name: str) -> str:
+            base = str(axis_name).lower()
+            if base not in {"x", "y"}:
+                return base
+            get_float = getattr(layer, "get_float", None)
+            if not callable(get_float):
+                return base
+            try:
+                primary_show = float(get_float(f"{base}.showlabel"))
+            except Exception:
+                primary_show = 1.0
+            secondary = "x2" if base == "x" else "y2"
+            try:
+                secondary_show = float(get_float(f"{secondary}.showlabel"))
+            except Exception:
+                secondary_show = 0.0
+            if primary_show < 0.5 and secondary_show >= 0.5:
+                return secondary
+            return base
+
         def _set_origin_graph_title(origin_any: Any, graph: Any, title: str) -> None:
             try:
                 graph.set_str("title", title)
@@ -1247,10 +1267,14 @@ class VSMTemperatureScanProcessor:
                 for field_value, layer in layer_map.items():
                     layer_fields.setdefault(layer, []).append(field_value)
                 for layer, layer_values in layer_fields.items():
-                    _set_origin_axis_title(layer, "x", x_axis_label)
                     _set_origin_axis_title(
                         layer,
-                        "y",
+                        _visible_axis_for_title(layer, "x"),
+                        x_axis_label,
+                    )
+                    _set_origin_axis_title(
+                        layer,
+                        _visible_axis_for_title(layer, "y"),
                         self._axis_label_for_fields(layer_values, base=axis_base),
                     )
                 legend_entries: dict[Any, list[tuple[int, str]]] = {}
@@ -1362,10 +1386,14 @@ class VSMTemperatureScanProcessor:
                     for field_value, layer in s_layer_map.items():
                         s_layer_fields.setdefault(layer, []).append(field_value)
                     for layer, layer_values in s_layer_fields.items():
-                        _set_origin_axis_title(layer, "x", x_axis_label)
                         _set_origin_axis_title(
                             layer,
-                            "y",
+                            _visible_axis_for_title(layer, "x"),
+                            x_axis_label,
+                        )
+                        _set_origin_axis_title(
+                            layer,
+                            _visible_axis_for_title(layer, "y"),
                             self._axis_label_for_fields(layer_values, base=axis_base),
                         )
                     legend_entries = {}

@@ -7938,38 +7938,40 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         title: str,
         start_dir: Path | str,
     ) -> list[str]:
-        dialog = QtWidgets.QFileDialog(parent, title, str(start_dir))
-        dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
-        dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly, True)
-        # Native dialogs only expose single-folder selection on most platforms.
-        dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
-
-        for view_type in (QtWidgets.QListView, QtWidgets.QTreeView):
-            for view in dialog.findChildren(view_type):
-                model = view.model()
-                if model is not None and isinstance(model, QtWidgets.QFileSystemModel):
-                    view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-
-        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
-            return []
-
         selected: list[str] = []
         seen: set[str] = set()
-        for entry in dialog.selectedFiles():
+        current_dir = Path(start_dir)
+        while True:
+            entry = QtWidgets.QFileDialog.getExistingDirectory(
+                parent,
+                title,
+                str(current_dir),
+                QtWidgets.QFileDialog.Option.ShowDirsOnly,
+            )
             if not entry:
-                continue
+                break
             candidate = Path(entry)
             try:
                 resolved = candidate.resolve()
             except Exception:
                 resolved = candidate
             if not resolved.is_dir():
-                continue
+                break
             key = str(resolved)
-            if key in seen:
-                continue
-            seen.add(key)
-            selected.append(key)
+            if key not in seen:
+                seen.add(key)
+                selected.append(key)
+            current_dir = resolved
+            add_more = QtWidgets.QMessageBox.question(
+                parent,
+                title,
+                "Add another folder?",
+                QtWidgets.QMessageBox.StandardButton.Yes
+                | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if add_more != QtWidgets.QMessageBox.StandardButton.Yes:
+                break
         return selected
 
     def _set_tree_item_text(
