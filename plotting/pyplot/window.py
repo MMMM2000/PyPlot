@@ -5060,11 +5060,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._data_menu = data_menu
 
         import_files_action = data_menu.addAction("Import Files…")
-        import_files_action.triggered.connect(self._import_data_from_files)
+        import_files_action.triggered.connect(self._dispatch_import_data_from_files)
         self._import_files_action = import_files_action
 
         import_folder_action = data_menu.addAction("Import Folders…")
-        import_folder_action.triggered.connect(self._import_data_from_folder)
+        import_folder_action.triggered.connect(self._dispatch_import_data_from_folder)
         self._import_folder_action = import_folder_action
 
         data_menu.addSeparator()
@@ -5095,6 +5095,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._reorder_columns_action = reorder_action
 
         self._update_worksheet_actions()
+
+    def _dispatch_import_data_from_files(self) -> None:
+        handler = getattr(self, "_import_data_from_files", None)
+        if callable(handler):
+            handler()
+
+    def _dispatch_import_data_from_folder(self) -> None:
+        handler = getattr(self, "_import_data_from_folder", None)
+        if callable(handler):
+            handler()
 
     def _configure_toolbar(self, toolbar: QtWidgets.QToolBar) -> None:
         """Apply shared sizing and behaviour to top-level toolbars."""

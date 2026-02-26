@@ -274,3 +274,47 @@ def test_vsm_hysteresis_folder_import_updates_selected_paths_and_enables_plot(
         window._clear_project_dirty()  # noqa: SLF001 - avoid close prompt in headless tests
         window.close()
         app.processEvents()
+
+
+def test_vsm_hysteresis_folder_menu_action_uses_plugin_import_handler(
+    tmp_path: Path,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        source_dir = tmp_path / "vsm_hys_action"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        source_file = source_dir / "202507101320-Hys-a140-T-30-00.VSM-Hys-Data"
+        source_file.write_text(
+            "\n".join(
+                [
+                    "@Section 0",
+                    "Column 0: Time since start, Time [s]",
+                    "Column 1: Applied Field, Applied Field [Oe]",
+                    "Column 2: Signal parallel with sample, Moment [emu]",
+                    "@@END Columns",
+                    "@@End of Header.",
+                    "@@Data",
+                    "New Section: Section 0:",
+                    "0.0 0.0 0.0",
+                    "1.0 5.0 0.2",
+                    "2.0 -5.0 -0.2",
+                    "@@END Data",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        window._select_directories = (  # type: ignore[assignment]
+            lambda _parent=None, *, title, start_dir: [str(source_dir)]
+        )
+        assert window._import_folder_action is not None  # noqa: SLF001 - test guard
+        window._import_folder_action.trigger()  # noqa: SLF001 - exercise menu action route
+
+        assert len(window.measurements) > 0  # noqa: SLF001 - plugin parser loaded data
+        assert len(window._worksheets) > 0  # noqa: SLF001 - worksheet tree populated
+        assert window.plot_button.isEnabled()
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001 - avoid close prompt in headless tests
+        window.close()
+        app.processEvents()
