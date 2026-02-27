@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import math
 import sys
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, cast
@@ -182,7 +183,23 @@ def hide_origin_workbook(origin: Any | None, workbook: Any | None, graph: Any | 
 def escape_origin_text(text: str) -> str:
     """Escape text for use in LabTalk string literals."""
 
-    return str(text).replace('"', '""')
+    return _origin_display_text(text).replace('"', '""')
+
+
+def _origin_display_text(text: str) -> str:
+    """Normalize text for broad Origin font/template compatibility."""
+
+    value = unicodedata.normalize("NFKC", str(text or ""))
+    return (
+        value
+        .replace("\u2013", "-")  # en dash
+        .replace("\u2014", "-")  # em dash
+        .replace("\u2212", "-")  # math minus
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+    )
 
 
 def origin_lt_exec(executor: Any, command: str) -> bool:
@@ -315,13 +332,14 @@ def set_origin_graph_title(
 ) -> None:
     """Set a graph title with robust placement across Origin templates."""
 
-    safe_title = escape_origin_text(title)
+    display_title = _origin_display_text(title)
+    safe_title = escape_origin_text(display_title)
     try:
-        graph.lname = title
+        graph.lname = display_title
     except Exception:
         pass
     try:
-        graph.name = origin_safe_token(title, fallback="Graph", max_len=13)
+        graph.name = origin_safe_token(display_title, fallback="Graph", max_len=13)
     except Exception:
         pass
 
@@ -340,7 +358,7 @@ def set_origin_graph_title(
             if title_label is None:
                 continue
             try:
-                title_label.text = title
+                title_label.text = display_title
             except Exception:
                 continue
             position_origin_title_label(title_label, layer=primary_layer)
@@ -349,7 +367,7 @@ def set_origin_graph_title(
     add_label = getattr(primary_layer, "add_label", None)
     if callable(add_label):
         try:
-            manual = add_label(title)
+            manual = add_label(display_title)
         except Exception:
             manual = None
         if manual is not None:
@@ -372,6 +390,7 @@ def set_origin_graph_title(
 def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
     """Set an axis title using object API with LabTalk fallback."""
 
+    display_title = _origin_display_text(title)
     key = str(axis_name).lower()
     axis_obj = None
     axis_method = getattr(layer, "axis", None)
@@ -385,7 +404,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         label_obj = getattr(axis_obj, "label", None)
         if label_obj is not None and hasattr(label_obj, "text"):
             try:
-                label_obj.text = title
+                label_obj.text = display_title
                 title_set = True
             except Exception:
                 pass
@@ -393,7 +412,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
             for attr in ("title", "text"):
                 if hasattr(axis_obj, attr):
                     try:
-                        setattr(axis_obj, attr, title)
+                        setattr(axis_obj, attr, display_title)
                         title_set = True
                         break
                     except Exception:
@@ -401,7 +420,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
 
     cmd: str | None = None
     if not title_set:
-        safe_title = escape_origin_text(title)
+        safe_title = escape_origin_text(display_title)
         if key == "x":
             cmd = f'label -s -xb "{safe_title}";'
         elif key == "y":
@@ -479,7 +498,14 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
 
     # Keep titles just outside axes (not inside data area) while avoiding export clipping.
     offset = x_span * 0.03
-    target_x = (x_from - offset) if key == "y" else (x_to + offset)
+    target_x = x_to + offset
+    if key == "y":
+        target_y = (y_from + y_to) / 2.0
+        try:
+            set_float("y", target_y)
+        except Exception:
+            pass
+        return
     if key == "y2" and existing_label_x is not None and existing_label_x > 130.0:
         target_x = 130.0
     target_y = (y_from + y_to) / 2.0

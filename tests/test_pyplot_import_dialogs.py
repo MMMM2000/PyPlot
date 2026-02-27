@@ -3,10 +3,12 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from PyQt6 import QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+import pandas as pd
 
 from plotting.plugins.base import PyPlotPlugin
 from plotting.pyplot.app import PyPlotWorkbench
@@ -154,6 +156,81 @@ def test_vsm_hysteresis_register_plot_tab_respects_shared_grid_default() -> None
 
         grid_lines = list(ax.get_xgridlines()) + list(ax.get_ygridlines())
         assert not any(bool(line.get_visible()) for line in grid_lines)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_hysteresis_prefers_plot_field_axis_when_applied_field_is_flat() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        # Ensure plugin methods are bound onto the host.
+        assert callable(getattr(window, "_resolve_axis_for_loop_plot", None))
+        window.x_axis_combo.clear()
+        window.x_axis_combo.addItems(
+            [
+                "Applied Field [Oe]",
+                "Applied Field For Plot [Oe]",
+                "Signal X direction [emu]",
+            ]
+        )
+
+        flat_field = pd.DataFrame(
+            {
+                "Applied Field [Oe]": [0.0, 0.0, 0.0],
+                "Applied Field For Plot [Oe]": [-1000.0, 0.0, 1000.0],
+            }
+        )
+        varied_field = pd.DataFrame(
+            {
+                "Applied Field [Oe]": [0.0, 0.0, 0.0],
+                "Applied Field For Plot [Oe]": [-500.0, 0.0, 500.0],
+            }
+        )
+        measurements = [
+            SimpleNamespace(data=flat_field),
+            SimpleNamespace(data=varied_field),
+        ]
+
+        resolved, changed = window._resolve_axis_for_loop_plot(  # type: ignore[attr-defined]
+            "Applied Field [Oe]",
+            measurements,
+            axis="x",
+        )
+        assert resolved == "Applied Field For Plot [Oe]"
+        assert changed is True
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_hysteresis_populate_axis_defaults_to_applied_field_for_plot() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        assert callable(getattr(window, "_populate_axis_combos", None))
+        window._stored_axes = ("Applied Field [Oe]", "Signal X direction [emu]")  # noqa: SLF001
+        window.measurements = [  # type: ignore[attr-defined]
+            SimpleNamespace(
+                data=pd.DataFrame(
+                    {
+                        "Applied Field [Oe]": [0.0, 0.0, 0.0],
+                        "Applied Field For Plot [Oe]": [-1000.0, 0.0, 1000.0],
+                        "Signal X direction [emu]": [-0.1, 0.0, 0.1],
+                    }
+                )
+            )
+        ]
+        labels = [
+            "Applied Field [Oe]",
+            "Applied Field For Plot [Oe]",
+            "Signal X direction [emu]",
+        ]
+
+        window._populate_axis_combos(labels)  # type: ignore[attr-defined]
+
+        assert window.x_axis_combo.currentText() == "Applied Field For Plot [Oe]"
     finally:
         window.close()
         app.processEvents()

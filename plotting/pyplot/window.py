@@ -68,6 +68,7 @@ from plotting.shared.origin import (
     origin_session,
     schedule_origin_release,
     release_origin,
+    escape_origin_text as shared_escape_origin_text,
     set_origin_axis_title as shared_set_origin_axis_title,
     set_origin_graph_title as shared_set_origin_graph_title,
 )
@@ -2543,7 +2544,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if settings_menu is None:
             settings_menu = bar.addMenu("Settings")
         if not hasattr(self, "_max_windows_action") or not isinstance(getattr(self, "_max_windows_action"), QtGui.QAction):
-            self._max_windows_action = settings_menu.addAction("Set max visible windowsâ€¦")
+            self._max_windows_action = settings_menu.addAction("Set max visible windows...")
             self._max_windows_action.triggered.connect(self._prompt_max_visible_windows)
 
     def _prompt_max_visible_windows(self) -> None:
@@ -3456,7 +3457,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         plotted = 0
 
         self._begin_task_progress(
-            "Exporting workbooks to Origin…",
+            "Exporting workbooks to Origin...",
             maximum=max(1, len(workbook_list)),
             value=0,
         )
@@ -4466,7 +4467,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _escape_origin_text(text: str) -> str:
-        return str(text).replace("\"", "''")
+        try:
+            return shared_escape_origin_text(str(text))
+        except Exception:
+            return str(text).replace("\"", "''")
 
     def _sync_shared_action_states(self) -> None:
         self._prune_shared_plot_workbooks()
@@ -4781,7 +4785,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         central_layout.setSpacing(6)
 
         self.path_edit = QtWidgets.QLineEdit()
-        self.path_edit.setPlaceholderText("Select files or foldersâ€¦")
+        self.path_edit.setPlaceholderText("Select files or folders...")
         self.path_edit.editingFinished.connect(self._handle_manual_path_entry)
         self.path_edit.hide()
         self.browse_files_button = None
@@ -4823,7 +4827,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             status.addPermanentWidget(progress_bar, 0)
             self._task_progress_bar = progress_bar
 
-            label = QtWidgets.QLabel("x: â€”   y: â€”", self)
+            label = QtWidgets.QLabel("x: --   y: --", self)
             label.setObjectName("mw_cursor_status")
             label.setMinimumWidth(320)
             label.setMinimumHeight(26)
@@ -5041,7 +5045,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         else:
             file_menu.addMenu(new_menu)
 
-        open_project_action = QtGui.QAction("Openâ€¦", self)
+        open_project_action = QtGui.QAction("Open...", self)
         try:
             open_project_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Open))
         except Exception:
@@ -5066,7 +5070,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         else:
             file_menu.addAction(save_project_action)
 
-        save_as_action = QtGui.QAction("Save Project Asâ€¦", self)
+        save_as_action = QtGui.QAction("Save Project As...", self)
         try:
             save_as_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.SaveAs))
         except Exception:
@@ -5100,11 +5104,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         menu_bar.addMenu(data_menu)
         self._data_menu = data_menu
 
-        import_files_action = data_menu.addAction("Import Filesâ€¦")
+        import_files_action = data_menu.addAction("Import Files...")
         import_files_action.triggered.connect(self._dispatch_import_data_from_files)
         self._import_files_action = import_files_action
 
-        import_folder_action = data_menu.addAction("Import Foldersâ€¦")
+        import_folder_action = data_menu.addAction("Import Folders...")
         import_folder_action.triggered.connect(self._dispatch_import_data_from_folder)
         self._import_folder_action = import_folder_action
 
@@ -5131,7 +5135,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         delete_column_action.triggered.connect(self._delete_selected_columns)
         self._delete_column_action = delete_column_action
 
-        reorder_action = data_menu.addAction("Reorder Columnsâ€¦")
+        reorder_action = data_menu.addAction("Reorder Columns...")
         reorder_action.triggered.connect(self._reorder_columns)
         self._reorder_columns_action = reorder_action
 
@@ -5920,12 +5924,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         self._action_toolbar = toolbar
 
-        import_action = toolbar.addAction("Import dataâ€¦")
+        import_action = toolbar.addAction("Import data...")
         import_action.triggered.connect(self._prompt_import_data)
         self.import_data_button = import_action
         self._style_toolbar_button(toolbar, import_action)
 
-        save_action = toolbar.addAction("Save graphâ€¦")
+        save_action = toolbar.addAction("Save graph...")
         save_action.setEnabled(False)
         save_action.triggered.connect(self._save_current_graph)
         self.save_graph_button = save_action
@@ -5937,25 +5941,25 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.normalize_button = normalize_action
         self._style_toolbar_button(toolbar, normalize_action)
 
-        export_action = toolbar.addAction("Export TXTâ€¦")
+        export_action = toolbar.addAction("Export TXT...")
         export_action.setEnabled(False)
         export_action.triggered.connect(self._export_txt)
         self.export_button = export_action
         self._style_toolbar_button(toolbar, export_action)
 
-        origin_action = toolbar.addAction("Open in Originâ€¦")
+        origin_action = toolbar.addAction("Open in Origin...")
         origin_action.setEnabled(False)
         origin_action.triggered.connect(self._open_origin_prompt)
         self.open_origin_button = origin_action
         self._style_toolbar_button(toolbar, origin_action)
 
-        export_workbooks_action = toolbar.addAction("Export workbooks to Originâ€¦")
+        export_workbooks_action = toolbar.addAction("Export workbooks to Origin...")
         export_workbooks_action.setEnabled(False)
         export_workbooks_action.triggered.connect(self._export_workbooks_to_origin)
         self.export_origin_button = export_workbooks_action
         self._style_toolbar_button(toolbar, export_workbooks_action)
 
-        check_outliers_action = toolbar.addAction("Check outliersâ€¦")
+        check_outliers_action = toolbar.addAction("Check outliers...")
         check_outliers_action.setEnabled(False)
         check_outliers_action.triggered.connect(self._show_check_outliers_dialog)
         self.check_outliers_button = check_outliers_action
@@ -6012,7 +6016,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._rescale_y_action = rescale_y_action
         self._style_toolbar_button(toolbar, rescale_y_action)
 
-        rescale_all_action = toolbar.addAction("Rescale allâ€¦")
+        rescale_all_action = toolbar.addAction("Rescale all...")
         rescale_all_action.setEnabled(False)
         rescale_all_action.setToolTip("Rescale multiple graphs at once.")
         rescale_all_action.triggered.connect(self._open_rescale_all_dialog)
@@ -6243,14 +6247,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if label is None:
             return
         if event is None or getattr(event, "inaxes", None) is None:
-            label.setText("x: â€”   y: â€”")
+            label.setText("x: --   y: --")
             return
         try:
             x_val = float(event.xdata)
             y_val = float(event.ydata)
             label.setText(f"x: {x_val:.4g}   y: {y_val:.4g}")
         except Exception:
-            label.setText("x: â€”   y: â€”")
+            label.setText("x: --   y: --")
 
     def _rescale_current_axes(self, axis: str) -> None:
         axes = self._current_axes()
@@ -6265,6 +6269,22 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             axes.relim()
             scalex = axis in {"both", "x"}
             scaley = axis in {"both", "y"}
+            try:
+                if scalex:
+                    axes.set_autoscalex_on(True)
+                if scaley:
+                    axes.set_autoscaley_on(True)
+            except Exception:
+                pass
+            try:
+                enable_axis = "both"
+                if scalex and not scaley:
+                    enable_axis = "x"
+                elif scaley and not scalex:
+                    enable_axis = "y"
+                axes.autoscale(enable=True, axis=enable_axis, tight=False)
+            except Exception:
+                pass
             axes.autoscale_view(scalex=scalex, scaley=scaley)
             canvas = getattr(axes, "figure", None)
             if canvas is not None:
@@ -6882,13 +6902,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         actions_added = False
 
         if isinstance(files_action, QtGui.QAction):
-            label = files_action.text() or "Import filesâ€¦"
+            label = files_action.text() or "Import files..."
             proxy = menu.addAction(label)
             proxy.triggered.connect(files_action.trigger)
             actions_added = True
 
         if isinstance(folder_action, QtGui.QAction):
-            label = folder_action.text() or "Import foldersâ€¦"
+            label = folder_action.text() or "Import folders..."
             proxy = menu.addAction(label)
             proxy.triggered.connect(folder_action.trigger)
             actions_added = True
@@ -6958,7 +6978,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._style_toolbar_button(toolbar, underline_action)
 
         color_button = QtWidgets.QToolButton(toolbar)
-        color_button.setText("Colorâ€¦")
+        color_button.setText("Color...")
         color_button.setEnabled(False)
         color_button.clicked.connect(self._choose_format_color)
         color_button.setToolTip("Select an object to adjust its colour")
@@ -7444,7 +7464,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def _update_project_title(self) -> None:
         title = self._base_title
         if self._project_path is not None:
-            title = f"{self._base_title} â€” {self._project_path.name}"
+            title = f"{self._base_title} - {self._project_path.name}"
         self.setWindowTitle(title)
 
     def _update_project_actions(self) -> None:
@@ -7681,14 +7701,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         imported = 0
         total_files = len(files)
         self._begin_task_progress(
-            "Importing dataâ€¦",
+            "Importing data...",
             maximum=max(1, total_files),
             value=0,
         )
         progress: QtWidgets.QProgressDialog | None = None
         if total_files > 1:
             progress = QtWidgets.QProgressDialog(
-                "Importing dataâ€¦",
+                "Importing data...",
                 "Cancel",
                 0,
                 total_files,
@@ -8385,7 +8405,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if worksheet is None:
                 continue
             rows, columns = worksheet.dataframe.shape
-            detail = f"{rows} Ã— {columns}"
+            detail = f"{rows} x {columns}"
             source_tooltip = str(worksheet.source) if worksheet.source is not None else detail
             self._set_tree_item_text(
                 item,
@@ -8558,7 +8578,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not plugin_name:
             base_title = getattr(self, "_base_title", "") or "pyplot"
             plugin_name = base_title.strip() or "pyplot"
-        sanitized = plugin_name.replace("â€”", " ").replace("ï¿½?", " ").replace("-", " ")
+        sanitized = (
+            plugin_name
+            .replace("—", " ")
+            .replace("-", " ")
+        )
         parts = [segment for segment in sanitized.replace("/", " ").split() if segment]
         prefix = " ".join(parts) if parts else "pyplot"
         extension = getattr(self, "PROJECT_EXTENSION", "")
@@ -8589,7 +8613,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         dialog.setIcon(QtWidgets.QMessageBox.Icon.Question)
         dialog.setText("Save this PyPlot session before closing?")
         dialog.setInformativeText(
-            "Choose â€œSave projectâ€ to keep your current imports, or close without saving to discard them."
+            "Choose \"Save project\" to keep your current imports, or close without saving to discard them."
         )
         save_button = dialog.addButton("Save project", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
         discard_button = dialog.addButton(
@@ -10417,19 +10441,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         if role is None:
             button.setEnabled(False)
-            button.setText("Colorâ€¦")
+            button.setText("Color...")
             button.setToolTip("Select an object to adjust its colour")
             button.setIcon(QtGui.QIcon())
             return
         button.setEnabled(True)
         if role == "text":
-            button.setText("Text colorâ€¦")
+            button.setText("Text color...")
             button.setToolTip("Change the selected text colour")
         elif role == "line":
-            button.setText("Line colorâ€¦")
+            button.setText("Line color...")
             button.setToolTip("Change the selected line colour")
         else:
-            button.setText("Colorâ€¦")
+            button.setText("Color...")
             button.setToolTip("Change the selected object's colour")
         if color is None or not color.isValid():
             button.setIcon(QtGui.QIcon())
@@ -10615,7 +10639,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     @staticmethod
     def _tight_layout_recommendation_text(recommendations: dict[str, float]) -> str:
         if not recommendations:
-            return "Title â‰¤ 14 pt; labels â‰¤ 11 pt; ticks â‰¤ 9 pt; legend â‰¤ 8 pt."
+            return "Title <= 14 pt; labels <= 11 pt; ticks <= 9 pt; legend <= 8 pt."
         labels = {
             "title_font": "Title",
             "label_font": "Axis labels",
@@ -10626,7 +10650,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         for key in ("title_font", "label_font", "tick_font", "legend_font_size"):
             if key not in recommendations:
                 continue
-            parts.append(f"{labels.get(key, key)} â‰¤ {float(recommendations[key]):.1f} pt")
+            parts.append(f"{labels.get(key, key)} <= {float(recommendations[key]):.1f} pt")
         return "; ".join(parts) if parts else "Reduce text sizes."
 
     def _apply_tight_layout_auto_fit(self, figure: Any, recommendations: dict[str, float]) -> int:
@@ -12462,7 +12486,10 @@ class _MdiTabProxy(QtWidgets.QWidget):
         target_w = slot_width if preferred_width is None else min(preferred_width, slot_width)
         target_w = max(300, min(target_w, slot_width))
         target_h = int(target_w / aspect) if aspect else available_h
-        min_height = min(available_h, max(base_h, 220))
+        # Large legends can inflate Qt size hints and force near-square windows.
+        # Keep a conservative minimum so restored windows stay landscape.
+        min_height_hint = max(min_hint.height(), min_size.height(), 220)
+        min_height = min(available_h, max(220, min(min_height_hint, int(available_h * 0.5))))
         if available_h >= min_height:
             target_h = max(target_h, min_height)
         if target_h > available_h and target_h > 0:

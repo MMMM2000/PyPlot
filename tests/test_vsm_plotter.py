@@ -151,6 +151,36 @@ def test_parse_handles_zero_angle_token(tmp_path: Path) -> None:
     assert module._parse_temperature(path) == -30.0
 
 
+def test_common_parent_and_sample_inference_preserve_sample_folder(tmp_path: Path) -> None:
+    root = tmp_path / "vsm_hyst_loops"
+    path_one = root / "Sample_A" / "25C" / "A.VSM-Hys-Data"
+    path_two = root / "Sample_A" / "120C" / "B.VSM-Hys-Data"
+    path_one.parent.mkdir(parents=True)
+    path_two.parent.mkdir(parents=True)
+    path_one.write_text("@@Data\n1 2 3\n@@END Data\n")
+    path_two.write_text("@@Data\n1 2 3\n@@END Data\n")
+
+    common = module._common_parent_path([path_one, path_two])
+    assert common == root / "Sample_A"
+    assert module._infer_sample_name_from_path(path_one, common_parent=common) == "Sample_A"
+    assert module._infer_sample_name_from_path(path_two, common_parent=common) == "Sample_A"
+
+
+def test_sample_inference_separates_multiple_samples(tmp_path: Path) -> None:
+    root = tmp_path / "vsm_hyst_loops"
+    path_one = root / "Sample_A" / "120C" / "A.VSM-Hys-Data"
+    path_two = root / "Sample_B" / "120C" / "B.VSM-Hys-Data"
+    path_one.parent.mkdir(parents=True)
+    path_two.parent.mkdir(parents=True)
+    path_one.write_text("@@Data\n1 2 3\n@@END Data\n")
+    path_two.write_text("@@Data\n1 2 3\n@@END Data\n")
+
+    common = module._common_parent_path([path_one, path_two])
+    assert common == root
+    assert module._infer_sample_name_from_path(path_one, common_parent=common) == "Sample_A"
+    assert module._infer_sample_name_from_path(path_two, common_parent=common) == "Sample_B"
+
+
 def test_parse_metadata_from_set_temperature_line(tmp_path: Path) -> None:
     path = tmp_path / "no_tokens.VSM-Hys-Data"
     content = """Action 0:      Set Field Angle to -15.5 [deg]

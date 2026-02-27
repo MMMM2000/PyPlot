@@ -396,7 +396,7 @@ class PyPlotWorkbench(PyPlotWindow):
             return
         if isinstance(self._graph_options_action, QtGui.QAction):
             return
-        self._graph_options_action = settings_menu.addAction("Graph options…")
+        self._graph_options_action = settings_menu.addAction("Graph options...")
         self._graph_options_action.triggered.connect(self._open_graph_options_dialog)
 
     @staticmethod
@@ -2098,7 +2098,7 @@ class PyPlotWorkbench(PyPlotWindow):
         graph_anchor_note.setWordWrap(True)
         graph_anchor_layout.addWidget(graph_anchor_note)
         open_graph_format_btn = QtWidgets.QPushButton(
-            "Open graph formatting…",
+            "Open graph formatting...",
             graph_anchor_section,
         )
         open_graph_format_btn.clicked.connect(self._open_graph_format_dialog)

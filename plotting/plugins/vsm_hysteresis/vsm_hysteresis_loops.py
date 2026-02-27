@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -58,6 +59,9 @@ SET_TEMPERATURE_RE = re.compile(
 )
 FOLDER_SANITIZE_RE = re.compile(r"[^0-9A-Za-z._-]+")
 SAMPLE_FRACTION_RE = re.compile(r"(?<=\b)(\d+)-(\d+)(?=\b)")
+TEMP_FOLDER_HINT_RE = re.compile(
+    r"^[Tt]?[+\-]?\d+(?:[.,]\d+)?(?:°?[Cc])?$"
+)
 
 ORIGIN_PLOT_COLORS = [
     "#1f77b4",
@@ -696,6 +700,75 @@ def _find_vsm_files(directory: Path) -> List[Path]:
     for path in matches:
         unique[path.resolve()] = path
     return sorted(unique.values())
+
+
+def _common_parent_path(paths: Sequence[Path]) -> Path | None:
+    """Return a shared parent directory for ``paths`` when available."""
+
+    parent_strings: List[str] = []
+    for path in paths:
+        if not isinstance(path, Path):
+            continue
+        try:
+            parent_strings.append(str(path.parent.resolve()))
+        except Exception:
+            parent_strings.append(str(path.parent))
+    if not parent_strings:
+        return None
+    try:
+        return Path(os.path.commonpath(parent_strings))
+    except Exception:
+        return None
+
+
+def _looks_like_temperature_folder(name: str) -> bool:
+    """Return True when ``name`` resembles a temperature token."""
+
+    compact = str(name or "").strip().replace(" ", "")
+    if not compact or len(compact) > 12:
+        return False
+    return bool(TEMP_FOLDER_HINT_RE.fullmatch(compact))
+
+
+def _infer_sample_name_from_path(path: Path, *, common_parent: Path | None) -> str | None:
+    """Infer a sample label from directory structure when headers are missing."""
+
+    candidate = ""
+    parent = path.parent
+    if common_parent is not None:
+        try:
+            relative_parent = parent.resolve().relative_to(common_parent.resolve())
+        except Exception:
+            relative_parent = None
+        if relative_parent is not None:
+            parts = [part.strip() for part in relative_parent.parts if part.strip()]
+            if parts:
+                candidate = parts[0]
+
+    common_name = (
+        common_parent.name.strip()
+        if isinstance(common_parent, Path) and common_parent.name
+        else ""
+    )
+    if candidate and _looks_like_temperature_folder(candidate):
+        if common_name and not _looks_like_temperature_folder(common_name):
+            candidate = common_name
+        else:
+            ancestor = parent.parent.name.strip() if parent.parent is not None else ""
+            if ancestor and not _looks_like_temperature_folder(ancestor):
+                candidate = ancestor
+
+    if not candidate:
+        candidate = parent.name.strip()
+    if candidate and _looks_like_temperature_folder(candidate):
+        ancestor = parent.parent.name.strip() if parent.parent is not None else ""
+        if ancestor and not _looks_like_temperature_folder(ancestor):
+            candidate = ancestor
+        elif common_name and not _looks_like_temperature_folder(common_name):
+            candidate = common_name
+
+    cleaned = candidate.strip()
+    return cleaned or None
 
 
 _BASE_Y_LABEL_KEY = "base_y_label"
@@ -1877,9 +1950,9 @@ class VSMPlotter(PyPlotWindow):
 
     def _extend_menus(self, menu_bar: QtWidgets.QMenuBar) -> None:
         export_menu = menu_bar.addMenu("Export")
-        export_data_action = export_menu.addAction("TXT data…")
+        export_data_action = export_menu.addAction("TXT data...")
         export_data_action.triggered.connect(self._export_txt)
-        export_metrics_action = export_menu.addAction("Derived metrics…")
+        export_metrics_action = export_menu.addAction("Derived metrics...")
         export_metrics_action.triggered.connect(self._export_metrics)
 
         developer_menu: QtWidgets.QMenu | None = None
@@ -1890,13 +1963,13 @@ class VSMPlotter(PyPlotWindow):
                 break
         if developer_menu is not None:
             developer_menu.addSeparator()
-            coercivity_action = developer_menu.addAction("Coercivity debug…")
+            coercivity_action = developer_menu.addAction("Coercivity debug...")
             if coercivity_action is not None:
                 coercivity_action.setObjectName("mw_vsm_coercivity_debug")
                 coercivity_action.triggered.connect(
                     partial(self._show_metric_debug, "coercivity")
                 )
-            remanence_action = developer_menu.addAction("Remanence debug…")
+            remanence_action = developer_menu.addAction("Remanence debug...")
             if remanence_action is not None:
                 remanence_action.setObjectName("mw_vsm_remanence_debug")
                 remanence_action.triggered.connect(
@@ -2681,7 +2754,7 @@ class VSMPlotter(PyPlotWindow):
         self._save_settings()
 
     def _import_data_from_files(self) -> None:
-        # Route shared "Import data…" action through the plugin loader so
+        # Route shared "Import data..." action through the plugin loader so
         # measurements/worksheet tabs/plot enablement stay in sync.
         self._choose_files()
 
@@ -2698,7 +2771,7 @@ class VSMPlotter(PyPlotWindow):
         seen: set[Path] = set()
         paths: list[Path] = []
         self._begin_task_progress(
-            "Scanning folders for VSM files…",
+            "Scanning folders for VSM files...",
             maximum=max(1, len(directories)),
             value=0,
         )
@@ -2763,7 +2836,7 @@ class VSMPlotter(PyPlotWindow):
         self._save_settings()
 
     def _import_data_from_folder(self) -> None:
-        # Route shared "Import data…" action through the plugin loader so
+        # Route shared "Import data..." action through the plugin loader so
         # measurements/worksheet tabs/plot enablement stay in sync.
         self._choose_folder()
 
@@ -3586,17 +3659,52 @@ class VSMPlotter(PyPlotWindow):
         self._project_path = None
         self._update_project_title()
 
-        paths = self._selected_paths()
-        if not paths:
+        raw_paths = [path for path in self._selected_paths() if isinstance(path, Path)]
+        if not raw_paths:
             if show_warning:
                 QtWidgets.QMessageBox.warning(
                     self, "VSM Hysteresis Loops", "Select at least one VSM file to load."
                 )
             return
 
+        paths: List[Path] = []
+        seen_paths: set[Path] = set()
+        for entry in raw_paths:
+            if not entry.exists():
+                continue
+            if entry.is_dir():
+                for candidate in _find_vsm_files(entry):
+                    try:
+                        resolved = candidate.resolve()
+                    except Exception:
+                        resolved = candidate
+                    if resolved in seen_paths:
+                        continue
+                    seen_paths.add(resolved)
+                    paths.append(resolved)
+                continue
+            try:
+                resolved = entry.resolve()
+            except Exception:
+                resolved = entry
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+            paths.append(resolved)
+
+        if not paths:
+            if show_warning:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "VSM Hysteresis Loops",
+                    "No VSM files were found in the selected paths.",
+                )
+            return
+
+        common_parent = _common_parent_path(paths)
         total_steps = max(1, len(paths)) + 3
         self._begin_task_progress(
-            "Importing VSM measurements…",
+            "Importing VSM measurements...",
             maximum=total_steps,
             value=0,
         )
@@ -3623,6 +3731,8 @@ class VSMPlotter(PyPlotWindow):
             angle = _parse_angle(path)
             header_info = _header_metadata(path)
             sample_name = header_info.get("sample_name")
+            if not sample_name:
+                sample_name = _infer_sample_name_from_path(path, common_parent=common_parent)
             operator = header_info.get("operator")
             test_id = header_info.get("test_id")
 
@@ -3684,7 +3794,7 @@ class VSMPlotter(PyPlotWindow):
 
         self._update_task_progress(
             value=max(1, len(paths)),
-            title="Creating workbooks…",
+            title="Creating workbooks...",
         )
 
         if total_loaded == 0:
@@ -3705,7 +3815,7 @@ class VSMPlotter(PyPlotWindow):
 
         self._update_task_progress(
             value=max(1, len(paths)) + 1,
-            title="Updating project tree and worksheets…",
+            title="Updating project tree and worksheets...",
         )
         self._update_sample_title()
         self._populate_project_tree()
@@ -3867,13 +3977,34 @@ class VSMPlotter(PyPlotWindow):
             combo.clear()
             combo.addItems(numeric_labels)
             combo.blockSignals(False)
-        _choose(
-            preferred_x,
-            self.x_axis_combo,
-            stored_x,
-            avoid_raw=True,
-            prefer_varying=True,
-        )
+        plot_field_default = None
+        for label in numeric_labels:
+            lowered = label.lower()
+            if "applied field for plot" not in lowered:
+                continue
+            if "raw applied field" in lowered:
+                continue
+            spread = self._axis_spread_for_measurements(self.measurements, label)
+            if spread is None or spread <= 1e-12:
+                continue
+            plot_field_default = label
+            break
+        if plot_field_default is not None:
+            self.x_axis_combo.setCurrentText(plot_field_default)
+        else:
+            stored_x_for_choice = stored_x
+            if isinstance(stored_x_for_choice, str) and stored_x_for_choice:
+                # Persisted stale choices can collapse loops into near-vertical lines.
+                # Default to field-like axes unless the stored X axis is field-based.
+                if "field" not in stored_x_for_choice.lower():
+                    stored_x_for_choice = None
+            _choose(
+                preferred_x,
+                self.x_axis_combo,
+                stored_x_for_choice,
+                avoid_raw=True,
+                prefer_varying=True,
+            )
         _choose(preferred_y, self.y_axis_combo, stored_y)
         # Guard against stale settings selecting the same column for both axes.
         x_selected = self.x_axis_combo.currentText().strip()
@@ -3975,6 +4106,24 @@ class VSMPlotter(PyPlotWindow):
             return spread is not None and spread > 1e-12
 
         current_spread = self._axis_spread_for_measurements(measurements, selected)
+        if axis == "x" and selected:
+            lowered_selected = selected.lower()
+            if "applied field" in lowered_selected and "for plot" not in lowered_selected:
+                best_label: str | None = None
+                best_spread = 0.0
+                for label in options:
+                    lowered = label.lower()
+                    if "applied field for plot" not in lowered:
+                        continue
+                    spread = self._axis_spread_for_measurements(measurements, label)
+                    if spread is None or spread <= 1e-12:
+                        continue
+                    if spread > best_spread:
+                        best_spread = spread
+                        best_label = label
+                if best_label is not None:
+                    if current_spread is None or best_spread > current_spread * 10.0:
+                        return best_label, best_label != selected
         if (
             selected
             and (not excluded or selected != excluded)
@@ -4027,7 +4176,7 @@ class VSMPlotter(PyPlotWindow):
 
         total_steps = max(1, len(self.measurements)) + 4
         self._begin_task_progress(
-            "Preparing hysteresis plots…",
+            "Preparing hysteresis plots...",
             maximum=total_steps,
             value=0,
         )
@@ -4130,7 +4279,7 @@ class VSMPlotter(PyPlotWindow):
 
         self._update_task_progress(
             value=max(1, len(self.measurements)) + 1,
-            title="Rendering graphs…",
+            title="Rendering graphs...",
         )
 
         self._update_angle_overlay_options(prepared_groups)
@@ -4396,7 +4545,7 @@ class VSMPlotter(PyPlotWindow):
         self._render_matplotlib(prepared_groups, rescale_info, x_axis, y_axis, rescale_enabled)
         self._update_task_progress(
             value=max(1, len(self.measurements)) + 3,
-            title="Finalizing graph objects…",
+            title="Finalizing graph objects...",
         )
 
         self.open_origin_button.setEnabled(bool(prepared_groups))
@@ -6587,7 +6736,7 @@ class VSMPlotter(PyPlotWindow):
     ) -> None:
         total_groups = max(1, len(prepared_groups))
         self._begin_task_progress(
-            "Exporting plots to Origin…",
+            "Exporting plots to Origin...",
             maximum=total_groups,
             value=0,
         )
