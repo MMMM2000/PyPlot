@@ -202,6 +202,24 @@ New Section: Section 0:
     assert module._parse_temperature(path) == -30.0
 
 
+def test_explicit_temperature_overrides_recipe_fallback_token(tmp_path: Path) -> None:
+    path = tmp_path / "202608010957-Hys-28.VSM-HYS-DATA"
+    content = """@Measurement Controlfilename: C:\\vsm-lv\\Rasto\\Recipes\\Hys-a090-T025-95.VHC
+Action 0:      Set Field Angle to 90.0000 [deg]
+Action 1:      Set Sample Temperature to 24.9979 [degC]
+@@Data
+New Section: Section 0:
+1 2 3
+@@END Data
+"""
+    path.write_text(content)
+
+    module._metadata_from_file.cache_clear()  # type: ignore[attr-defined]
+
+    assert module._parse_angle(path) == 90.0
+    assert module._parse_temperature(path) == 25.0
+
+
 def test_parse_metadata_from_angle_offset(tmp_path: Path) -> None:
     path = tmp_path / "offset_only.VSM-Hys-Data"
     content = """Sample Angle Offset = 42.0

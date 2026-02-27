@@ -16,7 +16,29 @@ from plotting.plugins._window import window_api
 class VSMHysteresisPlugin(PyPlotPlugin):
     """PyPlot plugin wrapper around :class:`VSMPlotter`."""
 
-    _METHOD_EXCLUDES = {"__init__", "_selected_paths", "_create_dock_widget", "_create_dock_switcher"}
+    _METHOD_EXCLUDES = {
+        "__init__",
+        "_selected_paths",
+        "_create_dock_widget",
+        "_create_dock_switcher",
+        # Keep shared PyPlot UX/state handlers from the host implementation.
+        "_populate_graph_settings",
+        "_open_origin_prompt",
+        "_ensure_graph_tree_item",
+        "_update_graph_tree_for_tab",
+        "_style_graph_item",
+        "_focus_tree_on_tab",
+        "_update_tab_buttons",
+        "_handle_current_tab_changed",
+        "_rebuild_object_manager_for_tab",
+        "_handle_object_item_changed",
+        "_is_tab_visible",
+        "_set_tab_visibility",
+        "_find_alternate_tab_index",
+        "_minimize_tab",
+        "_update_save_graph_enabled",
+        "_update_normalize_enabled",
+    }
     requires_imported_data = True
     uses_shared_plot_workbooks = True
 

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from PyQt6 import QtCore, QtWidgets
+from matplotlib import colors as mcolors
 from matplotlib import ticker as mticker
 
 from plotting.pyplot.app import PyPlotWorkbench
@@ -168,6 +169,72 @@ def test_apply_graph_format_rebuilds_legend_with_visible_lines_only() -> None:
         app.processEvents()
 
 
+def test_apply_graph_format_updates_legend_orientation() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        axes = window._current_axes()
+        assert axes is not None
+        axes.plot([1.0, 2.0, 3.0], [1.0, 2.0, 3.0], label="A")
+        axes.plot([1.0, 2.0, 3.0], [2.0, 3.0, 4.0], label="B")
+        axes.legend(loc="best")
+
+        controls = window._graph_format_controls
+        orientation_combo = controls.get("legend_orientation_combo")
+        assert isinstance(orientation_combo, QtWidgets.QComboBox)
+        controls["show_legend_cb"].setChecked(True)
+
+        orientation_combo.setCurrentIndex(orientation_combo.findData("horizontal"))
+        window._apply_graph_format(apply_all=False)
+        legend = axes.get_legend()
+        assert legend is not None
+        assert getattr(legend, "_mw_orientation", None) == "horizontal"
+        assert int(getattr(legend, "_ncol", 1)) >= 2
+
+        orientation_combo.setCurrentIndex(orientation_combo.findData("vertical"))
+        window._apply_graph_format(apply_all=False)
+        legend = axes.get_legend()
+        assert legend is not None
+        assert getattr(legend, "_mw_orientation", None) == "vertical"
+        assert int(getattr(legend, "_ncol", 1)) == 1
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_dark_mode_toggle_restores_light_legend_when_snapshot_missing() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._handle_dark_mode_toggled(True)  # noqa: SLF001 - test hook
+        app.processEvents()
+        window._create_blank_graph()
+        axes = window._current_axes()
+        assert axes is not None
+        axes.plot([1.0, 2.0, 3.0], [1.0, 2.0, 3.0], label="Series")
+        legend = axes.legend(loc="best")
+        assert legend is not None
+
+        # Simulate plugin-local dark legend styling without a stored light snapshot.
+        legend.get_frame().set_facecolor("#1e1e1e")
+        legend.get_frame().set_edgecolor("#f1f3f4")
+        state = window._axes_theme_state.setdefault(axes, {})  # noqa: SLF001 - test hook
+        state.pop("legend", None)
+
+        window._handle_dark_mode_toggled(False)  # noqa: SLF001 - test hook
+        app.processEvents()
+
+        legend = axes.get_legend()
+        assert legend is not None
+        r, g, b, _ = mcolors.to_rgba(legend.get_frame().get_facecolor())
+        luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        assert luminance > 0.75
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_save_graph_works_with_mdi_proxy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -220,6 +287,30 @@ def test_single_mdi_subwindow_fills_viewport_after_arrange() -> None:
         margin = getattr(tab_proxy, "_layout_margin", 6)
         assert sub.geometry().width() >= viewport.width() - margin * 2
         assert sub.geometry().height() >= viewport.height() - margin * 2
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_single_mdi_subwindow_normalizes_after_activation_helper() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.resize(1500, 950)
+        window._create_blank_graph()
+        app.processEvents()
+        tab_proxy = window.tab_widget
+        mdi = getattr(tab_proxy, "_mdi", None)
+        assert isinstance(mdi, QtWidgets.QMdiArea)
+        sub = mdi.activeSubWindow()
+        assert isinstance(sub, QtWidgets.QMdiSubWindow)
+        sub.setGeometry(40, 40, 320, 700)
+        app.processEvents()
+        window._normalize_single_visible_graph_subwindow()  # noqa: SLF001 - test hook
+        app.processEvents()
+        viewport = mdi.viewport().rect()
+        margin = getattr(tab_proxy, "_layout_margin", 6)
+        assert sub.geometry().width() >= viewport.width() - margin * 2
     finally:
         window.close()
         app.processEvents()

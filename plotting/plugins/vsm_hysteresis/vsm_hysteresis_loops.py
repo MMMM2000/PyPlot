@@ -1596,10 +1596,6 @@ def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
                     if candidate is not None:
                         temperature = candidate
             if stripped.startswith("@@Data") or stripped.startswith("@@Final Manipulated Data"):
-                if angle is not None and temperature is not None:
-                    break
-                continue
-            if angle is not None and temperature is not None:
                 break
 
     if explicit_temperature is not None:
@@ -2430,9 +2426,7 @@ class VSMPlotter(PyPlotWindow):
 
         dark_value = self.settings.value("plot_dark_mode", False)
         dark_enabled = bool(dark_value) if dark_value is not None else False
-        if hasattr(self, "dark_mode_checkbox"):
-            self.dark_mode_checkbox.setChecked(dark_enabled)
-        elif hasattr(self, "_dark_mode_enabled"):
+        if hasattr(self, "_dark_mode_enabled") and not hasattr(self, "dark_mode_checkbox"):
             try:
                 self._dark_mode_enabled = dark_enabled
             except Exception:
@@ -2490,7 +2484,8 @@ class VSMPlotter(PyPlotWindow):
     def _save_settings(self) -> None:
         self.settings.setValue("sources", self.path_edit.text())
         self.settings.setValue("plot_style", self._plot_style_token())
-        self.settings.setValue("plot_dark_mode", self._plot_dark_enabled())
+        if not hasattr(self, "dark_mode_checkbox"):
+            self.settings.setValue("plot_dark_mode", self._plot_dark_enabled())
         if self.last_export_path:
             self.settings.setValue("last_export_path", str(self.last_export_path))
         if self._last_source_dir:
@@ -3627,7 +3622,9 @@ class VSMPlotter(PyPlotWindow):
         numeric_labels = [label for label in labels if label]
         preferred_x = [
             "Applied Field For Plot",
+            "Applied Field For Plot [Oe]",
             "Raw Applied Field For Plot",
+            "Raw Applied Field For Plot [Oe]",
             "Applied Field [Oe]",
             "Applied Field",
         ]
@@ -3640,6 +3637,9 @@ class VSMPlotter(PyPlotWindow):
         ]
 
         stored_x, stored_y = self._stored_axes
+        if isinstance(stored_x, str) and "applied field for plot" in stored_x.lower():
+            # Keep loop plotting defaults anchored to the requested primary field axis.
+            stored_x = None
         if stored_x and stored_y:
             stored_x_lower = stored_x.lower()
             stored_y_lower = stored_y.lower()
@@ -3748,6 +3748,101 @@ class VSMPlotter(PyPlotWindow):
         self._store_axis_selection()
 
     # ------------------------------------------------------------------ plotting helpers
+    def _axis_spread_for_measurements(
+        self,
+        measurements: Sequence[VSMMeasurement],
+        axis_label: str,
+    ) -> float | None:
+        label = str(axis_label or "").strip()
+        if not label:
+            return None
+        spreads: List[float] = []
+        for measurement in measurements:
+            if label not in measurement.data.columns:
+                continue
+            series = pd.to_numeric(measurement.data[label], errors="coerce").dropna()
+            if series.empty:
+                continue
+            try:
+                spread = float(series.max() - series.min())
+            except Exception:
+                continue
+            if math.isfinite(spread):
+                spreads.append(abs(spread))
+        if not spreads:
+            return None
+        return max(spreads)
+
+    def _resolve_axis_for_loop_plot(
+        self,
+        selected_axis: str,
+        measurements: Sequence[VSMMeasurement],
+        *,
+        axis: Literal["x", "y"],
+        exclude: str | None = None,
+    ) -> tuple[str, bool]:
+        selected = str(selected_axis or "").strip()
+        excluded = str(exclude or "").strip()
+        combo = self.x_axis_combo if axis == "x" else self.y_axis_combo
+        options: List[str] = []
+        for index in range(combo.count()):
+            label = combo.itemText(index).strip()
+            if not label:
+                continue
+            if label not in options:
+                options.append(label)
+
+        if not options:
+            return selected, False
+
+        preferred = (
+            [
+                "Applied Field For Plot",
+                "Applied Field For Plot [Oe]",
+                "Raw Applied Field For Plot",
+                "Raw Applied Field For Plot [Oe]",
+                "Applied Field [Oe]",
+                "Applied Field",
+            ]
+            if axis == "x"
+            else [
+                "Signal X direction",
+                "Signal X direction [emu]",
+                "Signal parallel with sample",
+                "Signal Magnitude",
+                "Moment [emu]",
+            ]
+        )
+
+        def _accept(label: str) -> bool:
+            if excluded and label == excluded:
+                return False
+            lowered = label.lower()
+            if axis == "x" and "raw applied field" in lowered:
+                return False
+            spread = self._axis_spread_for_measurements(measurements, label)
+            return spread is not None and spread > 1e-12
+
+        current_spread = self._axis_spread_for_measurements(measurements, selected)
+        if (
+            selected
+            and (not excluded or selected != excluded)
+            and current_spread is not None
+            and current_spread > 1e-12
+        ):
+            return selected, False
+
+        for token in preferred:
+            for label in options:
+                if token.lower() in label.lower() and _accept(label):
+                    return label, label != selected
+
+        for label in options:
+            if _accept(label):
+                return label, label != selected
+
+        return selected, False
+
     def _store_axis_selection(self) -> None:
         if not hasattr(self, "x_axis_combo") or not hasattr(self, "y_axis_combo"):
             return
@@ -3782,6 +3877,41 @@ class VSMPlotter(PyPlotWindow):
         self.open_origin_button.setEnabled(False)
         self.export_button.setEnabled(False)
         target_temp = self.temperature_combo.currentData()
+        eligible_measurements = [
+            measurement
+            for measurement in self.measurements
+            if measurement.temperature is not None
+            and measurement.angle is not None
+            and (target_temp is None or measurement.temperature == target_temp)
+        ]
+        resolved_x, x_changed = self._resolve_axis_for_loop_plot(
+            x_axis,
+            eligible_measurements,
+            axis="x",
+        )
+        resolved_y, y_changed = self._resolve_axis_for_loop_plot(
+            y_axis,
+            eligible_measurements,
+            axis="y",
+            exclude=resolved_x,
+        )
+        if x_changed:
+            self.x_axis_combo.blockSignals(True)
+            self.x_axis_combo.setCurrentText(resolved_x)
+            self.x_axis_combo.blockSignals(False)
+            self._append_log(
+                f"Selected X axis '{x_axis}' had no usable variation; switched to '{resolved_x}'."
+            )
+        if y_changed:
+            self.y_axis_combo.blockSignals(True)
+            self.y_axis_combo.setCurrentText(resolved_y)
+            self.y_axis_combo.blockSignals(False)
+            self._append_log(
+                f"Selected Y axis '{y_axis}' had no usable variation; switched to '{resolved_y}'."
+            )
+        x_axis = resolved_x
+        y_axis = resolved_y
+
         groups: Dict[float, List[VSMMeasurement]] = {}
         for measurement in self.measurements:
             if measurement.temperature is None or measurement.angle is None:

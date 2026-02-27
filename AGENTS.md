@@ -21,8 +21,9 @@
 - Run `launcher.py` as a smoke check when practical, or note if skipped.
 - For graph-generation changes, always create real output graphs and visually verify results before finishing.
 - Apply that visual verification rule to both Matplotlib graphs and Origin-exported graphs, and continue iterating until output is correct.
-- Remove temporary PNG artifacts created only for test/debug verification after you finish validating the output.
-- Remove temporary visual-check artifacts (for example probe dumps, one-off summaries, and debug folders in `logs/`) once validation is complete.
+- Store temporary visual-check outputs under a workspace `artifacts/` folder (create it when needed).
+- Remove temporary PNG artifacts and other transient visual-check files after validation, then remove `artifacts/` when it only contains those temporary checks.
+- Remove temporary visual-check artifacts left in other locations (for example probe dumps, one-off summaries, and debug folders in `logs/`) once validation is complete.
 
 ## Diagnostics
 - When investigating crashes or errors, check `logs/message_log.txt` (and other files under `logs/`) first and summarize relevant traces.

@@ -78,6 +78,7 @@ class PyPlotWorkbench(PyPlotWindow):
         "figure_aspect_mode": "auto",
         "figure_aspect_ratio": DEFAULT_FIGURE_ASPECT_RATIO,
         "legend_location": "best",
+        "legend_orientation": "auto",
         "legend_font_size": 10,
         "legend_columns": 1,
         "legend_show_symbols": True,
@@ -414,10 +415,19 @@ class PyPlotWorkbench(PyPlotWindow):
             ("Center", "center"),
         ]
 
+    @staticmethod
+    def _legend_orientation_choices() -> list[tuple[str, str]]:
+        return [
+            ("Auto", "auto"),
+            ("Horizontal", "horizontal"),
+            ("Vertical", "vertical"),
+        ]
+
     def _clean_graph_option_payload(self, payload: Dict[str, Any] | None) -> Dict[str, Any]:
         defaults = dict(self.GRAPH_OPTION_DEFAULTS)
         source = payload if isinstance(payload, dict) else {}
         choices = {value for _, value in self._legend_location_choices()}
+        legend_orientation_choices = {value for _, value in self._legend_orientation_choices()}
         figure_aspect_choices = {"auto", "custom"}
         cleaned: Dict[str, Any] = {}
         for key, default in defaults.items():
@@ -438,6 +448,10 @@ class PyPlotWorkbench(PyPlotWindow):
             if key == "legend_location":
                 token = str(value).strip().lower()
                 cleaned[key] = token if token in choices else str(default)
+                continue
+            if key == "legend_orientation":
+                token = str(value).strip().lower()
+                cleaned[key] = token if token in legend_orientation_choices else str(default)
                 continue
             if key == "figure_aspect_mode":
                 token = str(value).strip().lower()
@@ -674,6 +688,9 @@ class PyPlotWorkbench(PyPlotWindow):
         legend_location_combo = QtWidgets.QComboBox(parent)
         for label, token in self._legend_location_choices():
             legend_location_combo.addItem(label, token)
+        legend_orientation_combo = QtWidgets.QComboBox(parent)
+        for label, token in self._legend_orientation_choices():
+            legend_orientation_combo.addItem(label, token)
         legend_font_size_spin = QtWidgets.QSpinBox(parent)
         legend_font_size_spin.setRange(6, 96)
         legend_columns_spin = QtWidgets.QSpinBox(parent)
@@ -685,6 +702,7 @@ class PyPlotWorkbench(PyPlotWindow):
         )
         legend_draggable_cb = QtWidgets.QCheckBox("Legend draggable", parent)
         form.addRow("Legend location:", legend_location_combo)
+        form.addRow("Legend orientation:", legend_orientation_combo)
         form.addRow("Legend font size:", legend_font_size_spin)
         form.addRow("Legend columns:", legend_columns_spin)
         form.addRow(legend_show_symbols_cb)
@@ -706,6 +724,7 @@ class PyPlotWorkbench(PyPlotWindow):
             "figure_aspect_mode": figure_aspect_mode_combo,
             "figure_aspect_ratio": figure_aspect_ratio_spin,
             "legend_location": legend_location_combo,
+            "legend_orientation": legend_orientation_combo,
             "legend_font_size": legend_font_size_spin,
             "legend_columns": legend_columns_spin,
             "legend_show_symbols": legend_show_symbols_cb,
@@ -743,6 +762,7 @@ class PyPlotWorkbench(PyPlotWindow):
             "figure_aspect_mode": "figure_aspect_mode_combo",
             "figure_aspect_ratio": "figure_aspect_ratio_spin",
             "legend_location": "legend_location_combo",
+            "legend_orientation": "legend_orientation_combo",
             "legend_font_size": "legend_font_spin",
             "legend_columns": "legend_columns_spin",
             "legend_show_symbols": "legend_show_symbols_cb",
@@ -1075,6 +1095,7 @@ class PyPlotWorkbench(PyPlotWindow):
                         {
                             "visible": True,
                             "loc": str(options["legend_location"]),
+                            "orientation": str(options["legend_orientation"]),
                             "font_size": float(options["legend_font_size"]),
                             "ncol": int(options["legend_columns"]),
                             "show_symbols": bool(options["legend_show_symbols"]),
@@ -2024,6 +2045,10 @@ class PyPlotWorkbench(PyPlotWindow):
         for label, token in self._legend_location_choices():
             legend_location_combo.addItem(label, token)
         legend_form.addRow("Location:", legend_location_combo)
+        legend_orientation_combo = QtWidgets.QComboBox(legend_tab)
+        for label, token in self._legend_orientation_choices():
+            legend_orientation_combo.addItem(label, token)
+        legend_form.addRow("Orientation:", legend_orientation_combo)
 
         legend_font_spin = QtWidgets.QSpinBox(legend_tab)
         legend_font_spin.setRange(6, 96)
@@ -2124,6 +2149,7 @@ class PyPlotWorkbench(PyPlotWindow):
             "show_grid_cb": show_grid_cb,
             "show_legend_cb": show_legend_cb,
             "legend_location_combo": legend_location_combo,
+            "legend_orientation_combo": legend_orientation_combo,
             "legend_font_spin": legend_font_spin,
             "legend_columns_spin": legend_columns_spin,
             "legend_show_symbols_cb": legend_show_symbols_cb,
@@ -2642,6 +2668,7 @@ class PyPlotWorkbench(PyPlotWindow):
         show_grid_cb = self._control_widget("show_grid_cb")
         show_legend_cb = self._control_widget("show_legend_cb")
         legend_location_combo = self._control_widget("legend_location_combo")
+        legend_orientation_combo = self._control_widget("legend_orientation_combo")
         legend_font_spin = self._control_widget("legend_font_spin")
         legend_columns_spin = self._control_widget("legend_columns_spin")
         legend_show_symbols_cb = self._control_widget("legend_show_symbols_cb")
@@ -2858,6 +2885,13 @@ class PyPlotWorkbench(PyPlotWindow):
                     idx = legend_location_combo.findData("best")
                 if idx >= 0:
                     legend_location_combo.setCurrentIndex(idx)
+            if isinstance(legend_orientation_combo, QtWidgets.QComboBox):
+                orientation = str(legend_state.get("orientation", "auto"))
+                idx = legend_orientation_combo.findData(orientation)
+                if idx < 0:
+                    idx = legend_orientation_combo.findData("auto")
+                if idx >= 0:
+                    legend_orientation_combo.setCurrentIndex(idx)
             if isinstance(legend_font_spin, QtWidgets.QSpinBox):
                 legend_font_spin.setValue(int(legend_state.get("font_size", 10)))
             if isinstance(legend_columns_spin, QtWidgets.QSpinBox):
@@ -3025,6 +3059,7 @@ class PyPlotWorkbench(PyPlotWindow):
         show_grid_cb = self._control_widget("show_grid_cb")
         show_legend_cb = self._control_widget("show_legend_cb")
         legend_location_combo = self._control_widget("legend_location_combo")
+        legend_orientation_combo = self._control_widget("legend_orientation_combo")
         legend_font_spin = self._control_widget("legend_font_spin")
         legend_columns_spin = self._control_widget("legend_columns_spin")
         legend_show_symbols_cb = self._control_widget("legend_show_symbols_cb")
@@ -3181,6 +3216,11 @@ class PyPlotWorkbench(PyPlotWindow):
             float(legend_font_spin.value())
             if isinstance(legend_font_spin, QtWidgets.QSpinBox)
             else 10.0
+        )
+        legend_orientation = (
+            str(legend_orientation_combo.currentData())
+            if isinstance(legend_orientation_combo, QtWidgets.QComboBox)
+            else "auto"
         )
         legend_columns = (
             int(legend_columns_spin.value())
@@ -3424,6 +3464,7 @@ class PyPlotWorkbench(PyPlotWindow):
                                     {
                                         "visible": True,
                                         "loc": legend_location,
+                                        "orientation": legend_orientation,
                                         "font_size": legend_font_size,
                                         "ncol": max(1, legend_columns),
                                         "show_symbols": legend_show_symbols,

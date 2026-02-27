@@ -13,6 +13,7 @@ from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot.window import (
     TOOLBAR_SECTION_PROPERTY,
     GraphLineState,
+    PyPlotWindow,
     TabDescriptor,
 )
 
@@ -103,6 +104,29 @@ def test_vsm_hysteresis_register_plot_tab_enables_shared_open_origin() -> None:
         window._register_plot_tab(tab, canvas, ax, descriptor)
         window._sync_shared_action_states()  # noqa: SLF001
         assert window.open_origin_button.isEnabled()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_hysteresis_preserves_shared_window_handlers() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        expected = {
+            "_open_origin_prompt": PyPlotWorkbench._open_origin_prompt,
+            "_populate_graph_settings": PyPlotWorkbench._populate_graph_settings,
+            "_ensure_graph_tree_item": PyPlotWindow._ensure_graph_tree_item,
+            "_focus_tree_on_tab": PyPlotWindow._focus_tree_on_tab,
+            "_handle_current_tab_changed": PyPlotWindow._handle_current_tab_changed,
+            "_update_tab_buttons": PyPlotWindow._update_tab_buttons,
+            "_rebuild_object_manager_for_tab": PyPlotWindow._rebuild_object_manager_for_tab,
+            "_handle_object_item_changed": PyPlotWindow._handle_object_item_changed,
+        }
+        for name, target in expected.items():
+            method = getattr(window, name, None)
+            assert callable(method)
+            assert getattr(method, "__func__", None) is target
     finally:
         window.close()
         app.processEvents()
@@ -392,6 +416,61 @@ def test_vsm_hysteresis_folder_menu_action_uses_plugin_import_handler(
         assert len(window.measurements) > 0  # noqa: SLF001 - plugin parser loaded data
         assert len(window._worksheets) > 0  # noqa: SLF001 - worksheet tree populated
         assert window.plot_button.isEnabled()
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001 - avoid close prompt in headless tests
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_hysteresis_generate_falls_back_from_flat_applied_field_axis(
+    tmp_path: Path,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        source = tmp_path / "202507101320-Hys-a140-T-30-00.VSM-Hys-Data"
+        source.write_text(
+            "\n".join(
+                [
+                    "@Section 0",
+                    "Column 0: Time since start, Time [s]",
+                    "Column 1: Applied Field, Applied Field [Oe]",
+                    "Column 2: Applied Field For Plot, Applied Field For Plot [Oe]",
+                    "Column 3: Signal X direction, Signal X direction [emu]",
+                    "@@END Columns",
+                    "@@End of Header.",
+                    "@@Data",
+                    "New Section: Section 0:",
+                    "0.0 0.0 -10000.0 -0.20",
+                    "1.0 0.0 -5000.0 -0.10",
+                    "2.0 0.0 0.0 0.00",
+                    "3.0 0.0 5000.0 0.10",
+                    "4.0 0.0 10000.0 0.20",
+                    "@@END Data",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        window._commit_selected_paths([source])  # noqa: SLF001 - test hook
+        window.path_edit.setText(str(source))
+        window._load_measurements(show_warning=False)
+        assert window.x_axis_combo.currentText() == "Applied Field For Plot [Oe]"
+        assert window.y_axis_combo.currentText() == "Signal X direction [emu]"
+
+        x_index = window.x_axis_combo.findText("Applied Field [Oe]")
+        y_index = window.y_axis_combo.findText("Signal X direction [emu]")
+        assert x_index >= 0
+        assert y_index >= 0
+        window.x_axis_combo.setCurrentIndex(x_index)
+        window.y_axis_combo.setCurrentIndex(y_index)
+
+        window._generate_plots()
+        app.processEvents()
+
+        assert window.x_axis_combo.currentText() == "Applied Field For Plot [Oe]"
+        assert window.tab_widget.count() > 0
+        assert window.open_origin_button.isEnabled()
     finally:
         window._clear_project_dirty()  # noqa: SLF001 - avoid close prompt in headless tests
         window.close()

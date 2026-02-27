@@ -6471,6 +6471,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             axes_list = list(getattr(figure, "axes", []))
             if not axes_list:
                 axes_list = [axes]
+            if enabled:
+                # Capture the pre-dark figure face once per figure so multi-axis
+                # figures restore to the same light frame color.
+                try:
+                    baseline_figure_face = figure.get_facecolor()
+                except Exception:
+                    baseline_figure_face = None
+                if baseline_figure_face is not None:
+                    for ax in axes_list:
+                        state = self._axes_theme_state.setdefault(ax, {})
+                        state.setdefault("figure_face", baseline_figure_face)
             for ax in axes_list:
                 self._apply_dark_mode_to_single_axes(ax, enabled)
             return canv
@@ -6484,8 +6495,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         state = self._axes_theme_state.setdefault(axes, {})
 
         text_state = state.setdefault("text_items", {})
-        legend = None
-
         if enabled:
             if "figure_face" not in state and figure is not None:
                 state["figure_face"] = figure.get_facecolor()
@@ -6500,7 +6509,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 if title is not None:
                     state["title_color"] = title.get_color()
             if "spine_colors" not in state:
-                state["spine_colors"] = {name: spine.get_edgecolor() for name, spine in axes.spines.items()}
+                state["spine_colors"] = {
+                    name: spine.get_edgecolor() for name, spine in axes.spines.items()
+                }
             if "grid_color" not in state:
                 try:
                     grid_lines = axes.get_xgridlines()
@@ -6510,6 +6521,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 except Exception:
                     state.setdefault("grid_color", None)
                     state.setdefault("grid_alpha", None)
+
+            legend = None
             try:
                 legend = axes.get_legend()
             except Exception:
@@ -6563,24 +6576,54 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     artist.set_color(light_text)
                 except Exception:
                     pass
-        if legend is not None:
-            try:
-                legend.get_frame().set_facecolor(dark_face)
-                legend.get_frame().set_edgecolor(light_text)
-            except Exception:
-                pass
-            for text in legend.get_texts():
-                if _should_force_light_text(text.get_color()):
-                    text.set_color(light_text)
-            _sync_legend_text_colors(legend)
-            title_artist = legend.get_title()
-            if title_artist is not None and _should_force_light_text(title_artist.get_color()):
-                title_artist.set_color(light_text)
+            if legend is not None:
+                try:
+                    legend.get_frame().set_facecolor(dark_face)
+                    legend.get_frame().set_edgecolor(light_text)
+                except Exception:
+                    pass
+                for text in legend.get_texts():
+                    if _should_force_light_text(text.get_color()):
+                        text.set_color(light_text)
+                _sync_legend_text_colors(legend)
+                title_artist = legend.get_title()
+                if (
+                    title_artist is not None
+                    and _should_force_light_text(title_artist.get_color())
+                ):
+                    title_artist.set_color(light_text)
         else:
-            if figure is not None and "figure_face" in state:
-                figure.patch.set_facecolor(state["figure_face"])
-            if "axes_face" in state:
-                axes.set_facecolor(state["axes_face"])
+            light_face = state.get("figure_face", "#ffffff")
+            axes_face = state.get("axes_face", "#ffffff")
+            label_color_x = state.get("x_label_color", "#202020")
+            label_color_y = state.get("y_label_color", "#202020")
+            title_color = state.get("title_color", "#202020")
+            if _should_force_light_text(light_face):
+                light_face = "#ffffff"
+            if _should_force_light_text(axes_face):
+                axes_face = "#ffffff"
+            if _should_force_light_text(label_color_x):
+                label_color_x = "#202020"
+            if _should_force_light_text(label_color_y):
+                label_color_y = "#202020"
+            if _should_force_light_text(title_color):
+                title_color = "#202020"
+
+            if figure is not None:
+                try:
+                    figure.patch.set_facecolor(light_face)
+                except Exception:
+                    try:
+                        figure.patch.set_facecolor("#ffffff")
+                    except Exception:
+                        pass
+            try:
+                axes.set_facecolor(axes_face)
+            except Exception:
+                try:
+                    axes.set_facecolor("#ffffff")
+                except Exception:
+                    pass
             for name, spine in axes.spines.items():
                 colors = state.get("spine_colors", {})
                 if name in colors:
@@ -6588,37 +6631,68 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         spine.set_color(colors[name])
                     except Exception:
                         pass
-            axes.tick_params(colors=state.get("x_label_color", "#202020"))
-            axes.xaxis.label.set_color(state.get("x_label_color", "#202020"))
-            axes.yaxis.label.set_color(state.get("y_label_color", "#202020"))
+            axes.tick_params(colors=label_color_x)
+            axes.xaxis.label.set_color(label_color_x)
+            axes.yaxis.label.set_color(label_color_y)
             title = axes.title
             if title is not None:
-                title.set_color(state.get("title_color", "#202020"))
-            default_tick_color = state.get("x_label_color", "#202020")
+                title.set_color(title_color)
             for tick in axes.get_xticklabels() + axes.get_yticklabels():
-                tick.set_color(default_tick_color)
+                tick.set_color(label_color_x)
+
             legend = None
             try:
                 legend = axes.get_legend()
             except Exception:
                 legend = None
-            if legend is not None and "legend" in state:
-                meta = state["legend"]
+            if legend is not None:
+                meta = state.get("legend") if isinstance(state.get("legend"), dict) else {}
+                frame_face = meta.get("frame_face", "#ffffff")
+                frame_edge = meta.get("frame_edge", "#4c4c4c")
+                if _should_force_light_text(frame_face):
+                    frame_face = "#ffffff"
+                if _should_force_light_text(frame_edge):
+                    frame_edge = "#4c4c4c"
                 try:
-                    legend.get_frame().set_facecolor(meta.get("frame_face"))
-                    legend.get_frame().set_edgecolor(meta.get("frame_edge"))
+                    legend.get_frame().set_facecolor(frame_face)
+                    legend.get_frame().set_edgecolor(frame_edge)
                 except Exception:
                     pass
-                text_colors = meta.get("text_colors", [])
-                for text, color in zip(legend.get_texts(), text_colors):
+
+                fallback_text_color = label_color_x
+                text_colors = (
+                    list(meta.get("text_colors", []))
+                    if isinstance(meta, dict)
+                    else []
+                )
+                for index, text in enumerate(legend.get_texts()):
+                    color = (
+                        text_colors[index]
+                        if index < len(text_colors)
+                        else fallback_text_color
+                    )
+                    if _should_force_light_text(color):
+                        color = fallback_text_color
                     try:
                         text.set_color(color)
                     except Exception:
-                        pass
+                        continue
+
                 title_artist = legend.get_title()
-                if title_artist is not None and meta.get("title_color") is not None:
-                    title_artist.set_color(meta.get("title_color"))
+                if title_artist is not None:
+                    color = (
+                        meta.get("title_color")
+                        if isinstance(meta, dict)
+                        else None
+                    )
+                    if color is None or _should_force_light_text(color):
+                        color = fallback_text_color
+                    try:
+                        title_artist.set_color(color)
+                    except Exception:
+                        pass
                 _sync_legend_text_colors(legend)
+
             original_grid_color = state.get("grid_color")
             original_grid_alpha = state.get("grid_alpha")
             if original_grid_color is not None:
@@ -11074,6 +11148,35 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             pass
         finally:
             self._normalizing_docks = False
+
+    def _normalize_single_visible_graph_subwindow(self) -> None:
+        tab_widget = getattr(self, "tab_widget", None)
+        arrange = getattr(tab_widget, "_arrange_subwindows", None)
+        if not callable(arrange):
+            return
+        visible_getter = getattr(tab_widget, "_ordered_visible_subwindows", None)
+        visible_count: int | None = None
+        if callable(visible_getter):
+            try:
+                visible = visible_getter()
+            except Exception:
+                visible = None
+            if isinstance(visible, (list, tuple)):
+                visible_count = len(visible)
+        if visible_count is not None and visible_count > 1:
+            return
+        try:
+            QtCore.QTimer.singleShot(0, arrange)
+        except Exception:
+            pass
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() != QtCore.QEvent.Type.ActivationChange:
+            return
+        if not self.isActiveWindow():
+            return
+        self._normalize_single_visible_graph_subwindow()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
