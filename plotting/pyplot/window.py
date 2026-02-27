@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import datetime
 import logging
@@ -2191,6 +2191,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._object_tree_updating = False
         self._tight_layout_warning_signatures: set[tuple[int, str]] = set()
         self._last_tight_layout_warning_message: str | None = None
+        self._task_progress_label: QtWidgets.QLabel | None = None
+        self._task_progress_bar: QtWidgets.QProgressBar | None = None
 
         self.graph_dock: QtWidgets.QDockWidget | None = None
         self.graph_panel: QtWidgets.QWidget | None = None
@@ -2541,7 +2543,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if settings_menu is None:
             settings_menu = bar.addMenu("Settings")
         if not hasattr(self, "_max_windows_action") or not isinstance(getattr(self, "_max_windows_action"), QtGui.QAction):
-            self._max_windows_action = settings_menu.addAction("Set max visible windows…")
+            self._max_windows_action = settings_menu.addAction("Set max visible windowsâ€¦")
             self._max_windows_action.triggered.connect(self._prompt_max_visible_windows)
 
     def _prompt_max_visible_windows(self) -> None:
@@ -3448,117 +3450,137 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         graph_callback: Callable[[Any, WorkbookData, WorksheetData], None] | None = None,
         keep_origin_open: bool = True,
     ) -> tuple[int, int, list[str]]:
+        workbook_list = list(workbooks)
         errors: list[str] = []
         exported = 0
         plotted = 0
 
-        with origin_session(keep_open=keep_origin_open) as origin_any:
-            if keep_origin_open:
-                schedule_origin_release()
-            workbook_names: set[str] = set()
-            for workbook in workbooks:
-                worksheets = [self._worksheets.get(key) for key in workbook.worksheets]
-                worksheet_objs = [sheet for sheet in worksheets if sheet is not None]
-                if not worksheet_objs:
-                    continue
+        self._begin_task_progress(
+            "Exporting workbooks to Origin…",
+            maximum=max(1, len(workbook_list)),
+            value=0,
+        )
+        try:
+            with origin_session(keep_open=keep_origin_open) as origin_any:
+                if keep_origin_open:
+                    schedule_origin_release()
+                workbook_names: set[str] = set()
+                for workbook_index, workbook in enumerate(workbook_list, start=1):
+                    self._update_task_progress(
+                        value=workbook_index - 1,
+                        title=(
+                            f"Exporting workbook {workbook_index}/{len(workbook_list)}: "
+                            f"{workbook.name}"
+                        ),
+                    )
+                    worksheets = [self._worksheets.get(key) for key in workbook.worksheets]
+                    worksheet_objs = [sheet for sheet in worksheets if sheet is not None]
+                    if not worksheet_objs:
+                        continue
 
-                book_name = self._origin_unique_name(
-                    workbook_names,
-                    workbook.name,
-                    fallback="Workbook",
-                    limit=32,
-                )
-                try:
-                    book_obj = origin_any.new_book('w', lname=book_name)
-                except Exception as exc:  # pragma: no cover - depends on Origin runtime
-                    errors.append(f"{workbook.name}: {exc}")
-                    continue
-                if book_obj is None:
-                    errors.append(f"{workbook.name}: Origin did not return a workbook")
-                    continue
-
-                book = cast(Any, book_obj)
-                try:
-                    book.activate()
-                except Exception:
-                    pass
-                for attr, value in (("lname", book_name), ("name", book_name[:13])):
-                    try:
-                        setattr(book, attr, value)
-                    except Exception:
-                        pass
-
-                sheet_names: set[str] = set()
-                for index, worksheet in enumerate(worksheet_objs):
-                    sheet_name = self._origin_unique_name(
-                        sheet_names,
-                        worksheet.name,
-                        fallback="Sheet",
+                    book_name = self._origin_unique_name(
+                        workbook_names,
+                        workbook.name,
+                        fallback="Workbook",
                         limit=32,
                     )
-                    sheet = None
                     try:
-                        if index < len(book):
-                            sheet = book[index]
-                        else:
-                            add_sheet = getattr(book, "add_sheet", None)
-                            if callable(add_sheet):
-                                try:
-                                    sheet = add_sheet('w', lname=sheet_name)
-                                except TypeError:
-                                    sheet = add_sheet()
-                            if sheet is None:
-                                sheet = origin_any.new_sheet('w', lname=sheet_name)
-                    except Exception as exc:  # pragma: no cover - Origin runtime dependent
-                        errors.append(f"{workbook.name}/{worksheet.name}: {exc}")
+                        book_obj = origin_any.new_book("w", lname=book_name)
+                    except Exception as exc:  # pragma: no cover - depends on Origin runtime
+                        errors.append(f"{workbook.name}: {exc}")
+                        continue
+                    if book_obj is None:
+                        errors.append(f"{workbook.name}: Origin did not return a workbook")
                         continue
 
-                    if sheet is None:
-                        errors.append(
-                            f"{workbook.name}/{worksheet.name}: Unable to create worksheet"
-                        )
-                        continue
-
+                    book = cast(Any, book_obj)
                     try:
-                        sheet.name = sheet_name
+                        book.activate()
                     except Exception:
                         pass
-
-                    frame = worksheet.dataframe
-                    try:
-                        sheet.from_df(frame)
-                    except Exception as exc:  # pragma: no cover - Origin runtime dependent
-                        errors.append(f"{workbook.name}/{worksheet.name}: {exc}")
-                        continue
-
-                    roles = ""
-                    try:
-                        roles = (worksheet.axis_roles or "").strip()
-                    except Exception:
-                        roles = ""
-                    if not roles:
-                        roles = self._origin_axis_roles(frame)
-                    if roles:
+                    for attr, value in (("lname", book_name), ("name", book_name[:13])):
                         try:
-                            sheet.cols_axis(roles)
+                            setattr(book, attr, value)
                         except Exception:
                             pass
 
-                    self._apply_origin_metadata(origin_any, sheet, worksheet)
-                    exported += 1
-                    if create_graphs:
+                    sheet_names: set[str] = set()
+                    for index, worksheet in enumerate(worksheet_objs):
+                        sheet_name = self._origin_unique_name(
+                            sheet_names,
+                            worksheet.name,
+                            fallback="Sheet",
+                            limit=32,
+                        )
+                        sheet = None
                         try:
-                            if self._plot_origin_worksheet(
-                                origin_any,
-                                sheet,
-                                workbook,
-                                worksheet,
-                                roles=roles,
-                                graph_callback=graph_callback,
-                            ):
-                                plotted += 1
+                            if index < len(book):
+                                sheet = book[index]
+                            else:
+                                add_sheet = getattr(book, "add_sheet", None)
+                                if callable(add_sheet):
+                                    try:
+                                        sheet = add_sheet("w", lname=sheet_name)
+                                    except TypeError:
+                                        sheet = add_sheet()
+                                if sheet is None:
+                                    sheet = origin_any.new_sheet("w", lname=sheet_name)
                         except Exception as exc:  # pragma: no cover - Origin runtime dependent
-                            errors.append(f"{workbook.name}/{worksheet.name} graph: {exc}")
+                            errors.append(f"{workbook.name}/{worksheet.name}: {exc}")
+                            continue
+
+                        if sheet is None:
+                            errors.append(
+                                f"{workbook.name}/{worksheet.name}: Unable to create worksheet"
+                            )
+                            continue
+
+                        try:
+                            sheet.name = sheet_name
+                        except Exception:
+                            pass
+
+                        frame = worksheet.dataframe
+                        try:
+                            sheet.from_df(frame)
+                        except Exception as exc:  # pragma: no cover - Origin runtime dependent
+                            errors.append(f"{workbook.name}/{worksheet.name}: {exc}")
+                            continue
+
+                        roles = ""
+                        try:
+                            roles = (worksheet.axis_roles or "").strip()
+                        except Exception:
+                            roles = ""
+                        if not roles:
+                            roles = self._origin_axis_roles(frame)
+                        if roles:
+                            try:
+                                sheet.cols_axis(roles)
+                            except Exception:
+                                pass
+
+                        self._apply_origin_metadata(origin_any, sheet, worksheet)
+                        exported += 1
+                        if create_graphs:
+                            try:
+                                if self._plot_origin_worksheet(
+                                    origin_any,
+                                    sheet,
+                                    workbook,
+                                    worksheet,
+                                    roles=roles,
+                                    graph_callback=graph_callback,
+                                ):
+                                    plotted += 1
+                            except Exception as exc:  # pragma: no cover - Origin runtime dependent
+                                errors.append(f"{workbook.name}/{worksheet.name} graph: {exc}")
+        finally:
+            self._update_task_progress(
+                value=max(1, len(workbook_list)),
+                title="Origin export complete.",
+            )
+            self._end_task_progress()
 
         return exported, plotted, errors
 
@@ -4759,7 +4781,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         central_layout.setSpacing(6)
 
         self.path_edit = QtWidgets.QLineEdit()
-        self.path_edit.setPlaceholderText("Select files or folders…")
+        self.path_edit.setPlaceholderText("Select files or foldersâ€¦")
         self.path_edit.editingFinished.connect(self._handle_manual_path_entry)
         self.path_edit.hide()
         self.browse_files_button = None
@@ -4785,7 +4807,23 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         except Exception:
             status = None
         if status is not None:
-            label = QtWidgets.QLabel("x: —   y: —", self)
+            progress_label = QtWidgets.QLabel("", self)
+            progress_label.setObjectName("mw_task_progress_label")
+            progress_label.setMinimumWidth(220)
+            progress_label.setVisible(False)
+            status.addPermanentWidget(progress_label, 0)
+            self._task_progress_label = progress_label
+
+            progress_bar = QtWidgets.QProgressBar(self)
+            progress_bar.setObjectName("mw_task_progress_bar")
+            progress_bar.setMinimumWidth(260)
+            progress_bar.setMaximumWidth(360)
+            progress_bar.setTextVisible(True)
+            progress_bar.setVisible(False)
+            status.addPermanentWidget(progress_bar, 0)
+            self._task_progress_bar = progress_bar
+
+            label = QtWidgets.QLabel("x: â€”   y: â€”", self)
             label.setObjectName("mw_cursor_status")
             label.setMinimumWidth(320)
             label.setMinimumHeight(26)
@@ -5003,7 +5041,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         else:
             file_menu.addMenu(new_menu)
 
-        open_project_action = QtGui.QAction("Open…", self)
+        open_project_action = QtGui.QAction("Openâ€¦", self)
         try:
             open_project_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Open))
         except Exception:
@@ -5028,7 +5066,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         else:
             file_menu.addAction(save_project_action)
 
-        save_as_action = QtGui.QAction("Save Project As…", self)
+        save_as_action = QtGui.QAction("Save Project Asâ€¦", self)
         try:
             save_as_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.SaveAs))
         except Exception:
@@ -5062,11 +5100,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         menu_bar.addMenu(data_menu)
         self._data_menu = data_menu
 
-        import_files_action = data_menu.addAction("Import Files…")
+        import_files_action = data_menu.addAction("Import Filesâ€¦")
         import_files_action.triggered.connect(self._dispatch_import_data_from_files)
         self._import_files_action = import_files_action
 
-        import_folder_action = data_menu.addAction("Import Folders…")
+        import_folder_action = data_menu.addAction("Import Foldersâ€¦")
         import_folder_action.triggered.connect(self._dispatch_import_data_from_folder)
         self._import_folder_action = import_folder_action
 
@@ -5093,7 +5131,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         delete_column_action.triggered.connect(self._delete_selected_columns)
         self._delete_column_action = delete_column_action
 
-        reorder_action = data_menu.addAction("Reorder Columns…")
+        reorder_action = data_menu.addAction("Reorder Columnsâ€¦")
         reorder_action.triggered.connect(self._reorder_columns)
         self._reorder_columns_action = reorder_action
 
@@ -5882,12 +5920,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         self._action_toolbar = toolbar
 
-        import_action = toolbar.addAction("Import data…")
+        import_action = toolbar.addAction("Import dataâ€¦")
         import_action.triggered.connect(self._prompt_import_data)
         self.import_data_button = import_action
         self._style_toolbar_button(toolbar, import_action)
 
-        save_action = toolbar.addAction("Save graph…")
+        save_action = toolbar.addAction("Save graphâ€¦")
         save_action.setEnabled(False)
         save_action.triggered.connect(self._save_current_graph)
         self.save_graph_button = save_action
@@ -5899,25 +5937,25 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.normalize_button = normalize_action
         self._style_toolbar_button(toolbar, normalize_action)
 
-        export_action = toolbar.addAction("Export TXT…")
+        export_action = toolbar.addAction("Export TXTâ€¦")
         export_action.setEnabled(False)
         export_action.triggered.connect(self._export_txt)
         self.export_button = export_action
         self._style_toolbar_button(toolbar, export_action)
 
-        origin_action = toolbar.addAction("Open in Origin…")
+        origin_action = toolbar.addAction("Open in Originâ€¦")
         origin_action.setEnabled(False)
         origin_action.triggered.connect(self._open_origin_prompt)
         self.open_origin_button = origin_action
         self._style_toolbar_button(toolbar, origin_action)
 
-        export_workbooks_action = toolbar.addAction("Export workbooks to Origin…")
+        export_workbooks_action = toolbar.addAction("Export workbooks to Originâ€¦")
         export_workbooks_action.setEnabled(False)
         export_workbooks_action.triggered.connect(self._export_workbooks_to_origin)
         self.export_origin_button = export_workbooks_action
         self._style_toolbar_button(toolbar, export_workbooks_action)
 
-        check_outliers_action = toolbar.addAction("Check outliers…")
+        check_outliers_action = toolbar.addAction("Check outliersâ€¦")
         check_outliers_action.setEnabled(False)
         check_outliers_action.triggered.connect(self._show_check_outliers_dialog)
         self.check_outliers_button = check_outliers_action
@@ -5974,7 +6012,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._rescale_y_action = rescale_y_action
         self._style_toolbar_button(toolbar, rescale_y_action)
 
-        rescale_all_action = toolbar.addAction("Rescale all…")
+        rescale_all_action = toolbar.addAction("Rescale allâ€¦")
         rescale_all_action.setEnabled(False)
         rescale_all_action.setToolTip("Rescale multiple graphs at once.")
         rescale_all_action.triggered.connect(self._open_rescale_all_dialog)
@@ -6111,19 +6149,108 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if self._dark_mode_action is not None:
             self._dark_mode_action.setEnabled(True)
 
+    def _begin_task_progress(
+        self,
+        title: str,
+        *,
+        maximum: int | None = None,
+        value: int = 0,
+    ) -> None:
+        label = self._task_progress_label
+        bar = self._task_progress_bar
+        if label is None or bar is None:
+            return
+        try:
+            label.setText(str(title or "").strip())
+            label.setVisible(True)
+            if isinstance(maximum, int) and maximum > 0:
+                bar.setRange(0, int(maximum))
+                bar.setValue(max(0, min(int(value), int(maximum))))
+                bar.setFormat("%v / %m")
+            else:
+                bar.setRange(0, 0)
+                bar.setFormat("%p%")
+            bar.setVisible(True)
+        except Exception:
+            return
+        try:
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _update_task_progress(
+        self,
+        *,
+        value: int | None = None,
+        maximum: int | None = None,
+        title: str | None = None,
+    ) -> None:
+        label = self._task_progress_label
+        bar = self._task_progress_bar
+        if label is None or bar is None:
+            return
+        try:
+            if title is not None:
+                label.setText(str(title).strip())
+            if isinstance(maximum, int) and maximum > 0:
+                bar.setRange(0, int(maximum))
+                bar.setFormat("%v / %m")
+            if value is not None:
+                if bar.maximum() > 0:
+                    bar.setValue(max(0, min(int(value), int(bar.maximum()))))
+                else:
+                    bar.setValue(0)
+            label.setVisible(True)
+            bar.setVisible(True)
+        except Exception:
+            return
+        try:
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _advance_task_progress(self, step: int = 1, *, title: str | None = None) -> None:
+        bar = self._task_progress_bar
+        if bar is None:
+            return
+        current = 0
+        try:
+            current = int(bar.value())
+        except Exception:
+            current = 0
+        self._update_task_progress(value=current + int(step), title=title)
+
+    def _end_task_progress(self) -> None:
+        label = self._task_progress_label
+        bar = self._task_progress_bar
+        if label is None or bar is None:
+            return
+        try:
+            label.clear()
+            label.setVisible(False)
+            bar.setRange(0, 1)
+            bar.setValue(0)
+            bar.setVisible(False)
+        except Exception:
+            return
+        try:
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pass
+
     def _update_cursor_status(self, event: Any | None) -> None:
         label = self._cursor_label
         if label is None:
             return
         if event is None or getattr(event, "inaxes", None) is None:
-            label.setText("x: —   y: —")
+            label.setText("x: â€”   y: â€”")
             return
         try:
             x_val = float(event.xdata)
             y_val = float(event.ydata)
             label.setText(f"x: {x_val:.4g}   y: {y_val:.4g}")
         except Exception:
-            label.setText("x: —   y: —")
+            label.setText("x: â€”   y: â€”")
 
     def _rescale_current_axes(self, axis: str) -> None:
         axes = self._current_axes()
@@ -6746,7 +6873,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._apply()
         self._persist_defaults()
         super().accept()
-        return canvas
+
     def _prompt_import_data(self) -> None:
         files_action = getattr(self, "_import_files_action", None)
         folder_action = getattr(self, "_import_folder_action", None)
@@ -6755,13 +6882,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         actions_added = False
 
         if isinstance(files_action, QtGui.QAction):
-            label = files_action.text() or "Import files…"
+            label = files_action.text() or "Import filesâ€¦"
             proxy = menu.addAction(label)
             proxy.triggered.connect(files_action.trigger)
             actions_added = True
 
         if isinstance(folder_action, QtGui.QAction):
-            label = folder_action.text() or "Import folders…"
+            label = folder_action.text() or "Import foldersâ€¦"
             proxy = menu.addAction(label)
             proxy.triggered.connect(folder_action.trigger)
             actions_added = True
@@ -6831,7 +6958,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._style_toolbar_button(toolbar, underline_action)
 
         color_button = QtWidgets.QToolButton(toolbar)
-        color_button.setText("Color…")
+        color_button.setText("Colorâ€¦")
         color_button.setEnabled(False)
         color_button.clicked.connect(self._choose_format_color)
         color_button.setToolTip("Select an object to adjust its colour")
@@ -7317,7 +7444,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def _update_project_title(self) -> None:
         title = self._base_title
         if self._project_path is not None:
-            title = f"{self._base_title} — {self._project_path.name}"
+            title = f"{self._base_title} â€” {self._project_path.name}"
         self.setWindowTitle(title)
 
     def _update_project_actions(self) -> None:
@@ -7553,10 +7680,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         errors: List[str] = []
         imported = 0
         total_files = len(files)
+        self._begin_task_progress(
+            "Importing dataâ€¦",
+            maximum=max(1, total_files),
+            value=0,
+        )
         progress: QtWidgets.QProgressDialog | None = None
         if total_files > 1:
             progress = QtWidgets.QProgressDialog(
-                "Importing data…",
+                "Importing dataâ€¦",
                 "Cancel",
                 0,
                 total_files,
@@ -7570,6 +7702,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         position = 0
         try:
             for position, file_path in enumerate(files, start=1):
+                self._update_task_progress(
+                    value=position - 1,
+                    title=f"Importing {file_path.name} ({position}/{total_files})",
+                )
                 if progress is not None:
                     progress.setLabelText(
                         f"Importing {file_path.name} ({position}/{total_files})"
@@ -7600,6 +7736,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     progress.close()
                 except Exception:
                     pass
+            self._update_task_progress(
+                value=total_files if not cancelled else max(position - 1, 0),
+                title="Import complete." if not cancelled else "Import cancelled.",
+            )
+            self._end_task_progress()
         if cancelled:
             QtWidgets.QMessageBox.information(
                 self,
@@ -8244,7 +8385,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if worksheet is None:
                 continue
             rows, columns = worksheet.dataframe.shape
-            detail = f"{rows} × {columns}"
+            detail = f"{rows} Ã— {columns}"
             source_tooltip = str(worksheet.source) if worksheet.source is not None else detail
             self._set_tree_item_text(
                 item,
@@ -8417,7 +8558,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not plugin_name:
             base_title = getattr(self, "_base_title", "") or "pyplot"
             plugin_name = base_title.strip() or "pyplot"
-        sanitized = plugin_name.replace("—", " ").replace("�?", " ").replace("-", " ")
+        sanitized = plugin_name.replace("â€”", " ").replace("ï¿½?", " ").replace("-", " ")
         parts = [segment for segment in sanitized.replace("/", " ").split() if segment]
         prefix = " ".join(parts) if parts else "pyplot"
         extension = getattr(self, "PROJECT_EXTENSION", "")
@@ -8448,7 +8589,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         dialog.setIcon(QtWidgets.QMessageBox.Icon.Question)
         dialog.setText("Save this PyPlot session before closing?")
         dialog.setInformativeText(
-            "Choose “Save project” to keep your current imports, or close without saving to discard them."
+            "Choose â€œSave projectâ€ to keep your current imports, or close without saving to discard them."
         )
         save_button = dialog.addButton("Save project", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
         discard_button = dialog.addButton(
@@ -10276,19 +10417,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         if role is None:
             button.setEnabled(False)
-            button.setText("Color…")
+            button.setText("Colorâ€¦")
             button.setToolTip("Select an object to adjust its colour")
             button.setIcon(QtGui.QIcon())
             return
         button.setEnabled(True)
         if role == "text":
-            button.setText("Text color…")
+            button.setText("Text colorâ€¦")
             button.setToolTip("Change the selected text colour")
         elif role == "line":
-            button.setText("Line color…")
+            button.setText("Line colorâ€¦")
             button.setToolTip("Change the selected line colour")
         else:
-            button.setText("Color…")
+            button.setText("Colorâ€¦")
             button.setToolTip("Change the selected object's colour")
         if color is None or not color.isValid():
             button.setIcon(QtGui.QIcon())
@@ -10422,6 +10563,173 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 summary_parts.append(f"{name}: {size:.1f} pt")
         return top_label, "; ".join(summary_parts)
 
+    @staticmethod
+    def _tight_layout_recommended_size(name: str, current_size: float, count: int) -> float:
+        token = str(name or "").strip().lower()
+        if "legend entries" in token:
+            if count >= 48:
+                cap = 6.0
+            elif count >= 32:
+                cap = 7.0
+            elif count >= 16:
+                cap = 8.0
+            else:
+                cap = 9.0
+        elif "legend title" in token:
+            cap = 9.0
+        elif "x label" in token or "y label" in token:
+            cap = 11.0
+        elif "tick labels" in token:
+            cap = 9.0
+        elif "figure title" in token:
+            cap = 14.0
+        elif "title" in token:
+            cap = 14.0
+        else:
+            cap = 10.0
+        return min(float(current_size), cap)
+
+    def _tight_layout_font_recommendations(self, figure: Any) -> dict[str, float]:
+        recommendations: dict[str, float] = {}
+        for name, size, count in self._tight_layout_font_candidates(figure):
+            key: str | None
+            token = str(name or "").strip().lower()
+            if "legend entries" in token or "legend title" in token:
+                key = "legend_font_size"
+            elif "tick labels" in token:
+                key = "tick_font"
+            elif "x label" in token or "y label" in token:
+                key = "label_font"
+            elif "title" in token:
+                key = "title_font"
+            else:
+                key = None
+            if not key:
+                continue
+            suggested = self._tight_layout_recommended_size(name, size, count)
+            existing = recommendations.get(key)
+            if existing is None or suggested < existing:
+                recommendations[key] = float(suggested)
+        return recommendations
+
+    @staticmethod
+    def _tight_layout_recommendation_text(recommendations: dict[str, float]) -> str:
+        if not recommendations:
+            return "Title â‰¤ 14 pt; labels â‰¤ 11 pt; ticks â‰¤ 9 pt; legend â‰¤ 8 pt."
+        labels = {
+            "title_font": "Title",
+            "label_font": "Axis labels",
+            "tick_font": "Tick labels",
+            "legend_font_size": "Legend text",
+        }
+        parts: list[str] = []
+        for key in ("title_font", "label_font", "tick_font", "legend_font_size"):
+            if key not in recommendations:
+                continue
+            parts.append(f"{labels.get(key, key)} â‰¤ {float(recommendations[key]):.1f} pt")
+        return "; ".join(parts) if parts else "Reduce text sizes."
+
+    def _apply_tight_layout_auto_fit(self, figure: Any, recommendations: dict[str, float]) -> int:
+        if figure is None or not recommendations:
+            return 0
+        changed = 0
+        axes_list: list[Any]
+        try:
+            axes_list = [axis for axis in list(getattr(figure, "axes", [])) if axis is not None]
+        except Exception:
+            axes_list = []
+        for axes in axes_list:
+            title_font = recommendations.get("title_font")
+            if title_font is not None:
+                title = getattr(axes, "title", None)
+                if title is not None:
+                    try:
+                        current = self._valid_font_size(title.get_fontsize())
+                        if current is not None and current > float(title_font) + 0.01:
+                            title.set_fontsize(float(title_font))
+                            changed += 1
+                    except Exception:
+                        pass
+            label_font = recommendations.get("label_font")
+            if label_font is not None:
+                for label in (getattr(getattr(axes, "xaxis", None), "label", None), getattr(getattr(axes, "yaxis", None), "label", None)):
+                    if label is None:
+                        continue
+                    try:
+                        current = self._valid_font_size(label.get_fontsize())
+                        if current is not None and current > float(label_font) + 0.01:
+                            label.set_fontsize(float(label_font))
+                            changed += 1
+                    except Exception:
+                        continue
+            tick_font = recommendations.get("tick_font")
+            if tick_font is not None:
+                for getter in (getattr(axes, "get_xticklabels", None), getattr(axes, "get_yticklabels", None)):
+                    if not callable(getter):
+                        continue
+                    try:
+                        labels = list(getter())
+                    except Exception:
+                        labels = []
+                    for label in labels:
+                        try:
+                            current = self._valid_font_size(label.get_fontsize())
+                            if current is not None and current > float(tick_font) + 0.01:
+                                label.set_fontsize(float(tick_font))
+                                changed += 1
+                        except Exception:
+                            continue
+            legend_font = recommendations.get("legend_font_size")
+            if legend_font is not None:
+                try:
+                    legend = axes.get_legend()
+                except Exception:
+                    legend = None
+                if legend is not None:
+                    for text in list(getattr(legend, "get_texts", lambda: [])()):
+                        try:
+                            current = self._valid_font_size(text.get_fontsize())
+                            if current is not None and current > float(legend_font) + 0.01:
+                                text.set_fontsize(float(legend_font))
+                                changed += 1
+                        except Exception:
+                            continue
+                    title = getattr(legend, "get_title", lambda: None)()
+                    if title is not None:
+                        try:
+                            current = self._valid_font_size(title.get_fontsize())
+                            if current is not None and current > float(legend_font) + 0.01:
+                                title.set_fontsize(float(legend_font))
+                                changed += 1
+                        except Exception:
+                            pass
+
+        if changed <= 0:
+            return 0
+        fit_to_content = getattr(self, "_fit_figure_to_content", None)
+        if callable(fit_to_content):
+            try:
+                fit_to_content(figure)
+            except Exception:
+                pass
+        else:
+            tight_layout = getattr(figure, "tight_layout", None)
+            if callable(tight_layout):
+                try:
+                    tight_layout(pad=1.0)
+                except Exception:
+                    pass
+            canvas = getattr(figure, "canvas", None)
+            if canvas is not None:
+                try:
+                    canvas.draw_idle()
+                except Exception:
+                    try:
+                        canvas.draw()
+                    except Exception:
+                        pass
+        return changed
+
     def _handle_tight_layout_warning(
         self,
         figure: Any,
@@ -10443,11 +10751,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if signature in self._tight_layout_warning_signatures:
             return
         self._tight_layout_warning_signatures.add(signature)
+        recommendations = self._tight_layout_font_recommendations(figure)
+        recommendation_text = self._tight_layout_recommendation_text(recommendations)
         message = (
             f"{context_label}: Matplotlib could not fit all graph decorations.\n\n"
             f"Likely too large font: {offender}\n"
             f"Detected text sizes: {summary}\n\n"
-            "Reduce that font size in Graph formatting, or enlarge the graph."
+            f"Suggested size targets: {recommendation_text}\n\n"
+            "Choose: keep current sizes, auto-fit this graph, or apply a plugin override."
         )
         self._last_tight_layout_warning_message = message
 
@@ -10467,11 +10778,65 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     pass
             return
 
-        QtWidgets.QMessageBox.warning(
-            self,
-            "Graph layout warning",
-            message,
+        axes_for_override = None
+        try:
+            axes_list = [axis for axis in list(getattr(figure, "axes", [])) if axis is not None]
+        except Exception:
+            axes_list = []
+        if axes_list:
+            axes_for_override = axes_list[0]
+        apply_override_handler = getattr(self, "_apply_plugin_graph_option_override_for_axes", None)
+        can_apply_override = callable(apply_override_handler) and axes_for_override is not None
+
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Graph layout warning")
+        dialog.setText(message)
+        keep_button = dialog.addButton(
+            "Keep current sizes",
+            QtWidgets.QMessageBox.ButtonRole.RejectRole,
         )
+        auto_button = dialog.addButton(
+            "Auto-fit current graph",
+            QtWidgets.QMessageBox.ButtonRole.AcceptRole,
+        )
+        override_button = None
+        if can_apply_override:
+            override_button = dialog.addButton(
+                "Apply plugin override",
+                QtWidgets.QMessageBox.ButtonRole.ActionRole,
+            )
+        dialog.setDefaultButton(keep_button)
+        dialog.exec()
+
+        clicked = dialog.clickedButton()
+        if clicked is auto_button:
+            changed = self._apply_tight_layout_auto_fit(figure, recommendations)
+            append_log = getattr(self, "_append_log", None)
+            if callable(append_log):
+                if changed > 0:
+                    append_log(
+                        f"Auto-fit adjusted {changed} text element(s) to reduce graph layout clipping."
+                    )
+                else:
+                    append_log(
+                        "Auto-fit could not reduce text sizes further; adjust Graph formatting manually.",
+                        level="warning",
+                    )
+            return
+
+        if override_button is not None and clicked is override_button and callable(apply_override_handler):
+            applied = False
+            try:
+                applied = bool(apply_override_handler(axes_for_override, recommendations))
+            except Exception:
+                applied = False
+            if not applied:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Graph layout warning",
+                    "Plugin override could not be applied. You can still adjust sizes in Graph options.",
+                )
 
     def _tight_layout_with_feedback(
         self,
@@ -12533,3 +12898,4 @@ __all__ = [
     "PlotTabState",
     "TabDescriptor",
 ]
+

@@ -702,6 +702,8 @@ _BASE_Y_LABEL_KEY = "base_y_label"
 _BASE_TITLE_KEY = "base_title"
 _PRE_NORMALIZE_Y_KEY = "pre_normalize_y"
 _NORMALIZABLE_TAB_KINDS = {"temperature", "overlay"}
+_LEGACY_ANY_SAMPLE = "*"
+PlotGroupKey = tuple[str, float]
 
 
 @dataclass
@@ -1792,17 +1794,17 @@ class VSMPlotter(PyPlotWindow):
         self.last_export_path: Path | None = None
 
         self.measurements: List[VSMMeasurement] = []
-        self._last_prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]] = {}
-        self._last_rescale_info: Dict[float, Dict[Path, RescaleResult]] = {}
+        self._last_prepared_groups: Dict[PlotGroupKey, List[tuple[VSMMeasurement, pd.DataFrame]]] = {}
+        self._last_rescale_info: Dict[PlotGroupKey, Dict[Path, RescaleResult]] = {}
         self._last_axes: tuple[str, str] | None = None
         self._last_rescale_enabled = False
-        self._line_visibility: Dict[float, Dict[float, bool]] = {}
+        self._line_visibility: Dict[PlotGroupKey, Dict[float, bool]] = {}
         self._worksheet_models: Dict[Hashable, WorksheetTableModel] = {}
-        self._plotted_series_exports: Dict[tuple[float, float], PlotSeriesExport] = {}
+        self._plotted_series_exports: Dict[tuple[str, float, float], PlotSeriesExport] = {}
         self._metrics_by_temperature: Dict[float, pd.DataFrame] = {}
         self._metrics_by_angle: Dict[float, pd.DataFrame] = {}
         self._metric_column_names: Dict[str, str] = {}
-        self._metric_results: Dict[tuple[float, float], MetricResult] = {}
+        self._metric_results: Dict[tuple[str, float, float], MetricResult] = {}
         self._metric_debug_tables: Dict[str, Dict[float, pd.DataFrame]] = {}
         self._metric_debug_columns: Dict[str, Dict[str, str]] = {}
         self._metric_debug_windows: Dict[str, MetricDebugWindow] = {}
@@ -1914,10 +1916,19 @@ class VSMPlotter(PyPlotWindow):
             'x': self.x_axis_combo.currentText() if hasattr(self, 'x_axis_combo') else None,
             'y': self.y_axis_combo.currentText() if hasattr(self, 'y_axis_combo') else None,
         }
-        visibility_payload: Dict[str, Dict[str, bool]] = {}
-        for temperature, angles in self._line_visibility.items():
+        visibility_payload: List[Dict[str, Any]] = []
+        for group_key, angles in self._line_visibility.items():
+            sample_name, temperature = group_key
+            if sample_name == _LEGACY_ANY_SAMPLE:
+                continue
             angle_map = {str(angle): bool(flag) for angle, flag in angles.items()}
-            visibility_payload[str(temperature)] = angle_map
+            visibility_payload.append(
+                {
+                    "sample": str(sample_name),
+                    "temperature": float(temperature),
+                    "angles": angle_map,
+                }
+            )
         measurements_payload: List[Dict[str, Any]] = []
         base_dir = base_path.resolve() if base_path is not None else None
         for measurement in self.measurements:
@@ -1956,7 +1967,7 @@ class VSMPlotter(PyPlotWindow):
             'temperature_filter': temperature_filter,
             'field_direction': bool(self._field_direction_enabled),
             'style': self.style_combo.currentData() if hasattr(self, 'style_combo') else None,
-            'dark_mode': bool(self.dark_mode_checkbox.isChecked()) if hasattr(self, 'dark_mode_checkbox') else False,
+            'dark_mode': bool(self._plot_dark_enabled()),
             'line_visibility': visibility_payload,
             'measurements': measurements_payload,
         }
@@ -1981,8 +1992,17 @@ class VSMPlotter(PyPlotWindow):
             if index >= 0:
                 self.style_combo.setCurrentIndex(index)
         dark_value = payload.get('dark_mode')
-        if hasattr(self, 'dark_mode_checkbox'):
-            self.dark_mode_checkbox.setChecked(bool(dark_value))
+        dark_action = getattr(self, "_dark_mode_action", None)
+        if dark_action is not None and callable(getattr(dark_action, "setChecked", None)):
+            try:
+                dark_action.setChecked(bool(dark_value))
+            except Exception:
+                pass
+        else:
+            try:
+                self._dark_mode_enabled = bool(dark_value)
+            except Exception:
+                pass
         axes_data = payload.get('axes', {}) if isinstance(payload, dict) else {}
         x_axis = axes_data.get('x') if isinstance(axes_data, dict) else None
         y_axis = axes_data.get('y') if isinstance(axes_data, dict) else None
@@ -2081,8 +2101,31 @@ class VSMPlotter(PyPlotWindow):
         self._save_settings()
         return True
 
-    def _deserialize_line_visibility(self, payload: Any) -> Dict[float, Dict[float, bool]]:
-        result: Dict[float, Dict[float, bool]] = {}
+    def _deserialize_line_visibility(self, payload: Any) -> Dict[PlotGroupKey, Dict[float, bool]]:
+        result: Dict[PlotGroupKey, Dict[float, bool]] = {}
+        if isinstance(payload, list):
+            for entry in payload:
+                if not isinstance(entry, dict):
+                    continue
+                sample = entry.get("sample")
+                temperature = entry.get("temperature")
+                if not isinstance(sample, str):
+                    continue
+                if not isinstance(temperature, (int, float)):
+                    continue
+                visibility: Dict[float, bool] = {}
+                angles = entry.get("angles")
+                if isinstance(angles, dict):
+                    for angle_key, flag in angles.items():
+                        try:
+                            angle = float(angle_key)
+                        except (TypeError, ValueError):
+                            continue
+                        visibility[angle] = bool(flag)
+                result[(sample.strip() or "Unknown sample", float(temperature))] = visibility
+            return result
+
+        # Backward compatibility with older projects that keyed only by temperature.
         if not isinstance(payload, dict):
             return result
         for temp_key, angles in payload.items():
@@ -2098,8 +2141,54 @@ class VSMPlotter(PyPlotWindow):
                     except (TypeError, ValueError):
                         continue
                     visibility[angle] = bool(flag)
-            result[temperature] = visibility
+            result[(_LEGACY_ANY_SAMPLE, float(temperature))] = visibility
         return result
+
+    def _plot_group_key(
+        self,
+        sample_name: str | None,
+        temperature: float | None,
+    ) -> PlotGroupKey | None:
+        if temperature is None:
+            return None
+        try:
+            temp_value = float(temperature)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(temp_value):
+            return None
+        sample = str(sample_name or "").strip() or "Unknown sample"
+        return (sample, temp_value)
+
+    def _line_visibility_for_group(self, key: PlotGroupKey) -> Dict[float, bool]:
+        visibility = self._line_visibility.get(key)
+        if isinstance(visibility, dict):
+            return visibility
+        legacy_key = (_LEGACY_ANY_SAMPLE, float(key[1]))
+        legacy_visibility = self._line_visibility.get(legacy_key)
+        if isinstance(legacy_visibility, dict):
+            migrated = dict(legacy_visibility)
+            self._line_visibility[key] = migrated
+            return migrated
+        created: Dict[float, bool] = {}
+        self._line_visibility[key] = created
+        return created
+
+    def _descriptor_plot_group_key(self, descriptor: TabDescriptor | None) -> PlotGroupKey | None:
+        if not isinstance(descriptor, TabDescriptor):
+            return None
+        metadata = descriptor.metadata if isinstance(descriptor.metadata, dict) else {}
+        raw_key = metadata.get("plot_group_key")
+        if isinstance(raw_key, (tuple, list)) and len(raw_key) == 2:
+            sample = raw_key[0]
+            temperature = raw_key[1]
+            if isinstance(sample, str) and isinstance(temperature, (int, float)):
+                return (sample.strip() or "Unknown sample", float(temperature))
+        sample_name = metadata.get("sample_name")
+        temperature = metadata.get("temperature")
+        if isinstance(sample_name, str) and isinstance(temperature, (int, float)):
+            return (sample_name.strip() or "Unknown sample", float(temperature))
+        return None
 
     @staticmethod
     def _json_friendly(value: Any) -> Any:
@@ -2137,22 +2226,6 @@ class VSMPlotter(PyPlotWindow):
         axes_form.addRow("X axis", self.x_axis_combo)
         axes_form.addRow("Y axis", self.y_axis_combo)
 
-        layout.addWidget(axes_group)
-
-        appearance_group = QtWidgets.QGroupBox("Appearance")
-        _style_group(appearance_group)
-        appearance_layout = QtWidgets.QVBoxLayout(appearance_group)
-        appearance_layout.setContentsMargins(8, 8, 8, 8)
-        self.style_combo = QtWidgets.QComboBox()
-        self.style_combo.addItem("Line", "line")
-        self.style_combo.addItem("Line + symbols", "line_markers")
-        appearance_layout.addWidget(QtWidgets.QLabel("Matplotlib style"))
-        appearance_layout.addWidget(self.style_combo)
-
-        self.dark_mode_checkbox = QtWidgets.QCheckBox("Dark plot theme")
-        self.dark_mode_checkbox.setToolTip("Render Matplotlib plots using a dark background theme.")
-        self.dark_mode_checkbox.toggled.connect(self._restyle_plots)
-        appearance_layout.addWidget(self.dark_mode_checkbox)
         self.field_direction_button = QtWidgets.QPushButton(
             "Highlight field direction"
         )
@@ -2161,8 +2234,9 @@ class VSMPlotter(PyPlotWindow):
             "Use solid lines for increasing magnetic field and dashed lines for decreasing segments."
         )
         self.field_direction_button.toggled.connect(self._handle_field_direction_toggle)
-        appearance_layout.addWidget(self.field_direction_button)
-        layout.addWidget(appearance_group)
+        axes_form.addRow("Field direction", self.field_direction_button)
+
+        layout.addWidget(axes_group)
 
         overlay_group = QtWidgets.QGroupBox("Angle overlays")
         _style_group(overlay_group)
@@ -2426,7 +2500,13 @@ class VSMPlotter(PyPlotWindow):
 
         dark_value = self.settings.value("plot_dark_mode", False)
         dark_enabled = bool(dark_value) if dark_value is not None else False
-        if hasattr(self, "_dark_mode_enabled") and not hasattr(self, "dark_mode_checkbox"):
+        dark_action = getattr(self, "_dark_mode_action", None)
+        if dark_action is not None and callable(getattr(dark_action, "isChecked", None)):
+            try:
+                self._dark_mode_enabled = bool(dark_action.isChecked())
+            except Exception:
+                self._dark_mode_enabled = bool(getattr(self, "_dark_mode_enabled", False))
+        elif hasattr(self, "_dark_mode_enabled"):
             try:
                 self._dark_mode_enabled = dark_enabled
             except Exception:
@@ -2617,14 +2697,28 @@ class VSMPlotter(PyPlotWindow):
 
         seen: set[Path] = set()
         paths: list[Path] = []
-        for raw_directory in directories:
+        self._begin_task_progress(
+            "Scanning folders for VSM files…",
+            maximum=max(1, len(directories)),
+            value=0,
+        )
+        for index, raw_directory in enumerate(directories, start=1):
             directory = Path(raw_directory)
+            self._update_task_progress(
+                value=index - 1,
+                title=f"Scanning {directory.name or str(directory)} ({index}/{len(directories)})",
+            )
             for path in _find_vsm_files(directory):
                 resolved = path.resolve()
                 if resolved in seen:
                     continue
                 seen.add(resolved)
                 paths.append(resolved)
+        self._update_task_progress(
+            value=max(1, len(directories)),
+            title="Folder scan complete.",
+        )
+        self._end_task_progress()
 
         if not paths:
             QtWidgets.QMessageBox.information(
@@ -3500,12 +3594,23 @@ class VSMPlotter(PyPlotWindow):
                 )
             return
 
+        total_steps = max(1, len(paths)) + 3
+        self._begin_task_progress(
+            "Importing VSM measurements…",
+            maximum=total_steps,
+            value=0,
+        )
+
         total_loaded = 0
         plottable = 0
         common_columns: Dict[str, int] | None = None
         plottable_column_counts: Dict[str, int] = {}
         plottable_column_order: Dict[str, int] = {}
-        for path in paths:
+        for position, path in enumerate(paths, start=1):
+            self._update_task_progress(
+                value=position - 1,
+                title=f"Importing {path.name} ({position}/{len(paths)})",
+            )
             if not path.exists():
                 self._append_log(f"Skipping missing file: {path}")
                 continue
@@ -3577,12 +3682,18 @@ class VSMPlotter(PyPlotWindow):
                     if label not in plottable_column_order:
                         plottable_column_order[label] = index
 
+        self._update_task_progress(
+            value=max(1, len(paths)),
+            title="Creating workbooks…",
+        )
+
         if total_loaded == 0:
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
                 "No VSM measurements could be loaded.",
             )
+            self._end_task_progress()
             return
 
         self.measurements.sort(
@@ -3592,6 +3703,10 @@ class VSMPlotter(PyPlotWindow):
             )
         )
 
+        self._update_task_progress(
+            value=max(1, len(paths)) + 1,
+            title="Updating project tree and worksheets…",
+        )
         self._update_sample_title()
         self._populate_project_tree()
         self._populate_worksheets()
@@ -3635,6 +3750,11 @@ class VSMPlotter(PyPlotWindow):
         self.export_button.setEnabled(True)
         self._update_project_actions()
         self._save_settings()
+        self._update_task_progress(
+            value=total_steps,
+            title="Import complete.",
+        )
+        self._end_task_progress()
 
     def _populate_axis_combos(self, labels: List[str]) -> None:
         numeric_labels = [label for label in labels if label]
@@ -3655,9 +3775,22 @@ class VSMPlotter(PyPlotWindow):
         ]
 
         stored_x, stored_y = self._stored_axes
-        if isinstance(stored_x, str) and "applied field for plot" in stored_x.lower():
-            # Keep loop plotting defaults anchored to the requested primary field axis.
-            stored_x = None
+        if isinstance(stored_x, str):
+            stored_x_lower = stored_x.lower()
+            # VSM loop plots should default to a field axis; ignore unrelated
+            # stored axes from prior plugin/state usage.
+            if "applied field" not in stored_x_lower:
+                stored_x = None
+        if isinstance(stored_y, str):
+            stored_y_lower = stored_y.lower()
+            expected_y_tokens = (
+                "signal x direction",
+                "signal parallel with sample",
+                "signal magnitude",
+                "moment",
+            )
+            if not any(token in stored_y_lower for token in expected_y_tokens):
+                stored_y = None
         if stored_x and stored_y:
             stored_x_lower = stored_x.lower()
             stored_y_lower = stored_y.lower()
@@ -3892,6 +4025,13 @@ class VSMPlotter(PyPlotWindow):
             )
             return
 
+        total_steps = max(1, len(self.measurements)) + 4
+        self._begin_task_progress(
+            "Preparing hysteresis plots…",
+            maximum=total_steps,
+            value=0,
+        )
+
         self.open_origin_button.setEnabled(False)
         self.export_button.setEnabled(False)
         target_temp = self.temperature_combo.currentData()
@@ -3930,16 +4070,23 @@ class VSMPlotter(PyPlotWindow):
         x_axis = resolved_x
         y_axis = resolved_y
 
-        groups: Dict[float, List[VSMMeasurement]] = {}
-        for measurement in self.measurements:
-            if measurement.temperature is None or measurement.angle is None:
+        groups: Dict[PlotGroupKey, List[VSMMeasurement]] = {}
+        for position, measurement in enumerate(self.measurements, start=1):
+            self._update_task_progress(
+                value=position - 1,
+                title=f"Preparing data ({position}/{len(self.measurements)})",
+            )
+            if measurement.angle is None:
                 continue
-            if target_temp is not None and measurement.temperature != target_temp:
+            group_key = self._plot_group_key(measurement.sample_name, measurement.temperature)
+            if group_key is None:
+                continue
+            if target_temp is not None and float(group_key[1]) != float(target_temp):
                 continue
             if x_axis not in measurement.data.columns or y_axis not in measurement.data.columns:
                 self._append_log(f"Skipping {measurement.path.name} because it lacks the selected axes.")
                 continue
-            groups.setdefault(measurement.temperature, []).append(measurement)
+            groups.setdefault(group_key, []).append(measurement)
 
         if not groups:
             QtWidgets.QMessageBox.information(
@@ -3947,10 +4094,14 @@ class VSMPlotter(PyPlotWindow):
                 "VSM Hysteresis Loops",
                 "No measurements match the selected filters and axes.",
             )
+            self._end_task_progress()
             return
 
-        prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]] = {}
-        for temperature, measurement_list in sorted(groups.items()):
+        prepared_groups: Dict[PlotGroupKey, List[tuple[VSMMeasurement, pd.DataFrame]]] = {}
+        for group_key, measurement_list in sorted(
+            groups.items(),
+            key=lambda item: (item[0][0].lower(), float(item[0][1])),
+        ):
             prepared: List[tuple[VSMMeasurement, pd.DataFrame]] = []
             for measurement in sorted(measurement_list, key=lambda m: m.angle):
                 subset = (
@@ -3965,7 +4116,7 @@ class VSMPlotter(PyPlotWindow):
                     continue
                 prepared.append((measurement, subset))
             if prepared:
-                prepared_groups[temperature] = prepared
+                prepared_groups[group_key] = prepared
 
         if not prepared_groups:
             self._reset_object_manager()
@@ -3974,26 +4125,33 @@ class VSMPlotter(PyPlotWindow):
                 "No numeric data matched the selected axes; nothing to plot."
             )
             self._update_normalize_enabled()
+            self._end_task_progress()
             return
+
+        self._update_task_progress(
+            value=max(1, len(self.measurements)) + 1,
+            title="Rendering graphs…",
+        )
 
         self._update_angle_overlay_options(prepared_groups)
 
-        rescale_info: Dict[float, Dict[Path, RescaleResult]] = {}
+        rescale_info: Dict[PlotGroupKey, Dict[Path, RescaleResult]] = {}
         rescale_enabled = False
 
-        plot_exports: Dict[tuple[float, float], PlotSeriesExport] = {}
+        plot_exports: Dict[tuple[str, float, float], PlotSeriesExport] = {}
         metric_records: List[tuple[float, float, MetricResult]] = []
         coercivity_debug_entries: Dict[float, List[Dict[str, float]]] = {}
         remanence_debug_entries: Dict[float, List[Dict[str, float]]] = {}
         self._metric_results = {}
-        for temperature, entries in prepared_groups.items():
+        for group_key, entries in prepared_groups.items():
+            sample_key, temperature = group_key
             for measurement, subset in entries:
                 if measurement.angle is None:
                     continue
                 export_subset = subset.copy()
                 if export_subset.empty:
                     continue
-                key = (float(temperature), float(measurement.angle))
+                key = (sample_key, float(temperature), float(measurement.angle))
                 plot_exports[key] = PlotSeriesExport(
                     temperature=float(temperature),
                     angle=float(measurement.angle),
@@ -4236,6 +4394,10 @@ class VSMPlotter(PyPlotWindow):
 
         self.tab_widget.clear()
         self._render_matplotlib(prepared_groups, rescale_info, x_axis, y_axis, rescale_enabled)
+        self._update_task_progress(
+            value=max(1, len(self.measurements)) + 3,
+            title="Finalizing graph objects…",
+        )
 
         self.open_origin_button.setEnabled(bool(prepared_groups))
         self.export_button.setEnabled(True)
@@ -4253,6 +4415,11 @@ class VSMPlotter(PyPlotWindow):
         if not self._tab_descriptors:
             self.export_button.setEnabled(False)
             self.open_origin_button.setEnabled(False)
+        self._update_task_progress(
+            value=total_steps,
+            title="Plot generation complete.",
+        )
+        self._end_task_progress()
 
     def _handle_metric_debug_closed(self, metric: str, *_: Any) -> None:
         self._metric_debug_windows.pop(metric, None)
@@ -4277,13 +4444,14 @@ class VSMPlotter(PyPlotWindow):
         window.activateWindow()
 
     def _compute_rescale_lookup(self, x_axis: str, y_axis: str) -> Dict[Path, RescaleResult]:
-        grouped: Dict[float, List[VSMMeasurement]] = {}
+        grouped: Dict[PlotGroupKey, List[VSMMeasurement]] = {}
         for measurement in self.measurements:
-            if measurement.temperature is None:
+            group_key = self._plot_group_key(measurement.sample_name, measurement.temperature)
+            if group_key is None:
                 continue
             if x_axis not in measurement.data.columns or y_axis not in measurement.data.columns:
                 continue
-            grouped.setdefault(measurement.temperature, []).append(measurement)
+            grouped.setdefault(group_key, []).append(measurement)
 
         lookup: Dict[Path, RescaleResult] = {}
         for measurement_list in grouped.values():
@@ -4322,6 +4490,17 @@ class VSMPlotter(PyPlotWindow):
         return "line"
 
     def _plot_dark_enabled(self) -> bool:
+        try:
+            action = getattr(self, "_dark_mode_action", None)
+        except Exception:
+            action = None
+        if action is not None:
+            is_checked = getattr(action, "isChecked", None)
+            if callable(is_checked):
+                try:
+                    return bool(is_checked())
+                except Exception:
+                    pass
         try:
             toggle = self.dark_mode_checkbox
         except Exception:
@@ -4388,74 +4567,26 @@ class VSMPlotter(PyPlotWindow):
         """Apply the current light/dark theme to ``axes``."""
 
         dark = self._plot_dark_enabled()
-        options = self._graph_options_for_axes(axes)
-        show_grid = bool(options.get("show_grid", True))
-        title_font = options.get("title_font")
-        label_font = options.get("label_font")
-        tick_font = options.get("tick_font")
         apply_dark_mode = getattr(self, "_apply_dark_mode_to_axes", None)
         if callable(apply_dark_mode):
             try:
                 apply_dark_mode(axes, dark)
             except Exception:
                 pass
-        if dark:
-            bg = "#121212"
-            fg = "#f0f0f0"
-            grid = "#404040"
-        else:
-            bg = "#ffffff"
-            fg = "#202020"
-            grid = "#d0d0d0"
-
-        try:
-            axes.set_facecolor(bg)
-            axes.figure.set_facecolor(bg)
-        except Exception:  # pragma: no cover - backend differences
-            pass
-
-        try:
-            for spine in getattr(axes, "spines", {}).values():
-                spine.set_color(fg)
-        except Exception:  # pragma: no cover - backend differences
-            pass
-
-        try:
-            if isinstance(tick_font, (int, float)):
-                axes.tick_params(colors=fg, labelsize=float(tick_font))
-            else:
-                axes.tick_params(colors=fg)
-            axes.xaxis.label.set_color(fg)
-            axes.yaxis.label.set_color(fg)
-            axes.title.set_color(fg)
-        except Exception:  # pragma: no cover - backend differences
-            pass
-
-        if isinstance(title_font, (int, float)):
-            try:
-                axes.title.set_fontsize(float(title_font))
-            except Exception:
-                pass
-        if isinstance(label_font, (int, float)):
-            try:
-                axes.xaxis.label.set_fontsize(float(label_font))
-                axes.yaxis.label.set_fontsize(float(label_font))
-            except Exception:
-                pass
-
-        try:
-            if show_grid:
-                axes.grid(True, color=grid)
-            else:
-                axes.grid(False)
-        except Exception:  # pragma: no cover - backend differences
-            pass
 
     def _style_legend(self, legend: Any | None) -> None:
         """Restyle ``legend`` to match the current theme."""
 
         if legend is None:
             return
+        axes = getattr(legend, "axes", None)
+        if axes is not None:
+            try:
+                if axes.get_legend() is legend:
+                    # Shared graph formatting manages the primary legend.
+                    return
+            except Exception:
+                pass
         dark = self._plot_dark_enabled()
         fg = "#f0f0f0" if dark else "#202020"
         bg = "#1e1e1e" if dark else "#ffffff"
@@ -4839,7 +4970,7 @@ class VSMPlotter(PyPlotWindow):
 
     def _update_angle_overlay_options(
         self,
-        prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]],
+        prepared_groups: Dict[PlotGroupKey, List[tuple[VSMMeasurement, pd.DataFrame]]],
     ) -> None:
         selected_angles = set(self._selected_overlay_angles())
         self.angle_overlay_list.blockSignals(True)
@@ -4918,9 +5049,9 @@ class VSMPlotter(PyPlotWindow):
                 except Exception:
                     pass
             if descriptor.kind == "temperature":
-                temperature = descriptor.metadata.get("temperature")
-                if isinstance(temperature, (int, float)):
-                    visibility = self._line_visibility.setdefault(float(temperature), {})
+                group_key = self._descriptor_plot_group_key(descriptor)
+                if group_key is not None:
+                    visibility = self._line_visibility_for_group(group_key)
                     angle_value = None
                     if isinstance(normalized_key, tuple) and len(normalized_key) == 2:
                         angle_value = normalized_key[1]
@@ -4938,18 +5069,17 @@ class VSMPlotter(PyPlotWindow):
             and len(normalized_key) == 2
             and normalized_key[0] == "angle"
         ):
-            temperature = descriptor.metadata.get("temperature")
+            group_key = self._descriptor_plot_group_key(descriptor)
             angle_value = normalized_key[1]
-            if isinstance(temperature, (int, float)) and isinstance(angle_value, (int, float)):
-                temp_f = float(temperature)
+            if group_key is not None and isinstance(angle_value, (int, float)):
                 angle_f = float(angle_value)
-                self._toggle_line_visibility(temp_f, angle_f, new_visible)
+                self._toggle_line_visibility(group_key, angle_f, new_visible)
                 result_visible = bool(line_state.line.get_visible())
 
                 self._record_history_action(
                     f"{action} {line_state.label}",
-                    undo=lambda: self._toggle_line_visibility(temp_f, angle_f, old_visible),
-                    redo=lambda: self._toggle_line_visibility(temp_f, angle_f, new_visible),
+                    undo=lambda gk=group_key, av=angle_f: self._toggle_line_visibility(gk, av, old_visible),
+                    redo=lambda gk=group_key, av=angle_f: self._toggle_line_visibility(gk, av, new_visible),
                 )
                 handled = True
 
@@ -4974,7 +5104,7 @@ class VSMPlotter(PyPlotWindow):
             if isinstance(tree, QtWidgets.QTreeWidget):
                 tree.blockSignals(False)
 
-    def _toggle_line_visibility(self, temperature: float, angle: float, visible: bool) -> None:
+    def _toggle_line_visibility(self, group: Any, angle: float, visible: bool) -> None:
         try:
             attrs = object.__getattribute__(self, "__dict__")
         except Exception:
@@ -4992,7 +5122,37 @@ class VSMPlotter(PyPlotWindow):
             except Exception:
                 pass
         plot_tabs = attrs.get("_plot_tabs", {})
-        tab_state = plot_tabs.get(float(temperature))
+        group_key: PlotGroupKey | None = None
+        legacy_temperature: float | None = None
+        tab_lookup_key: Any = None
+        if isinstance(group, (tuple, list)) and len(group) == 2:
+            sample = group[0]
+            temperature = group[1]
+            if isinstance(sample, str) and isinstance(temperature, (int, float)):
+                group_key = (sample.strip() or "Unknown sample", float(temperature))
+                tab_lookup_key = group_key
+        elif isinstance(group, (int, float)):
+            legacy_temperature = float(group)
+            tab_lookup_key = legacy_temperature
+            for candidate in plot_tabs.keys():
+                if (
+                    isinstance(candidate, tuple)
+                    and len(candidate) == 2
+                    and isinstance(candidate[1], (int, float))
+                    and math.isclose(float(candidate[1]), legacy_temperature, rel_tol=0.0, abs_tol=1e-6)
+                ):
+                    group_key = (str(candidate[0]), float(candidate[1]))
+                    tab_lookup_key = candidate
+                    break
+        if group_key is None and legacy_temperature is None:
+            return
+        tab_state = plot_tabs.get(tab_lookup_key)
+        if tab_state is None and group_key is not None:
+            tab_state = plot_tabs.get(group_key)
+        if tab_state is None and legacy_temperature is not None:
+            tab_state = plot_tabs.get(legacy_temperature)
+            if tab_state is not None:
+                tab_lookup_key = legacy_temperature
         if tab_state is None:
             return
         line = tab_state.lines.get(float(angle))
@@ -5005,20 +5165,46 @@ class VSMPlotter(PyPlotWindow):
         self._refresh_tab_legend(tab_state)
 
         line_visibility = attrs.setdefault("_line_visibility", {})
-        line_visibility.setdefault(float(temperature), {})[float(angle)] = visible
+        if group_key is not None:
+            line_visibility.setdefault(group_key, {})[float(angle)] = visible
+        if legacy_temperature is not None:
+            line_visibility.setdefault(float(legacy_temperature), {})[float(angle)] = visible
         try:
             self._line_visibility = line_visibility
         except Exception:
             pass
 
         tab_descriptors = attrs.get("_tab_descriptors", {})
-        for tab, descriptor in tab_descriptors.items():
+        for _tab, descriptor in tab_descriptors.items():
             if descriptor.kind != "temperature":
                 continue
-            meta_temp = descriptor.metadata.get("temperature")
-            if not isinstance(meta_temp, (int, float)):
-                continue
-            if not math.isclose(float(meta_temp), float(temperature), rel_tol=0.0, abs_tol=1e-6):
+            descriptor_group_key = self._descriptor_plot_group_key(descriptor)
+            if descriptor_group_key is not None:
+                if group_key is not None and descriptor_group_key != group_key:
+                    continue
+                if (
+                    group_key is None
+                    and legacy_temperature is not None
+                    and not math.isclose(
+                        float(descriptor_group_key[1]),
+                        float(legacy_temperature),
+                        rel_tol=0.0,
+                        abs_tol=1e-6,
+                    )
+                ):
+                    continue
+            elif legacy_temperature is not None:
+                descriptor_temp = descriptor.metadata.get("temperature")
+                if not isinstance(descriptor_temp, (int, float)):
+                    continue
+                if not math.isclose(
+                    float(descriptor_temp),
+                    float(legacy_temperature),
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                ):
+                    continue
+            else:
                 continue
             state = descriptor.lines.get(("angle", float(angle)))
             if state is None:
@@ -5057,13 +5243,12 @@ class VSMPlotter(PyPlotWindow):
 
         if isinstance(descriptor, TabDescriptor):
             if descriptor.kind == "temperature":
-                temperature = descriptor.metadata.get("temperature")
-                if isinstance(temperature, (int, float)):
-                    key = float(temperature)
-                    tab_state = self._plot_tabs.pop(key, None)
+                group_key = self._descriptor_plot_group_key(descriptor)
+                if group_key is not None:
+                    tab_state = self._plot_tabs.pop(group_key, None)
                     if tab_state is not None:
                         extra["plot_tab_state"] = tab_state
-                    visibility = self._line_visibility.pop(key, None)
+                    visibility = self._line_visibility.pop(group_key, None)
                     if visibility is not None:
                         extra["line_visibility"] = visibility
 
@@ -5117,15 +5302,14 @@ class VSMPlotter(PyPlotWindow):
 
         if isinstance(descriptor, TabDescriptor):
             if descriptor.kind == "temperature":
-                temperature = descriptor.metadata.get("temperature")
-                if isinstance(temperature, (int, float)):
-                    key = float(temperature)
+                group_key = self._descriptor_plot_group_key(descriptor)
+                if group_key is not None:
                     tab_state = extra.get("plot_tab_state") if isinstance(extra, dict) else None
                     if isinstance(tab_state, PlotTabState):
-                        self._plot_tabs[key] = tab_state
+                        self._plot_tabs[group_key] = tab_state
                     visibility = extra.get("line_visibility") if isinstance(extra, dict) else None
                     if isinstance(visibility, dict):
-                        self._line_visibility[key] = visibility
+                        self._line_visibility[group_key] = visibility
             self._apply_direction_split_to_descriptor(descriptor)
             self._refresh_descriptor_legend(descriptor, force_layout=True)
 
@@ -5173,7 +5357,11 @@ class VSMPlotter(PyPlotWindow):
             lines: Dict[tuple[str, float | str], GraphLineState] = {}
             plotted = False
             raw_sample_names: set[str] = set()
-            for temperature, entries in sorted(self._last_prepared_groups.items()):
+            for group_key, entries in sorted(
+                self._last_prepared_groups.items(),
+                key=lambda item: (float(item[0][1]), item[0][0].lower()),
+            ):
+                sample_key, temperature = group_key
                 for measurement, subset in entries:
                     if measurement.angle is None:
                         continue
@@ -5183,7 +5371,7 @@ class VSMPlotter(PyPlotWindow):
                         raw_sample_names.add(str(measurement.sample_name))
                     series_y = _numeric_column(subset, y_axis)
                     if rescale_enabled:
-                        result = rescale_info.get(temperature, {}).get(measurement.path)
+                        result = rescale_info.get(group_key, {}).get(measurement.path)
                         if result is not None:
                             if result.replacement is not None:
                                 replacement = result.replacement.reindex(subset.index)
@@ -5194,10 +5382,11 @@ class VSMPlotter(PyPlotWindow):
                     numeric_y = pd.to_numeric(series_y, errors="coerce").to_numpy()
                     if numeric_x.size == 0 or numeric_y.size == 0:
                         continue
+                    sample_label = self._format_sample_label(sample_key) or sample_key
                     label = self._series_label(
                         measurement,
                         y_axis,
-                        f"{temperature:g} °C",
+                        f"{sample_label} {temperature:g} °C",
                     )
                     line, = ax.plot(
                         numeric_x,
@@ -5205,8 +5394,9 @@ class VSMPlotter(PyPlotWindow):
                         label=label,
                         **line_kwargs,
                     )
-                    lines[("temperature", float(temperature))] = GraphLineState(
-                        key=("temperature", float(temperature)),
+                    line_key = ("temperature", f"{sample_key}|{float(temperature):g}")
+                    lines[line_key] = GraphLineState(
+                        key=line_key,
                         label=label,
                         line=line,
                         base_x=numeric_x,
@@ -5341,8 +5531,15 @@ class VSMPlotter(PyPlotWindow):
                         metadata["angle"] = float(angle_value)
 
                 entry = None
-                if isinstance(temperature, (int, float)) and isinstance(angle_value, (int, float)):
-                    entry = self._plotted_series_exports.get((float(temperature), float(angle_value)))
+                sample_name = descriptor.metadata.get("sample_name")
+                if (
+                    isinstance(sample_name, str)
+                    and isinstance(temperature, (int, float))
+                    and isinstance(angle_value, (int, float))
+                ):
+                    entry = self._plotted_series_exports.get(
+                        (sample_name.strip() or "Unknown sample", float(temperature), float(angle_value))
+                    )
                 if entry is not None:
                     metadata["source"] = entry.source.name
                     metadata["rescaled"] = entry.rescaled
@@ -6178,27 +6375,40 @@ class VSMPlotter(PyPlotWindow):
             return
 
         selected_tabs = dialog.selected_tabs()
-        selected_temperatures: List[float] = []
+        selected_group_keys: List[PlotGroupKey] = []
         for label, detail, tab, descriptor in entries:
             if tab not in selected_tabs:
                 continue
-            temperature = descriptor.metadata.get("temperature")
-            if isinstance(temperature, (int, float)):
-                selected_temperatures.append(float(temperature))
+            key_meta = descriptor.metadata.get("plot_group_key")
+            group_key: PlotGroupKey | None = None
+            if isinstance(key_meta, (tuple, list)) and len(key_meta) == 2:
+                sample = key_meta[0]
+                temperature = key_meta[1]
+                if isinstance(sample, str) and isinstance(temperature, (int, float)):
+                    group_key = (sample.strip() or "Unknown sample", float(temperature))
+            if group_key is None:
+                temperature = descriptor.metadata.get("temperature")
+                sample_name = descriptor.metadata.get("sample_name")
+                if isinstance(sample_name, str) and isinstance(temperature, (int, float)):
+                    group_key = (sample_name.strip() or "Unknown sample", float(temperature))
+            if group_key is None:
+                continue
+            if group_key not in selected_group_keys:
+                selected_group_keys.append(group_key)
 
-        if not selected_temperatures:
+        if not selected_group_keys:
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                "No temperature plots were selected for Origin.",
+                "No plots were selected for Origin.",
             )
             return
 
         x_axis, y_axis = self._last_axes
         selected_prepared = {
-            temp: self._last_prepared_groups.get(temp)
-            for temp in selected_temperatures
-            if temp in self._last_prepared_groups
+            key: self._last_prepared_groups.get(key)
+            for key in selected_group_keys
+            if key in self._last_prepared_groups
         }
         selected_prepared = {k: v for k, v in selected_prepared.items() if v}
         if not selected_prepared:
@@ -6210,16 +6420,16 @@ class VSMPlotter(PyPlotWindow):
             return
 
         rescale_info = {
-            temp: self._last_rescale_info.get(temp, {})
-            for temp in selected_prepared.keys()
+            key: self._last_rescale_info.get(key, {})
+            for key in selected_prepared.keys()
         }
 
         self._export_origin(selected_prepared, rescale_info, x_axis, y_axis, self._last_rescale_enabled)
 
     def _render_matplotlib(
         self,
-        prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]],
-        rescale_info: Dict[float, Dict[Path, RescaleResult]],
+        prepared_groups: Dict[PlotGroupKey, List[tuple[VSMMeasurement, pd.DataFrame]]],
+        rescale_info: Dict[PlotGroupKey, Dict[Path, RescaleResult]],
         x_axis: str,
         y_axis: str,
         rescale_enabled: bool,
@@ -6230,37 +6440,29 @@ class VSMPlotter(PyPlotWindow):
         self._clear_tab_list(self._overlay_tab_widgets)
         self.tab_widget.setVisible(True)
         self._plot_tabs = {}
-        for temperature in list(self._line_visibility.keys()):
-            if temperature not in prepared_groups:
-                del self._line_visibility[temperature]
+        for group_key in list(self._line_visibility.keys()):
+            if group_key not in prepared_groups and group_key[0] != _LEGACY_ANY_SAMPLE:
+                del self._line_visibility[group_key]
         line_kwargs = self._line_style_kwargs()
-        for temperature, entries in sorted(prepared_groups.items()):
+        for group_key, entries in sorted(
+            prepared_groups.items(),
+            key=lambda item: (item[0][0].lower(), float(item[0][1])),
+        ):
+            sample_key, temperature = group_key
             fig = Figure(figsize=(11.5, 7.8))
             ax = fig.add_subplot(111)
-            visibility = self._line_visibility.setdefault(temperature, {})
+            visibility = self._line_visibility_for_group(group_key)
             lines: Dict[float, Any] = {}
             descriptor_lines: Dict[tuple[str, float | str], GraphLineState] = {}
             valid_angles: set[float] = set()
-            raw_sample_names = {
-                str(measurement.sample_name)
-                for measurement, _ in entries
-                if measurement.sample_name
-            }
-            formatted_samples = {
-                sample
-                for sample in (
-                    self._format_sample_label(name) for name in raw_sample_names
-                )
-                if sample
-            }
-            sample_label = next(iter(formatted_samples)) if len(formatted_samples) == 1 else None
+            sample_label = self._format_sample_label(sample_key) or sample_key
             for measurement, subset in entries:
                 if measurement.angle is None:
                     continue
                 angle = float(measurement.angle)
                 series_y = _numeric_column(subset, y_axis)
                 if rescale_enabled:
-                    result = rescale_info.get(temperature, {}).get(measurement.path)
+                    result = rescale_info.get(group_key, {}).get(measurement.path)
                     if result is not None:
                         if result.replacement is not None:
                             replacement = result.replacement.reindex(subset.index)
@@ -6301,7 +6503,7 @@ class VSMPlotter(PyPlotWindow):
             ax.set_xlabel(x_axis)
             ax.set_ylabel(y_axis)
             temperature_label = f"{temperature:g} °C"
-            title = f"{sample_label} — {temperature_label}" if sample_label else temperature_label
+            title = f"{sample_label} — {temperature_label}"
             ax.set_title(title)
             self._apply_plot_theme(ax)
 
@@ -6317,13 +6519,13 @@ class VSMPlotter(PyPlotWindow):
 
             canvas = FigureCanvas(fig)
             tab_state = PlotTabState(axes=ax, canvas=canvas, lines=lines)
-            self._plot_tabs[temperature] = tab_state
+            self._plot_tabs[group_key] = tab_state
 
             tab = QtWidgets.QWidget()
             layout = QtWidgets.QVBoxLayout(tab)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(canvas)
-            title = f"{temperature:g} °C"
+            title = f"{sample_label} — {temperature_label}"
             descriptor = TabDescriptor(
                 kind="temperature",
                 title=ax.get_title(),
@@ -6333,10 +6535,12 @@ class VSMPlotter(PyPlotWindow):
                 canvas=canvas,
                 axes=ax,
                 lines=descriptor_lines,
-                metadata={"temperature": float(temperature)},
+                metadata={
+                    "temperature": float(temperature),
+                    "sample_name": sample_key,
+                    "plot_group_key": group_key,
+                },
             )
-            if sample_label:
-                descriptor.metadata["sample_name"] = sample_label
             self.tab_widget.addTab(tab, title)
             self._temperature_tab_widgets.append(tab)
             self._register_plot_tab(tab, canvas, ax, descriptor)
@@ -6375,49 +6579,78 @@ class VSMPlotter(PyPlotWindow):
 
     def _export_origin(
         self,
-        prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]],
-        rescale_info: Dict[float, Dict[Path, RescaleResult]],
+        prepared_groups: Dict[PlotGroupKey, List[tuple[VSMMeasurement, pd.DataFrame]]],
+        rescale_info: Dict[PlotGroupKey, Dict[Path, RescaleResult]],
         x_axis: str,
         y_axis: str,
         rescale_enabled: bool,
     ) -> None:
+        total_groups = max(1, len(prepared_groups))
+        self._begin_task_progress(
+            "Exporting plots to Origin…",
+            maximum=total_groups,
+            value=0,
+        )
         try:
-            with origin_session(keep_open=True) as op:
-                exported = 0
-                for temperature, entries in sorted(prepared_groups.items()):
-                    valid = []
-                    for measurement, subset in entries:
-                        series_y = _numeric_column(subset, y_axis)
-                        if rescale_enabled:
-                            result = rescale_info.get(temperature, {}).get(measurement.path)
-                            if result is not None:
-                                series_y = series_y * result.scale + result.offset
-                        export_subset = pd.DataFrame(
-                            {
-                                x_axis: _numeric_column(subset, x_axis),
-                                y_axis: pd.to_numeric(series_y, errors="coerce"),
-                            }
-                        ).dropna().astype(float)
-                        if export_subset.empty:
-                            continue
-                        valid.append((measurement, export_subset))
-                    if not valid:
-                        continue
-                    try:
-                        self._build_origin_group(op, temperature, valid, x_axis, y_axis)
-                        exported += 1
-                    except Exception as exc:
-                        self._append_log(
-                            f"Origin export failed for {temperature:g} °C: {exc}"
+            try:
+                with origin_session(keep_open=True) as op:
+                    exported = 0
+                    ordered_groups = sorted(
+                        prepared_groups.items(),
+                        key=lambda item: (item[0][0].lower(), float(item[0][1])),
+                    )
+                    for index, (group_key, entries) in enumerate(ordered_groups, start=1):
+                        sample_key, temperature = group_key
+                        self._update_task_progress(
+                            value=index - 1,
+                            title=f"Exporting {sample_key} @ {temperature:g} °C ({index}/{len(ordered_groups)})",
                         )
-                if exported:
-                    self._append_log(f"Sent {exported} temperature groups to Origin.")
-                else:
-                    self._append_log("No Origin plots were exported because all groups were empty.")
-        except (ModuleNotFoundError, ImportError):
-            self._append_log("OriginPro is not installed. Install originpro to enable Origin output.")
-        except Exception as exc:
-            self._append_log(f"Unexpected Origin error: {exc}")
+                        valid = []
+                        for measurement, subset in entries:
+                            series_y = _numeric_column(subset, y_axis)
+                            if rescale_enabled:
+                                result = rescale_info.get(group_key, {}).get(measurement.path)
+                                if result is not None:
+                                    series_y = series_y * result.scale + result.offset
+                            export_subset = pd.DataFrame(
+                                {
+                                    x_axis: _numeric_column(subset, x_axis),
+                                    y_axis: pd.to_numeric(series_y, errors="coerce"),
+                                }
+                            ).dropna().astype(float)
+                            if export_subset.empty:
+                                continue
+                            valid.append((measurement, export_subset))
+                        if not valid:
+                            continue
+                        try:
+                            self._build_origin_group(
+                                op,
+                                temperature,
+                                valid,
+                                x_axis,
+                                y_axis,
+                                sample_label=sample_key,
+                            )
+                            exported += 1
+                        except Exception as exc:
+                            self._append_log(
+                                f"Origin export failed for {temperature:g} °C: {exc}"
+                            )
+                    if exported:
+                        self._append_log(f"Sent {exported} temperature groups to Origin.")
+                    else:
+                        self._append_log("No Origin plots were exported because all groups were empty.")
+            except (ModuleNotFoundError, ImportError):
+                self._append_log("OriginPro is not installed. Install originpro to enable Origin output.")
+            except Exception as exc:
+                self._append_log(f"Unexpected Origin error: {exc}")
+        finally:
+            self._update_task_progress(
+                value=total_groups,
+                title="Origin export complete.",
+            )
+            self._end_task_progress()
 
     def _origin_book_name(self, temperature: float, sample_label: str | None = None) -> str:
         if sample_label:
@@ -6440,13 +6673,14 @@ class VSMPlotter(PyPlotWindow):
         entries: Sequence[Tuple[VSMMeasurement, pd.DataFrame]],
         x_axis: str,
         y_axis: str,
+        sample_label: str | None = None,
     ) -> None:
-        sample_label: str | None = None
-        for measurement, _subset in entries:
-            candidate = measurement.sample_name
-            if candidate:
-                sample_label = str(candidate)
-                break
+        if not sample_label:
+            for measurement, _subset in entries:
+                candidate = measurement.sample_name
+                if candidate:
+                    sample_label = str(candidate)
+                    break
         book = origin_any.new_book(
             'w', lname=self._origin_book_name(temperature, sample_label)
         )

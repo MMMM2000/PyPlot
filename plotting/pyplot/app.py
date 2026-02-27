@@ -3013,6 +3013,52 @@ class PyPlotWorkbench(PyPlotWindow):
             return self._tab_plugin_name(descriptor)
         return None
 
+    def _apply_plugin_graph_option_override_for_axes(
+        self,
+        axes: Any,
+        recommendations: Dict[str, float],
+    ) -> bool:
+        if axes is None or not isinstance(recommendations, dict):
+            return False
+        plugin_name = self._plugin_name_for_axes(axes) or self._current_plotter_name
+        if not isinstance(plugin_name, str) or not plugin_name.strip():
+            return False
+
+        payload = dict(self._effective_graph_options(plugin_name))
+        updated = False
+        for source_key, target_key in (
+            ("title_font", "title_font"),
+            ("label_font", "label_font"),
+            ("tick_font", "tick_font"),
+            ("legend_font_size", "legend_font_size"),
+        ):
+            value = recommendations.get(source_key)
+            if value is None:
+                continue
+            try:
+                numeric = float(value)
+            except Exception:
+                continue
+            if not math.isfinite(numeric) or numeric <= 0.0:
+                continue
+            payload[target_key] = numeric
+            updated = True
+        if not updated:
+            return False
+
+        global_payload = dict(self._effective_graph_options(None))
+        self._store_graph_option_defaults(
+            global_payload=global_payload,
+            plugin_key=str(plugin_name),
+            plugin_override_enabled=True,
+            plugin_payload=payload,
+            refresh_open_graphs=True,
+        )
+        self._append_log(
+            f"Applied graph option override for {plugin_name} using layout-fit font recommendations."
+        )
+        return True
+
     def _apply_graph_format(self, *, apply_all: bool) -> None:
         if self._graph_format_updating:
             return

@@ -454,6 +454,15 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
     layer_get_float = getattr(layer, "get_float", None)
     if not callable(set_float) or not callable(layer_get_float):
         return
+    label_get_float = getattr(axis_label, "get_float", None)
+    existing_label_x: float | None = None
+    if callable(label_get_float):
+        try:
+            candidate = float(label_get_float("x"))
+        except Exception:
+            candidate = math.nan
+        if math.isfinite(candidate):
+            existing_label_x = candidate
     try:
         x_from = float(layer_get_float("x.from"))
         x_to = float(layer_get_float("x.to"))
@@ -471,6 +480,8 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
     # Keep titles just outside axes (not inside data area) while avoiding export clipping.
     offset = x_span * 0.03
     target_x = (x_from - offset) if key == "y" else (x_to + offset)
+    if key == "y2" and existing_label_x is not None and existing_label_x > 130.0:
+        target_x = 130.0
     target_y = (y_from + y_to) / 2.0
 
     try:
