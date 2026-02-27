@@ -109,6 +109,56 @@ def test_vsm_hysteresis_register_plot_tab_enables_shared_open_origin() -> None:
         app.processEvents()
 
 
+def test_vsm_hysteresis_register_plot_tab_respects_shared_grid_default() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        window._graph_option_defaults_by_plugin["VSM Hysteresis Loops"] = {  # noqa: SLF001 - test hook
+            "show_grid": False
+        }
+
+        fig = Figure(figsize=(4, 3))
+        ax = fig.add_subplot(111)
+        line, = ax.plot([0.0, 1.0], [0.0, 1.0], label="0Â°")
+        canvas = FigureCanvas(fig)
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(canvas)
+        window.tab_widget.addTab(tab, "120 Â°C")
+        window.tab_widget.setCurrentWidget(tab)
+
+        descriptor = TabDescriptor(
+            kind="temperature",
+            title="120 Â°C",
+            root_label="120 Â°C",
+            x_label="Field [Oe]",
+            y_label="Moment [emu]",
+            canvas=canvas,
+            axes=ax,
+            lines={
+                ("angle", 0.0): GraphLineState(
+                    key=("angle", 0.0),
+                    label="0Â°",
+                    line=line,
+                    base_x=[0.0, 1.0],
+                    base_y=[0.0, 1.0],
+                    full_x=[0.0, 1.0],
+                    full_y=[0.0, 1.0],
+                )
+            },
+            metadata={"plugin": "VSM Hysteresis Loops"},
+        )
+        window._register_plot_tab(tab, canvas, ax, descriptor)
+        app.processEvents()
+
+        grid_lines = list(ax.get_xgridlines()) + list(ax.get_ygridlines())
+        assert not any(bool(line.get_visible()) for line in grid_lines)
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_vsm_hysteresis_preserves_shared_window_handlers() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")

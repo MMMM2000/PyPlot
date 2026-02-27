@@ -3584,21 +3584,46 @@ class PyPlotWorkbench(PyPlotWindow):
                     pass
         tight_layout = getattr(figure, "tight_layout", None)
         if callable(tight_layout) and not constrained_layout:
+            axes_count = 0
             try:
-                axes_count = 0
-                try:
-                    axes_count = len(getattr(figure, "axes", []))
-                except Exception:
-                    axes_count = 0
-                if axes_count > 1:
-                    tight_layout(pad=1.1, rect=(0.08, 0.10, 0.92, 0.90))
-                else:
-                    tight_layout(pad=1.0, rect=(0.06, 0.08, 0.96, 0.92))
+                axes_count = len(getattr(figure, "axes", []))
             except Exception:
+                axes_count = 0
+            kwargs: Dict[str, Any]
+            if axes_count > 1:
+                kwargs = {"pad": 1.1, "rect": (0.08, 0.10, 0.92, 0.90)}
+            else:
+                kwargs = {"pad": 1.0, "rect": (0.06, 0.08, 0.96, 0.92)}
+            apply_with_feedback = getattr(self, "_tight_layout_with_feedback", None)
+            if callable(apply_with_feedback):
+                applied = False
                 try:
-                    tight_layout(pad=1.0)
+                    applied = bool(
+                        apply_with_feedback(
+                            figure,
+                            context="Graph formatting",
+                            **kwargs,
+                        )
+                    )
                 except Exception:
-                    pass
+                    applied = False
+                if not applied:
+                    try:
+                        apply_with_feedback(
+                            figure,
+                            context="Graph formatting",
+                            pad=1.0,
+                        )
+                    except Exception:
+                        pass
+            else:
+                try:
+                    tight_layout(**kwargs)
+                except Exception:
+                    try:
+                        tight_layout(pad=1.0)
+                    except Exception:
+                        pass
         canvas = getattr(figure, "canvas", None)
         if canvas is None:
             return

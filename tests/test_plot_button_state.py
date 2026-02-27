@@ -235,6 +235,37 @@ def test_dark_mode_toggle_restores_light_legend_when_snapshot_missing() -> None:
         app.processEvents()
 
 
+def test_tight_layout_warning_reports_font_offender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        axes = window._current_axes()
+        assert axes is not None
+        figure = axes.figure
+        axes.set_title("Extremely long title for layout warning checks", fontsize=42)
+
+        def _fake_tight_layout(**_: object) -> None:
+            import warnings
+
+            warnings.warn(
+                "Tight layout not applied. The left and right margins cannot be made large enough to accommodate all Axes decorations.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        monkeypatch.setattr(figure, "tight_layout", _fake_tight_layout, raising=False)
+        assert window._tight_layout_with_feedback(figure, context="Graph formatting", pad=1.0)  # noqa: SLF001
+
+        text = str(getattr(window, "_last_tight_layout_warning_message", "") or "")  # noqa: SLF001
+        assert "Likely too large font: Axes 1 title (42.0 pt" in text
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_save_graph_works_with_mdi_proxy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

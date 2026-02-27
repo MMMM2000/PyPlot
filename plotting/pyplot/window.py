@@ -7,6 +7,7 @@ import re
 import sys
 import time
 import traceback
+import warnings
 import weakref
 import numpy as np
 from dataclasses import dataclass, field
@@ -2188,6 +2189,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._format_selection: tuple[str, Any] | None = None
         self._format_updating = False
         self._object_tree_updating = False
+        self._tight_layout_warning_signatures: set[tuple[int, str]] = set()
+        self._last_tight_layout_warning_message: str | None = None
 
         self.graph_dock: QtWidgets.QDockWidget | None = None
         self.graph_panel: QtWidgets.QWidget | None = None
@@ -6514,13 +6517,18 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 }
             if "grid_color" not in state:
                 try:
-                    grid_lines = axes.get_xgridlines()
+                    grid_lines = list(axes.get_xgridlines()) + list(axes.get_ygridlines())
                     if grid_lines:
                         state["grid_color"] = grid_lines[0].get_color()
                         state["grid_alpha"] = grid_lines[0].get_alpha()
                 except Exception:
                     state.setdefault("grid_color", None)
                     state.setdefault("grid_alpha", None)
+            try:
+                grid_lines = list(axes.get_xgridlines()) + list(axes.get_ygridlines())
+                state["grid_visible"] = any(bool(line.get_visible()) for line in grid_lines)
+            except Exception:
+                state.setdefault("grid_visible", False)
 
             legend = None
             try:
@@ -6537,7 +6545,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
             dark_face = "#202124"
             light_text = "#f1f3f4"
-            grid_color = "#4a4d52"
+            dark_grid_color = "#4a4d52"
 
             if figure is not None:
                 figure.patch.set_facecolor(dark_face)
@@ -6549,7 +6557,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     pass
             axes.tick_params(colors=light_text)
             try:
-                axes.grid(True, color=grid_color, alpha=0.3)
+                if bool(state.get("grid_visible", True)):
+                    axes.grid(True, color=dark_grid_color, alpha=0.3)
+                else:
+                    axes.grid(False)
             except Exception:
                 pass
             axes.xaxis.label.set_color(light_text)
@@ -6695,12 +6706,21 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
             original_grid_color = state.get("grid_color")
             original_grid_alpha = state.get("grid_alpha")
-            if original_grid_color is not None:
+            original_grid_visible = bool(state.get("grid_visible", False))
+            if original_grid_visible:
                 try:
-                    axes.grid(True, color=original_grid_color)
+                    if original_grid_color is not None:
+                        axes.grid(True, color=original_grid_color)
+                    else:
+                        axes.grid(True)
                     if original_grid_alpha is not None:
                         for line in axes.get_xgridlines() + axes.get_ygridlines():
                             line.set_alpha(original_grid_alpha)
+                except Exception:
+                    pass
+            else:
+                try:
+                    axes.grid(False)
                 except Exception:
                     pass
             stale: list[int] = []
@@ -10293,18 +10313,207 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return (color.redF(), color.greenF(), color.blueF(), color.alphaF())
         return color.name()
 
+    @staticmethod
+    def _valid_font_size(value: Any) -> float | None:
+        try:
+            size = float(value)
+        except Exception:
+            return None
+        if not np.isfinite(size) or size <= 0.0:
+            return None
+        return size
+
+    def _tight_layout_font_candidates(self, figure: Any) -> list[tuple[str, float, int]]:
+        if figure is None:
+            return []
+        candidates: list[tuple[str, float, int]] = []
+        axes_list = []
+        try:
+            axes_list = [axis for axis in list(getattr(figure, "axes", [])) if axis is not None]
+        except Exception:
+            axes_list = []
+
+        for index, axes in enumerate(axes_list, start=1):
+            title = getattr(axes, "title", None)
+            if title is not None:
+                size = self._valid_font_size(getattr(title, "get_fontsize", lambda: None)())
+                if size is not None:
+                    candidates.append((f"Axes {index} title", size, 1))
+            x_label = getattr(getattr(axes, "xaxis", None), "label", None)
+            if x_label is not None:
+                size = self._valid_font_size(getattr(x_label, "get_fontsize", lambda: None)())
+                if size is not None:
+                    candidates.append((f"Axes {index} X label", size, 1))
+            y_label = getattr(getattr(axes, "yaxis", None), "label", None)
+            if y_label is not None:
+                size = self._valid_font_size(getattr(y_label, "get_fontsize", lambda: None)())
+                if size is not None:
+                    candidates.append((f"Axes {index} Y label", size, 1))
+
+            for axis_name, getter in (
+                ("X tick labels", getattr(axes, "get_xticklabels", None)),
+                ("Y tick labels", getattr(axes, "get_yticklabels", None)),
+            ):
+                if not callable(getter):
+                    continue
+                try:
+                    labels = list(getter())
+                except Exception:
+                    labels = []
+                sizes = [
+                    size
+                    for size in (
+                        self._valid_font_size(getattr(label, "get_fontsize", lambda: None)())
+                        for label in labels
+                    )
+                    if size is not None
+                ]
+                if sizes:
+                    candidates.append((f"Axes {index} {axis_name}", max(sizes), len(sizes)))
+
+            legend = None
+            try:
+                legend = axes.get_legend()
+            except Exception:
+                legend = None
+            if legend is not None:
+                try:
+                    legend_texts = list(legend.get_texts())
+                except Exception:
+                    legend_texts = []
+                legend_sizes = [
+                    size
+                    for size in (
+                        self._valid_font_size(getattr(text, "get_fontsize", lambda: None)())
+                        for text in legend_texts
+                    )
+                    if size is not None
+                ]
+                if legend_sizes:
+                    candidates.append((f"Axes {index} legend entries", max(legend_sizes), len(legend_sizes)))
+                legend_title = getattr(legend, "get_title", lambda: None)()
+                if legend_title is not None:
+                    size = self._valid_font_size(getattr(legend_title, "get_fontsize", lambda: None)())
+                    if size is not None:
+                        candidates.append((f"Axes {index} legend title", size, 1))
+
+        suptitle = getattr(figure, "_suptitle", None)
+        if suptitle is not None:
+            size = self._valid_font_size(getattr(suptitle, "get_fontsize", lambda: None)())
+            if size is not None:
+                candidates.append(("Figure title", size, 1))
+        return candidates
+
+    def _tight_layout_warning_details(self, figure: Any) -> tuple[str, str]:
+        candidates = self._tight_layout_font_candidates(figure)
+        if not candidates:
+            return ("unknown text object", "No text font sizes could be measured.")
+        ranked = sorted(candidates, key=lambda entry: (entry[1], entry[2]), reverse=True)
+        top_name, top_size, top_count = ranked[0]
+        top_label = f"{top_name} ({top_size:.1f} pt"
+        if top_count > 1:
+            top_label += f", {top_count} items"
+        top_label += ")"
+        summary_parts = []
+        for name, size, count in ranked[:5]:
+            if count > 1:
+                summary_parts.append(f"{name}: {size:.1f} pt ({count} items)")
+            else:
+                summary_parts.append(f"{name}: {size:.1f} pt")
+        return top_label, "; ".join(summary_parts)
+
+    def _handle_tight_layout_warning(
+        self,
+        figure: Any,
+        messages: Sequence[str],
+        *,
+        context: str | None = None,
+    ) -> None:
+        target = None
+        for raw in messages:
+            text = str(raw or "").strip()
+            if "tight layout not applied" in text.lower():
+                target = text
+                break
+        if not target:
+            return
+        offender, summary = self._tight_layout_warning_details(figure)
+        context_label = str(context or "Graph layout").strip()
+        signature = (id(figure), f"{context_label}|{target}|{offender}")
+        if signature in self._tight_layout_warning_signatures:
+            return
+        self._tight_layout_warning_signatures.add(signature)
+        message = (
+            f"{context_label}: Matplotlib could not fit all graph decorations.\n\n"
+            f"Likely too large font: {offender}\n"
+            f"Detected text sizes: {summary}\n\n"
+            "Reduce that font size in Graph formatting, or enlarge the graph."
+        )
+        self._last_tight_layout_warning_message = message
+
+        app = QtWidgets.QApplication.instance()
+        platform_name = ""
+        if app is not None:
+            try:
+                platform_name = str(app.platformName() or "").strip().lower()
+            except Exception:
+                platform_name = ""
+        if platform_name in {"offscreen", "minimal", "headless"}:
+            append_log = getattr(self, "_append_log", None)
+            if callable(append_log):
+                try:
+                    append_log(f"Graph layout warning: {message}", level="warning")
+                except Exception:
+                    pass
+            return
+
+        QtWidgets.QMessageBox.warning(
+            self,
+            "Graph layout warning",
+            message,
+        )
+
+    def _tight_layout_with_feedback(
+        self,
+        figure: Any,
+        *,
+        context: str | None = None,
+        **kwargs: Any,
+    ) -> bool:
+        if figure is None:
+            return False
+        tight_layout = getattr(figure, "tight_layout", None)
+        if not callable(tight_layout):
+            return False
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", UserWarning)
+                tight_layout(**kwargs)
+        except Exception:
+            return False
+        messages = [str(getattr(warning, "message", "")).strip() for warning in caught]
+        self._handle_tight_layout_warning(figure, messages, context=context)
+        return True
+
     def _redraw_artist(self, artist: Any) -> None:
         figure = getattr(artist, "figure", None)
         if figure is None:
             axes = getattr(artist, "axes", None)
             if axes is not None:
                 figure = getattr(axes, "figure", None)
-        tight_layout = getattr(figure, "tight_layout", None) if figure is not None else None
-        if callable(tight_layout):
-            try:
-                tight_layout(pad=1.0)
-            except Exception:
-                pass
+        if figure is not None:
+            applied = self._tight_layout_with_feedback(
+                figure,
+                pad=1.0,
+                context="Graph redraw",
+            )
+            if not applied:
+                tight_layout = getattr(figure, "tight_layout", None)
+                if callable(tight_layout):
+                    try:
+                        tight_layout(pad=1.0)
+                    except Exception:
+                        pass
         canvas = getattr(figure, "canvas", None) if figure is not None else None
         if canvas is None:
             return

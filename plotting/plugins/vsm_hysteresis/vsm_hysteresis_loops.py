@@ -3341,6 +3341,24 @@ class VSMPlotter(PyPlotWindow):
             descriptor.metadata.setdefault(_BASE_Y_LABEL_KEY, descriptor.y_label)
             descriptor.metadata.setdefault(_BASE_TITLE_KEY, descriptor.title)
         PyPlotWindow._register_plot_tab(self, tab, canvas, axes, descriptor)
+        apply_graph_options = getattr(self, "_apply_graph_options_to_axes", None)
+        if callable(apply_graph_options):
+            plugin_name = None
+            tab_plugin_name = getattr(self, "_tab_plugin_name", None)
+            if callable(tab_plugin_name):
+                try:
+                    plugin_name = tab_plugin_name(descriptor)
+                except Exception:
+                    plugin_name = None
+            try:
+                apply_graph_options(axes, plugin_name=plugin_name)
+            except TypeError:
+                try:
+                    apply_graph_options(axes)
+                except Exception:
+                    pass
+            except Exception:
+                pass
         if descriptor is not None:
             if self._field_direction_enabled:
                 self._apply_direction_split_to_descriptor(descriptor)
@@ -4318,15 +4336,67 @@ class VSMPlotter(PyPlotWindow):
         except Exception:
             return False
 
+    def _graph_options_for_axes(self, axes: Any) -> Dict[str, Any]:
+        try:
+            resolver = getattr(self, "_effective_graph_options", None)
+        except Exception:
+            return {}
+        if not callable(resolver):
+            return {}
+        descriptor = None
+        try:
+            tab_for_axes = getattr(self, "_tab_for_axes", None)
+        except Exception:
+            tab_for_axes = None
+        if callable(tab_for_axes):
+            try:
+                tab = tab_for_axes(axes)
+            except Exception:
+                tab = None
+            if tab is not None:
+                try:
+                    descriptor = self._tab_descriptors.get(tab)
+                except Exception:
+                    descriptor = None
+        plugin_name = None
+        try:
+            tab_plugin_name = getattr(self, "_tab_plugin_name", None)
+        except Exception:
+            tab_plugin_name = None
+        if callable(tab_plugin_name):
+            try:
+                plugin_name = tab_plugin_name(descriptor)
+            except Exception:
+                plugin_name = None
+        if not plugin_name:
+            try:
+                plugin_name = getattr(self, "_current_plotter_name", None)
+            except Exception:
+                plugin_name = None
+        try:
+            options = resolver(plugin_name)
+        except TypeError:
+            try:
+                options = resolver(None)
+            except Exception:
+                options = {}
+        except Exception:
+            options = {}
+        return dict(options) if isinstance(options, dict) else {}
+
     def _apply_plot_theme(self, axes: Any) -> None:
         """Apply the current light/dark theme to ``axes``."""
 
         dark = self._plot_dark_enabled()
+        options = self._graph_options_for_axes(axes)
+        show_grid = bool(options.get("show_grid", True))
+        title_font = options.get("title_font")
+        label_font = options.get("label_font")
+        tick_font = options.get("tick_font")
         apply_dark_mode = getattr(self, "_apply_dark_mode_to_axes", None)
         if callable(apply_dark_mode):
             try:
                 apply_dark_mode(axes, dark)
-                return
             except Exception:
                 pass
         if dark:
@@ -4351,15 +4421,33 @@ class VSMPlotter(PyPlotWindow):
             pass
 
         try:
-            axes.tick_params(colors=fg)
+            if isinstance(tick_font, (int, float)):
+                axes.tick_params(colors=fg, labelsize=float(tick_font))
+            else:
+                axes.tick_params(colors=fg)
             axes.xaxis.label.set_color(fg)
             axes.yaxis.label.set_color(fg)
             axes.title.set_color(fg)
         except Exception:  # pragma: no cover - backend differences
             pass
 
+        if isinstance(title_font, (int, float)):
+            try:
+                axes.title.set_fontsize(float(title_font))
+            except Exception:
+                pass
+        if isinstance(label_font, (int, float)):
+            try:
+                axes.xaxis.label.set_fontsize(float(label_font))
+                axes.yaxis.label.set_fontsize(float(label_font))
+            except Exception:
+                pass
+
         try:
-            axes.grid(True, color=grid)
+            if show_grid:
+                axes.grid(True, color=grid)
+            else:
+                axes.grid(False)
         except Exception:  # pragma: no cover - backend differences
             pass
 
@@ -4435,21 +4523,62 @@ class VSMPlotter(PyPlotWindow):
             self._style_legend(legend)
 
     def _refresh_tab_legend(self, tab_state: PlotTabState, *, draw: bool = True) -> None:
-        legend = getattr(tab_state.axes, "legend_", None)
-        if legend is not None:
+        tab = None
+        try:
+            tab_for_axes = getattr(self, "_tab_for_axes", None)
+        except Exception:
+            tab_for_axes = None
+        if callable(tab_for_axes):
             try:
-                legend.remove()
-            except Exception:  # pragma: no cover - matplotlib backend specific
-                pass
-        visible_lines = [line for line in tab_state.lines.values() if line.get_visible()]
-        labels = [line.get_label() for line in visible_lines]
-        legend = tab_state.axes.legend(visible_lines, labels, loc="best")
+                tab = tab_for_axes(tab_state.axes)
+            except Exception:
+                tab = None
+        descriptor = self._tab_descriptors.get(tab) if tab is not None else None
+        plugin_name = None
+        try:
+            tab_plugin_name = getattr(self, "_tab_plugin_name", None)
+        except Exception:
+            tab_plugin_name = None
+        if callable(tab_plugin_name):
+            try:
+                plugin_name = tab_plugin_name(descriptor)
+            except Exception:
+                plugin_name = None
+        try:
+            legend = self._sync_axes_legend_with_visible_lines(
+                tab_state.axes,
+                plugin_name=plugin_name,
+            )
+        except Exception:
+            legend = None
+            old_legend = getattr(tab_state.axes, "legend_", None)
+            if old_legend is not None:
+                try:
+                    old_legend.remove()
+                except Exception:
+                    pass
+            visible_lines = [line for line in tab_state.lines.values() if line.get_visible()]
+            labels = [line.get_label() for line in visible_lines]
+            try:
+                legend = tab_state.axes.legend(visible_lines, labels, loc="best")
+            except Exception:
+                legend = None
         self._apply_plot_theme(tab_state.axes)
         self._style_legend(legend)
         try:
-            tab_state.axes.figure.tight_layout()
-        except Exception:  # pragma: no cover - backend specific
-            pass
+            fit_to_content = getattr(self, "_fit_figure_to_content", None)
+        except Exception:
+            fit_to_content = None
+        if callable(fit_to_content):
+            try:
+                fit_to_content(tab_state.axes.figure)
+            except Exception:
+                pass
+        else:
+            try:
+                tab_state.axes.figure.tight_layout()
+            except Exception:  # pragma: no cover - backend specific
+                pass
         if draw:
             try:
                 tab_state.canvas.draw_idle()
@@ -4462,34 +4591,60 @@ class VSMPlotter(PyPlotWindow):
         *,
         force_layout: bool = False,
     ) -> None:
-        legend = getattr(descriptor.axes, "legend_", None)
-        if legend is not None:
+        plugin_name = None
+        try:
+            tab_plugin_name = getattr(self, "_tab_plugin_name", None)
+        except Exception:
+            tab_plugin_name = None
+        if callable(tab_plugin_name):
             try:
-                legend.remove()
-            except Exception:  # pragma: no cover - matplotlib backend specific
-                pass
-
-        visible_states = [
-            state for state in descriptor.lines.values() if state.line.get_visible()
-        ]
-        if visible_states:
-            handles = [self._legend_handle_for_state(state) for state in visible_states]
-            legend = descriptor.axes.legend(
-                handles,
-                [state.label for state in visible_states],
-                loc="best",
+                plugin_name = tab_plugin_name(descriptor)
+            except Exception:
+                plugin_name = None
+        try:
+            legend = self._sync_axes_legend_with_visible_lines(
+                descriptor.axes,
+                plugin_name=plugin_name,
             )
-            self._apply_plot_theme(descriptor.axes)
-            self._style_legend(legend)
-        else:
+        except Exception:
             legend = None
-            self._apply_plot_theme(descriptor.axes)
+            old_legend = getattr(descriptor.axes, "legend_", None)
+            if old_legend is not None:
+                try:
+                    old_legend.remove()
+                except Exception:
+                    pass
+            visible_states = [
+                state for state in descriptor.lines.values() if state.line.get_visible()
+            ]
+            if visible_states:
+                handles = [self._legend_handle_for_state(state) for state in visible_states]
+                try:
+                    legend = descriptor.axes.legend(
+                        handles,
+                        [state.label for state in visible_states],
+                        loc="best",
+                    )
+                except Exception:
+                    legend = None
+        self._apply_plot_theme(descriptor.axes)
+        self._style_legend(legend)
 
         if force_layout or not descriptor.layout_initialized:
             try:
-                descriptor.axes.figure.tight_layout()
-            except Exception:  # pragma: no cover - backend specific
-                pass
+                fit_to_content = getattr(self, "_fit_figure_to_content", None)
+            except Exception:
+                fit_to_content = None
+            if callable(fit_to_content):
+                try:
+                    fit_to_content(descriptor.axes.figure)
+                except Exception:
+                    pass
+            else:
+                try:
+                    descriptor.axes.figure.tight_layout()
+                except Exception:  # pragma: no cover - backend specific
+                    pass
             descriptor.layout_initialized = True
         try:
             descriptor.canvas.draw_idle()
