@@ -8,7 +8,18 @@ script = ""
 [setup.darwin]
 script = '''
 set -e
-[ -d .venv ] || python3 -m venv .venv
+if [ -d .venv ]; then
+  .venv/bin/python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)" || {
+    echo "Existing .venv is not Python 3.13. Remove .venv and rerun worktree setup." >&2
+    exit 1
+  }
+else
+  command -v python3.13 >/dev/null 2>&1 || {
+    echo "python3.13 is required for this project. Install it and retry." >&2
+    exit 1
+  }
+  python3.13 -m venv .venv
+fi
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
