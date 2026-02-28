@@ -417,6 +417,69 @@ def test_project_explorer_hides_imported_data_root_until_data_is_loaded() -> Non
         app.processEvents()
 
 
+def test_project_explorer_search_filters_tree_items() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        tree = window.project_tree  # noqa: SLF001 - UI fixture
+        search = window.project_tree_search  # noqa: SLF001 - UI fixture
+        assert isinstance(search, QtWidgets.QLineEdit)
+
+        root = QtWidgets.QTreeWidgetItem(["Alpha workbook", ""])
+        child = QtWidgets.QTreeWidgetItem(["Beta sheet", "rows x columns"])
+        root.addChild(child)
+        root.setExpanded(True)
+        tree.addTopLevelItem(root)
+
+        other = QtWidgets.QTreeWidgetItem(["Gamma workbook", ""])
+        tree.addTopLevelItem(other)
+        app.processEvents()
+
+        search.setText("beta")
+        app.processEvents()
+        assert not root.isHidden()
+        assert not child.isHidden()
+        assert other.isHidden()
+
+        search.setText("rows x")
+        app.processEvents()
+        assert not child.isHidden()
+        assert not root.isHidden()
+
+        search.setText("")
+        app.processEvents()
+        assert not root.isHidden()
+        assert not child.isHidden()
+        assert not other.isHidden()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_project_explorer_search_applies_to_new_rows_while_active() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        tree = window.project_tree  # noqa: SLF001 - UI fixture
+        search = window.project_tree_search  # noqa: SLF001 - UI fixture
+        assert isinstance(search, QtWidgets.QLineEdit)
+
+        search.setText("alpha")
+        app.processEvents()
+
+        hidden_item = QtWidgets.QTreeWidgetItem(["Gamma workbook", ""])
+        visible_item = QtWidgets.QTreeWidgetItem(["Alpha workbook", ""])
+        tree.addTopLevelItem(hidden_item)
+        tree.addTopLevelItem(visible_item)
+        app.processEvents()
+
+        assert hidden_item.isHidden()
+        assert not visible_item.isHidden()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_apply_graph_format_supports_tick_increment_and_count() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()

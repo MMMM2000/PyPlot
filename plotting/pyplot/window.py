@@ -2151,6 +2151,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._data_sources_widget: QtWidgets.QWidget | None = None
         self._data_tree_root: QtWidgets.QTreeWidgetItem | None = None
         self._workbook_tree_root: QtWidgets.QTreeWidgetItem | None = None
+        self._project_tree_search_text = ""
+        self._project_tree_filter_refresh_pending = False
         self._data_folder_items: Dict[Path, QtWidgets.QTreeWidgetItem] = {}
         self._data_workbook_items: Dict[Hashable, QtWidgets.QTreeWidgetItem] = {}
         self._workbooks: Dict[Hashable, WorkbookData] = {}
@@ -2194,6 +2196,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._last_tight_layout_warning_message: str | None = None
         self._task_progress_label: QtWidgets.QLabel | None = None
         self._task_progress_bar: QtWidgets.QProgressBar | None = None
+        self.project_tree_search: QtWidgets.QLineEdit | None = None
 
         self.graph_dock: QtWidgets.QDockWidget | None = None
         self.graph_panel: QtWidgets.QWidget | None = None
@@ -4857,8 +4860,26 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.project_tree.customContextMenuRequested.connect(self._handle_project_context_menu)
         self.project_tree.itemDoubleClicked.connect(self._dispatch_project_item_activation)
         self.project_tree.itemActivated.connect(self._dispatch_project_item_activation)
+        model = self.project_tree.model()
+        if model is not None:
+            model.rowsInserted.connect(self._schedule_project_tree_filter_refresh)
+            model.rowsRemoved.connect(self._schedule_project_tree_filter_refresh)
+            model.modelReset.connect(self._schedule_project_tree_filter_refresh)
+            model.layoutChanged.connect(self._schedule_project_tree_filter_refresh)
+            model.dataChanged.connect(self._schedule_project_tree_filter_refresh)
+        self.project_tree_search = QtWidgets.QLineEdit()
+        self.project_tree_search.setObjectName("project_tree_search")
+        self.project_tree_search.setPlaceholderText("Search Project Explorer...")
+        self.project_tree_search.setClearButtonEnabled(True)
+        self.project_tree_search.textChanged.connect(self._handle_project_tree_search_text_changed)
+        project_container = QtWidgets.QWidget()
+        project_layout = QtWidgets.QVBoxLayout(project_container)
+        project_layout.setContentsMargins(4, 4, 4, 4)
+        project_layout.setSpacing(4)
+        project_layout.addWidget(self.project_tree_search)
+        project_layout.addWidget(self.project_tree, 1)
         project_dock = self._create_dock_widget("Project Explorer", "projectExplorerDock")
-        project_dock.setWidget(self.project_tree)
+        project_dock.setWidget(project_container)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
         project_dock.setMinimumWidth(PRIMARY_DOCK_MIN_WIDTH)
         self.project_dock = project_dock
@@ -9179,6 +9200,90 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._choose_folder()
 
     # ------------------------------------------------------------------ project tree helpers
+    def _handle_project_tree_search_text_changed(self, text: str) -> None:
+        self._project_tree_search_text = text.strip().casefold()
+        self._apply_project_tree_filter()
+
+    def _schedule_project_tree_filter_refresh(self, *_args: object) -> None:
+        if self._project_tree_filter_refresh_pending:
+            return
+        self._project_tree_filter_refresh_pending = True
+        QtCore.QTimer.singleShot(0, self._flush_project_tree_filter_refresh)
+
+    def _flush_project_tree_filter_refresh(self) -> None:
+        self._project_tree_filter_refresh_pending = False
+        self._apply_project_tree_filter()
+
+    def _apply_project_tree_filter(self) -> None:
+        tree = getattr(self, "project_tree", None)
+        if not isinstance(tree, QtWidgets.QTreeWidget):
+            return
+        query = self._project_tree_search_text
+        with self._suspend_project_tree_updates():
+            if not query:
+                for index in range(tree.topLevelItemCount()):
+                    item = tree.topLevelItem(index)
+                    if item is not None:
+                        self._set_project_tree_item_visibility(item, visible=True)
+                return
+            for index in range(tree.topLevelItemCount()):
+                item = tree.topLevelItem(index)
+                if item is None:
+                    continue
+                has_match = self._filter_project_tree_item(item, query)
+                item.setHidden(not has_match)
+                if has_match and item.childCount() > 0:
+                    item.setExpanded(True)
+
+    def _set_project_tree_item_visibility(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        *,
+        visible: bool,
+    ) -> None:
+        item.setHidden(not visible)
+        for index in range(item.childCount()):
+            child = item.child(index)
+            if child is not None:
+                self._set_project_tree_item_visibility(child, visible=visible)
+
+    def _filter_project_tree_item(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        query: str,
+    ) -> bool:
+        direct_match = self._project_tree_item_matches(item, query)
+        child_match = False
+        for index in range(item.childCount()):
+            child = item.child(index)
+            if child is None:
+                continue
+            is_child_visible = self._filter_project_tree_item(child, query)
+            child.setHidden(not is_child_visible)
+            child_match = child_match or is_child_visible
+            if is_child_visible and child.childCount() > 0:
+                child.setExpanded(True)
+        visible = direct_match or child_match
+        item.setHidden(not visible)
+        return visible
+
+    def _project_tree_item_matches(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        query: str,
+    ) -> bool:
+        if not query:
+            return True
+        text = " ".join(
+            (
+                item.text(0),
+                item.text(1),
+                item.toolTip(0),
+                item.toolTip(1),
+            )
+        ).casefold()
+        return query in text
+
     def _handle_project_item_double_click(
         self,
         item: QtWidgets.QTreeWidgetItem,
@@ -12925,4 +13030,3 @@ __all__ = [
     "PlotTabState",
     "TabDescriptor",
 ]
-

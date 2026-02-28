@@ -7,6 +7,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 - **Project Explorer** lists imported workbooks, worksheets, and generated graphs. Every plug-in uses the same tree so you can keep one set of worksheets available while switching tools.
   Empty-state behavior: `Imported Data` now appears only after at least one workbook/sheet is actually imported.
   Readability note: long names/paths now use middle elision, improved column sizing, alternating rows, and tooltips with full text so dense imports remain navigable.
+  Search note: the dock now includes a search box that filters tree items by name/details/path text while keeping matching parent branches visible.
 - **Object Manager** mirrors the current Matplotlib tab (axes, lines, legends, annotations) and lets you tweak selections via the toolbar actions.
 - **Legend sync** now follows line visibility toggles and graph-format applies: legends are rebuilt from currently visible lines so hidden series are not listed.
 - **Toolbars** (Plugin, Plot actions, Navigation, Format) live at the top. Enabled actions now show a subtle highlight so you can immediately see what is clickable; disabled items stay muted.
