@@ -38,8 +38,16 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         "_minimize_tab",
         "_update_save_graph_enabled",
         "_update_normalize_enabled",
+        # Keep shared PyPlot project persistence/versioning behavior.
+        "_has_project_data_to_save",
+        "_reset_project_state",
+        "_after_project_saved",
+        "_after_project_loaded",
+        "_build_project_payload",
+        "_apply_project_payload",
     }
     requires_imported_data = True
+    auto_load_on_import = True
     uses_shared_plot_workbooks = True
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
@@ -290,10 +298,6 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         host._last_source_dir = None
         host.last_export_path = None
         host._base_title = "VSM Hysteresis Loops"
-        host.PROJECT_EXTENSION = vsm.VSMPlotter.PROJECT_EXTENSION
-        host.PROJECT_VERSION = vsm.VSMPlotter.PROJECT_VERSION
-        host.PROJECT_CODE = vsm.VSMPlotter.PROJECT_CODE
-        host.PROJECT_SETTINGS_PREFIX = vsm.VSMPlotter.PROJECT_SETTINGS_PREFIX
 
         self._bind_methods()
         if hasattr(host, "_retabify_primary_docks"):
@@ -383,9 +387,14 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         for name, member in vsm.VSMPlotter.__dict__.items():
             if name in self._METHOD_EXCLUDES:
                 continue
-            if not inspect.isfunction(member):
+            if inspect.isfunction(member):
+                setattr(host, name, types.MethodType(member, host))
                 continue
-            setattr(host, name, types.MethodType(member, host))
+            if isinstance(member, staticmethod):
+                setattr(host, name, member.__func__)
+                continue
+            if isinstance(member, classmethod):
+                setattr(host, name, member.__get__(type(host), type(host)))
         host._vsm_methods_bound = True
 
 

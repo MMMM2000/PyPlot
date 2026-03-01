@@ -63,6 +63,7 @@ class PyPlotWorkbench(PyPlotWindow):
     PROJECT_CODE = "pyplot"
     PROJECT_SETTINGS_PREFIX = "pyplot"
     GRAPH_DOCK_ENABLED = False
+    PLUGIN_SHARED_STATE_KEY = "__pyplot_shared__"
     GRAPH_OPTION_DEFAULTS: Dict[str, Any] = {
         "show_grid": True,
         "show_legend": True,
@@ -1418,9 +1419,63 @@ class PyPlotWorkbench(PyPlotWindow):
             if isinstance(data, pd.DataFrame):
                 if not data.empty:
                     return True
-            else:
+                continue
+            if isinstance(data, (list, tuple, set, dict, str, bytes)):
+                if len(data) > 0:
+                    return True
+                continue
+            length = getattr(data, "__len__", None)
+            if callable(length):
+                try:
+                    if int(length()) > 0:
+                        return True
+                    continue
+                except Exception:
+                    pass
+            if bool(data):
                 return True
         return False
+
+    @staticmethod
+    def _plugin_has_runtime_data(plugin: PyPlotPlugin | None) -> bool:
+        if plugin is None:
+            return False
+        for attr in ("_data", "_dataset"):
+            data = getattr(plugin, attr, None)
+            if data is None:
+                continue
+            if isinstance(data, pd.DataFrame):
+                if not data.empty:
+                    return True
+                continue
+            if isinstance(data, (list, tuple, set, dict, str, bytes)):
+                if len(data) > 0:
+                    return True
+                continue
+            length = getattr(data, "__len__", None)
+            if callable(length):
+                try:
+                    if int(length()) > 0:
+                        return True
+                    continue
+                except Exception:
+                    pass
+            if bool(data):
+                return True
+        return False
+
+    def _plugin_tab_count(self, plugin_name: str | None) -> int:
+        token = str(plugin_name or "").strip()
+        if not token:
+            return 0
+        descriptors = getattr(self, "_tab_descriptors", {})
+        if not isinstance(descriptors, dict):
+            return 0
+        count = 0
+        for descriptor in descriptors.values():
+            if self._tab_plugin_name(descriptor) == token:
+                count += 1
+        return count
 
     def _plugin_ready_to_plot(self, plugin: PyPlotPlugin | None) -> bool:
         if plugin is None:
@@ -1481,12 +1536,84 @@ class PyPlotWorkbench(PyPlotWindow):
         self._update_action_states()
         self._update_project_actions()
 
+    def _serialize_shared_plugin_project_state(
+        self,
+        plugin: PyPlotPlugin,
+        *,
+        base_path: Path | None,
+    ) -> Dict[str, Any]:
+        selected_paths_payload = [
+            self._portable_path(path, base_path)
+            for path in self._selected_paths()
+            if isinstance(path, Path)
+        ]
+        selected_paths_payload = [
+            entry for entry in selected_paths_payload if isinstance(entry, str) and entry
+        ]
+        payload: Dict[str, Any] = {
+            "selected_paths": selected_paths_payload,
+            "auto_load_on_import": bool(getattr(plugin, "auto_load_on_import", False)),
+            "had_plots": self._plugin_tab_count(plugin.name) > 0,
+        }
+        plugin_last_dir = self._plugin_last_directories.get(plugin.name)
+        plugin_last_dir_payload = self._portable_path(plugin_last_dir, base_path)
+        if isinstance(plugin_last_dir_payload, str) and plugin_last_dir_payload:
+            payload["plugin_last_directory"] = plugin_last_dir_payload
+        return payload
+
+    def _apply_shared_plugin_project_state(
+        self,
+        plugin: PyPlotPlugin,
+        shared_state: Dict[str, Any] | None,
+        *,
+        project_dir: Path,
+    ) -> bool:
+        if not isinstance(shared_state, dict):
+            return bool(getattr(plugin, "auto_load_on_import", False))
+
+        selected_payload = shared_state.get("selected_paths")
+        resolved_paths: list[Path] = []
+        if isinstance(selected_payload, list):
+            for entry in selected_payload:
+                if not isinstance(entry, str) or not entry:
+                    continue
+                resolved = self._resolve_portable_path(entry, project_dir)
+                if isinstance(resolved, Path):
+                    resolved_paths.append(resolved)
+        if resolved_paths:
+            commit_paths = getattr(self, "_commit_selected_paths", None)
+            if callable(commit_paths):
+                try:
+                    commit_paths(resolved_paths)
+                except Exception:
+                    pass
+
+        last_dir_entry = shared_state.get("plugin_last_directory")
+        if isinstance(last_dir_entry, str) and last_dir_entry:
+            resolved_last = self._resolve_portable_path(last_dir_entry, project_dir)
+            if isinstance(resolved_last, Path):
+                try:
+                    directory = resolved_last if resolved_last.is_dir() else resolved_last.parent
+                except Exception:
+                    directory = resolved_last.parent
+                if isinstance(directory, Path):
+                    self._plugin_last_directories[plugin.name] = directory
+
+        auto_load = shared_state.get("auto_load_on_import")
+        if isinstance(auto_load, bool):
+            return auto_load
+        return bool(getattr(plugin, "auto_load_on_import", False))
+
     def _build_project_payload(self, *, base_path: Path | None) -> Dict[str, Any]:
         selected_payload = [
             self._portable_path(path, base_path) for path in self._selected_path_entries
         ]
         active_plugin_state: Dict[str, Any] | None = None
         if self._current_plugin is not None:
+            shared_state = self._serialize_shared_plugin_project_state(
+                self._current_plugin,
+                base_path=base_path,
+            )
             try:
                 state = self._current_plugin.serialize_project_state(base_path=base_path)
             except Exception:
@@ -1496,8 +1623,10 @@ class PyPlotWorkbench(PyPlotWindow):
                     exc_info=True,
                 )
                 state = None
-            if isinstance(state, dict):
-                active_plugin_state = state
+            state_payload = dict(state) if isinstance(state, dict) else {}
+            state_payload[self.PLUGIN_SHARED_STATE_KEY] = shared_state
+            if state_payload:
+                active_plugin_state = state_payload
         workbooks_payload: List[Dict[str, Any]] = []
         for workbook in self._workbooks.values():
             worksheets_payload: List[Dict[str, Any]] = []
@@ -1626,15 +1755,64 @@ class PyPlotWorkbench(PyPlotWindow):
         if isinstance(active_plugin, str) and active_plugin:
             self._activate_plotter_for_project_load(active_plugin)
         plugin_state = payload.get("active_plugin_state")
+        auto_load_on_import = bool(
+            getattr(self._current_plugin, "auto_load_on_import", False)
+            if self._current_plugin is not None
+            else False
+        )
+        shared_had_plots = False
         if isinstance(plugin_state, dict) and self._current_plugin is not None:
+            shared_state = plugin_state.get(self.PLUGIN_SHARED_STATE_KEY)
+            if isinstance(shared_state, dict):
+                shared_had_plots = bool(shared_state.get("had_plots", False))
+            auto_load_on_import = self._apply_shared_plugin_project_state(
+                self._current_plugin,
+                shared_state if isinstance(shared_state, dict) else None,
+                project_dir=project_dir,
+            )
+            plugin_specific_state = {
+                key: value
+                for key, value in plugin_state.items()
+                if key != self.PLUGIN_SHARED_STATE_KEY
+            }
             try:
                 self._current_plugin.restore_project_state(
-                    plugin_state,
+                    plugin_specific_state,
                     project_dir=project_dir,
                 )
             except Exception:
                 LOGGER.warning(
                     "Failed to restore project state for plugin %s",
+                    self._current_plotter_name,
+                    exc_info=True,
+                )
+        should_autoload_plugin_data = (
+            self._current_plugin is not None
+            and (auto_load_on_import or shared_had_plots)
+            and not self._plugin_has_runtime_data(self._current_plugin)
+            and bool(self._selected_path_entries)
+        )
+        if should_autoload_plugin_data and self._current_plugin is not None:
+            try:
+                self._current_plugin.load_data()
+            except Exception:
+                LOGGER.warning(
+                    "Automatic project-load data restore failed for plugin %s",
+                    self._current_plotter_name,
+                    exc_info=True,
+                )
+        should_regenerate_shared_plots = (
+            self._current_plugin is not None
+            and shared_had_plots
+            and self._plugin_has_loaded_data(self._current_plugin)
+            and self._plugin_tab_count(self._current_plugin.name) == 0
+        )
+        if should_regenerate_shared_plots and self._current_plugin is not None:
+            try:
+                self._current_plugin.generate()
+            except Exception:
+                LOGGER.warning(
+                    "Automatic shared plot regeneration failed for plugin %s",
                     self._current_plotter_name,
                     exc_info=True,
                 )

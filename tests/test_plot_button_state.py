@@ -11,12 +11,16 @@ from matplotlib import colors as mcolors
 from matplotlib import ticker as mticker
 
 from plotting.pyplot.app import PyPlotWorkbench
+from plotting.pyplot import window as pyplot_window_module
 from plotting.pyplot.window import (
     PRIMARY_DOCK_EXPAND_THRESHOLD,
     PRIMARY_DOCK_EXPANDED_FRACTION,
     PRIMARY_DOCK_EXPANDED_MAX,
     PRIMARY_DOCK_MAX_FRACTION,
     PRIMARY_DOCK_DEFAULT_WIDTH,
+    WorkbookData,
+    WorksheetColumnMeta,
+    WorksheetData,
 )
 
 
@@ -261,6 +265,613 @@ def test_tight_layout_warning_reports_font_offender(
 
         text = str(getattr(window, "_last_tight_layout_warning_message", "") or "")  # noqa: SLF001
         assert "Likely too large font: Axes 1 title (42.0 pt" in text
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_tight_layout_warning_apply_to_all_uses_one_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        axes = window._current_axes()
+        assert axes is not None
+        figure = axes.figure
+
+        calls = {"dialog": 0, "autofit": 0}
+
+        monkeypatch.setattr(window, "_can_show_tight_layout_warning_dialog", lambda: True)
+
+        def _fake_dialog(*, message: str, can_apply_override: bool) -> tuple[str, bool]:
+            _ = (message, can_apply_override)
+            calls["dialog"] += 1
+            return ("auto", True)
+
+        def _fake_auto_fit(_figure: object, _recommendations: dict[str, float]) -> int:
+            calls["autofit"] += 1
+            return 1
+
+        monkeypatch.setattr(window, "_show_tight_layout_warning_dialog", _fake_dialog)
+        monkeypatch.setattr(window, "_apply_tight_layout_auto_fit", _fake_auto_fit)
+
+        window._handle_tight_layout_warning(  # noqa: SLF001 - test hook
+            figure,
+            [
+                "Tight layout not applied. The left and right margins cannot be made large enough to accommodate all Axes decorations. (A)",
+            ],
+            context="Graph formatting",
+        )
+        window._handle_tight_layout_warning(  # noqa: SLF001 - test hook
+            figure,
+            [
+                "Tight layout not applied. The left and right margins cannot be made large enough to accommodate all Axes decorations. (B)",
+            ],
+            context="Graph formatting",
+        )
+        assert calls["dialog"] == 1
+        assert calls["autofit"] == 2
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_subwindow_change_event_on_darwin_updates_fullscreen_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        tab_proxy = window.tab_widget
+        subwindow_for = getattr(tab_proxy, "_subwindow_for", None)
+        assert callable(subwindow_for)
+        tab = window.tab_widget.currentWidget()
+        assert isinstance(tab, QtWidgets.QWidget)
+        sub = subwindow_for(tab)
+        assert sub is not None
+
+        called: list[bool] = []
+
+        def _record(maximized: bool, *, source: object | None = None) -> None:
+            _ = source
+            called.append(bool(maximized))
+
+        monkeypatch.setattr(pyplot_window_module.sys, "platform", "darwin", raising=False)
+        monkeypatch.setattr(tab_proxy, "_handle_subwindow_state_change", _record)
+
+        sub.showMaximized()
+        app.processEvents()
+        assert called, "Expected state-change handler to run on macOS change events"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_switching_tabs_refits_figure_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        first_tab = window.tab_widget.currentWidget()
+        assert isinstance(first_tab, QtWidgets.QWidget)
+        window._create_blank_graph()
+        second_tab = window.tab_widget.currentWidget()
+        assert isinstance(second_tab, QtWidgets.QWidget)
+
+        fitted: list[object] = []
+
+        def _record_fit(figure: object) -> None:
+            fitted.append(figure)
+
+        monkeypatch.setattr(window, "_fit_figure_to_content", _record_fit)
+        window.tab_widget.setCurrentWidget(first_tab)
+        app.processEvents()
+        window.tab_widget.setCurrentWidget(second_tab)
+        app.processEvents()
+        assert fitted, "Expected tab switch to trigger figure re-fit"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_switching_tabs_preserves_maximized_subwindow_mode() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        first_tab = window.tab_widget.currentWidget()
+        assert isinstance(first_tab, QtWidgets.QWidget)
+        window._create_blank_graph()
+        second_tab = window.tab_widget.currentWidget()
+        assert isinstance(second_tab, QtWidgets.QWidget)
+
+        subwindow_for = getattr(window.tab_widget, "_subwindow_for", None)
+        maximize_single = getattr(window.tab_widget, "_maximize_single", None)
+        assert callable(subwindow_for)
+        assert callable(maximize_single)
+        first_sub = subwindow_for(first_tab)
+        second_sub = subwindow_for(second_tab)
+        assert first_sub is not None
+        assert second_sub is not None
+
+        maximize_single(first_sub)
+        app.processEvents()
+        assert not first_sub.isHidden()
+        assert second_sub.isHidden()
+
+        window.tab_widget.setCurrentWidget(second_tab)
+        app.processEvents()
+        assert not second_sub.isHidden()
+        assert first_sub.isHidden()
+        assert bool(getattr(window.tab_widget, "_global_maximized", False))
+        assert bool(getattr(window.tab_widget, "_fullscreen_lock", False))
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_fullscreen_geometry_fills_viewport_for_wide_aspect_graphs() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.resize(1600, 980)
+        window._create_blank_graph()
+        app.processEvents()
+
+        tab_proxy = window.tab_widget
+        mdi = getattr(tab_proxy, "_mdi", None)
+        subwindow_for = getattr(tab_proxy, "_subwindow_for", None)
+        maximize_single = getattr(tab_proxy, "_maximize_single", None)
+        assert isinstance(mdi, QtWidgets.QMdiArea)
+        assert callable(subwindow_for)
+        assert callable(maximize_single)
+
+        tab = window.tab_widget.currentWidget()
+        assert isinstance(tab, QtWidgets.QWidget)
+        sub = subwindow_for(tab)
+        assert sub is not None
+        sub.set_aspect_ratio(8.0)
+        maximize_single(sub)
+        app.processEvents()
+
+        margin = getattr(tab_proxy, "_layout_margin", 6)
+        viewport = mdi.viewport().rect().adjusted(margin, margin, -margin, -margin)
+        geometry = sub.geometry()
+        assert geometry.width() >= viewport.width() - 2
+        assert geometry.height() >= viewport.height() - 2
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_non_native_demote_event_keeps_fullscreen_lock() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        window._create_blank_graph()
+        app.processEvents()
+
+        tab_proxy = window.tab_widget
+        subwindow_for = getattr(tab_proxy, "_subwindow_for", None)
+        maximize_single = getattr(tab_proxy, "_maximize_single", None)
+        state_change = getattr(tab_proxy, "_handle_subwindow_state_change", None)
+        assert callable(subwindow_for)
+        assert callable(maximize_single)
+        assert callable(state_change)
+
+        first_tab = window.tab_widget.widget(0)
+        second_tab = window.tab_widget.widget(1)
+        assert isinstance(first_tab, QtWidgets.QWidget)
+        assert isinstance(second_tab, QtWidgets.QWidget)
+        first_sub = subwindow_for(first_tab)
+        second_sub = subwindow_for(second_tab)
+        assert first_sub is not None
+        assert second_sub is not None
+
+        tab_proxy._native_subwindow_maximize = False  # noqa: SLF001 - force mac path
+        maximize_single(first_sub)
+        app.processEvents()
+
+        setattr(first_sub, "_mw_last_old_maximized", False)
+        state_change(False, source=first_sub)
+        app.processEvents()
+
+        assert bool(getattr(tab_proxy, "_fullscreen_lock", False))
+        assert bool(getattr(tab_proxy, "_global_maximized", False))
+        visible_count = int(not first_sub.isHidden()) + int(not second_sub.isHidden())
+        assert visible_count == 1
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_current_annealing_generate_updates_shared_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
+        combo = getattr(window, "_plotter_combo", None)
+        assert isinstance(combo, QtWidgets.QComboBox)
+        index = combo.findText("Current Annealing")
+        assert index >= 0
+        combo.setCurrentIndex(index)
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+
+        import pandas as pd
+
+        plugin._data_by_file = {  # noqa: SLF001 - test hook
+            "/tmp/anneal-sample.txt": pd.DataFrame(
+                {"I_mA": [0.0, 10.0, 20.0, 10.0], "R_Ohm": [10.0, 12.0, 15.0, 13.0]}
+            )
+        }
+
+        events: list[tuple[str, object]] = []
+
+        def _begin(*args: object, **kwargs: object) -> None:
+            events.append(("begin", (args, kwargs)))
+
+        def _update(*args: object, **kwargs: object) -> None:
+            events.append(("update", (args, kwargs)))
+
+        def _end(*args: object, **kwargs: object) -> None:
+            events.append(("end", (args, kwargs)))
+
+        monkeypatch.setattr(window, "_begin_task_progress", _begin)
+        monkeypatch.setattr(window, "_update_task_progress", _update)
+        monkeypatch.setattr(window, "_end_task_progress", _end)
+
+        plugin.generate()
+        kinds = [entry[0] for entry in events]
+        assert "begin" in kinds
+        assert "update" in kinds
+        assert "end" in kinds
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_current_annealing_project_payload_restore_rebuilds_plots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
+        file_one = tmp_path / "anneal_one.txt"
+        file_two = tmp_path / "anneal_two.txt"
+        sample_text = "\n".join(
+            (
+                "0.001 0.01 10",
+                "0.002 0.02 12",
+                "0.003 0.03 14",
+                "0.002 0.02 13",
+            )
+        )
+        file_one.write_text(sample_text + "\n", encoding="utf-8")
+        file_two.write_text(sample_text + "\n", encoding="utf-8")
+
+        combo = getattr(window, "_plotter_combo", None)
+        assert isinstance(combo, QtWidgets.QComboBox)
+        index = combo.findText("Current Annealing")
+        assert index >= 0
+        combo.setCurrentIndex(index)
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+
+        commit_paths = getattr(window, "_commit_selected_paths", None)
+        assert callable(commit_paths)
+        commit_paths([file_one, file_two])
+
+        plugin.load_data()
+        plugin.generate()
+        app.processEvents()
+        assert len(getattr(plugin, "_plot_tabs", [])) == 2
+
+        payload = window._build_project_payload(base_path=tmp_path)  # noqa: SLF001 - persistence API
+        assert isinstance(payload.get("active_plugin_state"), dict)
+
+        window._reset_project_state()  # noqa: SLF001 - persistence API
+        app.processEvents()
+        assert window._apply_project_payload(payload, project_dir=tmp_path)  # noqa: SLF001
+        app.processEvents()
+
+        restored_plugin = getattr(window, "_current_plugin", None)
+        assert restored_plugin is not None
+        assert len(getattr(restored_plugin, "_plot_tabs", [])) == 2
+        plot_action = getattr(window, "plot_button", None)
+        assert hasattr(plot_action, "isEnabled")
+        assert plot_action.isEnabled()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_project_load_autoloads_current_annealing_without_plugin_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
+        path = tmp_path / "autoload_anneal.txt"
+        path.write_text(
+            "\n".join(
+                (
+                    "0.001 0.01 9",
+                    "0.002 0.02 10",
+                    "0.003 0.03 11",
+                    "0.002 0.02 10.5",
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        payload = {
+            "selected_paths": [path.name],
+            "workbooks": [],
+            "active_plugin": "Current Annealing",
+            "active_plugin_state": None,
+        }
+        assert window._apply_project_payload(payload, project_dir=tmp_path)  # noqa: SLF001
+        app.processEvents()
+
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+        assert window._plugin_has_loaded_data(plugin)  # noqa: SLF001 - readiness helper
+        plot_action = getattr(window, "plot_button", None)
+        assert hasattr(plot_action, "isEnabled")
+        assert plot_action.isEnabled()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_plugin_project_payload_includes_shared_wrapper_for_custom_plugin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
+        source = tmp_path / "shared_wrapper_source.txt"
+        source.write_text("0.001 0.01 9\n", encoding="utf-8")
+        window._commit_selected_paths([source])  # noqa: SLF001 - persistence helper
+
+        combo = getattr(window, "_plotter_combo", None)
+        assert isinstance(combo, QtWidgets.QComboBox)
+
+        custom_index = combo.findText("Current Annealing")
+        assert custom_index >= 0
+        combo.setCurrentIndex(custom_index)
+        custom_plugin = getattr(window, "_current_plugin", None)
+        assert custom_plugin is not None
+        monkeypatch.setattr(
+            custom_plugin,
+            "serialize_project_state",
+            lambda *, base_path: {"custom_state": "ok"},
+        )
+        payload_custom = window._build_project_payload(base_path=tmp_path)  # noqa: SLF001
+        state_custom = payload_custom.get("active_plugin_state")
+        assert isinstance(state_custom, dict)
+        assert state_custom.get("custom_state") == "ok"
+        shared_custom = state_custom.get(window.PLUGIN_SHARED_STATE_KEY)  # noqa: SLF001
+        assert isinstance(shared_custom, dict)
+        assert isinstance(shared_custom.get("selected_paths"), list)
+        assert shared_custom.get("auto_load_on_import") is True
+        assert shared_custom.get("had_plots") is False
+
+        window._create_blank_graph()  # noqa: SLF001 - create one plugin-associated tab
+        payload_with_plot = window._build_project_payload(base_path=tmp_path)  # noqa: SLF001
+        state_with_plot = payload_with_plot.get("active_plugin_state")
+        assert isinstance(state_with_plot, dict)
+        shared_with_plot = state_with_plot.get(window.PLUGIN_SHARED_STATE_KEY)  # noqa: SLF001
+        assert isinstance(shared_with_plot, dict)
+        assert shared_with_plot.get("had_plots") is True
+
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_plugin_project_payload_includes_shared_wrapper_for_default_plugin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
+        source = tmp_path / "shared_wrapper_default.txt"
+        source.write_text("0.001 0.01 9\n", encoding="utf-8")
+        window._commit_selected_paths([source])  # noqa: SLF001 - persistence helper
+
+        combo = getattr(window, "_plotter_combo", None)
+        assert isinstance(combo, QtWidgets.QComboBox)
+        default_index = combo.findText("Stress Dependence")
+        assert default_index >= 0
+        combo.setCurrentIndex(default_index)
+
+        payload_default = window._build_project_payload(base_path=tmp_path)  # noqa: SLF001
+        state_default = payload_default.get("active_plugin_state")
+        assert isinstance(state_default, dict)
+        shared_default = state_default.get(window.PLUGIN_SHARED_STATE_KEY)  # noqa: SLF001
+        assert isinstance(shared_default, dict)
+        assert isinstance(shared_default.get("selected_paths"), list)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_project_restore_passes_plugin_specific_state_without_shared_wrapper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
+        source = tmp_path / "wrapped_state_source.txt"
+        source.write_text("0.001 0.01 9\n0.002 0.02 10\n", encoding="utf-8")
+
+        combo = getattr(window, "_plotter_combo", None)
+        assert isinstance(combo, QtWidgets.QComboBox)
+        index = combo.findText("Current Annealing")
+        assert index >= 0
+        combo.setCurrentIndex(index)
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+
+        captured: dict[str, object] = {}
+
+        def _capture_restore(state: dict[str, object], *, project_dir: Path) -> None:
+            _ = project_dir
+            captured.update(state)
+
+        monkeypatch.setattr(plugin, "restore_project_state", _capture_restore)
+        monkeypatch.setattr(plugin, "load_data", lambda: None)
+
+        payload = {
+            "selected_paths": [],
+            "workbooks": [],
+            "active_plugin": "Current Annealing",
+            "active_plugin_state": {
+                "custom_marker": "value",
+                window.PLUGIN_SHARED_STATE_KEY: {  # noqa: SLF001 - reserved wrapper key
+                    "selected_paths": [source.name],
+                    "auto_load_on_import": True,
+                },
+            },
+        }
+        assert window._apply_project_payload(payload, project_dir=tmp_path)  # noqa: SLF001
+        app.processEvents()
+
+        assert captured == {"custom_marker": "value"}
+        selected = window._selected_paths()  # noqa: SLF001 - persistence helper
+        assert selected and selected[0].name == source.name
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_project_restore_regenerates_shared_plots_when_plugin_state_lacks_tabs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
+        source = tmp_path / "fmr_autoload.csv"
+        source.write_text("field,x,y\n1,2,3\n", encoding="utf-8")
+
+        combo = getattr(window, "_plotter_combo", None)
+        assert isinstance(combo, QtWidgets.QComboBox)
+        index = combo.findText("FMR")
+        assert index >= 0
+        combo.setCurrentIndex(index)
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+
+        calls = {"load": 0, "generate": 0}
+
+        def _fake_load_data() -> None:
+            calls["load"] += 1
+            setattr(plugin, "_data", object())
+
+        def _fake_generate() -> None:
+            calls["generate"] += 1
+
+        monkeypatch.setattr(plugin, "load_data", _fake_load_data)
+        monkeypatch.setattr(plugin, "generate", _fake_generate)
+        monkeypatch.setattr(plugin, "has_loaded_data", lambda: True, raising=False)
+        monkeypatch.setattr(plugin, "restore_project_state", lambda state, *, project_dir: None)
+
+        payload = {
+            "selected_paths": [],
+            "workbooks": [],
+            "active_plugin": "FMR",
+            "active_plugin_state": {
+                window.PLUGIN_SHARED_STATE_KEY: {  # noqa: SLF001 - reserved wrapper key
+                    "selected_paths": [source.name],
+                    "auto_load_on_import": False,
+                    "had_plots": True,
+                },
+            },
+        }
+
+        assert window._apply_project_payload(payload, project_dir=tmp_path)  # noqa: SLF001
+        app.processEvents()
+        assert calls["load"] == 1
+        assert calls["generate"] == 1
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_plugin_binds_static_project_helpers() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        fn = getattr(window, "_json_friendly", None)
+        assert callable(fn)
+        assert fn(float("inf")) is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_plugin_uses_shared_project_payload_format(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        payload = window._build_project_payload(base_path=tmp_path)  # noqa: SLF001
+        assert payload.get("active_plugin") == "VSM Hysteresis Loops"
+        state = payload.get("active_plugin_state")
+        assert isinstance(state, dict)
+        shared = state.get(window.PLUGIN_SHARED_STATE_KEY)  # noqa: SLF001
+        assert isinstance(shared, dict)
+        assert shared.get("auto_load_on_import") is True
+        assert window.PROJECT_VERSION == PyPlotWorkbench.PROJECT_VERSION
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_register_imported_workbook_recovers_after_tree_clear() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._ensure_data_root()  # noqa: SLF001 - establish root first
+        tree = getattr(window, "project_tree", None)
+        assert isinstance(tree, QtWidgets.QTreeWidget)
+        tree.clear()
+        app.processEvents()
+
+        import pandas as pd
+
+        workbook = WorkbookData(key="wb::1", name="Workbook 1")
+        worksheet = WorksheetData(
+            key="wb::1::sheet",
+            name="Sheet",
+            dataframe=pd.DataFrame({"X": [1.0, 2.0]}),
+            columns={"X": WorksheetColumnMeta(long_name="X")},
+            workbook_key="wb::1",
+        )
+        window._register_imported_workbook(workbook, [worksheet])  # noqa: SLF001
+        assert "wb::1" in window._workbooks  # noqa: SLF001
+        assert "wb::1::sheet" in window._worksheets  # noqa: SLF001
     finally:
         window.close()
         app.processEvents()

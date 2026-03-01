@@ -2194,6 +2194,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._object_tree_updating = False
         self._tight_layout_warning_signatures: set[tuple[int, str]] = set()
         self._last_tight_layout_warning_message: str | None = None
+        self._tight_layout_bulk_choice_by_context: Dict[str, str] = {}
+        self._tight_layout_bulk_choice_expiry_by_context: Dict[str, float] = {}
         self._task_progress_label: QtWidgets.QLabel | None = None
         self._task_progress_bar: QtWidgets.QProgressBar | None = None
         self.project_tree_search: QtWidgets.QLineEdit | None = None
@@ -5185,6 +5187,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
     def _apply_toolbar_style_hint(self) -> None:
         """Use the platform default toolbar styling with muted disabled buttons."""
 
+        if sys.platform == "darwin":
+            # Keep Cocoa-native disabled button styling on macOS.
+            return
         rules = """
 QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     border: 1px solid transparent;
@@ -5218,8 +5223,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             button = None
         if not isinstance(button, QtWidgets.QAbstractButton):
             return
-        button.setAutoRaise(False)
-        button.setMinimumHeight(self._toolbar_icon_size.height() + 6)
+        if sys.platform == "darwin":
+            button.setAutoRaise(True)
+            button.setMinimumHeight(0)
+        else:
+            button.setAutoRaise(False)
+            button.setMinimumHeight(self._toolbar_icon_size.height() + 6)
         button.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         if object_name:
             button.setObjectName(object_name)
@@ -8324,7 +8333,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         item.setToolTip(0, name_tooltip if name_tooltip is not None else text_name)
         item.setToolTip(1, details_tooltip if details_tooltip is not None else str(details))
 
+    @staticmethod
+    def _is_live_tree_item(item: QtWidgets.QTreeWidgetItem | None) -> bool:
+        if item is None:
+            return False
+        try:
+            item.text(0)
+        except RuntimeError:
+            return False
+        return True
+
     def _ensure_data_root(self) -> QtWidgets.QTreeWidgetItem:
+        if not self._is_live_tree_item(self._data_tree_root):
+            self._data_tree_root = None
         if self._data_tree_root is None:
             root = QtWidgets.QTreeWidgetItem(["Imported Data", ""])
             self._set_tree_item_text(root, name="Imported Data", details="")
@@ -8335,7 +8356,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def _remove_data_root_if_empty(self) -> None:
         root = self._data_tree_root
-        if root is None or root.childCount() > 0:
+        if not self._is_live_tree_item(root):
+            self._data_tree_root = None
+            return
+        if root.childCount() > 0:
             return
         tree = self.project_tree
         if isinstance(tree, QtWidgets.QTreeWidget):
@@ -8346,6 +8370,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._data_tree_root = None
 
     def _ensure_workbook_root(self) -> QtWidgets.QTreeWidgetItem:
+        if not self._is_live_tree_item(self._workbook_tree_root):
+            self._workbook_tree_root = None
         if self._workbook_tree_root is None:
             root = QtWidgets.QTreeWidgetItem(["Workbooks", ""])
             self._set_tree_item_text(root, name="Workbooks", details="")
@@ -8363,7 +8389,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def _remove_workbook_root_if_empty(self) -> None:
         root = self._workbook_tree_root
-        if root is None:
+        if not self._is_live_tree_item(root):
+            self._workbook_tree_root = None
             return
         if root.childCount() > 0:
             return
@@ -8384,6 +8411,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             resolved = folder
         item = self._data_folder_items.get(resolved)
+        if item is not None and not self._is_live_tree_item(item):
+            self._data_folder_items.pop(resolved, None)
+            item = None
         if item is None:
             label = resolved.name or str(resolved)
             detail = self._compact_path_text(resolved, max_parts=3)
@@ -8873,6 +8903,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if width <= 0:
             width = default_width
         width = max(width, PRIMARY_DOCK_MIN_WIDTH)
+        if dock.objectName() in {"projectExplorerDock", "objectManagerDock"}:
+            window_width = max(self.width(), self.size().width(), PRIMARY_DOCK_DEFAULT_WIDTH * 4)
+            if window_width >= PRIMARY_DOCK_EXPAND_THRESHOLD:
+                expanded_min = int(window_width * PRIMARY_DOCK_EXPANDED_FRACTION)
+                if PRIMARY_DOCK_EXPANDED_MAX > 0:
+                    expanded_min = min(expanded_min, PRIMARY_DOCK_EXPANDED_MAX)
+                width = max(width, expanded_min)
 
         return self._clamp_primary_dock_width(dock, width)
 
@@ -10859,6 +10896,101 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         pass
         return changed
 
+    @staticmethod
+    def _can_show_tight_layout_warning_dialog() -> bool:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return False
+        try:
+            platform_name = str(app.platformName() or "").strip().lower()
+        except Exception:
+            platform_name = ""
+        return platform_name not in {"offscreen", "minimal", "headless"}
+
+    def _tight_layout_warning_context_key(self, context_label: str) -> str:
+        return str(context_label or "Graph layout").strip().lower()
+
+    def _show_tight_layout_warning_dialog(
+        self,
+        *,
+        message: str,
+        can_apply_override: bool,
+    ) -> tuple[str, bool]:
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Graph layout warning")
+        dialog.setText(message)
+        keep_button = dialog.addButton(
+            "Keep current sizes",
+            QtWidgets.QMessageBox.ButtonRole.RejectRole,
+        )
+        auto_button = dialog.addButton(
+            "Auto-fit current graph",
+            QtWidgets.QMessageBox.ButtonRole.AcceptRole,
+        )
+        override_button = None
+        if can_apply_override:
+            override_button = dialog.addButton(
+                "Apply plugin override",
+                QtWidgets.QMessageBox.ButtonRole.ActionRole,
+            )
+        apply_all_checkbox = QtWidgets.QCheckBox(
+            "Apply this choice to all affected graphs",
+            dialog,
+        )
+        dialog.setCheckBox(apply_all_checkbox)
+        dialog.setDefaultButton(keep_button)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is auto_button:
+            choice = "auto"
+        elif override_button is not None and clicked is override_button:
+            choice = "override"
+        else:
+            choice = "keep"
+        return choice, bool(apply_all_checkbox.isChecked())
+
+    def _apply_tight_layout_warning_choice(
+        self,
+        *,
+        choice: str,
+        figure: Any,
+        recommendations: dict[str, float],
+        can_apply_override: bool,
+        apply_override_handler: Any,
+        axes_for_override: Any,
+    ) -> None:
+        token = str(choice or "").strip().lower()
+        if token == "auto":
+            changed = self._apply_tight_layout_auto_fit(figure, recommendations)
+            append_log = getattr(self, "_append_log", None)
+            if callable(append_log):
+                if changed > 0:
+                    append_log(
+                        f"Auto-fit adjusted {changed} text element(s) to reduce graph layout clipping."
+                    )
+                else:
+                    append_log(
+                        "Auto-fit could not reduce text sizes further; adjust Graph formatting manually.",
+                        level="warning",
+                    )
+            return
+        if token == "override":
+            if not can_apply_override or not callable(apply_override_handler):
+                return
+            applied = False
+            try:
+                applied = bool(apply_override_handler(axes_for_override, recommendations))
+            except Exception:
+                applied = False
+            if not applied:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Graph layout warning",
+                    "Plugin override could not be applied. You can still adjust sizes in Graph options.",
+                )
+            return
+
     def _handle_tight_layout_warning(
         self,
         figure: Any,
@@ -10891,14 +11023,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         )
         self._last_tight_layout_warning_message = message
 
-        app = QtWidgets.QApplication.instance()
-        platform_name = ""
-        if app is not None:
-            try:
-                platform_name = str(app.platformName() or "").strip().lower()
-            except Exception:
-                platform_name = ""
-        if platform_name in {"offscreen", "minimal", "headless"}:
+        if not self._can_show_tight_layout_warning_dialog():
             append_log = getattr(self, "_append_log", None)
             if callable(append_log):
                 try:
@@ -10916,56 +11041,42 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             axes_for_override = axes_list[0]
         apply_override_handler = getattr(self, "_apply_plugin_graph_option_override_for_axes", None)
         can_apply_override = callable(apply_override_handler) and axes_for_override is not None
-
-        dialog = QtWidgets.QMessageBox(self)
-        dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-        dialog.setWindowTitle("Graph layout warning")
-        dialog.setText(message)
-        keep_button = dialog.addButton(
-            "Keep current sizes",
-            QtWidgets.QMessageBox.ButtonRole.RejectRole,
-        )
-        auto_button = dialog.addButton(
-            "Auto-fit current graph",
-            QtWidgets.QMessageBox.ButtonRole.AcceptRole,
-        )
-        override_button = None
-        if can_apply_override:
-            override_button = dialog.addButton(
-                "Apply plugin override",
-                QtWidgets.QMessageBox.ButtonRole.ActionRole,
+        context_key = self._tight_layout_warning_context_key(context_label)
+        expiry = float(self._tight_layout_bulk_choice_expiry_by_context.get(context_key, 0.0))
+        if expiry > 0.0 and time.monotonic() > expiry:
+            self._tight_layout_bulk_choice_by_context.pop(context_key, None)
+            self._tight_layout_bulk_choice_expiry_by_context.pop(context_key, None)
+        bulk_choice = self._tight_layout_bulk_choice_by_context.get(context_key)
+        if isinstance(bulk_choice, str) and bulk_choice:
+            self._apply_tight_layout_warning_choice(
+                choice=bulk_choice,
+                figure=figure,
+                recommendations=recommendations,
+                can_apply_override=can_apply_override,
+                apply_override_handler=apply_override_handler,
+                axes_for_override=axes_for_override,
             )
-        dialog.setDefaultButton(keep_button)
-        dialog.exec()
-
-        clicked = dialog.clickedButton()
-        if clicked is auto_button:
-            changed = self._apply_tight_layout_auto_fit(figure, recommendations)
-            append_log = getattr(self, "_append_log", None)
-            if callable(append_log):
-                if changed > 0:
-                    append_log(
-                        f"Auto-fit adjusted {changed} text element(s) to reduce graph layout clipping."
-                    )
-                else:
-                    append_log(
-                        "Auto-fit could not reduce text sizes further; adjust Graph formatting manually.",
-                        level="warning",
-                    )
             return
 
-        if override_button is not None and clicked is override_button and callable(apply_override_handler):
-            applied = False
-            try:
-                applied = bool(apply_override_handler(axes_for_override, recommendations))
-            except Exception:
-                applied = False
-            if not applied:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "Graph layout warning",
-                    "Plugin override could not be applied. You can still adjust sizes in Graph options.",
-                )
+        choice, apply_to_all = self._show_tight_layout_warning_dialog(
+            message=message,
+            can_apply_override=can_apply_override,
+        )
+        if apply_to_all:
+            self._tight_layout_bulk_choice_by_context[context_key] = choice
+            # Keep batch decision for the current run only.
+            self._tight_layout_bulk_choice_expiry_by_context[context_key] = time.monotonic() + 30.0
+        else:
+            self._tight_layout_bulk_choice_by_context.pop(context_key, None)
+            self._tight_layout_bulk_choice_expiry_by_context.pop(context_key, None)
+        self._apply_tight_layout_warning_choice(
+            choice=choice,
+            figure=figure,
+            recommendations=recommendations,
+            can_apply_override=can_apply_override,
+            apply_override_handler=apply_override_handler,
+            axes_for_override=axes_for_override,
+        )
 
     def _tight_layout_with_feedback(
         self,
@@ -11629,18 +11740,37 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         layout = QtWidgets.QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        style = self.style()
 
         minimize_button = QtWidgets.QToolButton(container)
-        minimize_button.setText("-")
-        minimize_button.setAutoRaise(True)
+        minimize_icon = style.standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_TitleBarMinButton
+        )
+        if minimize_icon.isNull():
+            minimize_button.setText("-")
+        else:
+            minimize_button.setIcon(minimize_icon)
+            minimize_button.setText("")
+        minimize_button.setAutoRaise(sys.platform == "darwin")
         minimize_button.setToolTip("Hide this tab")
         minimize_button.clicked.connect(lambda _, t=tab: self._minimize_tab(t))
         layout.addWidget(minimize_button)
 
         if tab in self._tab_descriptors:
             close_button = QtWidgets.QToolButton(container)
-            close_button.setText("x")
-            close_button.setAutoRaise(True)
+            close_icon = style.standardIcon(
+                QtWidgets.QStyle.StandardPixmap.SP_TitleBarCloseButton
+            )
+            if close_icon.isNull():
+                close_icon = style.standardIcon(
+                    QtWidgets.QStyle.StandardPixmap.SP_DockWidgetCloseButton
+                )
+            if close_icon.isNull():
+                close_button.setText("x")
+            else:
+                close_button.setIcon(close_icon)
+                close_button.setText("")
+            close_button.setAutoRaise(sys.platform == "darwin")
             close_button.setToolTip("Close this graph tab")
             close_button.clicked.connect(lambda _, t=tab: self._close_tab(t))
             layout.addWidget(close_button)
@@ -11964,6 +12094,18 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         # Update cursor label immediately when switching tabs
         self._update_cursor_status(None)
         self._update_navigation_enabled()
+        if tab is not None:
+            axes = self._axes_by_tab.get(tab)
+            figure = getattr(axes, "figure", None) if axes is not None else None
+            fit_to_content = getattr(self, "_fit_figure_to_content", None)
+            if figure is not None and callable(fit_to_content):
+                try:
+                    QtCore.QTimer.singleShot(
+                        0,
+                        lambda fig=figure, fitter=fit_to_content: fitter(fig),
+                    )
+                except Exception:
+                    pass
 
     def _focus_tree_on_tab(self, tab: QtWidgets.QWidget | None) -> None:
         self.project_tree.blockSignals(True)
@@ -12125,8 +12267,6 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
 
     def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
         super().changeEvent(event)
-        if sys.platform == "darwin":
-            return
         if self._handling_change:
             return
         self._handling_change = True
@@ -12136,6 +12276,15 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
                 and self._owner is not None
                 and not self._owner._syncing_state  # noqa: SLF001
             ):
+                old_state = event.oldState()
+                was_maximized = bool(
+                    old_state
+                    & (
+                        QtCore.Qt.WindowState.WindowMaximized
+                        | QtCore.Qt.WindowState.WindowFullScreen
+                    )
+                )
+                setattr(self, "_mw_last_old_maximized", was_maximized)
                 self._owner._handle_subwindow_state_change(  # noqa: SLF001
                     self.isMaximized() or self.isFullScreen(),
                     source=self,
@@ -12300,6 +12449,74 @@ class _MdiTabProxy(QtWidgets.QWidget):
         return fallback
 
     @staticmethod
+    def _canvas_for_subwindow(sub: _ManagedSubWindow | None) -> FigureCanvas | None:
+        if sub is None:
+            return None
+        widget = sub.widget()
+        if isinstance(widget, FigureCanvas):
+            return widget
+        if widget is None:
+            return None
+        try:
+            canvases = widget.findChildren(FigureCanvas)
+        except Exception:
+            canvases = []
+        return canvases[0] if canvases else None
+
+    def _refresh_subwindow_figure_layout(
+        self,
+        sub: _ManagedSubWindow | None,
+        *,
+        deferred: bool = False,
+    ) -> None:
+        canvas = self._canvas_for_subwindow(sub)
+        if canvas is None:
+            return
+        figure = getattr(canvas, "figure", None)
+        if figure is None:
+            return
+
+        def _apply_layout() -> None:
+            constrained_layout = False
+            get_constrained_layout = getattr(figure, "get_constrained_layout", None)
+            if callable(get_constrained_layout):
+                try:
+                    constrained_layout = bool(get_constrained_layout())
+                except Exception:
+                    constrained_layout = False
+            if constrained_layout:
+                set_pads = getattr(figure, "set_constrained_layout_pads", None)
+                if callable(set_pads):
+                    try:
+                        set_pads(w_pad=0.04, h_pad=0.04, wspace=0.02, hspace=0.02)
+                    except Exception:
+                        pass
+            else:
+                tight_layout = getattr(figure, "tight_layout", None)
+                if callable(tight_layout):
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore", UserWarning)
+                            tight_layout(pad=1.0)
+                    except Exception:
+                        pass
+            try:
+                canvas.draw_idle()
+            except Exception:
+                try:
+                    canvas.draw()
+                except Exception:
+                    pass
+
+        if deferred:
+            try:
+                QtCore.QTimer.singleShot(0, _apply_layout)
+            except Exception:
+                _apply_layout()
+            return
+        _apply_layout()
+
+    @staticmethod
     def _fit_rect_to_aspect(rect: QtCore.QRect, aspect: float) -> QtCore.QRect:
         if not rect.isValid() or rect.width() <= 0 or rect.height() <= 0:
             return rect
@@ -12326,9 +12543,10 @@ class _MdiTabProxy(QtWidgets.QWidget):
         rect = viewport.rect().adjusted(margin, margin, -margin, -margin)
         if not rect.isValid() or rect.width() < 40 or rect.height() < 40:
             return False
-        aspect = self._subwindow_aspect_ratio(sub)
-        target = self._fit_rect_to_aspect(rect, aspect)
-        sub.setGeometry(target)
+        # Fullscreen mode should use the entire viewport. Preserving the figure
+        # aspect here can shrink "fullscreen" windows to thin strips.
+        sub.setGeometry(rect)
+        self._refresh_subwindow_figure_layout(sub, deferred=True)
         return True
 
     def _maybe_apply_maximize(self, sub: _ManagedSubWindow) -> None:
@@ -12345,10 +12563,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         widget = sub.widget() if sub is not None else None
         index = self.indexOf(widget) if widget is not None else -1
         if sub is not None:
-            if self._native_subwindow_maximize:
-                is_max = sub.isMaximized() or sub.isFullScreen() or self._fullscreen_lock
-            else:
-                is_max = self._fullscreen_lock
+            is_max = sub.isMaximized() or sub.isFullScreen() or self._fullscreen_lock
             if is_max:
                 self._fullscreen_lock = True
                 self._global_maximized = True
@@ -12384,9 +12599,10 @@ class _MdiTabProxy(QtWidgets.QWidget):
             return
         restored_from_hidden = False
         self._blocking = True
-        if sub in self._hidden_subwindows:
+        if sub in self._hidden_subwindows or sub in self._maximized_hidden:
             restored_from_hidden = True
             self._hidden_subwindows.discard(sub)
+            self._maximized_hidden.discard(sub)
             sub.show()
             self._register_visible(sub)
         self._mdi.setActiveSubWindow(sub)
@@ -12411,6 +12627,16 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._purge_stale_subwindow_refs()
         if source is not None and not self._is_live_subwindow(source):
             source = None
+        source_was_maximized = False
+        if isinstance(source, _ManagedSubWindow):
+            try:
+                source_was_maximized = bool(getattr(source, "_mw_last_old_maximized", False))
+            except Exception:
+                source_was_maximized = False
+            try:
+                delattr(source, "_mw_last_old_maximized")
+            except Exception:
+                pass
         self._syncing_state = True
         try:
             active = self._mdi.activeSubWindow()
@@ -12423,10 +12649,23 @@ class _MdiTabProxy(QtWidgets.QWidget):
                     self._apply_global_window_state()
             else:
                 if self._fullscreen_lock or self._global_maximized:
+                    if not self._native_subwindow_maximize and not source_was_maximized:
+                        QtCore.QTimer.singleShot(0, self._reconcile_maximized_state)
+                        return
                     # Ignore demote events emitted by non-active subwindows while
                     # a different subwindow is intentionally fullscreen/maximized.
                     if source is not None and active is not None and source is not active:
                         return
+                    if active is None:
+                        if (
+                            isinstance(source, _ManagedSubWindow)
+                            and self._is_live_subwindow(source)
+                            and source not in self._hidden_subwindows
+                        ):
+                            active = source
+                        else:
+                            QtCore.QTimer.singleShot(0, self._reconcile_maximized_state)
+                            return
                     if isinstance(active, _ManagedSubWindow) and self._is_live_subwindow(active):
                         try:
                             if active.isMaximized() or active.isFullScreen():
@@ -12434,6 +12673,9 @@ class _MdiTabProxy(QtWidgets.QWidget):
                                 return
                         except Exception:
                             self._maximize_single(active)
+                            return
+                        if source is None:
+                            QtCore.QTimer.singleShot(0, self._reconcile_maximized_state)
                             return
                 self._fullscreen_lock = False
                 self._global_maximized = False
@@ -12455,6 +12697,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._visibility_queue.remove(sub)
         except ValueError:
             pass
+        if self._global_maximized or self._fullscreen_lock:
+            QtCore.QTimer.singleShot(0, self._reconcile_maximized_state)
 
     def _apply_global_window_state(self, *, active: _ManagedSubWindow | None = None) -> None:
         self._purge_stale_subwindow_refs()
@@ -12464,6 +12708,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
             if self._global_maximized or self._fullscreen_lock:
                 if active_sub is not None:
                     self._maximize_single(active_sub)
+                else:
+                    self._reconcile_maximized_state()
             else:
                 for sub in self._subwindows.values():
                     if sub in self._hidden_subwindows:
@@ -12474,6 +12720,39 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 self._arrange_subwindows()
         finally:
             self._syncing_state = False
+
+    def _reconcile_maximized_state(self) -> None:
+        if not (self._global_maximized or self._fullscreen_lock):
+            return
+        self._purge_stale_subwindow_refs()
+        active = self._mdi.activeSubWindow()
+        target = (
+            active
+            if isinstance(active, _ManagedSubWindow)
+            and self._is_live_subwindow(active)
+            and active not in self._hidden_subwindows
+            else None
+        )
+        if target is None:
+            for widget in self._widgets:
+                sub = self._subwindow_for(widget)
+                if not self._is_live_subwindow(sub):
+                    continue
+                if sub in self._hidden_subwindows:
+                    continue
+                try:
+                    if sub.isHidden():
+                        continue
+                except Exception:
+                    continue
+                target = sub
+                break
+        if target is None:
+            self._fullscreen_lock = False
+            self._global_maximized = False
+            return
+        self._mdi.setActiveSubWindow(target)
+        self._maximize_single(target)
 
     def _register_visible(self, sub: _ManagedSubWindow) -> None:
         self._purge_stale_subwindow_refs()
@@ -12602,6 +12881,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
             target_w = max(240, int(target_w * scale))
             target_h = max(200, int(target_h * scale))
         sub.resize(target_w, target_h)
+        self._refresh_subwindow_figure_layout(sub, deferred=True)
 
     def arrangement_mode(self) -> str:
         return self._arrangement_mode
@@ -12717,6 +12997,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
                     )
                     target = self._fit_rect_to_aspect(cell, self._subwindow_aspect_ratio(sub))
                     sub.setGeometry(target)
+                    self._refresh_subwindow_figure_layout(sub, deferred=True)
             else:
                 height_span = max(1, inner.height())
                 for idx, sub in enumerate(subwindows):
@@ -12730,6 +13011,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
                     )
                     target = self._fit_rect_to_aspect(cell, self._subwindow_aspect_ratio(sub))
                     sub.setGeometry(target)
+                    self._refresh_subwindow_figure_layout(sub, deferred=True)
             active = self._mdi.activeSubWindow()
             if isinstance(active, QtWidgets.QMdiSubWindow):
                 active.raise_()
@@ -12766,6 +13048,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
             try:
                 sub.showNormal()
                 sub.setGeometry(target)
+                self._refresh_subwindow_figure_layout(sub, deferred=True)
             finally:
                 self._arranging_subwindows = False
             return

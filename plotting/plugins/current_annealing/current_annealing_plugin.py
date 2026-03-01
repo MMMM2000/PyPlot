@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
@@ -103,44 +103,51 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         anneal_core.SHOW_PLOTS = False
         anneal_core.BACKEND = "matplotlib"
 
-    def load_data(self) -> None:  # type: ignore[override]
-        host = self.host
-        paths = host.ensure_data_selection(self)
-        if not paths:
-            return
-        data_by_file: dict[str, pd.DataFrame] = {}
-        errors: list[str] = []
-        for path in paths:
+    def _portable_path(self, path: Path | None, base_path: Path | None) -> str | None:
+        helper = getattr(self.host, "_portable_path", None)
+        if callable(helper):
             try:
-                data = anneal_core.load_file(str(path))
-            except Exception as exc:
-                errors.append(f"{path.name}: {exc}")
-                continue
-            data_by_file[str(path)] = data
-        if errors:
-            QtWidgets.QMessageBox.warning(self.host, self.name, "Some files could not be loaded:\n" + "\n".join(errors[:10]))
-        if not data_by_file:
-            self._data_by_file = {}
-            self._loaded_files = []
-            self._data = None
-            self.update_ui()
-            return
-        self._data_by_file = data_by_file
-        self._loaded_files = list(data_by_file.keys())
-        self._data = data_by_file
-        if paths:
-            self.host._plugin_last_directories[self.name] = paths[0].parent
-        self._log(f"Loaded {len(data_by_file)} current annealing file(s).")
-        self._register_workbooks()
-        self.update_ui()
+                value = helper(path, base_path)
+            except Exception:
+                value = None
+            if isinstance(value, str):
+                return value
+        if path is None:
+            return None
+        return str(path)
 
-    def generate(self) -> None:  # type: ignore[override]
-        if not self._data_by_file:
-            self.load_data()
-        if not self._data_by_file:
-            return
-        window_module = window_api()
-        self._apply_settings_to_core()
+    def _resolve_portable_path(self, entry: Any, project_dir: Path) -> Path | None:
+        helper = getattr(self.host, "_resolve_portable_path", None)
+        if callable(helper):
+            try:
+                value = helper(entry, project_dir)
+            except Exception:
+                value = None
+            if isinstance(value, Path):
+                return value
+        if not isinstance(entry, str) or not entry.strip():
+            return None
+        path = Path(entry)
+        if not path.is_absolute():
+            path = project_dir / path
+        return path
+
+    def _loaded_source_key_for_path(self, path: Path) -> str | None:
+        try:
+            target = path.resolve()
+        except Exception:
+            target = path
+        for source in self._data_by_file.keys():
+            source_path = Path(source)
+            try:
+                source_resolved = source_path.resolve()
+            except Exception:
+                source_resolved = source_path
+            if source_resolved == target:
+                return source
+        return None
+
+    def _clear_plot_tabs(self) -> None:
         clear = getattr(self.host, "_clear_tab_list", None)
         if callable(clear):
             clear(self._plot_tabs)
@@ -150,64 +157,180 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 if index >= 0:
                     self.host.tab_widget.removeTab(index)
         self._plot_tabs.clear()
+
+    def _load_data_from_paths(
+        self,
+        paths: list[Path],
+        *,
+        show_errors: bool,
+    ) -> bool:
+        data_by_file: dict[str, pd.DataFrame] = {}
+        errors: list[str] = []
+        resolved_paths: list[Path] = []
+        for path in paths:
+            if not isinstance(path, Path):
+                continue
+            try:
+                resolved = path.resolve()
+            except Exception:
+                resolved = path
+            if not resolved.exists() or not resolved.is_file():
+                errors.append(f"{resolved.name}: file not found")
+                continue
+            try:
+                data = anneal_core.load_file(str(resolved))
+            except Exception as exc:
+                errors.append(f"{resolved.name}: {exc}")
+                continue
+            data_by_file[str(resolved)] = data
+            resolved_paths.append(resolved)
+        if errors and show_errors:
+            QtWidgets.QMessageBox.warning(
+                self.host,
+                self.name,
+                "Some files could not be loaded:\n" + "\n".join(errors[:10]),
+            )
+        if not data_by_file:
+            self._data_by_file = {}
+            self._loaded_files = []
+            self._data = None
+            return False
+        self._data_by_file = data_by_file
+        self._loaded_files = list(data_by_file.keys())
+        self._data = data_by_file
+        if resolved_paths:
+            self.host._plugin_last_directories[self.name] = resolved_paths[0].parent
+        self._register_workbooks()
+        return True
+
+    def _create_plot_tab(self, path_str: str, df: pd.DataFrame) -> QtWidgets.QWidget | None:
+        window_module = window_api()
+        title = format_annealing_title(Path(path_str).stem)
+        try:
+            fig, _ = anneal_core.plot_one(df, title)
+        except Exception as exc:
+            self._log(f"Failed to plot {Path(path_str).name}: {exc}", level="error")
+            return None
+        canvas = FigureCanvas(fig)
+        canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+        canvas.setMinimumSize(0, 0)
+        canvas.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(canvas)
+        ax = fig.axes[0] if fig.axes else None
+        lines: dict[tuple[str, float | str], GraphLineState] = {}
+        if ax is not None:
+            for index, line in enumerate(ax.get_lines(), start=1):
+                label = line.get_label() or f"Series {index}"
+                state = window_module.GraphLineState(
+                    key=(label, float(index)),
+                    label=label,
+                    line=line,
+                    base_x=line.get_xdata(),
+                    base_y=line.get_ydata(),
+                )
+                lines[state.key] = state
+        descriptor = window_module.TabDescriptor(
+            kind="current_annealing",
+            title=ax.get_title() if ax else title,
+            root_label=Path(path_str).name,
+            x_label=ax.get_xlabel() if ax else "Current [mA]",
+            y_label=ax.get_ylabel() if ax else "Resistance [Ω]",
+            canvas=canvas,
+            axes=ax,
+            lines=lines,
+            metadata={
+                "source_file": path_str,
+                "saved_path": "",
+            },
+        )
+        self.host.tab_widget.addTab(tab, Path(path_str).name)
+        self.host._register_plot_tab(tab, canvas, ax, descriptor)
+        self._plot_tabs.append(tab)
+        return tab
+
+    def load_data(self) -> None:  # type: ignore[override]
+        host = self.host
+        paths = host.ensure_data_selection(self)
+        if not paths:
+            return
+        loaded = self._load_data_from_paths(list(paths), show_errors=True)
+        if not loaded:
+            self.update_ui()
+            return
+        self._log(f"Loaded {len(self._data_by_file)} current annealing file(s).")
+        self.update_ui()
+
+    def generate(self) -> None:  # type: ignore[override]
+        if not self._data_by_file:
+            self.load_data()
+        if not self._data_by_file:
+            return
+        self._apply_settings_to_core()
+        self._clear_plot_tabs()
         plots_created = 0
         paths_sorted = sorted(self._data_by_file.keys())
+        total_paths = len(paths_sorted)
+        begin_shared_progress = getattr(self.host, "_begin_task_progress", None)
+        update_shared_progress = getattr(self.host, "_update_task_progress", None)
+        end_shared_progress = getattr(self.host, "_end_task_progress", None)
+        if callable(begin_shared_progress):
+            begin_shared_progress(
+                "Generating current annealing plots...",
+                maximum=max(1, total_paths),
+                value=0,
+            )
         progress = QtWidgets.QProgressDialog(
             "Generating current annealing plots…", "Cancel", 0, len(paths_sorted), self.host
         )
         progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.setWindowTitle("Generating Plots")
         progress.setMinimumDuration(300)
-        for idx, path_str in enumerate(paths_sorted, start=1):
-            if progress.wasCanceled():
-                break
-            df = self._data_by_file[path_str]
-            title = format_annealing_title(Path(path_str).stem)
-            try:
-                fig, _ = anneal_core.plot_one(df, title)
-            except Exception as exc:
-                self._log(f"Failed to plot {Path(path_str).name}: {exc}", level="error")
-                continue
-            canvas = FigureCanvas(fig)
-            canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
-            tab = QtWidgets.QWidget()
-            tab_layout = QtWidgets.QVBoxLayout(tab)
-            tab_layout.setContentsMargins(0, 0, 0, 0)
-            canvas.setMinimumSize(640, 420)
-            tab_layout.addWidget(canvas)
-            ax = fig.axes[0] if fig.axes else None
-            lines: dict[tuple[str, float | str], GraphLineState] = {}
-            if ax is not None:
-                for index, line in enumerate(ax.get_lines(), start=1):
-                    label = line.get_label() or f"Series {index}"
-                    state = window_module.GraphLineState(
-                        key=(label, float(index)),
-                        label=label,
-                        line=line,
-                        base_x=line.get_xdata(),
-                        base_y=line.get_ydata(),
+        cancelled = False
+        completed = 0
+        try:
+            for idx, path_str in enumerate(paths_sorted, start=1):
+                if callable(update_shared_progress):
+                    update_shared_progress(
+                        value=idx - 1,
+                        maximum=max(1, total_paths),
+                        title=f"Generating {Path(path_str).name} ({idx}/{total_paths})",
                     )
-                    lines[state.key] = state
-            descriptor = window_module.TabDescriptor(
-                kind="current_annealing",
-                title=ax.get_title() if ax else title,
-                root_label=Path(path_str).name,
-                x_label=ax.get_xlabel() if ax else "Current [mA]",
-                y_label=ax.get_ylabel() if ax else "Resistance [Ω]",
-                canvas=canvas,
-                axes=ax,
-                lines=lines,
-                metadata={
-                    "source_file": path_str,
-                    "saved_path": "",
-                },
-            )
-            self.host.tab_widget.addTab(tab, Path(path_str).name)
-            self.host._register_plot_tab(tab, canvas, ax, descriptor)
-            self._plot_tabs.append(tab)
-            plots_created += 1
-            progress.setValue(idx)
-            QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
-        progress.setValue(len(paths_sorted))
+                if progress.wasCanceled():
+                    cancelled = True
+                    break
+                df = self._data_by_file[path_str]
+                tab = self._create_plot_tab(path_str, df)
+                if tab is None:
+                    completed = idx
+                    progress.setValue(idx)
+                    continue
+                plots_created += 1
+                completed = idx
+                progress.setValue(idx)
+                if callable(update_shared_progress):
+                    update_shared_progress(
+                        value=idx,
+                        maximum=max(1, total_paths),
+                        title=f"Generating {Path(path_str).name} ({idx}/{total_paths})",
+                    )
+                QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        finally:
+            final_value = total_paths if not cancelled else max(0, min(completed, total_paths))
+            progress.setValue(final_value)
+            if callable(update_shared_progress):
+                update_shared_progress(
+                    value=final_value,
+                    maximum=max(1, total_paths),
+                    title="Plot generation complete." if not cancelled else "Plot generation cancelled.",
+                )
+            if callable(end_shared_progress):
+                end_shared_progress()
         if self._plot_tabs:
             setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
             if callable(setter):
@@ -215,6 +338,106 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 if index >= 0:
                     setter(index)
         self._log(f"Generated {plots_created} current annealing plot(s).")
+        self.update_ui()
+
+    def serialize_project_state(self, *, base_path: Path | None) -> dict[str, Any] | None:  # type: ignore[override]
+        loaded_paths = [
+            self._portable_path(Path(source), base_path)
+            for source in self._loaded_files
+            if isinstance(source, str) and source
+        ]
+        loaded_paths = [path for path in loaded_paths if isinstance(path, str) and path]
+
+        plots: list[str] = []
+        current_source: str | None = None
+        current_tab = self.host.tab_widget.currentWidget()
+        descriptors = getattr(self.host, "_tab_descriptors", {})
+        for tab in self._plot_tabs:
+            descriptor = descriptors.get(tab) if isinstance(descriptors, dict) else None
+            metadata = getattr(descriptor, "metadata", {}) if descriptor is not None else {}
+            source_value = metadata.get("source_file") if isinstance(metadata, dict) else None
+            if not isinstance(source_value, str) or not source_value.strip():
+                continue
+            portable = self._portable_path(Path(source_value), base_path)
+            if not isinstance(portable, str) or not portable.strip():
+                continue
+            plots.append(portable)
+            if tab is current_tab:
+                current_source = portable
+
+        return {
+            "loaded_paths": loaded_paths,
+            "open_plot_sources": plots,
+            "current_plot_source": current_source,
+            "had_plots": bool(self._plot_tabs),
+        }
+
+    def restore_project_state(self, state: dict[str, Any], *, project_dir: Path) -> None:  # type: ignore[override]
+        loaded_paths_payload = state.get("loaded_paths")
+        resolved_paths: list[Path] = []
+        if isinstance(loaded_paths_payload, list):
+            for entry in loaded_paths_payload:
+                resolved = self._resolve_portable_path(entry, project_dir)
+                if isinstance(resolved, Path):
+                    resolved_paths.append(resolved)
+        if not resolved_paths:
+            selected = getattr(self.host, "_selected_paths", None)
+            if callable(selected):
+                try:
+                    resolved_paths = [path for path in selected() if isinstance(path, Path)]
+                except Exception:
+                    resolved_paths = []
+        if resolved_paths:
+            commit_paths = getattr(self.host, "_commit_selected_paths", None)
+            if callable(commit_paths):
+                try:
+                    commit_paths(resolved_paths)
+                except Exception:
+                    pass
+
+        loaded = False
+        if resolved_paths:
+            loaded = self._load_data_from_paths(resolved_paths, show_errors=False)
+        else:
+            self._data_by_file = {}
+            self._loaded_files = []
+            self._data = None
+
+        self._clear_plot_tabs()
+        if loaded and self._data_by_file:
+            plot_sources_payload = state.get("open_plot_sources")
+            plot_source_paths: list[Path] = []
+            if isinstance(plot_sources_payload, list):
+                for entry in plot_sources_payload:
+                    resolved = self._resolve_portable_path(entry, project_dir)
+                    if isinstance(resolved, Path):
+                        plot_source_paths.append(resolved)
+            if not plot_source_paths and bool(state.get("had_plots", False)):
+                plot_source_paths = [Path(path) for path in self._loaded_files]
+
+            for source_path in plot_source_paths:
+                source_key = self._loaded_source_key_for_path(source_path)
+                if not source_key:
+                    continue
+                frame = self._data_by_file.get(source_key)
+                if frame is None:
+                    continue
+                self._create_plot_tab(source_key, frame)
+
+            current_source = state.get("current_plot_source")
+            current_path = self._resolve_portable_path(current_source, project_dir)
+            if isinstance(current_path, Path):
+                source_key = self._loaded_source_key_for_path(current_path)
+                if source_key:
+                    for tab in self._plot_tabs:
+                        descriptor = getattr(self.host, "_tab_descriptors", {}).get(tab)
+                        metadata = getattr(descriptor, "metadata", {}) if descriptor is not None else {}
+                        source_value = metadata.get("source_file") if isinstance(metadata, dict) else None
+                        if source_value == source_key:
+                            index = self.host.tab_widget.indexOf(tab)
+                            if index >= 0:
+                                self.host.tab_widget.setCurrentIndex(index)
+                            break
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
