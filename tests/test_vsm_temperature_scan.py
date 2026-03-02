@@ -22,7 +22,28 @@ def test_build_series_orders_sections_and_fields() -> None:
     series = processor._build_series(frame)
 
     order = [(int(entry.field), entry.segment_index) for entry in series]
-    assert order == [(10000, 0), (10000, 1), (5, 0), (5, 1)]
+    assert order == [(5, 0), (5, 1), (10000, 0), (10000, 1)]
+
+
+def test_field_axis_order_preserves_measurement_order() -> None:
+    processor = module.VSMTemperatureScanProcessor()
+    ordered = processor.field_axis_order([50, 10000, 50, 5, 10000])
+    assert ordered == [50.0, 10000.0, 5.0]
+
+
+def test_series_color_map_uses_warm_for_heating_and_cold_for_cooling() -> None:
+    processor = module.VSMTemperatureScanProcessor()
+    up_frame = pd.DataFrame({"temperature": [10, 20, 30], "signal": [1.0, 1.1, 1.2]})
+    down_frame = pd.DataFrame({"temperature": [30, 20, 10], "signal": [1.2, 1.1, 1.0]})
+    series = [
+        module.PlotSeries(field=10000.0, direction="up", segment_index=0, frame=up_frame),
+        module.PlotSeries(field=10000.0, direction="down", segment_index=1, frame=down_frame),
+    ]
+
+    color_map = processor.series_color_map(series)
+
+    assert color_map[(10000.0, "up", 0)] in module.VSM_TEMP_SCAN_WARM_COLORS
+    assert color_map[(10000.0, "down", 1)] in module.VSM_TEMP_SCAN_COLD_COLORS
 
 
 def test_plot_title_includes_field_labels() -> None:

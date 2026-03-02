@@ -99,3 +99,21 @@ def test_format_outlier_findings_contains_rows_and_columns() -> None:
     assert "Workbook A / Sheet1" in text
     assert "Rows: 30" in text
     assert "Columns: signal (1)" in text
+
+
+def test_outlier_preview_frame_includes_original_row_numbers() -> None:
+    workbook_key = ("test", "outliers")
+    worksheet = _make_sheet(workbook_key=workbook_key, sheet_name="Sheet1", signal_values=[1.0] * 29 + [20.0])
+    workbook = WorkbookData(key=workbook_key, name="Workbook A", worksheets=[worksheet.key])
+    holder = SimpleNamespace(
+        _worksheets={worksheet.key: worksheet},
+        _workbooks={workbook_key: workbook},
+        _detect_outlier_rows=PyPlotWindow._detect_outlier_rows,
+    )
+
+    findings = PyPlotWindow._collect_outlier_findings(holder)
+    preview = PyPlotWindow._outlier_preview_frame(worksheet.dataframe, findings[0])
+
+    assert list(preview.columns) == ["Row", "temperature", "signal"]
+    assert int(preview.iloc[0]["Row"]) == 30
+    assert float(preview.iloc[0]["signal"]) == 20.0

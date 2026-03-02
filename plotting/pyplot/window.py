@@ -4717,6 +4717,68 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             lines.append("")
         return "\n".join(lines).strip()
 
+    @staticmethod
+    def _outlier_preview_frame(
+        frame: pd.DataFrame,
+        finding: WorksheetOutlierFinding,
+    ) -> pd.DataFrame:
+        """Return flagged rows with an explicit 1-based row-number column."""
+
+        if frame.empty:
+            return pd.DataFrame()
+        mask = finding.row_mask.reindex(frame.index, fill_value=False).astype(bool)
+        preview = frame.loc[mask].copy()
+        if preview.empty:
+            return preview
+        row_numbers = [int(index) + 1 for index in preview.index.tolist()]
+        preview.insert(0, "Row", row_numbers)
+        preview.reset_index(drop=True, inplace=True)
+        return preview
+
+    def _build_outlier_preview_tab(
+        self,
+        finding: WorksheetOutlierFinding,
+    ) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget(self)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        worksheet = self._worksheets.get(finding.worksheet_key)
+        frame = worksheet.dataframe if worksheet is not None else pd.DataFrame()
+        preview = self._outlier_preview_frame(frame, finding)
+        if preview.empty:
+            layout.addWidget(QtWidgets.QLabel("No preview rows are available for this worksheet."))
+            return container
+
+        table = QtWidgets.QTableWidget(preview.shape[0], preview.shape[1], container)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.setHorizontalHeaderLabels([str(column) for column in preview.columns.tolist()])
+        outlier_columns = set(finding.column_hits.keys())
+        highlight_bg = QtGui.QColor(254, 226, 226)
+        highlight_fg = QtGui.QColor(153, 27, 27)
+
+        for row_index in range(preview.shape[0]):
+            for col_index, col_name in enumerate(preview.columns):
+                value = preview.iat[row_index, col_index]
+                display = "" if pd.isna(value) else str(value)
+                item = QtWidgets.QTableWidgetItem(display)
+                if str(col_name) in outlier_columns:
+                    item.setBackground(highlight_bg)
+                    item.setForeground(highlight_fg)
+                    item.setToolTip("Detected as an outlier in this column.")
+                table.setItem(row_index, col_index, item)
+
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(True)
+        table.resizeColumnsToContents()
+        layout.addWidget(table, 1)
+        return container
+
     def _apply_outlier_findings(self, findings: Sequence[WorksheetOutlierFinding]) -> int:
         removed_rows = 0
         changed = 0
@@ -4772,23 +4834,56 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         total_rows = sum(finding.outlier_count for finding in findings)
         detail_text = self._format_outlier_findings(findings)
-        message = QtWidgets.QMessageBox(self)
-        message.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-        message.setWindowTitle("Check outliers")
-        message.setText(
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Check outliers")
+        dialog.resize(980, 600)
+        dialog_layout = QtWidgets.QVBoxLayout(dialog)
+        dialog_layout.setContentsMargins(10, 10, 10, 10)
+        dialog_layout.setSpacing(8)
+
+        summary = QtWidgets.QLabel(
             f"Detected {total_rows} potential outlier row(s) in "
             f"{len(findings)} of {worksheet_count} worksheet(s)."
         )
-        message.setInformativeText("Remove detected rows from the affected worksheets?")
-        if detail_text:
-            message.setDetailedText(detail_text)
-        message.setStandardButtons(
-            QtWidgets.QMessageBox.StandardButton.Yes
-            | QtWidgets.QMessageBox.StandardButton.No
+        summary.setWordWrap(True)
+        dialog_layout.addWidget(summary)
+
+        hint = QtWidgets.QLabel(
+            "Preview below shows rows that would be removed. "
+            "Columns highlighted in red triggered the outlier detection."
         )
-        message.setDefaultButton(QtWidgets.QMessageBox.StandardButton.No)
-        response = message.exec()
-        if response != int(QtWidgets.QMessageBox.StandardButton.Yes):
+        hint.setWordWrap(True)
+        dialog_layout.addWidget(hint)
+
+        tabs = QtWidgets.QTabWidget(dialog)
+        for finding in findings:
+            title = f"{finding.workbook_name} / {finding.worksheet_name}"
+            tabs.addTab(self._build_outlier_preview_tab(finding), title)
+        dialog_layout.addWidget(tabs, 1)
+
+        if detail_text:
+            detail_box = QtWidgets.QPlainTextEdit(dialog)
+            detail_box.setReadOnly(True)
+            detail_box.setPlainText(detail_text)
+            detail_box.setMaximumHeight(120)
+            dialog_layout.addWidget(detail_box)
+
+        buttons = QtWidgets.QDialogButtonBox(dialog)
+        remove_button = buttons.addButton(
+            "Remove flagged rows",
+            QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole,
+        )
+        keep_button = buttons.addButton(
+            "Keep data",
+            QtWidgets.QDialogButtonBox.ButtonRole.RejectRole,
+        )
+        remove_button.setDefault(False)
+        keep_button.setDefault(True)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        dialog_layout.addWidget(buttons)
+
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
             self._append_log(
                 f"Outlier check complete: {total_rows} row(s) flagged across {len(findings)} worksheet(s)."
             )

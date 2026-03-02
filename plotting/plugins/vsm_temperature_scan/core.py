@@ -52,6 +52,9 @@ class PlotSeries:
 
 
 VSM_TEMP_SCAN_COLORS = ["#dc2626", "#2563eb", "#f97316", "#16a34a"]
+VSM_TEMP_SCAN_WARM_COLORS = ["#dc2626", "#f97316", "#ea580c", "#ef4444"]
+VSM_TEMP_SCAN_COLD_COLORS = ["#2563eb", "#0ea5e9", "#1d4ed8", "#06b6d4"]
+VSM_TEMP_SCAN_NEUTRAL_COLORS = ["#6b7280", "#4b5563"]
 SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _SAMPLE_HAS_ANGLE_RE = re.compile(r"(?:\d{1,3}\s*°|\d{1,3}\s*deg(?:ree)?s?)", re.IGNORECASE)
 
@@ -296,12 +299,46 @@ class VSMTemperatureScanProcessor:
         return ma.ffill().bfill()
 
     def series_color_map(self, series: Sequence[PlotSeries]) -> dict[tuple[float, str, int], str]:
-        """Assign a stable color per (field, direction, segment) tuple."""
+        """Assign colors per (field, direction, segment) tuple.
 
-        return {
-            (entry.field, entry.direction, entry.segment_index): VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)]
-            for idx, entry in enumerate(series)
-        }
+        Heating segments always use warm colors, cooling segments always use cold
+        colors, and flat/unknown segments use neutral tones.
+        """
+
+        counters: dict[str, int] = {"up": 0, "down": 0, "flat": 0}
+        colors: dict[tuple[float, str, int], str] = {}
+        for idx, entry in enumerate(series):
+            direction = self._series_direction(entry)
+            if direction == "up":
+                palette = VSM_TEMP_SCAN_WARM_COLORS
+            elif direction == "down":
+                palette = VSM_TEMP_SCAN_COLD_COLORS
+            else:
+                palette = VSM_TEMP_SCAN_NEUTRAL_COLORS
+            color_index = counters.get(direction, 0)
+            counters[direction] = color_index + 1
+            fallback = VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)]
+            color = palette[color_index % len(palette)] if palette else fallback
+            colors[(entry.field, entry.direction, entry.segment_index)] = color
+        return colors
+
+    def _series_direction(self, entry: PlotSeries) -> str:
+        direction = str(getattr(entry, "direction", "") or "").strip().lower()
+        if direction in {"up", "down", "flat"}:
+            return direction
+        if direction == "all":
+            temps = pd.to_numeric(
+                getattr(entry, "frame", pd.DataFrame()).get("temperature", pd.Series([], dtype=float)),
+                errors="coerce",
+            ).dropna()
+            if len(temps) >= 2:
+                delta = float(temps.iloc[-1] - temps.iloc[0])
+                if delta > 0:
+                    return "up"
+                if delta < 0:
+                    return "down"
+            return "flat"
+        return "flat"
 
     def _prepare_series(self, series: Sequence[PlotSeries]) -> list[PreparedSeries]:
         """Return sorted, de-duplicated segments with display metadata."""
@@ -333,13 +370,13 @@ class VSMTemperatureScanProcessor:
         if frame.empty:
             return series
         has_sections = "section_index" in frame.columns
-        for field_value, subset in frame.groupby("field"):
+        for field_value, subset in frame.groupby("field", sort=False):
             field_float = self._to_float(field_value)
             if field_float is None:
                 continue
-            ordered_subset = subset.reset_index(drop=True)
+            ordered_subset = subset.copy()
             if has_sections and self.split_directions:
-                for section_idx, segment in ordered_subset.groupby("section_index"):
+                for section_idx, segment in ordered_subset.groupby("section_index", sort=False):
                     segment_raw = segment.reset_index(drop=True)
                     temps_raw = segment_raw["temperature"].astype(float)
                     direction = "flat"
@@ -356,15 +393,14 @@ class VSMTemperatureScanProcessor:
                     )
             elif self.split_directions:
                 direction_counts: dict[str, int] = {}
-                for direction, segment in self._split_segments(ordered_subset):
+                for direction, segment in self._split_segments(ordered_subset.reset_index(drop=True)):
                     direction_counts[direction] = direction_counts.get(direction, 0) + 1
                     series.append(
                         PlotSeries(field_float, direction, direction_counts[direction], segment)
                     )
             else:
-                sorted_subset = ordered_subset.sort_values("temperature")
+                sorted_subset = ordered_subset.sort_values("temperature").reset_index(drop=True)
                 series.append(PlotSeries(field_float, "all", 1, sorted_subset))
-        series.sort(key=lambda item: (-abs(item.field), item.segment_index))
         return series
 
     def _dedupe_temperatures(self, frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -485,32 +521,19 @@ class VSMTemperatureScanProcessor:
         return "other"
 
     def field_axis_order(self, fields: Sequence[float]) -> list[float]:
-        """Prioritize high-field data on the left axis and low-field on the right."""
+        """Return fields in first-measured order (first appearance wins)."""
 
         ordered: list[float] = []
         seen: set[float] = set()
-
-        def _push(val: float | None) -> None:
-            if val is None:
-                return
-            if val in seen:
-                return
-            seen.add(val)
-            ordered.append(val)
-
-        primary: float | None = None
-        secondary: float | None = None
         for val in fields:
-            bucket = self._field_bucket(val)
-            if bucket == "high" and primary is None:
-                primary = val
-            elif bucket == "low" and secondary is None:
-                secondary = val
-
-        _push(primary)
-        _push(secondary)
-        for val in fields:
-            _push(val)
+            num = self._to_float(val)
+            if num is None:
+                continue
+            key = round(float(num), 6)
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(float(num))
         return ordered
 
     def _safe_filename(self, value: str, fallback: str = "export") -> str:

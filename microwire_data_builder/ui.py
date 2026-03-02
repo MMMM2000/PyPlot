@@ -12913,10 +12913,11 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         for idx, path in enumerate(paths, start=1):
             self._check_cancelled()
             try:
-                frame, _ = processor._parse_file(Path(path))
+                frame, parsed_sample = processor._parse_file(Path(path))
             except Exception:
                 self.logger.exception("Failed to parse %s", path)
                 frame = pd.DataFrame()
+                parsed_sample = ""
             if not isinstance(frame, pd.DataFrame) or frame.empty:
                 if progress is not None:
                     try:
@@ -12924,12 +12925,10 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                     except Exception:
                         pass
                 continue
-            raw_sample = _sample_from_path(Path(path), self.data.sources)
-            sample, variant = _split_sample_variant(raw_sample)
+            raw_sample = str(parsed_sample or "").strip() or _sample_from_path(Path(path), self.data.sources)
+            sample = raw_sample
             key = _microwire_key_from_path(Path(path), sample or raw_sample)
             label = Path(path).stem
-            if variant:
-                label = f"{variant} — {label}"
             record = VsmTemperatureScanRecord(
                 path=Path(path),
                 sample=sample,
@@ -12937,7 +12936,6 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 key=key,
                 label=label,
             )
-            setattr(record, "variant", variant)
             records.append(record)
             try:
                 processed[str(path)] = float(Path(path).stat().st_mtime)
@@ -13037,31 +13035,6 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         if visible_records:
             for record in visible_records:
                 sample = getattr(record, "sample", None)
-                if isinstance(sample, str) and sample.strip():
-                    existing_variant = getattr(record, "variant", None)
-                    variant: Optional[str] = None
-                    if isinstance(existing_variant, str) and existing_variant.strip():
-                        variant = existing_variant.strip()
-                    else:
-                        base_sample, parsed_variant = _split_sample_variant(sample)
-                        if base_sample:
-                            try:
-                                record.sample = base_sample
-                            except Exception:
-                                pass
-                            sample = base_sample
-                        if parsed_variant:
-                            variant = parsed_variant
-                        setattr(record, "variant", variant)
-                    if variant:
-                        label = getattr(record, "label", None)
-                        if isinstance(label, str) and label.strip():
-                            if variant not in label:
-                                try:
-                                    record.label = f"{variant} — {label}"
-                                except Exception:
-                                    pass
-                    sample = getattr(record, "sample", None)
                 if isinstance(sample, str) and sample.strip():
                     grouped.setdefault(sample, []).append(record)
         self._record_groups = grouped
