@@ -67,10 +67,13 @@ def test_vsm_hysteresis_uses_shared_controls_and_origin_routing() -> None:
         app.processEvents()
 
 
-def test_vsm_hysteresis_register_plot_tab_enables_shared_open_origin() -> None:
+def test_vsm_hysteresis_register_plot_tab_enables_shared_open_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
     try:
+        monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
         fig = Figure(figsize=(4, 3))
         ax = fig.add_subplot(111)
         line, = ax.plot([0.0, 1.0], [0.0, 1.0], label="0°")
@@ -111,10 +114,13 @@ def test_vsm_hysteresis_register_plot_tab_enables_shared_open_origin() -> None:
         app.processEvents()
 
 
-def test_vsm_hysteresis_register_plot_tab_respects_shared_grid_default() -> None:
+def test_vsm_hysteresis_register_plot_tab_respects_shared_grid_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
     try:
+        monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
         window._graph_option_defaults_by_plugin["VSM Hysteresis Loops"] = {  # noqa: SLF001 - test hook
             "show_grid": False
         }

@@ -6,12 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib import colors as mcolors
 from matplotlib import ticker as mticker
+import pandas as pd
 
 from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot import window as pyplot_window_module
+from plotting.plugins.fmr.fmr_plugin import FmrEntry
 from plotting.pyplot.window import (
     PRIMARY_DOCK_EXPAND_THRESHOLD,
     PRIMARY_DOCK_EXPANDED_FRACTION,
@@ -173,6 +175,33 @@ def test_apply_graph_format_rebuilds_legend_with_visible_lines_only() -> None:
         app.processEvents()
 
 
+def test_apply_graph_options_uses_single_legend_for_twin_axes() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        axes = window._current_axes()
+        assert axes is not None
+        twin = axes.twinx()
+        axes.plot([1.0, 2.0, 3.0], [1.0, 1.5, 2.0], label="50 Oe")
+        twin.plot([1.0, 2.0, 3.0], [4.0, 3.5, 3.0], label="10 kOe")
+
+        window._apply_graph_options_to_axes(axes, plugin_name=None)  # noqa: SLF001
+
+        visible_legends = []
+        for axis in axes.figure.axes:
+            legend = axis.get_legend()
+            if legend is not None and legend.get_visible():
+                visible_legends.append(legend)
+        assert len(visible_legends) == 1
+        labels = [text.get_text() for text in visible_legends[0].get_texts()]
+        assert "50 Oe" in labels
+        assert "10 kOe" in labels
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_apply_graph_format_updates_legend_orientation() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
@@ -234,6 +263,115 @@ def test_dark_mode_toggle_restores_light_legend_when_snapshot_missing() -> None:
         r, g, b, _ = mcolors.to_rgba(legend.get_frame().get_facecolor())
         luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
         assert luminance > 0.75
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_shared_graph_options_persist_to_pyplot_settings_when_plugin_swaps_settings(
+    tmp_path: Path,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        shared_ini = tmp_path / "pyplot-shared.ini"
+        plugin_ini = tmp_path / "plugin-local.ini"
+        shared_settings = QtCore.QSettings(str(shared_ini), QtCore.QSettings.Format.IniFormat)
+        plugin_settings = QtCore.QSettings(str(plugin_ini), QtCore.QSettings.Format.IniFormat)
+        window._shared_settings = shared_settings  # noqa: SLF001 - test hook
+        window.settings = plugin_settings
+
+        payload = window._clean_graph_option_payload(  # noqa: SLF001 - test hook
+            {
+                **window.GRAPH_OPTION_DEFAULTS,
+                "title_font": 27,
+                "legend_columns": 3,
+            }
+        )
+        window._graph_option_defaults_global = payload  # noqa: SLF001 - test hook
+        window._graph_option_defaults_by_plugin = {}  # noqa: SLF001 - test hook
+        window._save_graph_option_settings()  # noqa: SLF001 - test hook
+
+        shared_settings.sync()
+        plugin_settings.sync()
+        assert isinstance(shared_settings.value("graph_options_global"), str)
+        assert plugin_settings.value("graph_options_global", "") in {"", None}
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_hysteresis_activation_keeps_shared_pyplot_settings() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        shared_settings = window._shared_qsettings()  # noqa: SLF001 - test hook
+        assert isinstance(shared_settings, QtCore.QSettings)
+        assert window._activate_plotter_for_project_load("VSM Hysteresis Loops")  # noqa: SLF001
+        assert window.settings is shared_settings
+        plugin_settings = getattr(window, "_vsm_hysteresis_settings", None)
+        assert isinstance(plugin_settings, QtCore.QSettings)
+        assert plugin_settings is not shared_settings
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_project_tree_worksheet_item_opens_by_hashable_key() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        worksheet = WorksheetData(
+            key="wb::hash::sheet",
+            name="Sheet",
+            dataframe=pd.DataFrame({"x": [1.0], "y": [2.0]}),
+            columns={
+                "x": WorksheetColumnMeta(long_name="x"),
+                "y": WorksheetColumnMeta(long_name="y"),
+            },
+            workbook_key="wb::hash",
+        )
+        workbook = WorkbookData(
+            key="wb::hash",
+            name="Workbook",
+            worksheets=[worksheet.key],
+        )
+        window._register_imported_workbook(workbook, [worksheet])  # noqa: SLF001
+        item = window._worksheet_tree_items.get(worksheet.key)  # noqa: SLF001
+        assert item is not None
+
+        window._handle_project_item_double_click(item, 0)  # noqa: SLF001
+        widget = window._worksheet_tabs_open.get(worksheet.key)  # noqa: SLF001
+        assert isinstance(widget, QtWidgets.QWidget)
+        assert window.tab_widget.indexOf(widget) >= 0
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_removing_workbook_does_not_break_graph_activation() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()
+        tab = window.tab_widget.currentWidget()
+        assert isinstance(tab, QtWidgets.QWidget)
+        axes = window._current_axes()
+        assert axes is not None
+        axes.plot([0.0, 1.0], [0.0, 1.0], label="Series")
+        descriptor = window._tab_descriptors.get(tab)  # noqa: SLF001
+        assert descriptor is not None
+        window._register_shared_plot_workbook_for_tab(tab, descriptor)  # noqa: SLF001
+        graph_item = window._graph_tree_items.get(tab)  # noqa: SLF001
+        assert graph_item is not None
+        workbook_key = window._shared_plot_workbook_by_tab.get(tab)  # noqa: SLF001
+        assert workbook_key is not None
+
+        window._remove_imported_workbook(workbook_key)  # noqa: SLF001
+        window._handle_project_item_double_click(graph_item, 0)  # noqa: SLF001
+
+        assert window.tab_widget.currentWidget() is tab
+        assert window.tab_widget.indexOf(tab) >= 0
     finally:
         window.close()
         app.processEvents()
@@ -313,6 +451,48 @@ def test_tight_layout_warning_apply_to_all_uses_one_dialog(
         )
         assert calls["dialog"] == 1
         assert calls["autofit"] == 2
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_tight_layout_warning_uses_saved_plugin_override_without_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        axes = window._current_axes()
+        assert axes is not None
+        figure = axes.figure
+
+        calls = {"override": 0, "dialog": 0}
+        monkeypatch.setattr(window, "_can_show_tight_layout_warning_dialog", lambda: True)
+        monkeypatch.setattr(window, "_plugin_name_for_axes", lambda _axes: "Temperature Sensitivity")
+        monkeypatch.setattr(window, "_has_plugin_graph_option_override", lambda _name: True)
+
+        def _fake_override(_axes: object, _recommendations: dict[str, float]) -> bool:
+            calls["override"] += 1
+            return True
+
+        def _fake_dialog(*, message: str, can_apply_override: bool) -> tuple[str, bool]:
+            _ = (message, can_apply_override)
+            calls["dialog"] += 1
+            return ("keep", False)
+
+        monkeypatch.setattr(window, "_apply_plugin_graph_option_override_for_axes", _fake_override)
+        monkeypatch.setattr(window, "_show_tight_layout_warning_dialog", _fake_dialog)
+
+        window._handle_tight_layout_warning(  # noqa: SLF001
+            figure,
+            [
+                "Tight layout not applied. The left and right margins cannot be made large enough to accommodate all Axes decorations.",
+            ],
+            context="Graph formatting",
+        )
+        assert calls["override"] == 1
+        assert calls["dialog"] == 0
     finally:
         window.close()
         app.processEvents()
@@ -525,9 +705,13 @@ def test_current_annealing_generate_updates_shared_progress(
         def _end(*args: object, **kwargs: object) -> None:
             events.append(("end", (args, kwargs)))
 
+        def _fail_progress_dialog(*args: object, **kwargs: object) -> None:
+            raise AssertionError("Current Annealing must use shared task progress instead of QProgressDialog.")
+
         monkeypatch.setattr(window, "_begin_task_progress", _begin)
         monkeypatch.setattr(window, "_update_task_progress", _update)
         monkeypatch.setattr(window, "_end_task_progress", _end)
+        monkeypatch.setattr(QtWidgets, "QProgressDialog", _fail_progress_dialog)
 
         plugin.generate()
         kinds = [entry[0] for entry in events]
@@ -815,6 +999,79 @@ def test_project_restore_regenerates_shared_plots_when_plugin_state_lacks_tabs(
         app.processEvents()
         assert calls["load"] == 1
         assert calls["generate"] == 1
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_shared_rescale_works_for_fmr_graphs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="FMR")
+    try:
+        monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
+        import pandas as pd
+
+        combo = getattr(window, "_plotter_combo", None)
+        assert isinstance(combo, QtWidgets.QComboBox)
+        index = combo.findText("FMR")
+        assert index >= 0
+        combo.setCurrentIndex(index)
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+
+        frame = pd.DataFrame(
+            {
+                "Magnetic Field [Oe]": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                "Signal X [V]": [0.0, 2.0, 1.0, 3.0, 2.0, 4.0],
+                "Signal Y [V]": [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            }
+        )
+        plugin._dataset = [  # noqa: SLF001 - test fixture injection
+            FmrEntry(
+                path=Path("/tmp/fmr_rescale.csv"),
+                sample="Sample A",
+                frame=frame,
+                units={
+                    "Magnetic Field [Oe]": "Oe",
+                    "Signal X [V]": "V",
+                    "Signal Y [V]": "V",
+                },
+            )
+        ]
+        plugin._data = plugin._dataset  # noqa: SLF001 - loaded-state fixture
+        plugin.generate()
+        app.processEvents()
+
+        axes = window._current_axes()  # noqa: SLF001 - shared navigation target
+        assert axes is not None
+        lines = [line for line in axes.get_lines() if bool(line.get_visible())]
+        assert lines
+
+        x_values: list[float] = []
+        y_values: list[float] = []
+        for line in lines:
+            x_values.extend([float(value) for value in line.get_xdata()])
+            y_values.extend([float(value) for value in line.get_ydata()])
+        x_min = min(x_values)
+        x_max = max(x_values)
+        y_min = min(y_values)
+        y_max = max(y_values)
+
+        axes.set_xlim(x_min + 1.0, x_max - 1.0)
+        axes.set_ylim(y_min + 0.2, y_max - 0.2)
+        app.processEvents()
+
+        window._rescale_current_axes("both")  # noqa: SLF001 - shared feature under test
+        app.processEvents()
+
+        xlim = axes.get_xlim()
+        ylim = axes.get_ylim()
+        assert xlim[0] <= x_min
+        assert xlim[1] >= x_max
+        assert ylim[0] <= y_min
+        assert ylim[1] >= y_max
     finally:
         window.close()
         app.processEvents()
@@ -1225,6 +1482,146 @@ def test_apply_graph_format_sets_figure_dimensions_and_axes_aspect() -> None:
         app.processEvents()
 
 
+def test_canvas_resize_scales_display_dpi_but_preserves_figure_inches() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.resize(1200, 780)
+        window.show()
+        app.processEvents()
+        window._create_blank_graph()
+        app.processEvents()
+
+        canvas = window._current_canvas()
+        axes = window._current_axes()
+        assert canvas is not None
+        assert axes is not None
+        figure = axes.figure
+        assert figure is not None
+
+        base_width, base_height = figure.get_size_inches()
+        baseline_dpi = float(getattr(figure, "dpi", 100.0) or 100.0)
+        baseline_canvas_width = int(canvas.width())
+        baseline_canvas_height = int(canvas.height())
+
+        window.resize(1800, 1180)
+        app.processEvents()
+        app.processEvents()
+
+        expanded_width, expanded_height = figure.get_size_inches()
+        expanded_dpi = float(getattr(figure, "dpi", baseline_dpi) or baseline_dpi)
+        expanded_canvas_width = int(canvas.width())
+        expanded_canvas_height = int(canvas.height())
+        assert expanded_width == pytest.approx(base_width, rel=1e-3)
+        assert expanded_height == pytest.approx(base_height, rel=1e-3)
+        assert expanded_dpi > baseline_dpi
+        assert expanded_canvas_width >= baseline_canvas_width
+        assert expanded_canvas_height >= baseline_canvas_height
+
+        window.resize(980, 680)
+        app.processEvents()
+        app.processEvents()
+
+        shrunk_width, shrunk_height = figure.get_size_inches()
+        shrunk_dpi = float(getattr(figure, "dpi", expanded_dpi) or expanded_dpi)
+        assert shrunk_width == pytest.approx(base_width, rel=1e-3)
+        assert shrunk_height == pytest.approx(base_height, rel=1e-3)
+        assert shrunk_dpi < expanded_dpi
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_mdi_subwindow_resize_updates_embedded_canvas_geometry() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.resize(1280, 820)
+        window.show()
+        app.processEvents()
+        window._create_blank_graph()
+        app.processEvents()
+
+        tab = window.tab_widget.currentWidget()
+        assert isinstance(tab, QtWidgets.QWidget)
+        canvas = window._current_canvas()
+        assert canvas is not None
+        subwindow_for = getattr(window.tab_widget, "_subwindow_for", None)
+        fitter = getattr(window.tab_widget, "_fit_subwindow", None)
+        assert callable(subwindow_for)
+        assert callable(fitter)
+        sub = subwindow_for(tab)
+        assert isinstance(sub, QtWidgets.QMdiSubWindow)
+
+        baseline_canvas_width = int(canvas.width())
+        baseline_canvas_height = int(canvas.height())
+        baseline_sub_width = int(sub.width())
+        baseline_sub_height = int(sub.height())
+        fitter(sub, use_half_width=False, preferred_width=max(520, int(sub.width() * 1.45)))
+        app.processEvents()
+        app.processEvents()
+
+        grown_canvas_width = int(canvas.width())
+        grown_canvas_height = int(canvas.height())
+        grown_sub_width = int(sub.width())
+        grown_sub_height = int(sub.height())
+        assert grown_canvas_width != baseline_canvas_width or grown_canvas_height != baseline_canvas_height
+        assert (grown_canvas_width - baseline_canvas_width) * (grown_sub_width - baseline_sub_width) >= 0
+        assert (grown_canvas_height - baseline_canvas_height) * (grown_sub_height - baseline_sub_height) >= 0
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_apply_graph_format_dimensions_remain_fixed_after_window_resize() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.resize(1300, 860)
+        window.show()
+        app.processEvents()
+        window._create_blank_graph()
+        app.processEvents()
+        axes = next(iter(window._axes_by_tab.values()))  # noqa: SLF001 - test hook
+        assert axes is not None
+
+        controls = window._graph_format_controls
+        assert isinstance(controls.get("figure_width_spin"), QtWidgets.QDoubleSpinBox)
+        assert isinstance(controls.get("figure_height_spin"), QtWidgets.QDoubleSpinBox)
+        assert isinstance(controls.get("figure_width_auto_cb"), QtWidgets.QCheckBox)
+        assert isinstance(controls.get("figure_height_auto_cb"), QtWidgets.QCheckBox)
+        controls["figure_width_auto_cb"].setChecked(False)
+        controls["figure_height_auto_cb"].setChecked(False)
+        controls["figure_width_spin"].setValue(203.2)  # 8.0 in
+        controls["figure_height_spin"].setValue(127.0)  # 5.0 in
+        window._apply_graph_format(apply_all=False)
+        app.processEvents()
+
+        figure = axes.figure
+        target_width, target_height = figure.get_size_inches()
+        assert target_width == pytest.approx(8.0, rel=1e-2)
+        assert target_height == pytest.approx(5.0, rel=1e-2)
+
+        window.resize(1820, 1200)
+        app.processEvents()
+        app.processEvents()
+
+        window.resize(960, 660)
+        app.processEvents()
+        app.processEvents()
+
+        resized_width, resized_height = figure.get_size_inches()
+        assert resized_width == pytest.approx(target_width, rel=1e-3)
+        assert resized_height == pytest.approx(target_height, rel=1e-3)
+        assert resized_width / resized_height == pytest.approx(
+            target_width / target_height,
+            rel=1e-4,
+        )
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_apply_graph_format_supports_axis_value_factor_and_unit_reflection() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
@@ -1344,10 +1741,11 @@ def test_double_click_title_routes_to_shared_graph_format_window(
         bbox = axes.title.get_window_extent(renderer=renderer)
         called: dict[str, object] = {}
 
-        def _capture(*, axes, text_field=None, axis=None):
+        def _capture(*, axes, text_field=None, axis=None, legend=False):
             called["axes"] = axes
             called["text_field"] = text_field
             called["axis"] = axis
+            called["legend"] = legend
             return True
 
         monkeypatch.setattr(window, "_open_shared_graph_format_from_double_click", _capture)
@@ -1430,10 +1828,11 @@ def test_double_click_axis_routes_to_shared_graph_format_window(
 
         called: dict[str, object] = {}
 
-        def _capture(*, axes, text_field=None, axis=None):
+        def _capture(*, axes, text_field=None, axis=None, legend=False):
             called["axes"] = axes
             called["text_field"] = text_field
             called["axis"] = axis
+            called["legend"] = legend
             return True
 
         monkeypatch.setattr(window, "_open_shared_graph_format_from_double_click", _capture)
@@ -1595,6 +1994,180 @@ def test_project_explorer_graph_item_activation_switches_to_tab() -> None:
 
         window._dispatch_project_item_activation(first_plot_item, 0)
         assert window.tab_widget.currentWidget() is first_tab
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_project_explorer_graph_selection_switches_to_tab() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.show()
+        window.activateWindow()
+        app.processEvents()
+        window._create_blank_graph()
+        window._create_blank_graph()
+        app.processEvents()
+
+        tree = getattr(window, "project_tree", None)
+        assert isinstance(tree, QtWidgets.QTreeWidget)
+        plots_root = tree.topLevelItem(0)
+        assert plots_root is not None
+        assert plots_root.childCount() >= 2
+
+        first_plot_item = plots_root.child(0)
+        second_plot_item = plots_root.child(1)
+        assert first_plot_item is not None
+        assert second_plot_item is not None
+
+        first_payload = first_plot_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        second_payload = second_plot_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        assert isinstance(first_payload, tuple) and len(first_payload) >= 2
+        assert isinstance(second_payload, tuple) and len(second_payload) >= 2
+        assert first_payload[0] == "graph"
+        assert second_payload[0] == "graph"
+
+        first_tab = first_payload[1]
+        second_tab = second_payload[1]
+        assert isinstance(first_tab, QtWidgets.QWidget)
+        assert isinstance(second_tab, QtWidgets.QWidget)
+
+        tree.setCurrentItem(first_plot_item)
+        app.processEvents()
+        assert window.tab_widget.currentWidget() is first_tab
+
+        tree.setCurrentItem(second_plot_item)
+        app.processEvents()
+        assert window.tab_widget.currentWidget() is second_tab
+
+        tree.setFocus()
+        app.processEvents()
+        tree.setCurrentItem(first_plot_item)
+        app.processEvents()
+        assert tree.currentItem() is first_plot_item
+        assert window.tab_widget.currentWidget() is first_tab
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_project_explorer_arrow_navigation_keeps_tree_focus() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.show()
+        window.activateWindow()
+        app.processEvents()
+        window._create_blank_graph()
+        window._create_blank_graph()
+        window._create_blank_graph()
+        app.processEvents()
+
+        tree = getattr(window, "project_tree", None)
+        assert isinstance(tree, QtWidgets.QTreeWidget)
+        plots_root = tree.topLevelItem(0)
+        assert plots_root is not None
+        assert plots_root.childCount() >= 3
+
+        first_item = plots_root.child(0)
+        second_item = plots_root.child(1)
+        third_item = plots_root.child(2)
+        assert first_item is not None
+        assert second_item is not None
+        assert third_item is not None
+
+        first_payload = first_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        second_payload = second_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        third_payload = third_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        assert isinstance(first_payload, tuple) and len(first_payload) >= 2
+        assert isinstance(second_payload, tuple) and len(second_payload) >= 2
+        assert isinstance(third_payload, tuple) and len(third_payload) >= 2
+        first_tab = first_payload[1]
+        second_tab = second_payload[1]
+        third_tab = third_payload[1]
+        assert isinstance(first_tab, QtWidgets.QWidget)
+        assert isinstance(second_tab, QtWidgets.QWidget)
+        assert isinstance(third_tab, QtWidgets.QWidget)
+
+        tree.setCurrentItem(first_item)
+        tree.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+        app.processEvents()
+        assert tree.currentItem() is first_item
+        assert window.tab_widget.currentWidget() is first_tab
+
+        down_press = QtGui.QKeyEvent(
+            QtCore.QEvent.Type.KeyPress,
+            QtCore.Qt.Key.Key_Down,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+        )
+        down_release = QtGui.QKeyEvent(
+            QtCore.QEvent.Type.KeyRelease,
+            QtCore.Qt.Key.Key_Down,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+        )
+
+        QtWidgets.QApplication.sendEvent(tree, down_press)
+        QtWidgets.QApplication.sendEvent(tree, down_release)
+        app.processEvents()
+        assert tree.currentItem() is second_item
+        assert window.tab_widget.currentWidget() is second_tab
+        focus_widget = QtWidgets.QApplication.focusWidget()
+        assert focus_widget is tree or (
+            isinstance(focus_widget, QtWidgets.QWidget) and tree.isAncestorOf(focus_widget)
+        )
+
+        QtWidgets.QApplication.sendEvent(tree, down_press)
+        QtWidgets.QApplication.sendEvent(tree, down_release)
+        app.processEvents()
+        assert tree.currentItem() is third_item
+        assert window.tab_widget.currentWidget() is third_tab
+        focus_widget = QtWidgets.QApplication.focusWidget()
+        assert focus_widget is tree or (
+            isinstance(focus_widget, QtWidgets.QWidget) and tree.isAncestorOf(focus_widget)
+        )
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_copy_graph_to_clipboard_produces_png_pixmap() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        app.processEvents()
+
+        assert window._copy_graph_to_clipboard()  # noqa: SLF001 - host helper
+        clipboard = QtWidgets.QApplication.clipboard()
+        assert clipboard is not None
+        pixmap = clipboard.pixmap()
+        assert isinstance(pixmap, QtGui.QPixmap)
+        assert not pixmap.isNull()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_canvas_right_click_routes_to_context_menu() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        app.processEvents()
+        canvas = window._current_canvas()  # noqa: SLF001 - test helper
+        assert canvas is not None
+
+        calls = {"count": 0}
+
+        def _fake_context_menu(event: object) -> None:
+            _ = event
+            calls["count"] += 1
+
+        window._show_canvas_context_menu = _fake_context_menu  # type: ignore[assignment]
+        event = SimpleNamespace(button=3, dblclick=False, canvas=canvas)
+        window._handle_canvas_button_press(event)  # noqa: SLF001 - event dispatch helper
+        assert calls["count"] == 1
     finally:
         window.close()
         app.processEvents()

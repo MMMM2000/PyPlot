@@ -94,6 +94,7 @@ class PyPlotWorkbench(PyPlotWindow):
         initial_plotter: str | None = None,
     ) -> None:
         self.settings = QtCore.QSettings("MicrowireLab", "PyPlotWorkbench")
+        self._shared_settings = self.settings
         raw_dirs = self.settings.value("plugin_last_dirs", "{}")
         try:
             parsed_dirs = json.loads(raw_dirs) if isinstance(raw_dirs, str) else {}
@@ -185,6 +186,13 @@ class PyPlotWorkbench(PyPlotWindow):
         QtCore.QTimer.singleShot(0, self._show_primary_docks)
         QtCore.QTimer.singleShot(0, self._sync_graph_format_controls_from_current_axes)
 
+    def _shared_qsettings(self) -> QtCore.QSettings | None:
+        settings = getattr(self, "_shared_settings", None)
+        if isinstance(settings, QtCore.QSettings):
+            return settings
+        fallback = getattr(self, "settings", None)
+        return fallback if isinstance(fallback, QtCore.QSettings) else None
+
 
     def _update_window_title(self) -> None:
         parts = ["PyPlot"]
@@ -229,7 +237,8 @@ class PyPlotWorkbench(PyPlotWindow):
         self._apply_graph_options_to_axes(axes, plugin_name=plugin_name)
 
     def _load_plotter_history(self) -> list[str]:
-        stored = self.settings.value("plotter_history", "[]")
+        settings = self._shared_qsettings()
+        stored = settings.value("plotter_history", "[]") if settings is not None else "[]"
         if isinstance(stored, str):
             try:
                 parsed = json.loads(stored)
@@ -243,8 +252,11 @@ class PyPlotWorkbench(PyPlotWindow):
         return history
 
     def _save_plotter_history(self) -> None:
+        settings = self._shared_qsettings()
+        if settings is None:
+            return
         try:
-            self.settings.setValue("plotter_history", json.dumps(self._plotter_history))
+            settings.setValue("plotter_history", json.dumps(self._plotter_history))
         except Exception:
             pass
 
@@ -361,8 +373,8 @@ class PyPlotWorkbench(PyPlotWindow):
         return self._project_dialog_start_directory()
 
     def _sync_plugin_directory_settings(self) -> None:
-        settings = getattr(self, "settings", None)
-        if not isinstance(settings, QtCore.QSettings):
+        settings = self._shared_qsettings()
+        if settings is None:
             return
         try:
             import_payload = {key: str(value) for key, value in self._plugin_last_directories.items()}
@@ -492,8 +504,8 @@ class PyPlotWorkbench(PyPlotWindow):
         return cleaned
 
     def _load_graph_option_settings(self) -> None:
-        settings = getattr(self, "settings", None)
-        if not isinstance(settings, QtCore.QSettings):
+        settings = self._shared_qsettings()
+        if settings is None:
             self._graph_option_defaults_global = self._clean_graph_option_payload({})
             self._graph_option_defaults_by_plugin = {}
             return
@@ -519,8 +531,8 @@ class PyPlotWorkbench(PyPlotWindow):
         self._graph_option_defaults_by_plugin = cleaned_plugins
 
     def _save_graph_option_settings(self) -> None:
-        settings = getattr(self, "settings", None)
-        if not isinstance(settings, QtCore.QSettings):
+        settings = self._shared_qsettings()
+        if settings is None:
             return
         try:
             settings.setValue("graph_options_global", json.dumps(self._graph_option_defaults_global))
@@ -552,6 +564,12 @@ class PyPlotWorkbench(PyPlotWindow):
                 merged.update(override)
                 effective = self._clean_graph_option_payload(merged)
         return effective
+
+    def _has_plugin_graph_option_override(self, plugin_name: str | None) -> bool:
+        if not isinstance(plugin_name, str) or not plugin_name.strip():
+            return False
+        override = self._graph_option_defaults_by_plugin.get(plugin_name)
+        return isinstance(override, dict) and bool(override)
 
     def _set_graph_options_widgets(
         self,
@@ -1035,6 +1053,16 @@ class PyPlotWorkbench(PyPlotWindow):
                 )
             except Exception:
                 pass
+            sync_display_reference = getattr(self, "_sync_canvas_display_reference", None)
+            if callable(sync_display_reference):
+                try:
+                    sync_display_reference(
+                        axes=axes,
+                        width_in=figure_width,
+                        height_in=figure_height,
+                    )
+                except Exception:
+                    pass
         targets: list[Any]
         if figure is not None:
             try:
@@ -1189,26 +1217,29 @@ class PyPlotWorkbench(PyPlotWindow):
                 self._current_plugin.deactivate()
             except Exception:
                 pass
+        settings = self._shared_qsettings()
         self._sync_plugin_directory_settings()
-        self.settings.setValue("sources", self.path_edit.text())
-        if self._last_directory is not None:
-            self.settings.setValue("last_directory", str(self._last_directory))
-        if self._last_graph_dir is not None:
-            self.settings.setValue("last_graph_dir", str(self._last_graph_dir))
-        else:
-            self.settings.remove("last_graph_dir")
-        graph_format = getattr(self, "_last_graph_format", ".png")
-        if isinstance(graph_format, str) and graph_format in {".png", ".pdf", ".svg"}:
-            self.settings.setValue("last_graph_format", graph_format)
-        else:
-            self.settings.setValue("last_graph_format", ".png")
-        try:
-            legend_settings = getattr(self, "_legend_settings_by_plugin", {})
-            self.settings.setValue("legend_settings_by_plugin", json.dumps(legend_settings))
-        except Exception:
-            pass
+        if settings is not None:
+            settings.setValue("sources", self.path_edit.text())
+            if self._last_directory is not None:
+                settings.setValue("last_directory", str(self._last_directory))
+            if self._last_graph_dir is not None:
+                settings.setValue("last_graph_dir", str(self._last_graph_dir))
+            else:
+                settings.remove("last_graph_dir")
+            graph_format = getattr(self, "_last_graph_format", ".png")
+            if isinstance(graph_format, str) and graph_format in {".png", ".pdf", ".svg"}:
+                settings.setValue("last_graph_format", graph_format)
+            else:
+                settings.setValue("last_graph_format", ".png")
+            try:
+                legend_settings = getattr(self, "_legend_settings_by_plugin", {})
+                settings.setValue("legend_settings_by_plugin", json.dumps(legend_settings))
+            except Exception:
+                pass
         self._save_graph_option_settings()
-        self.settings.sync()
+        if settings is not None:
+            settings.sync()
         super().closeEvent(event)
 
     # ------------------------------------------------------------------ project and data integration
@@ -1520,8 +1551,10 @@ class PyPlotWorkbench(PyPlotWindow):
                 refresh()
             except Exception:
                 pass
-        self.settings.setValue("sources", self.path_edit.text())
-        self.settings.sync()
+        settings = self._shared_qsettings()
+        if settings is not None:
+            settings.setValue("sources", self.path_edit.text())
+            settings.sync()
     def _has_project_data_to_save(self) -> bool:
         measurements = getattr(self, "measurements", None)
         if isinstance(measurements, list) and measurements:
@@ -3574,6 +3607,16 @@ class PyPlotWorkbench(PyPlotWindow):
                         )
                     except Exception:
                         pass
+                    sync_display_reference = getattr(self, "_sync_canvas_display_reference", None)
+                    if callable(sync_display_reference):
+                        try:
+                            sync_display_reference(
+                                axes=axes,
+                                width_in=resolved_figure_width,
+                                height_in=resolved_figure_height,
+                            )
+                        except Exception:
+                            pass
 
                 x_label_base = self._label_units_to_brackets(str(x_label))
                 y_label_base = self._label_units_to_brackets(str(y_label))

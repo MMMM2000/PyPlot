@@ -44,6 +44,27 @@ def _pump_events(app: QtWidgets.QApplication, iterations: int = 6) -> None:
         app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
 
 
+def _snapshot_settings(*, organization: str, application: str) -> dict[str, object]:
+    settings = QtCore.QSettings(organization, application)
+    snapshot: dict[str, object] = {}
+    for key in settings.allKeys():
+        snapshot[key] = settings.value(key)
+    return snapshot
+
+
+def _restore_settings(
+    *,
+    organization: str,
+    application: str,
+    snapshot: dict[str, object],
+) -> None:
+    settings = QtCore.QSettings(organization, application)
+    settings.clear()
+    for key, value in snapshot.items():
+        settings.setValue(key, value)
+    settings.sync()
+
+
 def _default_shape_memory_inputs() -> list[Path]:
     base = Path("sample_data/manual_stress-strain")
     return [
@@ -301,6 +322,10 @@ def run_shape_memory_visual_check(
         "input_paths": [str(path) for path in resolved_inputs],
         "output_dir": str(output_dir),
     }
+    settings_snapshot = _snapshot_settings(
+        organization="MicrowireLab",
+        application="PyPlotWorkbench",
+    )
 
     window: PyPlotWorkbench | None = None
     try:
@@ -373,6 +398,14 @@ def run_shape_memory_visual_check(
                 window.close()
             except Exception:
                 pass
+        try:
+            _restore_settings(
+                organization="MicrowireLab",
+                application="PyPlotWorkbench",
+                snapshot=settings_snapshot,
+            )
+        except Exception:
+            pass
         if created_app:
             app.quit()
 

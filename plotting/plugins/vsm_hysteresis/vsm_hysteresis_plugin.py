@@ -268,10 +268,11 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         self.settings_widget()
         host.logger = logging.getLogger("vsm_hysteresis_loops")
         host.logger.setLevel(logging.INFO)
-        host.settings = QtCore.QSettings("MicrowireLab", "VSMHysteresisLoops")
+        host._vsm_hysteresis_settings = QtCore.QSettings("MicrowireLab", "VSMHysteresisLoops")
 
-        stored_x = host.settings.value("x_axis")
-        stored_y = host.settings.value("y_axis")
+        settings = host._vsm_hysteresis_settings
+        stored_x = settings.value("x_axis")
+        stored_y = settings.value("y_axis")
         host._stored_axes = (
             stored_x if isinstance(stored_x, str) and stored_x else None,
             stored_y if isinstance(stored_y, str) and stored_y else None,
@@ -284,6 +285,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         host._last_rescale_enabled = False
         host._line_visibility = {}
         host._worksheet_models = {}
+        host._measurement_worksheet_keys = set()
         host._plotted_series_exports = {}
         host._metrics_by_temperature = {}
         host._metrics_by_angle = {}

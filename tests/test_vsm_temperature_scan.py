@@ -59,6 +59,27 @@ def test_combine_dual_field_entries_merges_high_low() -> None:
     assert 10000 in fields
 
 
+def test_parse_file_appends_orientation_from_filename(tmp_path: Path) -> None:
+    processor = module.VSMTemperatureScanProcessor()
+    path = tmp_path / "202602010101-TSCN-a090-example.txt"
+    path.write_text(
+        "\n".join(
+            [
+                "@Samplename: Ni50Fe27Ga23 5-4 no glass 2",
+                "@@End of Header.",
+                "Time_since_start Applied_Field Signal_X_direction Sample_Temperature_For_Plot_",
+                "New Section: Section 0:",
+                "0 10000 0.00051 25.0",
+                "1 10000 0.00050 26.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    _frame, sample = processor._parse_file(path)
+    assert sample == "Ni50Fe27Ga23 5-4 no glass 2 (90°)"
+
+
 def test_axis_label_uses_kilooe_for_high_fields() -> None:
     processor = module.VSMTemperatureScanProcessor()
     label = processor._axis_label_for_fields([10000], base="Magnetization")

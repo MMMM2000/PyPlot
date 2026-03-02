@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -285,49 +286,59 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 maximum=max(1, total_paths),
                 value=0,
             )
-        progress = QtWidgets.QProgressDialog(
-            "Generating current annealing plots…", "Cancel", 0, len(paths_sorted), self.host
-        )
-        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
-        progress.setWindowTitle("Generating Plots")
-        progress.setMinimumDuration(300)
-        cancelled = False
         completed = 0
+        progress_interval = 1 if total_paths <= 25 else max(1, total_paths // 100)
+        detail_interval = 1 if total_paths <= 40 else max(1, total_paths // 24)
+        event_interval = 1 if total_paths <= 20 else max(2, total_paths // 48)
+        suspend_tree_updates = getattr(self.host, "_suspend_project_tree_updates", None)
+        tree_context = suspend_tree_updates() if callable(suspend_tree_updates) else nullcontext(None)
+        tab_updates_prev: bool | None = None
         try:
-            for idx, path_str in enumerate(paths_sorted, start=1):
-                if callable(update_shared_progress):
-                    update_shared_progress(
-                        value=idx - 1,
-                        maximum=max(1, total_paths),
-                        title=f"Generating {Path(path_str).name} ({idx}/{total_paths})",
-                    )
-                if progress.wasCanceled():
-                    cancelled = True
-                    break
-                df = self._data_by_file[path_str]
-                tab = self._create_plot_tab(path_str, df)
-                if tab is None:
+            tab_widget = getattr(self.host, "tab_widget", None)
+            if isinstance(tab_widget, QtWidgets.QWidget):
+                tab_updates_prev = tab_widget.updatesEnabled()
+                tab_widget.setUpdatesEnabled(False)
+            with tree_context:
+                for idx, path_str in enumerate(paths_sorted, start=1):
+                    df = self._data_by_file[path_str]
+                    tab = self._create_plot_tab(path_str, df)
                     completed = idx
-                    progress.setValue(idx)
-                    continue
-                plots_created += 1
-                completed = idx
-                progress.setValue(idx)
-                if callable(update_shared_progress):
-                    update_shared_progress(
-                        value=idx,
-                        maximum=max(1, total_paths),
-                        title=f"Generating {Path(path_str).name} ({idx}/{total_paths})",
-                    )
-                QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+                    if tab is not None:
+                        plots_created += 1
+                    if callable(update_shared_progress):
+                        should_update = (
+                            idx == total_paths
+                            or idx <= 2
+                            or idx % progress_interval == 0
+                        )
+                        if should_update:
+                            title: str | None = None
+                            if (
+                                idx == total_paths
+                                or idx <= 2
+                                or idx % detail_interval == 0
+                            ):
+                                title = f"Generating {Path(path_str).name} ({idx}/{total_paths})"
+                            update_shared_progress(
+                                value=idx,
+                                maximum=max(1, total_paths),
+                                title=title,
+                            )
+                    if idx == total_paths or idx % event_interval == 0:
+                        QtWidgets.QApplication.processEvents(
+                            QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                        )
         finally:
-            final_value = total_paths if not cancelled else max(0, min(completed, total_paths))
-            progress.setValue(final_value)
+            tab_widget = getattr(self.host, "tab_widget", None)
+            if isinstance(tab_widget, QtWidgets.QWidget) and tab_updates_prev is not None:
+                tab_widget.setUpdatesEnabled(tab_updates_prev)
+                tab_widget.update()
+            final_value = max(0, min(completed, total_paths))
             if callable(update_shared_progress):
                 update_shared_progress(
                     value=final_value,
                     maximum=max(1, total_paths),
-                    title="Plot generation complete." if not cancelled else "Plot generation cancelled.",
+                    title="Plot generation complete.",
                 )
             if callable(end_shared_progress):
                 end_shared_progress()

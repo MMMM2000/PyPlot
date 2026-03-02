@@ -331,77 +331,99 @@ class StressDependencePlugin(PyPlotPlugin):
             return
         self._clear_existing_tabs()
         total_steps = len(grouped) * len(config["variables"])
-        progress_dialog: QtWidgets.QProgressDialog | None = None
-        if total_steps > 1:
-            progress_dialog = QtWidgets.QProgressDialog(
-                "Generating stress dependence plots…",
-                "Cancel",
-                0,
-                total_steps,
-                self.host,
+        begin_shared_progress = getattr(self.host, "_begin_task_progress", None)
+        update_shared_progress = getattr(self.host, "_update_task_progress", None)
+        end_shared_progress = getattr(self.host, "_end_task_progress", None)
+        if callable(begin_shared_progress):
+            begin_shared_progress(
+                "Generating stress dependence plots...",
+                maximum=max(1, total_steps),
+                value=0,
             )
-            progress_dialog.setWindowTitle("Processing")
-            progress_dialog.setAutoClose(True)
-            progress_dialog.setAutoReset(True)
-            progress_dialog.show()
-
-        cancelled = False
+        progress_interval = 1 if total_steps <= 30 else max(1, total_steps // 90)
+        detail_interval = 1 if total_steps <= 48 else max(1, total_steps // 20)
+        event_interval = 1 if total_steps <= 24 else max(2, total_steps // 48)
         plots_created = 0
-        for (composition, title, sample_end, anneal), group in grouped:
-            for variable in config["variables"]:
-                if progress_dialog is not None:
-                    QtWidgets.QApplication.processEvents()
-                    if progress_dialog.wasCanceled():
-                        cancelled = True
-                        break
-                try:
-                    fig, saved_name = stress_core.plot_variable(
-                        group.copy(), variable, config["save"], config["output_dir"]
+        step = 0
+        try:
+            for (composition, title, sample_end, anneal), group in grouped:
+                for variable in config["variables"]:
+                    step += 1
+                    try:
+                        fig, saved_name = stress_core.plot_variable(
+                            group.copy(), variable, config["save"], config["output_dir"]
+                        )
+                    except Exception as exc:
+                        self._log(
+                            f"Failed to plot {variable} for {composition} {title}: {exc}",
+                            level="error",
+                        )
+                        continue
+                    canvas = FigureCanvas(fig)
+                    canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+                    tab = QtWidgets.QWidget()
+                    tab_layout = QtWidgets.QVBoxLayout(tab)
+                    tab_layout.setContentsMargins(0, 0, 0, 0)
+                    tab_layout.addWidget(canvas)
+                    ax = fig.axes[0] if fig.axes else None
+                    tab_label = stress_core.LABELS.get(variable, variable)
+                    descriptor = window_module.TabDescriptor(
+                        kind="stress_dependence",
+                        title=fig.axes[0].get_title() if fig.axes else tab_label,
+                        root_label=f"{composition} {title} {anneal}",
+                        x_label="Applied load (g)",
+                        y_label=stress_core.LABELS.get(variable, variable),
+                        canvas=canvas,
+                        axes=ax,
+                        lines={},
+                        metadata={
+                            "composition": composition,
+                            "title": title,
+                            "sample_end": stress_core.format_sample_end(sample_end),
+                            "anneal": anneal,
+                            "variable": variable,
+                            "saved_path": saved_name if config["save"] else "",
+                            "source_files": list(self._loaded_files),
+                        },
                     )
-                except Exception as exc:
-                    self._log(
-                        f"Failed to plot {variable} for {composition} {title}: {exc}",
-                        level="error",
-                    )
-                    continue
-                canvas = FigureCanvas(fig)
-                canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
-                tab = QtWidgets.QWidget()
-                tab_layout = QtWidgets.QVBoxLayout(tab)
-                tab_layout.setContentsMargins(0, 0, 0, 0)
-                tab_layout.addWidget(canvas)
-                ax = fig.axes[0] if fig.axes else None
-                tab_label = stress_core.LABELS.get(variable, variable)
-                descriptor = window_module.TabDescriptor(
-                    kind="stress_dependence",
-                    title=fig.axes[0].get_title() if fig.axes else tab_label,
-                    root_label=f"{composition} {title} {anneal}",
-                    x_label="Applied load (g)",
-                    y_label=stress_core.LABELS.get(variable, variable),
-                    canvas=canvas,
-                    axes=ax,
-                    lines={},
-                    metadata={
-                        "composition": composition,
-                        "title": title,
-                        "sample_end": stress_core.format_sample_end(sample_end),
-                        "anneal": anneal,
-                        "variable": variable,
-                        "saved_path": saved_name if config["save"] else "",
-                        "source_files": list(self._loaded_files),
-                    },
+                    self.host.tab_widget.addTab(tab, tab_label)
+                    self.host._register_plot_tab(tab, canvas, ax, descriptor)
+                    self._plot_tabs.append(tab)
+                    plots_created += 1
+                    if callable(update_shared_progress):
+                        should_update = (
+                            step == total_steps
+                            or step <= 2
+                            or step % progress_interval == 0
+                        )
+                        if should_update:
+                            title_text: str | None = None
+                            if (
+                                step == total_steps
+                                or step <= 2
+                                or step % detail_interval == 0
+                            ):
+                                title_text = (
+                                    f"Generating {composition} {anneal} - {tab_label} ({step}/{total_steps})"
+                                )
+                            update_shared_progress(
+                                value=step,
+                                maximum=max(1, total_steps),
+                                title=title_text,
+                            )
+                    if step == total_steps or step % event_interval == 0:
+                        QtWidgets.QApplication.processEvents(
+                            QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                        )
+        finally:
+            if callable(update_shared_progress):
+                update_shared_progress(
+                    value=max(0, min(step, total_steps)),
+                    maximum=max(1, total_steps),
+                    title="Plot generation complete.",
                 )
-                self.host.tab_widget.addTab(tab, tab_label)
-                self.host._register_plot_tab(tab, canvas, ax, descriptor)
-                self._plot_tabs.append(tab)
-                plots_created += 1
-                if progress_dialog is not None:
-                    progress_dialog.setValue(progress_dialog.value() + 1)
-            if cancelled:
-                break
-
-        if progress_dialog is not None:
-            progress_dialog.close()
+            if callable(end_shared_progress):
+                end_shared_progress()
 
         if not self._plot_tabs:
             QtWidgets.QMessageBox.warning(
@@ -420,10 +442,7 @@ class StressDependencePlugin(PyPlotPlugin):
             self._summary_label.setText(
                 f"Generated {plots_created} plot(s) across {len(grouped)} group(s)."
             )
-        if cancelled:
-            self._log("Plot generation cancelled by user.", level="error")
-        else:
-            self._log(f"Generated {plots_created} stress dependence plot(s).")
+        self._log(f"Generated {plots_created} stress dependence plot(s).")
 
         self.update_ui()
 

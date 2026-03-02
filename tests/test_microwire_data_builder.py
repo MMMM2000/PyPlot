@@ -800,6 +800,7 @@ def test_update_existing_exports_with_strain(tmp_path: Path) -> None:
 def test_builder_recent_projects_menu_updates(tmp_path: Path) -> None:
     _ensure_qapp()
     window = BuilderWindow()
+    window._auto_open_last = False
     try:
         window._clear_recent_projects()
         QtWidgets.QApplication.processEvents()
@@ -825,19 +826,24 @@ def test_builder_recent_projects_menu_updates(tmp_path: Path) -> None:
             None,
         )
         assert isinstance(clear_action, QtGui.QAction)
-        clear_action.trigger()
+        # QAction.trigger() can deadlock with native menu plumbing in headless macOS runs.
+        window._clear_recent_projects()
         QtWidgets.QApplication.processEvents()
 
         assert window._recent_projects == []
         refreshed_actions = menu.actions()
         assert refreshed_actions and refreshed_actions[0].text() == "No recent projects"
     finally:
-        window.close()
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 
 def test_builder_close_stops_pending_scan_threads(tmp_path: Path) -> None:
     _ensure_qapp()
     window = BuilderWindow()
+    window._auto_open_last = False
     try:
         scan_root = tmp_path / "scan"
         scan_root.mkdir(parents=True, exist_ok=True)
@@ -885,6 +891,7 @@ def test_load_project_handles_missing_sections(
 ) -> None:
     _ensure_qapp()
     window = BuilderWindow()
+    window._auto_open_last = False
     try:
         monkeypatch.setattr(
             QtWidgets.QMessageBox,
@@ -934,4 +941,7 @@ def test_load_project_handles_missing_sections(
             sources = getattr(getattr(section, "data", object()), "sources", [])
             assert list(sources) in ([], [fabrication_source])
     finally:
-        window.close()
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()

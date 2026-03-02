@@ -2115,6 +2115,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._navigation_helpers: Dict[FigureCanvas, NavigationToolbar2QT] = {}
         self._cursor_connections: Dict[FigureCanvas, int] = {}
         self._edit_connections: Dict[FigureCanvas, int] = {}
+        self._resize_connections: Dict[FigureCanvas, int] = {}
+        self._canvas_copy_shortcuts: Dict[FigureCanvas, QtGui.QShortcut] = {}
+        self._canvas_base_size_inches: Dict[FigureCanvas, tuple[float, float]] = {}
+        self._canvas_base_dpi: Dict[FigureCanvas, float] = {}
+        self._canvas_scaling_guard: set[FigureCanvas] = set()
+        self._canvas_display_scale: Dict[FigureCanvas, float] = {}
         self._cursor_label: QtWidgets.QLabel | None = None
         self._cursor_axes: Any | None = None
         self._nav_mode: Optional[str] = None
@@ -2153,6 +2159,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._workbook_tree_root: QtWidgets.QTreeWidgetItem | None = None
         self._project_tree_search_text = ""
         self._project_tree_filter_refresh_pending = False
+        self._project_tree_selection_sync_blocked = False
         self._data_folder_items: Dict[Path, QtWidgets.QTreeWidgetItem] = {}
         self._data_workbook_items: Dict[Hashable, QtWidgets.QTreeWidgetItem] = {}
         self._workbooks: Dict[Hashable, WorkbookData] = {}
@@ -2677,6 +2684,102 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
     def _save_current_graph(self) -> None:
         self._save_graph_for_current_tab()
+
+    def _copy_graph_to_clipboard(
+        self,
+        *,
+        canvas: FigureCanvas | None = None,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> bool:
+        """Copy the current Matplotlib graph as a PNG image to the clipboard."""
+
+        target = parent or self
+        active_canvas = canvas or self._current_canvas()
+        if active_canvas is None:
+            QtWidgets.QMessageBox.information(
+                target,
+                "Copy Graph",
+                "No plot area is available to copy.",
+            )
+            return False
+        try:
+            active_canvas.draw()
+        except Exception:
+            pass
+        try:
+            pixmap = active_canvas.grab()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                target,
+                "Copy Graph",
+                f"Failed to copy graph image:\n{exc}",
+            )
+            return False
+        if pixmap.isNull():
+            QtWidgets.QMessageBox.warning(
+                target,
+                "Copy Graph",
+                "Failed to copy graph image.",
+            )
+            return False
+        clipboard = QtWidgets.QApplication.clipboard()
+        if clipboard is None:
+            return False
+        clipboard.setPixmap(pixmap, QtGui.QClipboard.Mode.Clipboard)
+        return True
+
+    def _show_canvas_context_menu(self, event: Any) -> None:
+        canvas = getattr(event, "canvas", None)
+        if not isinstance(canvas, FigureCanvas):
+            return
+        tab: QtWidgets.QWidget | None = None
+        for candidate_tab, candidate_canvas in self._canvas_by_tab.items():
+            if candidate_canvas is canvas:
+                tab = candidate_tab
+                break
+        if isinstance(tab, QtWidgets.QWidget) and self.tab_widget.currentWidget() is not tab:
+            self._show_tab(tab)
+
+        global_pos: QtCore.QPoint | None = None
+        gui_event = getattr(event, "guiEvent", None)
+        if isinstance(gui_event, QtGui.QMouseEvent):
+            try:
+                global_pos = gui_event.globalPosition().toPoint()
+            except Exception:
+                try:
+                    global_pos = gui_event.globalPos()
+                except Exception:
+                    global_pos = None
+        if global_pos is None:
+            try:
+                x_pos = int(round(float(getattr(event, "x", 0.0) or 0.0)))
+                y_pos = int(round(float(getattr(event, "y", 0.0) or 0.0)))
+                global_pos = canvas.mapToGlobal(QtCore.QPoint(x_pos, y_pos))
+            except Exception:
+                global_pos = QtGui.QCursor.pos()
+
+        menu = QtWidgets.QMenu(self)
+        copy_action = menu.addAction("Copy graph as PNG")
+        export_action = menu.addAction("Export graph...")
+        chosen = menu.exec(global_pos)
+        if chosen is copy_action:
+            self._copy_graph_to_clipboard(canvas=canvas)
+        elif chosen is export_action:
+            self._save_graph_for_current_tab(parent=self)
+
+    @staticmethod
+    def _is_canvas_context_click(event: Any) -> bool:
+        gui_event = getattr(event, "guiEvent", None)
+        if isinstance(gui_event, QtGui.QMouseEvent):
+            try:
+                return gui_event.button() == QtCore.Qt.MouseButton.RightButton
+            except Exception:
+                return False
+        button = getattr(event, "button", None)
+        if isinstance(button, int):
+            return button == 3
+        token = str(button).strip().lower()
+        return token == "3" or "right" in token
 
     def _save_graph_for_current_tab(
         self,
@@ -4816,6 +4919,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         except Exception:
             status = None
         if status is not None:
+            label = QtWidgets.QLabel("x: --   y: --", self)
+            label.setObjectName("mw_cursor_status")
+            label.setMinimumWidth(320)
+            label.setMinimumHeight(26)
+            label.setContentsMargins(6, 2, 6, 2)
+            status.addPermanentWidget(label, 1)
+            self._cursor_label = label
+
             progress_label = QtWidgets.QLabel("", self)
             progress_label.setObjectName("mw_task_progress_label")
             progress_label.setMinimumWidth(220)
@@ -4831,14 +4942,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             progress_bar.setVisible(False)
             status.addPermanentWidget(progress_bar, 0)
             self._task_progress_bar = progress_bar
-
-            label = QtWidgets.QLabel("x: --   y: --", self)
-            label.setObjectName("mw_cursor_status")
-            label.setMinimumWidth(320)
-            label.setMinimumHeight(26)
-            label.setContentsMargins(6, 2, 6, 2)
-            status.addPermanentWidget(label, 1)
-            self._cursor_label = label
             try:
                 status.setMinimumHeight(30)
                 status.setSizeGripEnabled(True)
@@ -4862,6 +4965,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.project_tree.customContextMenuRequested.connect(self._handle_project_context_menu)
         self.project_tree.itemDoubleClicked.connect(self._dispatch_project_item_activation)
         self.project_tree.itemActivated.connect(self._dispatch_project_item_activation)
+        self.project_tree.currentItemChanged.connect(self._handle_project_tree_current_item_changed)
         model = self.project_tree.model()
         if model is not None:
             model.rowsInserted.connect(self._schedule_project_tree_filter_refresh)
@@ -6296,9 +6400,51 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             )
             return
         try:
+            requested_x = axis in {"both", "x"}
+            requested_y = axis in {"both", "y"}
+
+            def _axis_data_bounds(target_axes: Any) -> tuple[float | None, float | None, float | None, float | None]:
+                xmins: list[float] = []
+                xmaxs: list[float] = []
+                ymins: list[float] = []
+                ymaxs: list[float] = []
+                try:
+                    lines = list(target_axes.get_lines())
+                except Exception:
+                    lines = []
+                for line in lines:
+                    try:
+                        if not bool(line.get_visible()):
+                            continue
+                    except Exception:
+                        pass
+                    x_arr = self._coerce_numeric_array(line.get_xdata())
+                    if x_arr.size:
+                        xmins.append(float(np.min(x_arr)))
+                        xmaxs.append(float(np.max(x_arr)))
+                    y_arr = self._coerce_numeric_array(line.get_ydata())
+                    if y_arr.size:
+                        ymins.append(float(np.min(y_arr)))
+                        ymaxs.append(float(np.max(y_arr)))
+                xmin = min(xmins) if xmins else None
+                xmax = max(xmaxs) if xmaxs else None
+                ymin = min(ymins) if ymins else None
+                ymax = max(ymaxs) if ymaxs else None
+                return xmin, xmax, ymin, ymax
+
+            def _padded_limits(lower: float, upper: float) -> tuple[float, float]:
+                span = upper - lower
+                if not np.isfinite(span) or span <= 0:
+                    delta = max(abs(lower), 1.0) * 0.05
+                    return lower - delta, upper + delta
+                pad = span * 0.03
+                return lower - pad, upper + pad
+
+            prior_xlim = tuple(axes.get_xlim())
+            prior_ylim = tuple(axes.get_ylim())
             axes.relim()
-            scalex = axis in {"both", "x"}
-            scaley = axis in {"both", "y"}
+            scalex = requested_x
+            scaley = requested_y
             try:
                 if scalex:
                     axes.set_autoscalex_on(True)
@@ -6316,6 +6462,56 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             except Exception:
                 pass
             axes.autoscale_view(scalex=scalex, scaley=scaley)
+
+            # Some plugin plots keep stale/degenerate limits even after relim+autoscale.
+            # Fall back to data-driven bounds from visible lines.
+            xmin, xmax, ymin, ymax = _axis_data_bounds(axes)
+            if requested_x and xmin is not None and xmax is not None:
+                x_left, x_right = _padded_limits(float(xmin), float(xmax))
+                xscale = "linear"
+                try:
+                    xscale = str(axes.get_xscale() or "linear").lower()
+                except Exception:
+                    xscale = "linear"
+                if xscale == "log":
+                    if x_right > 0:
+                        x_left = max(x_left, np.nextafter(0.0, 1.0))
+                        if x_left < x_right:
+                            axes.set_xlim(x_left, x_right)
+                else:
+                    if x_left < x_right:
+                        axes.set_xlim(x_left, x_right)
+
+            if requested_y and ymin is not None and ymax is not None:
+                y_bottom, y_top = _padded_limits(float(ymin), float(ymax))
+                yscale = "linear"
+                try:
+                    yscale = str(axes.get_yscale() or "linear").lower()
+                except Exception:
+                    yscale = "linear"
+                if yscale == "log":
+                    if y_top > 0:
+                        y_bottom = max(y_bottom, np.nextafter(0.0, 1.0))
+                        if y_bottom < y_top:
+                            axes.set_ylim(y_bottom, y_top)
+                else:
+                    if y_bottom < y_top:
+                        axes.set_ylim(y_bottom, y_top)
+
+            # If nothing changed, attempt one more direct autoscale pass.
+            try:
+                current_xlim = tuple(axes.get_xlim())
+                current_ylim = tuple(axes.get_ylim())
+            except Exception:
+                current_xlim = prior_xlim
+                current_ylim = prior_ylim
+            if current_xlim == prior_xlim and current_ylim == prior_ylim:
+                try:
+                    axes.autoscale(enable=True, axis="both", tight=False)
+                    axes.autoscale_view(scalex=requested_x, scaley=requested_y)
+                except Exception:
+                    pass
+
             canvas = getattr(axes, "figure", None)
             if canvas is not None:
                 canvas = getattr(canvas, "canvas", None)
@@ -7217,6 +7413,34 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             self._edit_connections[canvas] = edit_cid
         except Exception:
             pass
+        try:
+            resize_cid = canvas.mpl_connect(
+                "resize_event",
+                lambda _event, c=canvas: self._handle_canvas_resize(c),
+            )
+            self._resize_connections[canvas] = resize_cid
+        except Exception:
+            pass
+        try:
+            copy_shortcut = QtGui.QShortcut(
+                QtGui.QKeySequence.StandardKey.Copy,
+                canvas,
+            )
+            copy_shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            copy_shortcut.activated.connect(
+                lambda c=canvas: self._copy_graph_to_clipboard(canvas=c),
+            )
+            self._canvas_copy_shortcuts[canvas] = copy_shortcut
+        except Exception:
+            pass
+        self._capture_canvas_base_geometry(canvas)
+        try:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda c=canvas: self._apply_canvas_display_scale(c, force=True),
+            )
+        except Exception:
+            pass
         if descriptor is not None:
             self._tab_descriptors[tab] = descriptor
             plugin_name = self._tab_plugin_name(descriptor)
@@ -7252,6 +7476,203 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             self._rebuild_object_manager_for_tab(tab)
         self._update_tab_buttons()
         self._mark_project_dirty()
+
+    def _capture_canvas_base_geometry(
+        self,
+        canvas: FigureCanvas | None,
+        *,
+        width_in: float | None = None,
+        height_in: float | None = None,
+        dpi: float | None = None,
+        keep_existing_dpi: bool = True,
+    ) -> bool:
+        if not isinstance(canvas, FigureCanvas):
+            return False
+        figure = getattr(canvas, "figure", None)
+        if figure is None:
+            return False
+        if width_in is None or height_in is None:
+            try:
+                size = figure.get_size_inches()
+                if len(size) >= 2:
+                    if width_in is None:
+                        width_in = float(size[0])
+                    if height_in is None:
+                        height_in = float(size[1])
+            except Exception:
+                return False
+        if width_in is None or height_in is None:
+            return False
+        try:
+            width_value = float(width_in)
+            height_value = float(height_in)
+        except Exception:
+            return False
+        if not np.isfinite(width_value) or not np.isfinite(height_value):
+            return False
+        if width_value <= 0.0 or height_value <= 0.0:
+            return False
+        self._canvas_base_size_inches[canvas] = (width_value, height_value)
+
+        dpi_value: float | None = None
+        if keep_existing_dpi:
+            existing_dpi = self._canvas_base_dpi.get(canvas)
+            if existing_dpi is not None and existing_dpi > 0.0 and np.isfinite(existing_dpi):
+                dpi_value = float(existing_dpi)
+        if dpi_value is None and dpi is not None:
+            try:
+                parsed = float(dpi)
+            except Exception:
+                parsed = 0.0
+            if parsed > 0.0 and np.isfinite(parsed):
+                dpi_value = parsed
+        if dpi_value is None:
+            try:
+                parsed = float(getattr(figure, "dpi", 100.0) or 100.0)
+            except Exception:
+                parsed = 100.0
+            if parsed <= 0.0 or not np.isfinite(parsed):
+                parsed = 100.0
+            dpi_value = float(parsed)
+        self._canvas_base_dpi[canvas] = float(dpi_value)
+        return True
+
+    def _canvas_for_axes_object(self, axes: Any) -> FigureCanvas | None:
+        if axes is None:
+            return None
+        tab = self._tab_for_axes(axes)
+        if tab is not None:
+            canvas = self._canvas_by_tab.get(tab)
+            if isinstance(canvas, FigureCanvas):
+                return canvas
+        figure = getattr(axes, "figure", None)
+        if figure is None:
+            return None
+        for canvas in self._canvas_by_tab.values():
+            if not isinstance(canvas, FigureCanvas):
+                continue
+            if getattr(canvas, "figure", None) is figure:
+                return canvas
+        return None
+
+    def _sync_canvas_display_reference(
+        self,
+        *,
+        axes: Any,
+        width_in: float | None = None,
+        height_in: float | None = None,
+    ) -> None:
+        canvas = self._canvas_for_axes_object(axes)
+        if not isinstance(canvas, FigureCanvas):
+            return
+        updated = self._capture_canvas_base_geometry(
+            canvas,
+            width_in=width_in,
+            height_in=height_in,
+            keep_existing_dpi=True,
+        )
+        if not updated:
+            return
+        self._apply_canvas_display_scale(canvas, force=True)
+
+    def _handle_canvas_resize(self, canvas: FigureCanvas | None) -> None:
+        if not isinstance(canvas, FigureCanvas):
+            return
+        self._apply_canvas_display_scale(canvas)
+
+    def _apply_canvas_display_scale(
+        self,
+        canvas: FigureCanvas | None,
+        *,
+        force: bool = False,
+    ) -> None:
+        if not isinstance(canvas, FigureCanvas):
+            return
+        if canvas in self._canvas_scaling_guard:
+            return
+        figure = getattr(canvas, "figure", None)
+        if figure is None:
+            return
+        if canvas not in self._canvas_base_size_inches:
+            if not self._capture_canvas_base_geometry(canvas):
+                return
+        base_size = self._canvas_base_size_inches.get(canvas)
+        if not isinstance(base_size, tuple) or len(base_size) < 2:
+            return
+        base_width, base_height = float(base_size[0]), float(base_size[1])
+        if base_width <= 0.0 or base_height <= 0.0:
+            return
+        base_dpi = float(self._canvas_base_dpi.get(canvas, 100.0) or 100.0)
+        if base_dpi <= 0.0:
+            base_dpi = 100.0
+
+        try:
+            canvas_width = int(canvas.width())
+            canvas_height = int(canvas.height())
+        except Exception:
+            return
+        if canvas_width <= 1 or canvas_height <= 1:
+            return
+        device_ratio = 1.0
+        ratio_getter = getattr(canvas, "devicePixelRatioF", None)
+        if callable(ratio_getter):
+            try:
+                ratio_value = float(ratio_getter())
+            except Exception:
+                ratio_value = 1.0
+            if ratio_value > 0.0 and np.isfinite(ratio_value):
+                device_ratio = ratio_value
+        width_px = float(canvas_width) * device_ratio
+        height_px = float(canvas_height) * device_ratio
+        if width_px <= 0.0 or height_px <= 0.0:
+            return
+        scale_x = width_px / max(1e-6, base_width * base_dpi)
+        scale_y = height_px / max(1e-6, base_height * base_dpi)
+        scale = min(scale_x, scale_y)
+        if not np.isfinite(scale) or scale <= 0.0:
+            return
+        scale = max(0.05, min(float(scale), 20.0))
+        target_dpi = max(1.0, float(base_dpi * scale))
+        self._canvas_display_scale[canvas] = scale
+
+        should_apply = force
+        if not should_apply:
+            try:
+                current_dpi = float(getattr(figure, "dpi", target_dpi) or target_dpi)
+            except Exception:
+                current_dpi = target_dpi
+            try:
+                size = figure.get_size_inches()
+                current_width = float(size[0])
+                current_height = float(size[1])
+            except Exception:
+                current_width = base_width
+                current_height = base_height
+            dpi_diff = abs(current_dpi - target_dpi)
+            size_diff = max(abs(current_width - base_width), abs(current_height - base_height))
+            should_apply = dpi_diff > max(0.2, target_dpi * 0.003) or size_diff > 1e-4
+        if not should_apply:
+            return
+
+        self._canvas_scaling_guard.add(canvas)
+        try:
+            try:
+                figure.set_dpi(target_dpi)
+            except Exception:
+                pass
+            try:
+                figure.set_size_inches(base_width, base_height, forward=False)
+            except Exception:
+                pass
+            try:
+                canvas.draw_idle()
+            except Exception:
+                try:
+                    canvas.draw()
+                except Exception:
+                    pass
+        finally:
+            self._canvas_scaling_guard.discard(canvas)
 
     def _ensure_graph_tree_item(
         self, tab: QtWidgets.QWidget, descriptor: TabDescriptor
@@ -7735,41 +8156,29 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             maximum=max(1, total_files),
             value=0,
         )
-        progress: QtWidgets.QProgressDialog | None = None
-        if total_files > 1:
-            progress = QtWidgets.QProgressDialog(
-                "Importing data...",
-                "Cancel",
-                0,
-                total_files,
-                self,
-            )
-            progress.setWindowTitle("Import Data")
-            progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-            progress.setMinimumDuration(0)
-            progress.setValue(0)
-        cancelled = False
+        update_interval = 1 if total_files <= 30 else max(1, total_files // 80)
+        event_interval = 1 if total_files <= 24 else max(2, total_files // 40)
         position = 0
         try:
             for position, file_path in enumerate(files, start=1):
-                self._update_task_progress(
-                    value=position - 1,
-                    title=f"Importing {file_path.name} ({position}/{total_files})",
-                )
-                if progress is not None:
-                    progress.setLabelText(
-                        f"Importing {file_path.name} ({position}/{total_files})"
-                    )
-                    progress.setValue(position - 1)
-                    try:
-                        QtWidgets.QApplication.processEvents()
-                    except Exception:
-                        pass
-                    if progress.wasCanceled():
-                        cancelled = True
-                        break
                 result = self._load_workbook_from_file(file_path)
                 if result is None:
+                    if (
+                        position == total_files
+                        or position <= 2
+                        or position % update_interval == 0
+                    ):
+                        self._update_task_progress(
+                            value=position,
+                            title=f"Importing {file_path.name} ({position}/{total_files})",
+                        )
+                    if position == total_files or position % event_interval == 0:
+                        try:
+                            QtWidgets.QApplication.processEvents(
+                                QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                            )
+                        except Exception:
+                            pass
                     continue
                 workbook, worksheets = result
                 try:
@@ -7778,26 +8187,28 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     errors.append(f"{file_path}: {exc}")
                     continue
                 imported += len(worksheets)
+                if (
+                    position == total_files
+                    or position <= 2
+                    or position % update_interval == 0
+                ):
+                    self._update_task_progress(
+                        value=position,
+                        title=f"Importing {file_path.name} ({position}/{total_files})",
+                    )
+                if position == total_files or position % event_interval == 0:
+                    try:
+                        QtWidgets.QApplication.processEvents(
+                            QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                        )
+                    except Exception:
+                        pass
         finally:
-            if progress is not None:
-                try:
-                    final_value = total_files if not cancelled else max(position - 1, 0)
-                    progress.setValue(final_value)
-                    progress.close()
-                except Exception:
-                    pass
             self._update_task_progress(
-                value=total_files if not cancelled else max(position - 1, 0),
-                title="Import complete." if not cancelled else "Import cancelled.",
+                value=total_files,
+                title="Import complete.",
             )
             self._end_task_progress()
-        if cancelled:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Import Data",
-                "Import cancelled before all files were processed.",
-            )
-            return
         if errors:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -8118,22 +8529,49 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         folder_item = None
         item = self._data_workbook_items.pop(key, None)
         if item is not None:
-            folder_item = item.parent()
+            if not self._is_live_tree_item(item):
+                item = None
+            else:
+                try:
+                    folder_item = item.parent()
+                except RuntimeError:
+                    folder_item = None
+            if folder_item is not None and not self._is_live_tree_item(folder_item):
+                folder_item = None
         for sheet_key in list(workbook.worksheets):
             self._remove_worksheet(sheet_key)
         with self._suspend_project_tree_updates():
             if item is not None and folder_item is not None:
-                index = folder_item.indexOfChild(item)
+                try:
+                    index = folder_item.indexOfChild(item)
+                except RuntimeError:
+                    index = -1
                 if index >= 0:
-                    folder_item.takeChild(index)
+                    try:
+                        folder_item.takeChild(index)
+                    except RuntimeError:
+                        pass
             # Drop empty folder items from Imported Data
             if folder_item is not None and folder_item is not self._data_tree_root:
-                if folder_item.childCount() == 0:
-                    parent = folder_item.parent()
+                try:
+                    child_count = folder_item.childCount()
+                except RuntimeError:
+                    child_count = -1
+                if child_count == 0:
+                    try:
+                        parent = folder_item.parent()
+                    except RuntimeError:
+                        parent = None
                     if parent is not None:
-                        idx = parent.indexOfChild(folder_item)
+                        try:
+                            idx = parent.indexOfChild(folder_item)
+                        except RuntimeError:
+                            idx = -1
                         if idx >= 0:
-                            parent.takeChild(idx)
+                            try:
+                                parent.takeChild(idx)
+                            except RuntimeError:
+                                pass
                     resolved = None
                     for path, candidate in list(self._data_folder_items.items()):
                         if candidate is folder_item:
@@ -8440,11 +8878,26 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     self.tab_widget.removeTab(index)
             item = self._worksheet_tree_items.pop(key, None)
             if item is not None:
-                parent = item.parent()
+                if not self._is_live_tree_item(item):
+                    item = None
+                parent = None
+                if item is not None:
+                    try:
+                        parent = item.parent()
+                    except RuntimeError:
+                        parent = None
+                if parent is not None and not self._is_live_tree_item(parent):
+                    parent = None
                 if parent is not None:
-                    index = parent.indexOfChild(item)
+                    try:
+                        index = parent.indexOfChild(item)
+                    except RuntimeError:
+                        index = -1
                     if index >= 0:
-                        parent.takeChild(index)
+                        try:
+                            parent.takeChild(index)
+                        except RuntimeError:
+                            pass
             self._worksheets.pop(key, None)
             self._worksheet_models.pop(key, None)
         self._sync_shared_action_states()
@@ -9333,11 +9786,23 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if role == "graph":
             tab = data[1]
             if isinstance(tab, QtWidgets.QWidget):
-                self._show_tab(tab)
+                index = self.tab_widget.indexOf(tab)
+                if index >= 0:
+                    self._show_tab(tab)
+                else:
+                    stale = self._graph_tree_items.pop(tab, None)
+                    if stale is not None:
+                        parent = stale.parent()
+                        if parent is not None:
+                            child_index = parent.indexOfChild(stale)
+                            if child_index >= 0:
+                                parent.takeChild(child_index)
         elif role == "worksheet":
-            path = data[1]
-            if isinstance(path, Path):
-                self._open_worksheet_tab(path)
+            worksheet_key = data[1]
+            if isinstance(worksheet_key, Hashable) and worksheet_key in self._worksheets:
+                self._open_worksheet_tab(worksheet_key)
+            elif isinstance(worksheet_key, Path):
+                self._open_worksheet_tab(worksheet_key)
         elif role == "worksheet_group":
             target = data[1]
             if isinstance(target, Hashable) and target in self._workbooks:
@@ -9345,6 +9810,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 if workbook is not None and workbook.worksheets:
                     self._open_worksheet_tab(workbook.worksheets[0])
                     return
+            if isinstance(target, Hashable) and target in self._worksheets:
+                self._open_worksheet_tab(target)
+                return
             item.setExpanded(not item.isExpanded())
 
     def _dispatch_project_item_activation(
@@ -9364,6 +9832,49 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             except Exception:
                 logging.getLogger(__name__).exception(
                     "Project Explorer activation failed"
+                )
+
+    def _handle_project_tree_current_item_changed(
+        self,
+        current: QtWidgets.QTreeWidgetItem | None,
+        previous: QtWidgets.QTreeWidgetItem | None,
+    ) -> None:
+        _ = previous
+        if current is None or self._project_tree_selection_sync_blocked:
+            return
+        tree = getattr(self, "project_tree", None)
+        keep_tree_focus = False
+        if isinstance(tree, QtWidgets.QTreeWidget):
+            focus_widget = QtWidgets.QApplication.focusWidget()
+            if focus_widget is tree:
+                keep_tree_focus = True
+            elif isinstance(focus_widget, QtWidgets.QWidget):
+                keep_tree_focus = tree.isAncestorOf(focus_widget)
+        data = self._project_item_payload(current, 0)
+        if not data or data[0] != "graph":
+            return
+        tab = data[1]
+        if isinstance(tab, QtWidgets.QWidget):
+            tab_index = self.tab_widget.indexOf(tab)
+            if tab_index < 0:
+                stale = self._graph_tree_items.pop(tab, None)
+                if stale is not None:
+                    parent = stale.parent()
+                    if parent is not None:
+                        child_index = parent.indexOfChild(stale)
+                        if child_index >= 0:
+                            parent.takeChild(child_index)
+                return
+        if isinstance(tab, QtWidgets.QWidget) and self.tab_widget.currentWidget() is not tab:
+            self._show_tab(tab)
+            if keep_tree_focus and isinstance(tree, QtWidgets.QTreeWidget):
+                try:
+                    tree.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+                except Exception:
+                    pass
+                QtCore.QTimer.singleShot(
+                    0,
+                    lambda t=tree: t.setFocus(QtCore.Qt.FocusReason.OtherFocusReason),
                 )
 
     def _assign_project_payload(
@@ -9737,23 +10248,78 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         metadata = descriptor.metadata if isinstance(descriptor, TabDescriptor) and isinstance(descriptor.metadata, dict) else {}
         plot_kind = str(metadata.get("plot_kind") or "").strip().lower()
         dual_axis_overlay = plot_kind == "shape_memory_dual_axis_overlay"
+        aggregate_overlay_axes = False
 
         legend_axes = axes
         legend_sources: list[Any] = [axes]
         figure = getattr(axes, "figure", None)
-        if dual_axis_overlay and figure is not None:
+        if figure is not None:
             try:
                 figure_axes = [axis for axis in list(figure.axes) if axis is not None]
             except Exception:
                 figure_axes = []
+            overlay_axes: list[Any] = []
             if figure_axes:
+                try:
+                    base_bounds = tuple(float(v) for v in axes.get_position().bounds)
+                except Exception:
+                    base_bounds = None
+
+                def _same_bounds(candidate: Any) -> bool:
+                    if candidate is axes:
+                        return True
+                    if base_bounds is None:
+                        return False
+                    try:
+                        candidate_bounds = tuple(float(v) for v in candidate.get_position().bounds)
+                    except Exception:
+                        return False
+                    if len(candidate_bounds) != len(base_bounds):
+                        return False
+                    return all(abs(a - b) <= 1e-6 for a, b in zip(candidate_bounds, base_bounds))
+
+                def _shares_base_axis(candidate: Any) -> bool:
+                    if candidate is axes:
+                        return True
+                    try:
+                        shared_x = axes.get_shared_x_axes()
+                        if shared_x is not None and shared_x.joined(axes, candidate):
+                            return True
+                    except Exception:
+                        pass
+                    try:
+                        shared_y = axes.get_shared_y_axes()
+                        if shared_y is not None and shared_y.joined(axes, candidate):
+                            return True
+                    except Exception:
+                        pass
+                    return False
+
+                for candidate_axis in figure_axes:
+                    if not _same_bounds(candidate_axis):
+                        continue
+                    if not _shares_base_axis(candidate_axis):
+                        continue
+                    overlay_axes.append(candidate_axis)
+
+            if dual_axis_overlay and figure_axes:
                 legend_sources = figure_axes
+                aggregate_overlay_axes = True
+            elif len(overlay_axes) > 1:
+                legend_sources = overlay_axes
+                aggregate_overlay_axes = True
+
+            if legend_sources:
                 primary_axes = descriptor.axes if isinstance(descriptor, TabDescriptor) else None
-                if primary_axes is not None and getattr(primary_axes, "figure", None) is figure:
+                if (
+                    primary_axes is not None
+                    and getattr(primary_axes, "figure", None) is figure
+                    and primary_axes in legend_sources
+                ):
                     legend_axes = primary_axes
                 else:
-                    legend_axes = figure_axes[0]
-                for candidate_axis in figure_axes:
+                    legend_axes = legend_sources[0]
+                for candidate_axis in legend_sources:
                     if candidate_axis is legend_axes:
                         continue
                     try:
@@ -9809,6 +10375,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     normalized = self._normalize_series_label_for_export(raw_label, descriptor=descriptor).strip()
                     if normalized:
                         label = normalized
+                if aggregate_overlay_axes:
                     dedupe_key = label.casefold()
                     if dedupe_key in seen_labels:
                         continue
@@ -11041,6 +11608,31 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             axes_for_override = axes_list[0]
         apply_override_handler = getattr(self, "_apply_plugin_graph_option_override_for_axes", None)
         can_apply_override = callable(apply_override_handler) and axes_for_override is not None
+        has_saved_override = False
+        if axes_for_override is not None:
+            plugin_name_for_axes = None
+            plugin_name_getter = getattr(self, "_plugin_name_for_axes", None)
+            if callable(plugin_name_getter):
+                try:
+                    plugin_name_for_axes = plugin_name_getter(axes_for_override)
+                except Exception:
+                    plugin_name_for_axes = None
+            override_checker = getattr(self, "_has_plugin_graph_option_override", None)
+            if callable(override_checker):
+                try:
+                    has_saved_override = bool(override_checker(plugin_name_for_axes))
+                except Exception:
+                    has_saved_override = False
+        if has_saved_override and can_apply_override:
+            self._apply_tight_layout_warning_choice(
+                choice="override",
+                figure=figure,
+                recommendations=recommendations,
+                can_apply_override=can_apply_override,
+                apply_override_handler=apply_override_handler,
+                axes_for_override=axes_for_override,
+            )
+            return
         context_key = self._tight_layout_warning_context_key(context_label)
         expiry = float(self._tight_layout_bulk_choice_expiry_by_context.get(context_key, 0.0))
         if expiry > 0.0 and time.monotonic() > expiry:
@@ -11590,6 +12182,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return bool(result)
 
     def _handle_canvas_button_press(self, event: Any) -> None:
+        if self._is_canvas_context_click(event):
+            self._show_canvas_context_menu(event)
+            return
         if not bool(getattr(event, "dblclick", False)):
             return
         if self._nav_mode in {"zoom", "pan"}:
@@ -11887,6 +12482,23 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     canvas.mpl_disconnect(edit_cid)
                 except Exception:
                     pass
+            resize_cid = self._resize_connections.pop(canvas, None)
+            if resize_cid is not None:
+                try:
+                    canvas.mpl_disconnect(resize_cid)
+                except Exception:
+                    pass
+            copy_shortcut = self._canvas_copy_shortcuts.pop(canvas, None)
+            if copy_shortcut is not None:
+                try:
+                    copy_shortcut.setParent(None)
+                    copy_shortcut.deleteLater()
+                except Exception:
+                    pass
+            self._canvas_base_size_inches.pop(canvas, None)
+            self._canvas_base_dpi.pop(canvas, None)
+            self._canvas_display_scale.pop(canvas, None)
+            self._canvas_scaling_guard.discard(canvas)
         item = self._graph_tree_items.pop(tab, None)
         if item is not None:
             parent = item.parent()
@@ -12108,20 +12720,30 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     pass
 
     def _focus_tree_on_tab(self, tab: QtWidgets.QWidget | None) -> None:
+        self._project_tree_selection_sync_blocked = True
         self.project_tree.blockSignals(True)
-        self.project_tree.clearSelection()
-        target_item: QtWidgets.QTreeWidgetItem | None = None
-        if tab is not None:
-            if tab in self._tab_descriptors:
-                target_item = self._graph_tree_items.get(tab)
-            else:
-                key = self._tab_to_worksheet_key.get(tab)
-                if key is not None:
-                    target_item = self._worksheet_tree_items.get(key)
-        if target_item is not None:
-            self.project_tree.setCurrentItem(target_item)
-            self.project_tree.scrollToItem(target_item)
-        self.project_tree.blockSignals(False)
+        try:
+            self.project_tree.clearSelection()
+            target_item: QtWidgets.QTreeWidgetItem | None = None
+            if tab is not None:
+                if tab in self._tab_descriptors:
+                    target_item = self._graph_tree_items.get(tab)
+                else:
+                    key = self._tab_to_worksheet_key.get(tab)
+                    if key is not None:
+                        target_item = self._worksheet_tree_items.get(key)
+            if target_item is not None:
+                if not self._is_live_tree_item(target_item):
+                    target_item = None
+                if target_item is not None:
+                    try:
+                        self.project_tree.setCurrentItem(target_item)
+                        self.project_tree.scrollToItem(target_item)
+                    except RuntimeError:
+                        pass
+        finally:
+            self.project_tree.blockSignals(False)
+            self._project_tree_selection_sync_blocked = False
 
     # ------------------------------------------------------------------ window menu hooks
     def _mdi_area(self) -> QtWidgets.QMdiArea | None:
@@ -12265,6 +12887,34 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
             return
         self._aspect_ratio = float(ratio)
 
+    def _sync_child_geometry(self) -> None:
+        widget = self.widget()
+        if widget is None:
+            return
+        try:
+            rect = self.contentsRect()
+        except Exception:
+            rect = QtCore.QRect()
+        if not rect.isValid() or rect.width() <= 0 or rect.height() <= 0:
+            return
+        try:
+            widget.setMinimumSize(0, 0)
+        except Exception:
+            pass
+        try:
+            widget.setGeometry(rect)
+        except Exception:
+            try:
+                widget.resize(rect.size())
+            except Exception:
+                pass
+
+    def _sync_child_geometry_deferred(self) -> None:
+        try:
+            QtCore.QTimer.singleShot(0, self._sync_child_geometry)
+        except Exception:
+            self._sync_child_geometry()
+
     def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
         super().changeEvent(event)
         if self._handling_change:
@@ -12305,13 +12955,25 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         if self._resizing or self._owner is None:
-            return super().resizeEvent(event)
+            result = super().resizeEvent(event)
+            self._sync_child_geometry()
+            self._sync_child_geometry_deferred()
+            return result
         if getattr(self._owner, "_global_maximized", False) or getattr(self._owner, "_fullscreen_lock", False):
-            return super().resizeEvent(event)
+            result = super().resizeEvent(event)
+            self._sync_child_geometry()
+            self._sync_child_geometry_deferred()
+            return result
         if getattr(self._owner, "_arranging_subwindows", False):
-            return super().resizeEvent(event)
+            result = super().resizeEvent(event)
+            self._sync_child_geometry()
+            self._sync_child_geometry_deferred()
+            return result
         if self._aspect_ratio is None:
-            return super().resizeEvent(event)
+            result = super().resizeEvent(event)
+            self._sync_child_geometry()
+            self._sync_child_geometry_deferred()
+            return result
         try:
             buttons = QtWidgets.QApplication.mouseButtons()
         except Exception:
@@ -12319,7 +12981,10 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
         # Ignore synthetic/background resizes (for example task switching) and
         # only enforce aspect when the user is actively dragging the frame.
         if not bool(buttons & QtCore.Qt.MouseButton.LeftButton):
-            return super().resizeEvent(event)
+            result = super().resizeEvent(event)
+            self._sync_child_geometry()
+            self._sync_child_geometry_deferred()
+            return result
         self._resizing = True
         try:
             self._owner._fit_subwindow(  # noqa: SLF001
@@ -12330,6 +12995,8 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
         finally:
             self._resizing = False
         super().resizeEvent(event)
+        self._sync_child_geometry()
+        self._sync_child_geometry_deferred()
 
 
 class _MdiTabProxy(QtWidgets.QWidget):
@@ -12462,6 +13129,17 @@ class _MdiTabProxy(QtWidgets.QWidget):
         except Exception:
             canvases = []
         return canvases[0] if canvases else None
+
+    @staticmethod
+    def _sync_subwindow_child_widget(sub: _ManagedSubWindow | None) -> None:
+        if not isinstance(sub, _ManagedSubWindow):
+            return
+        sync = getattr(sub, "_sync_child_geometry", None)
+        if callable(sync):
+            try:
+                sync()
+            except Exception:
+                pass
 
     def _refresh_subwindow_figure_layout(
         self,
@@ -13061,6 +13739,20 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._arrange_cascade_visible(visible_subwindows)
 
     def eventFilter(self, source: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if isinstance(source, _ManagedSubWindow):
+            if event.type() in {
+                QtCore.QEvent.Type.Resize,
+                QtCore.QEvent.Type.Show,
+                QtCore.QEvent.Type.LayoutRequest,
+            }:
+                self._sync_subwindow_child_widget(source)
+                try:
+                    QtCore.QTimer.singleShot(
+                        0,
+                        lambda s=source: self._sync_subwindow_child_widget(s),
+                    )
+                except Exception:
+                    pass
         if source is self._mdi.viewport() and event.type() == QtCore.QEvent.Type.Resize:
             if self._global_maximized or self._fullscreen_lock:
                 active = self._mdi.activeSubWindow()
@@ -13124,6 +13816,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         widget.setParent(None)
         sub = _ManagedSubWindow(self._mdi)
         sub.set_owner(self)
+        sub.installEventFilter(self)
         sub.setWidget(widget)
         sub.setWindowTitle(title)
         icon = self._icons.get(widget, QtGui.QIcon())

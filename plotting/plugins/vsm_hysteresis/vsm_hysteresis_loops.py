@@ -1322,7 +1322,9 @@ def _normalise_angle_value(value: float | None) -> float | None:
 
 
 def _normalise_temperature_value(value: float | None) -> float | None:
-    return _normalise_metadata_value(value, decimals=2, snap_threshold=0.2)
+    # VSM setpoints are typically configured in whole °C steps. Accept a wider
+    # snap band so values like -29.6 are normalised to -30 for grouping.
+    return _normalise_metadata_value(value, decimals=2, snap_threshold=0.45)
 
 def _read_vsm_file(path: Path) -> pd.DataFrame:
     columns: List[str] = []
@@ -1858,6 +1860,7 @@ class VSMPlotter(PyPlotWindow):
         self.logger = logging.getLogger("vsm_hysteresis_loops")
         self.logger.setLevel(logging.INFO)
         self.settings = QtCore.QSettings("MicrowireLab", "VSMHysteresisLoops")
+        self._vsm_hysteresis_settings = self.settings
         stored_x = self.settings.value("x_axis")
         stored_y = self.settings.value("y_axis")
         self._stored_axes: tuple[str | None, str | None] = (
@@ -1873,6 +1876,7 @@ class VSMPlotter(PyPlotWindow):
         self._last_rescale_enabled = False
         self._line_visibility: Dict[PlotGroupKey, Dict[float, bool]] = {}
         self._worksheet_models: Dict[Hashable, WorksheetTableModel] = {}
+        self._measurement_worksheet_keys: set[Hashable] = set()
         self._plotted_series_exports: Dict[tuple[str, float, float], PlotSeriesExport] = {}
         self._metrics_by_temperature: Dict[float, pd.DataFrame] = {}
         self._metrics_by_angle: Dict[float, pd.DataFrame] = {}
@@ -1894,6 +1898,17 @@ class VSMPlotter(PyPlotWindow):
         self._load_settings()
         self._ensure_window_visibility()
         self._update_project_actions()
+
+    def _plugin_settings(self) -> QtCore.QSettings:
+        settings = getattr(self, "_vsm_hysteresis_settings", None)
+        if isinstance(settings, QtCore.QSettings):
+            return settings
+        fallback = getattr(self, "settings", None)
+        if isinstance(fallback, QtCore.QSettings):
+            return fallback
+        settings = QtCore.QSettings("MicrowireLab", "VSMHysteresisLoops")
+        self._vsm_hysteresis_settings = settings
+        return settings
 
     def _create_dock_widget(self, title: str, object_name: str) -> QtWidgets.QDockWidget:
         return super()._create_dock_widget(title, object_name)
@@ -2133,8 +2148,8 @@ class VSMPlotter(PyPlotWindow):
                 float('inf') if m.angle is None else m.angle,
             )
         )
-        self._populate_project_tree()
         self._populate_worksheets()
+        self._populate_project_tree()
         unique_temperatures = sorted({m.temperature for m in self.measurements if m.temperature is not None})
         for temp in unique_temperatures:
             self.temperature_combo.addItem(f'{temp:g} °C', temp)
@@ -2540,38 +2555,39 @@ class VSMPlotter(PyPlotWindow):
 
 
     def _load_settings(self) -> None:
-        sources = self.settings.value("sources", "")
+        settings = self._plugin_settings()
+        sources = settings.value("sources", "")
         if isinstance(sources, str):
             self.path_edit.setText(sources)
 
-        export_path = self.settings.value("last_export_path", "")
+        export_path = settings.value("last_export_path", "")
         if isinstance(export_path, str) and export_path:
             try:
                 self.last_export_path = Path(export_path)
             except (TypeError, ValueError):
                 self.last_export_path = None
 
-        graph_dir = self.settings.value("last_graph_dir", "")
+        graph_dir = settings.value("last_graph_dir", "")
         if isinstance(graph_dir, str) and graph_dir:
             try:
                 self._last_graph_dir = Path(graph_dir)
             except (TypeError, ValueError):
                 self._last_graph_dir = None
 
-        source_dir = self.settings.value("last_source_dir", "")
+        source_dir = settings.value("last_source_dir", "")
         if isinstance(source_dir, str) and source_dir:
             try:
                 self._last_source_dir = Path(source_dir)
             except (TypeError, ValueError):
                 self._last_source_dir = None
 
-        style_value = self.settings.value("plot_style", "line")
+        style_value = settings.value("plot_style", "line")
         if isinstance(style_value, str) and hasattr(self, "style_combo"):
             index = self.style_combo.findData(style_value)
             if index >= 0:
                 self.style_combo.setCurrentIndex(index)
 
-        dark_value = self.settings.value("plot_dark_mode", False)
+        dark_value = settings.value("plot_dark_mode", False)
         dark_enabled = bool(dark_value) if dark_value is not None else False
         dark_action = getattr(self, "_dark_mode_action", None)
         if dark_action is not None and callable(getattr(dark_action, "isChecked", None)):
@@ -2586,12 +2602,12 @@ class VSMPlotter(PyPlotWindow):
                 pass
 
         suppress_window = bool(getattr(self, "_suppress_window_persistence", False))
-        maximized_preference = bool(self.settings.value("window_maximized", False))
+        maximized_preference = bool(settings.value("window_maximized", False))
 
         if not suppress_window:
             geometry_restored = False
             if not maximized_preference:
-                geometry = self.settings.value("geometry")
+                geometry = settings.value("geometry")
                 if isinstance(geometry, QtCore.QByteArray):
                     try:
                         geometry_restored = bool(self.restoreGeometry(geometry))
@@ -2619,15 +2635,15 @@ class VSMPlotter(PyPlotWindow):
                         frame.moveCenter(available.center())
                         self.move(frame.topLeft())
 
-            window_state = self.settings.value("window_state")
+            window_state = settings.value("window_state")
             signature_key = getattr(self, "_WINDOW_STATE_SIGNATURE_KEY", "window_state_signature")
-            signature = self.settings.value(signature_key, "")
+            signature = settings.value(signature_key, "")
             expected_signature = self._window_state_signature()
             if not isinstance(signature, str) or signature != expected_signature:
                 window_state = None
-                self.settings.remove("window_state")
-                self.settings.remove(signature_key)
-                self.settings.sync()
+                settings.remove("window_state")
+                settings.remove(signature_key)
+                settings.sync()
             if isinstance(window_state, QtCore.QByteArray):
                 try:
                     self.restoreState(window_state)
@@ -2635,25 +2651,26 @@ class VSMPlotter(PyPlotWindow):
                     pass
 
     def _save_settings(self) -> None:
-        self.settings.setValue("sources", self.path_edit.text())
-        self.settings.setValue("plot_style", self._plot_style_token())
+        settings = self._plugin_settings()
+        settings.setValue("sources", self.path_edit.text())
+        settings.setValue("plot_style", self._plot_style_token())
         if not hasattr(self, "dark_mode_checkbox"):
-            self.settings.setValue("plot_dark_mode", self._plot_dark_enabled())
+            settings.setValue("plot_dark_mode", self._plot_dark_enabled())
         if self.last_export_path:
-            self.settings.setValue("last_export_path", str(self.last_export_path))
+            settings.setValue("last_export_path", str(self.last_export_path))
         if self._last_source_dir:
-            self.settings.setValue("last_source_dir", str(self._last_source_dir))
+            settings.setValue("last_source_dir", str(self._last_source_dir))
         if not bool(getattr(self, "_suppress_window_persistence", False)):
             maximized_now = self.isMaximized() or bool(self.windowState() & QtCore.Qt.WindowState.WindowMaximized)
-            self.settings.setValue("window_maximized", maximized_now)
+            settings.setValue("window_maximized", maximized_now)
             if maximized_now:
-                self.settings.remove("geometry")
+                settings.remove("geometry")
             else:
-                self.settings.setValue("geometry", self.saveGeometry())
-            self.settings.setValue("window_state", self.saveState())
+                settings.setValue("geometry", self.saveGeometry())
+            settings.setValue("window_state", self.saveState())
             signature_key = getattr(self, "_WINDOW_STATE_SIGNATURE_KEY", "window_state_signature")
-            self.settings.setValue(signature_key, self._window_state_signature())
-        self.settings.sync()
+            settings.setValue(signature_key, self._window_state_signature())
+        settings.sync()
 
     def _window_state_signature(self) -> str:
         return f"qt={QtCore.QT_VERSION_STR};pyqt={QtCore.PYQT_VERSION_STR}"
@@ -2939,9 +2956,6 @@ class VSMPlotter(PyPlotWindow):
                 sample_parent.addChild(parent)
 
             worksheet_key = self._worksheet_group_key(sample_label, temperature)
-            worksheet = self._worksheets.get(worksheet_key)
-            if worksheet is None:
-                continue
             angle_count = sum(1 for m in group if m.angle is not None)
             detail = f"{angle_count} angle(s)" if angle_count else ""
             child = QtWidgets.QTreeWidgetItem(["Worksheet", detail])
@@ -2965,14 +2979,22 @@ class VSMPlotter(PyPlotWindow):
 
 
     def _populate_worksheets(self) -> None:
-        self._worksheet_models.clear()
-        self._worksheets.clear()
+        previous_measurement_keys = set(self._measurement_worksheet_keys)
+        for key in previous_measurement_keys:
+            widget = self._worksheet_tabs_open.get(key)
+            if widget is not None:
+                self._close_tab(widget)
+            self._worksheet_models.pop(key, None)
+            self._worksheets.pop(key, None)
+            self._worksheet_tree_items.pop(key, None)
+
         grouped: Dict[tuple[str, float | None], List[VSMMeasurement]] = {}
         for measurement in self.measurements:
             sample_label = measurement.sample_name or "Unknown sample"
             key = self._worksheet_group_key(sample_label, measurement.temperature)
             grouped.setdefault(key, []).append(measurement)
 
+        measurement_keys: set[Hashable] = set()
         for key, group in sorted(
             grouped.items(),
             key=lambda item: (
@@ -2985,12 +3007,14 @@ class VSMPlotter(PyPlotWindow):
             self._worksheets[worksheet.key] = worksheet
             model = WorksheetTableModel(worksheet, self)
             self._worksheet_models[worksheet.key] = model
+            measurement_keys.add(worksheet.key)
             widget = self._worksheet_tabs_open.get(worksheet.key)
             if widget is not None:
                 view = getattr(widget, "_worksheet_view", None)
                 if isinstance(view, QtWidgets.QTableView):
                     view.setModel(model)
                     self._configure_worksheet_view(view)
+        self._measurement_worksheet_keys = measurement_keys
 
         for key in list(self._worksheet_tabs_open.keys()):
             if key not in self._worksheets:
@@ -3244,7 +3268,7 @@ class VSMPlotter(PyPlotWindow):
         if not resolved.exists():
             return
         self._last_source_dir = resolved
-        self.settings.setValue("last_source_dir", str(resolved))
+        self._plugin_settings().setValue("last_source_dir", str(resolved))
 
     def _open_worksheet_tab(self, key: Hashable) -> None:
         model = self._worksheet_models.get(key)
@@ -3370,20 +3394,29 @@ class VSMPlotter(PyPlotWindow):
 
     def _focus_tree_on_tab(self, tab: QtWidgets.QWidget | None) -> None:
         self.project_tree.blockSignals(True)
-        self.project_tree.clearSelection()
-        target_item: QtWidgets.QTreeWidgetItem | None = None
-        if tab is not None:
-            descriptor = self._tab_descriptors.get(tab)
-            if descriptor is not None:
-                target_item = self._graph_tree_items.get(tab)
-            else:
-                key = self._tab_to_worksheet_key.get(tab)
-                if key is not None:
-                    target_item = self._worksheet_tree_items.get(key)
-        if target_item is not None:
-            self.project_tree.setCurrentItem(target_item)
-            self.project_tree.scrollToItem(target_item)
-        self.project_tree.blockSignals(False)
+        try:
+            self.project_tree.clearSelection()
+            target_item: QtWidgets.QTreeWidgetItem | None = None
+            if tab is not None:
+                descriptor = self._tab_descriptors.get(tab)
+                if descriptor is not None:
+                    target_item = self._graph_tree_items.get(tab)
+                else:
+                    key = self._tab_to_worksheet_key.get(tab)
+                    if key is not None:
+                        target_item = self._worksheet_tree_items.get(key)
+            if target_item is not None:
+                is_live = getattr(self, "_is_live_tree_item", None)
+                if callable(is_live) and not bool(is_live(target_item)):
+                    target_item = None
+                if target_item is not None:
+                    try:
+                        self.project_tree.setCurrentItem(target_item)
+                        self.project_tree.scrollToItem(target_item)
+                    except RuntimeError:
+                        pass
+        finally:
+            self.project_tree.blockSignals(False)
 
     def _update_tab_buttons(self) -> None:
         tab_bar = self.tab_widget.tabBar()
@@ -3618,6 +3651,7 @@ class VSMPlotter(PyPlotWindow):
         self._object_items = {}
         self._worksheet_models.clear()
         self._worksheets.clear()
+        self._measurement_worksheet_keys.clear()
         self._workbooks.clear()
         self._data_workbook_items.clear()
         self._data_folder_items.clear()
@@ -3818,8 +3852,8 @@ class VSMPlotter(PyPlotWindow):
             title="Updating project tree and worksheets...",
         )
         self._update_sample_title()
-        self._populate_project_tree()
         self._populate_worksheets()
+        self._populate_project_tree()
 
         unique_temperatures = sorted({m.temperature for m in self.measurements if m.temperature is not None})
         for temp in unique_temperatures:
@@ -4153,9 +4187,9 @@ class VSMPlotter(PyPlotWindow):
             y_axis or None,
         )
         if x_axis:
-            self.settings.setValue("x_axis", x_axis)
+            self._plugin_settings().setValue("x_axis", x_axis)
         if y_axis:
-            self.settings.setValue("y_axis", y_axis)
+            self._plugin_settings().setValue("y_axis", y_axis)
 
     def _generate_plots(self) -> None:
         if not self.measurements:
@@ -6048,8 +6082,9 @@ class VSMPlotter(PyPlotWindow):
             )
             self._append_log(f"Exported {exported} metric table(s) to {target_dir}")
             self.last_export_path = target_dir
-            self.settings.setValue("last_export_path", str(target_dir))
-            self.settings.sync()
+            settings = self._plugin_settings()
+            settings.setValue("last_export_path", str(target_dir))
+            settings.sync()
         else:
             QtWidgets.QMessageBox.information(
                 self,
@@ -6225,8 +6260,9 @@ class VSMPlotter(PyPlotWindow):
             return
 
         self._last_graph_dir = path.parent
-        self.settings.setValue("last_graph_dir", str(path.parent))
-        self.settings.sync()
+        settings = self._plugin_settings()
+        settings.setValue("last_graph_dir", str(path.parent))
+        settings.sync()
         self._append_log(f"Saved graph to {path}")
 
     def _descriptor_title_for_labels(self, descriptor: TabDescriptor, y_label: str) -> str:
@@ -6479,8 +6515,9 @@ class VSMPlotter(PyPlotWindow):
             )
             self._append_log(f"Exported {exported_series} data series to {target_dir}")
             self.last_export_path = target_dir
-            self.settings.setValue("last_export_path", str(target_dir))
-            self.settings.sync()
+            settings = self._plugin_settings()
+            settings.setValue("last_export_path", str(target_dir))
+            settings.sync()
         else:
             QtWidgets.QMessageBox.information(
                 self,

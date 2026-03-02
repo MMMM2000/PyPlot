@@ -53,6 +53,7 @@ class PlotSeries:
 
 VSM_TEMP_SCAN_COLORS = ["#dc2626", "#2563eb", "#f97316", "#16a34a"]
 SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+_SAMPLE_HAS_ANGLE_RE = re.compile(r"(?:\d{1,3}\s*°|\d{1,3}\s*deg(?:ree)?s?)", re.IGNORECASE)
 
 
 @dataclass
@@ -218,7 +219,35 @@ class VSMTemperatureScanProcessor:
                         }
                     )
         frame = pd.DataFrame.from_records(data_rows)
-        return frame, sample_name
+        return frame, self._augment_sample_with_orientation(sample_name, path)
+
+    def _augment_sample_with_orientation(self, sample_name: str, path: Path) -> str:
+        base = str(sample_name or "").strip() or path.stem
+        if _SAMPLE_HAS_ANGLE_RE.search(base):
+            return base
+        angle = self._orientation_from_filename(path)
+        if angle is None:
+            return base
+        return f"{base} ({angle:g}°)"
+
+    def _orientation_from_filename(self, path: Path) -> float | None:
+        stem = path.stem
+        match = re.search(
+            r"(?:^|[-_\s])a(?:ngle)?[-_\s]*([+-]?\d{1,3})(?:deg)?(?:$|[-_\s])",
+            stem,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        try:
+            angle = float(match.group(1))
+        except Exception:
+            return None
+        if not np.isfinite(angle):
+            return None
+        if angle < 0 or angle > 360:
+            return None
+        return float(int(round(angle)))
 
     def _pick_float(self, mapping: Dict[str, str], keys: Sequence[str]) -> float | None:
         for key in keys:

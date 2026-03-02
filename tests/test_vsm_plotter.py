@@ -195,7 +195,7 @@ New Section: Section 0:
     module._metadata_from_file.cache_clear()  # type: ignore[attr-defined]
 
     assert module._parse_angle(path) == -15.5
-    assert module._parse_temperature(path) == pytest.approx(-29.6, abs=0.05)
+    assert module._parse_temperature(path) == -30.0
 
 
 def test_parse_angle_ignores_composition_tokens(tmp_path: Path) -> None:
@@ -921,4 +921,3 @@ def test_toggle_line_visibility_updates_lines_and_state() -> None:
     handles_desc, labels_desc, _ = axes_descriptor.legend_history[-1]
     assert handles_desc == [line]
     assert labels_desc == ["45°"]
-
