@@ -247,6 +247,11 @@ def test_vsm_hysteresis_preserves_shared_window_handlers() -> None:
     window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
     try:
         expected = {
+            "_generate_plots": PyPlotWorkbench._generate_plots,
+            "_open_matplotlib_window": PyPlotWorkbench._open_matplotlib_window,
+            "_save_current_graph": PyPlotWorkbench._save_current_graph,
+            "_normalize_current_graph": PyPlotWorkbench._normalize_current_graph,
+            "_export_txt": PyPlotWorkbench._export_txt,
             "_open_origin_prompt": PyPlotWorkbench._open_origin_prompt,
             "_populate_graph_settings": PyPlotWorkbench._populate_graph_settings,
             "_ensure_graph_tree_item": PyPlotWindow._ensure_graph_tree_item,

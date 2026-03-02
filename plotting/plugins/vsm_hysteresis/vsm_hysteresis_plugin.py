@@ -22,6 +22,11 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         "_create_dock_widget",
         "_create_dock_switcher",
         # Keep shared PyPlot UX/state handlers from the host implementation.
+        "_generate_plots",
+        "_open_matplotlib_window",
+        "_save_current_graph",
+        "_normalize_current_graph",
+        "_export_txt",
         "_populate_graph_settings",
         "_open_origin_prompt",
         "_ensure_graph_tree_item",
@@ -214,23 +219,27 @@ class VSMHysteresisPlugin(PyPlotPlugin):
 
     def generate(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
-        self.host._generate_plots()
+        # Route directly to VSM logic so this does not depend on host method
+        # rebinding order (which can otherwise recurse through plugin dispatch).
+        self._vsm().VSMPlotter._generate_plots(self.host)
 
     def open_matplotlib(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
-        super().open_matplotlib()
+        self._vsm().VSMPlotter._open_matplotlib_window(self.host)
 
     def save_graph(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
-        super().save_graph()
+        self._vsm().VSMPlotter._save_current_graph(self.host)
 
     def normalize(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
-        super().normalize()
+        self._vsm().VSMPlotter._normalize_current_graph(self.host)
 
     def export_txt(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
-        super().export_txt()
+        # Route directly to VSM export implementation for the same reason as
+        # generate(): avoid fragile host action indirection.
+        self._vsm().VSMPlotter._export_txt(self.host)
 
     # UI state ------------------------------------------------------
     def update_ui(self) -> None:  # type: ignore[override]

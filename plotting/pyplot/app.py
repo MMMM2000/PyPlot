@@ -1518,6 +1518,30 @@ class PyPlotWorkbench(PyPlotWindow):
             return False
         return bool(self._selected_paths())
 
+    def _run_with_shared_progress(
+        self,
+        *,
+        title: str,
+        task: Callable[[], None],
+    ) -> None:
+        begin = getattr(self, "_begin_task_progress", None)
+        end = getattr(self, "_end_task_progress", None)
+        started = False
+        if callable(begin):
+            try:
+                begin(title, maximum=None, value=0)
+                started = True
+            except Exception:
+                started = False
+        try:
+            task()
+        finally:
+            if started and callable(end):
+                try:
+                    end()
+                except Exception:
+                    pass
+
     def _import_paths(self, paths: Iterable[Path]) -> None:
         path_list = [Path(p) for p in paths]
         super()._import_paths(path_list)
@@ -1540,7 +1564,10 @@ class PyPlotWorkbench(PyPlotWindow):
         )
         if should_auto_load:
             try:
-                auto_loader.load_data()
+                self._run_with_shared_progress(
+                    title=f"{self._current_plotter_name or 'Plugin'}: loading data...",
+                    task=auto_loader.load_data,
+                )
             except Exception:
                 LOGGER.warning("Automatic data load failed for %s", self._current_plotter_name, exc_info=True)
         self._update_action_states()
@@ -1827,7 +1854,10 @@ class PyPlotWorkbench(PyPlotWindow):
         )
         if should_autoload_plugin_data and self._current_plugin is not None:
             try:
-                self._current_plugin.load_data()
+                self._run_with_shared_progress(
+                    title=f"{self._current_plotter_name or 'Plugin'}: loading data...",
+                    task=self._current_plugin.load_data,
+                )
             except Exception:
                 LOGGER.warning(
                     "Automatic project-load data restore failed for plugin %s",
@@ -1842,7 +1872,10 @@ class PyPlotWorkbench(PyPlotWindow):
         )
         if should_regenerate_shared_plots and self._current_plugin is not None:
             try:
-                self._current_plugin.generate()
+                self._run_with_shared_progress(
+                    title=f"{self._current_plotter_name or 'Plugin'}: generating plots...",
+                    task=self._current_plugin.generate,
+                )
             except Exception:
                 LOGGER.warning(
                     "Automatic shared plot regeneration failed for plugin %s",
@@ -1967,7 +2000,10 @@ class PyPlotWorkbench(PyPlotWindow):
 
     def _generate_plots(self) -> None:
         if self._current_plugin is not None:
-            self._current_plugin.generate()
+            self._run_with_shared_progress(
+                title=f"{self._current_plotter_name or self._current_plugin.name}: generating plots...",
+                task=self._current_plugin.generate,
+            )
             return
         QtWidgets.QMessageBox.information(
             self,
@@ -2003,7 +2039,10 @@ class PyPlotWorkbench(PyPlotWindow):
         )
     def _export_txt(self) -> None:
         if self._current_plugin is not None:
-            self._current_plugin.export_txt()
+            self._run_with_shared_progress(
+                title=f"{self._current_plotter_name or self._current_plugin.name}: exporting TXT...",
+                task=self._current_plugin.export_txt,
+            )
             return
         QtWidgets.QMessageBox.information(
             self,
@@ -2012,7 +2051,10 @@ class PyPlotWorkbench(PyPlotWindow):
         )
     def _open_origin_prompt(self) -> None:
         if self._current_plugin is not None:
-            self._current_plugin.open_origin()
+            self._run_with_shared_progress(
+                title=f"{self._current_plotter_name or self._current_plugin.name}: exporting to Origin...",
+                task=self._current_plugin.open_origin,
+            )
             return
         QtWidgets.QMessageBox.information(
             self,

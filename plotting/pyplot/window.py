@@ -12383,7 +12383,18 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     if callable(maybe_maximize):
                         maybe_maximize(sub)
                 elif callable(fitter):
-                    fitter(sub, use_half_width=True, preferred_width=None)
+                    needs_fit = True
+                    try:
+                        geom = sub.geometry()
+                        needs_fit = (
+                            (not geom.isValid())
+                            or geom.width() < 220
+                            or geom.height() < 160
+                        )
+                    except Exception:
+                        needs_fit = True
+                    if needs_fit:
+                        fitter(sub, use_half_width=True, preferred_width=None)
         else:
             self._hidden_tabs.add(tab)
 
@@ -12691,11 +12702,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def _normalize_single_visible_graph_subwindow(self) -> None:
         tab_widget = getattr(self, "tab_widget", None)
-        arrange = getattr(tab_widget, "_arrange_subwindows", None)
-        if not callable(arrange):
-            return
         visible_getter = getattr(tab_widget, "_ordered_visible_subwindows", None)
         visible_count: int | None = None
+        visible = None
         if callable(visible_getter):
             try:
                 visible = visible_getter()
@@ -12705,10 +12714,18 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 visible_count = len(visible)
         if visible_count is not None and visible_count > 1:
             return
-        try:
-            QtCore.QTimer.singleShot(0, arrange)
-        except Exception:
-            pass
+        # Preserve user-managed subwindow geometry; only refresh figure layout.
+        if isinstance(visible, (list, tuple)) and len(visible) == 1:
+            sub = visible[0]
+            refresher = getattr(tab_widget, "_refresh_subwindow_figure_layout", None)
+            if callable(refresher):
+                try:
+                    QtCore.QTimer.singleShot(
+                        0,
+                        lambda s=sub, r=refresher: r(s, deferred=True),
+                    )
+                except Exception:
+                    pass
 
     def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
         super().changeEvent(event)
@@ -13170,6 +13187,48 @@ class _MdiTabProxy(QtWidgets.QWidget):
             sub for sub in self._visibility_queue if self._is_live_subwindow(sub)
         ]
 
+    @staticmethod
+    def _remember_subwindow_geometry(sub: _ManagedSubWindow | None) -> None:
+        if not isinstance(sub, _ManagedSubWindow):
+            return
+        try:
+            if sub.isHidden():
+                existing = getattr(sub, "_mw_saved_geometry", None)
+                if isinstance(existing, QtCore.QRect) and existing.isValid():
+                    return
+        except Exception:
+            pass
+        try:
+            if sub.isMaximized() or sub.isFullScreen():
+                return
+        except Exception:
+            pass
+        try:
+            geom = sub.geometry()
+        except Exception:
+            return
+        if not geom.isValid() or geom.width() < 120 or geom.height() < 90:
+            return
+        try:
+            setattr(sub, "_mw_saved_geometry", QtCore.QRect(geom))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _restore_saved_subwindow_geometry(sub: _ManagedSubWindow | None) -> bool:
+        if not isinstance(sub, _ManagedSubWindow):
+            return False
+        stored = getattr(sub, "_mw_saved_geometry", None)
+        if not isinstance(stored, QtCore.QRect):
+            return False
+        if not stored.isValid() or stored.width() < 120 or stored.height() < 90:
+            return False
+        try:
+            sub.setGeometry(QtCore.QRect(stored))
+            return True
+        except Exception:
+            return False
+
     def _subwindow_aspect_ratio(self, sub: _ManagedSubWindow | None) -> float:
         if sub is None:
             return 1.6
@@ -13384,7 +13443,21 @@ class _MdiTabProxy(QtWidgets.QWidget):
         else:
             sub.showNormal()
             if restored_from_hidden:
-                self._fit_subwindow(sub, use_half_width=False)
+                restored_geom = self._restore_saved_subwindow_geometry(sub)
+                if not restored_geom:
+                    needs_fit = True
+                    try:
+                        geom = sub.geometry()
+                        needs_fit = (
+                            (not geom.isValid())
+                            or geom.width() < 220
+                            or geom.height() < 160
+                        )
+                    except Exception:
+                        needs_fit = True
+                    if needs_fit:
+                        self._fit_subwindow(sub, use_half_width=False)
+                self._refresh_subwindow_figure_layout(sub, deferred=True)
         sub.raise_()
         self._blocking = False
         self.currentChanged.emit(index)
@@ -13459,6 +13532,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
     def _handle_subwindow_hidden(self, sub: _ManagedSubWindow) -> None:
         if not self._is_live_subwindow(sub):
             return
+        self._remember_subwindow_geometry(sub)
         self._hidden_subwindows.add(sub)
         # ensure tab visibility matches hidden state
         widget = sub.widget()
@@ -13569,6 +13643,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 continue
             if not self._is_live_subwindow(candidate):
                 continue
+            self._remember_subwindow_geometry(candidate)
             try:
                 candidate.hide()
             except RuntimeError:
@@ -14001,6 +14076,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 self._maximize_single(sub)
         else:
             was_active = self._mdi.activeSubWindow() is sub
+            self._remember_subwindow_geometry(sub)
             sub.hide()
             self._hidden_subwindows.add(sub)
             try:
@@ -14061,6 +14137,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         sub = self._subwindow_for(widget)
         if not self._is_live_subwindow(sub):
             return
+        was_hidden = sub in self._hidden_subwindows
         if visible:
             self._hidden_tabs.discard(widget)
             self._hidden_subwindows.discard(sub)
@@ -14071,7 +14148,21 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 self._maybe_apply_maximize(sub)
             else:
                 sub.showNormal()
-                self._arrange_subwindows()
+                if self._arrangement_mode in {"tile_vertical", "tile_horizontal"}:
+                    self._arrange_subwindows()
+                else:
+                    restored_geom = self._restore_saved_subwindow_geometry(sub) if was_hidden else False
+                    if not restored_geom:
+                        needs_fit = was_hidden
+                        try:
+                            geom = sub.geometry()
+                            if geom.isValid() and geom.width() >= 220 and geom.height() >= 160:
+                                needs_fit = False
+                        except Exception:
+                            needs_fit = True
+                        if needs_fit:
+                            self._fit_subwindow(sub, use_half_width=False)
+                    self._refresh_subwindow_figure_layout(sub, deferred=True)
         else:
             self._hidden_tabs.add(widget)
             self._hidden_subwindows.add(sub)

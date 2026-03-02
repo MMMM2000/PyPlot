@@ -1215,6 +1215,57 @@ def test_single_mdi_subwindow_normalizes_after_activation_helper() -> None:
         app.processEvents()
 
 
+def test_hidden_subwindow_restore_keeps_manual_geometry_offscreen() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.resize(1500, 950)
+        window._create_blank_graph()
+        window._create_blank_graph()
+        app.processEvents()
+
+        tab_proxy = window.tab_widget
+        set_mode = getattr(tab_proxy, "set_arrangement_mode", None)
+        assert callable(set_mode)
+        set_mode("cascade")
+
+        first_tab = tab_proxy.widget(0)
+        second_tab = tab_proxy.widget(1)
+        assert isinstance(first_tab, QtWidgets.QWidget)
+        assert isinstance(second_tab, QtWidgets.QWidget)
+
+        subwindow_for = getattr(tab_proxy, "_subwindow_for", None)
+        assert callable(subwindow_for)
+        first_sub = subwindow_for(first_tab)
+        assert isinstance(first_sub, QtWidgets.QMdiSubWindow)
+
+        expected = QtCore.QRect(120, 140, 640, 420)
+        tab_proxy.setCurrentWidget(first_tab)
+        app.processEvents()
+        first_sub.setGeometry(expected)
+        app.processEvents()
+        before = first_sub.geometry()
+        assert before.x() == expected.x()
+        assert before.y() == expected.y()
+        assert before.width() == expected.width()
+        assert before.height() == expected.height()
+
+        tab_proxy.set_max_visible_windows(1)
+        tab_proxy.setCurrentWidget(second_tab)
+        app.processEvents()
+        tab_proxy.setCurrentWidget(first_tab)
+        app.processEvents()
+
+        restored = first_sub.geometry()
+        assert restored.x() == expected.x()
+        assert restored.y() == expected.y()
+        assert restored.width() == expected.width()
+        assert restored.height() == expected.height()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_primary_dock_target_width_scales_on_large_window() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()

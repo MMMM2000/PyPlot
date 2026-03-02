@@ -165,6 +165,43 @@ def test_switching_subwindows_keeps_manual_geometry_in_cascade_mode() -> None:
         window.close()
 
 
+def test_restored_hidden_subwindow_keeps_manual_geometry() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        first = _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        second = _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        set_mode = getattr(window.tab_widget, "set_arrangement_mode", None)
+        assert callable(set_mode)
+        set_mode("cascade")
+
+        subwindow_for = getattr(window.tab_widget, "_subwindow_for", None)
+        assert callable(subwindow_for)
+        first_sub = subwindow_for(first)
+        second_sub = subwindow_for(second)
+        assert first_sub is not None
+        assert second_sub is not None
+
+        first_rect = QtCore.QRect(90, 110, 640, 430)
+        first_sub.setGeometry(first_rect)
+        app.processEvents()
+
+        window.tab_widget.set_max_visible_windows(1)
+        window.tab_widget.setCurrentWidget(second)
+        app.processEvents()
+        window.tab_widget.setCurrentWidget(first)
+        app.processEvents()
+
+        restored = first_sub.geometry()
+        assert restored.x() == first_rect.x()
+        assert restored.y() == first_rect.y()
+        assert restored.width() == first_rect.width()
+        assert restored.height() == first_rect.height()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_double_click_legend_opens_shared_legend_controls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
