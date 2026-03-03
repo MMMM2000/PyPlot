@@ -16,7 +16,8 @@ from plotting.plugins._window import window_api
 class VSMHysteresisPlugin(PyPlotPlugin):
     """PyPlot plugin wrapper around :class:`VSMPlotter`."""
 
-    _METHOD_EXCLUDES = {
+    # These methods are intentionally owned by the shared host implementation.
+    _HOST_OWNED_METHODS = {
         "__init__",
         "_selected_paths",
         "_create_dock_widget",
@@ -396,7 +397,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         # callables (including staticmethods) already exist on the host and
         # rebinding them can break signatures and shared behavior.
         for name, member in vsm.VSMPlotter.__dict__.items():
-            if name in self._METHOD_EXCLUDES:
+            if name.startswith("__") or name in self._HOST_OWNED_METHODS:
                 continue
             if inspect.isfunction(member):
                 setattr(host, name, types.MethodType(member, host))

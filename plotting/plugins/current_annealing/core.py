@@ -886,10 +886,38 @@ def plot_one(
                     handle.set_marker("")
                 except Exception:
                     pass
+        if legend is not None:
+            try:
+                handles_attr = getattr(legend, "legendHandles", None)
+                if handles_attr is None:
+                    handles_attr = getattr(legend, "legend_handles", [])
+                for handle, text in zip(handles_attr, legend.get_texts()):
+                    color = None
+                    get_color = getattr(handle, "get_color", None)
+                    if callable(get_color):
+                        color = get_color()
+                    if color is None:
+                        continue
+                    text.set_color(color)
+            except Exception:
+                pass
     ax.tick_params(axis="both", labelsize=TICK_SIZE)
     fig.tight_layout()
     cfg = dict(globals())
     apply_readability(ax, cfg)
+    legend = ax.get_legend()
+    if legend is not None:
+        try:
+            handles_attr = getattr(legend, "legendHandles", None)
+            if handles_attr is None:
+                handles_attr = getattr(legend, "legend_handles", [])
+            for handle, text in zip(handles_attr, legend.get_texts()):
+                get_color = getattr(handle, "get_color", None)
+                if not callable(get_color):
+                    continue
+                text.set_color(get_color())
+        except Exception:
+            pass
     fname = title.replace(os.sep, "_")
     return fig, fname
 

@@ -108,7 +108,7 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         options_layout.addWidget(combine_cb)
         self._combine_fields_cb = combine_cb
 
-        derivative_cb = QtWidgets.QCheckBox("Plot derivatives", options_section)
+        derivative_cb = QtWidgets.QCheckBox("Plot raw derivatives", options_section)
         derivative_cb.setChecked(bool(self._processor.show_derivative))
         derivative_cb.toggled.connect(lambda checked: self._on_derivative_changed(bool(checked)))
         options_layout.addWidget(derivative_cb)
@@ -281,15 +281,13 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                     ax_right.set_ylabel(y_label_right)
                 legend_handles: list[Any] = []
                 legend_labels: list[str] = []
-                seen_labels: set[str] = set()
                 for legend_axis in (ax_left, ax_right):
                     if legend_axis is None:
                         continue
                     handles, labels = legend_axis.get_legend_handles_labels()
                     for handle, label in zip(handles, labels):
-                        if not label or label in seen_labels:
+                        if not label:
                             continue
-                        seen_labels.add(label)
                         legend_handles.append(handle)
                         legend_labels.append(label)
                 if legend_handles:
@@ -368,7 +366,7 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                 self.host._register_plot_tab(tab, canvas, ax, descriptor)
                 self._plot_tabs.append(tab)
                 self._set_tab_bar_visible(False)
-            if self._processor.show_derivative and getattr(self._processor, "smooth_derivative", False):
+            if getattr(self._processor, "show_smoothed_derivative", False) and getattr(self._processor, "smooth_derivative", False):
                 fig = Figure(figsize=(8.5, 5))
                 ax = fig.add_subplot(111)
                 deriv_sm_title = self._processor._plot_title(entry.sample, "Smoothed d(Signal X)/dT", fields)
@@ -547,7 +545,211 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             else:
                 self._summary_label.clear()
 
+    # ------------------------------------------------------------------ project persistence
+    def serialize_project_state(self, *, base_path: Path | None) -> Dict[str, Any] | None:  # type: ignore[override]
+        _ = base_path
+        median_window = (
+            int(self._median_spin.value())
+            if isinstance(self._median_spin, QtWidgets.QSpinBox)
+            else int(getattr(self._processor, "median_window", 5))
+        )
+        moving_avg_window = (
+            int(self._ma_spin.value())
+            if isinstance(self._ma_spin, QtWidgets.QSpinBox)
+            else int(getattr(self._processor, "moving_avg_window", 15))
+        )
+        derivative_median_window = (
+            int(self._deriv_median_spin.value())
+            if isinstance(self._deriv_median_spin, QtWidgets.QSpinBox)
+            else int(getattr(self._processor, "derivative_median_window", 5))
+        )
+        derivative_moving_avg_window = (
+            int(self._deriv_ma_spin.value())
+            if isinstance(self._deriv_ma_spin, QtWidgets.QSpinBox)
+            else int(getattr(self._processor, "derivative_moving_avg_window", 20))
+        )
+        return {
+            "split_directions": bool(getattr(self._processor, "split_directions", True)),
+            "combine_fields": bool(getattr(self._processor, "combine_fields", False)),
+            "show_derivative": bool(getattr(self._processor, "show_derivative", False)),
+            "show_smoothed_derivative": bool(
+                getattr(self._processor, "show_smoothed_derivative", False)
+            ),
+            "show_smoothed_plot": bool(getattr(self._processor, "show_smoothed_plot", False)),
+            "show_overlay_derivative": bool(
+                getattr(self._processor, "show_overlay_derivative", False)
+            ),
+            "median_window": median_window,
+            "moving_avg_window": moving_avg_window,
+            "derivative_median_window": derivative_median_window,
+            "derivative_moving_avg_window": derivative_moving_avg_window,
+        }
+
+    def restore_project_state(  # type: ignore[override]
+        self, state: Dict[str, Any], *, project_dir: Path
+    ) -> None:
+        _ = project_dir
+        if not isinstance(state, dict):
+            return
+
+        split_directions = self._state_bool(
+            state.get("split_directions"),
+            default=bool(getattr(self._processor, "split_directions", True)),
+        )
+        combine_fields = self._state_bool(
+            state.get("combine_fields"),
+            default=bool(getattr(self._processor, "combine_fields", False)),
+        )
+        show_derivative = self._state_bool(
+            state.get("show_derivative"),
+            default=bool(getattr(self._processor, "show_derivative", False)),
+        )
+        show_smoothed_derivative = self._state_bool(
+            state.get("show_smoothed_derivative"),
+            default=bool(getattr(self._processor, "show_smoothed_derivative", False)),
+        )
+        show_smoothed_plot = self._state_bool(
+            state.get("show_smoothed_plot"),
+            default=bool(getattr(self._processor, "show_smoothed_plot", False)),
+        )
+        show_overlay_derivative = self._state_bool(
+            state.get("show_overlay_derivative"),
+            default=bool(getattr(self._processor, "show_overlay_derivative", False)),
+        )
+        median_window = self._state_int(
+            state.get("median_window"),
+            default=int(getattr(self._processor, "median_window", 5)),
+        )
+        moving_avg_window = self._state_int(
+            state.get("moving_avg_window"),
+            default=int(getattr(self._processor, "moving_avg_window", 15)),
+        )
+        derivative_median_window = self._state_int(
+            state.get("derivative_median_window"),
+            default=int(getattr(self._processor, "derivative_median_window", 5)),
+        )
+        derivative_moving_avg_window = self._state_int(
+            state.get("derivative_moving_avg_window"),
+            default=int(getattr(self._processor, "derivative_moving_avg_window", 20)),
+        )
+
+        self._processor.set_split_directions(split_directions)
+        setter = getattr(self._processor, "set_combine_fields", None)
+        if callable(setter):
+            setter(combine_fields)
+        else:
+            setattr(self._processor, "combine_fields", bool(combine_fields))
+        self._processor.set_show_derivative(show_derivative)
+        setter = getattr(self._processor, "set_show_smoothed_derivative", None)
+        if callable(setter):
+            setter(show_smoothed_derivative)
+        else:
+            setattr(self._processor, "show_smoothed_derivative", bool(show_smoothed_derivative))
+        self._processor.set_show_smoothed(show_smoothed_plot)
+        setter = getattr(self._processor, "set_show_overlay_derivative", None)
+        if callable(setter):
+            setter(show_overlay_derivative)
+        else:
+            setattr(self._processor, "show_overlay_derivative", bool(show_overlay_derivative))
+        self._processor.set_smoothing_windows(median_window, moving_avg_window)
+        setter = getattr(self._processor, "set_derivative_smoothing_windows", None)
+        if callable(setter):
+            setter(derivative_median_window, derivative_moving_avg_window)
+        else:
+            setattr(
+                self._processor,
+                "derivative_median_window",
+                int(derivative_median_window),
+            )
+            setattr(
+                self._processor,
+                "derivative_moving_avg_window",
+                int(derivative_moving_avg_window),
+            )
+
+        self._sync_settings_controls()
+        if self._dataset is not None:
+            self._register_workbooks()
+        self.update_ui()
+
     # ------------------------------------------------------------------ internal helpers
+    @staticmethod
+    def _state_bool(value: Any, *, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
+        return bool(default)
+
+    @staticmethod
+    def _state_int(value: Any, *, default: int, minimum: int = 1, maximum: int = 9999) -> int:
+        parsed: int | None = None
+        if isinstance(value, bool):
+            parsed = None
+        elif isinstance(value, int):
+            parsed = value
+        elif isinstance(value, float):
+            if np.isfinite(value):
+                parsed = int(value)
+        elif isinstance(value, str):
+            try:
+                numeric = float(value.strip())
+            except ValueError:
+                numeric = float("nan")
+            if np.isfinite(numeric):
+                parsed = int(numeric)
+        if parsed is None:
+            parsed = int(default)
+        parsed = max(int(minimum), parsed)
+        parsed = min(int(maximum), parsed)
+        return parsed
+
+    def _sync_settings_controls(self) -> None:
+        toggles: list[tuple[QtWidgets.QCheckBox | None, bool]] = [
+            (self._split_cb, bool(getattr(self._processor, "split_directions", True))),
+            (self._combine_fields_cb, bool(getattr(self._processor, "combine_fields", False))),
+            (self._derivative_cb, bool(getattr(self._processor, "show_derivative", False))),
+            (
+                self._smoothed_derivative_cb,
+                bool(getattr(self._processor, "show_smoothed_derivative", False)),
+            ),
+            (self._smooth_cb, bool(getattr(self._processor, "show_smoothed_plot", False))),
+            (
+                self._overlay_cb,
+                bool(getattr(self._processor, "show_overlay_derivative", False)),
+            ),
+        ]
+        for widget, value in toggles:
+            if not isinstance(widget, QtWidgets.QCheckBox):
+                continue
+            widget.blockSignals(True)
+            widget.setChecked(bool(value))
+            widget.blockSignals(False)
+        spins: list[tuple[QtWidgets.QSpinBox | None, int]] = [
+            (self._median_spin, int(getattr(self._processor, "median_window", 5))),
+            (self._ma_spin, int(getattr(self._processor, "moving_avg_window", 15))),
+            (
+                self._deriv_median_spin,
+                int(getattr(self._processor, "derivative_median_window", 5)),
+            ),
+            (
+                self._deriv_ma_spin,
+                int(getattr(self._processor, "derivative_moving_avg_window", 20)),
+            ),
+        ]
+        for widget, value in spins:
+            if not isinstance(widget, QtWidgets.QSpinBox):
+                continue
+            widget.blockSignals(True)
+            widget.setValue(int(value))
+            widget.blockSignals(False)
+
     def _apply_smoothing_settings(self) -> None:
         median = self._processor.median_window
         ma = self._processor.moving_avg_window
@@ -569,8 +771,6 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
 
     def _on_derivative_changed(self, enabled: bool) -> None:
         self._processor.set_show_derivative(enabled)
-        if isinstance(self._smoothed_derivative_cb, QtWidgets.QCheckBox) and not enabled:
-            self._smoothed_derivative_cb.setChecked(False)
         self._register_workbooks()
 
     def _on_smoothed_changed(self, enabled: bool) -> None:
@@ -584,8 +784,6 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         else:
             setattr(self._processor, "show_smoothed_derivative", bool(enabled))
         if enabled:
-            if isinstance(self._derivative_cb, QtWidgets.QCheckBox) and not self._derivative_cb.isChecked():
-                self._derivative_cb.setChecked(True)
             if isinstance(self._deriv_median_spin, QtWidgets.QSpinBox):
                 self._deriv_median_spin.setEnabled(True)
             if isinstance(self._deriv_ma_spin, QtWidgets.QSpinBox):

@@ -1,0 +1,22 @@
+2026-03-03 08:04
+- Hardened VSM hysteresis crossing calculations against non-scalar/object-array values to prevent scalar-conversion crashes during metrics and plot generation.
+- Fixed imported workbook merge handling in the microwire Assembly section so `pd.NA` values no longer trigger ambiguous-boolean exceptions when filling missing fields.
+- Hardened microwire key parsing so malformed/non-integral draw/piece indices no longer coerce into unintended grouping keys during database build paths.
+- Removed duplicate FMR preview rendering work in the compare graph preview refresh path.
+- Added regression tests for VSM coercion edge cases, microwire import-merge `pd.NA` scenarios, and VSM project payload/close-event rebinding safety.
+- Extracted shared cursor readout formatting into `plotting/pyplot/cursor_status.py` and improved status-bar readout behavior under tight layouts.
+- Added VSM Temperature Scan “smoothed derivative only” behavior so smoothed derivative plots/workbooks can be generated without forcing raw derivative outputs.
+- Added VSM Temperature Scan project-state persistence for split/combine flags, derivative toggles, overlay mode, and smoothing-window settings.
+- Added Object Manager regression coverage to ensure line-item hide/show controls keep legend entries synchronized even when legends are explicitly present.
+- Extended shared navigation/rescale regression coverage to include VSM Temperature Scan canvases (not only FMR-hosted canvases).
+- Updated shared navigation mode handling so active `Zoom`/`Pan` follows the selected graph tab instead of resetting on tab switch.
+- Hardened subwindow layout redraw to avoid queued Matplotlib idle-draw callbacks hitting deleted Qt canvases during rapid tab/window teardown.
+- Added microwire builder coverage for current-density/transition-temp merge behavior and column-group visibility in Assemble output workflows.
+- Added VSM Temperature Scan outlier-workflow coverage through shared PyPlot worksheet outlier detection/removal paths.
+- Added responsive status-bar width balancing so the cursor readout keeps a readable minimum width while task progress widgets are visible.
+- Refined VSM Temperature Scan non-Origin legends/colors: field-pair colors are now deterministic (red/blue then orange/green), legends keep section-order traces, and export legend text no longer embeds section prose.
+- Enlarged builder embedded preview defaults for annealing and VSM temperature scans, and expanded regression coverage for preview rendering and dual-axis legend ordering.
+- Hardened Current Annealing Matplotlib legend styling so legend text color follows line color after all readability/style passes.
+- Modernized core runtime dependencies in `pyproject.toml` and regenerated `requirements.txt` from the project spec for lock alignment.
+- Updated project runtime metadata to Python `>=3.13,<3.14` to match the supported environment and dependency lock workflow.
+- Compatibility note: Origin automation runtime checks remain Windows-only (`originpro`), so Origin export parity validation continues to require a Windows environment.

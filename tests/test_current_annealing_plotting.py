@@ -92,6 +92,29 @@ def test_plot_one_uses_shared_default_label_style_and_size() -> None:
     plt.close(fig)
 
 
+def test_plot_one_legend_text_color_follows_line_color() -> None:
+    df = pd.DataFrame(
+        {
+            "I_mA": [0.0, 10.0, 20.0, 10.0, 0.0],
+            "R_Ohm": [100.0, 120.0, 140.0, 130.0, 110.0],
+        }
+    )
+    fig, _ = anneal_core.plot_one(df, "Anneal")
+    try:
+        ax = fig.axes[0]
+        legend = ax.get_legend()
+        assert legend is not None
+        handles_attr = getattr(legend, "legendHandles", None)
+        if handles_attr is None:
+            handles_attr = getattr(legend, "legend_handles", [])
+        handle_colors = [mcolors.to_hex(handle.get_color()) for handle in handles_attr]
+        text_colors = [mcolors.to_hex(text.get_color()) for text in legend.get_texts()]
+        assert text_colors
+        assert text_colors == handle_colors[: len(text_colors)]
+    finally:
+        plt.close(fig)
+
+
 class _DummyTitleLabel:
     def __init__(self) -> None:
         self.text = ""

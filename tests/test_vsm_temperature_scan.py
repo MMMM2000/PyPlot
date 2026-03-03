@@ -31,19 +31,40 @@ def test_field_axis_order_preserves_measurement_order() -> None:
     assert ordered == [50.0, 10000.0, 5.0]
 
 
-def test_series_color_map_uses_warm_for_heating_and_cold_for_cooling() -> None:
+def test_series_color_map_uses_red_blue_then_orange_green_per_field_order() -> None:
     processor = module.VSMTemperatureScanProcessor()
     up_frame = pd.DataFrame({"temperature": [10, 20, 30], "signal": [1.0, 1.1, 1.2]})
     down_frame = pd.DataFrame({"temperature": [30, 20, 10], "signal": [1.2, 1.1, 1.0]})
     series = [
         module.PlotSeries(field=10000.0, direction="up", segment_index=0, frame=up_frame),
-        module.PlotSeries(field=10000.0, direction="down", segment_index=1, frame=down_frame),
+        module.PlotSeries(field=10000.0, direction="down", segment_index=0, frame=down_frame),
+        module.PlotSeries(field=5.0, direction="up", segment_index=0, frame=up_frame),
+        module.PlotSeries(field=5.0, direction="down", segment_index=0, frame=down_frame),
     ]
 
     color_map = processor.series_color_map(series)
 
-    assert color_map[(10000.0, "up", 0)] in module.VSM_TEMP_SCAN_WARM_COLORS
-    assert color_map[(10000.0, "down", 1)] in module.VSM_TEMP_SCAN_COLD_COLORS
+    assert color_map[(10000.0, "up", 0)] == "#dc2626"
+    assert color_map[(10000.0, "down", 0)] == "#2563eb"
+    assert color_map[(5.0, "up", 0)] == "#f97316"
+    assert color_map[(5.0, "down", 0)] == "#16a34a"
+
+
+def test_prepare_series_uses_arrow_direction_labels_without_section_text() -> None:
+    processor = module.VSMTemperatureScanProcessor()
+    frame = pd.DataFrame(
+        {
+            "temperature": [10, 20, 30],
+            "field": [5.0, 5.0, 5.0],
+            "signal": [1.0, 1.1, 1.2],
+            "section_index": [0, 0, 0],
+        }
+    )
+    series = processor._build_series(frame)
+    prepared = processor._prepare_series(series)
+    assert prepared
+    assert "Section" not in prepared[0].legend
+    assert "↑" in prepared[0].legend or "↓" in prepared[0].legend or "flat" in prepared[0].legend
 
 
 def test_plot_title_includes_field_labels() -> None:
@@ -264,6 +285,9 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
     monkeypatch.setattr(module, "origin_session", _fake_origin_session)
 
     processor = module.VSMTemperatureScanProcessor()
+    processor.set_show_derivative(False)
+    processor.set_show_smoothed_derivative(True)
+    processor.set_smooth_derivative(True)
     frame = pd.DataFrame(
         {
             "temperature": [30.0, 40.0, 50.0],
@@ -284,6 +308,9 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
     assert layer._axes["x"].label.text == "Temperature [°C]"
     assert "[emu]" in layer._axes["y"].label.text
     assert "\\l(" in layer._legend.text
+    titles = [str(getattr(item, "title_meta", "") or "") for item in fake_origin.graphs]
+    assert any("Smoothed d(Signal X)/dT" in title for title in titles)
+    assert not any(" - d(Signal X)/dT" in title and "Smoothed" not in title for title in titles)
 
 
 def test_plot_origin_combines_legend_entries_for_dual_axis(monkeypatch) -> None:

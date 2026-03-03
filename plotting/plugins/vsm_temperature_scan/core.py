@@ -55,6 +55,16 @@ VSM_TEMP_SCAN_COLORS = ["#dc2626", "#2563eb", "#f97316", "#16a34a"]
 VSM_TEMP_SCAN_WARM_COLORS = ["#dc2626", "#f97316", "#ea580c", "#ef4444"]
 VSM_TEMP_SCAN_COLD_COLORS = ["#2563eb", "#0ea5e9", "#1d4ed8", "#06b6d4"]
 VSM_TEMP_SCAN_NEUTRAL_COLORS = ["#6b7280", "#4b5563"]
+VSM_TEMP_SCAN_FIELD_DIRECTION_PALETTES: tuple[dict[str, list[str]], ...] = (
+    {
+        "up": ["#dc2626", "#ef4444", "#f87171"],   # red family
+        "down": ["#2563eb", "#3b82f6", "#60a5fa"],  # blue family
+    },
+    {
+        "up": ["#f97316", "#fb923c", "#fdba74"],   # orange family
+        "down": ["#16a34a", "#22c55e", "#4ade80"],  # green family
+    },
+)
 SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _SAMPLE_HAS_ANGLE_RE = re.compile(r"(?:\d{1,3}\s*°|\d{1,3}\s*deg(?:ree)?s?)", re.IGNORECASE)
 
@@ -301,23 +311,32 @@ class VSMTemperatureScanProcessor:
     def series_color_map(self, series: Sequence[PlotSeries]) -> dict[tuple[float, str, int], str]:
         """Assign colors per (field, direction, segment) tuple.
 
-        Heating segments always use warm colors, cooling segments always use cold
-        colors, and flat/unknown segments use neutral tones.
+        Field groups use stable direction color pairs:
+        first field -> red/blue, second field -> orange/green.
+        Additional fields cycle these pairs; repeated same-direction segments
+        walk lighter shades in first-seen (section) order.
         """
 
-        counters: dict[str, int] = {"up": 0, "down": 0, "flat": 0}
+        field_order = self.field_axis_order([entry.field for entry in series])
+        field_slots: dict[float, int] = {
+            round(float(field), 6): index for index, field in enumerate(field_order)
+        }
+        counters: dict[tuple[int, str], int] = {}
         colors: dict[tuple[float, str, int], str] = {}
         for idx, entry in enumerate(series):
             direction = self._series_direction(entry)
-            if direction == "up":
-                palette = VSM_TEMP_SCAN_WARM_COLORS
-            elif direction == "down":
-                palette = VSM_TEMP_SCAN_COLD_COLORS
-            else:
-                palette = VSM_TEMP_SCAN_NEUTRAL_COLORS
-            color_index = counters.get(direction, 0)
-            counters[direction] = color_index + 1
             fallback = VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)]
+            field_slot = field_slots.get(round(float(entry.field), 6), idx)
+            if direction in {"up", "down"} and VSM_TEMP_SCAN_FIELD_DIRECTION_PALETTES:
+                palette_group = VSM_TEMP_SCAN_FIELD_DIRECTION_PALETTES[
+                    field_slot % len(VSM_TEMP_SCAN_FIELD_DIRECTION_PALETTES)
+                ]
+                palette = list(palette_group.get(direction, []))
+            else:
+                palette = list(VSM_TEMP_SCAN_NEUTRAL_COLORS)
+            counter_key = (field_slot, direction)
+            color_index = counters.get(counter_key, 0)
+            counters[counter_key] = color_index + 1
             color = palette[color_index % len(palette)] if palette else fallback
             colors[(entry.field, entry.direction, entry.segment_index)] = color
         return colors
@@ -351,7 +370,10 @@ class VSMTemperatureScanProcessor:
             frame, _ = self._dedupe_temperatures(entry_series.frame)
             frame = frame.sort_values("temperature")
             section_label = f"Section {entry_series.segment_index + 1}"
-            legend_text = f"{entry_series.field:.0f} Oe{self._direction_label(entry_series.direction, entry_series.segment_index)} ({section_label})"
+            legend_text = (
+                f"{entry_series.field:.0f} Oe"
+                f"{self._direction_label(entry_series.direction, entry_series.segment_index)}"
+            )
             color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
             color = color_map.get(color_key, VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)])
             prepared.append(
@@ -1708,97 +1730,97 @@ class VSMTemperatureScanProcessor:
                     except Exception:
                         pass
                     _style_origin_layer(layer, deriv_title)
-    
-                    if self.show_smoothed_derivative and self.smooth_derivative:
-                        deriv_sm_sheet = book.add_sheet()
-                        deriv_sm_sheet.name = "Derivative (smoothed)"
-                        col = 0
-                        derivative_sm_pairs: list[tuple[float, int, str, str]] = []
-                        sm_designations: list[str] = []
-                        for item in prepared:
-                            frame = self._smooth_frame(item.frame)
-                            temps = frame["temperature"].astype(float).tolist()
-                            derivs = self._compute_derivative(frame, smooth=True)
-                            deriv_sm_sheet.from_list(
-                                col,
-                                temps,
-                                lname="Temperature",
-                                units="°C",
-                                comments=item.section_label,
-                                axis="X",
-                            )
-                            col_x = cast(Any, deriv_sm_sheet.obj.Columns(col))
-                            try:
-                                col_x.LongName = "Temperature"
-                                col_x.Units = "°C"
-                                col_x.Comment = item.section_label
-                                col_x.Type = 3
-                            except Exception:
-                                pass
-                            sm_designations.append("X")
-                            deriv_sm_sheet.from_list(
-                                col + 1,
-                                derivs,
-                                lname="dSignal/dT (smoothed)",
-                                units="emu/°C",
-                                comments=item.legend,
-                                axis="Y",
-                            )
-                            col_y = cast(Any, deriv_sm_sheet.obj.Columns(col + 1))
-                            try:
-                                col_y.LongName = "dSignal/dT (smoothed)"
-                                col_y.Units = "emu/°C"
-                                col_y.Comment = item.legend
-                                col_y.Type = 4
-                            except Exception:
-                                pass
-                            sm_designations.append("Y")
-                            col += 2
-                            derivative_sm_pairs.append((item.series.field, col - 2, item.legend, item.color))
-                            if sm_designations:
-                                try:
-                                    deriv_sm_sheet.cols_axis("".join(sm_designations))
-                                except Exception:
-                                    pass
-                            try:
-                                deriv_sm_sheet.header_rows("LUC")
-                            except Exception:
-                                pass
-                        deriv_sm_graph = origin.new_graph(template="line")
-                        graphs.append(deriv_sm_graph)
-                        deriv_sm_title = self._plot_title(entry.sample, "Smoothed d(Signal X)/dT", fields)
-                        _set_origin_graph_title(origin, deriv_sm_graph, deriv_sm_title)
-                        layer = deriv_sm_graph[0]
-                        _set_origin_axis_title(layer, "x", x_axis_label)
-                        _set_origin_axis_title(layer, "y", derivative_axis_label)
-                        legend_entries = {}
-                        legend_plot_count = 0
-                        for field_value, base_col, legend_text, color in derivative_sm_pairs:
-                            plot_obj = cast(Any, layer.add_plot(deriv_sm_sheet, coly=base_col + 1, colx=base_col))
-                            if plot_obj is not None:
-                                try:
-                                    plot_obj.legend = legend_text
-                                except Exception:
-                                    pass
-                                try:
-                                    plot_obj.color = color
-                                    plot_obj.symbol.color = color
-                                except Exception:
-                                    pass
-                                style = self._origin_style("derivative_smoothed")
-                                self._apply_origin_series_style(
-                                    plot_obj,
-                                    line_width=cast(float | None, style.get("line_width")),
-                                    show_markers=bool(style.get("show_markers", False)),
-                                    marker_size=cast(float | None, style.get("marker_size")),
-                                )
-                                legend_plot_count += 1
-                                legend_entries.setdefault(layer, []).append((legend_plot_count, legend_text))
+
+                if self.show_smoothed_derivative and self.smooth_derivative:
+                    deriv_sm_sheet = book.add_sheet()
+                    deriv_sm_sheet.name = "Derivative (smoothed)"
+                    col = 0
+                    derivative_sm_pairs: list[tuple[float, int, str, str]] = []
+                    sm_designations: list[str] = []
+                    for item in prepared:
+                        frame = self._smooth_frame(item.frame)
+                        temps = frame["temperature"].astype(float).tolist()
+                        derivs = self._compute_derivative(frame, smooth=True)
+                        deriv_sm_sheet.from_list(
+                            col,
+                            temps,
+                            lname="Temperature",
+                            units="°C",
+                            comments=item.section_label,
+                            axis="X",
+                        )
+                        col_x = cast(Any, deriv_sm_sheet.obj.Columns(col))
                         try:
-                            self._set_origin_legend(layer, legend_entries.get(layer, []))
+                            col_x.LongName = "Temperature"
+                            col_x.Units = "°C"
+                            col_x.Comment = item.section_label
+                            col_x.Type = 3
                         except Exception:
                             pass
-                        _style_origin_layer(layer, deriv_sm_title)
+                        sm_designations.append("X")
+                        deriv_sm_sheet.from_list(
+                            col + 1,
+                            derivs,
+                            lname="dSignal/dT (smoothed)",
+                            units="emu/°C",
+                            comments=item.legend,
+                            axis="Y",
+                        )
+                        col_y = cast(Any, deriv_sm_sheet.obj.Columns(col + 1))
+                        try:
+                            col_y.LongName = "dSignal/dT (smoothed)"
+                            col_y.Units = "emu/°C"
+                            col_y.Comment = item.legend
+                            col_y.Type = 4
+                        except Exception:
+                            pass
+                        sm_designations.append("Y")
+                        col += 2
+                        derivative_sm_pairs.append((item.series.field, col - 2, item.legend, item.color))
+                    if sm_designations:
+                        try:
+                            deriv_sm_sheet.cols_axis("".join(sm_designations))
+                        except Exception:
+                            pass
+                    try:
+                        deriv_sm_sheet.header_rows("LUC")
+                    except Exception:
+                        pass
+                    deriv_sm_graph = origin.new_graph(template="line")
+                    graphs.append(deriv_sm_graph)
+                    deriv_sm_title = self._plot_title(entry.sample, "Smoothed d(Signal X)/dT", fields)
+                    _set_origin_graph_title(origin, deriv_sm_graph, deriv_sm_title)
+                    layer = deriv_sm_graph[0]
+                    _set_origin_axis_title(layer, "x", x_axis_label)
+                    _set_origin_axis_title(layer, "y", derivative_axis_label)
+                    legend_entries = {}
+                    legend_plot_count = 0
+                    for field_value, base_col, legend_text, color in derivative_sm_pairs:
+                        plot_obj = cast(Any, layer.add_plot(deriv_sm_sheet, coly=base_col + 1, colx=base_col))
+                        if plot_obj is not None:
+                            try:
+                                plot_obj.legend = legend_text
+                            except Exception:
+                                pass
+                            try:
+                                plot_obj.color = color
+                                plot_obj.symbol.color = color
+                            except Exception:
+                                pass
+                            style = self._origin_style("derivative_smoothed")
+                            self._apply_origin_series_style(
+                                plot_obj,
+                                line_width=cast(float | None, style.get("line_width")),
+                                show_markers=bool(style.get("show_markers", False)),
+                                marker_size=cast(float | None, style.get("marker_size")),
+                            )
+                            legend_plot_count += 1
+                            legend_entries.setdefault(layer, []).append((legend_plot_count, legend_text))
+                    try:
+                        self._set_origin_legend(layer, legend_entries.get(layer, []))
+                    except Exception:
+                        pass
+                    _style_origin_layer(layer, deriv_sm_title)
     
                 try:
                     book.activate()

@@ -79,6 +79,7 @@ from plotting.shared.readability import (
     sync_readability,
 )
 from plotting.shared.logfiles import append_text_with_rotation
+from .cursor_status import cursor_readout_text
 
 
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
@@ -2021,12 +2022,11 @@ class LegendSettingsDialog(QtWidgets.QDialog):
             canvas = getattr(canvas, "canvas", None)
         if canvas is not None:
             try:
-                canvas.draw_idle()
+                # Use an immediate draw here to avoid queued idle-draw callbacks
+                # firing after the canvas has already been torn down.
+                canvas.draw()
             except Exception:
-                try:
-                    canvas.draw()
-                except Exception:
-                    pass
+                pass
         self._persist_defaults()
 
     def accept(self) -> None:  # type: ignore[override]
@@ -5016,23 +5016,28 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if status is not None:
             label = QtWidgets.QLabel("x: --   y: --", self)
             label.setObjectName("mw_cursor_status")
-            label.setMinimumWidth(320)
+            label.setMinimumWidth(180)
             label.setMinimumHeight(26)
             label.setContentsMargins(6, 2, 6, 2)
+            label.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Preferred,
+            )
             status.addPermanentWidget(label, 1)
             self._cursor_label = label
 
             progress_label = QtWidgets.QLabel("", self)
             progress_label.setObjectName("mw_task_progress_label")
-            progress_label.setMinimumWidth(220)
+            progress_label.setMinimumWidth(140)
+            progress_label.setMaximumWidth(280)
             progress_label.setVisible(False)
             status.addPermanentWidget(progress_label, 0)
             self._task_progress_label = progress_label
 
             progress_bar = QtWidgets.QProgressBar(self)
             progress_bar.setObjectName("mw_task_progress_bar")
-            progress_bar.setMinimumWidth(260)
-            progress_bar.setMaximumWidth(360)
+            progress_bar.setMinimumWidth(180)
+            progress_bar.setMaximumWidth(320)
             progress_bar.setTextVisible(True)
             progress_bar.setVisible(False)
             status.addPermanentWidget(progress_bar, 0)
@@ -5042,6 +5047,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 status.setSizeGripEnabled(True)
             except Exception:
                 pass
+            self._refresh_status_bar_layout()
 
         self.project_tree = QtWidgets.QTreeWidget()
         self.project_tree.setHeaderLabels(["Project Explorer", "Details"])
@@ -6404,6 +6410,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 bar.setRange(0, 0)
                 bar.setFormat("%p%")
             bar.setVisible(True)
+            self._refresh_status_bar_layout()
         except Exception:
             return
         try:
@@ -6435,6 +6442,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     bar.setValue(0)
             label.setVisible(True)
             bar.setVisible(True)
+            self._refresh_status_bar_layout()
         except Exception:
             return
         try:
@@ -6464,6 +6472,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             bar.setRange(0, 1)
             bar.setValue(0)
             bar.setVisible(False)
+            self._refresh_status_bar_layout()
         except Exception:
             return
         try:
@@ -6471,19 +6480,89 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             pass
 
+    def _refresh_status_bar_layout(self) -> None:
+        status = None
+        try:
+            status = self.statusBar()
+        except Exception:
+            status = None
+        if not isinstance(status, QtWidgets.QStatusBar):
+            return
+
+        cursor_label = self._cursor_label
+        progress_label = self._task_progress_label
+        progress_bar = self._task_progress_bar
+        if cursor_label is None:
+            return
+
+        total_width = max(int(status.width()), 0)
+        if total_width <= 0:
+            return
+
+        has_progress = bool(
+            (isinstance(progress_label, QtWidgets.QLabel) and progress_label.isVisible())
+            or (isinstance(progress_bar, QtWidgets.QProgressBar) and progress_bar.isVisible())
+        )
+
+        cursor_target = max(120, min(320, int(total_width * (0.42 if has_progress else 0.55))))
+        cursor_label.setMinimumWidth(cursor_target)
+
+        if not has_progress:
+            if isinstance(progress_label, QtWidgets.QLabel):
+                progress_label.setMinimumWidth(140)
+                progress_label.setMaximumWidth(280)
+            if isinstance(progress_bar, QtWidgets.QProgressBar):
+                progress_bar.setMinimumWidth(180)
+                progress_bar.setMaximumWidth(320)
+            return
+
+        available = max(total_width - cursor_target - 28, 0)
+        label_target = max(80, min(180, int(available * 0.35)))
+        bar_target = max(100, min(280, available - label_target))
+        if available <= 200:
+            label_target = max(60, min(120, int(available * 0.30)))
+            bar_target = max(90, available - label_target)
+
+        if isinstance(progress_label, QtWidgets.QLabel):
+            progress_label.setMinimumWidth(label_target)
+            progress_label.setMaximumWidth(max(label_target, 220))
+        if isinstance(progress_bar, QtWidgets.QProgressBar):
+            progress_bar.setMinimumWidth(bar_target)
+            progress_bar.setMaximumWidth(max(bar_target, 280))
+
     def _update_cursor_status(self, event: Any | None) -> None:
         label = self._cursor_label
         if label is None:
             return
-        if event is None or getattr(event, "inaxes", None) is None:
-            label.setText("x: --   y: --")
-            return
+        self._refresh_status_bar_layout()
+        x_value: float | None = None
+        y_value: float | None = None
+        if event is not None and getattr(event, "inaxes", None) is not None:
+            try:
+                x_value = float(event.xdata)
+                y_value = float(event.ydata)
+            except Exception:
+                x_value = None
+                y_value = None
+
+        available_px = 0
         try:
-            x_val = float(event.xdata)
-            y_val = float(event.ydata)
-            label.setText(f"x: {x_val:.4g}   y: {y_val:.4g}")
+            available_px = max(int(label.width()) - 8, 0)
+            if available_px <= 0:
+                status = self.statusBar()
+                if isinstance(status, QtWidgets.QStatusBar):
+                    available_px = max(int(status.width() * 0.45), 0)
         except Exception:
-            label.setText("x: --   y: --")
+            available_px = 0
+        metrics = QtGui.QFontMetrics(label.font())
+        label.setText(
+            cursor_readout_text(
+                x_value,
+                y_value,
+                available_px=available_px,
+                metrics=metrics,
+            )
+        )
 
     def _rescale_current_axes(self, axis: str) -> None:
         axes = self._current_axes()
@@ -12729,14 +12808,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
         super().changeEvent(event)
-        if event.type() != QtCore.QEvent.Type.ActivationChange:
+        if event.type() == QtCore.QEvent.Type.WindowStateChange:
+            QtCore.QTimer.singleShot(0, self._refresh_primary_dock_layout)
+            QtCore.QTimer.singleShot(20, self._normalize_docks_initial)
+            QtCore.QTimer.singleShot(0, self._refresh_status_bar_layout)
             return
-        if not self.isActiveWindow():
-            return
-        self._normalize_single_visible_graph_subwindow()
+        if event.type() == QtCore.QEvent.Type.ActivationChange and self.isActiveWindow():
+            self._normalize_single_visible_graph_subwindow()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        self._refresh_status_bar_layout()
         if self._primary_dock_layout_refreshing:
             return
         if self._dock_resize_refresh_pending:
@@ -12756,6 +12838,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[override]
         super().showEvent(event)
+        self._refresh_status_bar_layout()
         if not getattr(self, "_layout_fixed_once", False):
             self._layout_fixed_once = True
             QtCore.QTimer.singleShot(0, self._apply_initial_dock_sizes)
@@ -12810,7 +12893,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     # ------------------------------------------------------------------ state helpers
     def _handle_current_tab_changed(self, index: int) -> None:
         tab = self.tab_widget.widget(index) if index >= 0 else None
-        self._set_navigation_mode(None)
+        active_mode = self._nav_mode if self._nav_mode in {"zoom", "pan"} else None
+        self._set_navigation_mode(active_mode)
         self._update_tab_buttons()
         self._focus_tree_on_tab(tab)
         self._rebuild_object_manager_for_tab(tab)

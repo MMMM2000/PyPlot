@@ -162,8 +162,8 @@ MICROSCOPE_TABLE_COLUMNS = [
     "_images",
 ]
 
-ANNEALING_GRAPH_WIDTH = 420
-ANNEALING_GRAPH_HEIGHT = 200
+ANNEALING_GRAPH_WIDTH = 480
+ANNEALING_GRAPH_HEIGHT = 230
 ANNEALING_TITLE_FONT_SIZE = 8
 ANNEALING_AXIS_FONT_SIZE = 6
 ANNEALING_TICK_FONT_SIZE = 6
@@ -3686,6 +3686,8 @@ def _plot_vsm_temperature_scan_figure(
     ax_left = figure.add_subplot(111)
     ax_right = None
     axes_map: Dict[float, Any] = {}
+    legend_handles: List[Any] = []
+    legend_labels: List[str] = []
     for idx, entry_series in enumerate(series):
         frame = entry_series.frame
         temps = frame["temperature"]
@@ -3709,7 +3711,9 @@ def _plot_vsm_temperature_scan_figure(
             ax_right = ax_left.twinx()
             axes_map[entry_series.field] = ax_right
         axis = axes_map[entry_series.field]
-        axis.plot(temps, signal, color=color, linewidth=1.4, label=label)
+        line = axis.plot(temps, signal, color=color, linewidth=1.4, label=label)[0]
+        legend_handles.append(line)
+        legend_labels.append(label)
     title = record.sample or Path(record.path).stem
     variant = getattr(record, "variant", None)
     if isinstance(variant, str) and variant.strip():
@@ -3719,7 +3723,8 @@ def _plot_vsm_temperature_scan_figure(
     ax_left.set_ylabel("Signal X (emu)")
     if ax_right is not None:
         ax_right.set_ylabel("Signal X (emu) (secondary)")
-    ax_left.legend(loc="best")
+    if legend_handles:
+        ax_left.legend(legend_handles, legend_labels, loc="best")
     figure.tight_layout()
     return figure
 
@@ -4510,15 +4515,22 @@ def _vsm_temperature_preview_items(
     processor = _get_vsm_temp_processor(logger)
     if processor is None:
         return []
+    preview_width = max(int(width_px * 1.25), width_px)
+    preview_height = max(int(height_px * 1.25), height_px)
     items: List[_GraphPreviewItem] = []
     for record in records:
         figure = _plot_vsm_temperature_scan_figure(
             record,
             processor,
-            width_px=width_px,
-            height_px=height_px,
+            width_px=preview_width,
+            height_px=preview_height,
         )
-        pixmap = _figure_to_pixmap(figure, logger, width_px=width_px, height_px=height_px)
+        pixmap = _figure_to_pixmap(
+            figure,
+            logger,
+            width_px=preview_width,
+            height_px=preview_height,
+        )
         if pixmap is None:
             continue
         title = _record_label_for_display(record) or record.sample
@@ -17127,21 +17139,10 @@ class CompareSection(MiniDatabaseSection):
             self.fmr_gallery.set_items(
                 fmr_items, "No FMR graphs available for this microwire."
             )
-
-            fmr_records = self._ensure_fmr_groups().get(key, [])
-            fmr_items = _fmr_preview_items(
-                fmr_records,
-                self.logger,
-                width_px=ANNEALING_GRAPH_WIDTH,
-                height_px=ANNEALING_GRAPH_HEIGHT,
-            )
-            self.fmr_gallery.set_items(
-                fmr_items, "No FMR graphs available for this microwire."
-            )
         except Exception as exc:
-            self.logger.exception("Failed to update assemble graph preview panel")
+            self.logger.exception("Failed to update compare graph preview panel")
             self.log(
-                f"Failed to update assemble graph preview panel: {exc}",
+                f"Failed to update compare graph preview panel: {exc}",
                 level=logging.ERROR,
             )
 
@@ -17999,6 +18000,21 @@ class AssemblySection(QtWidgets.QWidget):
         except Exception:
             return None
 
+    @staticmethod
+    def _is_missing_import_value(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str) and not value.strip():
+            return True
+        try:
+            return bool(pd.isna(value))
+        except Exception:
+            return False
+
+    @classmethod
+    def _should_fill_import_value(cls, existing: Any, incoming: Any) -> bool:
+        return cls._is_missing_import_value(existing) and not cls._is_missing_import_value(incoming)
+
     def _apply_fabrication_defaults(
         self, record: Dict[str, Any], fabrication_index: FabricationIndex
     ) -> None:
@@ -18014,7 +18030,7 @@ class AssemblySection(QtWidgets.QWidget):
         piece_info = fabrication_index.get_piece(composition, draw_x, piece_y)
 
         def fill(column: str, value: object) -> None:
-            if record.get(column) in (None, "") and value not in (None, ""):
+            if self._should_fill_import_value(record.get(column), value):
                 record[column] = value
 
         fill("Length (m)", _value_for_output(piece_info, "length_m"))
@@ -18066,13 +18082,7 @@ class AssemblySection(QtWidgets.QWidget):
                     if column not in merged_frame.columns:
                         merged_frame[column] = None
                     existing = row.get(column)
-                    is_missing = existing is None or existing == ""
-                    if not is_missing:
-                        try:
-                            is_missing = bool(pd.isna(existing))
-                        except Exception:
-                            is_missing = False
-                    if is_missing and value not in (None, ""):
+                    if self._should_fill_import_value(existing, value):
                         merged_frame.at[row_idx, column] = value
                         updated = True
                 if updated:
@@ -18104,7 +18114,7 @@ class AssemblySection(QtWidgets.QWidget):
                 continue
             updated = False
             for column, value in record.items():
-                if existing.get(column) in (None, "") and value not in (None, ""):
+                if self._should_fill_import_value(existing.get(column), value):
                     existing[column] = value
                     added_fields += 1
                     updated = True
