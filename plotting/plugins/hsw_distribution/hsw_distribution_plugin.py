@@ -9,7 +9,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from plotting.plugins._window import window_api
 from plotting.plugins.base import PyPlotPlugin, register_plugin
 
-from . import dialog as hsw_dist_core
+from . import core as hsw_dist_core
 
 if TYPE_CHECKING:
     from plotting.pyplot.window import GraphLineState
@@ -218,7 +218,7 @@ class HswDistributionPlugin(PyPlotPlugin):
 
     def open_origin(self) -> None:  # type: ignore[override]
         def _task() -> None:
-            hsw_dist_core.run_distribution(self._loaded_files, self._config(backend="origin"))
+            hsw_dist_core.export_origin(self._loaded_files, self._config(backend="origin"))
 
         self.run_origin_export(
             ready=bool(self._loaded_files),
