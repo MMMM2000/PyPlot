@@ -22,6 +22,25 @@ from plotting.shared.readability import create_readability_group, sync_readabili
 from plotting.shared.backends import wants_matplotlib, wants_origin
 
 
+def _parse_float_str(value: str) -> float:
+    text = str(value).strip().replace(" ", "")
+    comma_count = text.count(",")
+    dot_count = text.count(".")
+    if comma_count and dot_count:
+        if text.rfind(",") > text.rfind("."):
+            decimal_sep, group_sep = ",", "."
+        else:
+            decimal_sep, group_sep = ".", ","
+        text = text.replace(group_sep, "")
+        if decimal_sep != ".":
+            text = text.replace(decimal_sep, ".")
+    elif comma_count == 1 and dot_count == 0:
+        text = text.replace(",", ".")
+    elif dot_count > 1 and comma_count == 0:
+        text = text.replace(".", "")
+    return float(text)
+
+
 class SettingsDialog(QtWidgets.QDialog):
     """Interactive configuration panel for Hsw distribution plots."""
 
@@ -170,8 +189,8 @@ class SettingsDialog(QtWidgets.QDialog):
         )
 
 
-def run_distribution(paths: Sequence[str], config: Dict[str, Any]) -> None:
-    """Execute the Hsw distribution analysis for ``paths`` using ``config``."""
+def build_figures(paths: Sequence[str], config: Dict[str, Any]) -> List[Tuple[Figure, str]]:
+    """Build Matplotlib figures for the configured HSW distribution plots."""
 
     labels = config.get("labels", ("TT", "HH"))
     raw_data: Dict[str, pd.DataFrame] = {}
@@ -179,7 +198,14 @@ def run_distribution(paths: Sequence[str], config: Dict[str, Any]) -> None:
     masks: Dict[str, np.ndarray] = {}
     for path in paths:
         name = os.path.splitext(os.path.basename(path))[0]
-        raw = pd.read_csv(path, sep=";", header=None, usecols=[0, 1], names=list(labels))
+        raw = pd.read_csv(
+            path,
+            sep=";",
+            header=None,
+            usecols=[0, 1],
+            names=list(labels),
+            converters={labels[0]: _parse_float_str, labels[1]: _parse_float_str},
+        )
         raw.columns = ["TT", "HH"]
         raw["TTn0"] = raw["TT"] / raw["TT"].max()
         raw["HHn0"] = raw["HH"] / raw["HH"].max()
@@ -223,30 +249,19 @@ def run_distribution(paths: Sequence[str], config: Dict[str, Any]) -> None:
             hazard = counts / (Ni + 1e-12)
             dp = (hazard / dh_val) / (hazard.sum() + 1e-12)
             hist[name][col] = {"centers": centers, "counts": counts, "dp": dp, "dh": dh_val}
-
-    num_per = (
-        (1 if config["raw"] else 0)
-        + (2 if config["hist"] else 0)
-        + (2 if config["ind_log"] else 0)
-        + (1 if config["comb_log"] else 0)
-    )
-    total_plots = len(data) * num_per
-    progress = ProgressDialog(total_plots) if total_plots else None
-
+    plots: List[Tuple[Figure, str]] = []
     backend = config.get("backend", "matplotlib")
     for name, df in data.items():
-        if progress and progress.cancelled:
-            break
         mask = masks[name]
         raw = raw_data[name]
 
         if config["raw"] and wants_matplotlib(backend):
-            plt.figure(figsize=(6, 3))
-            plt.scatter(df.index + 1, df["TT"], s=2, label=f"{labels[0]} inlier")
-            plt.scatter(df.index + 1, df["HH"], s=2, label=f"{labels[1]} inlier", color="C1")
+            fig, ax = plt.subplots(figsize=(6, 3))
+            ax.scatter(df.index + 1, df["TT"], s=2, label=f"{labels[0]} inlier")
+            ax.scatter(df.index + 1, df["HH"], s=2, label=f"{labels[1]} inlier", color="C1")
             if config["show_trimmed"]:
                 trimmed = ~mask
-                plt.scatter(
+                ax.scatter(
                     np.where(trimmed)[0] + 1,
                     raw["TT"][trimmed],
                     s=20,
@@ -254,7 +269,7 @@ def run_distribution(paths: Sequence[str], config: Dict[str, Any]) -> None:
                     marker="x",
                     label=f"{labels[0]} trimmed",
                 )
-                plt.scatter(
+                ax.scatter(
                     np.where(trimmed)[0] + 1,
                     raw["HH"][trimmed],
                     s=20,
@@ -262,72 +277,122 @@ def run_distribution(paths: Sequence[str], config: Dict[str, Any]) -> None:
                     marker="x",
                     label=f"{labels[1]} trimmed",
                 )
-            plt.title(f"{name} — Raw with Histogram-Core filter")
-            plt.xlabel("Index")
-            plt.ylabel("Switching Field")
-            plt.legend(fontsize="x-small")
-            plt.tight_layout()
-            if progress:
-                progress.update()
-        if progress and progress.cancelled:
-            break
+            ax.set_title(f"{name} — Raw with Histogram-Core filter")
+            ax.set_xlabel("Index")
+            ax.set_ylabel("Switching Field")
+            ax.legend(fontsize="x-small")
+            fig.tight_layout()
+            plots.append((fig, f"{name}_raw"))
         if config["hist"] and wants_matplotlib(backend):
             for col, h in hist[name].items():
-                plt.figure()
-                plt.bar(h["centers"], h["counts"], width=h["dh"], edgecolor="k", alpha=0.6)
-                plt.title(f"{name} — {col}: counts")
-                plt.xlabel("h = H/Hsw,max")
-                plt.ylabel("Counts")
-                plt.grid(ls="--", alpha=0.3)
-                if progress:
-                    progress.update()
-            if progress and progress.cancelled:
-                break
-        if config["ind_log"] and wants_matplotlib(backend) and not (progress and progress.cancelled):
+                fig, ax = plt.subplots()
+                ax.bar(h["centers"], h["counts"], width=h["dh"], edgecolor="k", alpha=0.6)
+                ax.set_title(f"{name} — {col}: counts")
+                ax.set_xlabel("h = H/Hsw,max")
+                ax.set_ylabel("Counts")
+                ax.grid(ls="--", alpha=0.3)
+                fig.tight_layout()
+                plots.append((fig, f"{name}_{col}_counts"))
+        if config["ind_log"] and wants_matplotlib(backend):
             for col, h in hist[name].items():
                 valid = h["dp"] > 0
                 x = (1 - h["centers"][valid]) ** 1.5
                 y = np.log(h["dp"][valid])
-                plt.figure()
-                plt.plot(x, y, "-o", markersize=4)
-                plt.title(f"{name} — {col}: ln(dp/dh) vs Δh^(3/2)")
-                plt.xlabel(r"$\Delta h^{3/2}$")
-                plt.ylabel(r"$\ln(dp/dh)$")
-                plt.grid(ls="--", alpha=0.3)
-                if progress:
-                    progress.update()
-            if progress and progress.cancelled:
-                break
-        if config["comb_log"] and wants_matplotlib(backend) and not (progress and progress.cancelled):
-            plt.figure()
+                fig, ax = plt.subplots()
+                ax.plot(x, y, "-o", markersize=4)
+                ax.set_title(f"{name} — {col}: ln(dp/dh) vs Δh^(3/2)")
+                ax.set_xlabel(r"$\Delta h^{3/2}$")
+                ax.set_ylabel(r"$\ln(dp/dh)$")
+                ax.grid(ls="--", alpha=0.3)
+                fig.tight_layout()
+                plots.append((fig, f"{name}_{col}_log"))
+        if config["comb_log"] and wants_matplotlib(backend):
+            fig, ax = plt.subplots()
             for col, h in hist[name].items():
                 valid = h["dp"] > 0
-                plt.plot(
+                ax.plot(
                     (1 - h["centers"][valid]) ** 1.5,
                     np.log(h["dp"][valid]),
                     "-o",
                     markersize=4,
                     label=col,
                 )
-            plt.title(f"{name} — Combined ln(dp/dh)")
-            plt.xlabel(r"$\Delta h^{3/2}$")
-            plt.ylabel(r"$\ln(dp/dh)$")
-            plt.legend()
-            plt.grid(ls="--", alpha=0.3)
-            if progress:
-                progress.update()
+            ax.set_title(f"{name} — Combined ln(dp/dh)")
+            ax.set_xlabel(r"$\Delta h^{3/2}$")
+            ax.set_ylabel(r"$\ln(dp/dh)$")
+            ax.legend()
+            ax.grid(ls="--", alpha=0.3)
+            fig.tight_layout()
+            plots.append((fig, f"{name}_combined_log"))
+    return plots
+
+
+def run_distribution(paths: Sequence[str], config: Dict[str, Any]) -> None:
+    """Execute the Hsw distribution analysis for ``paths`` using ``config``."""
+
+    labels = config.get("labels", ("TT", "HH"))
+    backend = config.get("backend", "matplotlib")
+    plots = build_figures(paths, config)
 
     if wants_origin(backend):
+        raw_data: Dict[str, pd.DataFrame] = {}
+        data: Dict[str, pd.DataFrame] = {}
+        masks: Dict[str, np.ndarray] = {}
+        for path in paths:
+            name = os.path.splitext(os.path.basename(path))[0]
+            raw = pd.read_csv(
+                path,
+                sep=";",
+                header=None,
+                usecols=[0, 1],
+                names=list(labels),
+                converters={labels[0]: _parse_float_str, labels[1]: _parse_float_str},
+            )
+            raw.columns = ["TT", "HH"]
+            raw["TTn0"] = raw["TT"] / raw["TT"].max()
+            raw["HHn0"] = raw["HH"] / raw["HH"].max()
+
+            n_bins = max(2, int(config["core_bins"]))
+            min_ct = max(1, int(config["core_min"]))
+            m_t, _, _ = core_mask(raw["TTn0"].to_numpy(dtype=float), n_bins, min_ct)
+            m_h, _, _ = core_mask(raw["HHn0"].to_numpy(dtype=float), n_bins, min_ct)
+            mask = m_t & m_h
+
+            filtered = raw.loc[mask, ["TT", "HH"]].reset_index(drop=True)
+            filtered["TTn"] = filtered["TT"] / filtered["TT"].max()
+            filtered["HHn"] = filtered["HH"] / filtered["HH"].max()
+            raw_data[name] = raw
+            data[name] = filtered
+            masks[name] = mask
+        hist: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
+        for name, df in data.items():
+            hist[name] = {}
+            vals_tt = df["TTn"].to_numpy(dtype=float)
+            vals_hh = df["HHn"].to_numpy(dtype=float)
+            for col, vals in [(labels[0], vals_tt), (labels[1], vals_hh)]:
+                hmin, hmax = vals.min(), vals.max()
+                if config["bin_mode"] == "auto":
+                    if config["share_bins"]:
+                        B_tt = find_auto_bins(vals_tt)
+                        B_hh = find_auto_bins(vals_hh)
+                        bins = min(B_tt, B_hh)
+                    else:
+                        bins = find_auto_bins(vals)
+                    counts, edges = np.histogram(vals, bins=bins, range=(hmin, hmax))
+                else:
+                    dh = config["bin_width"]
+                    edges = np.arange(hmin, hmax + dh, dh)
+                    counts, _ = np.histogram(vals, bins=edges)
+                centers = 0.5 * (edges[:-1] + edges[1:])
+                dh_val = edges[1] - edges[0]
+                Ni = np.cumsum(counts[::-1])[::-1]
+                hazard = counts / (Ni + 1e-12)
+                dp = (hazard / dh_val) / (hazard.sum() + 1e-12)
+                hist[name][col] = {"centers": centers, "counts": counts, "dp": dp, "dh": dh_val}
         _export_origin(hist, labels)
 
-    if progress:
-        if progress.cancelled:
-            plt.close("all")
-            print("Cancelled.")
-            return
-        progress.destroy()
-
-    show_plots()
+    if plots:
+        show_plots()
 
 
 class ProgressDialog:

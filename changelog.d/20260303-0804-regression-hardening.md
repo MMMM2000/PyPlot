@@ -23,6 +23,7 @@
 - Improved shared graph editing UX: the floating Graph formatting window now keeps its top tab bar fixed/visible, double-clicking plotted curves opens line/marker controls, legend visibility toggles in Object Manager redraw immediately, and legend context menus now expose `Reconstruct legend`.
 - Added shared smoke coverage for the Temperature Dependence, Temperature Sensitivity, Stress Dependence, and Stress Sensitivity PyPlot plugins to keep their import-and-generate flows exercised with sample data.
 - Added internal launcher CLI automation for PyPlot testing, including plugin selection, path import, plot generation, graph-format opening, screenshots, plot image capture, and JSON summaries for headless validation.
+- Migrated the remaining legacy embedded PyPlot entries (`Hsw Distribution`, `Hsw Load Compare`, `Maxion Continuous`, `PDF Plotter`, and `Strain 3D Plot`) onto native shared-plugin wrappers so the registry now runs through the shared PyPlot shell instead of embedded legacy dialogs.
 - Modernized core runtime dependencies in `pyproject.toml` and regenerated `requirements.txt` from the project spec for lock alignment.
 - Updated project runtime metadata to Python `>=3.13,<3.14` to match the supported environment and dependency lock workflow.
 - Compatibility note: Origin automation runtime checks remain Windows-only (`originpro`), so Origin export parity validation continues to require a Windows environment.

@@ -151,13 +151,8 @@ def load_file(path: str):
     return md, raw, filtered, mask
 
 
-def main(files: List[str], cfg: Dict[str, Any]):
-    if IMPROVE_READABILITY:
-        apply_readability_fonts()
+def build_figures(files: List[str], cfg: Dict[str, Any]) -> List[Tuple[Figure, str]]:
     backend = cfg.get("BACKEND", BACKEND)
-    cfg_show = cfg["show"]
-    cfg_save = cfg["save"]
-    out_dir = Path(cfg["out_dir"]).expanduser()
     records = []
     for p in files:
         md, raw, filtered, mask = load_file(p)
@@ -166,34 +161,25 @@ def main(files: List[str], cfg: Dict[str, Any]):
             continue
         records.append((md, raw, filtered, mask))
     if not records:
-        raise SystemExit("No valid ascending-load files selected.")
+        raise ValueError("No valid ascending-load files selected.")
     records.sort(key=lambda t: t[0]["load"])
     hist_data: Dict[float, Dict[str, Dict[str, np.ndarray]]] = {}
-    pdf_ymax = 0.0
     hist_ymax = 0.0
-    raw_ymax = 0.0
-    raw_ymin = float('inf')
     for md, raw, filt, mask in records:
         load = md["load"]
         hist = build_histograms(filt)
         hist_data[load] = hist
-        pdf_ymax = max(pdf_ymax, hist["TT"]["dp"].max(), hist["HH"]["dp"].max())
         hist_ymax = max(hist_ymax, hist["TT"]["counts"].max(), hist["HH"]["counts"].max())
-        masked_vals = raw.loc[mask, ["TT", "HH"]].to_numpy(dtype=float)
-        raw_ymax = max(raw_ymax, masked_vals.max())
-        raw_ymin = min(raw_ymin, masked_vals.min())
     loads = sorted(hist_data.keys())
     nrows = len(loads)
     all_centers = np.concatenate([h["centers"] for hist in hist_data.values() for h in hist.values()])
     x_min, x_max = all_centers.min(), all_centers.max()
     plots: List[Tuple[Figure, str]] = []
-    fig_log: Figure | None = None
-    fig_h: Figure | None = None
-    fig_r: Figure | None = None
+
     if wants_matplotlib(backend):
         fig_log, ax_log = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
         fig_log.subplots_adjust(hspace=0)
-        plots.append((fig_log, "log_compare.png"))
+        plots.append((fig_log, "log_compare"))
         if nrows == 1:
             ax_log = [ax_log]
         log_x_vals = []
@@ -238,6 +224,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
     if cfg["hist"] and wants_matplotlib(backend):
         fig_h, ax_h = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
         fig_h.subplots_adjust(hspace=0)
+        plots.append((fig_h, "hist_compare"))
         if nrows == 1:
             ax_h = [ax_h]
         for ax, load in zip(ax_h, loads):
@@ -262,11 +249,11 @@ def main(files: List[str], cfg: Dict[str, Any]):
         fig_h.supylabel("Counts")
         for ax in ax_h:
             apply_readability(ax, globals())
-        plots.append((fig_h, "hist_compare"))
 
     if cfg["raw"] and wants_matplotlib(backend):
         fig_r, ax_r = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
         fig_r.subplots_adjust(hspace=0)
+        plots.append((fig_r, "raw_compare"))
         if nrows == 1:
             ax_r = [ax_r]
         for (md, raw, _, mask), ax in zip(records, ax_r):
@@ -288,16 +275,22 @@ def main(files: List[str], cfg: Dict[str, Any]):
             ax.tick_params(axis="x", bottom=False, labelbottom=False)
         fig_r.supylabel("Switching Field")
         ax_r[0].set_title("Raw Hsw vs load (Histogram-Core filtered)")
-        plots.append((fig_r, "raw_compare"))
+    return plots
+
+
+def main(files: List[str], cfg: Dict[str, Any]):
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
+    backend = cfg.get("BACKEND", BACKEND)
+    cfg_show = cfg["show"]
+    cfg_save = cfg["save"]
+    out_dir = Path(cfg["out_dir"]).expanduser()
+    plots = build_figures(files, cfg)
 
     if cfg_save and wants_matplotlib(backend):
         out_dir.mkdir(parents=True, exist_ok=True)
-        if fig_log is not None:
-            save_figure(fig_log, out_dir / "log_compare", SAVE_FORMAT, PNG_DPI)
-        if cfg["hist"] and fig_h is not None:
-            save_figure(fig_h, out_dir / "hist_compare", SAVE_FORMAT, PNG_DPI)
-        if cfg["raw"] and fig_r is not None:
-            save_figure(fig_r, out_dir / "raw_compare", SAVE_FORMAT, PNG_DPI)
+        for fig, stem in plots:
+            save_figure(fig, out_dir / stem, SAVE_FORMAT, PNG_DPI)
 
     if wants_matplotlib(backend):
         if cfg_show:
