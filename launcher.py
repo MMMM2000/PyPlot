@@ -6,6 +6,7 @@ import os
 import time
 import logging
 import traceback
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
@@ -212,6 +213,63 @@ def _create_launcher_icon() -> QtGui.QIcon:
 def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument(
+        "--pyplot-list-plugins",
+        action="store_true",
+        help="List available PyPlot plugin names and exit.",
+    )
+    parser.add_argument(
+        "--pyplot-plugin",
+        default=None,
+        help="Open PyPlot directly with the selected plugin active.",
+    )
+    parser.add_argument(
+        "--pyplot-import",
+        action="append",
+        default=[],
+        help="File or folder to import in PyPlot automation mode. Can be provided multiple times.",
+    )
+    parser.add_argument(
+        "--pyplot-plot",
+        action="store_true",
+        help="Trigger the active plugin plot/generate action in PyPlot automation mode.",
+    )
+    parser.add_argument(
+        "--pyplot-open-graph-format",
+        action="store_true",
+        help="Open the shared Graph formatting window in PyPlot automation mode.",
+    )
+    parser.add_argument(
+        "--pyplot-open-origin",
+        action="store_true",
+        help="Trigger the active plugin Origin export action in PyPlot automation mode.",
+    )
+    parser.add_argument(
+        "--pyplot-screenshot",
+        default=None,
+        help="Save a screenshot of the PyPlot window to this path.",
+    )
+    parser.add_argument(
+        "--pyplot-plot-image",
+        default=None,
+        help="Save the current active Matplotlib graph image to this path.",
+    )
+    parser.add_argument(
+        "--pyplot-summary-json",
+        default=None,
+        help="Write a JSON summary of the automation run to this path.",
+    )
+    parser.add_argument(
+        "--pyplot-show-window",
+        action="store_true",
+        help="Keep the PyPlot window visible during automation.",
+    )
+    parser.add_argument(
+        "--pyplot-wait-ms",
+        type=int,
+        default=0,
+        help="Wait this many milliseconds after actions before capturing artifacts.",
+    )
+    parser.add_argument(
         "--visual-check",
         action="store_true",
         help="Run automated visual verification flow instead of opening the launcher UI.",
@@ -258,6 +316,20 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
     parser.set_defaults(visual_origin=True)
     args, qt_args = parser.parse_known_args(argv)
     return args, qt_args
+
+
+def _is_pyplot_automation_requested(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "pyplot_list_plugins", False)
+        or getattr(args, "pyplot_plugin", None)
+        or getattr(args, "pyplot_import", None)
+        or getattr(args, "pyplot_plot", False)
+        or getattr(args, "pyplot_open_graph_format", False)
+        or getattr(args, "pyplot_open_origin", False)
+        or getattr(args, "pyplot_screenshot", None)
+        or getattr(args, "pyplot_plot_image", None)
+        or getattr(args, "pyplot_summary_json", None)
+    )
 
 
 def _run_visual_check(args: argparse.Namespace) -> int:
@@ -308,6 +380,191 @@ def _run_visual_check(args: argparse.Namespace) -> int:
     for error in result.errors:
         print(f"[visual-check][error] {error}")
     return 1 if result.errors else 0
+
+
+def _pump_qt_events(app: QtWidgets.QApplication, *, rounds: int = 3) -> None:
+    for _ in range(max(1, int(rounds))):
+        try:
+            app.processEvents()
+        except Exception:
+            break
+
+
+def _path_payload(paths: list[Path]) -> list[str]:
+    payload: list[str] = []
+    for path in paths:
+        try:
+            payload.append(str(path.resolve()))
+        except Exception:
+            payload.append(str(path))
+    return payload
+
+
+def _pyplot_summary(window: "PyPlotWorkbench", plugin_name: str | None) -> dict[str, Any]:
+    current_tab = window.tab_widget.currentWidget()
+    axes = None
+    try:
+        axes = window._current_axes()
+    except Exception:
+        axes = None
+    current_title = ""
+    current_x = ""
+    current_y = ""
+    if axes is not None:
+        try:
+            current_title = str(axes.get_title() or "")
+        except Exception:
+            current_title = ""
+        try:
+            current_x = str(axes.get_xlabel() or "")
+        except Exception:
+            current_x = ""
+        try:
+            current_y = str(axes.get_ylabel() or "")
+        except Exception:
+            current_y = ""
+    visible_plot_tabs: list[str] = []
+    for index in range(window.tab_widget.count()):
+        try:
+            visible_plot_tabs.append(window.tab_widget.tabText(index))
+        except Exception:
+            continue
+    return {
+        "plugin": plugin_name,
+        "selected_paths": _path_payload(window._selected_paths()),  # type: ignore[attr-defined]
+        "worksheet_count": len(getattr(window, "_worksheets", {})),
+        "workbook_count": len(getattr(window, "_workbooks", {})),
+        "tab_count": int(window.tab_widget.count()),
+        "tab_labels": visible_plot_tabs,
+        "current_tab_label": window.tab_widget.tabText(window.tab_widget.currentIndex())
+        if window.tab_widget.currentIndex() >= 0
+        else "",
+        "current_title": current_title,
+        "current_x_label": current_x,
+        "current_y_label": current_y,
+        "graph_format_visible": bool(
+            isinstance(getattr(window, "_graph_format_dialog", None), QtWidgets.QDialog)
+            and window._graph_format_dialog.isVisible()  # type: ignore[attr-defined]
+        ),
+        "current_tab_has_axes": axes is not None,
+        "object_tree_top_level_count": int(getattr(window, "object_tree", QtWidgets.QTreeWidget()).topLevelItemCount()),
+        "current_widget_has_descriptor": current_tab in getattr(window, "_tab_descriptors", {}),
+    }
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _run_pyplot_automation(args: argparse.Namespace, qt_args: list[str]) -> int:
+    from plotting.pyplot.app import PyPlotWorkbench
+
+    if getattr(args, "pyplot_list_plugins", False):
+        _pyplot_main, plugin_names = _load_pyplot_metadata()
+        for name in plugin_names:
+            print(name)
+        return 0
+
+    plugin_name = getattr(args, "pyplot_plugin", None)
+    created_app = False
+    app = QtWidgets.QApplication.instance()
+    if not isinstance(app, QtWidgets.QApplication):
+        if not getattr(args, "pyplot_show_window", False):
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication([sys.argv[0], *qt_args])
+        created_app = True
+        try:
+            app.setQuitOnLastWindowClosed(False)
+        except Exception:
+            pass
+        _schedule_theme_application(app)
+
+    window: PyPlotWorkbench | None = None
+    try:
+        window = PyPlotWorkbench(initial_plotter=plugin_name)
+        if getattr(args, "pyplot_show_window", False) or getattr(args, "pyplot_screenshot", None):
+            window.show()
+        _pump_qt_events(app, rounds=4)
+
+        import_entries = [Path(str(entry)).expanduser() for entry in (getattr(args, "pyplot_import", []) or [])]
+        if import_entries:
+            window._import_paths(import_entries)  # type: ignore[attr-defined]
+            _pump_qt_events(app, rounds=6)
+
+        plugin = getattr(window, "_current_plugin", None)
+        if getattr(args, "pyplot_plot", False):
+            if plugin is None:
+                raise RuntimeError("No active PyPlot plugin selected for --pyplot-plot.")
+            plugin.generate()
+            _pump_qt_events(app, rounds=8)
+
+        if getattr(args, "pyplot_open_graph_format", False):
+            opener = getattr(window, "_open_graph_format_dialog", None)
+            if callable(opener):
+                opener()
+            _pump_qt_events(app, rounds=4)
+
+        if getattr(args, "pyplot_open_origin", False):
+            if plugin is None:
+                raise RuntimeError("No active PyPlot plugin selected for --pyplot-open-origin.")
+            plugin.open_origin()
+            _pump_qt_events(app, rounds=6)
+
+        wait_ms = max(0, int(getattr(args, "pyplot_wait_ms", 0) or 0))
+        if wait_ms > 0:
+            deadline = time.time() + wait_ms / 1000.0
+            while time.time() < deadline:
+                _pump_qt_events(app, rounds=1)
+                time.sleep(min(0.02, max(0.0, deadline - time.time())))
+
+        screenshot_path = getattr(args, "pyplot_screenshot", None)
+        if isinstance(screenshot_path, str) and screenshot_path.strip():
+            target = Path(screenshot_path).expanduser()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _pump_qt_events(app, rounds=4)
+            if not window.grab().save(str(target)):
+                raise RuntimeError(f"Failed to save PyPlot screenshot to {target}")
+
+        plot_image_path = getattr(args, "pyplot_plot_image", None)
+        if isinstance(plot_image_path, str) and plot_image_path.strip():
+            axes = window._current_axes()  # type: ignore[attr-defined]
+            if axes is None or getattr(axes, "figure", None) is None:
+                raise RuntimeError("No active plot is available for --pyplot-plot-image.")
+            target = Path(plot_image_path).expanduser()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            axes.figure.savefig(target, dpi=160)
+
+        summary = _pyplot_summary(window, plugin_name)
+        summary_path = getattr(args, "pyplot_summary_json", None)
+        if isinstance(summary_path, str) and summary_path.strip():
+            _write_json(Path(summary_path).expanduser(), summary)
+        else:
+            print(json.dumps(summary, ensure_ascii=False))
+        return 0
+    except Exception as exc:
+        message = f"[pyplot-cli] {type(exc).__name__}: {exc}"
+        print(message)
+        return 1
+    finally:
+        if window is not None:
+            try:
+                clear_dirty = getattr(window, "_clear_project_dirty", None)
+                if callable(clear_dirty):
+                    clear_dirty()
+            except Exception:
+                pass
+            try:
+                window.close()
+            except Exception:
+                pass
+        if isinstance(app, QtWidgets.QApplication):
+            _pump_qt_events(app, rounds=4)
+            if created_app:
+                try:
+                    app.quit()
+                except Exception:
+                    pass
 
 LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": _lazy("data_logging.data_logger", "main"),
@@ -965,6 +1222,8 @@ def main(argv: list[str] | None = None) -> None:
     args, qt_args = _parse_launcher_args(argv_list[1:])
     if args.visual_check:
         raise SystemExit(_run_visual_check(args))
+    if _is_pyplot_automation_requested(args):
+        raise SystemExit(_run_pyplot_automation(args, qt_args))
     _install_crash_log_hook()
 
     # Ensure a GUI platform plugin is used (not an offscreen one from tests)
