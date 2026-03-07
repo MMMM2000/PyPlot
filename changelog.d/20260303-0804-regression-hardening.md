@@ -24,6 +24,7 @@
 - Added shared smoke coverage for the Temperature Dependence, Temperature Sensitivity, Stress Dependence, and Stress Sensitivity PyPlot plugins to keep their import-and-generate flows exercised with sample data.
 - Added internal launcher CLI automation for PyPlot testing, including plugin selection, path import, plot generation, graph-format opening, screenshots, plot image capture, and JSON summaries for headless validation.
 - Migrated the remaining legacy embedded PyPlot entries (`Hsw Distribution`, `Hsw Load Compare`, `Maxion Continuous`, `PDF Plotter`, and `Strain 3D Plot`) onto native shared-plugin wrappers so the registry now runs through the shared PyPlot shell instead of embedded legacy dialogs.
+- Added shared connected-folder sources with automatic refresh/import polling plus a manual `Refresh connected` action, and introduced shared `Plot new` / `Replot all` behavior so newly imported files can be graphed incrementally without rebuilding every existing plot.
 - Modernized core runtime dependencies in `pyproject.toml` and regenerated `requirements.txt` from the project spec for lock alignment.
 - Updated project runtime metadata to Python `>=3.13,<3.14` to match the supported environment and dependency lock workflow.
 - Compatibility note: Origin automation runtime checks remain Windows-only (`originpro`), so Origin export parity validation continues to require a Windows environment.

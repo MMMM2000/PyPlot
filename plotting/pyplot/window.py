@@ -2178,10 +2178,20 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._left_dock_switcher_widget: _DockSwitcherWidget | None = None
         self._log_view_watcher: _LogViewWatcher | None = None
         self._last_import_sources: List[str] = []
+        self._last_imported_file_paths: List[Path] = []
+        self._pending_new_plot_paths: List[Path] = []
+        self._connected_data_folders: List[Path] = []
+        self._connected_folder_seen_files: set[str] = set()
+        self._connected_folder_polling = False
+        self._connected_folder_poll_interval_ms = 3000
+        self._connected_folders_restoring = False
         self._restoring_imports = False
         self._data_menu: QtWidgets.QMenu | None = None
         self._import_files_action: QtGui.QAction | None = None
         self._import_folder_action: QtGui.QAction | None = None
+        self._connect_folder_action: QtGui.QAction | None = None
+        self._refresh_connected_action: QtGui.QAction | None = None
+        self._refresh_connected_menu_action: QtGui.QAction | None = None
         self._refresh_import_action: QtGui.QAction | None = None
         self._new_workbook_action: QtGui.QAction | None = None
         self._add_column_before_action: QtGui.QAction | None = None
@@ -2196,6 +2206,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._history = _HistoryManager()
         self._retabify_pending = False
         self._import_storage_key = self._project_settings_key("import_sources")
+        self._connected_folder_storage_key = self._project_settings_key("connected_folders")
         self._format_controls = FormatToolbarControls()
         self._format_selection: tuple[str, Any] | None = None
         self._format_updating = False
@@ -2207,6 +2218,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._task_progress_label: QtWidgets.QLabel | None = None
         self._task_progress_bar: QtWidgets.QProgressBar | None = None
         self.project_tree_search: QtWidgets.QLineEdit | None = None
+        self._connected_folder_timer = QtCore.QTimer(self)
+        self._connected_folder_timer.setInterval(self._connected_folder_poll_interval_ms)
+        self._connected_folder_timer.timeout.connect(self._poll_connected_folders)
 
         self.graph_dock: QtWidgets.QDockWidget | None = None
         self.graph_panel: QtWidgets.QWidget | None = None
@@ -2284,6 +2298,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         QtCore.QTimer.singleShot(0, self._restore_persisted_imports)
+        QtCore.QTimer.singleShot(0, self._restore_connected_folders)
         self._apply_toolbar_style_hint()
         self._update_history_actions()
 
@@ -5343,6 +5358,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         import_folder_action.triggered.connect(self._dispatch_import_data_from_folder)
         self._import_folder_action = import_folder_action
 
+        connect_folder_action = data_menu.addAction("Connect Folders...")
+        connect_folder_action.triggered.connect(self._connect_data_from_folder)
+
+        refresh_connected_action = data_menu.addAction("Refresh Connected Folders")
+        refresh_connected_action.triggered.connect(self._refresh_connected_folders)
+        refresh_connected_action.setEnabled(False)
+        self._refresh_connected_menu_action = refresh_connected_action
+
         data_menu.addSeparator()
         recent_action = data_menu.addAction("Refresh Imported Data")
         recent_action.triggered.connect(self._refresh_imported_data_summary)
@@ -6166,6 +6189,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         import_action.triggered.connect(self._prompt_import_data)
         self.import_data_button = import_action
         self._style_toolbar_button(toolbar, import_action)
+
+        connect_action = toolbar.addAction("Connect folders")
+        connect_action.triggered.connect(self._connect_data_from_folder)
+        self._connect_folder_action = connect_action
+        self._style_toolbar_button(toolbar, connect_action)
+
+        refresh_connected_action = toolbar.addAction("Refresh connected")
+        refresh_connected_action.setEnabled(False)
+        refresh_connected_action.triggered.connect(self._refresh_connected_folders)
+        self._refresh_connected_action = refresh_connected_action
+        self._style_toolbar_button(toolbar, refresh_connected_action)
 
         save_action = toolbar.addAction("Save graph...")
         save_action.setEnabled(False)
@@ -7005,15 +7039,29 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not self._axes_by_tab:
             return
         canvases: set[FigureCanvas] = set()
+        platform_name = ""
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                platform_name = str(app.platformName() or "").strip().lower()
+            except Exception:
+                platform_name = ""
+        use_immediate_draw = platform_name in {"offscreen", "minimal", "headless"}
         for axes in set(filter(None, self._axes_by_tab.values())):
             canvas = self._apply_dark_mode_to_axes(axes, self._dark_mode_enabled)
             if isinstance(canvas, FigureCanvas):
                 canvases.add(canvas)
         for canvas in canvases:
             try:
-                canvas.draw_idle()
+                if use_immediate_draw:
+                    canvas.draw()
+                else:
+                    canvas.draw_idle()
             except Exception:
-                canvas.draw()
+                try:
+                    canvas.draw()
+                except Exception:
+                    pass
 
     def _apply_dark_mode_to_axes(self, axes: Any, enabled: bool) -> FigureCanvas | None:
         if axes is None:
@@ -7314,6 +7362,21 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             label = folder_action.text() or "Import folders..."
             proxy = menu.addAction(label)
             proxy.triggered.connect(folder_action.trigger)
+            actions_added = True
+
+        connect_action = getattr(self, "_connect_folder_action", None)
+        if isinstance(connect_action, QtGui.QAction):
+            label = connect_action.text() or "Connect folders..."
+            proxy = menu.addAction(label)
+            proxy.triggered.connect(connect_action.trigger)
+            actions_added = True
+
+        refresh_connected_action = getattr(self, "_refresh_connected_action", None)
+        if isinstance(refresh_connected_action, QtGui.QAction):
+            label = refresh_connected_action.text() or "Refresh connected folders"
+            proxy = menu.addAction(label)
+            proxy.setEnabled(refresh_connected_action.isEnabled())
+            proxy.triggered.connect(refresh_connected_action.trigger)
             actions_added = True
 
         if not actions_added:
@@ -8307,6 +8370,183 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         self._import_paths(Path(directory) for directory in directories)
 
+    def _connect_data_from_folder(self) -> None:
+        start_dir = self._data_dialog_start_directory()
+        directories = self._select_directories(
+            self,
+            title="Connect Data Folder(s)",
+            start_dir=start_dir,
+        )
+        if not directories:
+            return
+        self._connect_data_folders(Path(directory) for directory in directories)
+
+    def _connected_folder_file_candidates(self) -> List[Path]:
+        files: List[Path] = []
+        for folder in self._connected_data_folders:
+            if not isinstance(folder, Path) or not folder.exists() or not folder.is_dir():
+                continue
+            files.extend(self._iter_supported_files(folder))
+        unique: List[Path] = []
+        seen: set[str] = set()
+        for file_path in files:
+            try:
+                resolved = str(file_path.resolve())
+            except Exception:
+                resolved = str(file_path)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            unique.append(file_path)
+        return unique
+
+    def _known_imported_file_keys(self) -> set[str]:
+        keys: set[str] = set()
+        for workbook in self._workbooks.values():
+            source = getattr(workbook, "source", None)
+            if not isinstance(source, Path):
+                continue
+            try:
+                keys.add(str(source.resolve()))
+            except Exception:
+                keys.add(str(source))
+        return keys
+
+    def _update_connected_folder_state(self) -> None:
+        headless_platform = str(QtWidgets.QApplication.platformName() or "").strip().lower() in {"offscreen", "minimal"}
+        if self._connected_data_folders and not headless_platform:
+            if not self._connected_folder_timer.isActive():
+                self._connected_folder_timer.start()
+        else:
+            self._connected_folder_timer.stop()
+        action = getattr(self, "_refresh_connected_action", None)
+        if isinstance(action, QtGui.QAction):
+            action.setEnabled(bool(self._connected_data_folders))
+        menu_action = getattr(self, "_refresh_connected_menu_action", None)
+        if isinstance(menu_action, QtGui.QAction):
+            menu_action.setEnabled(bool(self._connected_data_folders))
+
+    def _persist_connected_folders(self) -> None:
+        entries = [str(path) for path in self._connected_data_folders if isinstance(path, Path)]
+        if entries:
+            self.settings.setValue(self._connected_folder_storage_key, entries)
+        else:
+            self.settings.remove(self._connected_folder_storage_key)
+
+    def _restore_connected_folders(self) -> None:
+        if self._connected_data_folders:
+            self._update_connected_folder_state()
+            return
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                platform_name = str(app.platformName() or "").strip().lower()
+            except Exception:
+                platform_name = ""
+        if platform_name in {"offscreen", "minimal", "headless"}:
+            self._connected_data_folders = []
+            self._connected_folder_seen_files = set()
+            self._update_connected_folder_state()
+            return
+        stored = self.settings.value(self._connected_folder_storage_key, [])
+        if isinstance(stored, str):
+            candidates = [stored] if stored.strip() else []
+        elif isinstance(stored, (list, tuple, set)):
+            candidates = [str(entry) for entry in stored if entry]
+        else:
+            candidates = []
+        folders: List[Path] = []
+        seen: set[str] = set()
+        for entry in candidates:
+            try:
+                path = Path(entry)
+            except Exception:
+                continue
+            if not path.exists() or not path.is_dir():
+                continue
+            try:
+                key = str(path.resolve())
+            except Exception:
+                key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            folders.append(path)
+        self._connected_data_folders = folders
+        self._connected_folder_seen_files = set()
+        self._update_connected_folder_state()
+        if folders:
+            self._connected_folders_restoring = True
+            try:
+                self._refresh_connected_folders()
+            finally:
+                self._connected_folders_restoring = False
+
+    def _connect_data_folders(self, folders: Iterable[Path]) -> None:
+        changed = False
+        existing = {
+            str(path.resolve()) if isinstance(path, Path) else str(path)
+            for path in self._connected_data_folders
+            if isinstance(path, Path)
+        }
+        for folder in folders:
+            if not isinstance(folder, Path) or not folder.exists() or not folder.is_dir():
+                continue
+            try:
+                key = str(folder.resolve())
+            except Exception:
+                key = str(folder)
+            if key in existing:
+                continue
+            existing.add(key)
+            self._connected_data_folders.append(folder)
+            changed = True
+        if not changed:
+            return
+        self._persist_connected_folders()
+        self._update_connected_folder_state()
+        self._refresh_connected_folders()
+        if not self._connected_folders_restoring:
+            self._mark_project_dirty()
+        update_project_actions = getattr(self, "_update_project_actions", None)
+        if callable(update_project_actions):
+            update_project_actions()
+
+    def _poll_connected_folders(self) -> None:
+        if not self.isVisible():
+            return
+        if self._connected_folder_polling:
+            return
+        self._connected_folder_polling = True
+        try:
+            self._refresh_connected_folders(silent=True)
+        finally:
+            self._connected_folder_polling = False
+
+    def _refresh_connected_folders(self, silent: bool = False) -> None:
+        connected_files = self._connected_folder_file_candidates()
+        new_files: List[Path] = []
+        for file_path in connected_files:
+            try:
+                key = str(file_path.resolve())
+            except Exception:
+                key = str(file_path)
+            if key in self._connected_folder_seen_files:
+                continue
+            new_files.append(file_path)
+        if not new_files:
+            if not silent:
+                self._append_log("No new files found in connected folders.")
+            return
+        self._import_paths(new_files)
+        for file_path in new_files:
+            try:
+                self._connected_folder_seen_files.add(str(file_path.resolve()))
+            except Exception:
+                self._connected_folder_seen_files.add(str(file_path))
+        if not silent:
+            self._append_log(f"Imported {len(new_files)} new file(s) from connected folders.")
+
     def _import_paths(self, paths: Iterable[Path]) -> None:
         provided_paths: List[Path] = []
         for source in paths:
@@ -8327,6 +8567,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         errors: List[str] = []
         imported = 0
+        imported_files: List[Path] = []
         total_files = len(files)
         self._begin_task_progress(
             "Importing data...",
@@ -8364,6 +8605,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     errors.append(f"{file_path}: {exc}")
                     continue
                 imported += len(worksheets)
+                imported_files.append(file_path)
                 if (
                     position == total_files
                     or position <= 2
@@ -8393,6 +8635,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 "Some files could not be imported:\n" + "\n".join(errors[:10]),
             )
         if imported:
+            self._last_imported_file_paths = list(imported_files)
+            pending: List[Path] = []
+            seen_pending: set[str] = set()
+            for file_path in [*self._pending_new_plot_paths, *imported_files]:
+                try:
+                    key = str(file_path.resolve())
+                except Exception:
+                    key = str(file_path)
+                if key in seen_pending:
+                    continue
+                seen_pending.add(key)
+                pending.append(file_path)
+            self._pending_new_plot_paths = pending
             self._refresh_imported_data_summary()
             self._update_project_actions()
             if provided_paths:
@@ -8401,6 +8656,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 self._persist_import_sources(provided_paths)
             self._session_has_imports = True
             self._mark_project_dirty()
+        else:
+            self._last_imported_file_paths = []
         if self._refresh_import_action is not None:
             self._refresh_import_action.setEnabled(bool(self._worksheets))
 

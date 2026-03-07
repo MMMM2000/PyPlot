@@ -124,6 +124,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._current_plugin: PyPlotPlugin | None = None
         self._current_plotter_name: str | None = None
         self._plotter_combo: QtWidgets.QComboBox | None = None
+        self._plot_scope_combo: QtWidgets.QComboBox | None = None
         self._active_plugin_updater: Callable[[], None] | None = None
         self._initial_plotter = initial_plotter
         self._plotter_history: list[str] = self._load_plotter_history()
@@ -139,6 +140,8 @@ class PyPlotWorkbench(PyPlotWindow):
         self._graph_options_action: QtGui.QAction | None = None
         self._graph_option_defaults_global: Dict[str, Any] = {}
         self._graph_option_defaults_by_plugin: Dict[str, Dict[str, Any]] = {}
+        self._plot_request_mode: str | None = None
+        self._plot_request_paths_snapshot: List[Path] | None = None
         super().__init__(title="PyPlot")
         self.setObjectName("PyPlotWorkbench")
         if not sys.platform.startswith("win") and sys.platform != "darwin":
@@ -308,6 +311,14 @@ class PyPlotWorkbench(PyPlotWindow):
         self.plot_button = plot_action
         self._style_toolbar_button(toolbar, plot_action, object_name="mw_plot_action")
 
+        plot_scope_combo = QtWidgets.QComboBox(toolbar)
+        plot_scope_combo.setObjectName("mw_plot_scope_combo")
+        plot_scope_combo.addItem("Replot all", "all")
+        plot_scope_combo.addItem("Plot new", "new")
+        plot_scope_combo.setToolTip("Choose whether to regenerate every graph or only graph newly imported files.")
+        toolbar.addWidget(plot_scope_combo)
+        self._plot_scope_combo = plot_scope_combo
+
         self._init_graph_settings_menu(toolbar)
 
     def _refresh_plotter_combo(self) -> None:
@@ -365,6 +376,28 @@ class PyPlotWorkbench(PyPlotWindow):
             self._active_plugin_updater = None
             self._update_action_states()
         return
+
+    def _requested_plot_scope(self) -> str:
+        combo = self._plot_scope_combo
+        if isinstance(combo, QtWidgets.QComboBox):
+            token = combo.currentData()
+            if isinstance(token, str) and token in {"all", "new"}:
+                return token
+        return "all"
+
+    def _recent_new_plot_paths(self) -> List[Path]:
+        return [
+            path for path in getattr(self, "_pending_new_plot_paths", [])
+            if isinstance(path, Path) and path.exists() and path.is_file()
+        ]
+
+    def _plot_request_paths(self) -> List[Path]:
+        if isinstance(self._plot_request_paths_snapshot, list):
+            return list(self._plot_request_paths_snapshot)
+        return list(self._selected_paths())
+
+    def _plot_request_is_incremental(self) -> bool:
+        return str(self._plot_request_mode or "").strip().lower() == "new"
     def _dialog_start_directory(self) -> Path:
         if self._current_plotter_name:
             stored = self._plugin_last_directories.get(self._current_plotter_name)
@@ -1331,6 +1364,14 @@ class PyPlotWorkbench(PyPlotWindow):
         *,
         warn_on_missing: bool = False,
     ) -> list[Path]:
+        request_paths = getattr(self, "_plot_request_paths", None)
+        if callable(request_paths):
+            try:
+                requested = [path for path in request_paths() if isinstance(path, Path) and path.is_file()]
+            except Exception:
+                requested = []
+            if requested:
+                return requested
         selection = [path for path in self._selected_paths() if path.is_file()]
         if selection:
             if len(selection) != len(self._selected_path_entries):
@@ -1401,6 +1442,9 @@ class PyPlotWorkbench(PyPlotWindow):
             button = getattr(self, "plot_button", None)
             if isinstance(button, (QtGui.QAction, QtWidgets.QWidget)):
                 button.setEnabled(self._plugin_ready_to_plot(self._current_plugin))
+            combo = self._plot_scope_combo
+            if isinstance(combo, QtWidgets.QComboBox):
+                combo.setEnabled(True)
             self._sync_shared_action_states()
             save_sync = getattr(self, "_update_save_graph_enabled", None)
             if callable(save_sync):
@@ -1418,6 +1462,9 @@ class PyPlotWorkbench(PyPlotWindow):
         button = getattr(self, "plot_button", None)
         if isinstance(button, (QtGui.QAction, QtWidgets.QWidget)):
             button.setEnabled(False)
+        combo = self._plot_scope_combo
+        if isinstance(combo, QtWidgets.QComboBox):
+            combo.setEnabled(False)
         self._set_plot_button_label(None)
         if hasattr(self, "popout_button"):
             self.popout_button.setEnabled(False)
@@ -1602,12 +1649,20 @@ class PyPlotWorkbench(PyPlotWindow):
         measurements = getattr(self, "measurements", None)
         if isinstance(measurements, list) and measurements:
             return True
+        if bool(getattr(self, "_connected_data_folders", [])):
+            return True
         return bool(self._worksheets)
 
     def _reset_project_state(self) -> None:
         super()._reset_project_state()
         self._clear_imported_data()
         self._selected_path_entries = []
+        self._connected_data_folders = []
+        self._connected_folder_seen_files = set()
+        self._persist_connected_folders()
+        self._update_connected_folder_state()
+        self._pending_new_plot_paths = []
+        self._last_imported_file_paths = []
         self.path_edit.clear()
         self._update_action_states()
         self._update_project_actions()
@@ -1631,6 +1686,16 @@ class PyPlotWorkbench(PyPlotWindow):
             "auto_load_on_import": bool(getattr(plugin, "auto_load_on_import", False)),
             "had_plots": self._plugin_tab_count(plugin.name) > 0,
         }
+        connected_payload = [
+            self._portable_path(path, base_path)
+            for path in getattr(self, "_connected_data_folders", [])
+            if isinstance(path, Path)
+        ]
+        connected_payload = [
+            entry for entry in connected_payload if isinstance(entry, str) and entry
+        ]
+        if connected_payload:
+            payload["connected_folders"] = connected_payload
         plugin_last_dir = self._plugin_last_directories.get(plugin.name)
         plugin_last_dir_payload = self._portable_path(plugin_last_dir, base_path)
         if isinstance(plugin_last_dir_payload, str) and plugin_last_dir_payload:
@@ -1661,6 +1726,23 @@ class PyPlotWorkbench(PyPlotWindow):
             if callable(commit_paths):
                 try:
                     commit_paths(resolved_paths)
+                except Exception:
+                    pass
+
+        connected_payload = shared_state.get("connected_folders")
+        connected_paths: list[Path] = []
+        if isinstance(connected_payload, list):
+            for entry in connected_payload:
+                if not isinstance(entry, str) or not entry:
+                    continue
+                resolved = self._resolve_portable_path(entry, project_dir)
+                if isinstance(resolved, Path):
+                    connected_paths.append(resolved)
+        if connected_paths:
+            connector = getattr(self, "_connect_data_folders", None)
+            if callable(connector):
+                try:
+                    connector(connected_paths)
                 except Exception:
                     pass
 
@@ -2016,10 +2098,56 @@ class PyPlotWorkbench(PyPlotWindow):
 
     def _generate_plots(self) -> None:
         if self._current_plugin is not None:
-            self._run_with_shared_progress(
-                title=f"{self._current_plotter_name or self._current_plugin.name}: generating plots...",
-                task=self._current_plugin.generate,
-            )
+            scope = self._requested_plot_scope()
+            if scope == "new":
+                new_paths = self._recent_new_plot_paths()
+                if not new_paths:
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        self._current_plotter_name or self._current_plugin.name,
+                        "No newly imported files are pending. Use Replot all or refresh connected folders first.",
+                    )
+                    return
+                original_selection = list(self._selected_path_entries)
+                plugin = self._current_plugin
+                original_tabs = list(getattr(plugin, "_plot_tabs", []))
+                new_tabs: List[QtWidgets.QWidget] = []
+                self._plot_request_mode = "new"
+                self._plot_request_paths_snapshot = list(new_paths)
+                try:
+                    self._commit_selected_paths(new_paths)
+                    loader = getattr(plugin, "load_data", None)
+                    if callable(loader):
+                        loader()
+                    if hasattr(plugin, "_plot_tabs"):
+                        setattr(plugin, "_plot_tabs", [])
+                    self._run_with_shared_progress(
+                        title=f"{self._current_plotter_name or plugin.name}: plotting new data...",
+                        task=plugin.generate,
+                    )
+                    new_tabs = list(getattr(plugin, "_plot_tabs", []))
+                    if hasattr(plugin, "_plot_tabs"):
+                        setattr(plugin, "_plot_tabs", [*original_tabs, *new_tabs])
+                    self._pending_new_plot_paths = []
+                finally:
+                    self._plot_request_mode = None
+                    self._plot_request_paths_snapshot = None
+                    self._commit_selected_paths(original_selection)
+                    self._sync_selected_paths_with_imports()
+                    self._update_action_states()
+                return
+
+            self._plot_request_mode = "all"
+            self._plot_request_paths_snapshot = list(self._selected_paths())
+            try:
+                self._run_with_shared_progress(
+                    title=f"{self._current_plotter_name or self._current_plugin.name}: generating plots...",
+                    task=self._current_plugin.generate,
+                )
+                self._pending_new_plot_paths = []
+            finally:
+                self._plot_request_mode = None
+                self._plot_request_paths_snapshot = None
             return
         QtWidgets.QMessageBox.information(
             self,

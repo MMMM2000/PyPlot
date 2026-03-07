@@ -1508,6 +1508,27 @@ def test_vsm_plugin_uses_shared_project_payload_format(tmp_path: Path) -> None:
         app.processEvents()
 
 
+def test_shared_project_payload_includes_connected_folders(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="Hysteresis Loops")
+    try:
+        connected = tmp_path / "connected"
+        connected.mkdir()
+        window._connect_data_folders([connected])  # noqa: SLF001
+        payload = window._build_project_payload(base_path=tmp_path)  # noqa: SLF001
+        state = payload.get("active_plugin_state")
+        assert isinstance(state, dict)
+        shared = state.get(window.PLUGIN_SHARED_STATE_KEY)  # noqa: SLF001
+        assert isinstance(shared, dict)
+        connected_folders = shared.get("connected_folders")
+        assert isinstance(connected_folders, list)
+        assert connected.name in connected_folders[0]
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
 def test_register_imported_workbook_recovers_after_tree_clear() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()

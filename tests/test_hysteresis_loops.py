@@ -193,3 +193,47 @@ def test_hysteresis_loops_separate_mode_creates_one_tab_per_file(tmp_path: Path)
         window._clear_project_dirty()  # noqa: SLF001
         window.close()
         app.processEvents()
+
+
+def test_plot_new_preserves_existing_hysteresis_tabs_and_adds_only_new_data(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="Hysteresis Loops")
+    try:
+        first = tmp_path / "SampleA 200C.dat"
+        second = tmp_path / "SampleB 250C.dat"
+        first.write_text("100 6.2e-10\n0 -6.0e-10\n-100 -6.2e-10\n", encoding="utf-8")
+        second.write_text("100 5.2e-10\n0 -5.0e-10\n-100 -5.2e-10\n", encoding="utf-8")
+
+        window._commit_selected_paths([first])  # noqa: SLF001
+        plugin = window._current_plugin  # noqa: SLF001
+        assert isinstance(plugin, PyPlotPlugin)
+        plugin.settings_widget()
+        mode_combo = getattr(plugin, "_mode_combo", None)
+        assert isinstance(mode_combo, QtWidgets.QComboBox)
+        mode_combo.setCurrentText("Combined")
+        plugin.load_data()
+        window._generate_plots()  # noqa: SLF001
+        app.processEvents()
+        assert len(getattr(plugin, "_plot_tabs", [])) == 1
+
+        window._import_paths([second])  # noqa: SLF001 - marks second file as new
+        scope_combo = getattr(window, "_plot_scope_combo", None)
+        assert isinstance(scope_combo, QtWidgets.QComboBox)
+        scope_combo.setCurrentIndex(scope_combo.findData("new"))
+        window._generate_plots()  # noqa: SLF001
+        app.processEvents()
+
+        plot_tabs = getattr(plugin, "_plot_tabs", [])
+        assert len(plot_tabs) == 2
+        labels = []
+        for tab in plot_tabs:
+            index = window.tab_widget.indexOf(tab)
+            if index >= 0:
+                labels.append(window.tab_widget.tabText(index))
+        assert any("SampleA" in label for label in labels)
+        assert any("SampleB" in label for label in labels)
+        assert not getattr(window, "_pending_new_plot_paths", None)  # noqa: SLF001
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
