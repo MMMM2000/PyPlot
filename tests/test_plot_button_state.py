@@ -238,6 +238,38 @@ def test_apply_graph_format_updates_legend_orientation() -> None:
         app.processEvents()
 
 
+def test_apply_graph_format_reflects_axis_factor_in_label_and_hides_offset_text() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        axes = window._current_axes()
+        assert axes is not None
+        axes.plot([-1.0, 0.0, 1.0], [-6.0e-10, 0.0, 6.0e-10], label="Series")
+        axes.set_xlabel("Magnetic field [A/m]")
+        axes.set_ylabel("Magnetic flux [Wb]")
+
+        controls = window._graph_format_controls
+        y_factor_edit = controls.get("y_value_factor_edit")
+        reflect_y = controls.get("reflect_y_scale_units_cb")
+        assert isinstance(y_factor_edit, QtWidgets.QLineEdit)
+        assert isinstance(reflect_y, QtWidgets.QCheckBox)
+        window._sync_graph_format_controls_from_current_axes()  # noqa: SLF001 - sync control state
+        y_factor_edit.setText("10^10")
+        reflect_y.setChecked(True)
+
+        window._apply_graph_format(apply_all=False)
+
+        y_label = axes.get_ylabel()
+        assert "Magnetic flux" in y_label
+        assert "Wb" in y_label
+        assert "\u00d710" in y_label
+        assert not bool(axes.yaxis.get_offset_text().get_visible())
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_dark_mode_toggle_restores_light_legend_when_snapshot_missing() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
@@ -2105,8 +2137,8 @@ def test_apply_graph_format_supports_axis_value_factor_and_unit_reflection() -> 
         controls["reflect_y_scale_units_cb"].setChecked(True)
         window._apply_graph_format(apply_all=False)
 
-        assert axes.get_xlabel() == "Field [Oe * 10^-3]"
-        assert axes.get_ylabel() == "Signal [V * 2]"
+        assert axes.get_xlabel() == "Field [Oe \u00d710\u00b3]"
+        assert axes.get_ylabel() == "Signal [V 0.5]"
         x_formatter = axes.xaxis.get_major_formatter()
         y_formatter = axes.yaxis.get_major_formatter()
         assert isinstance(x_formatter, mticker.FuncFormatter)
@@ -2501,6 +2533,173 @@ def test_object_manager_line_hide_updates_line_visibility_and_legend() -> None:
         labels = [text.get_text() for text in legend.get_texts()]
         assert "Visible A" in labels
         assert "Hide B" not in labels
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_object_manager_legend_hide_updates_visibility() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        tab, axes = next(iter(window._axes_by_tab.items()))  # noqa: SLF001 - test hook
+        assert axes is not None
+        axes.plot([0.0, 1.0], [1.0, 2.0], label="Series A")
+        legend = axes.legend(loc="best")
+        assert legend is not None
+
+        index = window.tab_widget.indexOf(tab)
+        if index >= 0:
+            window.tab_widget.setCurrentIndex(index)
+        window._rebuild_object_manager_for_tab(tab)
+
+        tree = window.object_tree  # noqa: SLF001 - UI fixture
+        assert isinstance(tree, QtWidgets.QTreeWidget)
+        root = tree.topLevelItem(0)
+        assert root is not None
+
+        legend_item: QtWidgets.QTreeWidgetItem | None = None
+
+        def _find_legend(item: QtWidgets.QTreeWidgetItem) -> QtWidgets.QTreeWidgetItem | None:
+            for idx in range(item.childCount()):
+                child = item.child(idx)
+                data = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict) and data.get("kind") == "legend":
+                    return child
+                found = _find_legend(child)
+                if found is not None:
+                    return found
+            return None
+
+        legend_item = _find_legend(root)
+        assert legend_item is not None
+        legend_item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
+        app.processEvents()
+
+        legend = axes.get_legend()
+        assert legend is not None
+        assert not bool(legend.get_visible())
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_graph_format_dialog_uses_fixed_tab_bar_with_per_tab_scroll() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        assert window._open_graph_format_dialog()  # noqa: SLF001
+        app.processEvents()
+
+        dialog = getattr(window, "_graph_format_dialog", None)
+        assert isinstance(dialog, QtWidgets.QDialog)
+        tabs = window._control_widget("format_tabs")  # noqa: SLF001
+        assert isinstance(tabs, QtWidgets.QTabWidget)
+        assert tabs.tabBar().isVisible()
+        assert dialog.findChild(QtWidgets.QScrollArea, "mw_graph_format_dialog_scroll") is None
+    finally:
+        dialog = getattr(window, "_graph_format_dialog", None)
+        if isinstance(dialog, QtWidgets.QDialog):
+            dialog.close()
+        window.close()
+        app.processEvents()
+
+
+def test_double_click_line_opens_shared_graph_format_line_controls() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        axes = window._current_axes()
+        assert axes is not None
+
+        called: dict[str, object] = {}
+
+        def _fake_open_graph_format_dialog(
+            checked: bool = False,
+            *,
+            focus_key: str | None = None,
+            select_all: bool = False,
+        ) -> bool:
+            called["checked"] = checked
+            called["focus_key"] = focus_key
+            called["select_all"] = select_all
+            return True
+
+        window._open_graph_format_dialog = _fake_open_graph_format_dialog  # type: ignore[assignment]
+        opened = window._open_shared_graph_format_from_double_click(  # noqa: SLF001
+            axes=axes,
+            line=True,
+        )
+        assert opened is True
+        assert called.get("focus_key") == "line_width_spin"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_object_manager_legend_context_menu_exposes_reconstruct() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        tab, axes = next(iter(window._axes_by_tab.items()))  # noqa: SLF001
+        assert axes is not None
+        axes.plot([0.0, 1.0], [1.0, 2.0], label="Series A")
+        legend = axes.legend(loc="best")
+        assert legend is not None
+
+        index = window.tab_widget.indexOf(tab)
+        if index >= 0:
+            window.tab_widget.setCurrentIndex(index)
+        window._rebuild_object_manager_for_tab(tab)
+
+        tree = window.object_tree  # noqa: SLF001
+        assert isinstance(tree, QtWidgets.QTreeWidget)
+        root = tree.topLevelItem(0)
+        assert root is not None
+
+        legend_item: QtWidgets.QTreeWidgetItem | None = None
+
+        def _find_legend(item: QtWidgets.QTreeWidgetItem) -> QtWidgets.QTreeWidgetItem | None:
+            for idx in range(item.childCount()):
+                child = item.child(idx)
+                data = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict) and data.get("kind") == "legend":
+                    return child
+                found = _find_legend(child)
+                if found is not None:
+                    return found
+            return None
+
+        legend_item = _find_legend(root)
+        assert legend_item is not None
+
+        called = {"reconstruct": False}
+
+        def _fake_reconstruct(item: QtWidgets.QTreeWidgetItem) -> None:
+            called["reconstruct"] = item is legend_item
+
+        window._reconstruct_legend_from_item = _fake_reconstruct  # type: ignore[assignment]
+        original_exec = QtWidgets.QMenu.exec
+
+        def _fake_exec(menu: QtWidgets.QMenu, *_args, **_kwargs):
+            actions = menu.actions()
+            assert [action.text() for action in actions] == [
+                "Legend settings...",
+                "Reconstruct legend",
+            ]
+            return actions[1]
+
+        QtWidgets.QMenu.exec = _fake_exec  # type: ignore[assignment]
+        try:
+            rect = tree.visualItemRect(legend_item)
+            window._handle_object_context_menu(rect.center())  # noqa: SLF001
+        finally:
+            QtWidgets.QMenu.exec = original_exec  # type: ignore[assignment]
+        assert called["reconstruct"] is True
     finally:
         window.close()
         app.processEvents()

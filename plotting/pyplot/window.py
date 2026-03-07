@@ -5112,12 +5112,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.object_tree.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        self.object_tree.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.object_tree.itemChanged.connect(self._dispatch_object_item_changed)
         selection_model = self.object_tree.selectionModel()
         if selection_model is not None:
             selection_model.selectionChanged.connect(self._handle_object_selection_changed)
         self.object_tree.itemDoubleClicked.connect(self._dispatch_object_item_activation)
         self.object_tree.itemActivated.connect(self._dispatch_object_item_activation)
+        self.object_tree.customContextMenuRequested.connect(self._handle_object_context_menu)
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
@@ -10627,10 +10629,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             canvas = self._canvas_by_tab.get(self.tab_widget.currentWidget())
             if canvas is not None:
                 try:
-                    canvas.draw_idle()
+                    canvas.draw()
                 except Exception:
-                    pass
-            if kind == "line" and current_tab is not None:
+                    try:
+                        canvas.draw_idle()
+                    except Exception:
+                        pass
+            if kind in {"line", "legend"} and current_tab is not None:
                 self._rebuild_object_manager_for_tab(current_tab)
             return
         self._object_tree_updating = True
@@ -10686,6 +10691,66 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             title = "Legend"
         item.setText(0, title or "Legend")
+
+    def _reconstruct_legend_from_item(self, item: QtWidgets.QTreeWidgetItem) -> None:
+        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return
+        if data.get("kind") != "legend":
+            return
+        legend = data.get("object")
+        if not isinstance(legend, Legend):
+            return
+        axes = getattr(legend, "axes", None)
+        if axes is None:
+            return
+        current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        descriptor = self._tab_descriptors.get(current_tab)
+        plugin_name = self._tab_plugin_name(descriptor)
+        rebuilt = self._sync_axes_legend_with_visible_lines(
+            axes,
+            plugin_name=plugin_name,
+        )
+        if rebuilt is None:
+            return
+        try:
+            rebuilt.set_visible(True)
+        except Exception:
+            pass
+        canvas = self._canvas_by_tab.get(current_tab)
+        if canvas is not None:
+            try:
+                canvas.draw()
+            except Exception:
+                try:
+                    canvas.draw_idle()
+                except Exception:
+                    pass
+        if current_tab is not None:
+            self._rebuild_object_manager_for_tab(current_tab)
+
+    def _handle_object_context_menu(self, pos: QtCore.QPoint) -> None:
+        tree = getattr(self, "object_tree", None)
+        if not isinstance(tree, QtWidgets.QTreeWidget):
+            return
+        item = tree.itemAt(pos)
+        if not isinstance(item, QtWidgets.QTreeWidgetItem):
+            return
+        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return
+        if data.get("kind") != "legend":
+            return
+
+        menu = QtWidgets.QMenu(tree)
+        settings_action = menu.addAction("Legend settings...")
+        reconstruct_action = menu.addAction("Reconstruct legend")
+
+        chosen = menu.exec(tree.viewport().mapToGlobal(pos))
+        if chosen is settings_action:
+            self._handle_object_item_double_click(item, 0)
+        elif chosen is reconstruct_action:
+            self._reconstruct_legend_from_item(item)
 
     def _dispatch_object_item_activation(
         self,
@@ -12339,19 +12404,23 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         text_field: Literal["title", "x_label", "y_label"] | None = None,
         axis: Literal["x", "y"] | None = None,
         legend: bool = False,
+        line: bool = False,
     ) -> bool:
         """Allow concrete hosts to route double-clicks into shared formatting UI."""
 
         opener = getattr(self, "_open_shared_graph_format_from_double_click", None)
         if not callable(opener):
             return False
+        kwargs: dict[str, Any] = {
+            "axes": axes,
+            "text_field": text_field,
+            "axis": axis,
+            "legend": legend,
+        }
+        if line:
+            kwargs["line"] = True
         try:
-            result = opener(
-                axes=axes,
-                text_field=text_field,
-                axis=axis,
-                legend=legend,
-            )
+            result = opener(**kwargs)
         except Exception:
             return False
         return bool(result)
@@ -12391,6 +12460,27 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     )
                     if not opened:
                         self._edit_axes_text_from_double_click(axes, field)
+                    return
+
+        for axes in candidates:
+            try:
+                lines = list(axes.get_lines())
+            except Exception:
+                lines = []
+            for line in lines:
+                if not isinstance(line, Line2D):
+                    continue
+                if not self._artist_hit(line, event):
+                    continue
+                try:
+                    self._set_format_selection(("line", line))
+                except Exception:
+                    pass
+                opened = self._open_shared_graph_format_from_canvas_target(
+                    axes,
+                    line=True,
+                )
+                if opened:
                     return
 
         for axes in candidates:

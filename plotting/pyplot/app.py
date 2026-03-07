@@ -1217,6 +1217,22 @@ class PyPlotWorkbench(PyPlotWindow):
                 self._current_plugin.deactivate()
             except Exception:
                 pass
+        for child in self.findChildren(QtWidgets.QMenu):
+            try:
+                child.close()
+            except Exception:
+                pass
+        for child in self.findChildren(QtWidgets.QDialog):
+            try:
+                child.close()
+            except Exception:
+                pass
+        graph_format_dialog = getattr(self, "_graph_format_dialog", None)
+        if isinstance(graph_format_dialog, QtWidgets.QDialog):
+            try:
+                graph_format_dialog.close()
+            except Exception:
+                pass
         settings = self._shared_qsettings()
         self._sync_plugin_directory_settings()
         if settings is not None:
@@ -2077,19 +2093,30 @@ class PyPlotWorkbench(PyPlotWindow):
         format_tabs = QtWidgets.QTabWidget(graph_section)
         format_tabs.setObjectName("mw_graph_format_tabs")
         format_tabs.setDocumentMode(True)
+        format_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
+        format_tabs.tabBar().setVisible(True)
         graph_section_layout.addWidget(format_tabs)
 
         def _create_tab(title: str) -> tuple[QtWidgets.QWidget, QtWidgets.QFormLayout]:
             tab = QtWidgets.QWidget(format_tabs)
             tab_layout = QtWidgets.QVBoxLayout(tab)
-            tab_layout.setContentsMargins(6, 6, 6, 6)
-            tab_layout.setSpacing(6)
+            tab_layout.setContentsMargins(0, 0, 0, 0)
+            tab_layout.setSpacing(0)
+            scroll = QtWidgets.QScrollArea(tab)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            tab_layout.addWidget(scroll, 1)
+            content = QtWidgets.QWidget(scroll)
+            scroll.setWidget(content)
+            content_layout = QtWidgets.QVBoxLayout(content)
+            content_layout.setContentsMargins(6, 6, 6, 6)
+            content_layout.setSpacing(6)
             form = QtWidgets.QFormLayout()
             form.setContentsMargins(0, 0, 0, 0)
             form.setHorizontalSpacing(8)
             form.setVerticalSpacing(6)
-            tab_layout.addLayout(form)
-            tab_layout.addStretch(1)
+            content_layout.addLayout(form)
+            content_layout.addStretch(1)
             format_tabs.addTab(tab, title)
             return tab, form
 
@@ -2468,18 +2495,12 @@ class PyPlotWorkbench(PyPlotWindow):
         root_layout.setContentsMargins(10, 10, 10, 10)
         root_layout.setSpacing(8)
 
-        scroll = QtWidgets.QScrollArea(dialog)
-        scroll.setObjectName("mw_graph_format_dialog_scroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        root_layout.addWidget(scroll, 1)
-
-        container = QtWidgets.QWidget(scroll)
+        container = QtWidgets.QWidget(dialog)
         container_layout = QtWidgets.QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(8)
         container_layout.addStretch(1)
-        scroll.setWidget(container)
+        root_layout.addWidget(container, 1)
 
         self._graph_format_dialog = dialog
         self._graph_format_dialog_container = container
@@ -2634,6 +2655,25 @@ class PyPlotWorkbench(PyPlotWindow):
         return f"{factor:.6g}"
 
     @staticmethod
+    def _superscript_number(value: int) -> str:
+        translation = str.maketrans("-0123456789", "\u207b\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079")
+        return str(int(value)).translate(translation)
+
+    @classmethod
+    def _factor_display_text(cls, factor: float) -> str:
+        if not math.isfinite(factor):
+            return "1"
+        if math.isclose(factor, 1.0, rel_tol=1e-12, abs_tol=1e-12):
+            return "1"
+        sign = "-" if factor < 0 else ""
+        abs_factor = abs(factor)
+        exponent = math.log10(abs_factor) if abs_factor > 0 else 0.0
+        rounded_exponent = int(round(exponent))
+        if abs_factor > 0 and math.isclose(exponent, rounded_exponent, rel_tol=1e-10, abs_tol=1e-10):
+            return f"{sign}\u00d710{cls._superscript_number(rounded_exponent)}"
+        return f"{factor:.6g}"
+
+    @staticmethod
     def _factor_edit_text(factor: float) -> str:
         return PyPlotWorkbench._factor_label_text(factor)
 
@@ -2670,14 +2710,15 @@ class PyPlotWorkbench(PyPlotWindow):
                 pass
         if not reflect_in_unit or math.isclose(factor, 1.0, rel_tol=1e-12, abs_tol=1e-12):
             return label
-        factor_text = self._factor_label_text(factor)
+        reflected_factor = 1.0 / factor if not math.isclose(factor, 0.0, abs_tol=1e-15) else 1.0
+        factor_text = self._factor_display_text(reflected_factor)
         left = label.rfind("[")
         right = label.rfind("]")
         if left >= 0 and right > left:
             unit = label[left + 1 : right].strip()
             prefix = label[:left].rstrip()
             if unit:
-                return f"{prefix} [{unit} * {factor_text}]".strip()
+                return f"{prefix} [{unit} {factor_text}]".strip()
             return f"{prefix} [{factor_text}]".strip()
         stripped = label.strip()
         if not stripped:
@@ -2685,6 +2726,16 @@ class PyPlotWorkbench(PyPlotWindow):
         return f"{stripped} [{factor_text}]"
 
     def _apply_axis_factor_formatter(self, axis_obj: Any, factor: float, *, axis_name: str) -> None:
+        offset_text = getattr(axis_obj, "get_offset_text", lambda: None)()
+        def _hide_offset_text() -> None:
+            if offset_text is None:
+                return
+            try:
+                offset_text.set_visible(False)
+                offset_text.set_text("")
+            except Exception:
+                pass
+
         if math.isclose(factor, 1.0, rel_tol=1e-12, abs_tol=1e-12):
             owner = getattr(axis_obj, "axes", None)
             scale = "linear"
@@ -2705,6 +2756,7 @@ class PyPlotWorkbench(PyPlotWindow):
                 lambda value, _pos, _factor=factor: self._format_scaled_tick(value, _factor)
             )
         )
+        _hide_offset_text()
 
     def _sync_tick_mode_inputs(self) -> None:
         if self._graph_format_updating:
@@ -3209,6 +3261,7 @@ class PyPlotWorkbench(PyPlotWindow):
         text_field: str | None = None,
         axis: str | None = None,
         legend: bool = False,
+        line: bool = False,
     ) -> bool:
         tab = self._tab_for_axes(axes)
         if isinstance(tab, QtWidgets.QWidget):
@@ -3231,6 +3284,8 @@ class PyPlotWorkbench(PyPlotWindow):
             select_all = True
         elif legend:
             focus_key = "show_legend_cb"
+        elif line:
+            focus_key = "line_width_spin"
         elif axis_token == "x":
             focus_key = "x_scale_combo"
         elif axis_token == "y":

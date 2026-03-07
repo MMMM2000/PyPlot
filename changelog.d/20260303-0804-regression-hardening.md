@@ -19,6 +19,8 @@
 - Hardened Current Annealing Matplotlib legend styling so legend text color follows line color after all readability/style passes.
 - Modernized the legacy Hysteresis Loops plugin into a native shared PyPlot workflow with `.dat` / `.txt` import support, shared graph formatting, Project Explorer integration, and grouped combined/separate/stacked plotting modes.
 - Extended shared import support to `.dat` files so hysteresis loop datasets can be loaded through the standard PyPlot file/folder import actions.
+- Updated Hysteresis Loops defaults to use line+symbol traces, `Magnetic field` / `Magnetic flux` axis labels, and reflected scientific-scale units in the Y label instead of a detached Matplotlib offset banner.
+- Improved shared graph editing UX: the floating Graph formatting window now keeps its top tab bar fixed/visible, double-clicking plotted curves opens line/marker controls, legend visibility toggles in Object Manager redraw immediately, and legend context menus now expose `Reconstruct legend`.
 - Modernized core runtime dependencies in `pyproject.toml` and regenerated `requirements.txt` from the project spec for lock alignment.
 - Updated project runtime metadata to Python `>=3.13,<3.14` to match the supported environment and dependency lock workflow.
 - Compatibility note: Origin automation runtime checks remain Windows-only (`originpro`), so Origin export parity validation continues to require a Windows environment.

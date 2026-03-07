@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import math
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+import numpy as np
 
 from plotting.plugins._window import window_api
 from plotting.plugins.base import PyPlotPlugin, register_plugin
@@ -416,6 +418,77 @@ class HysteresisLoopsPlugin(PyPlotPlugin):
         self.host.tab_widget.addTab(tab, root_label)
         self.host._register_plot_tab(tab, canvas, axes, descriptor)
         self._plot_tabs.append(tab)
+        self._apply_default_axis_format(axes)
+
+    def _preferred_display_factor(self, values: object) -> float:
+        try:
+            numeric = np.asarray(values, dtype=float).reshape(-1)
+        except Exception:
+            return 1.0
+        finite = numeric[np.isfinite(numeric)]
+        if finite.size == 0:
+            return 1.0
+        magnitude = float(np.nanmax(np.abs(finite)))
+        if not math.isfinite(magnitude) or magnitude <= 0.0:
+            return 1.0
+        exponent = math.floor(math.log10(magnitude))
+        if abs(exponent) < 3:
+            return 1.0
+        return float(10.0 ** (-exponent))
+
+    def _apply_default_axis_format(self, axes: object) -> None:
+        if axes is None:
+            return
+        x_base_label = core.X_AXIS_LABEL
+        y_base_label = core.Y_AXIS_LABEL
+        y_factor = 1.0
+        try:
+            lines = list(axes.get_lines())
+        except Exception:
+            lines = []
+        if lines:
+            try:
+                y_factor = self._preferred_display_factor(lines[0].get_ydata())
+            except Exception:
+                y_factor = 1.0
+
+        scaled_label = y_base_label
+        scale_label = getattr(self.host, "_scaled_axis_label", None)
+        if callable(scale_label):
+            try:
+                scaled_label = scale_label(y_base_label, y_factor, not math.isclose(y_factor, 1.0))
+            except Exception:
+                scaled_label = y_base_label
+
+        try:
+            axes.set_xlabel(x_base_label)
+            axes.set_ylabel(scaled_label)
+        except Exception:
+            return
+        setattr(axes, "_mw_x_base_label", x_base_label)
+        setattr(axes, "_mw_y_base_label", y_base_label)
+        setattr(axes, "_mw_x_value_factor", 1.0)
+        setattr(axes, "_mw_y_value_factor", float(y_factor))
+        setattr(axes, "_mw_x_reflect_scale_in_unit", False)
+        setattr(axes, "_mw_y_reflect_scale_in_unit", not math.isclose(y_factor, 1.0))
+
+        apply_factor = getattr(self.host, "_apply_axis_factor_formatter", None)
+        if callable(apply_factor):
+            try:
+                apply_factor(axes.xaxis, 1.0, axis_name="x")
+                apply_factor(axes.yaxis, float(y_factor), axis_name="y")
+            except Exception:
+                pass
+        tab_for_axes = getattr(self.host, "_tab_for_axes", None)
+        if callable(tab_for_axes):
+            try:
+                tab = tab_for_axes(axes)
+            except Exception:
+                tab = None
+            descriptor = self.host._tab_descriptors.get(tab) if tab is not None else None  # noqa: SLF001
+            if descriptor is not None:
+                descriptor.x_label = x_base_label
+                descriptor.y_label = scaled_label
 
 
 __all__ = ["HysteresisLoopsPlugin"]

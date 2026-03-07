@@ -131,8 +131,8 @@ def test_hysteresis_loops_generate_creates_plot_tabs_with_shared_labels(tmp_path
         source_dir.mkdir(parents=True, exist_ok=True)
         first = source_dir / "FeSiBP 159_9 s1 ascast.dat"
         second = source_dir / "FeSiBP 159_9 s1 200C.dat"
-        first.write_text("200 0.20\n100 0.10\n0 0.00\n-100 -0.10\n", encoding="utf-8")
-        second.write_text("200 0.25\n100 0.12\n0 0.00\n-100 -0.12\n", encoding="utf-8")
+        first.write_text("200 6.20e-10\n100 6.10e-10\n0 -6.00e-10\n-100 -6.10e-10\n", encoding="utf-8")
+        second.write_text("200 6.25e-10\n100 6.12e-10\n0 -6.00e-10\n-100 -6.12e-10\n", encoding="utf-8")
 
         window._commit_selected_paths([first, second])  # noqa: SLF001 - test hook
         plugin = window._current_plugin  # noqa: SLF001 - test hook
@@ -152,8 +152,16 @@ def test_hysteresis_loops_generate_creates_plot_tabs_with_shared_labels(tmp_path
             app.processEvents()
         axes = window._current_axes()  # noqa: SLF001 - test hook
         assert axes is not None
-        assert axes.get_xlabel() == "H [A/m]"
-        assert axes.get_ylabel() == "F [Wb]"
+        assert axes.get_xlabel() == "Magnetic field [A/m]"
+        y_label = axes.get_ylabel()
+        assert "Magnetic flux" in y_label
+        assert "Wb" in y_label
+        assert "\u00d710" in y_label
+        legend_lines = axes.get_lines()
+        assert legend_lines
+        assert str(legend_lines[0].get_marker()).strip().lower() not in {"", "none"}
+        offset_text = axes.yaxis.get_offset_text()
+        assert not bool(offset_text.get_visible())
         assert window.open_origin_button.isEnabled()
     finally:
         window._clear_project_dirty()  # noqa: SLF001

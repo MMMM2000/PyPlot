@@ -34,8 +34,8 @@ SHOW_TICK_LABELS = bool(_CFG.get("SHOW_TICK_LABELS", True))
 SHOW_AXIS_LABELS = bool(_CFG.get("SHOW_AXIS_LABELS", True))
 SHOW_TITLE = bool(_CFG.get("SHOW_TITLE", True))
 
-X_AXIS_LABEL = "H [A/m]"
-Y_AXIS_LABEL = "F [Wb]"
+X_AXIS_LABEL = "Magnetic field [A/m]"
+Y_AXIS_LABEL = "Magnetic flux [Wb]"
 
 _TEMP_RE = re.compile(r"(\d+)\s*([°]?[Cc])", re.IGNORECASE)
 
@@ -194,7 +194,15 @@ def combined_figure(records: Sequence[HysteresisLoopRecord]) -> Figure:
         raise ValueError("No hysteresis loop data available.")
     fig, ax = plt.subplots(figsize=(7.5, 4.6))
     for record in ordered:
-        ax.plot(record.x, record.y, linewidth=1.4, label=record.anneal_label)
+        ax.plot(
+            record.x,
+            record.y,
+            linewidth=1.3,
+            marker="o",
+            markersize=4.2,
+            markeredgewidth=0.0,
+            label=record.anneal_label,
+        )
     if SHOW_LEGEND and len(ordered) > 1:
         ax.legend(
             title="Anneal",
@@ -222,7 +230,15 @@ def stacked_figure(records: Sequence[HysteresisLoopRecord]) -> Figure:
     if len(ordered) == 1:
         axes = [axes]
     for ax, record in zip(axes, ordered):
-        ax.plot(record.x, record.y, linewidth=1.3, label=record.anneal_label)
+        ax.plot(
+            record.x,
+            record.y,
+            linewidth=1.2,
+            marker="o",
+            markersize=3.8,
+            markeredgewidth=0.0,
+            label=record.anneal_label,
+        )
         ax.text(
             0.02,
             0.96,
@@ -243,7 +259,15 @@ def separate_figures(records: Sequence[HysteresisLoopRecord]) -> list[Figure]:
     figures: list[Figure] = []
     for record in sort_records(records):
         fig, ax = plt.subplots(figsize=(7.0, 4.4))
-        ax.plot(record.x, record.y, linewidth=1.4, label=record.anneal_label)
+        ax.plot(
+            record.x,
+            record.y,
+            linewidth=1.3,
+            marker="o",
+            markersize=4.2,
+            markeredgewidth=0.0,
+            label=record.anneal_label,
+        )
         if SHOW_LEGEND:
             ax.legend(loc="best", fontsize=LEGEND_SIZE, labelcolor="linecolor")
         _style_axes(ax, title=f"{record.base_name} - {record.anneal_label}")
