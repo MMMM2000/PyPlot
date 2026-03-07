@@ -2046,6 +2046,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         ".csv",
         ".tsv",
         ".txt",
+        ".dat",
         ".xlsx",
         ".xls",
         ".xlsm",
@@ -8501,7 +8502,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     ) -> tuple[WorkbookData, List[WorksheetData]] | None:
         suffix = path.suffix.lower()
         try:
-            if suffix in {".csv", ".tsv", ".txt"}:
+            if suffix in {".csv", ".tsv", ".txt", ".dat"}:
                 frame = self._read_delimited_file(path, suffix)
                 if frame is None:
                     return None
