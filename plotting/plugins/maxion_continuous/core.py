@@ -240,7 +240,7 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
 
 
 def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
-    with origin_session() as op:
+    with origin_session(keep_open=True) as op:
         proc = None
         if PLOT_MODE in ("processed", "both") or (CENTER_MEDIAN_Y and CENTER_MEDIAN_SOURCE == "processed"):
             med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
@@ -311,8 +311,6 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
             y_lab = "T1+T2 (arb. u., x10^3)" if IMPROVE_READABILITY and SCALE_Y_1E3 else "T1+T2 (arb. u.)"
             set_origin_axis_title(gl, 'x', x_lab)
             set_origin_axis_title(gl, 'y', y_lab)
-            set_origin_axis_title(gl, 'x2', '')
-            set_origin_axis_title(gl, 'y2', '')
             set_origin_graph_title(op_any, gp, gl, f"Head {head} - {coils} coils - CH{ch} T1+T2")
             for attr, value in (
                 ("x.showAxes", 1),

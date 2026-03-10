@@ -157,12 +157,28 @@ class HswLoadComparePlugin(PyPlotPlugin):
                     )
                     lines[state.key] = state
             title = axes.get_title() if axes is not None else stem
+            x_label = axes.get_xlabel() if axes is not None else ""
+            y_label = axes.get_ylabel() if axes is not None else ""
+            if not x_label:
+                if stem == "log_compare":
+                    x_label = r"$\Delta h^{3/2}$"
+                elif stem == "hist_compare":
+                    x_label = "h = H/Hsw,max"
+                elif stem == "raw_compare":
+                    x_label = "Index"
+            if not y_label:
+                if stem == "log_compare":
+                    y_label = "ln(dp/dh)"
+                elif stem == "hist_compare":
+                    y_label = "Counts"
+                elif stem == "raw_compare":
+                    y_label = "Switching Field"
             descriptor = window_module.TabDescriptor(
                 kind="hsw_load_compare",
                 title=title,
-                root_label=stem,
-                x_label=axes.get_xlabel() if axes is not None else "",
-                y_label=axes.get_ylabel() if axes is not None else "",
+                root_label=title,
+                x_label=x_label,
+                y_label=y_label,
                 canvas=canvas,
                 axes=axes,
                 lines=lines,
@@ -177,15 +193,7 @@ class HswLoadComparePlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
-        def _task() -> None:
-            compare_core.main(self._loaded_files, self._config(backend="origin"))
-
-        self.run_origin_export(
-            ready=bool(self._loaded_files),
-            missing_message="Load HSW load-compare data before exporting to Origin.",
-            task=_task,
-            success_log="Sent HSW load-compare plots to Origin.",
-        )
+        super().open_origin()
 
     def update_ui(self) -> None:  # type: ignore[override]
         has_data = bool(self._loaded_files)

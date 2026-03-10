@@ -316,7 +316,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
             for md, _raw, filt, _mask in records:
                 hist_data[md["load"]] = build_histograms(filt)
             loads = sorted(hist_data.keys())
-            with origin_session() as op:
+            with origin_session(keep_open=True) as op:
                 op_any: Any = op
                 book: Any = op_any.new_book('w', lname="HSW Compare (Python)")
                 book.activate()
@@ -365,8 +365,6 @@ def main(files: List[str], cfg: Dict[str, Any]):
                     op_any.lt_exec('page.antialias=1; layer -aa 1;')
                     set_origin_axis_title(gl0, 'x', r"$\Delta h^{3/2}$")
                     set_origin_axis_title(gl0, 'y', "ln(dp/dh)")
-                    set_origin_axis_title(gl0, 'x2', '')
-                    set_origin_axis_title(gl0, 'y2', '')
                     set_origin_graph_title(op_any, gp, gl0, "HSW Load Compare")
                     for cmd in (
                         'layer.x.showAxes=1;',
@@ -386,5 +384,20 @@ def main(files: List[str], cfg: Dict[str, Any]):
                         op_any.lt_exec('legend.update=0;')
                 except Exception:
                     pass
+                for token in ('xt', 'XT', 'yr', 'YR'):
+                    try:
+                        axis_label = gl0.label(token)
+                    except Exception:
+                        axis_label = None
+                    if axis_label is None:
+                        continue
+                    try:
+                        axis_label.text = ""
+                    except Exception:
+                        pass
+                    try:
+                        axis_label.set_int('show', 0)
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"Origin plot failed: {e}")

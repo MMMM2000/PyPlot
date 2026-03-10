@@ -40,6 +40,27 @@ class PluginVerificationResult:
     errors: list[str] = field(default_factory=list)
 
 
+def _snapshot_settings(*, organization: str, application: str) -> dict[str, object]:
+    settings = QtCore.QSettings(organization, application)
+    snapshot: dict[str, object] = {}
+    for key in settings.allKeys():
+        snapshot[key] = settings.value(key)
+    return snapshot
+
+
+def _restore_settings(
+    *,
+    organization: str,
+    application: str,
+    snapshot: dict[str, object],
+) -> None:
+    settings = QtCore.QSettings(organization, application)
+    settings.clear()
+    for key, value in snapshot.items():
+        settings.setValue(key, value)
+    settings.sync()
+
+
 def _ensure_app() -> QtWidgets.QApplication:
     app = QtWidgets.QApplication.instance()
     if app is None:
@@ -105,36 +126,35 @@ def _export_shared_origin(
     if not workbooks:
         return 0, 0, images, warnings, ["No shared plot workbooks available."]
 
-    def _graph_callback(graph: object, workbook: object, worksheet: object) -> None:
-        book_name = getattr(workbook, "name", "Workbook")
-        sheet_name = getattr(worksheet, "name", "Sheet")
-        stem = _safe_stem(f"{book_name}_{sheet_name}")
-        path = output_dir / f"{len(images) + 1:02d}_{stem}.png"
-        save_fig = getattr(graph, "save_fig", None)
-        if not callable(save_fig):
-            warnings.append(f"{plugin_name}: graph has no save_fig for {book_name}/{sheet_name}.")
-            return
-        try:
-            save_fig(str(path))
-        except Exception as exc:
-            errors.append(f"{plugin_name}: save_fig failed for {book_name}/{sheet_name}: {exc}")
-            return
-        if path.exists():
-            images.append(str(path))
-        else:
-            warnings.append(f"{plugin_name}: Origin did not write {path.name}.")
-
     try:
         exported, plotted, push_errors = window._push_workbooks_to_origin(
             workbooks,
             create_graphs=True,
-            graph_callback=_graph_callback,
-            keep_origin_open=False,
+            keep_origin_open=True,
         )
     except Exception as exc:
         return 0, 0, images, warnings, [str(exc)]
 
     errors.extend(str(item) for item in (push_errors or []))
+    try:
+        import originpro as op_module  # type: ignore
+        graphs = list(op_module.graph_list("p"))
+        for index, graph in enumerate(graphs, start=1):
+            lname = getattr(graph, "lname", None) or getattr(graph, "name", None) or f"graph_{index}"
+            path = output_dir / f"{index:02d}_{_safe_stem(str(lname))}.png"
+            save_fig = getattr(graph, "save_fig", None)
+            if not callable(save_fig):
+                warnings.append(f"{plugin_name}: graph {lname} has no save_fig.")
+                continue
+            try:
+                save_fig(str(path))
+            except Exception as exc:
+                warnings.append(f"{plugin_name}: save_fig failed for {lname}: {exc}")
+                continue
+            if path.exists():
+                images.append(str(path))
+    except Exception as exc:
+        warnings.append(f"{plugin_name}: unable to enumerate/save Origin graphs after export: {exc}")
     return int(exported), int(plotted), images, warnings, errors
 
 
@@ -353,14 +373,14 @@ def _setup_fmr(window: PyPlotWorkbench) -> PyPlotPlugin:
 
 
 PLUGIN_SPECS: list[tuple[str, str, Callable[[PyPlotWorkbench, Path], PyPlotPlugin]]] = [
-    ("Temperature Dependence", "custom", lambda w, t: _setup_folder_import(w, ROOT / "sample_data" / "temperature_dependence")),
+    ("Temperature Dependence", "shared", lambda w, t: _setup_folder_import(w, ROOT / "sample_data" / "temperature_dependence")),
     ("Temperature Sensitivity", "custom", lambda w, t: _setup_folder_import(w, ROOT / "sample_data" / "temperature_dependence")),
-    ("Stress Dependence", "custom", lambda w, t: _setup_folder_import(w, ROOT / "sample_data" / "stress_dependence")),
+    ("Stress Dependence", "shared", lambda w, t: _setup_folder_import(w, ROOT / "sample_data" / "stress_dependence")),
     ("Stress Sensitivity", "custom", lambda w, t: _setup_folder_import(w, ROOT / "sample_data" / "stress_dependence")),
     ("Shape Memory Stress/Strain", "shared", lambda w, t: _setup_shape_memory(w)),
     ("Hysteresis Loops", "shared", lambda w, t: _setup_hysteresis_loops(w)),
     ("Hsw Distribution", "custom", lambda w, t: _setup_generated_hsw_distribution(w, t)),
-    ("Hsw Load Compare", "custom", lambda w, t: _setup_generated_hsw_load_compare(w, t)),
+    ("Hsw Load Compare", "shared", lambda w, t: _setup_generated_hsw_load_compare(w, t)),
     ("Maxion Continuous", "custom", lambda w, t: _setup_selected_paths(w, [ROOT / "sample_data" / "Maxion" / "1 final 2 coils.txt"])),
     ("PDF Plotter", "custom", lambda w, t: _setup_selected_paths(w, [ROOT / "sample_data" / "pdf_data" / "sample1.pdf"])),
     ("Strain 3D Plot", "shared", lambda w, t: _setup_generated_strain_3d(w, t)),
@@ -368,7 +388,7 @@ PLUGIN_SPECS: list[tuple[str, str, Callable[[PyPlotWorkbench, Path], PyPlotPlugi
     ("VSM Hysteresis Loops", "shared", lambda w, t: _setup_vsm_hysteresis(w)),
     ("VSM Temperature Scan", "custom", lambda w, t: _setup_vsm_temp_scan(w)),
     ("VSM Isotherms", "shared", lambda w, t: _setup_vsm_isotherms(w)),
-    ("DMA Iso-Stress", "custom", lambda w, t: _setup_dma(w)),
+    ("DMA Iso-Stress", "shared", lambda w, t: _setup_dma(w)),
     ("FMR", "custom", lambda w, t: _setup_fmr(w)),
 ]
 
@@ -381,55 +401,69 @@ def verify_plugins(
     app = _ensure_app()
     output_root.mkdir(parents=True, exist_ok=True)
     results: list[PluginVerificationResult] = []
+    settings_snapshot = _snapshot_settings(
+        organization="MicrowireLab",
+        application="PyPlotWorkbench",
+    )
+    settings = QtCore.QSettings("MicrowireLab", "PyPlotWorkbench")
+    settings.clear()
+    settings.sync()
     specs = [
         spec
         for spec in PLUGIN_SPECS
         if plugin_filter is None or spec[0] in plugin_filter
     ]
-    for plugin_name, route, setup in specs:
-        plugin_dir = output_root / _safe_stem(plugin_name)
-        if plugin_dir.exists():
-            shutil.rmtree(plugin_dir)
-        plugin_dir.mkdir(parents=True, exist_ok=True)
-        _reset_origin()
-        window = PyPlotWorkbench(initial_plotter=plugin_name)
-        temp_dir = plugin_dir / "inputs"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            plugin = _activate_plugin(window, plugin_name)
-            plugin.settings_widget()
-            plugin = setup(window, temp_dir)
-            _pump_events(app, iterations=12)
-            plot_tabs = len(getattr(plugin, "_plot_tabs", []) or [])
-            result = PluginVerificationResult(
-                plugin=plugin_name,
-                route=route,
-                shared_workbooks=bool(getattr(plugin, "uses_shared_plot_workbooks", True)),
-                plot_tabs=plot_tabs,
-            )
-            if route == "shared":
-                exported, plotted, images, warnings, errors = _export_shared_origin(window, plugin_name, plugin_dir)
-            else:
-                exported, plotted, images, warnings, errors = _export_custom_origin(plugin, plugin_dir)
-            result.exported = exported
-            result.plotted = plotted
-            result.images = images
-            result.warnings.extend(warnings)
-            result.errors.extend(errors)
-            result.contact_sheet = _make_contact_sheet(images, plugin_dir / "contact_sheet.png")
-            results.append(result)
-        except Exception as exc:
-            results.append(
-                PluginVerificationResult(
+    try:
+        for plugin_name, route, setup in specs:
+            plugin_dir = output_root / _safe_stem(plugin_name)
+            if plugin_dir.exists():
+                shutil.rmtree(plugin_dir)
+            plugin_dir.mkdir(parents=True, exist_ok=True)
+            _reset_origin()
+            window = PyPlotWorkbench(initial_plotter=plugin_name)
+            temp_dir = plugin_dir / "inputs"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                plugin = _activate_plugin(window, plugin_name)
+                plugin.settings_widget()
+                plugin = setup(window, temp_dir)
+                _pump_events(app, iterations=12)
+                plot_tabs = len(getattr(plugin, "_plot_tabs", []) or [])
+                result = PluginVerificationResult(
                     plugin=plugin_name,
                     route=route,
-                    shared_workbooks=False,
-                    plot_tabs=0,
-                    errors=[str(exc)],
+                    shared_workbooks=bool(getattr(plugin, "uses_shared_plot_workbooks", True)),
+                    plot_tabs=plot_tabs,
                 )
-            )
-        finally:
-            _close_window(window, app)
+                if route == "shared":
+                    exported, plotted, images, warnings, errors = _export_shared_origin(window, plugin_name, plugin_dir)
+                else:
+                    exported, plotted, images, warnings, errors = _export_custom_origin(plugin, plugin_dir)
+                result.exported = exported
+                result.plotted = plotted
+                result.images = images
+                result.warnings.extend(warnings)
+                result.errors.extend(errors)
+                result.contact_sheet = _make_contact_sheet(images, plugin_dir / "contact_sheet.png")
+                results.append(result)
+            except Exception as exc:
+                results.append(
+                    PluginVerificationResult(
+                        plugin=plugin_name,
+                        route=route,
+                        shared_workbooks=False,
+                        plot_tabs=0,
+                        errors=[str(exc)],
+                    )
+                )
+            finally:
+                _close_window(window, app)
+    finally:
+        _restore_settings(
+            organization="MicrowireLab",
+            application="PyPlotWorkbench",
+            snapshot=settings_snapshot,
+        )
     summary_path = output_root / "summary.json"
     summary_path.write_text(json.dumps([asdict(item) for item in results], indent=2), encoding="utf-8")
     overall_sheet_inputs = [item.images[0] for item in results if item.images]

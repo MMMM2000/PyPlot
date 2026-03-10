@@ -671,8 +671,8 @@ def test_switching_tabs_preserves_maximized_subwindow_mode() -> None:
         app.processEvents()
         assert not second_sub.isHidden()
         assert not first_sub.isHidden()
-        assert not bool(getattr(window.tab_widget, "_global_maximized", False))
-        assert not bool(getattr(window.tab_widget, "_fullscreen_lock", False))
+        assert bool(getattr(window.tab_widget, "_global_maximized", False))
+        assert bool(getattr(window.tab_widget, "_fullscreen_lock", False))
     finally:
         window.close()
         app.processEvents()
@@ -1805,13 +1805,15 @@ def test_status_bar_cursor_readout_stays_visible_during_progress_on_narrow_windo
         cursor_label = window._cursor_label  # noqa: SLF001 - internal status-bar helper
         progress_label = window._task_progress_label  # noqa: SLF001 - internal status-bar helper
         progress_bar = window._task_progress_bar  # noqa: SLF001 - internal status-bar helper
+        progress_dialog = window._task_progress_dialog  # noqa: SLF001 - internal progress helper
         assert isinstance(status, QtWidgets.QStatusBar)
         assert isinstance(cursor_label, QtWidgets.QLabel)
         assert isinstance(progress_label, QtWidgets.QLabel)
         assert isinstance(progress_bar, QtWidgets.QProgressBar)
+        assert isinstance(progress_dialog, QtWidgets.QDialog)
+        assert progress_dialog.isVisible()
         assert cursor_label.minimumWidth() >= 120
-        assert progress_label.minimumWidth() >= 60
-        assert progress_bar.minimumWidth() >= 90
+        assert progress_bar.value() == 1
 
         window._update_cursor_status(  # noqa: SLF001 - internal status-bar helper
             SimpleNamespace(inaxes=object(), xdata=1234.567, ydata=-9876.543)

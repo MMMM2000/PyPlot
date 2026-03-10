@@ -65,7 +65,7 @@ class PyPlotWorkbench(PyPlotWindow):
     GRAPH_DOCK_ENABLED = False
     PLUGIN_SHARED_STATE_KEY = "__pyplot_shared__"
     GRAPH_OPTION_DEFAULTS: Dict[str, Any] = {
-        "show_grid": True,
+        "show_grid": False,
         "show_legend": True,
         "title_font": 16,
         "label_font": 12,
@@ -2404,7 +2404,7 @@ class PyPlotWorkbench(PyPlotWindow):
         axes_form.addRow("Y max:", y_max_edit)
 
         show_grid_cb = QtWidgets.QCheckBox("Show grid", axes_tab)
-        show_grid_cb.setChecked(True)
+        show_grid_cb.setChecked(False)
         axes_form.addRow(show_grid_cb)
 
         tick_length_spin = QtWidgets.QDoubleSpinBox(ticks_tab)

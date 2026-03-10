@@ -17,7 +17,7 @@ class StressDependencePlugin(PyPlotPlugin):
     """Port the stress dependence workflow into the shared PyPlot frame."""
 
     requires_imported_data = True
-    uses_shared_plot_workbooks = False
+    uses_shared_plot_workbooks = True
 
     _VAR_LABELS = {
         "sum": "T1+T2",
@@ -370,7 +370,7 @@ class StressDependencePlugin(PyPlotPlugin):
                     descriptor = window_module.TabDescriptor(
                         kind="stress_dependence",
                         title=fig.axes[0].get_title() if fig.axes else tab_label,
-                        root_label=f"{composition} {title} {anneal}",
+                        root_label=fig.axes[0].get_title() if fig.axes else f"{composition} {title} {anneal}",
                         x_label="Applied load (g)",
                         y_label=stress_core.LABELS.get(variable, variable),
                         canvas=canvas,
@@ -447,21 +447,7 @@ class StressDependencePlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
-        if self._data is None:
-            self.load_data()
-        self._apply_settings_to_core()
-
-        def _task() -> None:
-            stress_core.SHOW_PLOTS = False
-            stress_core.main(self._loaded_files, backend="origin")
-
-        self.run_origin_export(
-            ready=bool(self._data is not None and self._loaded_files),
-            missing_message="Load stress dependence data before exporting to Origin.",
-            task=_task,
-            success_log="Sent stress dependence plots to Origin.",
-            failure_message="Failed to export stress dependence plots to Origin",
-        )
+        super().open_origin()
 
     def export_txt(self) -> None:  # type: ignore[override]
         if self._data is None:

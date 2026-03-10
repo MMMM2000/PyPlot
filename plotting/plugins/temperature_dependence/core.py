@@ -231,7 +231,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
 def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
     """Create an Origin graph matching the Matplotlib style."""
 
-    with origin_session() as op:
+    with origin_session(keep_open=True) as op:
         comp = df["composition"].iat[0]
         sample = df["sample"].iat[0]
         anneal = df["anneal"].iat[0]
@@ -255,7 +255,7 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
         # Push to Origin and build the graph
         book = op.new_book('w', lname="Temp Dependence (Python)")
         book.activate()
-        gp = op.new_graph(template='scatter')
+        gp = op.new_graph(template='line')
         gl = gp[0]
 
         if PLOT_MODE in ("raw", "both") and not raw_cont.empty:
@@ -337,6 +337,21 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
                 legend = gl.label('Legend')
                 legend.text = "\n".join(legend_lines)
                 op.lt_exec('legend.update=0;')
+            except Exception:
+                pass
+        for token in ('xt', 'XT', 'yr', 'YR'):
+            try:
+                label = gl.label(token)
+            except Exception:
+                label = None
+            if label is None:
+                continue
+            try:
+                label.text = ""
+            except Exception:
+                pass
+            try:
+                label.set_int('show', 0)
             except Exception:
                 pass
         try:

@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Tuple, cast
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure
+from plotting.shared.origin import schedule_origin_release
 
 try:
     from pypdf import PdfReader
@@ -247,6 +248,6 @@ def plot_lines_to_origin(
     except Exception:
         pass
     try:
-        op.exit()
+        schedule_origin_release()
     except Exception:
         pass

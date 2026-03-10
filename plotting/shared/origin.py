@@ -282,9 +282,9 @@ def origin_title_xy(layer: Any) -> tuple[float, float] | None:
 def _origin_title_font_size(text: str, default: float) -> float:
     length = len(str(text or "").strip())
     if length >= 46:
-        return min(default, 14.0)
+        return min(default, 12.0)
     if length >= 30:
-        return min(default, 16.0)
+        return min(default, 14.0)
     return default
 
 
@@ -292,7 +292,7 @@ def position_origin_title_label(
     label_obj: Any,
     *,
     layer: Any | None = None,
-    font_size: float = 18.0,
+    font_size: float = 16.0,
     title_text: str = "",
 ) -> None:
     """Style and position an Origin text label as a graph title."""
@@ -456,7 +456,59 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
             origin_lt_exec(lt_exec, f"layer.{key}.color = color(black);")
         if key == "y2":
             origin_lt_exec(lt_exec, "layer.y2.showlabel = 1;")
-    if key not in {"y", "y2"}:
+    if key not in {"x2", "y", "y2"}:
+        return
+
+    if key == "x2":
+        label_tokens = ("xt", "XT", "Xt")
+        label_getter = getattr(layer, "label", None)
+        if not callable(label_getter):
+            return
+        axis_label = None
+        for token in label_tokens:
+            try:
+                axis_label = label_getter(token)
+            except Exception:
+                axis_label = None
+            if axis_label is not None:
+                break
+        if axis_label is None:
+            return
+        set_int = getattr(axis_label, "set_int", None)
+        if callable(set_int):
+            try:
+                set_int("show", 1)
+            except Exception:
+                pass
+            try:
+                set_int("horzalign", 2)
+            except Exception:
+                pass
+        set_float = getattr(axis_label, "set_float", None)
+        layer_get_float = getattr(layer, "get_float", None)
+        if not callable(set_float) or not callable(layer_get_float):
+            return
+        try:
+            x_from = float(layer_get_float("x.from"))
+            x_to = float(layer_get_float("x.to"))
+            y_from = float(layer_get_float("y.from"))
+            y_to = float(layer_get_float("y.to"))
+        except Exception:
+            return
+        if not all(math.isfinite(value) for value in (x_from, x_to, y_from, y_to)):
+            return
+        x_span = x_to - x_from
+        y_span = y_to - y_from
+        if x_span <= 0.0 or y_span <= 0.0:
+            return
+        try:
+            set_float("x", x_to + (x_span * 0.01))
+        except Exception:
+            pass
+        try:
+            set_float("y", y_to - (y_span * 0.03))
+        except Exception:
+            pass
         return
 
     label_tokens = ("yl", "YL", "Yl") if key == "y" else ("yr", "YR", "Yr")

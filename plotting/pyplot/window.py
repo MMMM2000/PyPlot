@@ -2221,6 +2221,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._tight_layout_bulk_choice_expiry_by_context: Dict[str, float] = {}
         self._task_progress_label: QtWidgets.QLabel | None = None
         self._task_progress_bar: QtWidgets.QProgressBar | None = None
+        self._task_progress_dialog: QtWidgets.QDialog | None = None
         self.project_tree_search: QtWidgets.QLineEdit | None = None
         self._connected_folder_timer = QtCore.QTimer(self)
         self._connected_folder_timer.setInterval(self._connected_folder_poll_interval_ms)
@@ -3243,6 +3244,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         line_counter = 0
         seen_lines: set[int] = set()
+        collection_counter = 0
+        seen_collections: set[int] = set()
         for axes in self._descriptor_axes(descriptor):
             x_label, x_unit, y_label, y_unit = self._axis_label_parts(axes)
             x_factor = self._axis_value_factor(axes, axis_name="x")
@@ -3251,6 +3254,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 axis_lines = list(axes.get_lines())
             except Exception:
                 axis_lines = []
+            try:
+                axis_collections = list(getattr(axes, "collections", []) or [])
+            except Exception:
+                axis_collections = []
             for line in axis_lines:
                 marker = id(line)
                 if marker in seen_lines:
@@ -3272,6 +3279,52 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         except Exception:
                             pass
                 x_vals, y_vals = self._paired_numeric_arrays(line.get_xdata(), line.get_ydata())
+                if x_vals.size == 0 or y_vals.size == 0:
+                    continue
+                entries.append(
+                    _TabSeriesExportEntry(
+                        label=label,
+                        x_values=x_vals,
+                        y_values=y_vals,
+                        x_label=x_label or default_x or "X",
+                        x_unit=x_unit or default_x_unit,
+                        y_label=y_label or default_y or "Y",
+                        y_unit=y_unit or default_y_unit,
+                        x_scale_factor=x_factor,
+                        y_scale_factor=y_factor,
+                    )
+                )
+            for collection in axis_collections:
+                marker = id(collection)
+                if marker in seen_collections:
+                    continue
+                seen_collections.add(marker)
+                if not include_hidden:
+                    visible_getter = getattr(collection, "get_visible", None)
+                    if callable(visible_getter):
+                        try:
+                            if not bool(visible_getter()):
+                                continue
+                        except Exception:
+                            pass
+                collection_counter += 1
+                raw_label = str(
+                    getattr(collection, "get_label", lambda: f"Series {line_counter + collection_counter}")()
+                    or ""
+                ).strip()
+                if not raw_label or raw_label.startswith("_"):
+                    raw_label = f"Series {line_counter + collection_counter}"
+                label = self._normalize_series_label_for_export(raw_label, descriptor=descriptor)
+                offsets_getter = getattr(collection, "get_offsets", None)
+                if not callable(offsets_getter):
+                    continue
+                try:
+                    offsets = np.asarray(offsets_getter(), dtype=float)
+                except Exception:
+                    continue
+                if offsets.ndim != 2 or offsets.shape[1] < 2:
+                    continue
+                x_vals, y_vals = self._paired_numeric_arrays(offsets[:, 0], offsets[:, 1])
                 if x_vals.size == 0 or y_vals.size == 0:
                     continue
                 entries.append(
@@ -5066,28 +5119,33 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             status.addPermanentWidget(label, 1)
             self._cursor_label = label
 
-            progress_label = QtWidgets.QLabel("", self)
-            progress_label.setObjectName("mw_task_progress_label")
-            progress_label.setMinimumWidth(140)
-            progress_label.setMaximumWidth(280)
-            progress_label.setVisible(False)
-            status.addPermanentWidget(progress_label, 0)
-            self._task_progress_label = progress_label
-
-            progress_bar = QtWidgets.QProgressBar(self)
-            progress_bar.setObjectName("mw_task_progress_bar")
-            progress_bar.setMinimumWidth(180)
-            progress_bar.setMaximumWidth(320)
-            progress_bar.setTextVisible(True)
-            progress_bar.setVisible(False)
-            status.addPermanentWidget(progress_bar, 0)
-            self._task_progress_bar = progress_bar
             try:
                 status.setMinimumHeight(30)
                 status.setSizeGripEnabled(True)
             except Exception:
                 pass
             self._refresh_status_bar_layout()
+        progress_dialog = QtWidgets.QDialog(self, QtCore.Qt.WindowType.Tool)
+        progress_dialog.setWindowTitle("Working...")
+        progress_dialog.setModal(False)
+        progress_dialog.setWindowFlag(QtCore.Qt.WindowType.WindowContextHelpButtonHint, False)
+        progress_dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        progress_dialog.setMinimumWidth(360)
+        progress_layout = QtWidgets.QVBoxLayout(progress_dialog)
+        progress_layout.setContentsMargins(12, 12, 12, 12)
+        progress_layout.setSpacing(8)
+        progress_label = QtWidgets.QLabel("", progress_dialog)
+        progress_label.setObjectName("mw_task_progress_label")
+        progress_label.setWordWrap(True)
+        progress_layout.addWidget(progress_label)
+        progress_bar = QtWidgets.QProgressBar(progress_dialog)
+        progress_bar.setObjectName("mw_task_progress_bar")
+        progress_bar.setTextVisible(True)
+        progress_layout.addWidget(progress_bar)
+        progress_dialog.hide()
+        self._task_progress_dialog = progress_dialog
+        self._task_progress_label = progress_label
+        self._task_progress_bar = progress_bar
 
         self.project_tree = QtWidgets.QTreeWidget()
         self.project_tree.setHeaderLabels(["Project Explorer", "Details"])
@@ -6462,7 +6520,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         try:
             label.setText(str(title or "").strip())
-            label.setVisible(True)
             if isinstance(maximum, int) and maximum > 0:
                 bar.setRange(0, int(maximum))
                 bar.setValue(max(0, min(int(value), int(maximum))))
@@ -6470,8 +6527,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             else:
                 bar.setRange(0, 0)
                 bar.setFormat("%p%")
-            bar.setVisible(True)
-            self._refresh_status_bar_layout()
+            dialog = self._task_progress_dialog
+            if isinstance(dialog, QtWidgets.QDialog):
+                dialog.show()
+                dialog.raise_()
         except Exception:
             return
         try:
@@ -6501,9 +6560,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     bar.setValue(max(0, min(int(value), int(bar.maximum()))))
                 else:
                     bar.setValue(0)
-            label.setVisible(True)
-            bar.setVisible(True)
-            self._refresh_status_bar_layout()
+            dialog = self._task_progress_dialog
+            if isinstance(dialog, QtWidgets.QDialog):
+                dialog.show()
         except Exception:
             return
         try:
@@ -6529,11 +6588,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         try:
             label.clear()
-            label.setVisible(False)
             bar.setRange(0, 1)
             bar.setValue(0)
-            bar.setVisible(False)
-            self._refresh_status_bar_layout()
+            dialog = self._task_progress_dialog
+            if isinstance(dialog, QtWidgets.QDialog):
+                dialog.hide()
         except Exception:
             return
         try:
@@ -13912,18 +13971,9 @@ class _MdiTabProxy(QtWidgets.QWidget):
             sub.show()
             self._register_visible(sub)
         self._mdi.setActiveSubWindow(sub)
-        keep_maximized = False
         if was_global_maximized:
-            try:
-                keep_maximized = bool(sub.isMaximized() or sub.isFullScreen())
-            except Exception:
-                keep_maximized = False
-        if keep_maximized:
             self._maximize_single(sub)
         else:
-            if was_global_maximized:
-                self._fullscreen_lock = False
-                self._global_maximized = False
             sub.showNormal()
             if restored_from_hidden:
                 restored_geom = self._restore_saved_subwindow_geometry(sub)

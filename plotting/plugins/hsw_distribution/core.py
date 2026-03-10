@@ -192,7 +192,7 @@ def export_origin(paths: Sequence[str], config: Dict[str, Any]) -> None:
         bin_width=float(config["bin_width"]),
         share_bins=bool(config["share_bins"]),
     )
-    with origin_session() as op:
+    with origin_session(keep_open=True) as op:
         origin_any: Any = cast(Any, op)
         graph: Any = origin_any.new_graph(template="scatter")
         base_layer: Any = graph[0]

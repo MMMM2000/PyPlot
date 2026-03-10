@@ -1711,6 +1711,9 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
+        super().open_origin()
+        return
+
         if not self._dataset:
             self.load_data()
         exported_holder = {"count": 0}
@@ -1850,6 +1853,17 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                     except Exception:
                         try:
                             op.lt_exec('legend;')
+                        except Exception:
+                            pass
+                    try:
+                        legend = layer.label("Legend")
+                    except Exception:
+                        legend = None
+                    if legend is not None:
+                        try:
+                            legend_lines = [f"\\c({index}) {stress} MPa" for index, stress in enumerate(stresses, start=1)]
+                            legend.text = "\n".join(legend_lines)
+                            op.lt_exec("legend.update=0;")
                         except Exception:
                             pass
                     exported += 1

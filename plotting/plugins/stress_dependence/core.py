@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Tuple, cast
 from PyQt6 import QtWidgets
 
 from plotting.shared.config import load_config
+from plotting.shared.origin import schedule_origin_release
 from plotting.shared.utils import save_figure, show_plots
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.backends import wants_matplotlib, wants_origin
@@ -447,11 +448,6 @@ def _origin_build_graph(
     except Exception:
         pass
 
-    try:
-        op.exit()
-    except Exception:
-        pass
-
     # Defer legend tweaking until after plots are added.
 
 
@@ -477,7 +473,7 @@ def _origin_build_graph(
     w_mean_a = push_xy(mean_a, "mean_a", "mean up")
     w_mean_b = push_xy(mean_b, "mean_b", "mean down")
 
-    gp = cast(Any, op.new_graph(template='scatter'))
+    gp = cast(Any, op.new_graph(template='line'))
     gl = gp[0]
     # Try to set the graph title using the OriginPython API. Some templates
     # may ignore this; a LabTalk fallback is applied later.
@@ -572,6 +568,10 @@ def _origin_build_graph(
         set_origin_graph_title(op, gp, gl, title)
     except Exception:
         pass
+    try:
+        schedule_origin_release()
+    except Exception:
+        pass
 
     # Build legend with color-matched entries
     try:
@@ -588,6 +588,21 @@ def _origin_build_graph(
             pass
     except Exception:
         pass
+    for token in ('xt', 'XT', 'yr', 'YR'):
+        try:
+            label = gl.label(token)
+        except Exception:
+            label = None
+        if label is None:
+            continue
+        try:
+            label.text = ""
+        except Exception:
+            pass
+        try:
+            label.set_int('show', 0)
+        except Exception:
+            pass
 
     # Reapply colors and solid symbol fill via LabTalk so means are not black
     try:

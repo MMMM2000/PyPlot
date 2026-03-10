@@ -1233,6 +1233,34 @@ def plot_variable_origin(
         gl.set_int('legend.update', 1)
     except Exception:
         pass
+    try:
+        legend = gl.label('Legend')
+    except Exception:
+        legend = None
+    if legend is not None:
+        try:
+            set_float = getattr(legend, 'set_float', None)
+            set_int = getattr(legend, 'set_int', None)
+            if callable(set_float):
+                x_from = float(gl.get_float('x.from'))
+                x_to = float(gl.get_float('x.to'))
+                y_from = float(gl.get_float('y.from'))
+                y_to = float(gl.get_float('y.to'))
+                x_span = x_to - x_from
+                y_span = y_to - y_from
+                set_float('x', x_from + (x_span * 0.84))
+                set_float('y', y_from + (y_span * 0.34))
+            if callable(set_int):
+                try:
+                    set_int('horzalign', 1)
+                except Exception:
+                    pass
+                try:
+                    set_int('fontheight', 10)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     try:
         gl.set_int('x.top', 0)
@@ -1364,7 +1392,7 @@ def plot_variable_origin(
             except Exception:
                 pass
             try:
-                label.set_int('fontheight', max(TICK_SIZE, 18))
+                label.set_int('fontheight', 12)
             except Exception:
                 pass
         except Exception:
