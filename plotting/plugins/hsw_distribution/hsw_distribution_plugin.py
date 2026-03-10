@@ -200,7 +200,7 @@ class HswDistributionPlugin(PyPlotPlugin):
             descriptor = window_module.TabDescriptor(
                 kind="hsw_distribution",
                 title=title,
-                root_label=stem,
+                root_label=title,
                 x_label=axes.get_xlabel() if axes is not None else "",
                 y_label=axes.get_ylabel() if axes is not None else "",
                 canvas=canvas,
@@ -217,15 +217,7 @@ class HswDistributionPlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
-        def _task() -> None:
-            hsw_dist_core.export_origin(self._loaded_files, self._config(backend="origin"))
-
-        self.run_origin_export(
-            ready=bool(self._loaded_files),
-            missing_message="Load HSW distribution data before exporting to Origin.",
-            task=_task,
-            success_log="Sent HSW distribution plots to Origin.",
-        )
+        super().open_origin()
 
     def update_ui(self) -> None:  # type: ignore[override]
         has_data = bool(self._loaded_files)
