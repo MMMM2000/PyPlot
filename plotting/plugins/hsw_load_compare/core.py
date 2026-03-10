@@ -12,7 +12,11 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from plotting.shared.backends import wants_matplotlib, wants_origin
 from plotting.shared.utils import save_figure, show_plots
-from plotting.shared.origin import origin_session
+from plotting.shared.origin import (
+    origin_session,
+    set_origin_axis_title,
+    set_origin_graph_title,
+)
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 
 # Defaults
@@ -339,16 +343,47 @@ def main(files: List[str], cfg: Dict[str, Any]):
                             try:
                                 p.color = color
                                 p.symbol_shape = 2
+                                p.lname = col
+                                p.legend = col
                             except Exception:
                                 pass
                     try:
                         gl.rescale()
+                        for attr, value in (
+                            ("x.showAxes", 1),
+                            ("y.showAxes", 1),
+                            ("x.showlabel", 1),
+                            ("x2.showlabel", 0),
+                            ("y.showlabel", 1),
+                            ("y2.showlabel", 0),
+                        ):
+                            gl.set_int(attr, value)
                     except Exception:
                         pass
                 try:
                     gp.activate()
                     op_any.lt_exec('page.antialias=1; layer -aa 1;')
-                    op_any.lt_exec('lab -xb "$\\Delta h^{3/2}$"; lab -yl "ln(dp/dh)"; legend;')
+                    set_origin_axis_title(gl0, 'x', r"$\Delta h^{3/2}$")
+                    set_origin_axis_title(gl0, 'y', "ln(dp/dh)")
+                    set_origin_axis_title(gl0, 'x2', '')
+                    set_origin_axis_title(gl0, 'y2', '')
+                    set_origin_graph_title(op_any, gp, gl0, "HSW Load Compare")
+                    for cmd in (
+                        'layer.x.showAxes=1;',
+                        'layer.y.showAxes=1;',
+                        'layer.x.showlabel=1;',
+                        'layer.x2.showlabel=0;',
+                        'layer.y.showlabel=1;',
+                        'layer.y2.showlabel=0;',
+                        'lab -xt "";',
+                        'lab -yr "";',
+                    ):
+                        op_any.lt_exec(cmd)
+                    op_any.lt_exec('legend;')
+                    legend = gl0.label('Legend')
+                    if legend is not None:
+                        legend.text = "\\c(1) TT\n\\c(2) HH"
+                        op_any.lt_exec('legend.update=0;')
                 except Exception:
                     pass
         except Exception as e:

@@ -1202,14 +1202,15 @@ class PyPlotWorkbench(PyPlotWindow):
                     setter(aspect)
                 except Exception:
                     pass
-        if bool(getattr(self.tab_widget, "_global_maximized", False) or getattr(self.tab_widget, "_fullscreen_lock", False)):
-            maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
-            if callable(maybe_maximize):
-                try:
+        is_maximized_target = getattr(self.tab_widget, "_is_maximized_target", None)
+        maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
+        if callable(is_maximized_target) and callable(maybe_maximize):
+            try:
+                if bool(is_maximized_target(sub)):
                     maybe_maximize(sub)
-                except Exception:
-                    pass
-            return
+                    return
+            except Exception:
+                pass
         try:
             dpi = float(getattr(figure, "dpi", 100.0) or 100.0) if figure is not None else 100.0
         except Exception:
@@ -1659,7 +1660,6 @@ class PyPlotWorkbench(PyPlotWindow):
         self._selected_path_entries = []
         self._connected_data_folders = []
         self._connected_folder_seen_files = set()
-        self._persist_connected_folders()
         self._update_connected_folder_state()
         self._pending_new_plot_paths = []
         self._last_imported_file_paths = []
@@ -4000,18 +4000,16 @@ class PyPlotWorkbench(PyPlotWindow):
                                         setter(aspect)
                                     except Exception:
                                         pass
-                            if bool(
-                                getattr(self.tab_widget, "_global_maximized", False)
-                                or getattr(self.tab_widget, "_fullscreen_lock", False)
-                            ):
-                                maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
-                                if callable(maybe_maximize):
-                                    try:
+                            is_maximized_target = getattr(self.tab_widget, "_is_maximized_target", None)
+                            maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
+                            if callable(is_maximized_target) and callable(maybe_maximize):
+                                try:
+                                    if bool(is_maximized_target(sub)):
                                         maybe_maximize(sub)
-                                    except Exception:
-                                        pass
-                                touched += 1
-                                continue
+                                        touched += 1
+                                        continue
+                                except Exception:
+                                    pass
                             try:
                                 dpi = float(getattr(figure, "dpi", 100.0) or 100.0) if figure is not None else 100.0
                             except Exception:

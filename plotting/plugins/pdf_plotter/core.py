@@ -200,13 +200,14 @@ def plot_lines_to_origin(
 ) -> None:
     import originpro as op  # pragma: no cover - Origin only
 
+    line_items = list(lines)
     try:
         op.set_show()
     except Exception:
         pass
     graph = cast(Any, op.new_graph(template="scatter"))
     layer = graph[0]
-    for index, (label, xs, ys) in enumerate(lines):
+    for index, (label, xs, ys) in enumerate(line_items):
         sheet = cast(Any, op.new_sheet("w", lname=f"data_{index}"))
         sheet.from_list(0, np.asarray(xs, dtype=float).tolist())
         sheet.from_list(1, np.asarray(ys, dtype=float).tolist())
@@ -230,7 +231,19 @@ def plot_lines_to_origin(
         escaped_title = title.replace('"', "'")
         op.lt_exec('page.antialias=1; layer -aa 1;')
         op.lt_exec(f'title -s "{escaped_title}";')
-        op.lt_exec(f'lab -xb "{x_label}"; lab -yl "{y_label}"; legend;')
+        op.lt_exec(f'lab -xb "{x_label}"; lab -yl "{y_label}";')
+        if len(line_items) > 1:
+            op.lt_exec('legend;')
+        else:
+            op.lt_exec('lab -xt ""; lab -yr "";')
+            op.lt_exec('legend -d;')
+            try:
+                legend = layer.label('Legend')
+                if legend is not None:
+                    legend.text = ""
+                    legend.set_int('show', 0)
+            except Exception:
+                pass
     except Exception:
         pass
     try:

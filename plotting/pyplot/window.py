@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import datetime
+import hashlib
 import logging
 import math
 import os
@@ -2301,7 +2302,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         QtCore.QTimer.singleShot(0, self._restore_persisted_imports)
-        QtCore.QTimer.singleShot(0, self._restore_connected_folders)
         self._apply_toolbar_style_hint()
         self._update_history_actions()
 
@@ -8298,6 +8298,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             )
             return
         self._project_path = target
+        self._persist_connected_folders()
         self._update_project_title()
         self._remember_recent_project(target)
         self._after_project_saved(target, payload)
@@ -8359,6 +8360,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not success:
             return
         self._project_path = path
+        self._restore_connected_folders(force_local=True)
         self._update_project_title()
         self._remember_recent_project(path)
         self._after_project_loaded(path, payload)
@@ -8451,14 +8453,24 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             menu_action.setEnabled(bool(self._connected_data_folders))
 
     def _persist_connected_folders(self) -> None:
+        project_path = getattr(self, "_project_path", None)
+        if not isinstance(project_path, Path):
+            return
         entries = [str(path) for path in self._connected_data_folders if isinstance(path, Path)]
+        key = self._project_local_connected_folder_key(project_path)
         if entries:
-            self.settings.setValue(self._connected_folder_storage_key, entries)
+            self.settings.setValue(key, entries)
         else:
-            self.settings.remove(self._connected_folder_storage_key)
+            self.settings.remove(key)
 
-    def _restore_connected_folders(self) -> None:
-        if self._connected_data_folders:
+    def _restore_connected_folders(self, *, force_local: bool = False) -> None:
+        if self._connected_data_folders and not force_local:
+            self._update_connected_folder_state()
+            return
+        project_path = getattr(self, "_project_path", None)
+        if not isinstance(project_path, Path):
+            self._connected_data_folders = []
+            self._connected_folder_seen_files = set()
             self._update_connected_folder_state()
             return
         app = QtWidgets.QApplication.instance()
@@ -8472,7 +8484,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             self._connected_folder_seen_files = set()
             self._update_connected_folder_state()
             return
-        stored = self.settings.value(self._connected_folder_storage_key, [])
+        stored = self.settings.value(self._project_local_connected_folder_key(project_path), [])
         if isinstance(stored, str):
             candidates = [stored] if stored.strip() else []
         elif isinstance(stored, (list, tuple, set)):
@@ -8496,6 +8508,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 continue
             seen.add(key)
             folders.append(path)
+        if force_local and not folders and self._connected_data_folders:
+            self._update_connected_folder_state()
+            return
         self._connected_data_folders = folders
         self._connected_folder_seen_files = set()
         self._update_connected_folder_state()
@@ -8505,6 +8520,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 self._refresh_connected_folders()
             finally:
                 self._connected_folders_restoring = False
+
+    def _project_local_connected_folder_key(self, project_path: Path) -> str:
+        try:
+            resolved = str(project_path.resolve())
+        except Exception:
+            resolved = str(project_path)
+        digest = hashlib.sha1(resolved.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        return self._project_settings_key(f"connected_folders_local/{digest}")
 
     def _connect_data_folders(self, folders: Iterable[Path]) -> None:
         changed = False
@@ -13862,12 +13885,6 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 if was_global_maximized:
                     self._apply_global_window_state(active=sub)
             self._register_visible(sub)
-        if self._global_maximized and sub is not None and not sub.isMaximized():
-            self._syncing_state = True
-            try:
-                self._maybe_apply_maximize(sub)
-            finally:
-                self._syncing_state = False
         self.currentChanged.emit(index)
 
     def _subwindow_for(self, widget: QtWidgets.QWidget | None) -> _ManagedSubWindow | None:
@@ -13885,6 +13902,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         sub = self._subwindow_for(widget)
         if not self._is_live_subwindow(sub):
             return
+        was_global_maximized = bool(self._global_maximized or self._fullscreen_lock)
         restored_from_hidden = False
         self._blocking = True
         if sub in self._hidden_subwindows or sub in self._maximized_hidden:
@@ -13894,9 +13912,18 @@ class _MdiTabProxy(QtWidgets.QWidget):
             sub.show()
             self._register_visible(sub)
         self._mdi.setActiveSubWindow(sub)
-        if self._global_maximized or self._fullscreen_lock:
+        keep_maximized = False
+        if was_global_maximized:
+            try:
+                keep_maximized = bool(sub.isMaximized() or sub.isFullScreen())
+            except Exception:
+                keep_maximized = False
+        if keep_maximized:
             self._maximize_single(sub)
         else:
+            if was_global_maximized:
+                self._fullscreen_lock = False
+                self._global_maximized = False
             sub.showNormal()
             if restored_from_hidden:
                 restored_geom = self._restore_saved_subwindow_geometry(sub)
@@ -13950,6 +13977,18 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 else:
                     self._apply_global_window_state()
             else:
+                if (
+                    isinstance(source, _ManagedSubWindow)
+                    and self._is_live_subwindow(source)
+                ):
+                    try:
+                        if not source.isMaximized() and not source.isFullScreen():
+                            self._fullscreen_lock = False
+                            self._global_maximized = False
+                            self._apply_global_window_state(active=source if source is active else None)
+                            return
+                    except Exception:
+                        pass
                 if self._fullscreen_lock or self._global_maximized:
                     if not self._native_subwindow_maximize and not source_was_maximized:
                         QtCore.QTimer.singleShot(0, self._reconcile_maximized_state)
@@ -14139,8 +14178,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
                         lambda s=sub: self._apply_fullscreen_geometry(s),
                     )
             else:
-                sub.hide()
-                self._maximized_hidden.add(sub)
+                self._maximized_hidden.discard(sub)
 
     def _fit_subwindow(
         self,

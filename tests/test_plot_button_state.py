@@ -665,14 +665,14 @@ def test_switching_tabs_preserves_maximized_subwindow_mode() -> None:
         maximize_single(first_sub)
         app.processEvents()
         assert not first_sub.isHidden()
-        assert second_sub.isHidden()
+        assert not second_sub.isHidden()
 
         window.tab_widget.setCurrentWidget(second_tab)
         app.processEvents()
         assert not second_sub.isHidden()
-        assert first_sub.isHidden()
-        assert bool(getattr(window.tab_widget, "_global_maximized", False))
-        assert bool(getattr(window.tab_widget, "_fullscreen_lock", False))
+        assert not first_sub.isHidden()
+        assert not bool(getattr(window.tab_widget, "_global_maximized", False))
+        assert not bool(getattr(window.tab_widget, "_fullscreen_lock", False))
     finally:
         window.close()
         app.processEvents()
@@ -712,7 +712,7 @@ def test_fullscreen_geometry_fills_viewport_for_wide_aspect_graphs() -> None:
         app.processEvents()
 
 
-def test_non_native_demote_event_keeps_fullscreen_lock() -> None:
+def test_non_native_demote_event_clears_fullscreen_lock() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
     try:
@@ -745,10 +745,10 @@ def test_non_native_demote_event_keeps_fullscreen_lock() -> None:
         state_change(False, source=first_sub)
         app.processEvents()
 
-        assert bool(getattr(tab_proxy, "_fullscreen_lock", False))
-        assert bool(getattr(tab_proxy, "_global_maximized", False))
+        assert not bool(getattr(tab_proxy, "_fullscreen_lock", False))
+        assert not bool(getattr(tab_proxy, "_global_maximized", False))
         visible_count = int(not first_sub.isHidden()) + int(not second_sub.isHidden())
-        assert visible_count == 1
+        assert visible_count == 2
     finally:
         window.close()
         app.processEvents()
@@ -1525,6 +1525,62 @@ def test_shared_project_payload_includes_connected_folders(tmp_path: Path) -> No
         assert connected.name in connected_folders[0]
     finally:
         window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_connected_folders_do_not_restore_without_project_path(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="Hysteresis Loops")
+    try:
+        connected = tmp_path / "connected"
+        connected.mkdir()
+        window.settings.setValue(window._connected_folder_storage_key, [str(connected)])  # noqa: SLF001
+        window._connected_data_folders = []  # noqa: SLF001
+        window._restore_connected_folders()  # noqa: SLF001
+        assert window._connected_data_folders == []  # noqa: SLF001
+    finally:
+        window.settings.remove(window._connected_folder_storage_key)  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_connected_folders_restore_from_project_local_cache_per_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    monkeypatch.setattr(QtWidgets.QApplication, "platformName", lambda *_args: "windows")
+    window = PyPlotWorkbench(initial_plotter="Hysteresis Loops")
+    try:
+        project_one = tmp_path / "one.pypj"
+        project_two = tmp_path / "two.pypj"
+        folder_one = tmp_path / "folder_one"
+        folder_two = tmp_path / "folder_two"
+        folder_one.mkdir()
+        folder_two.mkdir()
+
+        window._project_path = project_one  # noqa: SLF001
+        window._connected_data_folders = [folder_one]  # noqa: SLF001
+        window._persist_connected_folders()  # noqa: SLF001
+
+        window._project_path = project_two  # noqa: SLF001
+        window._connected_data_folders = [folder_two]  # noqa: SLF001
+        window._persist_connected_folders()  # noqa: SLF001
+
+        window._project_path = project_one  # noqa: SLF001
+        window._connected_data_folders = []  # noqa: SLF001
+        window._restore_connected_folders(force_local=True)  # noqa: SLF001
+        assert window._connected_data_folders == [folder_one]  # noqa: SLF001
+
+        window._project_path = project_two  # noqa: SLF001
+        window._connected_data_folders = []  # noqa: SLF001
+        window._restore_connected_folders(force_local=True)  # noqa: SLF001
+        assert window._connected_data_folders == [folder_two]  # noqa: SLF001
+    finally:
+        for project in (project_one, project_two):
+            key = window._project_local_connected_folder_key(project)  # noqa: SLF001
+            window.settings.remove(key)  # noqa: SLF001
         window.close()
         app.processEvents()
 
