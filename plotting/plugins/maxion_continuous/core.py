@@ -268,7 +268,12 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
         w_raw.from_list(0, x_list)
         w_raw.from_list(1, y_vals.tolist())
         w_raw.cols_axis('XY')
-        gl.add_plot(w_raw, coly=1, colx=0, type='s')
+        raw_plot: Any = gl.add_plot(w_raw, coly=1, colx=0, type='s')
+        if raw_plot is not None:
+            try:
+                raw_plot.lname = 'raw'
+            except Exception:
+                pass
 
         # Processed
         if PLOT_MODE in ("processed", "both") and proc is not None:
@@ -284,9 +289,14 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
                 p: Any = plot_obj
                 try:
                     p.line_width = 1
+                    p.lname = f"med{MED_WINDOW}+mwa{MA_WINDOW}"
                 except Exception:
                     pass
 
+        try:
+            gl.rescale()
+        except Exception:
+            pass
         try:
             gp.activate()
             op_any.lt_exec('page.antialias=1;')

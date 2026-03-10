@@ -2,6 +2,7 @@
 
 import datetime
 import logging
+import math
 import os
 import re
 import sys
@@ -1059,6 +1060,8 @@ class _TabSeriesExportEntry:
     x_unit: str
     y_label: str
     y_unit: str
+    x_scale_factor: float = 1.0
+    y_scale_factor: float = 1.0
 
 
 @dataclass
@@ -3220,6 +3223,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     continue
                 line_axes = getattr(line_obj, "axes", None)
                 x_label, x_unit, y_label, y_unit = self._axis_label_parts(line_axes)
+                x_factor = self._axis_value_factor(line_axes, axis_name="x")
+                y_factor = self._axis_value_factor(line_axes, axis_name="y")
                 entries.append(
                     _TabSeriesExportEntry(
                         label=label,
@@ -3229,6 +3234,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         x_unit=x_unit or default_x_unit,
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
+                        x_scale_factor=x_factor,
+                        y_scale_factor=y_factor,
                     )
                 )
         if entries:
@@ -3238,6 +3245,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         seen_lines: set[int] = set()
         for axes in self._descriptor_axes(descriptor):
             x_label, x_unit, y_label, y_unit = self._axis_label_parts(axes)
+            x_factor = self._axis_value_factor(axes, axis_name="x")
+            y_factor = self._axis_value_factor(axes, axis_name="y")
             try:
                 axis_lines = list(axes.get_lines())
             except Exception:
@@ -3274,9 +3283,24 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         x_unit=x_unit or default_x_unit,
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
+                        x_scale_factor=x_factor,
+                        y_scale_factor=y_factor,
                     )
                 )
         return entries
+
+    @staticmethod
+    def _axis_value_factor(axes: Any, *, axis_name: str) -> float:
+        if axes is None:
+            return 1.0
+        attr = f"_mw_{axis_name}_value_factor"
+        try:
+            value = float(getattr(axes, attr, 1.0) or 1.0)
+        except Exception:
+            return 1.0
+        if not math.isfinite(value) or math.isclose(value, 0.0, abs_tol=1e-12):
+            return 1.0
+        return value
 
     def _tab_series_data(
         self,
@@ -3348,8 +3372,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 y_name = f"{token}_y_{suffix}"
             used_columns.add(x_name)
             used_columns.add(y_name)
-            columns[x_name] = pd.Series(x_vals)
-            columns[y_name] = pd.Series(y_vals)
+            columns[x_name] = pd.Series(x_vals * float(entry.x_scale_factor or 1.0))
+            columns[y_name] = pd.Series(y_vals * float(entry.y_scale_factor or 1.0))
             metadata[x_name] = WorksheetColumnMeta(
                 long_name=entry.x_label or "X",
                 units=entry.x_unit,

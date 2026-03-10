@@ -23,7 +23,12 @@ from matplotlib.typing import ColorType
 from plotting.shared.config import load_config
 from plotting.shared import common
 from plotting.shared.utils import save_figure, show_plots
-from plotting.shared.origin import schedule_origin_release, hide_origin_workbook
+from plotting.shared.origin import (
+    schedule_origin_release,
+    hide_origin_workbook,
+    set_origin_axis_title,
+    set_origin_graph_title,
+)
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.backends import wants_matplotlib, wants_origin
 
@@ -1295,7 +1300,7 @@ def plot_variable_origin(
             except Exception:
                 pass
             try:
-                label.set_int('fontheight', max(TICK_SIZE, 18))
+                label.set_int('fontheight', min(max(TICK_SIZE, 12), 14))
             except Exception:
                 pass
         except Exception:
@@ -1366,56 +1371,17 @@ def plot_variable_origin(
             pass
 
     try:
-        title_label = gl.label('Title')
-    except Exception:
-        title_label = None
-    if title_label is not None:
-        try:
-            title_label.text = context.title
-            title_label.set_int('attach', 0)
-            try:
-                title_label.set_double('x', title_center)
-                title_label.set_double('y', axis.plot_top + max(axis.title_gap * 0.1, 0.4))
-            except Exception:
-                pass
-            try:
-                title_label.set_int('horzalign', 1)
-                title_label.set_int('vertalign', 2)
-            except Exception:
-                pass
-        except Exception:
-            pass
-    try:
         gl.remove_label('py_title')
     except Exception:
         pass
-    title_y = axis.plot_top + max(axis.title_gap * 0.25, 0.6)
     try:
-        manual_title = gl.add_label(context.title, title_center, title_y)
+        set_origin_axis_title(gl, 'y', TS_LABELS[var])
     except Exception:
-        manual_title = None
-    if manual_title is not None:
-        try:
-            manual_title.name = 'py_title'
-            manual_title.set_int('attach', 0)
-            try:
-                manual_title.set_int('horzalign', 1)
-            except Exception:
-                pass
-            try:
-                manual_title.set_int('vertalign', 2)
-            except Exception:
-                pass
-            try:
-                manual_title.set_int('fontweight', 700)
-            except Exception:
-                pass
-            try:
-                manual_title.set_int('fontheight', TITLE_SIZE)
-            except Exception:
-                pass
-        except Exception:
-            pass
+        pass
+    try:
+        set_origin_graph_title(op, gp, gl, context.title)
+    except Exception:
+        pass
 
     try:
         hide_origin_workbook(op, book, gp)

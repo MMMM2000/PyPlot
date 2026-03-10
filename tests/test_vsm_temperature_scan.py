@@ -302,15 +302,15 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
     assert fake_origin.graphs, "Expected at least one Origin graph to be created"
     graph = fake_origin.graphs[0]
     layer = graph[0]
-    assert graph.title_meta is not None and "VSM Temperature Scan" in graph.title_meta
+    assert graph.title_meta is not None and "Signal X" in graph.title_meta
     assert any(cmd.startswith('title -s "') for cmd in graph.lt_commands)
     assert {"x", "y", "x2"}.issubset(set(layer.axis_calls))
     assert layer._axes["x"].label.text == "Temperature [°C]"
     assert "[emu]" in layer._axes["y"].label.text
     assert "\\l(" in layer._legend.text
     titles = [str(getattr(item, "title_meta", "") or "") for item in fake_origin.graphs]
-    assert any("Smoothed d(Signal X)/dT" in title for title in titles)
-    assert not any(" - d(Signal X)/dT" in title and "Smoothed" not in title for title in titles)
+    assert any("Smoothed dSignal/dT" in title for title in titles)
+    assert not any(" - dSignal/dT" in title and "Smoothed" not in title for title in titles)
 
 
 def test_plot_origin_combines_legend_entries_for_dual_axis(monkeypatch) -> None:

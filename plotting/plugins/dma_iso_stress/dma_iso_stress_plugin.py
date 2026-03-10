@@ -1795,6 +1795,14 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                             plot_obj = None
                         if plot_obj is not None:
                             try:
+                                plot_obj.legend = label
+                            except Exception:
+                                pass
+                            try:
+                                plot_obj.lname = label
+                            except Exception:
+                                pass
+                            try:
                                 plot_obj.line_width = line_width
                             except Exception:
                                 pass

@@ -9,7 +9,7 @@ from PyQt6 import QtWidgets
 
 from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
-from plotting.shared.origin import origin_session
+from plotting.shared.origin import origin_session, set_origin_axis_title, set_origin_graph_title
 
 from .core import (
     FmrParseResult,
@@ -408,6 +408,12 @@ class FmrPlugin(PyPlotPlugin):
                         field_col=field_col,
                         signal_col=x_col,
                     )
+                    x_unit = entry.units.get(field_col, "Oe")
+                    y_unit = entry.units.get(x_col) or entry.units.get(y_col) or "V"
+                    axis_field = "Field" if "field" in field_col.lower() else field_col
+                    x_label = f"{axis_field} [{x_unit}]" if x_unit else axis_field
+                    y_name = "X'" if rotated else "X"
+                    y_label = f"{y_name} [{y_unit}]" if y_unit else y_name
                     try:
                         book = op.new_book("w")
                     except Exception:
@@ -477,22 +483,28 @@ class FmrPlugin(PyPlotPlugin):
                         else entry.sample
                     )
                     try:
-                        graph.set_str("title", graph_title)
+                        set_origin_graph_title(op, graph, layer, graph_title)
                         graph.name = self._origin_graph_name(graph_title)
                         graph.lname = f"{entry.sample} - FMR"
                     except Exception:
                         pass
                     try:
-                        graph.activate()
-                        safe_title = graph_title.replace('"', "'")
-                        op.lt_exec(f'title -s "{safe_title}";')
+                        set_origin_axis_title(layer, "x", x_label)
+                        set_origin_axis_title(layer, "y", y_label)
                     except Exception:
                         pass
-                    for plot_obj, color in ((plot_x, "#111111"), (plot_y, "#dc2626")):
+                    for plot_obj, color, legend_text in (
+                        (plot_x, "#111111", "X'" if rotated else "X"),
+                        (plot_y, "#dc2626", "Y'" if rotated else "Y"),
+                    ):
                         if plot_obj is None:
                             continue
                         try:
                             plot_obj.color = color
+                        except Exception:
+                            pass
+                        try:
+                            plot_obj.legend = legend_text
                         except Exception:
                             pass
                         try:
@@ -513,6 +525,19 @@ class FmrPlugin(PyPlotPlugin):
                                 plot_obj.symbol_shape = 0
                             except Exception:
                                 pass
+                    try:
+                        layer.set_int("antialias", 1)
+                        layer.set_int("use_speed_mode", 0)
+                        layer.set_int("speedmode", 0)
+                    except Exception:
+                        pass
+                    try:
+                        layer.add_legend()
+                    except Exception:
+                        try:
+                            op.lt_exec("legend;")
+                        except Exception:
+                            pass
                     exported += 1
                 exported_holder["count"] = exported
 

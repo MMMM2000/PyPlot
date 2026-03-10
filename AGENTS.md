@@ -2,12 +2,16 @@
 
 ## Environment
 - Use a project virtual environment for all Python commands.
-- Use whichever project virtual environment best matches the task/runtime (for example `.venv` for Windows/Origin integration, `.venv-wsl` for WSL-native work) and state which interpreter was used.
+- Use the project `.venv` and state which interpreter was used.
+- If `.venv` is missing, outdated, or tied to the wrong Python minor version for the project, create or recreate it before running Python commands.
+- Treat `.venv` as disposable generated state: if the environment is broken or the project now requires a newer Python version, delete the old `.venv` and build a fresh one instead of waiting for the user to do it.
 
 ## Dependencies
 - Edit `pyproject.toml` first, then update `requirements.txt` from it.
 - Keep `pyproject.toml` and `requirements.txt` aligned; don't submit mismatched pins.
 - If Windows-only dependencies change, also sync `requirements-win.txt`.
+- When the current environment is missing dependencies or has stale pins, update it yourself. On Windows install `requirements.txt` first and then `requirements-win.txt`; otherwise install `requirements.txt`.
+- Install `.[test]` when tests or test-only tools are needed.
 
 ## Changelog
 - Keep `CHANGELOG.md` as the canonical release history on `main`.

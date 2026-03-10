@@ -222,6 +222,10 @@ def plot_lines_to_origin(
             except Exception:
                 pass
     try:
+        layer.rescale()
+    except Exception:
+        pass
+    try:
         graph.activate()
         escaped_title = title.replace('"', "'")
         op.lt_exec('page.antialias=1; layer -aa 1;')

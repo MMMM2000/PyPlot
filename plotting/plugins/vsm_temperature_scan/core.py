@@ -1406,7 +1406,7 @@ class VSMTemperatureScanProcessor:
                 )
                 graph = origin.new_graph(template=template)
                 graphs.append(graph)
-                graph_title = self._plot_title(entry.sample, "VSM Temperature Scan", fields)
+                graph_title = self._plot_title(entry.sample, "Signal X", fields)
                 _set_origin_graph_title(origin, graph, graph_title)
                 unique_fields: list[float] = self.field_axis_order([field for field, _, _, _ in column_pairs])
                 layer_map: Dict[float, Any] = {}
@@ -1697,7 +1697,7 @@ class VSMTemperatureScanProcessor:
                         pass
                     deriv_graph = origin.new_graph(template="line")
                     graphs.append(deriv_graph)
-                    deriv_title = self._plot_title(entry.sample, "d(Signal X)/dT", fields)
+                    deriv_title = self._plot_title(entry.sample, "dSignal/dT", fields)
                     _set_origin_graph_title(origin, deriv_graph, deriv_title)
                     layer = deriv_graph[0]
                     _set_origin_axis_title(layer, "x", x_axis_label)
@@ -1788,7 +1788,7 @@ class VSMTemperatureScanProcessor:
                         pass
                     deriv_sm_graph = origin.new_graph(template="line")
                     graphs.append(deriv_sm_graph)
-                    deriv_sm_title = self._plot_title(entry.sample, "Smoothed d(Signal X)/dT", fields)
+                    deriv_sm_title = self._plot_title(entry.sample, "Smoothed dSignal/dT", fields)
                     _set_origin_graph_title(origin, deriv_sm_graph, deriv_sm_title)
                     layer = deriv_sm_graph[0]
                     _set_origin_axis_title(layer, "x", x_axis_label)

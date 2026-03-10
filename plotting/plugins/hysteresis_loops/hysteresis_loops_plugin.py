@@ -394,6 +394,7 @@ class HysteresisLoopsPlugin(PyPlotPlugin):
         axes = figure.axes[0] if getattr(figure, "axes", None) else None
         line_states: dict[tuple[str, float | str], GraphLineState] = {}
         if axes is not None:
+            self._apply_default_axis_format(axes)
             for index, line in enumerate(axes.get_lines(), start=1):
                 label = line.get_label() or f"Series {index}"
                 state = window_module.GraphLineState(
@@ -418,7 +419,6 @@ class HysteresisLoopsPlugin(PyPlotPlugin):
         self.host.tab_widget.addTab(tab, root_label)
         self.host._register_plot_tab(tab, canvas, axes, descriptor)
         self._plot_tabs.append(tab)
-        self._apply_default_axis_format(axes)
 
     def _preferred_display_factor(self, values: object) -> float:
         try:

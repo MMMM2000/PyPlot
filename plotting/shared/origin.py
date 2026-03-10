@@ -273,16 +273,27 @@ def origin_title_xy(layer: Any) -> tuple[float, float] | None:
     y_span = y_to - y_from
     if x_span <= 0.0 or y_span <= 0.0:
         return None
-    # Keep the title close to the top edge of the plotting range; large offsets
-    # can push it outside the exported page area on some Origin templates.
-    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.03))
+    # Keep the title above the plotting range. Shared dual-axis exports in
+    # particular need a little extra clearance so the title does not collide
+    # with top-axis labels or legends.
+    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.05))
+
+
+def _origin_title_font_size(text: str, default: float) -> float:
+    length = len(str(text or "").strip())
+    if length >= 46:
+        return min(default, 14.0)
+    if length >= 30:
+        return min(default, 16.0)
+    return default
 
 
 def position_origin_title_label(
     label_obj: Any,
     *,
     layer: Any | None = None,
-    font_size: float = 22.0,
+    font_size: float = 18.0,
+    title_text: str = "",
 ) -> None:
     """Style and position an Origin text label as a graph title."""
 
@@ -313,10 +324,11 @@ def position_origin_title_label(
             target_x, target_y = computed
     set_float = getattr(label_obj, "set_float", None)
     if callable(set_float):
+        resolved_font_size = _origin_title_font_size(title_text, float(font_size))
         for key, value in (
             ("x", target_x),
             ("y", target_y),
-            ("fsize", float(font_size)),
+            ("fsize", float(resolved_font_size)),
         ):
             try:
                 set_float(key, float(value))
@@ -361,7 +373,7 @@ def set_origin_graph_title(
                 title_label.text = display_title
             except Exception:
                 continue
-            position_origin_title_label(title_label, layer=primary_layer)
+            position_origin_title_label(title_label, layer=primary_layer, title_text=display_title)
             return
 
     add_label = getattr(primary_layer, "add_label", None)
@@ -371,7 +383,7 @@ def set_origin_graph_title(
         except Exception:
             manual = None
         if manual is not None:
-            position_origin_title_label(manual, layer=primary_layer)
+            position_origin_title_label(manual, layer=primary_layer, title_text=display_title)
             try:
                 manual.name = "py_title"
             except Exception:

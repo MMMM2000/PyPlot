@@ -301,6 +301,17 @@ def main(files: List[str], cfg: Dict[str, Any]):
     # Origin output (log-compare panels)
     if wants_origin(backend):
         try:
+            records = []
+            hist_data: Dict[float, Dict[str, Dict[str, np.ndarray]]] = {}
+            for p in files:
+                md, raw, filtered, mask = load_file(p)
+                if md is None:
+                    continue
+                records.append((md, raw, filtered, mask))
+            records.sort(key=lambda t: t[0]["load"])
+            for md, _raw, filt, _mask in records:
+                hist_data[md["load"]] = build_histograms(filt)
+            loads = sorted(hist_data.keys())
             with origin_session() as op:
                 op_any: Any = op
                 book: Any = op_any.new_book('w', lname="HSW Compare (Python)")

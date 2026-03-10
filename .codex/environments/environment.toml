@@ -26,10 +26,32 @@ pip install -r requirements.txt
 pip install -e ".[test]"
 '''
 
+[setup.win32]
+script = '''
+$ErrorActionPreference = "Stop"
+
+$venvPython = Join-Path $PWD ".venv\Scripts\python.exe"
+
+if (Test-Path $venvPython) {
+    & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Existing .venv is not Python 3.13. Remove .venv and rerun worktree setup."
+    }
+} else {
+    py -3.13 -m venv .venv
+    $venvPython = Join-Path $PWD ".venv\Scripts\python.exe"
+}
+
+& $venvPython -m pip install --upgrade pip
+& $venvPython -m pip install -r requirements-win.txt
+& $venvPython -m pip install -e ".[test]"
+'''
+
 [[actions]]
 name = "Run"
 icon = "run"
 command = '''
-source .venv/bin/activate
+.\.venv\Scripts\Activate.ps1
 python -m launcher
 '''
+platform = "win32"
