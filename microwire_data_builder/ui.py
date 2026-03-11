@@ -260,6 +260,16 @@ TRANSITION_TEMP_COLUMNS = [
     TRANSITION_TEMP_MF_COLUMN,
 ]
 
+_SHAPE_MEMORY_COLUMN_ALIASES = {
+    "Shape memory displacement (mm)": SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+    "Shape memory load (g)": SHAPE_MEMORY_LOAD_COLUMN,
+    "Shape memory strain (%)": SHAPE_MEMORY_STRAIN_COLUMN,
+    "Shape memory stress (MPa)": SHAPE_MEMORY_STRESS_COLUMN,
+    "Shape memory fracture load (g)": SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+    "Shape memory fracture strain (%)": SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+    "Shape memory fracture stress (MPa)": SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+}
+
 
 _STAGE_LABELS = {
     "prep": "Preparing support files",
@@ -14147,6 +14157,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._preview_panel: _ShapeMemoryPreviewPanel | None = None
         self._preview_toggle: QtWidgets.QCheckBox | None = None
         super().__init__(logger, log_callback, parent)
+        self._normalise_value_columns()
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
@@ -14320,6 +14331,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
 
     def refresh(self) -> None:
         super().refresh()
+        self._normalise_value_columns()
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
         self._toggle_preview_panel(self._preview_panel_visible())
@@ -14376,6 +14388,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._normalise_value_columns()
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
         self._refresh_record_groups()
@@ -14385,6 +14398,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
+        self._normalise_value_columns()
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
         self._toggle_preview_panel(self._preview_panel_visible())
@@ -14578,6 +14592,33 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             if entry:
                 snapshot[key] = entry
         return snapshot
+
+    def _normalise_value_columns(self) -> None:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame):
+            return
+        updated = frame.copy()
+        renamed = False
+        for old_name, new_name in _SHAPE_MEMORY_COLUMN_ALIASES.items():
+            if old_name not in updated.columns:
+                continue
+            if new_name not in updated.columns:
+                updated = updated.rename(columns={old_name: new_name})
+            else:
+                mask = updated[new_name].isna() | (updated[new_name] == "")
+                updated.loc[mask, new_name] = updated.loc[mask, old_name]
+                updated = updated.drop(columns=[old_name])
+            renamed = True
+        for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
+            if column not in updated.columns:
+                updated[column] = None
+        if renamed or not frame.columns.equals(updated.columns):
+            self.data.table = updated
+            self.model.set_frame(updated)
+            try:
+                self.store.save(self.data)
+            except Exception:
+                pass
 
     def _preview_panel_visible(self) -> bool:
         extra = self.data.extra if isinstance(self.data.extra, dict) else {}
@@ -15167,10 +15208,10 @@ class StrainSection(MiniDatabaseSection):
     COLUMN_MODE = "Calc mode"
     COLUMN_CLAMP_SPAN = "Clamp span (mm)"
     COLUMN_MASS = "m"
-    COLUMN_TARGET_STRESS = "Stress (MPa)"
+    COLUMN_TARGET_STRESS = "Legacy stress (MPa)"
     COLUMN_M_LENGTH = "M length"
     COLUMN_A_LENGTH = "A length"
-    COLUMN_STRAIN = "Strain"
+    COLUMN_STRAIN = "Legacy strain"
     COLUMN_BROKE = "Broke"
     TABLE_COLUMNS = [
         COLUMN_COMPOSITION,
@@ -15190,6 +15231,10 @@ class StrainSection(MiniDatabaseSection):
     HIDDEN_COLUMNS = (COLUMN_DRAW, COLUMN_PIECE, COLUMN_BROKE)
     STRAIN_MODE_LINEAR = "linear"
     STRAIN_MODE_DUAL_SUPPORT = "dual_support"
+    COLUMN_ALIASES = {
+        "Strain": COLUMN_STRAIN,
+        "Stress (MPa)": COLUMN_TARGET_STRESS,
+    }
 
     def __init__(
         self,
@@ -15212,6 +15257,7 @@ class StrainSection(MiniDatabaseSection):
         self._strain_mode: str = self.STRAIN_MODE_LINEAR
         self._clamp_span_mm: float = 0.0
         super().__init__(logger, log_callback, parent)
+        self._normalise_legacy_columns()
         self.source_button.hide()
         self.refresh_button.hide()
         if hasattr(self, "open_sources_button"):
@@ -15442,6 +15488,7 @@ class StrainSection(MiniDatabaseSection):
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._normalise_legacy_columns()
         self._reload_strain_settings_from_extra()
         self._recompute_table_metrics()
         self._refresh_table_view()
@@ -16487,6 +16534,34 @@ class StrainSection(MiniDatabaseSection):
     def _current_offset(self) -> float:
         return float(self._strain_offsets.get(self._strain_mode, 0.0))
 
+    def _normalise_legacy_columns(self) -> None:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else None
+        if not isinstance(frame, pd.DataFrame):
+            return
+        updated = frame.copy()
+        changed = False
+        for old_name, new_name in self.COLUMN_ALIASES.items():
+            if old_name not in updated.columns:
+                continue
+            if new_name not in updated.columns:
+                updated = updated.rename(columns={old_name: new_name})
+            else:
+                mask = updated[new_name].isna() | (updated[new_name] == "")
+                updated.loc[mask, new_name] = updated.loc[mask, old_name]
+                updated = updated.drop(columns=[old_name])
+            changed = True
+        for column in self.TABLE_COLUMNS:
+            if column not in updated.columns:
+                updated[column] = None
+        if changed or not frame.columns.equals(updated.columns):
+            updated = updated.reindex(columns=self.TABLE_COLUMNS).copy()
+            self.data.table = updated
+            self.model.set_frame(updated)
+            try:
+                self.store.save(self.data)
+            except Exception:
+                pass
+
     def _update_strain_mode_visibility(self) -> None:
         if hasattr(self, "clamp_span_spin"):
             visible = self._strain_mode == self.STRAIN_MODE_DUAL_SUPPORT
@@ -16531,12 +16606,12 @@ class StrainSection(MiniDatabaseSection):
                 current = math.hypot(half_span, a_eff)
             except Exception:
                 return None
-            if initial <= 0:
+            if current <= 0:
                 return None
-            base_ratio = (current - initial) / initial
+            base_ratio = (initial - current) / current
         else:
             try:
-                base_ratio = (a_eff - m_eff) / m_eff
+                base_ratio = (m_eff - a_eff) / a_eff
             except ZeroDivisionError:
                 return None
         return base_ratio * 100
@@ -20658,11 +20733,11 @@ class AssemblySection(QtWidgets.QWidget):
         add(
             "strain",
             [
-                "Strain",
+                StrainSection.COLUMN_STRAIN,
                 "Calc mode",
                 "Clamp span (mm)",
                 "m",
-                "Stress (MPa)",
+                StrainSection.COLUMN_TARGET_STRESS,
                 "M length",
                 "A length",
                 "Broke",

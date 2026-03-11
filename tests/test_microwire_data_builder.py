@@ -219,6 +219,20 @@ def test_shape_memory_point_selection_reads_load_and_stress_axes() -> None:
     assert stress_pick.stress_mpa == pytest.approx(0.9)
 
 
+def test_legacy_strain_formula_uses_reversed_ratio() -> None:
+    section = builder_ui.StrainSection.__new__(builder_ui.StrainSection)
+    section._strain_mode = builder_ui.StrainSection.STRAIN_MODE_LINEAR
+    section._strain_offsets = {
+        builder_ui.StrainSection.STRAIN_MODE_LINEAR: 0.0,
+        builder_ui.StrainSection.STRAIN_MODE_DUAL_SUPPORT: 0.0,
+    }
+    section._clamp_span_mm = 0.0
+
+    value = builder_ui.StrainSection._compute_strain_percent(section, 10.0, 12.0)
+
+    assert value == pytest.approx(-16.6666667)
+
+
 def test_shape_memory_preview_panel_double_click_updates_picked_values() -> None:
     _ensure_qapp()
     panel = builder_ui._ShapeMemoryPreviewPanel(logging.getLogger("test"))

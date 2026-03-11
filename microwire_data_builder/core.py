@@ -105,17 +105,32 @@ CURRENT_DENSITY_EXTRA_COLUMNS = [
 ]
 
 SHAPE_MEMORY_VALUE_COLUMNS = [
-    "Shape memory displacement (mm)",
-    "Shape memory load (g)",
-    "Shape memory strain (%)",
-    "Shape memory stress (MPa)",
+    "Displacement (mm)",
+    "Load (g)",
+    "Strain (%)",
+    "Stress (MPa)",
 ]
 
 SHAPE_MEMORY_FRACTURE_COLUMNS = [
-    "Shape memory fracture load (g)",
-    "Shape memory fracture strain (%)",
-    "Shape memory fracture stress (MPa)",
+    "Fracture load (g)",
+    "Fracture strain (%)",
+    "Fracture stress (MPa)",
 ]
+
+SHAPE_MEMORY_ENTRY_ALIASES = {
+    "Shape memory displacement (mm)": "Displacement (mm)",
+    "Shape memory load (g)": "Load (g)",
+    "Shape memory strain (%)": "Strain (%)",
+    "Shape memory stress (MPa)": "Stress (MPa)",
+    "Shape memory fracture load (g)": "Fracture load (g)",
+    "Shape memory fracture strain (%)": "Fracture strain (%)",
+    "Shape memory fracture stress (MPa)": "Fracture stress (MPa)",
+}
+
+STRAIN_ENTRY_ALIASES = {
+    "Strain": "Legacy strain",
+    "Stress (MPa)": "Legacy stress (MPa)",
+}
 
 EA_VALENCE = {
     "Ni": 10,
@@ -169,7 +184,7 @@ STRAIN_EXTRA_COLUMNS = [
     "Calc mode",
     "Clamp span (mm)",
     "m",
-    "Stress (MPa)",
+    "Legacy stress (MPa)",
     "M length",
     "A length",
     "Broke",
@@ -190,7 +205,7 @@ OUTPUT_COLUMNS = [
     "d (µm)",
     "D (µm)",
     "d/D",
-    "Strain",
+    "Legacy strain",
     *STRAIN_EXTRA_COLUMNS,
     "As (mA)",
     "Ms (mA)",
@@ -250,13 +265,13 @@ VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
-SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Shape memory displacement (mm)"
-SHAPE_MEMORY_LOAD_COLUMN = "Shape memory load (g)"
-SHAPE_MEMORY_STRAIN_COLUMN = "Shape memory strain (%)"
-SHAPE_MEMORY_STRESS_COLUMN = "Shape memory stress (MPa)"
-SHAPE_MEMORY_FRACTURE_LOAD_COLUMN = "Shape memory fracture load (g)"
-SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN = "Shape memory fracture strain (%)"
-SHAPE_MEMORY_FRACTURE_STRESS_COLUMN = "Shape memory fracture stress (MPa)"
+SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Displacement (mm)"
+SHAPE_MEMORY_LOAD_COLUMN = "Load (g)"
+SHAPE_MEMORY_STRAIN_COLUMN = "Strain (%)"
+SHAPE_MEMORY_STRESS_COLUMN = "Stress (MPa)"
+SHAPE_MEMORY_FRACTURE_LOAD_COLUMN = "Fracture load (g)"
+SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN = "Fracture strain (%)"
+SHAPE_MEMORY_FRACTURE_STRESS_COLUMN = "Fracture stress (MPa)"
 FMR_COLUMN = "FMR graphs"
 
 TRANSITION_TEMP_AS_COLUMN = "As (°C)"
@@ -270,7 +285,7 @@ TRANSITION_TEMP_COLUMNS = (
     TRANSITION_TEMP_MF_COLUMN,
 )
 
-STRAIN_COLUMN = "Strain"
+STRAIN_COLUMN = "Legacy strain"
 
 ORIGIN_FIGURE_COLUMNS = tuple(
     column
@@ -5051,6 +5066,11 @@ def build_database(
             for column in SHAPE_MEMORY_VALUE_COLUMNS + SHAPE_MEMORY_FRACTURE_COLUMNS:
                 if column in payload:
                     entry[column] = payload.get(column)
+                    continue
+                for old_name, new_name in SHAPE_MEMORY_ENTRY_ALIASES.items():
+                    if new_name == column and old_name in payload:
+                        entry[column] = payload.get(old_name)
+                        break
             if entry:
                 shape_memory_entry_map[_microwire_key_to_str(key_parts)] = entry
     shape_memory_entry_map = dict(shape_memory_entry_map)
@@ -5067,6 +5087,11 @@ def build_database(
             for column in list(STRAIN_EXTRA_COLUMNS) + [STRAIN_COLUMN]:
                 if column in payload:
                     entry[column] = payload.get(column)
+                    continue
+                for old_name, new_name in STRAIN_ENTRY_ALIASES.items():
+                    if new_name == column and old_name in payload:
+                        entry[column] = payload.get(old_name)
+                        break
             if entry:
                 strain_entry_map[_microwire_key_to_str(key_parts)] = entry
     elif strain_records:
