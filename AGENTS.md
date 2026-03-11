@@ -13,6 +13,12 @@
 - When the current environment is missing dependencies or has stale pins, update it yourself. On Windows install `requirements.txt` first and then `requirements-win.txt`; otherwise install `requirements.txt`.
 - Install `.[test]` when tests or test-only tools are needed.
 
+## Git Sync
+- Before starting substantive work, refresh remote state with `git fetch --all --prune`.
+- If the current branch tracks an upstream, check whether it is behind before making changes.
+- When the worktree is clean and the update is a fast-forward, bring the branch up to date with `git pull --ff-only`.
+- If there are local changes, no upstream branch, or the pull would require a merge or rebase, stop and summarize the situation instead of forcing a sync.
+
 ## Changelog
 - Keep `CHANGELOG.md` as the canonical release history on `main`.
 - In feature branches/worktrees, add a changelog fragment under `changelog.d/` instead of editing `CHANGELOG.md` directly.
