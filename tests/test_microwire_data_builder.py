@@ -141,6 +141,46 @@ def test_shape_memory_preview_uses_dual_axis_overlay() -> None:
         builder_ui.plt.close(figure)
 
 
+def test_shape_memory_section_groups_flat_folder_files_by_filename_sample(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    logger = logging.getLogger("test")
+    section = builder_ui.ShapeMemoryStressStrainSection(logger, lambda *_args: None)
+    try:
+        paths = []
+        for name in [
+            "Ni50Fe27Ga23 5-4 s1 loop.txt",
+            "Ni50Fe27Ga23 6-4 s1 loop.txt",
+        ]:
+            path = tmp_path / name
+            path.write_text(
+                "\n".join(
+                    [
+                        "Displacement\tLoad\tStrain\tStress",
+                        "mm\tg\t%\tMPa",
+                        "0\t0\t0\t0",
+                        "0.01\t0.10\t0.05\t0.9",
+                        "0.02\t0.20\t0.10\t1.8",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            paths.append(path)
+
+        section._active_candidates = paths
+        result = section.process(paths)
+        section._handle_worker_finished(result)
+
+        frame = section.model.frame()
+        assert isinstance(frame, pd.DataFrame)
+        assert len(frame.index) == 2
+        assert set(frame["Microwire"].tolist()) == {"5/4", "6/4"}
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_build_database_populates_shape_memory_graph_column(tmp_path: Path) -> None:
     anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
     anneal_path.write_text("placeholder", encoding="utf-8")

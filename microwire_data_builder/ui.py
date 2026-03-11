@@ -13829,7 +13829,28 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 continue
             raw_sample = _sample_from_path(Path(path), self.data.sources)
             sample, variant = _split_sample_variant(raw_sample)
+            stem_sample, stem_variant = _split_sample_variant(Path(path).stem)
             key = _microwire_key_from_path(Path(path), sample or raw_sample)
+            if key is None:
+                key = _microwire_key_from_path(Path(path), stem_sample or Path(path).stem)
+            if key is not None:
+                composition, microwire = _microwire_info_from_key(key)
+                if (
+                    composition
+                    and microwire
+                    and (
+                        not sample
+                        or sample == Path(path).parent.name
+                        or _microwire_key_from_path(Path(path), sample) is None
+                    )
+                ):
+                    sample = f"{composition} {microwire}"
+                    if variant is None:
+                        variant = stem_variant
+            elif stem_sample:
+                sample = stem_sample
+                if variant is None:
+                    variant = stem_variant
             label = Path(path).stem
             if variant:
                 label = f"{variant} â€” {label}"
@@ -17424,11 +17445,18 @@ class CompareSection(MiniDatabaseSection):
         if not new_rows:
             return 0
         new_frame = pd.DataFrame(new_rows)
-        combined = (
-            pd.concat([current, new_frame], ignore_index=True)
-            if not current.empty
-            else new_frame
-        )
+        existing_rows: List[Dict[str, Any]] = []
+        if not current.empty:
+            try:
+                cleaned_current = current.dropna(how="all")
+            except Exception:
+                cleaned_current = current
+            if not cleaned_current.empty:
+                existing_rows = [
+                    dict(row)
+                    for row in cleaned_current.to_dict(orient="records")
+                ]
+        combined = pd.DataFrame(existing_rows + new_rows) if existing_rows else new_frame
         columns = list(self._compare_columns or combined.columns)
         for column in combined.columns:
             if column not in columns:
