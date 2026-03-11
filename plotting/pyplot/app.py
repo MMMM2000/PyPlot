@@ -237,7 +237,11 @@ class PyPlotWorkbench(PyPlotWindow):
     ) -> None:
         super()._register_plot_tab(tab, canvas, axes, descriptor)
         plugin_name = self._tab_plugin_name(descriptor)
-        self._apply_graph_options_to_axes(axes, plugin_name=plugin_name)
+        self._apply_graph_options_to_axes(
+            axes,
+            plugin_name=plugin_name,
+            adjust_subwindow=False,
+        )
 
     def _load_plotter_history(self) -> list[str]:
         settings = self._shared_qsettings()
@@ -845,7 +849,11 @@ class PyPlotWorkbench(PyPlotWindow):
                 continue
             seen.add(marker)
             plugin_name = self._plugin_name_for_axes(axes)
-            self._apply_graph_options_to_axes(axes, plugin_name=plugin_name)
+            self._apply_graph_options_to_axes(
+                axes,
+                plugin_name=plugin_name,
+                adjust_subwindow=True,
+            )
             applied += 1
         return applied
 
@@ -1046,7 +1054,13 @@ class PyPlotWorkbench(PyPlotWindow):
         height = max(0.5, min(height, 20.0))
         return width, height
 
-    def _apply_graph_options_to_axes(self, axes: Any, *, plugin_name: str | None) -> None:
+    def _apply_graph_options_to_axes(
+        self,
+        axes: Any,
+        *,
+        plugin_name: str | None,
+        adjust_subwindow: bool = True,
+    ) -> None:
         if axes is None:
             return
         options = self._effective_graph_options(plugin_name)
@@ -1179,6 +1193,8 @@ class PyPlotWorkbench(PyPlotWindow):
                         pass
 
         self._fit_figure_to_content(figure)
+        if not adjust_subwindow:
+            return
         tab = self._tab_for_axes(axes)  # noqa: SLF001 - shared helper
         if tab is None:
             return
@@ -1221,7 +1237,12 @@ class PyPlotWorkbench(PyPlotWindow):
         fitter = getattr(self.tab_widget, "_fit_subwindow", None)
         if callable(fitter):
             try:
-                fitter(sub, use_half_width=False, preferred_width=target_w)
+                fitter(
+                    sub,
+                    use_half_width=False,
+                    preferred_width=target_w,
+                    remember_manual=False,
+                )
                 fitted = True
             except Exception:
                 fitted = False
@@ -4020,7 +4041,12 @@ class PyPlotWorkbench(PyPlotWindow):
                             fitter = getattr(self.tab_widget, "_fit_subwindow", None)
                             if callable(fitter):
                                 try:
-                                    fitter(sub, use_half_width=False, preferred_width=target_w)
+                                    fitter(
+                                        sub,
+                                        use_half_width=False,
+                                        preferred_width=target_w,
+                                        remember_manual=False,
+                                    )
                                     fitted = True
                                 except Exception:
                                     fitted = False

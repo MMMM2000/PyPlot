@@ -545,6 +545,15 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             else:
                 self._summary_label.clear()
 
+    def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
+        return {
+            "title_font": 14,
+            "label_font": 11,
+            "tick_font": 9,
+            "figure_width": 9.5,
+            "figure_height": 5.8,
+        }
+
     # ------------------------------------------------------------------ project persistence
     def serialize_project_state(self, *, base_path: Path | None) -> Dict[str, Any] | None:  # type: ignore[override]
         _ = base_path

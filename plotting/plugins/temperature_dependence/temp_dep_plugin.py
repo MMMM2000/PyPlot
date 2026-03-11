@@ -273,6 +273,15 @@ class TemperatureDependencePlugin(PyPlotPlugin):
                     "Data loaded. Adjust settings and click Plot Temperature Dependence to generate graphs."
                 )
 
+    def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
+        return {
+            "title_font": 14,
+            "label_font": 11,
+            "tick_font": 9,
+            "figure_width": 9.2,
+            "figure_height": 5.6,
+        }
+
     def export_txt(self) -> None:  # type: ignore[override]
         if self._data is None:
             QtWidgets.QMessageBox.information(

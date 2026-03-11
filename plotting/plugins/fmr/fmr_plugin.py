@@ -674,6 +674,15 @@ class FmrPlugin(PyPlotPlugin):
             else:
                 self._summary_label.clear()
 
+    def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
+        return {
+            "title_font": 12,
+            "label_font": 11,
+            "tick_font": 9,
+            "figure_width": 9.4,
+            "figure_height": 5.8,
+        }
+
     def _clear_tabs(self) -> None:
         self.clear_plot_tabs(self._plot_tabs)
 

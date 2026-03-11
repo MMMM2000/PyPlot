@@ -263,6 +263,15 @@ class HysteresisLoopsPlugin(PyPlotPlugin):
         if callable(update_project_actions):
             update_project_actions()
 
+    def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
+        return {
+            "title_font": 14,
+            "label_font": 11,
+            "tick_font": 9,
+            "figure_width": 9.2,
+            "figure_height": 5.6,
+        }
+
     def serialize_project_state(self, *, base_path: Path | None) -> dict[str, object] | None:  # type: ignore[override]
         _ = base_path
         return {"plot_mode": self._plot_mode()}

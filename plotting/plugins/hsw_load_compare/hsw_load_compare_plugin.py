@@ -217,6 +217,15 @@ class HswLoadComparePlugin(PyPlotPlugin):
         if callable(updater):
             updater()
 
+    def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
+        return {
+            "title_font": 14,
+            "label_font": 11,
+            "tick_font": 9,
+            "figure_width": 9.5,
+            "figure_height": 5.8,
+        }
+
     def _config(self, *, backend: str = "matplotlib") -> dict[str, object]:
         return {
             "TT": bool(self._tt_cb.isChecked()) if self._tt_cb is not None else True,

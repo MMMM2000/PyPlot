@@ -400,6 +400,15 @@ class DmaIsoStressPlugin(PyPlotPlugin):
             else:
                 self._summary_label.clear()
 
+    def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
+        return {
+            "title_font": 14,
+            "label_font": 11,
+            "tick_font": 9,
+            "figure_width": 9.2,
+            "figure_height": 5.6,
+        }
+
     def _set_limit_controls_enabled(self, axis: str, enabled: bool) -> None:
         widgets: Iterable[QtWidgets.QDoubleSpinBox | None]
         if axis == "x":

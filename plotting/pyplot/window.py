@@ -2165,6 +2165,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._project_tree_search_text = ""
         self._project_tree_filter_refresh_pending = False
         self._project_tree_selection_sync_blocked = False
+        self._project_tree_focus_restore_pending = False
         self._data_folder_items: Dict[Path, QtWidgets.QTreeWidgetItem] = {}
         self._data_workbook_items: Dict[Hashable, QtWidgets.QTreeWidgetItem] = {}
         self._workbooks: Dict[Hashable, WorkbookData] = {}
@@ -10406,16 +10407,45 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                             parent.takeChild(child_index)
                 return
         if isinstance(tab, QtWidgets.QWidget) and self.tab_widget.currentWidget() is not tab:
+            if keep_tree_focus:
+                self._project_tree_focus_restore_pending = True
             self._show_tab(tab)
             if keep_tree_focus and isinstance(tree, QtWidgets.QTreeWidget):
+                self._restore_project_tree_focus(tree)
+
+    @staticmethod
+    def _restore_project_tree_focus(tree: QtWidgets.QTreeWidget) -> None:
+        def _focus_tree(target: QtWidgets.QTreeWidget) -> None:
+            try:
+                target.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+            except Exception:
+                pass
+            try:
+                viewport = target.viewport()
+            except Exception:
+                viewport = None
+            if isinstance(viewport, QtWidgets.QWidget):
                 try:
-                    tree.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+                    viewport.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
                 except Exception:
                     pass
-                QtCore.QTimer.singleShot(
+
+        _focus_tree(tree)
+        for delay in (0,):
+            try:
+                QtCore.QTimer.singleShot(delay, lambda t=tree: _focus_tree(t))
+            except Exception:
+                pass
+        try:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda t=tree: QtCore.QTimer.singleShot(
                     0,
-                    lambda t=tree: t.setFocus(QtCore.Qt.FocusReason.OtherFocusReason),
-                )
+                    lambda tt=t: _focus_tree(tt),
+                ),
+            )
+        except Exception:
+            pass
 
     def _assign_project_payload(
         self,
@@ -12927,7 +12957,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     except Exception:
                         needs_fit = True
                     if needs_fit:
-                        fitter(sub, use_half_width=True, preferred_width=None)
+                        fitter(
+                            sub,
+                            use_half_width=True,
+                            preferred_width=None,
+                            remember_manual=False,
+                        )
         else:
             self._hidden_tabs.add(tab)
 
@@ -13351,6 +13386,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._set_navigation_mode(active_mode)
         self._update_tab_buttons()
         self._focus_tree_on_tab(tab)
+        if self._project_tree_focus_restore_pending:
+            tree = getattr(self, "project_tree", None)
+            if isinstance(tree, QtWidgets.QTreeWidget):
+                self._restore_project_tree_focus(tree)
+            self._project_tree_focus_restore_pending = False
         self._rebuild_object_manager_for_tab(tab)
         self._update_worksheet_actions()
         # Update cursor label immediately when switching tabs
@@ -13641,6 +13681,7 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
                 self,
                 use_half_width=False,
                 preferred_width=event.size().width(),
+                remember_manual=True,
             )
         finally:
             self._resizing = False
@@ -13683,6 +13724,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._maximized_hidden: set[_ManagedSubWindow] = set()
         self._max_visible_windows: int = 6
         self._visibility_queue: list[_ManagedSubWindow] = []
+        self._arrange_generation = 0
         self._mdi.subWindowActivated.connect(self._handle_subwindow_activated)
         try:
             self._mdi.setContentsMargins(0, 0, 0, 0)
@@ -13916,8 +13958,17 @@ class _MdiTabProxy(QtWidgets.QWidget):
         # Fullscreen mode should use the entire viewport. Preserving the figure
         # aspect here can shrink "fullscreen" windows to thin strips.
         sub.setGeometry(rect)
+        self._sync_subwindow_child_widget(sub)
         self._refresh_subwindow_figure_layout(sub, deferred=True)
         return True
+
+    def _is_maximized_target(self, sub: _ManagedSubWindow | None) -> bool:
+        if not self._is_live_subwindow(sub):
+            return False
+        if not (self._global_maximized or self._fullscreen_lock):
+            return False
+        active = self._mdi.activeSubWindow()
+        return active is sub
 
     def _maybe_apply_maximize(self, sub: _ManagedSubWindow) -> None:
         self._apply_fullscreen_geometry(sub)
@@ -13989,7 +14040,11 @@ class _MdiTabProxy(QtWidgets.QWidget):
                     except Exception:
                         needs_fit = True
                     if needs_fit:
-                        self._fit_subwindow(sub, use_half_width=False)
+                        self._fit_subwindow(
+                            sub,
+                            use_half_width=False,
+                            remember_manual=False,
+                        )
                 self._refresh_subwindow_figure_layout(sub, deferred=True)
         sub.raise_()
         self._blocking = False
@@ -14236,7 +14291,13 @@ class _MdiTabProxy(QtWidgets.QWidget):
         *,
         use_half_width: bool = True,
         preferred_width: int | None = None,
+        remember_manual: bool = True,
     ) -> None:
+        self._arrange_generation += 1
+        try:
+            setattr(sub, "_mw_user_sized", bool(remember_manual))
+        except Exception:
+            pass
         if self._global_maximized and preferred_width is None:
             # Respect maximize state instead of resizing back to windowed dimensions.
             return
@@ -14273,7 +14334,21 @@ class _MdiTabProxy(QtWidgets.QWidget):
             target_w = max(240, int(target_w * scale))
             target_h = max(200, int(target_h * scale))
         sub.resize(target_w, target_h)
+        self._sync_subwindow_child_widget(sub)
         self._refresh_subwindow_figure_layout(sub, deferred=True)
+
+    def _queue_arrange_subwindows(self) -> None:
+        generation = self._arrange_generation
+
+        def _apply_if_current() -> None:
+            if generation != self._arrange_generation:
+                return
+            self._arrange_subwindows()
+
+        try:
+            QtCore.QTimer.singleShot(0, _apply_if_current)
+        except Exception:
+            _apply_if_current()
 
     def arrangement_mode(self) -> str:
         return self._arrangement_mode
@@ -14330,6 +14405,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
                     sub,
                     use_half_width=False,
                     preferred_width=shared_preferred_width,
+                    remember_manual=False,
                 )
                 geometry = sub.geometry()
                 clamped_w = min(max_w, geometry.width())
@@ -14474,11 +14550,34 @@ class _MdiTabProxy(QtWidgets.QWidget):
                     self._apply_fullscreen_geometry(active)
             else:
                 visible_count = len(self._ordered_visible_subwindows())
-                if (
-                    self._arrangement_mode in {"tile_vertical", "tile_horizontal"}
-                    or visible_count <= 1
-                ):
+                if self._arrangement_mode in {"tile_vertical", "tile_horizontal"}:
                     self._arrange_subwindows()
+                elif visible_count == 1:
+                    visible = self._ordered_visible_subwindows()
+                    sub = visible[0] if visible else None
+                    if isinstance(sub, _ManagedSubWindow):
+                        user_sized = bool(getattr(sub, "_mw_user_sized", False))
+                        needs_fit = False
+                        try:
+                            geom = sub.geometry()
+                            needs_fit = (
+                                (not geom.isValid())
+                                or geom.width() < 220
+                                or geom.height() < 160
+                            )
+                        except Exception:
+                            needs_fit = True
+                        if needs_fit:
+                            self._fit_subwindow(
+                                sub,
+                                use_half_width=False,
+                                remember_manual=False,
+                            )
+                        elif not user_sized:
+                            self._arrange_subwindows()
+                        else:
+                            self._sync_subwindow_child_widget(sub)
+                            self._refresh_subwindow_figure_layout(sub, deferred=True)
         return super().eventFilter(source, event)
 
     def _remove_widget(self, widget: QtWidgets.QWidget | None) -> None:
@@ -14537,7 +14636,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         if not icon.isNull():
             sub.setWindowIcon(icon)
         self._mdi.addSubWindow(sub)
-        self._fit_subwindow(sub)
+        self._fit_subwindow(sub, remember_manual=False)
         if self._global_maximized:
             self._maximize_single(sub)
         else:
@@ -14558,10 +14657,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._maximize_single(sub)
         else:
             self._arrange_subwindows()
-            try:
-                QtCore.QTimer.singleShot(0, self._arrange_subwindows)
-            except Exception:
-                pass
+            self._queue_arrange_subwindows()
         return index
 
     def removeTab(self, index: int) -> None:
@@ -14705,7 +14801,11 @@ class _MdiTabProxy(QtWidgets.QWidget):
                         except Exception:
                             needs_fit = True
                         if needs_fit:
-                            self._fit_subwindow(sub, use_half_width=False)
+                            self._fit_subwindow(
+                                sub,
+                                use_half_width=False,
+                                remember_manual=False,
+                            )
                     self._refresh_subwindow_figure_layout(sub, deferred=True)
         else:
             self._hidden_tabs.add(widget)

@@ -34,6 +34,10 @@ class PluginVerificationResult:
     plot_tabs: int
     exported: int = 0
     plotted: int = 0
+    window_image: str | None = None
+    tab_widget_image: str | None = None
+    matplotlib_images: list[str] = field(default_factory=list)
+    subwindow_images: list[str] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
     contact_sheet: str | None = None
     warnings: list[str] = field(default_factory=list)
@@ -249,6 +253,65 @@ def _make_contact_sheet(image_paths: list[str], output_path: Path, *, columns: i
     return str(output_path)
 
 
+def _capture_gui_images(
+    window: PyPlotWorkbench,
+    app: QtWidgets.QApplication,
+    plugin_dir: Path,
+) -> tuple[str | None, str | None, list[str], list[str]]:
+    window_image: str | None = None
+    tab_widget_image: str | None = None
+    matplotlib_images: list[str] = []
+    subwindow_images: list[str] = []
+    try:
+        window_path = plugin_dir / "pyplot_window.png"
+        window.grab().save(str(window_path))
+        if window_path.exists():
+            window_image = str(window_path)
+    except Exception:
+        pass
+    try:
+        tab_path = plugin_dir / "tab_widget.png"
+        window.tab_widget.grab().save(str(tab_path))
+        if tab_path.exists():
+            tab_widget_image = str(tab_path)
+    except Exception:
+        pass
+    subwindow_for = getattr(window.tab_widget, "_subwindow_for", None)
+    for index in range(window.tab_widget.count()):
+        tab = window.tab_widget.widget(index)
+        if not isinstance(tab, QtWidgets.QWidget):
+            continue
+        window.tab_widget.setCurrentIndex(index)
+        _pump_events(app, iterations=4)
+        descriptor = getattr(window, "_tab_descriptors", {}).get(tab)
+        title = str(getattr(descriptor, "title", "") or f"tab_{index + 1}")
+        stem = _safe_stem(title, fallback=f"tab_{index + 1:02d}")
+        canvas = getattr(descriptor, "canvas", None)
+        figure = getattr(canvas, "figure", None)
+        if figure is not None:
+            path = plugin_dir / f"matplotlib_{index + 1:02d}_{stem}.png"
+            try:
+                figure.savefig(path, dpi=180)
+                if path.exists():
+                    matplotlib_images.append(str(path))
+            except Exception:
+                pass
+        if callable(subwindow_for):
+            try:
+                sub = subwindow_for(tab)
+            except Exception:
+                sub = None
+            if isinstance(sub, QtWidgets.QWidget):
+                path = plugin_dir / f"subwindow_{index + 1:02d}_{stem}.png"
+                try:
+                    sub.grab().save(str(path))
+                    if path.exists():
+                        subwindow_images.append(str(path))
+                except Exception:
+                    pass
+    return window_image, tab_widget_image, matplotlib_images, subwindow_images
+
+
 def _first_files(root: Path, pattern: str, count: int) -> list[Path]:
     return sorted(root.rglob(pattern))[:count]
 
@@ -379,7 +442,7 @@ PLUGIN_SPECS: list[tuple[str, str, Callable[[PyPlotWorkbench, Path], PyPlotPlugi
     ("Stress Sensitivity", "custom", lambda w, t: _setup_folder_import(w, ROOT / "sample_data" / "stress_dependence")),
     ("Shape Memory Stress/Strain", "shared", lambda w, t: _setup_shape_memory(w)),
     ("Hysteresis Loops", "shared", lambda w, t: _setup_hysteresis_loops(w)),
-    ("Hsw Distribution", "custom", lambda w, t: _setup_generated_hsw_distribution(w, t)),
+    ("Hsw Distribution", "shared", lambda w, t: _setup_generated_hsw_distribution(w, t)),
     ("Hsw Load Compare", "shared", lambda w, t: _setup_generated_hsw_load_compare(w, t)),
     ("Maxion Continuous", "custom", lambda w, t: _setup_selected_paths(w, [ROOT / "sample_data" / "Maxion" / "1 final 2 coils.txt"])),
     ("PDF Plotter", "custom", lambda w, t: _setup_selected_paths(w, [ROOT / "sample_data" / "pdf_data" / "sample1.pdf"])),
@@ -435,6 +498,12 @@ def verify_plugins(
                     shared_workbooks=bool(getattr(plugin, "uses_shared_plot_workbooks", True)),
                     plot_tabs=plot_tabs,
                 )
+                (
+                    result.window_image,
+                    result.tab_widget_image,
+                    result.matplotlib_images,
+                    result.subwindow_images,
+                ) = _capture_gui_images(window, app, plugin_dir)
                 if route == "shared":
                     exported, plotted, images, warnings, errors = _export_shared_origin(window, plugin_name, plugin_dir)
                 else:
@@ -444,7 +513,11 @@ def verify_plugins(
                 result.images = images
                 result.warnings.extend(warnings)
                 result.errors.extend(errors)
-                result.contact_sheet = _make_contact_sheet(images, plugin_dir / "contact_sheet.png")
+                contact_inputs = []
+                contact_inputs.extend(result.matplotlib_images[:2])
+                contact_inputs.extend(result.subwindow_images[:2])
+                contact_inputs.extend(images[:2])
+                result.contact_sheet = _make_contact_sheet(contact_inputs, plugin_dir / "contact_sheet.png")
                 results.append(result)
             except Exception as exc:
                 results.append(
