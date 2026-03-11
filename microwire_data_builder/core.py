@@ -111,6 +111,12 @@ SHAPE_MEMORY_VALUE_COLUMNS = [
     "Shape memory stress (MPa)",
 ]
 
+SHAPE_MEMORY_FRACTURE_COLUMNS = [
+    "Shape memory fracture load (g)",
+    "Shape memory fracture strain (%)",
+    "Shape memory fracture stress (MPa)",
+]
+
 EA_VALENCE = {
     "Ni": 10,
     "Fe": 8,
@@ -221,6 +227,7 @@ OUTPUT_COLUMNS = [
     "DMA iso-stress graphs",
     "Shape memory stress/strain graphs",
     *SHAPE_MEMORY_VALUE_COLUMNS,
+    *SHAPE_MEMORY_FRACTURE_COLUMNS,
     "FMR graphs",
 ]
 
@@ -247,6 +254,9 @@ SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Shape memory displacement (mm)"
 SHAPE_MEMORY_LOAD_COLUMN = "Shape memory load (g)"
 SHAPE_MEMORY_STRAIN_COLUMN = "Shape memory strain (%)"
 SHAPE_MEMORY_STRESS_COLUMN = "Shape memory stress (MPa)"
+SHAPE_MEMORY_FRACTURE_LOAD_COLUMN = "Shape memory fracture load (g)"
+SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN = "Shape memory fracture strain (%)"
+SHAPE_MEMORY_FRACTURE_STRESS_COLUMN = "Shape memory fracture stress (MPa)"
 FMR_COLUMN = "FMR graphs"
 
 TRANSITION_TEMP_AS_COLUMN = "As (°C)"
@@ -5038,7 +5048,7 @@ def build_database(
             if key_parts is None:
                 continue
             entry: Dict[str, object] = {}
-            for column in SHAPE_MEMORY_VALUE_COLUMNS:
+            for column in SHAPE_MEMORY_VALUE_COLUMNS + SHAPE_MEMORY_FRACTURE_COLUMNS:
                 if column in payload:
                     entry[column] = payload.get(column)
             if entry:
@@ -5529,7 +5539,7 @@ def build_database(
                 row[SHAPE_MEMORY_STRESS_STRAIN_COLUMN] = list(dict.fromkeys(labels))
         shape_memory_entry = shape_memory_entry_map.get(key_str, {})
         if shape_memory_entry:
-            for column in SHAPE_MEMORY_VALUE_COLUMNS:
+            for column in SHAPE_MEMORY_VALUE_COLUMNS + SHAPE_MEMORY_FRACTURE_COLUMNS:
                 if column not in output_columns:
                     continue
                 value = shape_memory_entry.get(column)
@@ -5916,6 +5926,9 @@ __all__ = [
     "SHAPE_MEMORY_LOAD_COLUMN",
     "SHAPE_MEMORY_STRAIN_COLUMN",
     "SHAPE_MEMORY_STRESS_COLUMN",
+    "SHAPE_MEMORY_FRACTURE_LOAD_COLUMN",
+    "SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN",
+    "SHAPE_MEMORY_FRACTURE_STRESS_COLUMN",
     "FMR_COLUMN",
     "build_database",
     "build_fabrication_index",

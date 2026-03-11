@@ -84,6 +84,9 @@ from .core import (
     SHAPE_MEMORY_LOAD_COLUMN,
     SHAPE_MEMORY_STRAIN_COLUMN,
     SHAPE_MEMORY_STRESS_COLUMN,
+    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
     FMR_COLUMN,
     build_database,
     build_fabrication_index,
@@ -4436,7 +4439,7 @@ class _GraphGalleryWidget(QtWidgets.QWidget):
 
 
 class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
-    pointPicked = QtCore.pyqtSignal(object)
+    pointPicked = QtCore.pyqtSignal(str, object)
 
     def __init__(
         self,
@@ -4476,6 +4479,21 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
         layout.addWidget(self.cursor_label)
+
+        target_row = QtWidgets.QHBoxLayout()
+        target_row.setContentsMargins(0, 0, 0, 0)
+        target_row.setSpacing(10)
+        target_row.addWidget(QtWidgets.QLabel("Double-click target:"))
+        self._target_buttons: Dict[str, QtWidgets.QRadioButton] = {}
+        normal_button = QtWidgets.QRadioButton("Standard values")
+        normal_button.setChecked(True)
+        fracture_button = QtWidgets.QRadioButton("Fracture values")
+        self._target_buttons["standard"] = normal_button
+        self._target_buttons["fracture"] = fracture_button
+        target_row.addWidget(normal_button)
+        target_row.addWidget(fracture_button)
+        target_row.addStretch(1)
+        layout.addLayout(target_row)
 
         picked_row = QtWidgets.QHBoxLayout()
         picked_row.setContentsMargins(0, 0, 0, 0)
@@ -4613,9 +4631,15 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         self._update_picked_labels(selection)
         if selection is not None:
             try:
-                self.pointPicked.emit(selection)
+                self.pointPicked.emit(self._current_target(), selection)
             except Exception:
                 pass
+
+    def _current_target(self) -> str:
+        fracture = self._target_buttons.get("fracture")
+        if isinstance(fracture, QtWidgets.QRadioButton) and fracture.isChecked():
+            return "fracture"
+        return "standard"
 
     def _update_hover_label(self, selection: Optional[_ShapeMemoryPointSelection]) -> None:
         if selection is None:
@@ -14100,6 +14124,11 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         SHAPE_MEMORY_STRAIN_COLUMN,
         SHAPE_MEMORY_STRESS_COLUMN,
     ]
+    FRACTURE_COLUMNS = [
+        SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+        SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+        SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+    ]
 
     def __init__(
         self,
@@ -14275,12 +14304,12 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 payload = existing_entries.get(row_key, {})
                 if not isinstance(payload, dict):
                     continue
-                for column in self.VALUE_COLUMNS:
+                for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
                     if column not in table.columns:
                         table[column] = None
                     if column in payload:
                         table.at[row_index, column] = payload.get(column)
-        for column in self.VALUE_COLUMNS:
+        for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
             if column not in table.columns:
                 table[column] = None
         return SectionProcessResult(
@@ -14541,7 +14570,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             if not key:
                 continue
             entry: Dict[str, Any] = {}
-            for column in self.VALUE_COLUMNS:
+            for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
                 value = row.get(column)
                 if value in (None, ""):
                     continue
@@ -14577,7 +14606,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         except Exception:
             pass
 
-    def _apply_picked_selection(self, selection: object) -> None:
+    def _apply_picked_selection(self, target: str, selection: object) -> None:
         if not isinstance(selection, _ShapeMemoryPointSelection):
             return
         rows = self._selected_rows()
@@ -14587,12 +14616,19 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or row_index < 0 or row_index >= len(frame.index):
             return
-        updates = {
-            SHAPE_MEMORY_DISPLACEMENT_COLUMN: round(selection.displacement_mm, 6),
-            SHAPE_MEMORY_LOAD_COLUMN: round(selection.load_g, 6),
-            SHAPE_MEMORY_STRAIN_COLUMN: round(selection.strain_pct, 6),
-            SHAPE_MEMORY_STRESS_COLUMN: round(selection.stress_mpa, 6),
-        }
+        if target == "fracture":
+            updates = {
+                SHAPE_MEMORY_FRACTURE_LOAD_COLUMN: round(selection.load_g, 6),
+                SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN: round(selection.strain_pct, 6),
+                SHAPE_MEMORY_FRACTURE_STRESS_COLUMN: round(selection.stress_mpa, 6),
+            }
+        else:
+            updates = {
+                SHAPE_MEMORY_DISPLACEMENT_COLUMN: round(selection.displacement_mm, 6),
+                SHAPE_MEMORY_LOAD_COLUMN: round(selection.load_g, 6),
+                SHAPE_MEMORY_STRAIN_COLUMN: round(selection.strain_pct, 6),
+                SHAPE_MEMORY_STRESS_COLUMN: round(selection.stress_mpa, 6),
+            }
         updated = frame.copy()
         for column, value in updates.items():
             if column not in updated.columns:
@@ -20643,6 +20679,9 @@ class AssemblySection(QtWidgets.QWidget):
                 SHAPE_MEMORY_LOAD_COLUMN,
                 SHAPE_MEMORY_STRAIN_COLUMN,
                 SHAPE_MEMORY_STRESS_COLUMN,
+                SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
             ],
         )
         add("fmr", [FMR_COLUMN])
