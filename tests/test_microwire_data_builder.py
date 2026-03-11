@@ -46,6 +46,10 @@ MeasurementMetadata = core.MeasurementMetadata
 MeasurementRecord = core.MeasurementRecord
 ShapeMemoryStressStrainRecord = core.ShapeMemoryStressStrainRecord
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = core.SHAPE_MEMORY_STRESS_STRAIN_COLUMN
+SHAPE_MEMORY_DISPLACEMENT_COLUMN = core.SHAPE_MEMORY_DISPLACEMENT_COLUMN
+SHAPE_MEMORY_LOAD_COLUMN = core.SHAPE_MEMORY_LOAD_COLUMN
+SHAPE_MEMORY_STRAIN_COLUMN = core.SHAPE_MEMORY_STRAIN_COLUMN
+SHAPE_MEMORY_STRESS_COLUMN = core.SHAPE_MEMORY_STRESS_COLUMN
 _merged_header_row = core._merged_header_row
 _parse_piece_rows = core._parse_piece_rows
 _extract_microscope_diameters = core._extract_microscope_diameters
@@ -250,6 +254,50 @@ def test_shape_memory_preview_panel_double_click_updates_picked_values() -> None
     panel.close()
 
 
+def test_shape_memory_section_double_click_stores_value_columns(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        path = tmp_path / "Ni50Fe27Ga23 5-4 s1 loop.txt"
+        path.write_text(
+            "\n".join(
+                [
+                    "Displacement\tLoad\tStrain\tStress",
+                    "mm\tg\t%\tMPa",
+                    "0\t0\t0\t0",
+                    "0.01\t0.10\t0.05\t0.9",
+                    "0.02\t0.20\t0.10\t1.8",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        section._active_candidates = [path]
+        result = section.process([path])
+        section._handle_worker_finished(result)
+        section.table_view.selectRow(0)
+        section._apply_picked_selection(
+            builder_ui._ShapeMemoryPointSelection(
+                index=1,
+                displacement_mm=0.01,
+                load_g=0.10,
+                strain_pct=0.05,
+                stress_mpa=0.9,
+            )
+        )
+
+        frame = section.model.frame()
+        assert frame.at[0, SHAPE_MEMORY_DISPLACEMENT_COLUMN] == pytest.approx(0.01)
+        assert frame.at[0, SHAPE_MEMORY_LOAD_COLUMN] == pytest.approx(0.10)
+        assert frame.at[0, SHAPE_MEMORY_STRAIN_COLUMN] == pytest.approx(0.05)
+        assert frame.at[0, SHAPE_MEMORY_STRESS_COLUMN] == pytest.approx(0.9)
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_build_database_populates_shape_memory_graph_column(tmp_path: Path) -> None:
     anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
     anneal_path.write_text("placeholder", encoding="utf-8")
@@ -310,6 +358,59 @@ def test_build_database_populates_shape_memory_graph_column(tmp_path: Path) -> N
 
     assert SHAPE_MEMORY_STRESS_STRAIN_COLUMN in result.dataframe.columns
     assert result.dataframe.iloc[0][SHAPE_MEMORY_STRESS_STRAIN_COLUMN] == ["loop"]
+
+
+def test_build_database_populates_shape_memory_value_columns(tmp_path: Path) -> None:
+    anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
+    anneal_path.write_text("placeholder", encoding="utf-8")
+    metadata = MeasurementMetadata(
+        composition_token="Ni50Fe27Ga23",
+        draw_x=5,
+        piece_y=4,
+        setpoint_mA=1000,
+        alt_variant=False,
+        measurement_id="test-measurement",
+        file_name=anneal_path.name,
+        relpath=anneal_path.name,
+        timestamp_mtime_utc="2026-03-11T00:00:00+00:00",
+    )
+    measurement = MeasurementRecord(
+        path=anneal_path,
+        metadata=metadata,
+        dataframe=pd.DataFrame(
+            {"I_A": [0.1], "V_V": [0.2], "R_ohm": [2.0], "I_mA": [100.0]}
+        ),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path,
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+        ),
+        measurement_records=[measurement],
+        shape_memory_entries={
+            "Ni50Fe27Ga23|5|4": {
+                SHAPE_MEMORY_DISPLACEMENT_COLUMN: 0.01,
+                SHAPE_MEMORY_LOAD_COLUMN: 0.1,
+                SHAPE_MEMORY_STRAIN_COLUMN: 0.05,
+                SHAPE_MEMORY_STRESS_COLUMN: 0.9,
+            }
+        },
+        fabrication_index=FabricationIndex(),
+        skip_exports=True,
+    )
+
+    row = result.dataframe.iloc[0]
+    assert row[SHAPE_MEMORY_DISPLACEMENT_COLUMN] == pytest.approx(0.01)
+    assert row[SHAPE_MEMORY_LOAD_COLUMN] == pytest.approx(0.1)
+    assert row[SHAPE_MEMORY_STRAIN_COLUMN] == pytest.approx(0.05)
+    assert row[SHAPE_MEMORY_STRESS_COLUMN] == pytest.approx(0.9)
 
 
 def test_assembly_exposes_compare_hook() -> None:

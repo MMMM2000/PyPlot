@@ -13,7 +13,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - VSM temperature scan: multiple graphs per sample row (sub-versions in the same row).
 - Transition temps: pick As/Af/Ms/Mf from VSM temperature graphs without switching away from the active graph.
 - DMA iso-stress: multiple graphs per sample row (sub-versions in the same row).
-- Shape memory stress/strain: multiple dual-axis overlay graphs per sample row from manual stress/strain logger TXT files.
+- Shape memory stress/strain: multiple dual-axis overlay graphs per sample row from manual stress/strain logger TXT files. The section includes an optional side preview panel; double-clicking a preview picks displacement/load/strain/stress values into dedicated columns that can be carried into Assemble.
 - FMR: Field vs X/Y voltage plots from CSV files; multiple graphs per sample row.
 - Strain: stress/strain entries tied to composition + microwire; d auto-filled from microscope when available.
 - Assemble: combined preview and export configuration.

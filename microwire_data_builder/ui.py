@@ -20,7 +20,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, gettempdir
 from typing import Any, Callable, ClassVar, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, cast
 
 try:
@@ -80,6 +80,10 @@ from .core import (
     VSM_TEMPERATURE_SCAN_COLUMN,
     DMA_ISOSTRESS_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+    SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+    SHAPE_MEMORY_LOAD_COLUMN,
+    SHAPE_MEMORY_STRAIN_COLUMN,
+    SHAPE_MEMORY_STRESS_COLUMN,
     FMR_COLUMN,
     build_database,
     build_fabrication_index,
@@ -260,6 +264,54 @@ _STAGE_LABELS = {
     "build": "Building database rows",
     "final": "Finalising exports",
 }
+
+_TEST_PATH_TOKENS = ("pytest-of-", "pyplot-tests", ".pytest_cache")
+
+
+def _builder_settings() -> QtCore.QSettings:
+    custom_file = os.environ.get("MICROWIRE_BUILDER_SETTINGS_FILE", "").strip()
+    if custom_file:
+        return QtCore.QSettings(custom_file, QtCore.QSettings.Format.IniFormat)
+    platform = os.environ.get("QT_QPA_PLATFORM", "").strip().lower()
+    if os.environ.get("PYTEST_CURRENT_TEST") or platform == "offscreen":
+        settings_file = (
+            Path(gettempdir()) / f"microwire_data_builder_offscreen_{os.getpid()}.ini"
+        )
+        return QtCore.QSettings(str(settings_file), QtCore.QSettings.Format.IniFormat)
+    return QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
+
+
+def _looks_like_test_path(value: object) -> bool:
+    if not isinstance(value, (str, Path)):
+        return False
+    text = str(value).strip().replace("\\", "/").lower()
+    if not text:
+        return False
+    return any(token in text for token in _TEST_PATH_TOKENS)
+
+
+def _sanitise_existing_directory(value: object) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip() or _looks_like_test_path(value):
+        return None
+    candidate = Path(value).expanduser()
+    try:
+        if candidate.exists() and candidate.is_dir():
+            return str(candidate)
+    except Exception:
+        return None
+    return None
+
+
+def _sanitise_existing_file(value: object) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip() or _looks_like_test_path(value):
+        return None
+    candidate = Path(value).expanduser()
+    try:
+        if candidate.exists() and candidate.is_file():
+            return str(candidate)
+    except Exception:
+        return None
+    return None
 
 
 def _dialog_start_directory(preferred: Path | str | None = None) -> Path:
@@ -1163,7 +1215,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         self._last_root_dir = str(cwd)
         self._last_output_dir = str(self._default_output_dir)
         self._last_strain_dir = str(cwd)
-        self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
+        self.settings = _builder_settings()
         self._project_path: Optional[Path] = None
         self._save_project_action: QtGui.QAction | None = None
         self._save_project_as_action: QtGui.QAction | None = None
@@ -1689,6 +1741,8 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
             self.logger.addHandler(self._log_handler)
 
     def _load_settings(self) -> None:
+        settings_sanitized = False
+
         def _decode_paths(value: object) -> list[Path]:
             if isinstance(value, list | tuple):
                 return [Path(str(item)) for item in value]
@@ -1724,10 +1778,21 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
                 return default
 
         self.annealing_paths = _decode_paths(self.settings.value("annealing_paths", ""))
+        original_anneal_len = len(self.annealing_paths)
+        self.annealing_paths = [path for path in self.annealing_paths if not _looks_like_test_path(path)]
+        settings_sanitized = settings_sanitized or len(self.annealing_paths) != original_anneal_len
         self._update_list_widget(self.anneal_list, self.annealing_paths)
         self.microscope_paths = _decode_paths(self.settings.value("microscope_paths", ""))
+        original_microscope_len = len(self.microscope_paths)
+        self.microscope_paths = [
+            path for path in self.microscope_paths if not _looks_like_test_path(path)
+        ]
+        settings_sanitized = settings_sanitized or len(self.microscope_paths) != original_microscope_len
         self._update_list_widget(self.microscope_list, self.microscope_paths)
         self.data_roots = _decode_paths(self.settings.value("data_roots", ""))
+        original_root_len = len(self.data_roots)
+        self.data_roots = [path for path in self.data_roots if not _looks_like_test_path(path)]
+        settings_sanitized = settings_sanitized or len(self.data_roots) != original_root_len
         self._update_list_widget(self.root_list, self.data_roots)
 
         with QtCore.QSignalBlocker(self.plot_matplotlib_check):
@@ -1758,37 +1823,43 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         with QtCore.QSignalBlocker(self.figure_height_spin):
             self.figure_height_spin.setValue(height_value)
 
-        output_dir_value = self.settings.value("output_dir", "")
-        if isinstance(output_dir_value, str) and output_dir_value.strip():
+        output_dir_value = _sanitise_existing_directory(self.settings.value("output_dir", ""))
+        if output_dir_value:
             self.output_edit.setText(output_dir_value)
             self._last_output_dir = output_dir_value
+        elif self.settings.value("output_dir", ""):
+            settings_sanitized = True
 
         output_name_value = self.settings.value("output_name", "")
         if isinstance(output_name_value, str) and output_name_value.strip():
             self.output_name_edit.setText(output_name_value)
 
-        strain_path_value = self.settings.value("strain_path", "")
-        if isinstance(strain_path_value, str) and strain_path_value.strip():
+        strain_path_value = _sanitise_existing_file(self.settings.value("strain_path", ""))
+        if strain_path_value:
             self.strain_edit.setText(strain_path_value)
             try:
                 self._last_strain_dir = str(Path(strain_path_value).expanduser().parent)
             except Exception:
                 pass
+        elif self.settings.value("strain_path", ""):
+            settings_sanitized = True
 
-        last_microscope = self.settings.value("last_microscope_dir", "")
-        if isinstance(last_microscope, str) and last_microscope.strip():
+        last_microscope = _sanitise_existing_directory(
+            self.settings.value("last_microscope_dir", "")
+        )
+        if last_microscope:
             self._last_microscope_dir = last_microscope
-        last_anneal = self.settings.value("last_anneal_dir", "")
-        if isinstance(last_anneal, str) and last_anneal.strip():
+        last_anneal = _sanitise_existing_directory(self.settings.value("last_anneal_dir", ""))
+        if last_anneal:
             self._last_anneal_dir = last_anneal
-        last_root = self.settings.value("last_root_dir", "")
-        if isinstance(last_root, str) and last_root.strip():
+        last_root = _sanitise_existing_directory(self.settings.value("last_root_dir", ""))
+        if last_root:
             self._last_root_dir = last_root
-        last_output = self.settings.value("last_output_dir", "")
-        if isinstance(last_output, str) and last_output.strip():
+        last_output = _sanitise_existing_directory(self.settings.value("last_output_dir", ""))
+        if last_output:
             self._last_output_dir = last_output
-        last_strain = self.settings.value("last_strain_dir", "")
-        if isinstance(last_strain, str) and last_strain.strip():
+        last_strain = _sanitise_existing_directory(self.settings.value("last_strain_dir", ""))
+        if last_strain:
             self._last_strain_dir = last_strain
 
         timing_value = self.settings.value("stage_timing", "")
@@ -1819,6 +1890,8 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
                             "ema": ema,
                             "samples": max(samples, 0),
                         }
+        if settings_sanitized:
+            self._save_settings()
 
     def _save_settings(self) -> None:
         if not hasattr(self, "settings"):
@@ -4363,6 +4436,8 @@ class _GraphGalleryWidget(QtWidgets.QWidget):
 
 
 class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
+    pointPicked = QtCore.pyqtSignal(object)
+
     def __init__(
         self,
         logger: logging.Logger,
@@ -4536,6 +4611,11 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         selection = self._selection_from_event(event)
         self._update_hover_label(selection)
         self._update_picked_labels(selection)
+        if selection is not None:
+            try:
+                self.pointPicked.emit(selection)
+            except Exception:
+                pass
 
     def _update_hover_label(self, selection: Optional[_ShapeMemoryPointSelection]) -> None:
         if selection is None:
@@ -14014,6 +14094,12 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
     section_key = "shape_memory_stress_strain"
     section_title = "Shape memory stress/strain"
     supported_suffixes = (".txt",)
+    VALUE_COLUMNS = [
+        SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+        SHAPE_MEMORY_LOAD_COLUMN,
+        SHAPE_MEMORY_STRAIN_COLUMN,
+        SHAPE_MEMORY_STRESS_COLUMN,
+    ]
 
     def __init__(
         self,
@@ -14030,6 +14116,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._preview_spacing = 6
         self._table_splitter: QtWidgets.QSplitter | None = None
         self._preview_panel: _ShapeMemoryPreviewPanel | None = None
+        self._preview_toggle: QtWidgets.QCheckBox | None = None
         super().__init__(logger, log_callback, parent)
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
@@ -14055,6 +14142,10 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         )
         self.visibility_button.clicked.connect(self._open_visibility_dialog)
         self.controls_layout.addWidget(self.visibility_button)
+        self._preview_toggle = QtWidgets.QCheckBox("Show graph preview panel")
+        self._preview_toggle.setChecked(self._preview_panel_visible())
+        self._preview_toggle.toggled.connect(self._toggle_preview_panel)
+        self.controls_layout.addWidget(self._preview_toggle)
         header = self.table_view.verticalHeader() if self.table_view is not None else None
         if header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
@@ -14065,6 +14156,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             selection_model.selectionChanged.connect(self._handle_selection_changed)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -14088,6 +14180,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         splitter.setStretchFactor(1, 3)
         splitter.addWidget(table)
         preview_panel = _ShapeMemoryPreviewPanel(self.logger, splitter)
+        preview_panel.pointPicked.connect(self._apply_picked_selection)
         splitter.addWidget(preview_panel)
         self._preview_panel = preview_panel
         self._table_splitter = splitter
@@ -14148,7 +14241,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                     variant = stem_variant
             label = Path(path).stem
             if variant:
-                label = f"{variant} â€” {label}"
+                label = f"{variant} - {label}"
             record = ShapeMemoryStressStrainRecord(
                 path=Path(path),
                 sample=sample or raw_sample,
@@ -14173,6 +14266,23 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
             sample_column="_sample",
         )
+        existing_entries = self.entries_snapshot()
+        if existing_entries:
+            for row_index, row in table.iterrows():
+                row_key = _row_to_microwire_key(row)
+                if not row_key:
+                    continue
+                payload = existing_entries.get(row_key, {})
+                if not isinstance(payload, dict):
+                    continue
+                for column in self.VALUE_COLUMNS:
+                    if column not in table.columns:
+                        table[column] = None
+                    if column in payload:
+                        table.at[row_index, column] = payload.get(column)
+        for column in self.VALUE_COLUMNS:
+            if column not in table.columns:
+                table[column] = None
         return SectionProcessResult(
             table=table,
             processed=processed,
@@ -14183,6 +14293,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         super().refresh()
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
     def _load_hidden_paths(self) -> None:
@@ -14240,12 +14351,14 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         _drop_visible_sample_column(self)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
     def _refresh_record_groups(self) -> None:
@@ -14281,7 +14394,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                         if isinstance(label, str) and label.strip():
                             if variant not in label:
                                 try:
-                                    record.label = f"{variant} â€” {label}"
+                                    record.label = f"{variant} - {label}"
                                 except Exception:
                                     pass
                     sample = getattr(record, "sample", None)
@@ -14417,6 +14530,90 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
 
     def _handle_selection_changed(self, *_args: Any) -> None:
         self._update_preview()
+
+    def entries_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return {}
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for _, row in frame.iterrows():
+            key = _row_to_microwire_key(row)
+            if not key:
+                continue
+            entry: Dict[str, Any] = {}
+            for column in self.VALUE_COLUMNS:
+                value = row.get(column)
+                if value in (None, ""):
+                    continue
+                entry[column] = value
+            if entry:
+                snapshot[key] = entry
+        return snapshot
+
+    def _preview_panel_visible(self) -> bool:
+        extra = self.data.extra if isinstance(self.data.extra, dict) else {}
+        visible = extra.get("preview_panel_visible", True)
+        return bool(visible)
+
+    def _toggle_preview_panel(self, checked: bool) -> None:
+        extra = self.data.extra if isinstance(self.data.extra, dict) else {}
+        extra = dict(extra)
+        extra["preview_panel_visible"] = bool(checked)
+        self.data.extra = extra
+        panel = self._preview_panel
+        splitter = self._table_splitter
+        if isinstance(panel, QtWidgets.QWidget):
+            panel.setVisible(bool(checked))
+        if isinstance(splitter, QtWidgets.QSplitter):
+            if checked:
+                sizes = splitter.sizes()
+                if sizes and sizes[1] == 0:
+                    total = max(sum(sizes), 1)
+                    splitter.setSizes([int(total * 0.55), int(total * 0.45)])
+            else:
+                splitter.setSizes([1, 0])
+        try:
+            self.store.save(self.data)
+        except Exception:
+            pass
+
+    def _apply_picked_selection(self, selection: object) -> None:
+        if not isinstance(selection, _ShapeMemoryPointSelection):
+            return
+        rows = self._selected_rows()
+        if not rows:
+            return
+        row_index = rows[0]
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or row_index < 0 or row_index >= len(frame.index):
+            return
+        updates = {
+            SHAPE_MEMORY_DISPLACEMENT_COLUMN: round(selection.displacement_mm, 6),
+            SHAPE_MEMORY_LOAD_COLUMN: round(selection.load_g, 6),
+            SHAPE_MEMORY_STRAIN_COLUMN: round(selection.strain_pct, 6),
+            SHAPE_MEMORY_STRESS_COLUMN: round(selection.stress_mpa, 6),
+        }
+        updated = frame.copy()
+        for column, value in updates.items():
+            if column not in updated.columns:
+                updated[column] = None
+            updated.at[row_index, column] = value
+        self.data.table = updated
+        self.model.set_frame(updated)
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        try:
+            if self.table_view is not None:
+                self.table_view.selectRow(row_index)
+        except Exception:
+            pass
+        try:
+            self.store.save(self.data)
+        except Exception:
+            pass
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
 
     def _open_selected_graphs(self) -> None:
         records = self._selected_records()
@@ -19182,6 +19379,7 @@ class AssemblySection(QtWidgets.QWidget):
             List[VsmTemperatureScanRecord],
             List[DmaIsoStressRecord],
             List[ShapeMemoryStressStrainRecord],
+            Dict[str, Dict[str, Any]],
             List[FmrRecord],
             Dict[MicrowireKey, MicroscopeMeasurements],
             Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary],
@@ -19334,6 +19532,12 @@ class AssemblySection(QtWidgets.QWidget):
             shape_memory_stress_strain_records
         )
 
+        shape_memory_entries: Dict[str, Dict[str, Any]] = {}
+        if "shape_memory_stress_strain" in selected:
+            section = self.sections.get("shape_memory_stress_strain")
+            if isinstance(section, ShapeMemoryStressStrainSection):
+                shape_memory_entries = section.entries_snapshot()
+
         fmr_records: List[FmrRecord] = []
         if "fmr" in selected:
             payload = self._load_payload("fmr", "fmr_records")
@@ -19399,6 +19603,7 @@ class AssemblySection(QtWidgets.QWidget):
             vsm_temperature_records,
             dma_isostress_records,
             shape_memory_stress_strain_records,
+            shape_memory_entries,
             fmr_records,
             microscope_index,
             video_index,
@@ -20430,7 +20635,16 @@ class AssemblySection(QtWidgets.QWidget):
         add("vsm_hysteresis", [VSM_HYSTERESIS_COLUMN])
         add("vsm_temperature_scan", [VSM_TEMPERATURE_SCAN_COLUMN])
         add("dma_iso_stress", [DMA_ISOSTRESS_COLUMN])
-        add("shape_memory_stress_strain", [SHAPE_MEMORY_STRESS_STRAIN_COLUMN])
+        add(
+            "shape_memory_stress_strain",
+            [
+                SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+                SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                SHAPE_MEMORY_LOAD_COLUMN,
+                SHAPE_MEMORY_STRAIN_COLUMN,
+                SHAPE_MEMORY_STRESS_COLUMN,
+            ],
+        )
         add("fmr", [FMR_COLUMN])
         return mapping
 
@@ -21885,6 +22099,7 @@ class AssemblySection(QtWidgets.QWidget):
             vsm_temperature_records,
             dma_isostress_records,
             shape_memory_stress_strain_records,
+            shape_memory_entries,
             fmr_records,
             microscope_index,
             video_index,
@@ -21952,6 +22167,11 @@ class AssemblySection(QtWidgets.QWidget):
                 if "shape_memory_stress_strain" in selected
                 else []
             ),
+            "shape_memory_entries": (
+                shape_memory_entries
+                if "shape_memory_stress_strain" in selected
+                else {}
+            ),
             "fmr_records": fmr_records if "fmr" in selected else [],
             "microscope_index": microscope_index if "microscope" in selected else {},
             "video_index": video_index if "videos" in selected else {},
@@ -22011,6 +22231,7 @@ class AssemblySection(QtWidgets.QWidget):
             vsm_temperature_records,
             dma_isostress_records,
             shape_memory_stress_strain_records,
+            shape_memory_entries,
             fmr_records,
             microscope_index,
             video_index,
@@ -22061,6 +22282,11 @@ class AssemblySection(QtWidgets.QWidget):
                 shape_memory_stress_strain_records
                 if "shape_memory_stress_strain" in selected
                 else []
+            ),
+            "shape_memory_entries": (
+                shape_memory_entries
+                if "shape_memory_stress_strain" in selected
+                else {}
             ),
             "fmr_records": fmr_records if "fmr" in selected else [],
             "microscope_index": microscope_index if "microscope" in selected else {},
@@ -22275,7 +22501,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             downloads_dir if downloads_dir.exists() and downloads_dir.is_dir() else Path.cwd()
         )
         self._last_output_dir = str(self._default_output_dir)
-        self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
+        self.settings = _builder_settings()
         self._clamp_active = False
         self._recent_projects: List[str] = []
         self._recent_projects_menu: QtWidgets.QMenu | None = None
@@ -23252,11 +23478,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         return False
 
     def _project_dialog_start_directory(self) -> Path:
-        stored = self.settings.value(self._project_settings_key("last_dir"), "")
-        if isinstance(stored, str) and stored:
-            candidate = Path(stored)
-            if candidate.exists():
-                return candidate
+        stored = _sanitise_existing_directory(
+            self.settings.value(self._project_settings_key("last_dir"), "")
+        )
+        if stored:
+            return Path(stored)
         if isinstance(self._project_path, Path):
             return self._project_path.parent
         try:
@@ -23377,14 +23603,21 @@ class BuilderWindow(QtWidgets.QMainWindow):
             entries = [str(item) for item in raw if isinstance(item, str)]
         else:
             entries = []
+        original_entries = list(entries)
         seen: set[str] = set()
         ordered: List[str] = []
         for entry in entries:
             candidate = str(entry).strip()
-            if candidate and candidate not in seen:
+            if (
+                candidate
+                and not _looks_like_test_path(candidate)
+                and candidate not in seen
+            ):
                 seen.add(candidate)
                 ordered.append(candidate)
         self._recent_projects = ordered[:8]
+        if self._recent_projects != original_entries[:8]:
+            self._save_recent_projects_setting()
 
     def _save_recent_projects_setting(self) -> None:
         try:
@@ -23408,12 +23641,19 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _maybe_auto_open_last_project(self) -> None:
         if not self._auto_open_last:
             return
-        last_path = self.settings.value(self._project_settings_key("last_path"), "")
+        last_path = _sanitise_existing_file(
+            self.settings.value(self._project_settings_key("last_path"), "")
+        )
         candidate: Optional[Path] = None
-        if isinstance(last_path, str) and last_path:
+        if last_path:
             path_obj = Path(last_path)
             if path_obj.exists():
                 candidate = path_obj
+        else:
+            try:
+                self.settings.remove(self._project_settings_key("last_path"))
+            except Exception:
+                pass
         if candidate is None and self._recent_projects:
             fallback = Path(self._recent_projects[0])
             if fallback.exists():

@@ -104,6 +104,13 @@ CURRENT_DENSITY_EXTRA_COLUMNS = [
     "Sources",
 ]
 
+SHAPE_MEMORY_VALUE_COLUMNS = [
+    "Shape memory displacement (mm)",
+    "Shape memory load (g)",
+    "Shape memory strain (%)",
+    "Shape memory stress (MPa)",
+]
+
 EA_VALENCE = {
     "Ni": 10,
     "Fe": 8,
@@ -213,6 +220,7 @@ OUTPUT_COLUMNS = [
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
     "Shape memory stress/strain graphs",
+    *SHAPE_MEMORY_VALUE_COLUMNS,
     "FMR graphs",
 ]
 
@@ -235,6 +243,10 @@ VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
+SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Shape memory displacement (mm)"
+SHAPE_MEMORY_LOAD_COLUMN = "Shape memory load (g)"
+SHAPE_MEMORY_STRAIN_COLUMN = "Shape memory strain (%)"
+SHAPE_MEMORY_STRESS_COLUMN = "Shape memory stress (MPa)"
 FMR_COLUMN = "FMR graphs"
 
 TRANSITION_TEMP_AS_COLUMN = "As (°C)"
@@ -4775,6 +4787,7 @@ def build_database(
     shape_memory_stress_strain_records: Optional[
         Iterable[ShapeMemoryStressStrainRecord]
     ] = None,
+    shape_memory_entries: Optional[Dict[str, Dict[str, object]]] = None,
     fmr_records: Optional[Iterable[FmrRecord]] = None,
     phase_points: Optional[Dict[str, Dict[str, float]]] = None,
     transition_temps: Optional[Dict[str, Dict[str, float]]] = None,
@@ -5015,6 +5028,22 @@ def build_database(
             if entry:
                 current_density_map[_microwire_key_to_str(key_parts)] = entry
     current_density_map = dict(current_density_map)
+
+    shape_memory_entry_map: Dict[str, Dict[str, object]] = {}
+    if shape_memory_entries:
+        for key, payload in shape_memory_entries.items():
+            if not isinstance(key, str) or not isinstance(payload, dict):
+                continue
+            key_parts = _microwire_key_from_string(key)
+            if key_parts is None:
+                continue
+            entry: Dict[str, object] = {}
+            for column in SHAPE_MEMORY_VALUE_COLUMNS:
+                if column in payload:
+                    entry[column] = payload.get(column)
+            if entry:
+                shape_memory_entry_map[_microwire_key_to_str(key_parts)] = entry
+    shape_memory_entry_map = dict(shape_memory_entry_map)
 
     strain_entry_map: Dict[str, Dict[str, object]] = {}
     if strain_entries:
@@ -5498,6 +5527,15 @@ def build_database(
             ]
             if labels:
                 row[SHAPE_MEMORY_STRESS_STRAIN_COLUMN] = list(dict.fromkeys(labels))
+        shape_memory_entry = shape_memory_entry_map.get(key_str, {})
+        if shape_memory_entry:
+            for column in SHAPE_MEMORY_VALUE_COLUMNS:
+                if column not in output_columns:
+                    continue
+                value = shape_memory_entry.get(column)
+                if value in (None, ""):
+                    continue
+                row[column] = value
         fmr_entries = fmr_groups.get(key, [])
         if not fmr_entries:
             fmr_entries = fmr_groups.get((composition, draw_x, piece_y, None), [])
@@ -5874,6 +5912,10 @@ __all__ = [
     "VSM_TEMPERATURE_SCAN_COLUMN",
     "DMA_ISOSTRESS_COLUMN",
     "SHAPE_MEMORY_STRESS_STRAIN_COLUMN",
+    "SHAPE_MEMORY_DISPLACEMENT_COLUMN",
+    "SHAPE_MEMORY_LOAD_COLUMN",
+    "SHAPE_MEMORY_STRAIN_COLUMN",
+    "SHAPE_MEMORY_STRESS_COLUMN",
     "FMR_COLUMN",
     "build_database",
     "build_fabrication_index",
