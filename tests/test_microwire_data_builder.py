@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import importlib.util
 import logging
@@ -16,7 +17,9 @@ import pytest
 from PyQt6 import QtGui, QtWidgets
 
 from microwire_data_builder import ocr as ocr_module
+from microwire_data_builder import ui as builder_ui
 from microwire_data_builder.ui import BuilderWindow, MicroscopeSection
+from plotting.plugins.vsm_temperature_scan.core import VSMTemperatureScanProcessor
 
 CORE_PATH = Path(__file__).resolve().parent.parent / "microwire_data_builder" / "core.py"
 _APP_REF: QtWidgets.QApplication | None = None
@@ -35,6 +38,8 @@ _load_annealing = core._load_annealing
 _metadata_from_path = core._metadata_from_path
 _resistance_sanity_check = core._resistance_sanity_check
 _safe_plot_stem = core._safe_plot_stem
+_split_microwire_key = core._split_microwire_key
+_microwire_key_from_string = core._microwire_key_from_string
 OriginArtifact = core.OriginArtifact
 FabricationIndex = core.FabricationIndex
 _merged_header_row = core._merged_header_row
@@ -49,6 +54,61 @@ def _ensure_qapp() -> QtWidgets.QApplication:
         app = QtWidgets.QApplication(sys.argv[:1])
     _APP_REF = app
     return app
+
+
+def test_vsm_temperature_preview_keeps_dual_axis_legend_in_section_order() -> None:
+    processor = VSMTemperatureScanProcessor()
+    frame = pd.DataFrame(
+        {
+            "temperature": [10.0, 20.0, 20.0, 10.0, 10.0, 20.0, 20.0, 10.0],
+            "field": [10000.0, 10000.0, 10000.0, 10000.0, 5.0, 5.0, 5.0, 5.0],
+            "signal": [1.0, 1.1, 1.2, 1.1, 0.6, 0.7, 0.8, 0.7],
+            "section_index": [0, 0, 1, 1, 0, 0, 1, 1],
+        }
+    )
+    record = core.VsmTemperatureScanRecord(
+        path=Path("scan.txt"),
+        sample="Sample",
+        data=frame,
+    )
+
+    figure = builder_ui._plot_vsm_temperature_scan_figure(
+        record,
+        processor,
+        width_px=720,
+        height_px=360,
+    )
+    assert figure is not None
+    try:
+        legend = figure.axes[0].get_legend()
+        assert legend is not None
+        labels = [text.get_text() for text in legend.get_texts()]
+        assert labels == [
+            "10000 Oe ↑",
+            "10000 Oe ↓",
+            "5 Oe ↑",
+            "5 Oe ↓",
+        ]
+    finally:
+        builder_ui.plt.close(figure)
+
+
+def test_render_measurement_pixmap_uses_readable_default_preview_size() -> None:
+    _ensure_qapp()
+    record = SimpleNamespace(
+        dataframe=pd.DataFrame(
+            {
+                "I_mA": [0.0, 50.0, 100.0, 50.0],
+                "R_ohm": [120.0, 150.0, 180.0, 160.0],
+            }
+        ),
+        metadata=None,
+    )
+    pixmap = builder_ui._render_measurement_pixmap(record, logging.getLogger("test"))
+    assert isinstance(pixmap, QtGui.QPixmap)
+    assert not pixmap.isNull()
+    assert pixmap.width() >= builder_ui.ANNEALING_GRAPH_WIDTH
+    assert pixmap.height() >= builder_ui.ANNEALING_GRAPH_HEIGHT
 
 
 def test_assembly_exposes_compare_hook() -> None:
@@ -115,6 +175,29 @@ def test_filename_parser_extracts_metadata(tmp_path: Path) -> None:
     assert metadata.setpoint_mA == 30
     assert metadata.file_name == path.name
     assert metadata.measurement_id
+
+
+def test_split_microwire_key_rejects_non_integral_or_boolean_indices() -> None:
+    assert _split_microwire_key(("Ni50Fe27Ga23", 3.25, 4, None)) is None
+    assert _split_microwire_key(("Ni50Fe27Ga23", True, 4, None)) is None
+    assert _split_microwire_key(("Ni50Fe27Ga23", 3, float("nan"), None)) is None
+    assert _split_microwire_key(("Ni50Fe27Ga23", "3.0", "4.0", "a")) == (
+        "Ni50Fe27Ga23",
+        3,
+        4,
+        "a",
+    )
+
+
+def test_microwire_key_from_string_validates_numeric_indices() -> None:
+    assert _microwire_key_from_string("Ni50Fe27Ga23|3.0|4.0|a") == (
+        "Ni50Fe27Ga23",
+        3,
+        4,
+        "a",
+    )
+    assert _microwire_key_from_string("Ni50Fe27Ga23|3.2|4|a") is None
+    assert _microwire_key_from_string("Ni50Fe27Ga23|True|4") is None
 
 
 def test_annealing_loader_and_sanity_check(tmp_path: Path) -> None:
@@ -395,6 +478,68 @@ def test_build_database_origin_backend(tmp_path: Path, monkeypatch: pytest.Monke
     assert pd.isna(row["Figure — 1000 mA"])
     assert pd.isna(row["Figure — low mA"])
     assert pd.isna(row[core.STRAIN_COLUMN])
+
+
+def test_build_database_merges_current_density_and_transition_entries(tmp_path: Path) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 1_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+
+    config = BuilderConfig(
+        fabrication_files=[],
+        annealing_files=[high, low],
+        output_dir=tmp_path / "out",
+    )
+    result = build_database(
+        config,
+        current_density_entries={
+            "Ni55Fe18Ga27|1|1": {
+                "As1 (mA)": 110.0,
+                "Af1 (mA)": 145.0,
+                "Ms1 (mA)": 180.0,
+                "Mf1 (mA)": 165.0,
+                "As2 (mA)": 120.0,
+                "Af2 (mA)": 152.0,
+                "Ms2 (mA)": 189.0,
+                "Mf2 (mA)": 172.0,
+                "As current density (A/mm^2)": 4.5,
+                "Ms current density (A/mm^2)": 7.2,
+                "As2-As1 (mA)": 10.0,
+                "Af2-Af1 (mA)": 7.0,
+                "Ms2-Ms1 (mA)": 9.0,
+                "Mf2-Mf1 (mA)": 7.0,
+                "Mf1-Af1 (mA)": 20.0,
+                "Mf2-Af2 (mA)": 20.0,
+                "Setpoints (mA)": [1000, 120],
+                "Sources": ["Manual", "Import"],
+                "Notes": "manual annotations",
+            }
+        },
+        transition_temps={
+            "Ni55Fe18Ga27|1|1": {
+                "As": 22.5,
+                "Af": 35.0,
+                "Ms": 18.0,
+                "Mf": 8.0,
+            }
+        },
+    )
+
+    row = result.dataframe.iloc[0]
+    assert row["As (mA)"] == pytest.approx(110.0)
+    assert row["Ms (mA)"] == pytest.approx(180.0)
+    assert row["As1 (mA)"] == pytest.approx(110.0)
+    assert row["Af2 (mA)"] == pytest.approx(152.0)
+    assert row["Ms2-Ms1 (mA)"] == pytest.approx(9.0)
+    assert row["Mf1-Af1 (mA)"] == pytest.approx(20.0)
+    assert row["Setpoints (mA)"] == "1000, 120"
+    assert row["Sources"] == "Manual, Import"
+    assert row["Notes"] == "manual annotations"
+    assert row["As (°C)"] == pytest.approx(22.5)
+    assert row["Af (°C)"] == pytest.approx(35.0)
+    assert row["Ms (°C)"] == pytest.approx(18.0)
+    assert row["Mf (°C)"] == pytest.approx(8.0)
 
 
 def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -795,6 +940,34 @@ def test_update_existing_exports_with_strain(tmp_path: Path) -> None:
     columns = updated_excel.columns.tolist()
     assert core.STRAIN_COLUMN in columns
     assert updated_excel[core.STRAIN_COLUMN].iloc[0] == "6.250%"
+
+
+def test_builder_column_groups_include_transition_and_current_density_columns() -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    try:
+        assembly = getattr(window, "assembly_section", None)
+        assert assembly is not None
+        groups = assembly._column_groups(core.OUTPUT_COLUMNS)  # noqa: SLF001 - UI grouping helper
+        current_density_group = groups.get("Current density")
+        assert isinstance(current_density_group, list)
+        assert "As1 (mA)" in current_density_group
+        assert "Af1 (mA)" in current_density_group
+        assert "As2 (mA)" in current_density_group
+        assert "Mf2-Af2 (mA)" in current_density_group
+        transition_group = groups.get("Transition temps")
+        assert transition_group == [
+            "As (°C)",
+            "Af (°C)",
+            "Ms (°C)",
+            "Mf (°C)",
+        ]
+    finally:
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 
 def test_builder_recent_projects_menu_updates(tmp_path: Path) -> None:

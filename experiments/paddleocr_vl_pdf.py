@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
+import os
+import re
+import subprocess
 import threading
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Callable, List, Optional, Sequence, Tuple
 
 import pypdfium2 as pdfium
 from PIL import Image
 from PyQt6 import QtCore, QtGui, QtWidgets
-from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
+
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 try:
     from paddleocr import PaddleOCR, PaddleOCRVL
@@ -21,8 +27,6 @@ except ImportError as exc:  # pragma: no cover - dependency missing
     raise RuntimeError(
         "PaddleOCR is required for the PDF converter. Install the project dependencies first."
     ) from exc
-
-from plotting.shared.utils import ensure_app_theme
 
 
 LOGGER = logging.getLogger("paddleocr_vl_pdf")
@@ -35,6 +39,8 @@ except AttributeError:  # pragma: no cover - pillow<9.1 fallback
 
 _MAX_ANALYSIS_SIDE = 2200
 _MIN_ANALYSIS_SIDE = 48
+_DEFAULT_TEXT_DETECTION_MODEL = "PP-OCRv5_mobile_det"
+_DEFAULT_TEXT_RECOGNITION_MODEL = "latin_PP-OCRv5_mobile_rec"
 
 
 @dataclass
@@ -54,7 +60,7 @@ class OverlayRegion:
 class PagePayload:
     width: float
     height: float
-    image_reader: Optional[ImageReader]
+    image_path: Optional[Path]
     overlay: List[OverlayRegion]
     summary_lines: List[str]
 
@@ -104,6 +110,8 @@ def _initialise_vl_engine(disable_vl: bool) -> Tuple[PaddleOCR | PaddleOCRVL, st
         classic = PaddleOCR(
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
+            text_detection_model_name=_DEFAULT_TEXT_DETECTION_MODEL,
+            text_recognition_model_name=_DEFAULT_TEXT_RECOGNITION_MODEL,
             text_det_limit_side_len=4000,
             use_textline_orientation=False,
         )
@@ -125,9 +133,16 @@ def _initialise_vl_engine(disable_vl: bool) -> Tuple[PaddleOCR | PaddleOCRVL, st
 
 
 def _initialise_classic_engine() -> PaddleOCR:
+    LOGGER.info(
+        "Using PaddleOCR mobile OCR models (%s / %s).",
+        _DEFAULT_TEXT_DETECTION_MODEL,
+        _DEFAULT_TEXT_RECOGNITION_MODEL,
+    )
     return PaddleOCR(
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
+        text_detection_model_name=_DEFAULT_TEXT_DETECTION_MODEL,
+        text_recognition_model_name=_DEFAULT_TEXT_RECOGNITION_MODEL,
         text_det_limit_side_len=_MAX_ANALYSIS_SIDE,
         use_textline_orientation=False,
         return_word_box=True,
@@ -140,6 +155,8 @@ def _summarise_page(
     image_path: Path,
     prompt: str,
 ) -> List[str]:
+    if not prompt.strip():
+        return []
     if mode == "vl":
         try:
             result = engine.predict({"image": str(image_path), "prompt": prompt})
@@ -147,17 +164,37 @@ def _summarise_page(
             result = engine.predict(str(image_path))
         return _collect_strings(result, prompt=prompt)
 
-    recognised = engine.ocr(str(image_path))
     lines: List[str] = []
-    for entry in recognised:
-        try:
-            text = entry[1][0]
-        except Exception:
-            continue
+    for text, _box in _iter_classic_ocr_entries(engine.ocr(str(image_path))):
         cleaned = text.strip()
         if cleaned:
             lines.append(cleaned)
     return lines
+
+
+def _iter_classic_ocr_entries(results: object) -> List[tuple[str, object]]:
+    entries: List[tuple[str, object]] = []
+    if not isinstance(results, list):
+        return entries
+
+    for entry in results:
+        if isinstance(entry, dict):
+            texts = entry.get("rec_texts")
+            polys = entry.get("rec_polys") or entry.get("dt_polys")
+            if isinstance(texts, list) and isinstance(polys, list):
+                for text, poly in zip(texts, polys):
+                    if isinstance(text, str):
+                        entries.append((text, poly))
+            continue
+
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        box, info = entry[0], entry[1]
+        if isinstance(info, (list, tuple)) and info:
+            text = info[0]
+            if isinstance(text, str):
+                entries.append((text, box))
+    return entries
 
 
 def _extract_overlays(
@@ -178,21 +215,22 @@ def _extract_overlays(
     scale_x = page_width / float(raster_width or 1)
     scale_y = page_height / float(raster_height or 1)
 
-    for entry in results:
-        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+    for text, box in _iter_classic_ocr_entries(results):
+        if not isinstance(text, str):
             continue
-        box, info = entry[0], entry[1]
-        if not isinstance(box, (list, tuple)) or not box:
-            continue
-        try:
-            text = info[0].strip()
-        except Exception:
-            continue
+        text = text.strip()
         if not text:
             continue
 
-        xs = [point[0] for point in box if isinstance(point, (list, tuple)) and len(point) >= 2]
-        ys = [point[1] for point in box if isinstance(point, (list, tuple)) and len(point) >= 2]
+        xs: List[float] = []
+        ys: List[float] = []
+        try:
+            for point in box:
+                if len(point) >= 2:
+                    xs.append(float(point[0]))
+                    ys.append(float(point[1]))
+        except Exception:
+            continue
         if not xs or not ys:
             continue
         x0 = min(xs) * scale_x
@@ -215,42 +253,38 @@ def _extract_overlays(
     return overlays
 
 
-def _build_canvas(
-    output_path: Path,
-    pages: Sequence[PagePayload],
+def _write_page_to_canvas(
+    pdf: canvas.Canvas,
+    payload: PagePayload,
     *,
     show_images: bool,
     summary_font: float,
 ) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    pdf = canvas.Canvas(str(output_path))
-    for payload in pages:
-        pdf.setPageSize((payload.width, payload.height))
+    pdf.setPageSize((payload.width, payload.height))
 
-        if show_images and payload.image_reader is not None:
-            pdf.drawInlineImage(payload.image_reader, 0, 0, width=payload.width, height=payload.height)
+    if show_images and payload.image_path is not None:
+        pdf.drawInlineImage(str(payload.image_path), 0, 0, width=payload.width, height=payload.height)
 
-        for region in payload.overlay:
-            text_obj = pdf.beginText()
-            text_obj.setTextRenderMode(3)  # invisible text for search
-            font_height = max(region.height * 0.85, 6.0)
-            text_obj.setFont("Helvetica", font_height)
-            text_obj.setTextOrigin(region.x0, region.y0)
-            text_obj.textLine(region.text)
-            pdf.drawText(text_obj)
+    for region in payload.overlay:
+        text_obj = pdf.beginText()
+        text_obj.setTextRenderMode(3)  # invisible text for search
+        font_height = max(region.height * 0.85, 6.0)
+        text_obj.setFont("Helvetica", font_height)
+        text_obj.setTextOrigin(region.x0, region.y0)
+        text_obj.textLine(region.text)
+        pdf.drawText(text_obj)
 
-        if payload.summary_lines:
-            text_obj = pdf.beginText()
-            text_obj.setTextRenderMode(3)
-            text_obj.setFont("Helvetica", summary_font)
-            margin = 36
-            text_obj.setTextOrigin(margin, payload.height - margin)
-            for line in payload.summary_lines:
-                text_obj.textLine(line)
-            pdf.drawText(text_obj)
+    if payload.summary_lines:
+        text_obj = pdf.beginText()
+        text_obj.setTextRenderMode(3)
+        text_obj.setFont("Helvetica", summary_font)
+        margin = 36
+        text_obj.setTextOrigin(margin, payload.height - margin)
+        for line in payload.summary_lines:
+            text_obj.textLine(line)
+        pdf.drawText(text_obj)
 
-        pdf.showPage()
-    pdf.save()
+    pdf.showPage()
 
 
 class ConversionCancelled(Exception):
@@ -292,21 +326,66 @@ def _prepare_analysis_image(
     return analysis_path, analysis_image
 
 
+def _system_free_memory_percent() -> Optional[float]:
+    try:
+        completed = subprocess.run(
+            ["memory_pressure", "-Q"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    match = re.search(
+        r"System-wide memory free percentage:\s*([0-9]+(?:\.[0-9]+)?)%",
+        completed.stdout,
+    )
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _enforce_memory_guard(min_free_memory_percent: Optional[float]) -> None:
+    if min_free_memory_percent is None:
+        return
+    free_percent = _system_free_memory_percent()
+    if free_percent is None:
+        return
+    if free_percent < float(min_free_memory_percent):
+        raise RuntimeError(
+            "Stopping OCR to protect system memory: "
+            f"free memory fell to {free_percent:.1f}% (threshold {float(min_free_memory_percent):.1f}%)."
+        )
+
+
 def convert_pdf(
     input_path: Path,
     output_path: Path,
     *,
+    start_page: int = 1,
+    end_page: Optional[int] = None,
     dpi: int,
     disable_vl: bool,
     prompt: str,
     include_images: bool,
     summary_font: float,
+    include_summary_text: bool = True,
+    min_free_memory_percent: Optional[float] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> None:
-    vl_engine, vl_mode = _initialise_vl_engine(disable_vl)
-    classic_engine = _initialise_classic_engine()
-    payloads: List[PagePayload] = []
+    if disable_vl:
+        classic_engine = _initialise_classic_engine()
+        vl_engine, vl_mode = classic_engine, "classic"
+    else:
+        vl_engine, vl_mode = _initialise_vl_engine(disable_vl)
+        classic_engine = _initialise_classic_engine()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(output_path))
 
     with tempfile.TemporaryDirectory(prefix="paddleocr_vl_") as temp_dir_str:
         temp_dir = Path(temp_dir_str)
@@ -317,60 +396,177 @@ def convert_pdf(
                 f"Failed to load document (PDFium: {exc}). Try re-saving the PDF without encryption or export a fresh copy."
             ) from exc
         total_pages = len(pdf_doc)
+        selected_start = max(1, int(start_page))
+        selected_end = total_pages if end_page is None else min(total_pages, int(end_page))
+        if selected_end < selected_start:
+            raise RuntimeError(
+                f"Invalid page range: start page {selected_start} is after end page {selected_end}."
+            )
+        selected_total = selected_end - selected_start + 1
         if progress_callback is not None:
-            progress_callback(0, total_pages)
+            progress_callback(0, selected_total)
         scale = dpi / 72.0
+        processed_count = 0
 
-        for page_number, page in enumerate(pdf_doc, start=1):
-            if cancel_event is not None and cancel_event.is_set():
-                LOGGER.info("Conversion cancelled before processing page %s.", page_number)
-                raise ConversionCancelled()
+        try:
+            for page_number, page in enumerate(pdf_doc, start=1):
+                if page_number < selected_start:
+                    continue
+                if page_number > selected_end:
+                    break
+                _enforce_memory_guard(min_free_memory_percent)
+                if cancel_event is not None and cancel_event.is_set():
+                    LOGGER.info("Conversion cancelled before processing page %s.", page_number)
+                    raise ConversionCancelled()
 
-            renderer = page.render(scale=scale)
-            pil_image = renderer.to_pil()
-            renderer.close()
-            width, height = page.get_size()
+                renderer = page.render(scale=scale)
+                pil_image = renderer.to_pil()
+                renderer.close()
+                width, height = page.get_size()
 
-            image_path = temp_dir / f"page_{page_number:04d}.png"
-            pil_image.save(image_path, format="PNG")
+                image_path = temp_dir / f"page_{page_number:04d}.png"
+                pil_image.save(image_path, format="PNG")
 
-            analysis_path, analysis_image = _prepare_analysis_image(
-                pil_image, image_path, temp_dir, page_number
-            )
-
-            summary_lines = _summarise_page(vl_engine, vl_mode, analysis_path, prompt)
-            overlays = _extract_overlays(
-                classic_engine,
-                analysis_path,
-                width,
-                height,
-                analysis_image.width,
-                analysis_image.height,
-            )
-
-            image_reader = ImageReader(pil_image) if include_images else None
-            payloads.append(
-                PagePayload(
-                    width=width,
-                    height=height,
-                    image_reader=image_reader,
-                    overlay=overlays,
-                    summary_lines=summary_lines,
+                analysis_path, analysis_image = _prepare_analysis_image(
+                    pil_image, image_path, temp_dir, page_number
                 )
-            )
-            if progress_callback is not None:
-                progress_callback(page_number, total_pages)
-            if cancel_event is not None and cancel_event.is_set():
-                LOGGER.info("Conversion cancelled after processing page %s.", page_number)
-                raise ConversionCancelled()
 
-        pdf_doc.close()
+                if include_summary_text and vl_mode == "vl":
+                    summary_lines = _summarise_page(vl_engine, vl_mode, analysis_path, prompt)
+                else:
+                    summary_lines = []
+                overlays = _extract_overlays(
+                    classic_engine,
+                    analysis_path,
+                    width,
+                    height,
+                    analysis_image.width,
+                    analysis_image.height,
+                )
+
+                _write_page_to_canvas(
+                    pdf,
+                    PagePayload(
+                        width=width,
+                        height=height,
+                        image_path=image_path if include_images else None,
+                        overlay=overlays,
+                        summary_lines=summary_lines,
+                    ),
+                    show_images=include_images,
+                    summary_font=summary_font,
+                )
+
+                try:
+                    pil_image.close()
+                except Exception:
+                    pass
+                if analysis_path != image_path:
+                    try:
+                        analysis_image.close()
+                    except Exception:
+                        pass
+
+                processed_count += 1
+                if progress_callback is not None:
+                    progress_callback(processed_count, selected_total)
+                _enforce_memory_guard(min_free_memory_percent)
+                if cancel_event is not None and cancel_event.is_set():
+                    LOGGER.info("Conversion cancelled after processing page %s.", page_number)
+                    raise ConversionCancelled()
+        finally:
+            pdf_doc.close()
 
     if cancel_event is not None and cancel_event.is_set():
-        LOGGER.info("Conversion cancelled before writing output.")
+        LOGGER.info("Conversion cancelled before saving output.")
         raise ConversionCancelled()
-    _build_canvas(output_path, payloads, show_images=include_images, summary_font=summary_font)
+    pdf.save()
     LOGGER.info("Searchable PDF written to %s", output_path)
+
+
+def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Convert an image-based PDF into a searchable PDF using PaddleOCR."
+    )
+    parser.add_argument("input", nargs="?", help="Input image PDF")
+    parser.add_argument("output", nargs="?", help="Output searchable PDF")
+    parser.add_argument("--dpi", type=int, default=200, help="Raster DPI used for OCR (default: 200)")
+    parser.add_argument("--start-page", type=int, default=1, help="First 1-based page to convert.")
+    parser.add_argument("--end-page", type=int, help="Last 1-based page to convert.")
+    parser.add_argument(
+        "--use-vl",
+        action="store_true",
+        help="Use PaddleOCR-VL page summaries in addition to invisible OCR overlay text.",
+    )
+    parser.add_argument(
+        "--no-images",
+        action="store_true",
+        help="Write a text-only PDF without re-embedding the original page images.",
+    )
+    parser.add_argument(
+        "--no-summary-text",
+        action="store_true",
+        help="Disable page-level summary text injection. Recommended for plain searchable PDF output.",
+    )
+    parser.add_argument(
+        "--prompt",
+        default="Transcribe this page into text.",
+        help="Prompt used for PaddleOCR-VL page summaries.",
+    )
+    parser.add_argument(
+        "--summary-font",
+        type=float,
+        default=10.0,
+        help="Font size for hidden summary text when VL summaries are enabled.",
+    )
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Open the GUI instead of running the CLI conversion flow.",
+    )
+    parser.add_argument(
+        "--min-free-memory-percent",
+        type=float,
+        default=20.0,
+        help="Abort OCR if macOS reports less free memory than this percentage (default: 20).",
+    )
+    return parser.parse_args(argv)
+
+
+def _run_cli(args: argparse.Namespace) -> int:
+    input_value = (args.input or "").strip()
+    output_value = (args.output or "").strip()
+    if not input_value or not output_value:
+        raise SystemExit("CLI mode requires both input and output PDF paths.")
+
+    input_path = Path(input_value).expanduser()
+    output_path = Path(output_value).expanduser()
+    if not input_path.exists():
+        raise SystemExit(f"Input PDF does not exist: {input_path}")
+
+    LOGGER.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    LOGGER.handlers[:] = [handler]
+
+    def _progress(current: int, total: int) -> None:
+        print(f"[{current}/{total}] processed", flush=True)
+
+    convert_pdf(
+        input_path,
+        output_path,
+        start_page=max(1, int(args.start_page)),
+        end_page=args.end_page,
+        dpi=max(72, int(args.dpi)),
+        disable_vl=not args.use_vl,
+        prompt=args.prompt,
+        include_images=not args.no_images,
+        summary_font=float(args.summary_font),
+        include_summary_text=not args.no_summary_text,
+        min_free_memory_percent=float(args.min_free_memory_percent),
+        progress_callback=_progress,
+    )
+    return 0
 
 
 class _QtLogHandler(QtCore.QObject, logging.Handler):
@@ -722,7 +918,13 @@ class PaddleOCRVLPDFWindow(QtWidgets.QWidget):
         super().closeEvent(event)
 
 
-def main() -> QtWidgets.QWidget | None:
+def main(argv: Optional[Sequence[str]] = None) -> QtWidgets.QWidget | int | None:
+    args = _parse_args(list(argv) if argv is not None else sys.argv[1:])
+    if not args.gui and (args.input or args.output):
+        return _run_cli(args)
+
+    from plotting.shared.utils import ensure_app_theme
+
     app = QtWidgets.QApplication.instance()
     owns_app = False
     if app is None:
@@ -738,3 +940,7 @@ def main() -> QtWidgets.QWidget | None:
 
 
 __all__ = ["convert_pdf", "PaddleOCRVLPDFWindow", "main"]
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI/GUI entry point
+    raise SystemExit(main())

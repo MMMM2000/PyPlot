@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import re
 from pathlib import Path
 from typing import Any, Iterable, TYPE_CHECKING
 
@@ -749,3 +748,12 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                         "Data loaded. Adjust settings and click Plot Temperature Sensitivity to create graphs and workbooks."
                     )
         self.host._update_project_actions()
+
+    def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
+        return {
+            "title_font": 14,
+            "label_font": 11,
+            "tick_font": 9,
+            "figure_width": 9.5,
+            "figure_height": 5.8,
+        }

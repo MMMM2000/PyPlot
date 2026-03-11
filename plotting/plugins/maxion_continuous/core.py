@@ -12,7 +12,11 @@ from matplotlib.colors import is_color_like
 from matplotlib.figure import Figure
 from plotting.shared.common import maybe_handle_outliers_series
 from plotting.shared.utils import save_figure, show_plots
-from plotting.shared.origin import origin_session
+from plotting.shared.origin import (
+    origin_session,
+    set_origin_axis_title,
+    set_origin_graph_title,
+)
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.backends import wants_matplotlib, wants_origin
 from plotting.shared.config import load_config
@@ -236,7 +240,7 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
 
 
 def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
-    with origin_session() as op:
+    with origin_session(keep_open=True) as op:
         proc = None
         if PLOT_MODE in ("processed", "both") or (CENTER_MEDIAN_Y and CENTER_MEDIAN_SOURCE == "processed"):
             med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
@@ -268,7 +272,13 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
         w_raw.from_list(0, x_list)
         w_raw.from_list(1, y_vals.tolist())
         w_raw.cols_axis('XY')
-        gl.add_plot(w_raw, coly=1, colx=0, type='s')
+        raw_plot: Any = gl.add_plot(w_raw, coly=1, colx=0, type='s')
+        if raw_plot is not None:
+            try:
+                raw_plot.lname = 'raw'
+                raw_plot.legend = 'raw'
+            except Exception:
+                pass
 
         # Processed
         if PLOT_MODE in ("processed", "both") and proc is not None:
@@ -284,21 +294,61 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
                 p: Any = plot_obj
                 try:
                     p.line_width = 1
+                    p.lname = f"med{MED_WINDOW}+mwa{MA_WINDOW}"
+                    p.legend = f"med{MED_WINDOW}+mwa{MA_WINDOW}"
                 except Exception:
                     pass
 
+        try:
+            gl.rescale()
+        except Exception:
+            pass
         try:
             gp.activate()
             op_any.lt_exec('page.antialias=1;')
             op_any.lt_exec('layer -aa 1;')
             x_lab = "Sample index (x10^4)" if IMPROVE_READABILITY and SCALE_X_1E4 else "Sample index"
             y_lab = "T1+T2 (arb. u., x10^3)" if IMPROVE_READABILITY and SCALE_Y_1E3 else "T1+T2 (arb. u.)"
-            op_any.lt_exec(f'lab -xb "{x_lab}";')
-            op_any.lt_exec(f'lab -yl "{y_lab}";')
-            esc = (f"Head {head} - {coils} coils - CH{ch} T1+T2").replace('"', "'")
-            op_any.lt_exec(f'title -s "{esc}";')
+            set_origin_axis_title(gl, 'x', x_lab)
+            set_origin_axis_title(gl, 'y', y_lab)
+            set_origin_graph_title(op_any, gp, gl, f"Head {head} - {coils} coils - CH{ch} T1+T2")
+            for attr, value in (
+                ("x.showAxes", 1),
+                ("y.showAxes", 1),
+                ("x.showlabel", 1),
+                ("x2.showlabel", 0),
+                ("y.showlabel", 1),
+                ("y2.showlabel", 0),
+            ):
+                try:
+                    gl.set_int(attr, value)
+                except Exception:
+                    continue
+            for cmd in (
+                'layer.x.showAxes=1;',
+                'layer.y.showAxes=1;',
+                'layer.x.showlabel=1;',
+                'layer.x2.showlabel=0;',
+                'layer.y.showlabel=1;',
+                'layer.y2.showlabel=0;',
+                'lab -xt "";',
+                'lab -yr "";',
+            ):
+                try:
+                    op_any.lt_exec(cmd)
+                except Exception:
+                    continue
             if SHOW_LEGEND:
                 op_any.lt_exec('legend -o; legend.textcolor=1;')
+                try:
+                    legend = gl.label('Legend')
+                    lines = ['\\c(1) raw']
+                    if PLOT_MODE in ("processed", "both") and proc is not None:
+                        lines.append(f"\\c(2) med{MED_WINDOW}+mwa{MA_WINDOW}")
+                    legend.text = "\n".join(lines)
+                    op_any.lt_exec('legend.update=0;')
+                except Exception:
+                    pass
         except Exception:
             pass
 

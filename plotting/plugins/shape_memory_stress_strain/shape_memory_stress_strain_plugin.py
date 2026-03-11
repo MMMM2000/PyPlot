@@ -351,6 +351,37 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
         if callable(save_sync):
             save_sync()
 
+    def open_origin(self) -> None:  # type: ignore[override]
+        if not self._dataset:
+            self.load_data()
+        if not self._dataset:
+            return
+        self.settings_widget()
+        combo = self._layout_mode_combo
+        if not isinstance(combo, QtWidgets.QComboBox):
+            super().open_origin()
+            return
+        original_index = combo.currentIndex()
+        original_mode = self._plot_layout_mode()
+        if original_mode != LAYOUT_DUAL_AXIS:
+            super().open_origin()
+            return
+        separate_index = combo.findData(LAYOUT_SEPARATE_TABS)
+        if separate_index < 0:
+            super().open_origin()
+            return
+        try:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(separate_index)
+            combo.blockSignals(False)
+            self.generate()
+            super().open_origin()
+        finally:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(original_index)
+            combo.blockSignals(False)
+            self.generate()
+
     def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
         layout_mode = self._plot_layout_mode()
         if layout_mode == LAYOUT_DUAL_AXIS:

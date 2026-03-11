@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import sys
 import time
+from pathlib import Path
 
 import pytest
 from PyQt6 import QtWidgets
@@ -121,3 +124,63 @@ def test_graph_option_defaults_apply_figure_size_to_new_plot_tabs() -> None:
     finally:
         window.close()
         app.processEvents()
+
+
+def test_launcher_detects_pyplot_automation_flags() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(  # noqa: SLF001 - internal parser
+        [
+            "--pyplot-plugin",
+            "Hysteresis Loops",
+            "--pyplot-import",
+            "sample_data/hysteresis_loops",
+            "--pyplot-plot",
+        ]
+    )
+    assert launcher_module._is_pyplot_automation_requested(args) is True  # noqa: SLF001
+
+
+def test_launcher_pyplot_automation_generates_summary_and_artifacts(tmp_path: Path) -> None:
+    _ensure_app()
+    source = tmp_path / "250C sample.dat"
+    source.write_text(
+        "\n".join(
+            [
+                "150 6.2e-10",
+                "75 6.1e-10",
+                "0 -6.0e-10",
+                "-75 -6.1e-10",
+                "-150 -6.2e-10",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    screenshot_path = tmp_path / "window.png"
+    plot_path = tmp_path / "plot.png"
+    summary_path = tmp_path / "summary.json"
+    args = argparse.Namespace(
+        pyplot_list_plugins=False,
+        pyplot_plugin="Hysteresis Loops",
+        pyplot_import=[str(source)],
+        pyplot_plot=True,
+        pyplot_open_graph_format=True,
+        pyplot_open_origin=False,
+        pyplot_screenshot=str(screenshot_path),
+        pyplot_plot_image=str(plot_path),
+        pyplot_summary_json=str(summary_path),
+        pyplot_show_window=False,
+        pyplot_wait_ms=0,
+        visual_check=False,
+    )
+
+    exit_code = launcher_module._run_pyplot_automation(args, [])  # noqa: SLF001 - internal automation hook
+
+    assert exit_code == 0
+    assert screenshot_path.exists()
+    assert plot_path.exists()
+    assert summary_path.exists()
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["plugin"] == "Hysteresis Loops"
+    assert summary["tab_count"] >= 1
+    assert summary["current_tab_has_axes"] is True
+    assert summary["graph_format_visible"] is True

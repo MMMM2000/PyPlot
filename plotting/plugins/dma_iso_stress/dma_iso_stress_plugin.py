@@ -400,6 +400,15 @@ class DmaIsoStressPlugin(PyPlotPlugin):
             else:
                 self._summary_label.clear()
 
+    def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
+        return {
+            "title_font": 14,
+            "label_font": 11,
+            "tick_font": 9,
+            "figure_width": 9.2,
+            "figure_height": 5.6,
+        }
+
     def _set_limit_controls_enabled(self, axis: str, enabled: bool) -> None:
         widgets: Iterable[QtWidgets.QDoubleSpinBox | None]
         if axis == "x":
@@ -1711,6 +1720,9 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
+        super().open_origin()
+        return
+
         if not self._dataset:
             self.load_data()
         exported_holder = {"count": 0}
@@ -1795,6 +1807,14 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                             plot_obj = None
                         if plot_obj is not None:
                             try:
+                                plot_obj.legend = label
+                            except Exception:
+                                pass
+                            try:
+                                plot_obj.lname = label
+                            except Exception:
+                                pass
+                            try:
                                 plot_obj.line_width = line_width
                             except Exception:
                                 pass
@@ -1842,6 +1862,17 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                     except Exception:
                         try:
                             op.lt_exec('legend;')
+                        except Exception:
+                            pass
+                    try:
+                        legend = layer.label("Legend")
+                    except Exception:
+                        legend = None
+                    if legend is not None:
+                        try:
+                            legend_lines = [f"\\c({index}) {stress} MPa" for index, stress in enumerate(stresses, start=1)]
+                            legend.text = "\n".join(legend_lines)
+                            op.lt_exec("legend.update=0;")
                         except Exception:
                             pass
                     exported += 1

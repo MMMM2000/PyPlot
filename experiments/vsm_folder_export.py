@@ -27,12 +27,22 @@ except ModuleNotFoundError:
 
 
 _COLUMN_LINE_RE = re.compile(r"^Column\s+\d+\s*:\s*(.+)$")
+_VSM_FILENAME_RE = re.compile(
+    r"(?:-hys-|-tscn-|\.vsm-(?:hys|tscn)-data$)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_vsm_data_file(path: Path) -> bool:
+    return bool(_VSM_FILENAME_RE.search(path.name))
 
 
 def _collect_files(root: Path, recursive: bool) -> list[Path]:
     if recursive:
-        return [path for path in root.rglob("*") if path.is_file()]
-    return [path for path in root.iterdir() if path.is_file()]
+        candidates = [path for path in root.rglob("*") if path.is_file()]
+    else:
+        candidates = [path for path in root.iterdir() if path.is_file()]
+    return [path for path in candidates if _looks_like_vsm_data_file(path)]
 
 
 def _write_frame(frame: pd.DataFrame, output_path: Path) -> None:
@@ -68,7 +78,7 @@ def _convert_file(
     path: Path,
     root: Path,
     output_root: Path,
-) -> bool:
+) -> Tuple[bool, str]:
     try:
         rel = path.resolve().relative_to(root.resolve())
     except Exception:
@@ -77,16 +87,16 @@ def _convert_file(
     output_path = output_path.with_suffix(".txt")
     try:
         frame = _read_vsm_file(path)
-    except Exception:
-        return False
+    except Exception as exc:
+        return False, f"parse failed ({exc})"
     if not isinstance(frame, pd.DataFrame) or frame.empty:
-        return False
+        return False, "no tabular rows"
     raw_columns = _extract_column_names(path)
     if raw_columns and len(raw_columns) == frame.shape[1]:
         frame = frame.copy()
         frame.columns = raw_columns
     _write_frame(frame, output_path)
-    return True
+    return True, "ok"
 
 
 def convert_folder(
@@ -98,13 +108,13 @@ def convert_folder(
 ) -> Tuple[int, int]:
     files = _collect_files(input_root, recursive)
     if not files:
-        raise RuntimeError("No files found in the input folder.")
+        raise RuntimeError("No VSM hysteresis/temperature files were found in the input folder.")
     converted = 0
     skipped = 0
     for path in files:
         if path.name.startswith("._"):
             continue
-        ok = _convert_file(path, input_root, output_root)
+        ok, reason = _convert_file(path, input_root, output_root)
         if ok:
             converted += 1
             if log:
@@ -112,7 +122,7 @@ def convert_folder(
         else:
             skipped += 1
             if log:
-                log(f"Skipped: {path.name}")
+                log(f"Skipped: {path.name} ({reason})")
     return converted, skipped
 
 

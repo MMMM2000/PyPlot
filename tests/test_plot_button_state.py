@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ import pandas as pd
 from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot import window as pyplot_window_module
 from plotting.plugins.fmr.fmr_plugin import FmrEntry
+from plotting.plugins.vsm_temperature_scan.core import VSMEntry as VSMTempEntry
 from plotting.pyplot.window import (
     PRIMARY_DOCK_EXPAND_THRESHOLD,
     PRIMARY_DOCK_EXPANDED_FRACTION,
@@ -236,6 +238,38 @@ def test_apply_graph_format_updates_legend_orientation() -> None:
         app.processEvents()
 
 
+def test_apply_graph_format_reflects_axis_factor_in_label_and_hides_offset_text() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        axes = window._current_axes()
+        assert axes is not None
+        axes.plot([-1.0, 0.0, 1.0], [-6.0e-10, 0.0, 6.0e-10], label="Series")
+        axes.set_xlabel("Magnetic field [A/m]")
+        axes.set_ylabel("Magnetic flux [Wb]")
+
+        controls = window._graph_format_controls
+        y_factor_edit = controls.get("y_value_factor_edit")
+        reflect_y = controls.get("reflect_y_scale_units_cb")
+        assert isinstance(y_factor_edit, QtWidgets.QLineEdit)
+        assert isinstance(reflect_y, QtWidgets.QCheckBox)
+        window._sync_graph_format_controls_from_current_axes()  # noqa: SLF001 - sync control state
+        y_factor_edit.setText("10^10")
+        reflect_y.setChecked(True)
+
+        window._apply_graph_format(apply_all=False)
+
+        y_label = axes.get_ylabel()
+        assert "Magnetic flux" in y_label
+        assert "Wb" in y_label
+        assert "\u00d710" in y_label
+        assert not bool(axes.yaxis.get_offset_text().get_visible())
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_dark_mode_toggle_restores_light_legend_when_snapshot_missing() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
@@ -296,6 +330,55 @@ def test_shared_graph_options_persist_to_pyplot_settings_when_plugin_swaps_setti
         plugin_settings.sync()
         assert isinstance(shared_settings.value("graph_options_global"), str)
         assert plugin_settings.value("graph_options_global", "") in {"", None}
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_preferred_export_directory_prefers_plugin_specific_history(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        plugin_name = "FMR"
+        import_dir = tmp_path / "import"
+        export_dir = tmp_path / "export"
+        import_dir.mkdir()
+        export_dir.mkdir()
+
+        window._plugin_last_directories = {plugin_name: import_dir}  # noqa: SLF001 - test hook
+        window._plugin_last_export_dirs = {plugin_name: export_dir}  # noqa: SLF001 - test hook
+
+        preferred = window._preferred_export_directory(plugin_name)  # noqa: SLF001 - test hook
+        assert preferred == export_dir
+
+        window._plugin_last_export_dirs = {plugin_name: tmp_path / "missing-export"}  # noqa: SLF001
+        preferred = window._preferred_export_directory(plugin_name)  # noqa: SLF001 - test hook
+        assert preferred == import_dir
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_remember_plugin_export_dir_persists_mapping(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        settings_path = tmp_path / "pyplot.ini"
+        window.settings = QtCore.QSettings(str(settings_path), QtCore.QSettings.Format.IniFormat)
+        plugin_name = "VSM Temperature Scan"
+        export_dir = tmp_path / "vsm-export"
+        export_dir.mkdir()
+
+        window._remember_plugin_export_dir(plugin_name, export_dir)  # noqa: SLF001 - test hook
+
+        mapping = getattr(window, "_plugin_last_export_dirs", {})
+        assert isinstance(mapping, dict)
+        assert mapping.get(plugin_name) == export_dir
+
+        raw = window.settings.value("plugin_last_export_dirs", "")
+        assert isinstance(raw, str) and raw
+        payload = json.loads(raw)
+        assert payload.get(plugin_name) == str(export_dir)
     finally:
         window.close()
         app.processEvents()
@@ -582,12 +665,12 @@ def test_switching_tabs_preserves_maximized_subwindow_mode() -> None:
         maximize_single(first_sub)
         app.processEvents()
         assert not first_sub.isHidden()
-        assert second_sub.isHidden()
+        assert not second_sub.isHidden()
 
         window.tab_widget.setCurrentWidget(second_tab)
         app.processEvents()
         assert not second_sub.isHidden()
-        assert first_sub.isHidden()
+        assert not first_sub.isHidden()
         assert bool(getattr(window.tab_widget, "_global_maximized", False))
         assert bool(getattr(window.tab_widget, "_fullscreen_lock", False))
     finally:
@@ -629,7 +712,7 @@ def test_fullscreen_geometry_fills_viewport_for_wide_aspect_graphs() -> None:
         app.processEvents()
 
 
-def test_non_native_demote_event_keeps_fullscreen_lock() -> None:
+def test_non_native_demote_event_clears_fullscreen_lock() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
     try:
@@ -662,10 +745,10 @@ def test_non_native_demote_event_keeps_fullscreen_lock() -> None:
         state_change(False, source=first_sub)
         app.processEvents()
 
-        assert bool(getattr(tab_proxy, "_fullscreen_lock", False))
-        assert bool(getattr(tab_proxy, "_global_maximized", False))
+        assert not bool(getattr(tab_proxy, "_fullscreen_lock", False))
+        assert not bool(getattr(tab_proxy, "_global_maximized", False))
         visible_count = int(not first_sub.isHidden()) + int(not second_sub.isHidden())
-        assert visible_count == 1
+        assert visible_count == 2
     finally:
         window.close()
         app.processEvents()
@@ -1077,6 +1160,305 @@ def test_shared_rescale_works_for_fmr_graphs(
         app.processEvents()
 
 
+def test_shared_rescale_works_for_vsm_temperature_scan_graphs() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Temperature Scan")
+    try:
+        window._confirm_close_with_unsaved_data = lambda: True  # noqa: SLF001 - avoid modal close prompt
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+        frame = pd.DataFrame(
+            {
+                "temperature": [20.0, 30.0, 40.0, 50.0, 60.0],
+                "field": [10000.0, 10000.0, 10000.0, 10000.0, 10000.0],
+                "signal": [2.2e-4, 2.0e-4, 1.9e-4, 1.85e-4, 1.8e-4],
+                "section_index": [0, 0, 0, 0, 0],
+            }
+        )
+        plugin._dataset = [  # noqa: SLF001 - test fixture injection
+            VSMTempEntry(path=Path("/tmp/vsm_temp_scan_rescale.txt"), sample="Sample", dataframe=frame)
+        ]
+        plugin.generate()
+        app.processEvents()
+
+        axes = window._current_axes()  # noqa: SLF001 - shared navigation target
+        assert axes is not None
+        axes.set_xlim(38.0, 42.0)
+        axes.set_ylim(1.90e-4, 1.91e-4)
+
+        window._rescale_current_axes("both")  # noqa: SLF001 - shared feature under test
+        app.processEvents()
+
+        x_limits = axes.get_xlim()
+        y_limits = axes.get_ylim()
+        assert x_limits[0] < 25.0 and x_limits[1] > 55.0
+        assert y_limits[0] < 1.81e-4 and y_limits[1] > 2.19e-4
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_navigation_mode_follows_active_graph_tab() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        first_tab = window.tab_widget.currentWidget()
+        window._create_blank_graph()
+        second_tab = window.tab_widget.currentWidget()
+        assert isinstance(first_tab, QtWidgets.QWidget)
+        assert isinstance(second_tab, QtWidgets.QWidget)
+        assert first_tab is not second_tab
+
+        window.tab_widget.setCurrentWidget(first_tab)
+        app.processEvents()
+        window._handle_zoom_triggered(True)  # noqa: SLF001 - shared toolbar hook
+        app.processEvents()
+        first_canvas = window._current_canvas()  # noqa: SLF001 - internal graph target
+        assert first_canvas is not None
+        assert getattr(window, "_nav_mode", None) == "zoom"  # noqa: SLF001
+
+        window.tab_widget.setCurrentWidget(second_tab)
+        app.processEvents()
+        second_canvas = window._current_canvas()  # noqa: SLF001 - internal graph target
+        assert second_canvas is not None
+        assert second_canvas is not first_canvas
+        assert getattr(window, "_nav_mode", None) == "zoom"  # noqa: SLF001
+        assert getattr(window, "_nav_active_canvas", None) is second_canvas  # noqa: SLF001
+        zoom_action = getattr(window, "_zoom_action", None)
+        assert isinstance(zoom_action, QtGui.QAction)
+        assert zoom_action.isChecked()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_temp_scan_smoothed_derivative_toggle_does_not_force_raw_derivative() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Temperature Scan")
+    try:
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+        _ = plugin.settings_widget()
+        derivative_cb = getattr(plugin, "_derivative_cb", None)
+        smoothed_cb = getattr(plugin, "_smoothed_derivative_cb", None)
+        assert isinstance(derivative_cb, QtWidgets.QCheckBox)
+        assert isinstance(smoothed_cb, QtWidgets.QCheckBox)
+
+        derivative_cb.setChecked(False)
+        smoothed_cb.setChecked(True)
+
+        assert bool(getattr(plugin._processor, "show_smoothed_derivative", False))  # noqa: SLF001
+        assert not bool(getattr(plugin._processor, "show_derivative", False))  # noqa: SLF001
+        assert not derivative_cb.isChecked()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_temp_scan_registers_smoothed_derivative_workbook_without_raw_derivative() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Temperature Scan")
+    try:
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+
+        frame = pd.DataFrame(
+            {
+                "temperature": [20.0, 30.0, 40.0],
+                "field": [10000.0, 10000.0, 10000.0],
+                "signal": [2.0e-4, 1.8e-4, 1.6e-4],
+                "section_index": [0, 0, 0],
+            }
+        )
+        plugin._dataset = [  # noqa: SLF001 - test fixture injection
+            VSMTempEntry(path=Path("/tmp/tscan_smoothed_only.txt"), sample="Sample", dataframe=frame)
+        ]
+        plugin._processor.set_show_derivative(False)  # noqa: SLF001
+        plugin._processor.set_show_smoothed_derivative(True)  # noqa: SLF001
+        plugin._processor.set_smooth_derivative(True)  # noqa: SLF001
+
+        plugin._register_workbooks()  # noqa: SLF001 - exercise registration path
+
+        managed = set(getattr(plugin, "_managed_workbooks", set()))  # noqa: SLF001
+        assert any(key.endswith("::derivative_smoothed") for key in managed)
+        assert not any(key.endswith("::derivative") for key in managed)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_temp_scan_project_state_restores_plot_options(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Temperature Scan")
+    try:
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+        _ = plugin.settings_widget()
+
+        split_cb = getattr(plugin, "_split_cb", None)
+        combine_cb = getattr(plugin, "_combine_fields_cb", None)
+        derivative_cb = getattr(plugin, "_derivative_cb", None)
+        smoothed_derivative_cb = getattr(plugin, "_smoothed_derivative_cb", None)
+        smoothed_cb = getattr(plugin, "_smooth_cb", None)
+        overlay_cb = getattr(plugin, "_overlay_cb", None)
+        median_spin = getattr(plugin, "_median_spin", None)
+        ma_spin = getattr(plugin, "_ma_spin", None)
+        deriv_median_spin = getattr(plugin, "_deriv_median_spin", None)
+        deriv_ma_spin = getattr(plugin, "_deriv_ma_spin", None)
+        assert isinstance(split_cb, QtWidgets.QCheckBox)
+        assert isinstance(combine_cb, QtWidgets.QCheckBox)
+        assert isinstance(derivative_cb, QtWidgets.QCheckBox)
+        assert isinstance(smoothed_derivative_cb, QtWidgets.QCheckBox)
+        assert isinstance(smoothed_cb, QtWidgets.QCheckBox)
+        assert isinstance(overlay_cb, QtWidgets.QCheckBox)
+        assert isinstance(median_spin, QtWidgets.QSpinBox)
+        assert isinstance(ma_spin, QtWidgets.QSpinBox)
+        assert isinstance(deriv_median_spin, QtWidgets.QSpinBox)
+        assert isinstance(deriv_ma_spin, QtWidgets.QSpinBox)
+
+        split_cb.setChecked(False)
+        combine_cb.setChecked(True)
+        derivative_cb.setChecked(False)
+        smoothed_derivative_cb.setChecked(True)
+        smoothed_cb.setChecked(True)
+        overlay_cb.setChecked(True)
+        median_spin.setValue(9)
+        ma_spin.setValue(21)
+        deriv_median_spin.setValue(7)
+        deriv_ma_spin.setValue(31)
+        app.processEvents()
+
+        payload = window._build_project_payload(base_path=tmp_path)  # noqa: SLF001
+        state = payload.get("active_plugin_state")
+        assert isinstance(state, dict)
+        assert state.get("combine_fields") is True
+        assert state.get("split_directions") is False
+        assert state.get("show_derivative") is False
+        assert state.get("show_smoothed_derivative") is True
+        assert state.get("show_smoothed_plot") is True
+        assert state.get("show_overlay_derivative") is True
+        assert state.get("median_window") == 9
+        assert state.get("moving_avg_window") == 21
+        assert state.get("derivative_median_window") == 7
+        assert state.get("derivative_moving_avg_window") == 31
+        plugin_state = {
+            key: value
+            for key, value in state.items()
+            if key != window.PLUGIN_SHARED_STATE_KEY  # noqa: SLF001
+        }
+
+        split_cb.setChecked(True)
+        combine_cb.setChecked(False)
+        derivative_cb.setChecked(True)
+        smoothed_derivative_cb.setChecked(False)
+        smoothed_cb.setChecked(False)
+        overlay_cb.setChecked(False)
+        median_spin.setValue(3)
+        ma_spin.setValue(5)
+        deriv_median_spin.setValue(3)
+        deriv_ma_spin.setValue(5)
+        app.processEvents()
+
+        plugin.restore_project_state(plugin_state, project_dir=tmp_path)
+        app.processEvents()
+
+        assert not bool(getattr(plugin._processor, "split_directions", True))  # noqa: SLF001
+        assert bool(getattr(plugin._processor, "combine_fields", False))  # noqa: SLF001
+        assert not bool(getattr(plugin._processor, "show_derivative", True))  # noqa: SLF001
+        assert bool(getattr(plugin._processor, "show_smoothed_derivative", False))  # noqa: SLF001
+        assert bool(getattr(plugin._processor, "show_smoothed_plot", False))  # noqa: SLF001
+        assert bool(getattr(plugin._processor, "show_overlay_derivative", False))  # noqa: SLF001
+        assert int(getattr(plugin._processor, "median_window", 0)) == 9  # noqa: SLF001
+        assert int(getattr(plugin._processor, "moving_avg_window", 0)) == 21  # noqa: SLF001
+        assert int(getattr(plugin._processor, "derivative_median_window", 0)) == 7  # noqa: SLF001
+        assert int(getattr(plugin._processor, "derivative_moving_avg_window", 0)) == 31  # noqa: SLF001
+
+        split_cb = getattr(plugin, "_split_cb", None)
+        combine_cb = getattr(plugin, "_combine_fields_cb", None)
+        derivative_cb = getattr(plugin, "_derivative_cb", None)
+        smoothed_derivative_cb = getattr(plugin, "_smoothed_derivative_cb", None)
+        smoothed_cb = getattr(plugin, "_smooth_cb", None)
+        overlay_cb = getattr(plugin, "_overlay_cb", None)
+        median_spin = getattr(plugin, "_median_spin", None)
+        ma_spin = getattr(plugin, "_ma_spin", None)
+        deriv_median_spin = getattr(plugin, "_deriv_median_spin", None)
+        deriv_ma_spin = getattr(plugin, "_deriv_ma_spin", None)
+        assert isinstance(split_cb, QtWidgets.QCheckBox) and not split_cb.isChecked()
+        assert isinstance(combine_cb, QtWidgets.QCheckBox) and combine_cb.isChecked()
+        assert isinstance(derivative_cb, QtWidgets.QCheckBox) and not derivative_cb.isChecked()
+        assert (
+            isinstance(smoothed_derivative_cb, QtWidgets.QCheckBox)
+            and smoothed_derivative_cb.isChecked()
+        )
+        assert isinstance(smoothed_cb, QtWidgets.QCheckBox) and smoothed_cb.isChecked()
+        assert isinstance(overlay_cb, QtWidgets.QCheckBox) and overlay_cb.isChecked()
+        assert isinstance(median_spin, QtWidgets.QSpinBox) and median_spin.value() == 9
+        assert isinstance(ma_spin, QtWidgets.QSpinBox) and ma_spin.value() == 21
+        assert (
+            isinstance(deriv_median_spin, QtWidgets.QSpinBox)
+            and deriv_median_spin.value() == 7
+        )
+        assert isinstance(deriv_ma_spin, QtWidgets.QSpinBox) and deriv_ma_spin.value() == 31
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_temp_scan_workbooks_support_outlier_detection_workflow() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Temperature Scan")
+    try:
+        window._confirm_close_with_unsaved_data = lambda: True  # noqa: SLF001 - avoid modal close prompt
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+
+        temperatures = list(range(30))
+        frame = pd.DataFrame(
+            {
+                "temperature": temperatures,
+                "field": [10000.0] * len(temperatures),
+                "signal": ([2.0e-4] * 29) + [9.0e-4],
+                "section_index": [0] * len(temperatures),
+            }
+        )
+        plugin._dataset = [  # noqa: SLF001 - test fixture injection
+            VSMTempEntry(path=Path("/tmp/tscan_outlier.txt"), sample="Outlier", dataframe=frame)
+        ]
+        plugin._processor.set_show_derivative(False)  # noqa: SLF001
+        plugin._processor.set_show_smoothed_derivative(False)  # noqa: SLF001
+        plugin._processor.set_show_smoothed(False)  # noqa: SLF001
+        plugin._register_workbooks()  # noqa: SLF001 - produce worksheet data
+
+        findings = window._collect_outlier_findings()  # noqa: SLF001 - shared outlier flow
+        assert findings
+        target = next(
+            (
+                finding
+                for finding in findings
+                if str(finding.workbook_name).startswith("Outlier (TScan)")
+            ),
+            None,
+        )
+        assert target is not None
+        assert target.outlier_count >= 1
+        assert 29 in target.row_indices
+
+        removed = window._apply_outlier_findings([target])  # noqa: SLF001 - shared outlier flow
+        assert removed >= 1
+
+        workbook_key = next(
+            key for key in window._workbooks.keys() if str(key).startswith("vsm_temp_scan::")
+        )  # noqa: SLF001
+        workbook = window._workbooks[workbook_key]  # noqa: SLF001
+        assert workbook.worksheets
+        worksheet = window._worksheets[workbook.worksheets[0]]  # noqa: SLF001
+        assert len(worksheet.dataframe) == 29
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_vsm_plugin_binds_static_project_helpers() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
@@ -1084,6 +1466,26 @@ def test_vsm_plugin_binds_static_project_helpers() -> None:
         fn = getattr(window, "_json_friendly", None)
         assert callable(fn)
         assert fn(float("inf")) is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_plugin_keeps_host_owned_project_methods_on_workbench() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        build_payload = getattr(window, "_build_project_payload", None)
+        apply_payload = getattr(window, "_apply_project_payload", None)
+        assert callable(build_payload)
+        assert callable(apply_payload)
+        assert getattr(build_payload, "__func__", None) is PyPlotWorkbench._build_project_payload
+        assert getattr(apply_payload, "__func__", None) is PyPlotWorkbench._apply_project_payload
+
+        plot_metrics = getattr(window, "_plot_metrics_vs_angle", None)
+        assert callable(plot_metrics)
+        module_name = getattr(getattr(plot_metrics, "__func__", None), "__module__", "")
+        assert module_name.endswith("plotting.plugins.vsm_hysteresis.vsm_hysteresis_loops")
     finally:
         window.close()
         app.processEvents()
@@ -1102,6 +1504,83 @@ def test_vsm_plugin_uses_shared_project_payload_format(tmp_path: Path) -> None:
         assert shared.get("auto_load_on_import") is True
         assert window.PROJECT_VERSION == PyPlotWorkbench.PROJECT_VERSION
     finally:
+        window.close()
+        app.processEvents()
+
+
+def test_shared_project_payload_includes_connected_folders(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="Hysteresis Loops")
+    try:
+        connected = tmp_path / "connected"
+        connected.mkdir()
+        window._connect_data_folders([connected])  # noqa: SLF001
+        payload = window._build_project_payload(base_path=tmp_path)  # noqa: SLF001
+        state = payload.get("active_plugin_state")
+        assert isinstance(state, dict)
+        shared = state.get(window.PLUGIN_SHARED_STATE_KEY)  # noqa: SLF001
+        assert isinstance(shared, dict)
+        connected_folders = shared.get("connected_folders")
+        assert isinstance(connected_folders, list)
+        assert connected.name in connected_folders[0]
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_connected_folders_do_not_restore_without_project_path(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="Hysteresis Loops")
+    try:
+        connected = tmp_path / "connected"
+        connected.mkdir()
+        window.settings.setValue(window._connected_folder_storage_key, [str(connected)])  # noqa: SLF001
+        window._connected_data_folders = []  # noqa: SLF001
+        window._restore_connected_folders()  # noqa: SLF001
+        assert window._connected_data_folders == []  # noqa: SLF001
+    finally:
+        window.settings.remove(window._connected_folder_storage_key)  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_connected_folders_restore_from_project_local_cache_per_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    monkeypatch.setattr(QtWidgets.QApplication, "platformName", lambda *_args: "windows")
+    window = PyPlotWorkbench(initial_plotter="Hysteresis Loops")
+    try:
+        project_one = tmp_path / "one.pypj"
+        project_two = tmp_path / "two.pypj"
+        folder_one = tmp_path / "folder_one"
+        folder_two = tmp_path / "folder_two"
+        folder_one.mkdir()
+        folder_two.mkdir()
+
+        window._project_path = project_one  # noqa: SLF001
+        window._connected_data_folders = [folder_one]  # noqa: SLF001
+        window._persist_connected_folders()  # noqa: SLF001
+
+        window._project_path = project_two  # noqa: SLF001
+        window._connected_data_folders = [folder_two]  # noqa: SLF001
+        window._persist_connected_folders()  # noqa: SLF001
+
+        window._project_path = project_one  # noqa: SLF001
+        window._connected_data_folders = []  # noqa: SLF001
+        window._restore_connected_folders(force_local=True)  # noqa: SLF001
+        assert window._connected_data_folders == [folder_one]  # noqa: SLF001
+
+        window._project_path = project_two  # noqa: SLF001
+        window._connected_data_folders = []  # noqa: SLF001
+        window._restore_connected_folders(force_local=True)  # noqa: SLF001
+        assert window._connected_data_folders == [folder_two]  # noqa: SLF001
+    finally:
+        for project in (project_one, project_two):
+            key = window._project_local_connected_folder_key(project)  # noqa: SLF001
+            window.settings.remove(key)  # noqa: SLF001
         window.close()
         app.processEvents()
 
@@ -1305,6 +1784,45 @@ def test_primary_dock_target_width_caps_large_persisted_values() -> None:
             expected_max = min(expected_max, PRIMARY_DOCK_EXPANDED_MAX)
         assert target <= expected_max
     finally:
+        window.close()
+        app.processEvents()
+
+
+def test_status_bar_cursor_readout_stays_visible_during_progress_on_narrow_window() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.resize(720, 520)
+        app.processEvents()
+        window._begin_task_progress(  # noqa: SLF001 - internal status-bar helper
+            "Loading large dataset...",
+            maximum=10,
+            value=1,
+        )
+        app.processEvents()
+
+        status = window.statusBar()
+        cursor_label = window._cursor_label  # noqa: SLF001 - internal status-bar helper
+        progress_label = window._task_progress_label  # noqa: SLF001 - internal status-bar helper
+        progress_bar = window._task_progress_bar  # noqa: SLF001 - internal status-bar helper
+        progress_dialog = window._task_progress_dialog  # noqa: SLF001 - internal progress helper
+        assert isinstance(status, QtWidgets.QStatusBar)
+        assert isinstance(cursor_label, QtWidgets.QLabel)
+        assert isinstance(progress_label, QtWidgets.QLabel)
+        assert isinstance(progress_bar, QtWidgets.QProgressBar)
+        assert isinstance(progress_dialog, QtWidgets.QDialog)
+        assert progress_dialog.isVisible()
+        assert cursor_label.minimumWidth() >= 120
+        assert progress_bar.value() == 1
+
+        window._update_cursor_status(  # noqa: SLF001 - internal status-bar helper
+            SimpleNamespace(inaxes=object(), xdata=1234.567, ydata=-9876.543)
+        )
+        text = cursor_label.text()
+        assert text
+        assert "x:" in text or "," in text
+    finally:
+        window._end_task_progress()  # noqa: SLF001 - internal status-bar helper
         window.close()
         app.processEvents()
 
@@ -1698,8 +2216,8 @@ def test_apply_graph_format_supports_axis_value_factor_and_unit_reflection() -> 
         controls["reflect_y_scale_units_cb"].setChecked(True)
         window._apply_graph_format(apply_all=False)
 
-        assert axes.get_xlabel() == "Field [Oe * 10^-3]"
-        assert axes.get_ylabel() == "Signal [V * 2]"
+        assert axes.get_xlabel() == "Field [Oe \u00d710\u00b3]"
+        assert axes.get_ylabel() == "Signal [V 0.5]"
         x_formatter = axes.xaxis.get_major_formatter()
         y_formatter = axes.yaxis.get_major_formatter()
         assert isinstance(x_formatter, mticker.FuncFormatter)
@@ -1999,6 +2517,268 @@ def test_object_manager_lists_line_items_for_each_axes() -> None:
 
         _collect(root)
         assert set(labels) >= {"Left axis", "Right axis"}
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_object_manager_lists_line_items_when_legend_exists() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        assert window._axes_by_tab  # noqa: SLF001 - test hook
+        tab, axes = next(iter(window._axes_by_tab.items()))  # noqa: SLF001 - test hook
+        assert axes is not None
+        axes.plot([0.0, 1.0], [1.0, 2.0], label="Series A")
+        axes.plot([0.0, 1.0], [2.0, 3.0], label="Series B")
+        axes.legend(loc="best")
+
+        index = window.tab_widget.indexOf(tab)
+        if index >= 0:
+            window.tab_widget.setCurrentIndex(index)
+        window._rebuild_object_manager_for_tab(tab)
+
+        tree = getattr(window, "object_tree", None)
+        assert isinstance(tree, QtWidgets.QTreeWidget)
+        root = tree.topLevelItem(0)
+        assert root is not None
+
+        labels: list[str] = []
+
+        def _collect(item: QtWidgets.QTreeWidgetItem) -> None:
+            for idx in range(item.childCount()):
+                child = item.child(idx)
+                data = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict) and data.get("kind") == "line":
+                    labels.append(child.text(0))
+                _collect(child)
+
+        _collect(root)
+        assert set(labels) >= {"Series A", "Series B"}
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_object_manager_line_hide_updates_line_visibility_and_legend() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        assert window._axes_by_tab  # noqa: SLF001 - test hook
+        tab, axes = next(iter(window._axes_by_tab.items()))  # noqa: SLF001 - test hook
+        assert axes is not None
+        line_a = axes.plot([0.0, 1.0], [1.0, 2.0], label="Visible A")[0]
+        _ = axes.plot([0.0, 1.0], [2.0, 3.0], label="Hide B")[0]
+        axes.legend(loc="best")
+
+        index = window.tab_widget.indexOf(tab)
+        if index >= 0:
+            window.tab_widget.setCurrentIndex(index)
+        window._rebuild_object_manager_for_tab(tab)
+
+        tree = getattr(window, "object_tree", None)
+        assert isinstance(tree, QtWidgets.QTreeWidget)
+        root = tree.topLevelItem(0)
+        assert root is not None
+
+        target_item: QtWidgets.QTreeWidgetItem | None = None
+
+        def _find_line(item: QtWidgets.QTreeWidgetItem) -> QtWidgets.QTreeWidgetItem | None:
+            for idx in range(item.childCount()):
+                child = item.child(idx)
+                data = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict) and data.get("kind") == "line" and child.text(0) == "Hide B":
+                    return child
+                found = _find_line(child)
+                if found is not None:
+                    return found
+            return None
+
+        target_item = _find_line(root)
+        assert target_item is not None
+        target_item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
+        app.processEvents()
+
+        lines = list(axes.get_lines())
+        hidden_line = next((line for line in lines if line.get_label() == "Hide B"), None)
+        assert hidden_line is not None
+        assert not bool(hidden_line.get_visible())
+        assert bool(line_a.get_visible())
+
+        legend = axes.get_legend()
+        assert legend is not None
+        labels = [text.get_text() for text in legend.get_texts()]
+        assert "Visible A" in labels
+        assert "Hide B" not in labels
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_object_manager_legend_hide_updates_visibility() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        tab, axes = next(iter(window._axes_by_tab.items()))  # noqa: SLF001 - test hook
+        assert axes is not None
+        axes.plot([0.0, 1.0], [1.0, 2.0], label="Series A")
+        legend = axes.legend(loc="best")
+        assert legend is not None
+
+        index = window.tab_widget.indexOf(tab)
+        if index >= 0:
+            window.tab_widget.setCurrentIndex(index)
+        window._rebuild_object_manager_for_tab(tab)
+
+        tree = window.object_tree  # noqa: SLF001 - UI fixture
+        assert isinstance(tree, QtWidgets.QTreeWidget)
+        root = tree.topLevelItem(0)
+        assert root is not None
+
+        legend_item: QtWidgets.QTreeWidgetItem | None = None
+
+        def _find_legend(item: QtWidgets.QTreeWidgetItem) -> QtWidgets.QTreeWidgetItem | None:
+            for idx in range(item.childCount()):
+                child = item.child(idx)
+                data = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict) and data.get("kind") == "legend":
+                    return child
+                found = _find_legend(child)
+                if found is not None:
+                    return found
+            return None
+
+        legend_item = _find_legend(root)
+        assert legend_item is not None
+        legend_item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
+        app.processEvents()
+
+        legend = axes.get_legend()
+        assert legend is not None
+        assert not bool(legend.get_visible())
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_graph_format_dialog_uses_fixed_tab_bar_with_per_tab_scroll() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        assert window._open_graph_format_dialog()  # noqa: SLF001
+        app.processEvents()
+
+        dialog = getattr(window, "_graph_format_dialog", None)
+        assert isinstance(dialog, QtWidgets.QDialog)
+        tabs = window._control_widget("format_tabs")  # noqa: SLF001
+        assert isinstance(tabs, QtWidgets.QTabWidget)
+        assert tabs.tabBar().isVisible()
+        assert dialog.findChild(QtWidgets.QScrollArea, "mw_graph_format_dialog_scroll") is None
+    finally:
+        dialog = getattr(window, "_graph_format_dialog", None)
+        if isinstance(dialog, QtWidgets.QDialog):
+            dialog.close()
+        window.close()
+        app.processEvents()
+
+
+def test_double_click_line_opens_shared_graph_format_line_controls() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        axes = window._current_axes()
+        assert axes is not None
+
+        called: dict[str, object] = {}
+
+        def _fake_open_graph_format_dialog(
+            checked: bool = False,
+            *,
+            focus_key: str | None = None,
+            select_all: bool = False,
+        ) -> bool:
+            called["checked"] = checked
+            called["focus_key"] = focus_key
+            called["select_all"] = select_all
+            return True
+
+        window._open_graph_format_dialog = _fake_open_graph_format_dialog  # type: ignore[assignment]
+        opened = window._open_shared_graph_format_from_double_click(  # noqa: SLF001
+            axes=axes,
+            line=True,
+        )
+        assert opened is True
+        assert called.get("focus_key") == "line_width_spin"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_object_manager_legend_context_menu_exposes_reconstruct() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        tab, axes = next(iter(window._axes_by_tab.items()))  # noqa: SLF001
+        assert axes is not None
+        axes.plot([0.0, 1.0], [1.0, 2.0], label="Series A")
+        legend = axes.legend(loc="best")
+        assert legend is not None
+
+        index = window.tab_widget.indexOf(tab)
+        if index >= 0:
+            window.tab_widget.setCurrentIndex(index)
+        window._rebuild_object_manager_for_tab(tab)
+
+        tree = window.object_tree  # noqa: SLF001
+        assert isinstance(tree, QtWidgets.QTreeWidget)
+        root = tree.topLevelItem(0)
+        assert root is not None
+
+        legend_item: QtWidgets.QTreeWidgetItem | None = None
+
+        def _find_legend(item: QtWidgets.QTreeWidgetItem) -> QtWidgets.QTreeWidgetItem | None:
+            for idx in range(item.childCount()):
+                child = item.child(idx)
+                data = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict) and data.get("kind") == "legend":
+                    return child
+                found = _find_legend(child)
+                if found is not None:
+                    return found
+            return None
+
+        legend_item = _find_legend(root)
+        assert legend_item is not None
+
+        called = {"reconstruct": False}
+
+        def _fake_reconstruct(item: QtWidgets.QTreeWidgetItem) -> None:
+            called["reconstruct"] = item is legend_item
+
+        window._reconstruct_legend_from_item = _fake_reconstruct  # type: ignore[assignment]
+        original_exec = QtWidgets.QMenu.exec
+
+        def _fake_exec(menu: QtWidgets.QMenu, *_args, **_kwargs):
+            actions = menu.actions()
+            assert [action.text() for action in actions] == [
+                "Legend settings...",
+                "Reconstruct legend",
+            ]
+            return actions[1]
+
+        QtWidgets.QMenu.exec = _fake_exec  # type: ignore[assignment]
+        try:
+            rect = tree.visualItemRect(legend_item)
+            window._handle_object_context_menu(rect.center())  # noqa: SLF001
+        finally:
+            QtWidgets.QMenu.exec = original_exec  # type: ignore[assignment]
+        assert called["reconstruct"] is True
     finally:
         window.close()
         app.processEvents()

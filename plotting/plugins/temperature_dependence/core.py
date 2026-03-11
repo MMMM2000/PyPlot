@@ -14,7 +14,7 @@ from matplotlib.figure import Figure
 from plotting.shared.config import load_config
 from plotting.shared.common import maybe_handle_outliers
 from plotting.shared.utils import save_figure, show_plots
-from plotting.shared.origin import origin_session
+from plotting.shared.origin import origin_session, set_origin_axis_title, set_origin_graph_title
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.backends import wants_matplotlib, wants_origin
 
@@ -231,7 +231,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
 def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
     """Create an Origin graph matching the Matplotlib style."""
 
-    with origin_session() as op:
+    with origin_session(keep_open=True) as op:
         comp = df["composition"].iat[0]
         sample = df["sample"].iat[0]
         anneal = df["anneal"].iat[0]
@@ -255,7 +255,7 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
         # Push to Origin and build the graph
         book = op.new_book('w', lname="Temp Dependence (Python)")
         book.activate()
-        gp = op.new_graph(template='scatter')
+        gp = op.new_graph(template='line')
         gl = gp[0]
 
         if PLOT_MODE in ("raw", "both") and not raw_cont.empty:
@@ -266,6 +266,8 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
             try:
                 p_cont.color = OVERALL_COLOR
                 p_cont.symbol_shape = 2  # circle
+                p_cont.legend = "raw 25-100C"
+                p_cont.lname = "raw 25-100C"
             except Exception:
                 pass
         if PLOT_MODE in ("raw", "both") and not raw_disc.empty:
@@ -275,6 +277,9 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
             p_disc = cast(Any, gl.add_plot(w_disc, coly=1, colx=0, type='s'))
             try:
                 p_disc.color = RAW_COLORS.get(25, '#45A1D6')
+                disc_label = "raw discrete"
+                p_disc.legend = disc_label
+                p_disc.lname = disc_label
             except Exception:
                 pass
         if PLOT_MODE in ("processed", "both") and not proc.empty:
@@ -285,6 +290,9 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
             try:
                 p_proc.color = PROC_COLOR
                 p_proc.line_width = PROC_LW
+                proc_label = f"med{MED_WINDOW}+mwa{MA_WINDOW}"
+                p_proc.legend = proc_label
+                p_proc.lname = proc_label
             except Exception:
                 pass
 
@@ -293,11 +301,63 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
             gp.activate()
             op.lt_exec('page.antialias=1;')
             op.lt_exec('layer -aa 1;')
-            op.lt_exec('lab -xb "Temperature (\u00B0C)";')
-            op.lt_exec(f'lab -yl "{LABELS[var]}";')
-            esc = (f"{comp} {sample} {anneal} - {LABELS[var]}").replace('"', "'")
-            op.lt_exec(f'title -s "{esc}";')
             op.lt_exec('legend;')
+        except Exception:
+            pass
+        for attr in (
+            'x.showAxes', 'y.showAxes',
+            'x.showlabel', 'x2.showlabel',
+            'y.showlabel', 'y2.showlabel',
+        ):
+            try:
+                gl.set_int(attr, 1 if attr in {'x.showAxes', 'y.showAxes', 'x.showlabel', 'y.showlabel'} else 0)
+            except Exception:
+                continue
+        for cmd in (
+            'layer.x.showAxes=1;',
+            'layer.y.showAxes=1;',
+            'layer.x.showlabel=1;',
+            'layer.x2.showlabel=0;',
+            'layer.y.showlabel=1;',
+            'layer.y2.showlabel=0;',
+        ):
+            try:
+                op.lt_exec(cmd)
+            except Exception:
+                continue
+        legend_lines: list[str] = []
+        if PLOT_MODE in ("raw", "both") and not raw_cont.empty:
+            legend_lines.append("\\c(1) raw 25-100C")
+        if PLOT_MODE in ("raw", "both") and not raw_disc.empty:
+            legend_lines.append(f"\\c({len(legend_lines) + 1}) raw discrete")
+        if PLOT_MODE in ("processed", "both") and not proc.empty:
+            legend_lines.append(f"\\c({len(legend_lines) + 1}) med{MED_WINDOW}+mwa{MA_WINDOW}")
+        if legend_lines:
+            try:
+                legend = gl.label('Legend')
+                legend.text = "\n".join(legend_lines)
+                op.lt_exec('legend.update=0;')
+            except Exception:
+                pass
+        for token in ('xt', 'XT', 'yr', 'YR'):
+            try:
+                label = gl.label(token)
+            except Exception:
+                label = None
+            if label is None:
+                continue
+            try:
+                label.text = ""
+            except Exception:
+                pass
+            try:
+                label.set_int('show', 0)
+            except Exception:
+                pass
+        try:
+            set_origin_axis_title(gl, 'x', 'Temperature (\u00B0C)')
+            set_origin_axis_title(gl, 'y', LABELS[var])
+            set_origin_graph_title(op, gp, gl, f"{comp} {sample} {anneal} - {LABELS[var]}")
         except Exception:
             pass
 

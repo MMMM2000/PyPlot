@@ -1,15 +1,21 @@
+from __future__ import annotations
 
+import csv
 import os
 import re
-from typing import Any, List, Tuple, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable, List, Sequence, Tuple
 
-import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+import numpy as np
+import pandas as pd
+
 from plotting.shared.backends import wants_matplotlib, wants_origin
 from plotting.shared.config import load_config
-from plotting.shared.utils import show_plots
 from plotting.shared.readability import apply_readability_fonts, apply_readability
+from plotting.shared.utils import show_plots
 
 _CFG = load_config().get("hysteresis_loops", {})
 MODE = _CFG.get("MODE", "Combined")
@@ -28,229 +34,360 @@ SHOW_TICK_LABELS = bool(_CFG.get("SHOW_TICK_LABELS", True))
 SHOW_AXIS_LABELS = bool(_CFG.get("SHOW_AXIS_LABELS", True))
 SHOW_TITLE = bool(_CFG.get("SHOW_TITLE", True))
 
+X_AXIS_LABEL = "Magnetic field [A/m]"
+Y_AXIS_LABEL = "Magnetic flux [Wb]"
 
-def load_loop(path: str) -> Tuple[np.ndarray, np.ndarray]:
-    data = np.loadtxt(path, usecols=(0, 1))
-    if data.ndim == 1:
-        data = data.reshape(1, -1)
-    x = data[:, 0]
-    y = data[:, 1]
+_TEMP_RE = re.compile(r"(\d+)\s*([°]?[Cc])", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class HysteresisLoopRecord:
+    path: Path
+    base_name: str
+    anneal_sort_key: float
+    anneal_label: str
+    x: np.ndarray
+    y: np.ndarray
+
+
+def _clean_numeric_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    cleaned = frame.copy()
+    for column in cleaned.columns:
+        series = cleaned[column].astype(str).str.replace("\u2212", "-", regex=False).str.strip()
+        cleaned[column] = pd.to_numeric(series, errors="coerce")
+    return cleaned
+
+
+def _read_numeric_frame(path: Path) -> pd.DataFrame:
+    errors: list[str] = []
+    candidates: tuple[str | None, ...] = (r"\s+", "\t", ",", ";", None)
+    for sep in candidates:
+        try:
+            frame = pd.read_csv(
+                path,
+                sep=sep,
+                engine="python",
+                comment="#",
+                header=None,
+                dtype=str,
+                on_bad_lines="skip",
+            )
+        except (OSError, csv.Error, pd.errors.ParserError, UnicodeDecodeError) as exc:
+            errors.append(str(exc))
+            continue
+        if frame.empty:
+            continue
+        frame = frame.dropna(axis=1, how="all")
+        if frame.empty:
+            continue
+        numeric = _clean_numeric_frame(frame)
+        usable = [
+            column
+            for column in numeric.columns
+            if int(numeric[column].notna().sum()) >= 2
+        ]
+        if len(usable) < 2:
+            continue
+        subset = numeric.loc[:, usable[:2]].dropna(how="any")
+        if not subset.empty:
+            return subset.reset_index(drop=True)
+    message = "; ".join(errors[:3]) if errors else "no usable numeric columns found"
+    raise ValueError(f"{path.name}: {message}")
+
+
+def load_loop(path: str | Path) -> Tuple[np.ndarray, np.ndarray]:
+    source = Path(path)
+    data = _read_numeric_frame(source)
+    x = data.iloc[:, 0].to_numpy(dtype=float)
+    y = data.iloc[:, 1].to_numpy(dtype=float)
     return x, y
 
-_RE_TEMP = re.compile(r"(\d+)\s*([°]?[Cc])", re.IGNORECASE)
 
 def _parse_meta(filename: str) -> Tuple[str, float, str]:
-    """Return (base_name, sort_key, label).
+    """Return ``(base_name, sort_key, label)`` for one hysteresis source file."""
 
-    - base_name: e.g. "FeSiBP 159_9 s3"
-    - sort_key: -inf for as-cast, otherwise numeric temperature
-    - label: "as-cast" or "350°C"
-    """
     name = os.path.splitext(os.path.basename(filename))[0]
-    norm = name.lower().replace('-', '').replace('_', '')
-    # detect as-cast
-    if 'ascast' in norm or ('asc' in norm and 'cast' in norm):
+    norm = name.lower().replace("-", "").replace("_", "")
+    if "ascast" in norm or ("asc" in norm and "cast" in norm):
         parts = name.split()
-        base = ' '.join(parts[:-1]) if len(parts) > 1 else name
-        return base, float('-inf'), 'as-cast'
-    m = _RE_TEMP.search(name)
-    if m:
-        t = float(m.group(1))
-        base = name[:m.start()].strip()
-        return base, t, f"{int(t)}°C"
-    # fallback: treat as as-cast
+        base = " ".join(parts[:-1]) if len(parts) > 1 else name
+        return base, float("-inf"), "as-cast"
+    match = _TEMP_RE.search(name)
+    if match:
+        temperature = float(match.group(1))
+        base = name[: match.start()].strip()
+        return base, temperature, f"{int(temperature)}°C"
     parts = name.split()
-    base = ' '.join(parts[:-1]) if len(parts) > 1 else name
-    return base, float('-inf'), 'as-cast'
+    base = " ".join(parts[:-1]) if len(parts) > 1 else name
+    return base, float("-inf"), "as-cast"
 
 
-def _stacked(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> Figure:
-    """Stacked figure: as-cast on top, highest temp bottom; zero spacing."""
-    # Parse for ordering
-    metas = [(_parse_meta(p), p, x, y) for (p, x, y) in loaded]
-    metas.sort(key=lambda t: (t[0][1], t[0][2]))  # by sort_key then label
-    base_name = metas[0][0][0]
-    n = len(metas)
-    fig, axes = plt.subplots(n, 1, sharex=True, figsize=(7, 1.2 * n), gridspec_kw={'hspace': 0})
-    if n == 1:
-        axes = [axes]
-    for ax, ((base, _, label), path, x, y) in zip(axes, metas):
-        ax.plot(x, y, lw=1.2)
-        ax.grid(True, linestyle='--', alpha=0.3)
-        ax.text(0.02, 0.96, label, transform=ax.transAxes, va='top', ha='left')
-        ax.set_ylabel('F (Wb)')
-    for ax in axes[:-1]:
-        ax.label_outer()
-    axes[-1].set_xlabel('H (A/m)')
-    fig.suptitle(base_name)
-    fig.subplots_adjust(hspace=0, top=0.9, left=0.1, right=0.95, bottom=0.1)
-    for ax in axes:
-        apply_readability(ax, globals())
+def load_records(paths: Iterable[str | Path]) -> list[HysteresisLoopRecord]:
+    records: list[HysteresisLoopRecord] = []
+    for entry in paths:
+        path = Path(entry)
+        x, y = load_loop(path)
+        base_name, anneal_sort_key, anneal_label = _parse_meta(path.name)
+        records.append(
+            HysteresisLoopRecord(
+                path=path,
+                base_name=base_name,
+                anneal_sort_key=anneal_sort_key,
+                anneal_label=anneal_label,
+                x=x,
+                y=y,
+            )
+        )
+    return records
+
+
+def sort_records(records: Sequence[HysteresisLoopRecord]) -> list[HysteresisLoopRecord]:
+    return sorted(
+        records,
+        key=lambda record: (
+            record.anneal_sort_key,
+            record.anneal_label.casefold(),
+            record.path.name.casefold(),
+        ),
+    )
+
+
+def group_records(
+    records: Sequence[HysteresisLoopRecord],
+) -> dict[str, list[HysteresisLoopRecord]]:
+    grouped: dict[str, list[HysteresisLoopRecord]] = {}
+    for record in sort_records(records):
+        grouped.setdefault(record.base_name, []).append(record)
+    return grouped
+
+
+def _apply_legend_line_colors(ax: Any) -> None:
+    legend = ax.get_legend()
+    if legend is None:
+        return
+    handles = getattr(legend, "legend_handles", None)
+    if handles is None:
+        handles = getattr(legend, "legendHandles", [])
+    for handle, text in zip(handles, legend.get_texts()):
+        get_color = getattr(handle, "get_color", None)
+        if callable(get_color):
+            try:
+                text.set_color(get_color())
+            except Exception:
+                continue
+
+
+def _style_axes(ax: Any, *, title: str | None = None) -> None:
+    ax.grid(True, linestyle="--", alpha=0.3)
+    ax.set_xlabel(X_AXIS_LABEL, fontsize=AXIS_LABEL_SIZE)
+    ax.set_ylabel(Y_AXIS_LABEL, fontsize=AXIS_LABEL_SIZE)
+    if title and SHOW_TITLE:
+        ax.set_title(title, fontsize=TITLE_SIZE, pad=10)
+    ax.tick_params(axis="both", labelsize=TICK_SIZE)
+    apply_readability(ax, globals())
+    _apply_legend_line_colors(ax)
+
+
+def combined_figure(records: Sequence[HysteresisLoopRecord]) -> Figure:
+    ordered = sort_records(records)
+    if not ordered:
+        raise ValueError("No hysteresis loop data available.")
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    for record in ordered:
+        ax.plot(
+            record.x,
+            record.y,
+            linewidth=1.3,
+            marker="o",
+            markersize=4.2,
+            markeredgewidth=0.0,
+            label=record.anneal_label,
+        )
+    if SHOW_LEGEND and len(ordered) > 1:
+        ax.legend(
+            title="Anneal",
+            loc="best",
+            fontsize=LEGEND_SIZE,
+            labelcolor="linecolor",
+        )
+    _style_axes(ax, title=ordered[0].base_name)
+    fig.tight_layout()
+    _apply_legend_line_colors(ax)
     return fig
 
 
+def stacked_figure(records: Sequence[HysteresisLoopRecord]) -> Figure:
+    ordered = sort_records(records)
+    if not ordered:
+        raise ValueError("No hysteresis loop data available.")
+    fig, axes = plt.subplots(
+        len(ordered),
+        1,
+        sharex=True,
+        figsize=(7.2, max(2.4, 1.8 * len(ordered))),
+        gridspec_kw={"hspace": 0.05},
+    )
+    if len(ordered) == 1:
+        axes = [axes]
+    for ax, record in zip(axes, ordered):
+        ax.plot(
+            record.x,
+            record.y,
+            linewidth=1.2,
+            marker="o",
+            markersize=3.8,
+            markeredgewidth=0.0,
+            label=record.anneal_label,
+        )
+        ax.text(
+            0.02,
+            0.96,
+            record.anneal_label,
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+        )
+        _style_axes(ax)
+    axes[-1].set_xlabel(X_AXIS_LABEL, fontsize=AXIS_LABEL_SIZE)
+    if SHOW_TITLE:
+        fig.suptitle(ordered[0].base_name, fontsize=TITLE_SIZE)
+    fig.tight_layout()
+    return fig
+
+
+def separate_figures(records: Sequence[HysteresisLoopRecord]) -> list[Figure]:
+    figures: list[Figure] = []
+    for record in sort_records(records):
+        fig, ax = plt.subplots(figsize=(7.0, 4.4))
+        ax.plot(
+            record.x,
+            record.y,
+            linewidth=1.3,
+            marker="o",
+            markersize=4.2,
+            markeredgewidth=0.0,
+            label=record.anneal_label,
+        )
+        if SHOW_LEGEND:
+            ax.legend(loc="best", fontsize=LEGEND_SIZE, labelcolor="linecolor")
+        _style_axes(ax, title=f"{record.base_name} - {record.anneal_label}")
+        fig.tight_layout()
+        figures.append(fig)
+    return figures
+
+
 def _origin_plot_combined(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> None:
-    import originpro as op  # lazy import
+    import originpro as op  # pragma: no cover - Origin only
+
     origin_any: Any = op
-    # Ensure Origin UI is visible when plotting
     try:
         origin_any.set_show()
     except Exception:
         pass
 
-    try:
-        origin_any.exit()
-    except Exception:
-        pass
-
-    book: Any = origin_any.new_book('w', lname="Hysteresis (Python)")
+    book: Any = origin_any.new_book("w", lname="Hysteresis (Python)")
     book.activate()
-    gp: Any = origin_any.new_graph(template='line')
-    gl: Any = gp[0]
+    graph: Any = origin_any.new_graph(template="line")
+    layer: Any = graph[0]
 
     base_title = None
     for path, x, y in loaded:
-        base, _t, label = _parse_meta(path)
+        base, _temperature, label = _parse_meta(path)
         if base_title is None:
             base_title = base
-        wks: Any = origin_any.new_sheet('w', lname=label)
-        wks.from_list(0, x)
-        wks.from_list(1, y)
-        wks.cols_axis('XY')
-        gl.add_plot(wks, coly=1, colx=0, type='y')
+        worksheet: Any = origin_any.new_sheet("w", lname=label)
+        worksheet.from_list(0, x)
+        worksheet.from_list(1, y)
+        worksheet.cols_axis("XY")
+        layer.add_plot(worksheet, coly=1, colx=0, type="y")
 
     try:
-        gp.activate()
-        origin_any.lt_exec('page.antialias=1;')
-        origin_any.lt_exec('layer -aa 1;')
-        origin_any.lt_exec('lab -xb "H (A/m)";')
-        origin_any.lt_exec('lab -yl "F (Wb)";')
+        graph.activate()
+        origin_any.lt_exec('lab -xb "H [A/m]";')
+        origin_any.lt_exec('lab -yl "F [Wb]";')
         if base_title:
-            esc = base_title.replace('"', "'")
-            origin_any.lt_exec(f'title -s "{esc}";')
-        origin_any.lt_exec('legend;')
-    except Exception:
-        pass
-
-    try:
-        origin_any.exit()
+            safe_title = base_title.replace('"', "'")
+            origin_any.lt_exec(f'title -s "{safe_title}";')
+        origin_any.lt_exec("legend;")
     except Exception:
         pass
 
 
 def _origin_plot_separate(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> None:
-    import originpro as op  # lazy import
+    import originpro as op  # pragma: no cover - Origin only
+
     origin_any: Any = op
-    # Ensure Origin UI is visible when plotting
     try:
         origin_any.set_show()
     except Exception:
         pass
 
-    book: Any = origin_any.new_book('w', lname="Hysteresis (Python)")
+    book: Any = origin_any.new_book("w", lname="Hysteresis (Python)")
     book.activate()
     for path, x, y in loaded:
-        base, _t, label = _parse_meta(path)
-        wks: Any = origin_any.new_sheet('w', lname=label)
-        wks.from_list(0, x)
-        wks.from_list(1, y)
-        wks.cols_axis('XY')
-        gp: Any = origin_any.new_graph(template='line')
-        gl: Any = gp[0]
-        gl.add_plot(wks, coly=1, colx=0, type='y')
+        base, _temperature, label = _parse_meta(path)
+        worksheet: Any = origin_any.new_sheet("w", lname=label)
+        worksheet.from_list(0, x)
+        worksheet.from_list(1, y)
+        worksheet.cols_axis("XY")
+        graph: Any = origin_any.new_graph(template="line")
+        layer: Any = graph[0]
+        layer.add_plot(worksheet, coly=1, colx=0, type="y")
         try:
-            gp.activate()
-            origin_any.lt_exec('page.antialias=1;')
-            origin_any.lt_exec('layer -aa 1;')
-            esc = (f"{base} - {label}").replace('"', "'")
-            origin_any.lt_exec(f'title -s "{esc}";')
-            origin_any.lt_exec('lab -xb "H (A/m)";')
-            origin_any.lt_exec('lab -yl "F (Wb)";')
+            graph.activate()
+            safe_title = f"{base} - {label}".replace('"', "'")
+            origin_any.lt_exec(f'title -s "{safe_title}";')
+            origin_any.lt_exec('lab -xb "H [A/m]";')
+            origin_any.lt_exec('lab -yl "F [Wb]";')
         except Exception:
             pass
 
-    try:
-        origin_any.exit()
-    except Exception:
-        pass
-
 
 def plot_loops(
-    paths: Sequence[str],
+    paths: Sequence[str | Path],
     mode: str = "Combined",
     show: bool = True,
     backend: str = BACKEND,
 ) -> Figure | List[Figure] | None:
-    """Plot hysteresis loops.
-
-    mode: "Combined" (one axes with legend), "Stacked" (zero spacing),
-          or "Separate" (one window per file).
-    """
     if IMPROVE_READABILITY:
         apply_readability_fonts()
+
+    records = load_records(paths)
+    grouped = group_records(records)
+
     if not wants_matplotlib(backend) and wants_origin(backend):
-        loaded: List[Tuple[str, np.ndarray, np.ndarray]] = []
-        for path in paths:
-            x, y = load_loop(path)
-            loaded.append((path, x, y))
-        m = mode.lower()
-        if m == "combined":
-            _origin_plot_combined(loaded)
-        elif m == "separate":
+        loaded = [(str(record.path), record.x, record.y) for record in records]
+        mode_key = mode.strip().lower()
+        if mode_key == "separate":
             _origin_plot_separate(loaded)
         else:
-            # Fallback: combined when 'stacked' requested (multi-layer stacking is complex)
             _origin_plot_combined(loaded)
         return None
 
-    loaded: List[Tuple[str, np.ndarray, np.ndarray]] = []
-    for path in paths:
-        x, y = load_loop(path)
-        loaded.append((path, x, y))
-
-    if mode.lower() == "stacked":
-        fig = _stacked(loaded)
+    mode_key = mode.strip().lower()
+    if mode_key == "separate":
+        figures = separate_figures(records)
         if show:
             show_plots()
-        return fig
+        return figures
 
-    if mode.lower() == "combined":
-        fig, ax = plt.subplots()
-        base_title = None
-        for path, x, y in loaded:
-            base, _, label = _parse_meta(path)
-            if base_title is None:
-                base_title = base
-            ax.plot(x, y, lw=1.2, label=label)
-        ax.grid(True, linestyle='--', alpha=0.3)
-        ax.set_xlabel("H (A/m)")
-        ax.set_ylabel("F (Wb)")
-        if base_title:
-            ax.set_title(base_title)
-        ax.legend(title="Anneal", loc="best")
-        fig.tight_layout()
-        apply_readability(ax, globals())
-        if show:
-            show_plots()
-        return fig
-
-    # Separate
-    figs: List[Figure] = []
-    for path, x, y in loaded:
-        fig, ax = plt.subplots()
-        ax.plot(x, y, lw=1.2)
-        ax.set_xlabel("H (A/m)")
-        ax.set_ylabel("F (Wb)")
-        base, _, label = _parse_meta(path)
-        ax.set_title(f"{base} — {label}")
-        ax.grid(True, linestyle="--", alpha=0.3)
-        fig.tight_layout()
-        apply_readability(ax, globals())
-        figs.append(fig)
+    builders = {
+        "combined": combined_figure,
+        "stacked": stacked_figure,
+    }
+    builder = builders.get(mode_key, combined_figure)
+    figures = [builder(group) for group in grouped.values()]
     if show:
         show_plots()
-    return figs
+    if len(figures) == 1:
+        return figures[0]
+    return figures
 
 
 def main(files: List[str], backend: str = BACKEND) -> None:
-    plot_loops(files, mode=MODE, show=SHOW_PLOTS and wants_matplotlib(backend), backend=backend)
+    plot_loops(
+        files,
+        mode=MODE,
+        show=SHOW_PLOTS and wants_matplotlib(backend),
+        backend=backend,
+    )

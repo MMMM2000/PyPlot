@@ -508,6 +508,54 @@ def _numeric_column(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(values, errors="coerce")
 
 
+def _scalar_float(value: Any) -> float | None:
+    """Return a finite scalar float when ``value`` is scalar-like, else ``None``."""
+
+    candidate = value
+    if isinstance(candidate, np.ndarray):
+        if candidate.ndim == 0:
+            candidate = candidate.item()
+        elif candidate.size == 1:
+            candidate = candidate.reshape(-1)[0]
+        else:
+            return None
+    elif isinstance(candidate, (list, tuple)):
+        if len(candidate) != 1:
+            return None
+        candidate = candidate[0]
+    try:
+        numeric = float(candidate)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return numeric
+
+
+def _coerce_numeric_array(values: np.ndarray | Sequence[Any]) -> np.ndarray:
+    """Coerce arbitrary numeric-like sequences into a 1D finite/NaN float array."""
+
+    raw = np.asarray(values, dtype=object).reshape(-1)
+    coerced = np.full(raw.shape, np.nan, dtype=float)
+    for idx, value in enumerate(raw):
+        numeric = _scalar_float(value)
+        if numeric is not None:
+            coerced[idx] = numeric
+    return coerced
+
+
+def _json_friendly_value(value: Any) -> Any:
+    """Convert runtime values to JSON-safe payload values."""
+
+    if isinstance(value, (int, str, bool)) or value is None:
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, np.generic):
+        return _json_friendly_value(value.item())
+    return str(value)
+
+
 def _apply_rescaling(
     entries: Sequence[tuple[Path, pd.DataFrame]],
     x_axis: str,
@@ -971,6 +1019,8 @@ def _symmetrise_crossings(
 def _collect_crossings_x_at_y(
     x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0
 ) -> List[float]:
+    x_values = _coerce_numeric_array(x_values)
+    y_values = _coerce_numeric_array(y_values)
     candidates: List[float] = []
 
     def _record(value: float) -> None:
@@ -1079,6 +1129,8 @@ def _collect_crossings_x_at_y(
 def _collect_crossings_y_at_x(
     x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0
 ) -> List[float]:
+    x_values = _coerce_numeric_array(x_values)
+    y_values = _coerce_numeric_array(y_values)
     candidates: List[float] = []
 
     def _record(value: float) -> None:
@@ -2027,13 +2079,13 @@ class VSMPlotter(PyPlotWindow):
             for _, row in table.iterrows():
                 record: Dict[str, Any] = {}
                 for column in table.columns:
-                    record[str(column)] = self._json_friendly(row[column])
+                    record[str(column)] = _json_friendly_value(row[column])
                 records.append(record)
-            index_payload = [self._json_friendly(value) for value in table.index.tolist()]
+            index_payload = [_json_friendly_value(value) for value in table.index.tolist()]
             entry: Dict[str, Any] = {
                 'path': str(measurement.path),
-                'temperature': self._json_friendly(measurement.temperature),
-                'angle': self._json_friendly(measurement.angle),
+                'temperature': _json_friendly_value(measurement.temperature),
+                'angle': _json_friendly_value(measurement.angle),
                 'data': {
                     'columns': [str(column) for column in table.columns],
                     'records': records,
@@ -2280,14 +2332,7 @@ class VSMPlotter(PyPlotWindow):
 
     @staticmethod
     def _json_friendly(value: Any) -> Any:
-        if isinstance(value, (int, str, bool)) or value is None:
-            return value
-        if isinstance(value, float):
-            return value if math.isfinite(value) else None
-        if isinstance(value, np.generic):
-            python_value = value.item()
-            return VSMPlotter._json_friendly(python_value)
-        return str(value)
+        return _json_friendly_value(value)
 
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
         def _style_group(group: QtWidgets.QGroupBox, *, margin: int = 12) -> None:

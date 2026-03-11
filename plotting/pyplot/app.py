@@ -65,7 +65,7 @@ class PyPlotWorkbench(PyPlotWindow):
     GRAPH_DOCK_ENABLED = False
     PLUGIN_SHARED_STATE_KEY = "__pyplot_shared__"
     GRAPH_OPTION_DEFAULTS: Dict[str, Any] = {
-        "show_grid": True,
+        "show_grid": False,
         "show_legend": True,
         "title_font": 16,
         "label_font": 12,
@@ -124,6 +124,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._current_plugin: PyPlotPlugin | None = None
         self._current_plotter_name: str | None = None
         self._plotter_combo: QtWidgets.QComboBox | None = None
+        self._plot_scope_combo: QtWidgets.QComboBox | None = None
         self._active_plugin_updater: Callable[[], None] | None = None
         self._initial_plotter = initial_plotter
         self._plotter_history: list[str] = self._load_plotter_history()
@@ -139,6 +140,8 @@ class PyPlotWorkbench(PyPlotWindow):
         self._graph_options_action: QtGui.QAction | None = None
         self._graph_option_defaults_global: Dict[str, Any] = {}
         self._graph_option_defaults_by_plugin: Dict[str, Dict[str, Any]] = {}
+        self._plot_request_mode: str | None = None
+        self._plot_request_paths_snapshot: List[Path] | None = None
         super().__init__(title="PyPlot")
         self.setObjectName("PyPlotWorkbench")
         if not sys.platform.startswith("win") and sys.platform != "darwin":
@@ -234,7 +237,11 @@ class PyPlotWorkbench(PyPlotWindow):
     ) -> None:
         super()._register_plot_tab(tab, canvas, axes, descriptor)
         plugin_name = self._tab_plugin_name(descriptor)
-        self._apply_graph_options_to_axes(axes, plugin_name=plugin_name)
+        self._apply_graph_options_to_axes(
+            axes,
+            plugin_name=plugin_name,
+            adjust_subwindow=False,
+        )
 
     def _load_plotter_history(self) -> list[str]:
         settings = self._shared_qsettings()
@@ -308,6 +315,14 @@ class PyPlotWorkbench(PyPlotWindow):
         self.plot_button = plot_action
         self._style_toolbar_button(toolbar, plot_action, object_name="mw_plot_action")
 
+        plot_scope_combo = QtWidgets.QComboBox(toolbar)
+        plot_scope_combo.setObjectName("mw_plot_scope_combo")
+        plot_scope_combo.addItem("Replot all", "all")
+        plot_scope_combo.addItem("Plot new", "new")
+        plot_scope_combo.setToolTip("Choose whether to regenerate every graph or only graph newly imported files.")
+        toolbar.addWidget(plot_scope_combo)
+        self._plot_scope_combo = plot_scope_combo
+
         self._init_graph_settings_menu(toolbar)
 
     def _refresh_plotter_combo(self) -> None:
@@ -365,6 +380,28 @@ class PyPlotWorkbench(PyPlotWindow):
             self._active_plugin_updater = None
             self._update_action_states()
         return
+
+    def _requested_plot_scope(self) -> str:
+        combo = self._plot_scope_combo
+        if isinstance(combo, QtWidgets.QComboBox):
+            token = combo.currentData()
+            if isinstance(token, str) and token in {"all", "new"}:
+                return token
+        return "all"
+
+    def _recent_new_plot_paths(self) -> List[Path]:
+        return [
+            path for path in getattr(self, "_pending_new_plot_paths", [])
+            if isinstance(path, Path) and path.exists() and path.is_file()
+        ]
+
+    def _plot_request_paths(self) -> List[Path]:
+        if isinstance(self._plot_request_paths_snapshot, list):
+            return list(self._plot_request_paths_snapshot)
+        return list(self._selected_paths())
+
+    def _plot_request_is_incremental(self) -> bool:
+        return str(self._plot_request_mode or "").strip().lower() == "new"
     def _dialog_start_directory(self) -> Path:
         if self._current_plotter_name:
             stored = self._plugin_last_directories.get(self._current_plotter_name)
@@ -812,7 +849,11 @@ class PyPlotWorkbench(PyPlotWindow):
                 continue
             seen.add(marker)
             plugin_name = self._plugin_name_for_axes(axes)
-            self._apply_graph_options_to_axes(axes, plugin_name=plugin_name)
+            self._apply_graph_options_to_axes(
+                axes,
+                plugin_name=plugin_name,
+                adjust_subwindow=True,
+            )
             applied += 1
         return applied
 
@@ -1013,7 +1054,13 @@ class PyPlotWorkbench(PyPlotWindow):
         height = max(0.5, min(height, 20.0))
         return width, height
 
-    def _apply_graph_options_to_axes(self, axes: Any, *, plugin_name: str | None) -> None:
+    def _apply_graph_options_to_axes(
+        self,
+        axes: Any,
+        *,
+        plugin_name: str | None,
+        adjust_subwindow: bool = True,
+    ) -> None:
         if axes is None:
             return
         options = self._effective_graph_options(plugin_name)
@@ -1146,6 +1193,8 @@ class PyPlotWorkbench(PyPlotWindow):
                         pass
 
         self._fit_figure_to_content(figure)
+        if not adjust_subwindow:
+            return
         tab = self._tab_for_axes(axes)  # noqa: SLF001 - shared helper
         if tab is None:
             return
@@ -1169,14 +1218,15 @@ class PyPlotWorkbench(PyPlotWindow):
                     setter(aspect)
                 except Exception:
                     pass
-        if bool(getattr(self.tab_widget, "_global_maximized", False) or getattr(self.tab_widget, "_fullscreen_lock", False)):
-            maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
-            if callable(maybe_maximize):
-                try:
+        is_maximized_target = getattr(self.tab_widget, "_is_maximized_target", None)
+        maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
+        if callable(is_maximized_target) and callable(maybe_maximize):
+            try:
+                if bool(is_maximized_target(sub)):
                     maybe_maximize(sub)
-                except Exception:
-                    pass
-            return
+                    return
+            except Exception:
+                pass
         try:
             dpi = float(getattr(figure, "dpi", 100.0) or 100.0) if figure is not None else 100.0
         except Exception:
@@ -1187,7 +1237,12 @@ class PyPlotWorkbench(PyPlotWindow):
         fitter = getattr(self.tab_widget, "_fit_subwindow", None)
         if callable(fitter):
             try:
-                fitter(sub, use_half_width=False, preferred_width=target_w)
+                fitter(
+                    sub,
+                    use_half_width=False,
+                    preferred_width=target_w,
+                    remember_manual=False,
+                )
                 fitted = True
             except Exception:
                 fitted = False
@@ -1215,6 +1270,22 @@ class PyPlotWorkbench(PyPlotWindow):
         if self._current_plugin is not None:
             try:
                 self._current_plugin.deactivate()
+            except Exception:
+                pass
+        for child in self.findChildren(QtWidgets.QMenu):
+            try:
+                child.close()
+            except Exception:
+                pass
+        for child in self.findChildren(QtWidgets.QDialog):
+            try:
+                child.close()
+            except Exception:
+                pass
+        graph_format_dialog = getattr(self, "_graph_format_dialog", None)
+        if isinstance(graph_format_dialog, QtWidgets.QDialog):
+            try:
+                graph_format_dialog.close()
             except Exception:
                 pass
         settings = self._shared_qsettings()
@@ -1315,6 +1386,14 @@ class PyPlotWorkbench(PyPlotWindow):
         *,
         warn_on_missing: bool = False,
     ) -> list[Path]:
+        request_paths = getattr(self, "_plot_request_paths", None)
+        if callable(request_paths):
+            try:
+                requested = [path for path in request_paths() if isinstance(path, Path) and path.is_file()]
+            except Exception:
+                requested = []
+            if requested:
+                return requested
         selection = [path for path in self._selected_paths() if path.is_file()]
         if selection:
             if len(selection) != len(self._selected_path_entries):
@@ -1385,6 +1464,9 @@ class PyPlotWorkbench(PyPlotWindow):
             button = getattr(self, "plot_button", None)
             if isinstance(button, (QtGui.QAction, QtWidgets.QWidget)):
                 button.setEnabled(self._plugin_ready_to_plot(self._current_plugin))
+            combo = self._plot_scope_combo
+            if isinstance(combo, QtWidgets.QComboBox):
+                combo.setEnabled(True)
             self._sync_shared_action_states()
             save_sync = getattr(self, "_update_save_graph_enabled", None)
             if callable(save_sync):
@@ -1402,6 +1484,9 @@ class PyPlotWorkbench(PyPlotWindow):
         button = getattr(self, "plot_button", None)
         if isinstance(button, (QtGui.QAction, QtWidgets.QWidget)):
             button.setEnabled(False)
+        combo = self._plot_scope_combo
+        if isinstance(combo, QtWidgets.QComboBox):
+            combo.setEnabled(False)
         self._set_plot_button_label(None)
         if hasattr(self, "popout_button"):
             self.popout_button.setEnabled(False)
@@ -1586,12 +1671,19 @@ class PyPlotWorkbench(PyPlotWindow):
         measurements = getattr(self, "measurements", None)
         if isinstance(measurements, list) and measurements:
             return True
+        if bool(getattr(self, "_connected_data_folders", [])):
+            return True
         return bool(self._worksheets)
 
     def _reset_project_state(self) -> None:
         super()._reset_project_state()
         self._clear_imported_data()
         self._selected_path_entries = []
+        self._connected_data_folders = []
+        self._connected_folder_seen_files = set()
+        self._update_connected_folder_state()
+        self._pending_new_plot_paths = []
+        self._last_imported_file_paths = []
         self.path_edit.clear()
         self._update_action_states()
         self._update_project_actions()
@@ -1615,6 +1707,16 @@ class PyPlotWorkbench(PyPlotWindow):
             "auto_load_on_import": bool(getattr(plugin, "auto_load_on_import", False)),
             "had_plots": self._plugin_tab_count(plugin.name) > 0,
         }
+        connected_payload = [
+            self._portable_path(path, base_path)
+            for path in getattr(self, "_connected_data_folders", [])
+            if isinstance(path, Path)
+        ]
+        connected_payload = [
+            entry for entry in connected_payload if isinstance(entry, str) and entry
+        ]
+        if connected_payload:
+            payload["connected_folders"] = connected_payload
         plugin_last_dir = self._plugin_last_directories.get(plugin.name)
         plugin_last_dir_payload = self._portable_path(plugin_last_dir, base_path)
         if isinstance(plugin_last_dir_payload, str) and plugin_last_dir_payload:
@@ -1645,6 +1747,23 @@ class PyPlotWorkbench(PyPlotWindow):
             if callable(commit_paths):
                 try:
                     commit_paths(resolved_paths)
+                except Exception:
+                    pass
+
+        connected_payload = shared_state.get("connected_folders")
+        connected_paths: list[Path] = []
+        if isinstance(connected_payload, list):
+            for entry in connected_payload:
+                if not isinstance(entry, str) or not entry:
+                    continue
+                resolved = self._resolve_portable_path(entry, project_dir)
+                if isinstance(resolved, Path):
+                    connected_paths.append(resolved)
+        if connected_paths:
+            connector = getattr(self, "_connect_data_folders", None)
+            if callable(connector):
+                try:
+                    connector(connected_paths)
                 except Exception:
                     pass
 
@@ -2000,10 +2119,56 @@ class PyPlotWorkbench(PyPlotWindow):
 
     def _generate_plots(self) -> None:
         if self._current_plugin is not None:
-            self._run_with_shared_progress(
-                title=f"{self._current_plotter_name or self._current_plugin.name}: generating plots...",
-                task=self._current_plugin.generate,
-            )
+            scope = self._requested_plot_scope()
+            if scope == "new":
+                new_paths = self._recent_new_plot_paths()
+                if not new_paths:
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        self._current_plotter_name or self._current_plugin.name,
+                        "No newly imported files are pending. Use Replot all or refresh connected folders first.",
+                    )
+                    return
+                original_selection = list(self._selected_path_entries)
+                plugin = self._current_plugin
+                original_tabs = list(getattr(plugin, "_plot_tabs", []))
+                new_tabs: List[QtWidgets.QWidget] = []
+                self._plot_request_mode = "new"
+                self._plot_request_paths_snapshot = list(new_paths)
+                try:
+                    self._commit_selected_paths(new_paths)
+                    loader = getattr(plugin, "load_data", None)
+                    if callable(loader):
+                        loader()
+                    if hasattr(plugin, "_plot_tabs"):
+                        setattr(plugin, "_plot_tabs", [])
+                    self._run_with_shared_progress(
+                        title=f"{self._current_plotter_name or plugin.name}: plotting new data...",
+                        task=plugin.generate,
+                    )
+                    new_tabs = list(getattr(plugin, "_plot_tabs", []))
+                    if hasattr(plugin, "_plot_tabs"):
+                        setattr(plugin, "_plot_tabs", [*original_tabs, *new_tabs])
+                    self._pending_new_plot_paths = []
+                finally:
+                    self._plot_request_mode = None
+                    self._plot_request_paths_snapshot = None
+                    self._commit_selected_paths(original_selection)
+                    self._sync_selected_paths_with_imports()
+                    self._update_action_states()
+                return
+
+            self._plot_request_mode = "all"
+            self._plot_request_paths_snapshot = list(self._selected_paths())
+            try:
+                self._run_with_shared_progress(
+                    title=f"{self._current_plotter_name or self._current_plugin.name}: generating plots...",
+                    task=self._current_plugin.generate,
+                )
+                self._pending_new_plot_paths = []
+            finally:
+                self._plot_request_mode = None
+                self._plot_request_paths_snapshot = None
             return
         QtWidgets.QMessageBox.information(
             self,
@@ -2077,19 +2242,30 @@ class PyPlotWorkbench(PyPlotWindow):
         format_tabs = QtWidgets.QTabWidget(graph_section)
         format_tabs.setObjectName("mw_graph_format_tabs")
         format_tabs.setDocumentMode(True)
+        format_tabs.setTabPosition(QtWidgets.QTabWidget.TabPosition.North)
+        format_tabs.tabBar().setVisible(True)
         graph_section_layout.addWidget(format_tabs)
 
         def _create_tab(title: str) -> tuple[QtWidgets.QWidget, QtWidgets.QFormLayout]:
             tab = QtWidgets.QWidget(format_tabs)
             tab_layout = QtWidgets.QVBoxLayout(tab)
-            tab_layout.setContentsMargins(6, 6, 6, 6)
-            tab_layout.setSpacing(6)
+            tab_layout.setContentsMargins(0, 0, 0, 0)
+            tab_layout.setSpacing(0)
+            scroll = QtWidgets.QScrollArea(tab)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            tab_layout.addWidget(scroll, 1)
+            content = QtWidgets.QWidget(scroll)
+            scroll.setWidget(content)
+            content_layout = QtWidgets.QVBoxLayout(content)
+            content_layout.setContentsMargins(6, 6, 6, 6)
+            content_layout.setSpacing(6)
             form = QtWidgets.QFormLayout()
             form.setContentsMargins(0, 0, 0, 0)
             form.setHorizontalSpacing(8)
             form.setVerticalSpacing(6)
-            tab_layout.addLayout(form)
-            tab_layout.addStretch(1)
+            content_layout.addLayout(form)
+            content_layout.addStretch(1)
             format_tabs.addTab(tab, title)
             return tab, form
 
@@ -2249,7 +2425,7 @@ class PyPlotWorkbench(PyPlotWindow):
         axes_form.addRow("Y max:", y_max_edit)
 
         show_grid_cb = QtWidgets.QCheckBox("Show grid", axes_tab)
-        show_grid_cb.setChecked(True)
+        show_grid_cb.setChecked(False)
         axes_form.addRow(show_grid_cb)
 
         tick_length_spin = QtWidgets.QDoubleSpinBox(ticks_tab)
@@ -2468,18 +2644,12 @@ class PyPlotWorkbench(PyPlotWindow):
         root_layout.setContentsMargins(10, 10, 10, 10)
         root_layout.setSpacing(8)
 
-        scroll = QtWidgets.QScrollArea(dialog)
-        scroll.setObjectName("mw_graph_format_dialog_scroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        root_layout.addWidget(scroll, 1)
-
-        container = QtWidgets.QWidget(scroll)
+        container = QtWidgets.QWidget(dialog)
         container_layout = QtWidgets.QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(8)
         container_layout.addStretch(1)
-        scroll.setWidget(container)
+        root_layout.addWidget(container, 1)
 
         self._graph_format_dialog = dialog
         self._graph_format_dialog_container = container
@@ -2634,6 +2804,25 @@ class PyPlotWorkbench(PyPlotWindow):
         return f"{factor:.6g}"
 
     @staticmethod
+    def _superscript_number(value: int) -> str:
+        translation = str.maketrans("-0123456789", "\u207b\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079")
+        return str(int(value)).translate(translation)
+
+    @classmethod
+    def _factor_display_text(cls, factor: float) -> str:
+        if not math.isfinite(factor):
+            return "1"
+        if math.isclose(factor, 1.0, rel_tol=1e-12, abs_tol=1e-12):
+            return "1"
+        sign = "-" if factor < 0 else ""
+        abs_factor = abs(factor)
+        exponent = math.log10(abs_factor) if abs_factor > 0 else 0.0
+        rounded_exponent = int(round(exponent))
+        if abs_factor > 0 and math.isclose(exponent, rounded_exponent, rel_tol=1e-10, abs_tol=1e-10):
+            return f"{sign}\u00d710{cls._superscript_number(rounded_exponent)}"
+        return f"{factor:.6g}"
+
+    @staticmethod
     def _factor_edit_text(factor: float) -> str:
         return PyPlotWorkbench._factor_label_text(factor)
 
@@ -2670,14 +2859,15 @@ class PyPlotWorkbench(PyPlotWindow):
                 pass
         if not reflect_in_unit or math.isclose(factor, 1.0, rel_tol=1e-12, abs_tol=1e-12):
             return label
-        factor_text = self._factor_label_text(factor)
+        reflected_factor = 1.0 / factor if not math.isclose(factor, 0.0, abs_tol=1e-15) else 1.0
+        factor_text = self._factor_display_text(reflected_factor)
         left = label.rfind("[")
         right = label.rfind("]")
         if left >= 0 and right > left:
             unit = label[left + 1 : right].strip()
             prefix = label[:left].rstrip()
             if unit:
-                return f"{prefix} [{unit} * {factor_text}]".strip()
+                return f"{prefix} [{unit} {factor_text}]".strip()
             return f"{prefix} [{factor_text}]".strip()
         stripped = label.strip()
         if not stripped:
@@ -2685,6 +2875,16 @@ class PyPlotWorkbench(PyPlotWindow):
         return f"{stripped} [{factor_text}]"
 
     def _apply_axis_factor_formatter(self, axis_obj: Any, factor: float, *, axis_name: str) -> None:
+        offset_text = getattr(axis_obj, "get_offset_text", lambda: None)()
+        def _hide_offset_text() -> None:
+            if offset_text is None:
+                return
+            try:
+                offset_text.set_visible(False)
+                offset_text.set_text("")
+            except Exception:
+                pass
+
         if math.isclose(factor, 1.0, rel_tol=1e-12, abs_tol=1e-12):
             owner = getattr(axis_obj, "axes", None)
             scale = "linear"
@@ -2705,6 +2905,7 @@ class PyPlotWorkbench(PyPlotWindow):
                 lambda value, _pos, _factor=factor: self._format_scaled_tick(value, _factor)
             )
         )
+        _hide_offset_text()
 
     def _sync_tick_mode_inputs(self) -> None:
         if self._graph_format_updating:
@@ -3209,6 +3410,7 @@ class PyPlotWorkbench(PyPlotWindow):
         text_field: str | None = None,
         axis: str | None = None,
         legend: bool = False,
+        line: bool = False,
     ) -> bool:
         tab = self._tab_for_axes(axes)
         if isinstance(tab, QtWidgets.QWidget):
@@ -3231,6 +3433,8 @@ class PyPlotWorkbench(PyPlotWindow):
             select_all = True
         elif legend:
             focus_key = "show_legend_cb"
+        elif line:
+            focus_key = "line_width_spin"
         elif axis_token == "x":
             focus_key = "x_scale_combo"
         elif axis_token == "y":
@@ -3817,18 +4021,16 @@ class PyPlotWorkbench(PyPlotWindow):
                                         setter(aspect)
                                     except Exception:
                                         pass
-                            if bool(
-                                getattr(self.tab_widget, "_global_maximized", False)
-                                or getattr(self.tab_widget, "_fullscreen_lock", False)
-                            ):
-                                maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
-                                if callable(maybe_maximize):
-                                    try:
+                            is_maximized_target = getattr(self.tab_widget, "_is_maximized_target", None)
+                            maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
+                            if callable(is_maximized_target) and callable(maybe_maximize):
+                                try:
+                                    if bool(is_maximized_target(sub)):
                                         maybe_maximize(sub)
-                                    except Exception:
-                                        pass
-                                touched += 1
-                                continue
+                                        touched += 1
+                                        continue
+                                except Exception:
+                                    pass
                             try:
                                 dpi = float(getattr(figure, "dpi", 100.0) or 100.0) if figure is not None else 100.0
                             except Exception:
@@ -3839,7 +4041,12 @@ class PyPlotWorkbench(PyPlotWindow):
                             fitter = getattr(self.tab_widget, "_fit_subwindow", None)
                             if callable(fitter):
                                 try:
-                                    fitter(sub, use_half_width=False, preferred_width=target_w)
+                                    fitter(
+                                        sub,
+                                        use_half_width=False,
+                                        preferred_width=target_w,
+                                        remember_manual=False,
+                                    )
                                     fitted = True
                                 except Exception:
                                     fitted = False

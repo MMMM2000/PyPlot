@@ -613,3 +613,33 @@ def test_vsm_hysteresis_generate_falls_back_from_flat_applied_field_axis(
         window._clear_project_dirty()  # noqa: SLF001 - avoid close prompt in headless tests
         window.close()
         app.processEvents()
+
+
+def test_connected_folder_refresh_imports_only_new_files(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="Hysteresis Loops")
+    try:
+        source_dir = tmp_path / "connected_hys"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        first = source_dir / "SampleA 200C.dat"
+        first.write_text("100 0.1\n0 0.0\n-100 -0.1\n", encoding="utf-8")
+
+        window._connect_data_folders([source_dir])  # noqa: SLF001
+        app.processEvents()
+        assert window._worksheets  # noqa: SLF001
+        initial_count = len(window._worksheets)  # noqa: SLF001
+        assert window._last_imported_file_paths == [first]  # noqa: SLF001
+
+        second = source_dir / "SampleB 250C.dat"
+        second.write_text("100 0.2\n0 0.0\n-100 -0.2\n", encoding="utf-8")
+        window._refresh_connected_folders()  # noqa: SLF001
+        app.processEvents()
+
+        imported = getattr(window, "_last_imported_file_paths", [])
+        assert second in imported
+        pending = getattr(window, "_pending_new_plot_paths", [])
+        assert second in pending
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()

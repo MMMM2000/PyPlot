@@ -1453,22 +1453,48 @@ def _microwire_parts_from_label(
 def _split_microwire_key(
     value: object,
 ) -> Optional[Tuple[str, int, int, Optional[str]]]:
+    def _coerce_index(raw: object) -> Optional[int]:
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, (int, np.integer)):
+            return int(raw)
+        if isinstance(raw, (float, np.floating)):
+            numeric = float(raw)
+            if not math.isfinite(numeric) or not numeric.is_integer():
+                return None
+            return int(numeric)
+        if isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return None
+            if re.fullmatch(r"[+-]?\d+", text):
+                try:
+                    return int(text)
+                except (TypeError, ValueError):
+                    return None
+            try:
+                numeric = float(text)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(numeric) or not numeric.is_integer():
+                return None
+            return int(numeric)
+        return None
+
     if isinstance(value, tuple):
         if len(value) == 3:
-            try:
-                composition = str(value[0]).strip()
-                draw = int(value[1])
-                piece = int(value[2])
-            except (TypeError, ValueError):
+            composition = str(value[0]).strip()
+            draw = _coerce_index(value[1])
+            piece = _coerce_index(value[2])
+            if draw is None or piece is None:
                 return None
             if composition:
                 return composition, draw, piece, None
         if len(value) == 4:
-            try:
-                composition = str(value[0]).strip()
-                draw = int(value[1])
-                piece = int(value[2])
-            except (TypeError, ValueError):
+            composition = str(value[0]).strip()
+            draw = _coerce_index(value[1])
+            piece = _coerce_index(value[2])
+            if draw is None or piece is None:
                 return None
             suffix = value[3]
             suffix_text = str(suffix).strip() if suffix is not None else ""
@@ -1504,13 +1530,13 @@ def _microwire_key_from_string(
     composition = parts[0]
     if not composition:
         return None
-    try:
-        draw = int(parts[1])
-        piece = int(parts[2])
-    except (TypeError, ValueError):
+    parsed = _split_microwire_key((composition, parts[1], parts[2], parts[3] if len(parts) == 4 else None))
+    if parsed is None:
         return None
-    suffix = parts[3] if len(parts) == 4 else ""
-    return composition, draw, piece, suffix or None
+    _composition, draw, piece, suffix = parsed
+    if not _composition:
+        return None
+    return composition, draw, piece, suffix
 
 
 def _format_strain_value(record: StrainRecord) -> Optional[str]:
@@ -5815,5 +5841,4 @@ __all__ = [
     "LOGGER_NAME",
     "DEFAULT_OUTPUT_NAME",
 ]
-
 

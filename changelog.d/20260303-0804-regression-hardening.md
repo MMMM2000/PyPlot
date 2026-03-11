@@ -1,0 +1,31 @@
+2026-03-03 08:04
+- Hardened VSM hysteresis crossing calculations against non-scalar/object-array values to prevent scalar-conversion crashes during metrics and plot generation.
+- Fixed imported workbook merge handling in the microwire Assembly section so `pd.NA` values no longer trigger ambiguous-boolean exceptions when filling missing fields.
+- Hardened microwire key parsing so malformed/non-integral draw/piece indices no longer coerce into unintended grouping keys during database build paths.
+- Removed duplicate FMR preview rendering work in the compare graph preview refresh path.
+- Added regression tests for VSM coercion edge cases, microwire import-merge `pd.NA` scenarios, and VSM project payload/close-event rebinding safety.
+- Extracted shared cursor readout formatting into `plotting/pyplot/cursor_status.py` and improved status-bar readout behavior under tight layouts.
+- Added VSM Temperature Scan “smoothed derivative only” behavior so smoothed derivative plots/workbooks can be generated without forcing raw derivative outputs.
+- Added VSM Temperature Scan project-state persistence for split/combine flags, derivative toggles, overlay mode, and smoothing-window settings.
+- Added Object Manager regression coverage to ensure line-item hide/show controls keep legend entries synchronized even when legends are explicitly present.
+- Extended shared navigation/rescale regression coverage to include VSM Temperature Scan canvases (not only FMR-hosted canvases).
+- Updated shared navigation mode handling so active `Zoom`/`Pan` follows the selected graph tab instead of resetting on tab switch.
+- Hardened subwindow layout redraw to avoid queued Matplotlib idle-draw callbacks hitting deleted Qt canvases during rapid tab/window teardown.
+- Added microwire builder coverage for current-density/transition-temp merge behavior and column-group visibility in Assemble output workflows.
+- Added VSM Temperature Scan outlier-workflow coverage through shared PyPlot worksheet outlier detection/removal paths.
+- Added responsive status-bar width balancing so the cursor readout keeps a readable minimum width while task progress widgets are visible.
+- Refined VSM Temperature Scan non-Origin legends/colors: field-pair colors are now deterministic (red/blue then orange/green), legends keep section-order traces, and export legend text no longer embeds section prose.
+- Enlarged builder embedded preview defaults for annealing and VSM temperature scans, and expanded regression coverage for preview rendering and dual-axis legend ordering.
+- Hardened Current Annealing Matplotlib legend styling so legend text color follows line color after all readability/style passes.
+- Modernized the legacy Hysteresis Loops plugin into a native shared PyPlot workflow with `.dat` / `.txt` import support, shared graph formatting, Project Explorer integration, and grouped combined/separate/stacked plotting modes.
+- Extended shared import support to `.dat` files so hysteresis loop datasets can be loaded through the standard PyPlot file/folder import actions.
+- Updated Hysteresis Loops defaults to use line+symbol traces, `Magnetic field` / `Magnetic flux` axis labels, and reflected scientific-scale units in the Y label instead of a detached Matplotlib offset banner.
+- Improved shared graph editing UX: the floating Graph formatting window now keeps its top tab bar fixed/visible, double-clicking plotted curves opens line/marker controls, legend visibility toggles in Object Manager redraw immediately, and legend context menus now expose `Reconstruct legend`.
+- Added shared smoke coverage for the Temperature Dependence, Temperature Sensitivity, Stress Dependence, and Stress Sensitivity PyPlot plugins to keep their import-and-generate flows exercised with sample data.
+- Added internal launcher CLI automation for PyPlot testing, including plugin selection, path import, plot generation, graph-format opening, screenshots, plot image capture, and JSON summaries for headless validation.
+- Migrated the remaining legacy embedded PyPlot entries (`Hsw Distribution`, `Hsw Load Compare`, `Maxion Continuous`, `PDF Plotter`, and `Strain 3D Plot`) onto native shared-plugin wrappers so the registry now runs through the shared PyPlot shell instead of embedded legacy dialogs.
+- Added shared connected-folder sources with automatic refresh/import polling plus a manual `Refresh connected` action, and introduced shared `Plot new` / `Replot all` behavior so newly imported files can be graphed incrementally without rebuilding every existing plot.
+- Fixed the PaddleOCR PDF experiment so it can be run directly as a CLI script, streams output page-by-page instead of holding the entire document in RAM, and can stop early on low-memory systems before forcing a macOS restart.
+- Modernized core runtime dependencies in `pyproject.toml` and regenerated `requirements.txt` from the project spec for lock alignment.
+- Updated project runtime metadata to Python `>=3.13,<3.14` to match the supported environment and dependency lock workflow.
+- Compatibility note: Origin automation runtime checks remain Windows-only (`originpro`), so Origin export parity validation continues to require a Windows environment.

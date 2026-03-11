@@ -7,9 +7,11 @@ from typing import List, Dict, Any, Tuple, cast
 from PyQt6 import QtWidgets
 
 from plotting.shared.config import load_config
+from plotting.shared.origin import schedule_origin_release
 from plotting.shared.utils import save_figure, show_plots
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.backends import wants_matplotlib, wants_origin
+from plotting.shared.origin import set_origin_axis_title, set_origin_graph_title
 
 import numpy as np
 import pandas as pd
@@ -446,11 +448,6 @@ def _origin_build_graph(
     except Exception:
         pass
 
-    try:
-        op.exit()
-    except Exception:
-        pass
-
     # Defer legend tweaking until after plots are added.
 
 
@@ -476,7 +473,7 @@ def _origin_build_graph(
     w_mean_a = push_xy(mean_a, "mean_a", "mean up")
     w_mean_b = push_xy(mean_b, "mean_b", "mean down")
 
-    gp = cast(Any, op.new_graph(template='scatter'))
+    gp = cast(Any, op.new_graph(template='line'))
     gl = gp[0]
     # Try to set the graph title using the OriginPython API. Some templates
     # may ignore this; a LabTalk fallback is applied later.
@@ -536,31 +533,50 @@ def _origin_build_graph(
         pass
 
     # Axis labels and grid lines
-    esc = title.replace('"', "'")
     for cmd in (
         'page.antialias=1;',
         'layer -aa 1;',
-        'lab -xb "Applied load (g)";',
-        f'lab -yl "{LABELS[var]}";',
         'lab -xt "";',
         'lab -yr "";',
         'layer.x.showAxes=1;',
         'layer.y.showAxes=1;',
+        'layer.x.top=0;',
+        'layer.y.right=0;',
+        'layer.x.top.label.show=0;',
+        'layer.y.right.label.show=0;',
+        'layer.x.top.ticklabels=0;',
+        'layer.y.right.ticklabels=0;',
         'layer.x.gridMajor=1;',
         'layer.y.gridMajor=1;',
-        f'title -s "{esc}";',
     ):
         try:
             op.lt_exec(cmd)
         except Exception:
             pass
+    for attr in (
+        'x.showAxes', 'y.showAxes',
+        'x.showlabel', 'x2.showlabel',
+        'y.showlabel', 'y2.showlabel',
+    ):
+        try:
+            gl.set_int(attr, 1 if attr in {'x.showAxes', 'y.showAxes', 'x.showlabel', 'y.showlabel'} else 0)
+        except Exception:
+            continue
+    try:
+        set_origin_axis_title(gl, 'x', 'Applied load (g)')
+        set_origin_axis_title(gl, 'y', LABELS[var])
+        set_origin_graph_title(op, gp, gl, title)
+    except Exception:
+        pass
+    try:
+        schedule_origin_release()
+    except Exception:
+        pass
 
     # Build legend with color-matched entries
     try:
-        legend_title = title.split(" \u2014 ")[0]
         legend = gl.label('Legend')
         legend.text = (
-            f"{legend_title}\n"
             "\\c(1) raw ↑\n"
             "\\c(2) raw ↓\n"
             "\\c(3) mean ↑\n"
@@ -572,6 +588,21 @@ def _origin_build_graph(
             pass
     except Exception:
         pass
+    for token in ('xt', 'XT', 'yr', 'YR'):
+        try:
+            label = gl.label(token)
+        except Exception:
+            label = None
+        if label is None:
+            continue
+        try:
+            label.text = ""
+        except Exception:
+            pass
+        try:
+            label.set_int('show', 0)
+        except Exception:
+            pass
 
     # Reapply colors and solid symbol fill via LabTalk so means are not black
     try:

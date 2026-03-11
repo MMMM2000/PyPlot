@@ -475,6 +475,15 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             can_popout=bool(self._plot_tabs),
         )
 
+    def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
+        return {
+            "title_font": 14,
+            "label_font": 11,
+            "tick_font": 9,
+            "figure_width": 9.2,
+            "figure_height": 5.6,
+        }
+
     def _register_workbooks(self) -> None:
         host = self.host
         window_module = window_api()

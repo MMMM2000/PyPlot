@@ -20,7 +20,12 @@ from matplotlib.axes import Axes
 from plotting.shared.config import load_config
 from plotting.shared.common import maybe_handle_outliers
 from plotting.shared.utils import save_figure, show_plots
-from plotting.shared.origin import hide_origin_workbook, schedule_origin_release
+from plotting.shared.origin import (
+    hide_origin_workbook,
+    schedule_origin_release,
+    set_origin_axis_title,
+    set_origin_graph_title,
+)
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.backends import wants_matplotlib, wants_origin
 from tqdm import tqdm
@@ -698,12 +703,16 @@ def plot_samples_origin(
     try:
         p.color = RAW_ALT_COLORS[1]
         p.symbol_size = RAW_MARKER_SIZE
+        p.legend = "raw marked end"
+        p.lname = "raw marked end"
     except Exception:
         pass
     p = cast(Any, gl.add_plot(w, coly=idx_raw_even_y, colx=idx_raw_even_x, type='s'))
     try:
         p.color = RAW_ALT_COLORS[0]
         p.symbol_size = RAW_MARKER_SIZE
+        p.legend = "raw unmarked end"
+        p.lname = "raw unmarked end"
     except Exception:
         pass
 
@@ -719,6 +728,7 @@ def plot_samples_origin(
             p.symbol_shape = 2
             p.symbol_size = LEGEND_MARKER_SIZE
             p.legend = "mean marked end" if plot_idx == 1 else "mean unmarked end"
+            p.lname = "mean marked end" if plot_idx == 1 else "mean unmarked end"
         except Exception:
             pass
 
@@ -733,6 +743,7 @@ def plot_samples_origin(
             try:
                 p.color = 'black'
                 p.legend = f"dependence med {med_window} mwa {ma_window}"
+                p.lname = f"dependence med {med_window} mwa {ma_window}"
             except Exception:
                 pass
 
@@ -745,6 +756,20 @@ def plot_samples_origin(
     try:
         gp.activate()
         op.lt_exec('legend -o;')
+    except Exception:
+        pass
+    try:
+        legend = gl.label('Legend')
+        legend_lines = [
+            "\\c(1) raw marked end",
+            "\\c(2) raw unmarked end",
+            "\\c(3) mean marked end",
+            "\\c(4) mean unmarked end",
+        ]
+        if INCLUDE_DEPENDENCE and cont_column_pairs:
+            legend_lines.append("\\c(5) dependence")
+        legend.text = "\n".join(legend_lines)
+        op.lt_exec('legend.update=0;')
     except Exception:
         pass
 
@@ -768,13 +793,6 @@ def plot_samples_origin(
             y_axis.title = LABELS.get(var, "")
     except Exception:
         pass
-    try:
-        gl.set_str('x.top.title$', title_str)
-        gl.set_int('x.top.title.show', 1)
-        gl.set_int('x.top', 1)
-    except Exception:
-        pass
-
     for attr in (
         'x.top', 'y.right',
         'x.top.label.show', 'y.right.label.show',
@@ -853,19 +871,13 @@ def plot_samples_origin(
             pass
 
     try:
-        manual_title = gl.add_label(title_str, float(title_center), float(title_y))
+        set_origin_axis_title(gl, 'y', LABELS.get(var, ""))
     except Exception:
-        manual_title = None
-    if manual_title is not None:
-        try:
-            manual_title.name = 'py_title'
-            manual_title.set_int('attach', 0)
-            manual_title.set_int('horzalign', 1)
-            manual_title.set_int('vertalign', 2)
-            manual_title.set_int('fontweight', 700)
-            manual_title.set_int('fontheight', 22)
-        except Exception:
-            pass
+        pass
+    try:
+        set_origin_graph_title(op, gp, gl, title_str)
+    except Exception:
+        pass
 
     # Delta labels mirroring Matplotlib
     for idx, sample in enumerate(samples, start=1):
@@ -883,6 +895,7 @@ def plot_samples_origin(
             lbl.set_int('horzalign', 1)
             lbl.set_int('vertalign', 0 if delta_val >= 0 else 1)
             lbl.set_int('fontweight', 700)
+            lbl.set_int('fontheight', 14)
         except Exception:
             pass
 

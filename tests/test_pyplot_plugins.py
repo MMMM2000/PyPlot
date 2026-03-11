@@ -279,6 +279,92 @@ def test_object_manager_legend_double_click_uses_shared_graph_format(
         window.close()
 
 
+def test_double_click_line_opens_shared_graph_format_line_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+
+        called: dict[str, object] = {}
+
+        def _fake_open_graph_format_dialog(
+            checked: bool = False,
+            *,
+            focus_key: str | None = None,
+            select_all: bool = False,
+        ) -> bool:
+            called["checked"] = checked
+            called["focus_key"] = focus_key
+            called["select_all"] = select_all
+            return True
+
+        monkeypatch.setattr(window, "_open_graph_format_dialog", _fake_open_graph_format_dialog)
+        opened = window._open_shared_graph_format_from_double_click(  # noqa: SLF001
+            axes=axes,
+            line=True,
+        )
+        assert opened is True
+        assert called.get("focus_key") == "line_width_spin"
+    finally:
+        window.close()
+
+
+def test_object_manager_legend_context_menu_exposes_reconstruct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        tab = _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+        legend = axes.legend(loc="best")
+        assert legend is not None
+        window._rebuild_object_manager_for_tab(tab)  # noqa: SLF001
+
+        tree = window.object_tree  # noqa: SLF001
+        assert isinstance(tree, QtWidgets.QTreeWidget)
+        root = tree.topLevelItem(0)
+        assert root is not None
+        legend_item = None
+        for idx in range(root.childCount()):
+            candidate = root.child(idx)
+            data = candidate.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict) and data.get("kind") == "legend":
+                legend_item = candidate
+                break
+        assert legend_item is not None
+
+        called: dict[str, bool] = {"reconstruct": False}
+
+        def _fake_reconstruct(item: QtWidgets.QTreeWidgetItem) -> None:
+            called["reconstruct"] = item is legend_item
+
+        monkeypatch.setattr(window, "_reconstruct_legend_from_item", _fake_reconstruct)
+
+        original_exec = QtWidgets.QMenu.exec
+
+        def _fake_exec(menu: QtWidgets.QMenu, *_args, **_kwargs):
+            actions = menu.actions()
+            assert [action.text() for action in actions] == [
+                "Legend settings...",
+                "Reconstruct legend",
+            ]
+            return actions[1]
+
+        monkeypatch.setattr(QtWidgets.QMenu, "exec", _fake_exec)
+        rect = tree.visualItemRect(legend_item)
+        window._handle_object_context_menu(rect.center())  # noqa: SLF001
+        assert called["reconstruct"] is True
+        monkeypatch.setattr(QtWidgets.QMenu, "exec", original_exec)
+    finally:
+        window.close()
+
+
 def test_graph_option_apply_refreshes_open_graphs() -> None:
     _ensure_app()
     window = PyPlotWorkbench(plotters={})

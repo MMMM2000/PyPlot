@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
 import datetime
+import hashlib
 import logging
+import math
 import os
 import re
 import sys
@@ -79,6 +81,7 @@ from plotting.shared.readability import (
     sync_readability,
 )
 from plotting.shared.logfiles import append_text_with_rotation
+from .cursor_status import cursor_readout_text
 
 
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
@@ -1058,6 +1061,8 @@ class _TabSeriesExportEntry:
     x_unit: str
     y_label: str
     y_unit: str
+    x_scale_factor: float = 1.0
+    y_scale_factor: float = 1.0
 
 
 @dataclass
@@ -2021,12 +2026,11 @@ class LegendSettingsDialog(QtWidgets.QDialog):
             canvas = getattr(canvas, "canvas", None)
         if canvas is not None:
             try:
-                canvas.draw_idle()
+                # Use an immediate draw here to avoid queued idle-draw callbacks
+                # firing after the canvas has already been torn down.
+                canvas.draw()
             except Exception:
-                try:
-                    canvas.draw()
-                except Exception:
-                    pass
+                pass
         self._persist_defaults()
 
     def accept(self) -> None:  # type: ignore[override]
@@ -2046,6 +2050,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         ".csv",
         ".tsv",
         ".txt",
+        ".dat",
         ".xlsx",
         ".xls",
         ".xlsm",
@@ -2160,6 +2165,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._project_tree_search_text = ""
         self._project_tree_filter_refresh_pending = False
         self._project_tree_selection_sync_blocked = False
+        self._project_tree_focus_restore_pending = False
         self._data_folder_items: Dict[Path, QtWidgets.QTreeWidgetItem] = {}
         self._data_workbook_items: Dict[Hashable, QtWidgets.QTreeWidgetItem] = {}
         self._workbooks: Dict[Hashable, WorkbookData] = {}
@@ -2177,10 +2183,20 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._left_dock_switcher_widget: _DockSwitcherWidget | None = None
         self._log_view_watcher: _LogViewWatcher | None = None
         self._last_import_sources: List[str] = []
+        self._last_imported_file_paths: List[Path] = []
+        self._pending_new_plot_paths: List[Path] = []
+        self._connected_data_folders: List[Path] = []
+        self._connected_folder_seen_files: set[str] = set()
+        self._connected_folder_polling = False
+        self._connected_folder_poll_interval_ms = 3000
+        self._connected_folders_restoring = False
         self._restoring_imports = False
         self._data_menu: QtWidgets.QMenu | None = None
         self._import_files_action: QtGui.QAction | None = None
         self._import_folder_action: QtGui.QAction | None = None
+        self._connect_folder_action: QtGui.QAction | None = None
+        self._refresh_connected_action: QtGui.QAction | None = None
+        self._refresh_connected_menu_action: QtGui.QAction | None = None
         self._refresh_import_action: QtGui.QAction | None = None
         self._new_workbook_action: QtGui.QAction | None = None
         self._add_column_before_action: QtGui.QAction | None = None
@@ -2195,6 +2211,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._history = _HistoryManager()
         self._retabify_pending = False
         self._import_storage_key = self._project_settings_key("import_sources")
+        self._connected_folder_storage_key = self._project_settings_key("connected_folders")
         self._format_controls = FormatToolbarControls()
         self._format_selection: tuple[str, Any] | None = None
         self._format_updating = False
@@ -2205,7 +2222,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._tight_layout_bulk_choice_expiry_by_context: Dict[str, float] = {}
         self._task_progress_label: QtWidgets.QLabel | None = None
         self._task_progress_bar: QtWidgets.QProgressBar | None = None
+        self._task_progress_dialog: QtWidgets.QDialog | None = None
         self.project_tree_search: QtWidgets.QLineEdit | None = None
+        self._connected_folder_timer = QtCore.QTimer(self)
+        self._connected_folder_timer.setInterval(self._connected_folder_poll_interval_ms)
+        self._connected_folder_timer.timeout.connect(self._poll_connected_folders)
 
         self.graph_dock: QtWidgets.QDockWidget | None = None
         self.graph_panel: QtWidgets.QWidget | None = None
@@ -3204,6 +3225,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     continue
                 line_axes = getattr(line_obj, "axes", None)
                 x_label, x_unit, y_label, y_unit = self._axis_label_parts(line_axes)
+                x_factor = self._axis_value_factor(line_axes, axis_name="x")
+                y_factor = self._axis_value_factor(line_axes, axis_name="y")
                 entries.append(
                     _TabSeriesExportEntry(
                         label=label,
@@ -3213,6 +3236,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         x_unit=x_unit or default_x_unit,
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
+                        x_scale_factor=x_factor,
+                        y_scale_factor=y_factor,
                     )
                 )
         if entries:
@@ -3220,12 +3245,20 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         line_counter = 0
         seen_lines: set[int] = set()
+        collection_counter = 0
+        seen_collections: set[int] = set()
         for axes in self._descriptor_axes(descriptor):
             x_label, x_unit, y_label, y_unit = self._axis_label_parts(axes)
+            x_factor = self._axis_value_factor(axes, axis_name="x")
+            y_factor = self._axis_value_factor(axes, axis_name="y")
             try:
                 axis_lines = list(axes.get_lines())
             except Exception:
                 axis_lines = []
+            try:
+                axis_collections = list(getattr(axes, "collections", []) or [])
+            except Exception:
+                axis_collections = []
             for line in axis_lines:
                 marker = id(line)
                 if marker in seen_lines:
@@ -3258,9 +3291,70 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         x_unit=x_unit or default_x_unit,
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
+                        x_scale_factor=x_factor,
+                        y_scale_factor=y_factor,
+                    )
+                )
+            for collection in axis_collections:
+                marker = id(collection)
+                if marker in seen_collections:
+                    continue
+                seen_collections.add(marker)
+                if not include_hidden:
+                    visible_getter = getattr(collection, "get_visible", None)
+                    if callable(visible_getter):
+                        try:
+                            if not bool(visible_getter()):
+                                continue
+                        except Exception:
+                            pass
+                collection_counter += 1
+                raw_label = str(
+                    getattr(collection, "get_label", lambda: f"Series {line_counter + collection_counter}")()
+                    or ""
+                ).strip()
+                if not raw_label or raw_label.startswith("_"):
+                    raw_label = f"Series {line_counter + collection_counter}"
+                label = self._normalize_series_label_for_export(raw_label, descriptor=descriptor)
+                offsets_getter = getattr(collection, "get_offsets", None)
+                if not callable(offsets_getter):
+                    continue
+                try:
+                    offsets = np.asarray(offsets_getter(), dtype=float)
+                except Exception:
+                    continue
+                if offsets.ndim != 2 or offsets.shape[1] < 2:
+                    continue
+                x_vals, y_vals = self._paired_numeric_arrays(offsets[:, 0], offsets[:, 1])
+                if x_vals.size == 0 or y_vals.size == 0:
+                    continue
+                entries.append(
+                    _TabSeriesExportEntry(
+                        label=label,
+                        x_values=x_vals,
+                        y_values=y_vals,
+                        x_label=x_label or default_x or "X",
+                        x_unit=x_unit or default_x_unit,
+                        y_label=y_label or default_y or "Y",
+                        y_unit=y_unit or default_y_unit,
+                        x_scale_factor=x_factor,
+                        y_scale_factor=y_factor,
                     )
                 )
         return entries
+
+    @staticmethod
+    def _axis_value_factor(axes: Any, *, axis_name: str) -> float:
+        if axes is None:
+            return 1.0
+        attr = f"_mw_{axis_name}_value_factor"
+        try:
+            value = float(getattr(axes, attr, 1.0) or 1.0)
+        except Exception:
+            return 1.0
+        if not math.isfinite(value) or math.isclose(value, 0.0, abs_tol=1e-12):
+            return 1.0
+        return value
 
     def _tab_series_data(
         self,
@@ -3332,8 +3426,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 y_name = f"{token}_y_{suffix}"
             used_columns.add(x_name)
             used_columns.add(y_name)
-            columns[x_name] = pd.Series(x_vals)
-            columns[y_name] = pd.Series(y_vals)
+            columns[x_name] = pd.Series(x_vals * float(entry.x_scale_factor or 1.0))
+            columns[y_name] = pd.Series(y_vals * float(entry.y_scale_factor or 1.0))
             metadata[x_name] = WorksheetColumnMeta(
                 long_name=entry.x_label or "X",
                 units=entry.x_unit,
@@ -5016,32 +5110,43 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if status is not None:
             label = QtWidgets.QLabel("x: --   y: --", self)
             label.setObjectName("mw_cursor_status")
-            label.setMinimumWidth(320)
+            label.setMinimumWidth(180)
             label.setMinimumHeight(26)
             label.setContentsMargins(6, 2, 6, 2)
+            label.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Preferred,
+            )
             status.addPermanentWidget(label, 1)
             self._cursor_label = label
 
-            progress_label = QtWidgets.QLabel("", self)
-            progress_label.setObjectName("mw_task_progress_label")
-            progress_label.setMinimumWidth(220)
-            progress_label.setVisible(False)
-            status.addPermanentWidget(progress_label, 0)
-            self._task_progress_label = progress_label
-
-            progress_bar = QtWidgets.QProgressBar(self)
-            progress_bar.setObjectName("mw_task_progress_bar")
-            progress_bar.setMinimumWidth(260)
-            progress_bar.setMaximumWidth(360)
-            progress_bar.setTextVisible(True)
-            progress_bar.setVisible(False)
-            status.addPermanentWidget(progress_bar, 0)
-            self._task_progress_bar = progress_bar
             try:
                 status.setMinimumHeight(30)
                 status.setSizeGripEnabled(True)
             except Exception:
                 pass
+            self._refresh_status_bar_layout()
+        progress_dialog = QtWidgets.QDialog(self, QtCore.Qt.WindowType.Tool)
+        progress_dialog.setWindowTitle("Working...")
+        progress_dialog.setModal(False)
+        progress_dialog.setWindowFlag(QtCore.Qt.WindowType.WindowContextHelpButtonHint, False)
+        progress_dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        progress_dialog.setMinimumWidth(360)
+        progress_layout = QtWidgets.QVBoxLayout(progress_dialog)
+        progress_layout.setContentsMargins(12, 12, 12, 12)
+        progress_layout.setSpacing(8)
+        progress_label = QtWidgets.QLabel("", progress_dialog)
+        progress_label.setObjectName("mw_task_progress_label")
+        progress_label.setWordWrap(True)
+        progress_layout.addWidget(progress_label)
+        progress_bar = QtWidgets.QProgressBar(progress_dialog)
+        progress_bar.setObjectName("mw_task_progress_bar")
+        progress_bar.setTextVisible(True)
+        progress_layout.addWidget(progress_bar)
+        progress_dialog.hide()
+        self._task_progress_dialog = progress_dialog
+        self._task_progress_label = progress_label
+        self._task_progress_bar = progress_bar
 
         self.project_tree = QtWidgets.QTreeWidget()
         self.project_tree.setHeaderLabels(["Project Explorer", "Details"])
@@ -5105,12 +5210,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.object_tree.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        self.object_tree.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.object_tree.itemChanged.connect(self._dispatch_object_item_changed)
         selection_model = self.object_tree.selectionModel()
         if selection_model is not None:
             selection_model.selectionChanged.connect(self._handle_object_selection_changed)
         self.object_tree.itemDoubleClicked.connect(self._dispatch_object_item_activation)
         self.object_tree.itemActivated.connect(self._dispatch_object_item_activation)
+        self.object_tree.customContextMenuRequested.connect(self._handle_object_context_menu)
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
@@ -5333,6 +5440,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         import_folder_action = data_menu.addAction("Import Folders...")
         import_folder_action.triggered.connect(self._dispatch_import_data_from_folder)
         self._import_folder_action = import_folder_action
+
+        connect_folder_action = data_menu.addAction("Connect Folders...")
+        connect_folder_action.triggered.connect(self._connect_data_from_folder)
+
+        refresh_connected_action = data_menu.addAction("Refresh Connected Folders")
+        refresh_connected_action.triggered.connect(self._refresh_connected_folders)
+        refresh_connected_action.setEnabled(False)
+        self._refresh_connected_menu_action = refresh_connected_action
 
         data_menu.addSeparator()
         recent_action = data_menu.addAction("Refresh Imported Data")
@@ -6158,6 +6273,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.import_data_button = import_action
         self._style_toolbar_button(toolbar, import_action)
 
+        connect_action = toolbar.addAction("Connect folders")
+        connect_action.triggered.connect(self._connect_data_from_folder)
+        self._connect_folder_action = connect_action
+        self._style_toolbar_button(toolbar, connect_action)
+
+        refresh_connected_action = toolbar.addAction("Refresh connected")
+        refresh_connected_action.setEnabled(False)
+        refresh_connected_action.triggered.connect(self._refresh_connected_folders)
+        self._refresh_connected_action = refresh_connected_action
+        self._style_toolbar_button(toolbar, refresh_connected_action)
+
         save_action = toolbar.addAction("Save graph...")
         save_action.setEnabled(False)
         save_action.triggered.connect(self._save_current_graph)
@@ -6395,7 +6521,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         try:
             label.setText(str(title or "").strip())
-            label.setVisible(True)
             if isinstance(maximum, int) and maximum > 0:
                 bar.setRange(0, int(maximum))
                 bar.setValue(max(0, min(int(value), int(maximum))))
@@ -6403,7 +6528,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             else:
                 bar.setRange(0, 0)
                 bar.setFormat("%p%")
-            bar.setVisible(True)
+            dialog = self._task_progress_dialog
+            if isinstance(dialog, QtWidgets.QDialog):
+                dialog.show()
+                dialog.raise_()
         except Exception:
             return
         try:
@@ -6433,8 +6561,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     bar.setValue(max(0, min(int(value), int(bar.maximum()))))
                 else:
                     bar.setValue(0)
-            label.setVisible(True)
-            bar.setVisible(True)
+            dialog = self._task_progress_dialog
+            if isinstance(dialog, QtWidgets.QDialog):
+                dialog.show()
         except Exception:
             return
         try:
@@ -6460,10 +6589,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         try:
             label.clear()
-            label.setVisible(False)
             bar.setRange(0, 1)
             bar.setValue(0)
-            bar.setVisible(False)
+            dialog = self._task_progress_dialog
+            if isinstance(dialog, QtWidgets.QDialog):
+                dialog.hide()
         except Exception:
             return
         try:
@@ -6471,19 +6601,89 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             pass
 
+    def _refresh_status_bar_layout(self) -> None:
+        status = None
+        try:
+            status = self.statusBar()
+        except Exception:
+            status = None
+        if not isinstance(status, QtWidgets.QStatusBar):
+            return
+
+        cursor_label = self._cursor_label
+        progress_label = self._task_progress_label
+        progress_bar = self._task_progress_bar
+        if cursor_label is None:
+            return
+
+        total_width = max(int(status.width()), 0)
+        if total_width <= 0:
+            return
+
+        has_progress = bool(
+            (isinstance(progress_label, QtWidgets.QLabel) and progress_label.isVisible())
+            or (isinstance(progress_bar, QtWidgets.QProgressBar) and progress_bar.isVisible())
+        )
+
+        cursor_target = max(120, min(320, int(total_width * (0.42 if has_progress else 0.55))))
+        cursor_label.setMinimumWidth(cursor_target)
+
+        if not has_progress:
+            if isinstance(progress_label, QtWidgets.QLabel):
+                progress_label.setMinimumWidth(140)
+                progress_label.setMaximumWidth(280)
+            if isinstance(progress_bar, QtWidgets.QProgressBar):
+                progress_bar.setMinimumWidth(180)
+                progress_bar.setMaximumWidth(320)
+            return
+
+        available = max(total_width - cursor_target - 28, 0)
+        label_target = max(80, min(180, int(available * 0.35)))
+        bar_target = max(100, min(280, available - label_target))
+        if available <= 200:
+            label_target = max(60, min(120, int(available * 0.30)))
+            bar_target = max(90, available - label_target)
+
+        if isinstance(progress_label, QtWidgets.QLabel):
+            progress_label.setMinimumWidth(label_target)
+            progress_label.setMaximumWidth(max(label_target, 220))
+        if isinstance(progress_bar, QtWidgets.QProgressBar):
+            progress_bar.setMinimumWidth(bar_target)
+            progress_bar.setMaximumWidth(max(bar_target, 280))
+
     def _update_cursor_status(self, event: Any | None) -> None:
         label = self._cursor_label
         if label is None:
             return
-        if event is None or getattr(event, "inaxes", None) is None:
-            label.setText("x: --   y: --")
-            return
+        self._refresh_status_bar_layout()
+        x_value: float | None = None
+        y_value: float | None = None
+        if event is not None and getattr(event, "inaxes", None) is not None:
+            try:
+                x_value = float(event.xdata)
+                y_value = float(event.ydata)
+            except Exception:
+                x_value = None
+                y_value = None
+
+        available_px = 0
         try:
-            x_val = float(event.xdata)
-            y_val = float(event.ydata)
-            label.setText(f"x: {x_val:.4g}   y: {y_val:.4g}")
+            available_px = max(int(label.width()) - 8, 0)
+            if available_px <= 0:
+                status = self.statusBar()
+                if isinstance(status, QtWidgets.QStatusBar):
+                    available_px = max(int(status.width() * 0.45), 0)
         except Exception:
-            label.setText("x: --   y: --")
+            available_px = 0
+        metrics = QtGui.QFontMetrics(label.font())
+        label.setText(
+            cursor_readout_text(
+                x_value,
+                y_value,
+                available_px=available_px,
+                metrics=metrics,
+            )
+        )
 
     def _rescale_current_axes(self, axis: str) -> None:
         axes = self._current_axes()
@@ -6923,15 +7123,29 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not self._axes_by_tab:
             return
         canvases: set[FigureCanvas] = set()
+        platform_name = ""
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                platform_name = str(app.platformName() or "").strip().lower()
+            except Exception:
+                platform_name = ""
+        use_immediate_draw = platform_name in {"offscreen", "minimal", "headless"}
         for axes in set(filter(None, self._axes_by_tab.values())):
             canvas = self._apply_dark_mode_to_axes(axes, self._dark_mode_enabled)
             if isinstance(canvas, FigureCanvas):
                 canvases.add(canvas)
         for canvas in canvases:
             try:
-                canvas.draw_idle()
+                if use_immediate_draw:
+                    canvas.draw()
+                else:
+                    canvas.draw_idle()
             except Exception:
-                canvas.draw()
+                try:
+                    canvas.draw()
+                except Exception:
+                    pass
 
     def _apply_dark_mode_to_axes(self, axes: Any, enabled: bool) -> FigureCanvas | None:
         if axes is None:
@@ -7232,6 +7446,21 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             label = folder_action.text() or "Import folders..."
             proxy = menu.addAction(label)
             proxy.triggered.connect(folder_action.trigger)
+            actions_added = True
+
+        connect_action = getattr(self, "_connect_folder_action", None)
+        if isinstance(connect_action, QtGui.QAction):
+            label = connect_action.text() or "Connect folders..."
+            proxy = menu.addAction(label)
+            proxy.triggered.connect(connect_action.trigger)
+            actions_added = True
+
+        refresh_connected_action = getattr(self, "_refresh_connected_action", None)
+        if isinstance(refresh_connected_action, QtGui.QAction):
+            label = refresh_connected_action.text() or "Refresh connected folders"
+            proxy = menu.addAction(label)
+            proxy.setEnabled(refresh_connected_action.isEnabled())
+            proxy.triggered.connect(refresh_connected_action.trigger)
             actions_added = True
 
         if not actions_added:
@@ -8129,6 +8358,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             )
             return
         self._project_path = target
+        self._persist_connected_folders()
         self._update_project_title()
         self._remember_recent_project(target)
         self._after_project_saved(target, payload)
@@ -8190,6 +8420,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not success:
             return
         self._project_path = path
+        self._restore_connected_folders(force_local=True)
         self._update_project_title()
         self._remember_recent_project(path)
         self._after_project_loaded(path, payload)
@@ -8225,6 +8456,204 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         self._import_paths(Path(directory) for directory in directories)
 
+    def _connect_data_from_folder(self) -> None:
+        start_dir = self._data_dialog_start_directory()
+        directories = self._select_directories(
+            self,
+            title="Connect Data Folder(s)",
+            start_dir=start_dir,
+        )
+        if not directories:
+            return
+        self._connect_data_folders(Path(directory) for directory in directories)
+
+    def _connected_folder_file_candidates(self) -> List[Path]:
+        files: List[Path] = []
+        for folder in self._connected_data_folders:
+            if not isinstance(folder, Path) or not folder.exists() or not folder.is_dir():
+                continue
+            files.extend(self._iter_supported_files(folder))
+        unique: List[Path] = []
+        seen: set[str] = set()
+        for file_path in files:
+            try:
+                resolved = str(file_path.resolve())
+            except Exception:
+                resolved = str(file_path)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            unique.append(file_path)
+        return unique
+
+    def _known_imported_file_keys(self) -> set[str]:
+        keys: set[str] = set()
+        for workbook in self._workbooks.values():
+            source = getattr(workbook, "source", None)
+            if not isinstance(source, Path):
+                continue
+            try:
+                keys.add(str(source.resolve()))
+            except Exception:
+                keys.add(str(source))
+        return keys
+
+    def _update_connected_folder_state(self) -> None:
+        headless_platform = str(QtWidgets.QApplication.platformName() or "").strip().lower() in {"offscreen", "minimal"}
+        if self._connected_data_folders and not headless_platform:
+            if not self._connected_folder_timer.isActive():
+                self._connected_folder_timer.start()
+        else:
+            self._connected_folder_timer.stop()
+        action = getattr(self, "_refresh_connected_action", None)
+        if isinstance(action, QtGui.QAction):
+            action.setEnabled(bool(self._connected_data_folders))
+        menu_action = getattr(self, "_refresh_connected_menu_action", None)
+        if isinstance(menu_action, QtGui.QAction):
+            menu_action.setEnabled(bool(self._connected_data_folders))
+
+    def _persist_connected_folders(self) -> None:
+        project_path = getattr(self, "_project_path", None)
+        if not isinstance(project_path, Path):
+            return
+        entries = [str(path) for path in self._connected_data_folders if isinstance(path, Path)]
+        key = self._project_local_connected_folder_key(project_path)
+        if entries:
+            self.settings.setValue(key, entries)
+        else:
+            self.settings.remove(key)
+
+    def _restore_connected_folders(self, *, force_local: bool = False) -> None:
+        if self._connected_data_folders and not force_local:
+            self._update_connected_folder_state()
+            return
+        project_path = getattr(self, "_project_path", None)
+        if not isinstance(project_path, Path):
+            self._connected_data_folders = []
+            self._connected_folder_seen_files = set()
+            self._update_connected_folder_state()
+            return
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                platform_name = str(app.platformName() or "").strip().lower()
+            except Exception:
+                platform_name = ""
+        if platform_name in {"offscreen", "minimal", "headless"}:
+            self._connected_data_folders = []
+            self._connected_folder_seen_files = set()
+            self._update_connected_folder_state()
+            return
+        stored = self.settings.value(self._project_local_connected_folder_key(project_path), [])
+        if isinstance(stored, str):
+            candidates = [stored] if stored.strip() else []
+        elif isinstance(stored, (list, tuple, set)):
+            candidates = [str(entry) for entry in stored if entry]
+        else:
+            candidates = []
+        folders: List[Path] = []
+        seen: set[str] = set()
+        for entry in candidates:
+            try:
+                path = Path(entry)
+            except Exception:
+                continue
+            if not path.exists() or not path.is_dir():
+                continue
+            try:
+                key = str(path.resolve())
+            except Exception:
+                key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            folders.append(path)
+        if force_local and not folders and self._connected_data_folders:
+            self._update_connected_folder_state()
+            return
+        self._connected_data_folders = folders
+        self._connected_folder_seen_files = set()
+        self._update_connected_folder_state()
+        if folders:
+            self._connected_folders_restoring = True
+            try:
+                self._refresh_connected_folders()
+            finally:
+                self._connected_folders_restoring = False
+
+    def _project_local_connected_folder_key(self, project_path: Path) -> str:
+        try:
+            resolved = str(project_path.resolve())
+        except Exception:
+            resolved = str(project_path)
+        digest = hashlib.sha1(resolved.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        return self._project_settings_key(f"connected_folders_local/{digest}")
+
+    def _connect_data_folders(self, folders: Iterable[Path]) -> None:
+        changed = False
+        existing = {
+            str(path.resolve()) if isinstance(path, Path) else str(path)
+            for path in self._connected_data_folders
+            if isinstance(path, Path)
+        }
+        for folder in folders:
+            if not isinstance(folder, Path) or not folder.exists() or not folder.is_dir():
+                continue
+            try:
+                key = str(folder.resolve())
+            except Exception:
+                key = str(folder)
+            if key in existing:
+                continue
+            existing.add(key)
+            self._connected_data_folders.append(folder)
+            changed = True
+        if not changed:
+            return
+        self._persist_connected_folders()
+        self._update_connected_folder_state()
+        self._refresh_connected_folders()
+        if not self._connected_folders_restoring:
+            self._mark_project_dirty()
+        update_project_actions = getattr(self, "_update_project_actions", None)
+        if callable(update_project_actions):
+            update_project_actions()
+
+    def _poll_connected_folders(self) -> None:
+        if not self.isVisible():
+            return
+        if self._connected_folder_polling:
+            return
+        self._connected_folder_polling = True
+        try:
+            self._refresh_connected_folders(silent=True)
+        finally:
+            self._connected_folder_polling = False
+
+    def _refresh_connected_folders(self, silent: bool = False) -> None:
+        connected_files = self._connected_folder_file_candidates()
+        new_files: List[Path] = []
+        for file_path in connected_files:
+            try:
+                key = str(file_path.resolve())
+            except Exception:
+                key = str(file_path)
+            if key in self._connected_folder_seen_files:
+                continue
+            new_files.append(file_path)
+        if not new_files:
+            if not silent:
+                self._append_log("No new files found in connected folders.")
+            return
+        self._import_paths(new_files)
+        for file_path in new_files:
+            try:
+                self._connected_folder_seen_files.add(str(file_path.resolve()))
+            except Exception:
+                self._connected_folder_seen_files.add(str(file_path))
+        if not silent:
+            self._append_log(f"Imported {len(new_files)} new file(s) from connected folders.")
+
     def _import_paths(self, paths: Iterable[Path]) -> None:
         provided_paths: List[Path] = []
         for source in paths:
@@ -8245,6 +8674,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         errors: List[str] = []
         imported = 0
+        imported_files: List[Path] = []
         total_files = len(files)
         self._begin_task_progress(
             "Importing data...",
@@ -8282,6 +8712,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     errors.append(f"{file_path}: {exc}")
                     continue
                 imported += len(worksheets)
+                imported_files.append(file_path)
                 if (
                     position == total_files
                     or position <= 2
@@ -8311,6 +8742,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 "Some files could not be imported:\n" + "\n".join(errors[:10]),
             )
         if imported:
+            self._last_imported_file_paths = list(imported_files)
+            pending: List[Path] = []
+            seen_pending: set[str] = set()
+            for file_path in [*self._pending_new_plot_paths, *imported_files]:
+                try:
+                    key = str(file_path.resolve())
+                except Exception:
+                    key = str(file_path)
+                if key in seen_pending:
+                    continue
+                seen_pending.add(key)
+                pending.append(file_path)
+            self._pending_new_plot_paths = pending
             self._refresh_imported_data_summary()
             self._update_project_actions()
             if provided_paths:
@@ -8319,6 +8763,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 self._persist_import_sources(provided_paths)
             self._session_has_imports = True
             self._mark_project_dirty()
+        else:
+            self._last_imported_file_paths = []
         if self._refresh_import_action is not None:
             self._refresh_import_action.setEnabled(bool(self._worksheets))
 
@@ -8422,7 +8868,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     ) -> tuple[WorkbookData, List[WorksheetData]] | None:
         suffix = path.suffix.lower()
         try:
-            if suffix in {".csv", ".tsv", ".txt"}:
+            if suffix in {".csv", ".tsv", ".txt", ".dat"}:
                 frame = self._read_delimited_file(path, suffix)
                 if frame is None:
                     return None
@@ -9961,16 +10407,45 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                             parent.takeChild(child_index)
                 return
         if isinstance(tab, QtWidgets.QWidget) and self.tab_widget.currentWidget() is not tab:
+            if keep_tree_focus:
+                self._project_tree_focus_restore_pending = True
             self._show_tab(tab)
             if keep_tree_focus and isinstance(tree, QtWidgets.QTreeWidget):
+                self._restore_project_tree_focus(tree)
+
+    @staticmethod
+    def _restore_project_tree_focus(tree: QtWidgets.QTreeWidget) -> None:
+        def _focus_tree(target: QtWidgets.QTreeWidget) -> None:
+            try:
+                target.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+            except Exception:
+                pass
+            try:
+                viewport = target.viewport()
+            except Exception:
+                viewport = None
+            if isinstance(viewport, QtWidgets.QWidget):
                 try:
-                    tree.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+                    viewport.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
                 except Exception:
                     pass
-                QtCore.QTimer.singleShot(
+
+        _focus_tree(tree)
+        for delay in (0,):
+            try:
+                QtCore.QTimer.singleShot(delay, lambda t=tree: _focus_tree(t))
+            except Exception:
+                pass
+        try:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda t=tree: QtCore.QTimer.singleShot(
                     0,
-                    lambda t=tree: t.setFocus(QtCore.Qt.FocusReason.OtherFocusReason),
-                )
+                    lambda tt=t: _focus_tree(tt),
+                ),
+            )
+        except Exception:
+            pass
 
     def _assign_project_payload(
         self,
@@ -10547,10 +11022,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             canvas = self._canvas_by_tab.get(self.tab_widget.currentWidget())
             if canvas is not None:
                 try:
-                    canvas.draw_idle()
+                    canvas.draw()
                 except Exception:
-                    pass
-            if kind == "line" and current_tab is not None:
+                    try:
+                        canvas.draw_idle()
+                    except Exception:
+                        pass
+            if kind in {"line", "legend"} and current_tab is not None:
                 self._rebuild_object_manager_for_tab(current_tab)
             return
         self._object_tree_updating = True
@@ -10606,6 +11084,66 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             title = "Legend"
         item.setText(0, title or "Legend")
+
+    def _reconstruct_legend_from_item(self, item: QtWidgets.QTreeWidgetItem) -> None:
+        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return
+        if data.get("kind") != "legend":
+            return
+        legend = data.get("object")
+        if not isinstance(legend, Legend):
+            return
+        axes = getattr(legend, "axes", None)
+        if axes is None:
+            return
+        current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        descriptor = self._tab_descriptors.get(current_tab)
+        plugin_name = self._tab_plugin_name(descriptor)
+        rebuilt = self._sync_axes_legend_with_visible_lines(
+            axes,
+            plugin_name=plugin_name,
+        )
+        if rebuilt is None:
+            return
+        try:
+            rebuilt.set_visible(True)
+        except Exception:
+            pass
+        canvas = self._canvas_by_tab.get(current_tab)
+        if canvas is not None:
+            try:
+                canvas.draw()
+            except Exception:
+                try:
+                    canvas.draw_idle()
+                except Exception:
+                    pass
+        if current_tab is not None:
+            self._rebuild_object_manager_for_tab(current_tab)
+
+    def _handle_object_context_menu(self, pos: QtCore.QPoint) -> None:
+        tree = getattr(self, "object_tree", None)
+        if not isinstance(tree, QtWidgets.QTreeWidget):
+            return
+        item = tree.itemAt(pos)
+        if not isinstance(item, QtWidgets.QTreeWidgetItem):
+            return
+        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return
+        if data.get("kind") != "legend":
+            return
+
+        menu = QtWidgets.QMenu(tree)
+        settings_action = menu.addAction("Legend settings...")
+        reconstruct_action = menu.addAction("Reconstruct legend")
+
+        chosen = menu.exec(tree.viewport().mapToGlobal(pos))
+        if chosen is settings_action:
+            self._handle_object_item_double_click(item, 0)
+        elif chosen is reconstruct_action:
+            self._reconstruct_legend_from_item(item)
 
     def _dispatch_object_item_activation(
         self,
@@ -12259,19 +12797,23 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         text_field: Literal["title", "x_label", "y_label"] | None = None,
         axis: Literal["x", "y"] | None = None,
         legend: bool = False,
+        line: bool = False,
     ) -> bool:
         """Allow concrete hosts to route double-clicks into shared formatting UI."""
 
         opener = getattr(self, "_open_shared_graph_format_from_double_click", None)
         if not callable(opener):
             return False
+        kwargs: dict[str, Any] = {
+            "axes": axes,
+            "text_field": text_field,
+            "axis": axis,
+            "legend": legend,
+        }
+        if line:
+            kwargs["line"] = True
         try:
-            result = opener(
-                axes=axes,
-                text_field=text_field,
-                axis=axis,
-                legend=legend,
-            )
+            result = opener(**kwargs)
         except Exception:
             return False
         return bool(result)
@@ -12311,6 +12853,27 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     )
                     if not opened:
                         self._edit_axes_text_from_double_click(axes, field)
+                    return
+
+        for axes in candidates:
+            try:
+                lines = list(axes.get_lines())
+            except Exception:
+                lines = []
+            for line in lines:
+                if not isinstance(line, Line2D):
+                    continue
+                if not self._artist_hit(line, event):
+                    continue
+                try:
+                    self._set_format_selection(("line", line))
+                except Exception:
+                    pass
+                opened = self._open_shared_graph_format_from_canvas_target(
+                    axes,
+                    line=True,
+                )
+                if opened:
                     return
 
         for axes in candidates:
@@ -12394,7 +12957,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     except Exception:
                         needs_fit = True
                     if needs_fit:
-                        fitter(sub, use_half_width=True, preferred_width=None)
+                        fitter(
+                            sub,
+                            use_half_width=True,
+                            preferred_width=None,
+                            remember_manual=False,
+                        )
         else:
             self._hidden_tabs.add(tab)
 
@@ -12729,14 +13297,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
         super().changeEvent(event)
-        if event.type() != QtCore.QEvent.Type.ActivationChange:
+        if event.type() == QtCore.QEvent.Type.WindowStateChange:
+            QtCore.QTimer.singleShot(0, self._refresh_primary_dock_layout)
+            QtCore.QTimer.singleShot(20, self._normalize_docks_initial)
+            QtCore.QTimer.singleShot(0, self._refresh_status_bar_layout)
             return
-        if not self.isActiveWindow():
-            return
-        self._normalize_single_visible_graph_subwindow()
+        if event.type() == QtCore.QEvent.Type.ActivationChange and self.isActiveWindow():
+            self._normalize_single_visible_graph_subwindow()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
+        self._refresh_status_bar_layout()
         if self._primary_dock_layout_refreshing:
             return
         if self._dock_resize_refresh_pending:
@@ -12756,6 +13327,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[override]
         super().showEvent(event)
+        self._refresh_status_bar_layout()
         if not getattr(self, "_layout_fixed_once", False):
             self._layout_fixed_once = True
             QtCore.QTimer.singleShot(0, self._apply_initial_dock_sizes)
@@ -12810,9 +13382,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     # ------------------------------------------------------------------ state helpers
     def _handle_current_tab_changed(self, index: int) -> None:
         tab = self.tab_widget.widget(index) if index >= 0 else None
-        self._set_navigation_mode(None)
+        active_mode = self._nav_mode if self._nav_mode in {"zoom", "pan"} else None
+        self._set_navigation_mode(active_mode)
         self._update_tab_buttons()
         self._focus_tree_on_tab(tab)
+        if self._project_tree_focus_restore_pending:
+            tree = getattr(self, "project_tree", None)
+            if isinstance(tree, QtWidgets.QTreeWidget):
+                self._restore_project_tree_focus(tree)
+            self._project_tree_focus_restore_pending = False
         self._rebuild_object_manager_for_tab(tab)
         self._update_worksheet_actions()
         # Update cursor label immediately when switching tabs
@@ -13103,6 +13681,7 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
                 self,
                 use_half_width=False,
                 preferred_width=event.size().width(),
+                remember_manual=True,
             )
         finally:
             self._resizing = False
@@ -13145,6 +13724,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._maximized_hidden: set[_ManagedSubWindow] = set()
         self._max_visible_windows: int = 6
         self._visibility_queue: list[_ManagedSubWindow] = []
+        self._arrange_generation = 0
         self._mdi.subWindowActivated.connect(self._handle_subwindow_activated)
         try:
             self._mdi.setContentsMargins(0, 0, 0, 0)
@@ -13378,8 +13958,17 @@ class _MdiTabProxy(QtWidgets.QWidget):
         # Fullscreen mode should use the entire viewport. Preserving the figure
         # aspect here can shrink "fullscreen" windows to thin strips.
         sub.setGeometry(rect)
+        self._sync_subwindow_child_widget(sub)
         self._refresh_subwindow_figure_layout(sub, deferred=True)
         return True
+
+    def _is_maximized_target(self, sub: _ManagedSubWindow | None) -> bool:
+        if not self._is_live_subwindow(sub):
+            return False
+        if not (self._global_maximized or self._fullscreen_lock):
+            return False
+        active = self._mdi.activeSubWindow()
+        return active is sub
 
     def _maybe_apply_maximize(self, sub: _ManagedSubWindow) -> None:
         self._apply_fullscreen_geometry(sub)
@@ -13406,12 +13995,6 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 if was_global_maximized:
                     self._apply_global_window_state(active=sub)
             self._register_visible(sub)
-        if self._global_maximized and sub is not None and not sub.isMaximized():
-            self._syncing_state = True
-            try:
-                self._maybe_apply_maximize(sub)
-            finally:
-                self._syncing_state = False
         self.currentChanged.emit(index)
 
     def _subwindow_for(self, widget: QtWidgets.QWidget | None) -> _ManagedSubWindow | None:
@@ -13429,6 +14012,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         sub = self._subwindow_for(widget)
         if not self._is_live_subwindow(sub):
             return
+        was_global_maximized = bool(self._global_maximized or self._fullscreen_lock)
         restored_from_hidden = False
         self._blocking = True
         if sub in self._hidden_subwindows or sub in self._maximized_hidden:
@@ -13438,7 +14022,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
             sub.show()
             self._register_visible(sub)
         self._mdi.setActiveSubWindow(sub)
-        if self._global_maximized or self._fullscreen_lock:
+        if was_global_maximized:
             self._maximize_single(sub)
         else:
             sub.showNormal()
@@ -13456,7 +14040,11 @@ class _MdiTabProxy(QtWidgets.QWidget):
                     except Exception:
                         needs_fit = True
                     if needs_fit:
-                        self._fit_subwindow(sub, use_half_width=False)
+                        self._fit_subwindow(
+                            sub,
+                            use_half_width=False,
+                            remember_manual=False,
+                        )
                 self._refresh_subwindow_figure_layout(sub, deferred=True)
         sub.raise_()
         self._blocking = False
@@ -13494,6 +14082,18 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 else:
                     self._apply_global_window_state()
             else:
+                if (
+                    isinstance(source, _ManagedSubWindow)
+                    and self._is_live_subwindow(source)
+                ):
+                    try:
+                        if not source.isMaximized() and not source.isFullScreen():
+                            self._fullscreen_lock = False
+                            self._global_maximized = False
+                            self._apply_global_window_state(active=source if source is active else None)
+                            return
+                    except Exception:
+                        pass
                 if self._fullscreen_lock or self._global_maximized:
                     if not self._native_subwindow_maximize and not source_was_maximized:
                         QtCore.QTimer.singleShot(0, self._reconcile_maximized_state)
@@ -13683,8 +14283,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
                         lambda s=sub: self._apply_fullscreen_geometry(s),
                     )
             else:
-                sub.hide()
-                self._maximized_hidden.add(sub)
+                self._maximized_hidden.discard(sub)
 
     def _fit_subwindow(
         self,
@@ -13692,7 +14291,13 @@ class _MdiTabProxy(QtWidgets.QWidget):
         *,
         use_half_width: bool = True,
         preferred_width: int | None = None,
+        remember_manual: bool = True,
     ) -> None:
+        self._arrange_generation += 1
+        try:
+            setattr(sub, "_mw_user_sized", bool(remember_manual))
+        except Exception:
+            pass
         if self._global_maximized and preferred_width is None:
             # Respect maximize state instead of resizing back to windowed dimensions.
             return
@@ -13729,7 +14334,21 @@ class _MdiTabProxy(QtWidgets.QWidget):
             target_w = max(240, int(target_w * scale))
             target_h = max(200, int(target_h * scale))
         sub.resize(target_w, target_h)
+        self._sync_subwindow_child_widget(sub)
         self._refresh_subwindow_figure_layout(sub, deferred=True)
+
+    def _queue_arrange_subwindows(self) -> None:
+        generation = self._arrange_generation
+
+        def _apply_if_current() -> None:
+            if generation != self._arrange_generation:
+                return
+            self._arrange_subwindows()
+
+        try:
+            QtCore.QTimer.singleShot(0, _apply_if_current)
+        except Exception:
+            _apply_if_current()
 
     def arrangement_mode(self) -> str:
         return self._arrangement_mode
@@ -13786,6 +14405,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
                     sub,
                     use_half_width=False,
                     preferred_width=shared_preferred_width,
+                    remember_manual=False,
                 )
                 geometry = sub.geometry()
                 clamped_w = min(max_w, geometry.width())
@@ -13930,11 +14550,34 @@ class _MdiTabProxy(QtWidgets.QWidget):
                     self._apply_fullscreen_geometry(active)
             else:
                 visible_count = len(self._ordered_visible_subwindows())
-                if (
-                    self._arrangement_mode in {"tile_vertical", "tile_horizontal"}
-                    or visible_count <= 1
-                ):
+                if self._arrangement_mode in {"tile_vertical", "tile_horizontal"}:
                     self._arrange_subwindows()
+                elif visible_count == 1:
+                    visible = self._ordered_visible_subwindows()
+                    sub = visible[0] if visible else None
+                    if isinstance(sub, _ManagedSubWindow):
+                        user_sized = bool(getattr(sub, "_mw_user_sized", False))
+                        needs_fit = False
+                        try:
+                            geom = sub.geometry()
+                            needs_fit = (
+                                (not geom.isValid())
+                                or geom.width() < 220
+                                or geom.height() < 160
+                            )
+                        except Exception:
+                            needs_fit = True
+                        if needs_fit:
+                            self._fit_subwindow(
+                                sub,
+                                use_half_width=False,
+                                remember_manual=False,
+                            )
+                        elif not user_sized:
+                            self._arrange_subwindows()
+                        else:
+                            self._sync_subwindow_child_widget(sub)
+                            self._refresh_subwindow_figure_layout(sub, deferred=True)
         return super().eventFilter(source, event)
 
     def _remove_widget(self, widget: QtWidgets.QWidget | None) -> None:
@@ -13993,7 +14636,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         if not icon.isNull():
             sub.setWindowIcon(icon)
         self._mdi.addSubWindow(sub)
-        self._fit_subwindow(sub)
+        self._fit_subwindow(sub, remember_manual=False)
         if self._global_maximized:
             self._maximize_single(sub)
         else:
@@ -14014,10 +14657,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._maximize_single(sub)
         else:
             self._arrange_subwindows()
-            try:
-                QtCore.QTimer.singleShot(0, self._arrange_subwindows)
-            except Exception:
-                pass
+            self._queue_arrange_subwindows()
         return index
 
     def removeTab(self, index: int) -> None:
@@ -14161,7 +14801,11 @@ class _MdiTabProxy(QtWidgets.QWidget):
                         except Exception:
                             needs_fit = True
                         if needs_fit:
-                            self._fit_subwindow(sub, use_half_width=False)
+                            self._fit_subwindow(
+                                sub,
+                                use_half_width=False,
+                                remember_manual=False,
+                            )
                     self._refresh_subwindow_figure_layout(sub, deferred=True)
         else:
             self._hidden_tabs.add(widget)

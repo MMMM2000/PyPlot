@@ -24,7 +24,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
     """Embed the temperature dependence workflow directly inside PyPlot."""
 
     requires_imported_data = True
-    uses_shared_plot_workbooks = False
+    uses_shared_plot_workbooks = True
 
     _VAR_LABELS = {
         "sum": "T1+T2",
@@ -219,7 +219,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             descriptor = window_module.TabDescriptor(
                 kind="temperature_dependence",
                 title=title,
-                root_label=tab_label,
+                root_label=title,
                 x_label=x_label,
                 y_label=y_label,
                 canvas=canvas,
@@ -245,17 +245,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
-        def _task() -> None:
-            self._apply_settings_to_core()
-            temp_core.SHOW_PLOTS = False
-            temp_core.main(self._loaded_files, backend="origin")
-
-        self.run_origin_export(
-            ready=bool(self._loaded_files),
-            missing_message="Load temperature dependence data before exporting to Origin.",
-            task=_task,
-            success_log="Sent temperature plots to Origin.",
-        )
+        super().open_origin()
 
     def update_ui(self) -> None:
         has_data = self._data is not None
@@ -282,6 +272,15 @@ class TemperatureDependencePlugin(PyPlotPlugin):
                 self._summary_label.setText(
                     "Data loaded. Adjust settings and click Plot Temperature Dependence to generate graphs."
                 )
+
+    def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
+        return {
+            "title_font": 14,
+            "label_font": 11,
+            "tick_font": 9,
+            "figure_width": 9.2,
+            "figure_height": 5.6,
+        }
 
     def export_txt(self) -> None:  # type: ignore[override]
         if self._data is None:
