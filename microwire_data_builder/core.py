@@ -212,6 +212,7 @@ OUTPUT_COLUMNS = [
     "VSM hysteresis graphs",
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
+    "Shape memory stress/strain graphs",
     "FMR graphs",
 ]
 
@@ -233,6 +234,7 @@ FIGURE_COLUMNS = (
 VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
+SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
 FMR_COLUMN = "FMR graphs"
 
 TRANSITION_TEMP_AS_COLUMN = "As (°C)"
@@ -664,6 +666,17 @@ class DmaIsoStressRecord:
     path: Path
     sample: str
     datasets: Dict[int, Tuple[List[float], List[float]]]
+    key: Optional[Tuple[str, int, int]] = None
+    label: Optional[str] = None
+
+
+@dataclass
+class ShapeMemoryStressStrainRecord:
+    """Parsed shape-memory stress/strain measurement for a single file."""
+
+    path: Path
+    sample: str
+    data: pd.DataFrame
     key: Optional[Tuple[str, int, int]] = None
     label: Optional[str] = None
 
@@ -4759,6 +4772,9 @@ def build_database(
     vsm_hysteresis_records: Optional[Iterable[VsmHysteresisRecord]] = None,
     vsm_temperature_scan_records: Optional[Iterable[VsmTemperatureScanRecord]] = None,
     dma_iso_stress_records: Optional[Iterable[DmaIsoStressRecord]] = None,
+    shape_memory_stress_strain_records: Optional[
+        Iterable[ShapeMemoryStressStrainRecord]
+    ] = None,
     fmr_records: Optional[Iterable[FmrRecord]] = None,
     phase_points: Optional[Dict[str, Dict[str, float]]] = None,
     transition_temps: Optional[Dict[str, Dict[str, float]]] = None,
@@ -4943,6 +4959,9 @@ def build_database(
     vsm_hysteresis_groups = _group_records(vsm_hysteresis_records)
     vsm_temperature_groups = _group_records(vsm_temperature_scan_records)
     dma_isostress_groups = _group_records(dma_iso_stress_records)
+    shape_memory_stress_strain_groups = _group_records(
+        shape_memory_stress_strain_records
+    )
     fmr_groups = _group_records(fmr_records)
 
     phase_points_map: Dict[str, Dict[str, float]] = {}
@@ -5460,6 +5479,25 @@ def build_database(
             labels = [_record_label(record) for record in dma_records if _record_label(record)]
             if labels:
                 row[DMA_ISOSTRESS_COLUMN] = list(dict.fromkeys(labels))
+        shape_memory_records = shape_memory_stress_strain_groups.get(key, [])
+        if not shape_memory_records:
+            shape_memory_records = shape_memory_stress_strain_groups.get(
+                (composition, draw_x, piece_y, None),
+                [],
+            )
+        if not shape_memory_records:
+            shape_memory_records = shape_memory_stress_strain_groups.get(
+                (composition, draw_x, piece_y),
+                [],
+            )
+        if shape_memory_records:
+            labels = [
+                _record_label(record)
+                for record in shape_memory_records
+                if _record_label(record)
+            ]
+            if labels:
+                row[SHAPE_MEMORY_STRESS_STRAIN_COLUMN] = list(dict.fromkeys(labels))
         fmr_entries = fmr_groups.get(key, [])
         if not fmr_entries:
             fmr_entries = fmr_groups.get((composition, draw_x, piece_y, None), [])
@@ -5830,10 +5868,12 @@ __all__ = [
     "VsmHysteresisRecord",
     "VsmTemperatureScanRecord",
     "DmaIsoStressRecord",
+    "ShapeMemoryStressStrainRecord",
     "FmrRecord",
     "VSM_HYSTERESIS_COLUMN",
     "VSM_TEMPERATURE_SCAN_COLUMN",
     "DMA_ISOSTRESS_COLUMN",
+    "SHAPE_MEMORY_STRESS_STRAIN_COLUMN",
     "FMR_COLUMN",
     "build_database",
     "build_fabrication_index",

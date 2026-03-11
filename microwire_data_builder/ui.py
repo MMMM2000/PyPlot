@@ -71,6 +71,7 @@ from .core import (
     VsmHysteresisRecord,
     VsmTemperatureScanRecord,
     DmaIsoStressRecord,
+    ShapeMemoryStressStrainRecord,
     FmrRecord,
     OUTPUT_COLUMNS,
     FIGURE_COLUMNS,
@@ -78,6 +79,7 @@ from .core import (
     VSM_HYSTERESIS_COLUMN,
     VSM_TEMPERATURE_SCAN_COLUMN,
     DMA_ISOSTRESS_COLUMN,
+    SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
     FMR_COLUMN,
     build_database,
     build_fabrication_index,
@@ -124,6 +126,15 @@ try:
     from plotting.plugins.dma_iso_stress.parser import parse_dma_txt
 except Exception:  # pragma: no cover - optional dependency
     parse_dma_txt = None  # type: ignore[assignment]
+
+try:
+    from plotting.plugins.shape_memory_stress_strain.core import (
+        load_manual_stress_strain_file,
+        make_dual_axis_overlay_figure,
+    )
+except Exception:  # pragma: no cover - optional dependency
+    load_manual_stress_strain_file = None  # type: ignore[assignment]
+    make_dual_axis_overlay_figure = None  # type: ignore[assignment]
 
 try:
     from plotting.plugins.vsm_hysteresis.vsm_hysteresis_loops import (
@@ -3758,6 +3769,29 @@ def _plot_dma_iso_stress_figure(
     return figure
 
 
+def _plot_shape_memory_stress_strain_figure(
+    record: ShapeMemoryStressStrainRecord,
+    *,
+    width_px: int,
+    height_px: int,
+) -> Optional["plt.Figure"]:
+    if make_dual_axis_overlay_figure is None:
+        return None
+    frame = record.data if isinstance(record.data, pd.DataFrame) else pd.DataFrame()
+    if frame.empty:
+        return None
+    title = record.sample or Path(record.path).stem
+    variant = getattr(record, "variant", None)
+    if isinstance(variant, str) and variant.strip():
+        title = f"{title} ({variant.strip()})"
+    figure = make_dual_axis_overlay_figure(frame, title=title)
+    try:
+        figure.set_size_inches(max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
+    except Exception:
+        pass
+    return figure
+
+
 def _plot_fmr_figure(
     record: FmrRecord,
     *,
@@ -4608,6 +4642,55 @@ def _dma_iso_stress_preview_items(
                     open_origin=True,
                 ),
                 tooltip="Send this DMA iso-stress file to Origin via PyPlot.",
+            ),
+        )
+        items.append(_GraphPreviewItem(title, pixmap, actions=actions))
+    return items
+
+
+def _shape_memory_stress_strain_preview_items(
+    records: Sequence[ShapeMemoryStressStrainRecord],
+    logger: logging.Logger,
+    *,
+    width_px: int,
+    height_px: int,
+) -> List[_GraphPreviewItem]:
+    items: List[_GraphPreviewItem] = []
+    for record in records:
+        figure = _plot_shape_memory_stress_strain_figure(
+            record,
+            width_px=width_px,
+            height_px=height_px,
+        )
+        pixmap = _figure_to_pixmap(figure, logger, width_px=width_px, height_px=height_px)
+        if pixmap is None:
+            continue
+        title = _record_label_for_display(record) or record.sample
+        paths = [record.path] if isinstance(record.path, Path) else []
+        actions = (
+            _GraphPreviewAction(
+                "Open in PyPlot",
+                partial(
+                    _open_pyplot_for_paths,
+                    paths,
+                    "Shape Memory Stress/Strain",
+                    logger,
+                    auto_plot=True,
+                    open_origin=False,
+                ),
+                tooltip="Open this shape-memory file in the PyPlot Shape Memory Stress/Strain plugin.",
+            ),
+            _GraphPreviewAction(
+                "Open in Origin",
+                partial(
+                    _open_pyplot_for_paths,
+                    paths,
+                    "Shape Memory Stress/Strain",
+                    logger,
+                    auto_plot=True,
+                    open_origin=True,
+                ),
+                tooltip="Send this shape-memory file to Origin via PyPlot.",
             ),
         )
         items.append(_GraphPreviewItem(title, pixmap, actions=actions))
@@ -13668,6 +13751,419 @@ class DmaIsoStressSection(MiniDatabaseSection):
                     continue
         return sources
 
+class ShapeMemoryStressStrainSection(MiniDatabaseSection):
+    section_key = "shape_memory_stress_strain"
+    section_title = "Shape memory stress/strain"
+    supported_suffixes = (".txt",)
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[int, str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
+        self._record_groups: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
+        self._record_groups_by_key: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
+        self._hidden_paths: Set[str] = set()
+        self._all_records: List[ShapeMemoryStressStrainRecord] = []
+        self._preview_group_count = 1
+        self._preview_spacing = 6
+        self._table_splitter: QtWidgets.QSplitter | None = None
+        super().__init__(logger, log_callback, parent)
+        self._load_hidden_paths()
+        if isinstance(self.model, DataFrameModel):
+            self.model.set_decoration_provider(self._preview_decoration)
+        self.open_graphs_button = QtWidgets.QPushButton("Open graphs")
+        self.open_graphs_button.clicked.connect(self._open_selected_graphs)
+        self.controls_layout.addWidget(self.open_graphs_button)
+        self.open_pyplot_button = QtWidgets.QPushButton("Open in PyPlot")
+        self.open_pyplot_button.setToolTip(
+            "Open the selected shape-memory files in PyPlot."
+        )
+        self.open_pyplot_button.clicked.connect(self._open_selected_in_pyplot)
+        self.controls_layout.addWidget(self.open_pyplot_button)
+        self.open_origin_button = QtWidgets.QPushButton("Open in Origin")
+        self.open_origin_button.setToolTip(
+            "Send the selected shape-memory files to Origin via PyPlot."
+        )
+        self.open_origin_button.clicked.connect(self._open_selected_in_origin)
+        self.controls_layout.addWidget(self.open_origin_button)
+        self.visibility_button = QtWidgets.QPushButton("Visibility...")
+        self.visibility_button.setToolTip(
+            "Show or hide specific shape-memory graphs."
+        )
+        self.visibility_button.clicked.connect(self._open_visibility_dialog)
+        self.controls_layout.addWidget(self.visibility_button)
+        header = self.table_view.verticalHeader() if self.table_view is not None else None
+        if header is not None:
+            default_height = ANNEALING_GRAPH_HEIGHT + 24
+            header.setDefaultSectionSize(default_height)
+            header.setMinimumSectionSize(default_height)
+        self._refresh_record_groups()
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+
+    def process(
+        self,
+        paths: List[Path],
+        progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
+    ) -> SectionProcessResult:
+        if load_manual_stress_strain_file is None:
+            raise RuntimeError("Shape-memory stress/strain parser is not available.")
+        records: List[ShapeMemoryStressStrainRecord] = []
+        processed: Dict[str, float] = {}
+        total = len(paths)
+        for idx, path in enumerate(paths, start=1):
+            self._check_cancelled()
+            try:
+                frame = load_manual_stress_strain_file(Path(path))
+            except Exception:
+                self.logger.exception("Failed to parse %s", path)
+                frame = pd.DataFrame()
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                if progress is not None:
+                    try:
+                        progress(idx, total, f"Skipped {Path(path).name}")
+                    except Exception:
+                        pass
+                continue
+            raw_sample = _sample_from_path(Path(path), self.data.sources)
+            sample, variant = _split_sample_variant(raw_sample)
+            key = _microwire_key_from_path(Path(path), sample or raw_sample)
+            label = Path(path).stem
+            if variant:
+                label = f"{variant} â€” {label}"
+            record = ShapeMemoryStressStrainRecord(
+                path=Path(path),
+                sample=sample or raw_sample,
+                data=frame,
+                key=key,
+                label=label,
+            )
+            if variant:
+                setattr(record, "variant", variant)
+            records.append(record)
+            try:
+                processed[str(path)] = float(Path(path).stat().st_mtime)
+            except OSError:
+                processed[str(path)] = 0.0
+            if progress is not None:
+                try:
+                    progress(idx, total, f"Parsed {Path(path).name}")
+                except Exception:
+                    pass
+        table = _graph_records_to_frame(
+            records,
+            SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+            sample_column="_sample",
+        )
+        return SectionProcessResult(
+            table=table,
+            processed=processed,
+            payloads={"shape_memory_stress_strain_records": records},
+        )
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._refresh_record_groups()
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+
+    def _load_hidden_paths(self) -> None:
+        hidden = self.data.extra.get("hidden_paths")
+        if isinstance(hidden, (list, tuple, set)):
+            self._hidden_paths = {str(path) for path in hidden if path}
+        else:
+            self._hidden_paths = set()
+
+    def _store_hidden_paths(self) -> None:
+        self.data.extra["hidden_paths"] = sorted(self._hidden_paths)
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception(
+                "Failed to persist shape-memory visibility settings"
+            )
+
+    def _visible_records(
+        self, records: Sequence[ShapeMemoryStressStrainRecord]
+    ) -> List[ShapeMemoryStressStrainRecord]:
+        if not self._hidden_paths:
+            return list(records)
+        return [
+            record
+            for record in records
+            if _record_path_key(record) not in self._hidden_paths
+        ]
+
+    def _open_visibility_dialog(self) -> None:
+        items = _visibility_items_from_records(self._all_records)
+        if not items:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No shape-memory graphs are available yet.",
+            )
+            return
+        groups = _visibility_groups_from_records(self._all_records)
+        dialog = _GraphVisibilityDialog(
+            "Shape-memory visibility",
+            items,
+            self._hidden_paths,
+            groups=groups,
+            parent=self,
+        )
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._hidden_paths = dialog.hidden_paths()
+            self._store_hidden_paths()
+            self._refresh_record_groups()
+
+    def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
+        super().import_project_payload(payload)
+        self._load_hidden_paths()
+        _drop_visible_sample_column(self)
+        self._refresh_record_groups()
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+
+    def _handle_worker_finished(self, result: SectionProcessResult) -> None:
+        super()._handle_worker_finished(result)
+        self._refresh_record_groups()
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+
+    def _refresh_record_groups(self) -> None:
+        grouped: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
+        try:
+            payload = self.store.load_payload("shape_memory_stress_strain_records")
+        except Exception:
+            payload = None
+        all_records = list(payload) if isinstance(payload, list) else []
+        self._all_records = list(all_records)
+        visible_records = self._visible_records(all_records)
+        if visible_records:
+            for record in visible_records:
+                sample = getattr(record, "sample", None)
+                if isinstance(sample, str) and sample.strip():
+                    existing_variant = getattr(record, "variant", None)
+                    variant: Optional[str] = None
+                    if isinstance(existing_variant, str) and existing_variant.strip():
+                        variant = existing_variant.strip()
+                    else:
+                        base_sample, parsed_variant = _split_sample_variant(sample)
+                        if base_sample:
+                            try:
+                                record.sample = base_sample
+                            except Exception:
+                                pass
+                            sample = base_sample
+                        if parsed_variant:
+                            variant = parsed_variant
+                        setattr(record, "variant", variant)
+                    if variant:
+                        label = getattr(record, "label", None)
+                        if isinstance(label, str) and label.strip():
+                            if variant not in label:
+                                try:
+                                    record.label = f"{variant} â€” {label}"
+                                except Exception:
+                                    pass
+                    sample = getattr(record, "sample", None)
+                if isinstance(sample, str) and sample.strip():
+                    grouped.setdefault(sample, []).append(record)
+        self._record_groups = grouped
+        self._record_groups_by_key = _group_graph_records_by_key(visible_records)
+        max_groups = 1
+        for records in grouped.values():
+            group_count = len(records)
+            if group_count > max_groups:
+                max_groups = group_count
+        self._preview_group_count = max_groups
+        self._update_preview_icon_size()
+        self._pixmap_cache.clear()
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+
+    def _preview_icon_width(self) -> int:
+        count = max(int(self._preview_group_count), 1)
+        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
+
+    def _preview_icon_height(self) -> int:
+        return ANNEALING_GRAPH_HEIGHT
+
+    def _update_preview_icon_size(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        width = self._preview_icon_width()
+        height = self._preview_icon_height()
+        try:
+            table.setIconSize(
+                QtCore.QSize(max(width, ANNEALING_GRAPH_WIDTH), max(height, ANNEALING_GRAPH_HEIGHT))
+            )
+        except Exception:
+            pass
+        header = table.verticalHeader()
+        if header is not None:
+            try:
+                header.setDefaultSectionSize(max(height + 24, ANNEALING_GRAPH_HEIGHT + 24))
+            except Exception:
+                pass
+        self._auto_fit_columns()
+
+    def _preview_decoration(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[QtGui.QPixmap]:
+        if column != SHAPE_MEMORY_STRESS_STRAIN_COLUMN:
+            return None
+        sample = _row_sample_value(row)
+        if not sample:
+            return None
+        cache_key = f"{sample}|{column}"
+        if cache_key in self._pixmap_cache:
+            return self._pixmap_cache[cache_key]
+        records = self._record_groups.get(sample, [])
+        if not records:
+            row_key = _row_to_microwire_key(row)
+            if row_key:
+                records = self._record_groups_by_key.get(row_key, [])
+        pixmap: Optional[QtGui.QPixmap] = None
+        if records:
+            items = _shape_memory_stress_strain_preview_items(
+                records,
+                self.logger,
+                width_px=ANNEALING_GRAPH_WIDTH,
+                height_px=ANNEALING_GRAPH_HEIGHT,
+            )
+            pixmaps = [item.pixmap for item in items if item.pixmap is not None]
+            if pixmaps:
+                pixmap = _combine_pixmaps_side_by_side(
+                    pixmaps,
+                    width_px=self._preview_icon_width(),
+                    height_px=self._preview_icon_height(),
+                    spacing=self._preview_spacing,
+                    scale_to_fit=False,
+                )
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
+
+    def _selected_records(self) -> List[ShapeMemoryStressStrainRecord]:
+        rows = self._selected_rows()
+        records: List[ShapeMemoryStressStrainRecord] = []
+        if not rows:
+            return records
+        for row_index in rows:
+            series = self._row_series(row_index)
+            if series is None:
+                continue
+            sample = _row_sample_value(series)
+            if not sample:
+                continue
+            matched = self._record_groups.get(sample, [])
+            if not matched:
+                row_key = _row_to_microwire_key(series)
+                if row_key:
+                    matched = self._record_groups_by_key.get(row_key, [])
+            records.extend(matched)
+        return records
+
+    def _open_selected_graphs(self) -> None:
+        records = self._selected_records()
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to open their graphs.",
+            )
+            return
+        items = _shape_memory_stress_strain_preview_items(
+            records,
+            self.logger,
+            width_px=GRAPH_PREVIEW_WIDTH,
+            height_px=GRAPH_PREVIEW_HEIGHT,
+        )
+        if not items:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No graphs are available for the selected rows.",
+            )
+            return
+        dialog = _GraphGalleryDialog(
+            "Shape memory stress/strain graphs",
+            items,
+            parent=self,
+            empty_message="No shape-memory graphs available.",
+        )
+        dialog.exec()
+
+    def _open_selected_in_pyplot(self) -> None:
+        records = self._selected_records()
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to open their graphs.",
+            )
+            return
+        paths = [record.path for record in records if isinstance(record.path, Path)]
+        paths = list(dict.fromkeys(paths))
+        if not paths:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No files are available for the selected rows.",
+            )
+            return
+        _open_pyplot_for_paths(
+            paths,
+            "Shape Memory Stress/Strain",
+            self.logger,
+            auto_plot=True,
+            open_origin=False,
+        )
+
+    def _open_selected_in_origin(self) -> None:
+        records = self._selected_records()
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to open their graphs.",
+            )
+            return
+        paths = [record.path for record in records if isinstance(record.path, Path)]
+        paths = list(dict.fromkeys(paths))
+        if not paths:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No files are available for the selected rows.",
+            )
+            return
+        _open_pyplot_for_paths(
+            paths,
+            "Shape Memory Stress/Strain",
+            self.logger,
+            auto_plot=True,
+            open_origin=True,
+        )
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        raw = row.get("_sources")
+        if isinstance(raw, (list, tuple, set)):
+            for entry in raw:
+                if not entry:
+                    continue
+                try:
+                    sources.append(Path(entry))
+                except Exception:
+                    continue
+        return sources
+
 
 class FmrSection(MiniDatabaseSection):
     section_key = "fmr"
@@ -16096,6 +16592,8 @@ class CompareSection(MiniDatabaseSection):
         self._cached_vsm_temperature_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
         self._cached_dma_isostress_records: List[DmaIsoStressRecord] = []
         self._cached_dma_isostress_groups: Dict[str, List[DmaIsoStressRecord]] = {}
+        self._cached_shape_memory_stress_strain_records: List[ShapeMemoryStressStrainRecord] = []
+        self._cached_shape_memory_stress_strain_groups: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
         self._cached_fmr_records: List[FmrRecord] = []
         self._cached_fmr_groups: Dict[str, List[FmrRecord]] = {}
         self._row_keys: Set[str] = set()
@@ -16110,6 +16608,7 @@ class CompareSection(MiniDatabaseSection):
             VSM_HYSTERESIS_COLUMN,
             VSM_TEMPERATURE_SCAN_COLUMN,
             DMA_ISOSTRESS_COLUMN,
+            SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
             FMR_COLUMN,
         }
         super().__init__(logger, log_callback, parent)
@@ -16169,6 +16668,12 @@ class CompareSection(MiniDatabaseSection):
         self.open_dma_button.clicked.connect(lambda: self._open_preview_graph("dma_iso_stress"))
         self.open_dma_button.setEnabled(False)
         graph_row.addWidget(self.open_dma_button)
+        self.open_shape_memory_button = QtWidgets.QPushButton("Open shape-memory graphs")
+        self.open_shape_memory_button.clicked.connect(
+            lambda: self._open_preview_graph("shape_memory_stress_strain")
+        )
+        self.open_shape_memory_button.setEnabled(False)
+        graph_row.addWidget(self.open_shape_memory_button)
         self.open_fmr_button = QtWidgets.QPushButton("Open FMR graphs")
         self.open_fmr_button.clicked.connect(lambda: self._open_preview_graph("fmr"))
         self.open_fmr_button.setEnabled(False)
@@ -16239,6 +16744,11 @@ class CompareSection(MiniDatabaseSection):
             self.graph_preview_panel,
         )
         self.graph_preview_tabs.addTab(self.dma_iso_gallery, "DMA iso-stress")
+        self.shape_memory_gallery = _GraphGalleryWidget(
+            "Select a row to preview shape-memory graphs.",
+            self.graph_preview_panel,
+        )
+        self.graph_preview_tabs.addTab(self.shape_memory_gallery, "Shape memory")
         self.fmr_gallery = _GraphGalleryWidget(
             "Select a row to preview FMR graphs.",
             self.graph_preview_panel,
@@ -16848,6 +17358,19 @@ class CompareSection(MiniDatabaseSection):
                     height_px=ANNEALING_GRAPH_HEIGHT,
                 )
                 return self._combined_graph_pixmap(cache_key, items, stack_vertical=True)
+            if field == SHAPE_MEMORY_STRESS_STRAIN_COLUMN:
+                records = self._ensure_shape_memory_stress_strain_groups().get(key, [])
+                if not records:
+                    return None
+                signature = self._record_signature(records)
+                cache_key = ("shape_memory_stress_strain", key, signature)
+                items = _shape_memory_stress_strain_preview_items(
+                    records,
+                    self.logger,
+                    width_px=ANNEALING_GRAPH_WIDTH,
+                    height_px=ANNEALING_GRAPH_HEIGHT,
+                )
+                return self._combined_graph_pixmap(cache_key, items, stack_vertical=True)
             if field == FMR_COLUMN:
                 records = self._ensure_fmr_groups().get(key, [])
                 if not records:
@@ -17007,6 +17530,12 @@ class CompareSection(MiniDatabaseSection):
         self.open_dma_button.setEnabled(
             bool(enabled and self._ensure_dma_isostress_groups().get(key or "", []))
         )
+        self.open_shape_memory_button.setEnabled(
+            bool(
+                enabled
+                and self._ensure_shape_memory_stress_strain_groups().get(key or "", [])
+            )
+        )
         self.open_fmr_button.setEnabled(
             bool(enabled and self._ensure_fmr_groups().get(key or "", []))
         )
@@ -17057,6 +17586,9 @@ class CompareSection(MiniDatabaseSection):
                 self.dma_iso_gallery.clear(
                     "Select a row to preview DMA iso-stress graphs."
                 )
+                self.shape_memory_gallery.clear(
+                    "Select a row to preview shape-memory graphs."
+                )
                 self.fmr_gallery.clear("Select a row to preview FMR graphs.")
                 return
             key = _row_to_microwire_key(row)
@@ -17071,6 +17603,7 @@ class CompareSection(MiniDatabaseSection):
                 self.vsm_hysteresis_gallery.clear(message)
                 self.vsm_temperature_gallery.clear(message)
                 self.dma_iso_gallery.clear(message)
+                self.shape_memory_gallery.clear(message)
                 self.fmr_gallery.clear(message)
                 return
 
@@ -17127,6 +17660,18 @@ class CompareSection(MiniDatabaseSection):
             )
             self.dma_iso_gallery.set_items(
                 dma_items, "No DMA iso-stress graphs available for this microwire."
+            )
+
+            shape_memory_records = self._ensure_shape_memory_stress_strain_groups().get(key, [])
+            shape_memory_items = _shape_memory_stress_strain_preview_items(
+                shape_memory_records,
+                self.logger,
+                width_px=ANNEALING_GRAPH_WIDTH,
+                height_px=ANNEALING_GRAPH_HEIGHT,
+            )
+            self.shape_memory_gallery.set_items(
+                shape_memory_items,
+                "No shape-memory graphs available for this microwire.",
             )
 
             fmr_records = self._ensure_fmr_groups().get(key, [])
@@ -17207,6 +17752,16 @@ class CompareSection(MiniDatabaseSection):
                 height_px=GRAPH_PREVIEW_HEIGHT,
             )
             empty_message = "No DMA iso-stress graphs available."
+        elif kind == "shape_memory_stress_strain":
+            records = self._ensure_shape_memory_stress_strain_groups().get(key, [])
+            title = "Shape memory stress/strain graphs"
+            items = _shape_memory_stress_strain_preview_items(
+                records,
+                self.logger,
+                width_px=GRAPH_PREVIEW_WIDTH,
+                height_px=GRAPH_PREVIEW_HEIGHT,
+            )
+            empty_message = "No shape-memory graphs available."
         else:
             records = self._ensure_fmr_groups().get(key, [])
             title = "FMR graphs"
@@ -17302,6 +17857,27 @@ class CompareSection(MiniDatabaseSection):
                 self._cached_dma_isostress_records = list(records)
                 self._cached_dma_isostress_groups = _group_graph_records_by_key(records)
                 groups = self._cached_dma_isostress_groups
+        return groups
+
+    def _ensure_shape_memory_stress_strain_groups(
+        self,
+    ) -> Dict[str, List[ShapeMemoryStressStrainRecord]]:
+        groups = self._cached_shape_memory_stress_strain_groups
+        if not groups:
+            payload = self._load_payload(
+                "shape_memory_stress_strain",
+                "shape_memory_stress_strain_records",
+            )
+            if isinstance(payload, list):
+                records = self._filter_hidden_records(
+                    payload,
+                    "shape_memory_stress_strain",
+                )
+                self._cached_shape_memory_stress_strain_records = list(records)
+                self._cached_shape_memory_stress_strain_groups = (
+                    _group_graph_records_by_key(records)
+                )
+                groups = self._cached_shape_memory_stress_strain_groups
         return groups
 
     def _ensure_fmr_groups(self) -> Dict[str, List[FmrRecord]]:
@@ -17404,6 +17980,8 @@ class AssemblySection(QtWidgets.QWidget):
         self._cached_vsm_temperature_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
         self._cached_dma_isostress_records: List[DmaIsoStressRecord] = []
         self._cached_dma_isostress_groups: Dict[str, List[DmaIsoStressRecord]] = {}
+        self._cached_shape_memory_stress_strain_records: List[ShapeMemoryStressStrainRecord] = []
+        self._cached_shape_memory_stress_strain_groups: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
         self._cached_fmr_records: List[FmrRecord] = []
         self._cached_fmr_groups: Dict[str, List[FmrRecord]] = {}
         self._compare_section: Optional["CompareSection"] = None
@@ -17419,12 +17997,14 @@ class AssemblySection(QtWidgets.QWidget):
             VSM_HYSTERESIS_COLUMN,
             VSM_TEMPERATURE_SCAN_COLUMN,
             DMA_ISOSTRESS_COLUMN,
+            SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
             FMR_COLUMN,
         }
         self._inline_graph_columns: Set[str] = set(FIGURE_COLUMNS) | {
             VSM_HYSTERESIS_COLUMN,
             VSM_TEMPERATURE_SCAN_COLUMN,
             DMA_ISOSTRESS_COLUMN,
+            SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
             FMR_COLUMN,
         }
         self._graph_pixmap_cache: Dict[Tuple[object, ...], QtGui.QPixmap] = {}
@@ -17458,6 +18038,7 @@ class AssemblySection(QtWidgets.QWidget):
             ("vsm_temperature_scan", "VSM temperature scan"),
             ("transition_temps", "Transition temps"),
             ("dma_iso_stress", "DMA iso-stress"),
+            ("shape_memory_stress_strain", "Shape memory stress/strain"),
             ("fmr", "FMR"),
             ("strain", "Strain"),
         ]
@@ -17512,6 +18093,12 @@ class AssemblySection(QtWidgets.QWidget):
         self.open_dma_button.clicked.connect(lambda: self._open_preview_graph("dma_iso_stress"))
         self.open_dma_button.setEnabled(False)
         graph_row.addWidget(self.open_dma_button)
+        self.open_shape_memory_button = QtWidgets.QPushButton("Open shape-memory graphs")
+        self.open_shape_memory_button.clicked.connect(
+            lambda: self._open_preview_graph("shape_memory_stress_strain")
+        )
+        self.open_shape_memory_button.setEnabled(False)
+        graph_row.addWidget(self.open_shape_memory_button)
         self.open_fmr_button = QtWidgets.QPushButton("Open FMR graphs")
         self.open_fmr_button.clicked.connect(lambda: self._open_preview_graph("fmr"))
         self.open_fmr_button.setEnabled(False)
@@ -17626,6 +18213,11 @@ class AssemblySection(QtWidgets.QWidget):
             self.graph_preview_panel,
         )
         self.graph_preview_tabs.addTab(self.dma_iso_gallery, "DMA iso-stress")
+        self.shape_memory_gallery = _GraphGalleryWidget(
+            "Select a row to preview shape-memory graphs.",
+            self.graph_preview_panel,
+        )
+        self.graph_preview_tabs.addTab(self.shape_memory_gallery, "Shape memory")
         self.fmr_gallery = _GraphGalleryWidget(
             "Select a row to preview FMR graphs.",
             self.graph_preview_panel,
@@ -18233,6 +18825,7 @@ class AssemblySection(QtWidgets.QWidget):
             List[VsmHysteresisRecord],
             List[VsmTemperatureScanRecord],
             List[DmaIsoStressRecord],
+            List[ShapeMemoryStressStrainRecord],
             List[FmrRecord],
             Dict[MicrowireKey, MicroscopeMeasurements],
             Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary],
@@ -18366,6 +18959,25 @@ class AssemblySection(QtWidgets.QWidget):
         self._cached_dma_isostress_records = list(dma_isostress_records)
         self._cached_dma_isostress_groups = _group_graph_records_by_key(dma_isostress_records)
 
+        shape_memory_stress_strain_records: List[ShapeMemoryStressStrainRecord] = []
+        if "shape_memory_stress_strain" in selected:
+            payload = self._load_payload(
+                "shape_memory_stress_strain",
+                "shape_memory_stress_strain_records",
+            )
+            if isinstance(payload, list):
+                shape_memory_stress_strain_records = list(
+                    self._filter_hidden_records(payload, "shape_memory_stress_strain")
+                )
+            else:
+                _mark_missing("Shape memory stress/strain")
+        self._cached_shape_memory_stress_strain_records = list(
+            shape_memory_stress_strain_records
+        )
+        self._cached_shape_memory_stress_strain_groups = _group_graph_records_by_key(
+            shape_memory_stress_strain_records
+        )
+
         fmr_records: List[FmrRecord] = []
         if "fmr" in selected:
             payload = self._load_payload("fmr", "fmr_records")
@@ -18430,6 +19042,7 @@ class AssemblySection(QtWidgets.QWidget):
             vsm_hysteresis_records,
             vsm_temperature_records,
             dma_isostress_records,
+            shape_memory_stress_strain_records,
             fmr_records,
             microscope_index,
             video_index,
@@ -18984,6 +19597,19 @@ class AssemblySection(QtWidgets.QWidget):
                     height_px=ANNEALING_GRAPH_HEIGHT,
                 )
                 return self._combined_graph_pixmap(cache_key, items, stack_vertical=False)
+            if column_label == SHAPE_MEMORY_STRESS_STRAIN_COLUMN:
+                records = self._ensure_shape_memory_stress_strain_groups().get(key, [])
+                if not records:
+                    return None
+                signature = self._record_signature(records)
+                cache_key = ("shape_memory_stress_strain", key, signature)
+                items = _shape_memory_stress_strain_preview_items(
+                    records,
+                    self.logger,
+                    width_px=ANNEALING_GRAPH_WIDTH,
+                    height_px=ANNEALING_GRAPH_HEIGHT,
+                )
+                return self._combined_graph_pixmap(cache_key, items, stack_vertical=False)
             if column_label == FMR_COLUMN:
                 records = self._ensure_fmr_groups().get(key, [])
                 if not records:
@@ -19086,6 +19712,27 @@ class AssemblySection(QtWidgets.QWidget):
                 groups = self._cached_dma_isostress_groups
         return groups
 
+    def _ensure_shape_memory_stress_strain_groups(
+        self,
+    ) -> Dict[str, List[ShapeMemoryStressStrainRecord]]:
+        groups = self._cached_shape_memory_stress_strain_groups
+        if not groups:
+            payload = self._load_payload(
+                "shape_memory_stress_strain",
+                "shape_memory_stress_strain_records",
+            )
+            if isinstance(payload, list):
+                records = self._filter_hidden_records(
+                    payload,
+                    "shape_memory_stress_strain",
+                )
+                self._cached_shape_memory_stress_strain_records = list(records)
+                self._cached_shape_memory_stress_strain_groups = (
+                    _group_graph_records_by_key(records)
+                )
+                groups = self._cached_shape_memory_stress_strain_groups
+        return groups
+
     def _ensure_fmr_groups(self) -> Dict[str, List[FmrRecord]]:
         groups = self._cached_fmr_groups
         if not groups:
@@ -19184,6 +19831,16 @@ class AssemblySection(QtWidgets.QWidget):
                 self.open_dma_button.setEnabled(
                     bool(enabled and self._ensure_dma_isostress_groups().get(key or "", []))
                 )
+            if hasattr(self, "open_shape_memory_button"):
+                self.open_shape_memory_button.setEnabled(
+                    bool(
+                        enabled
+                        and self._ensure_shape_memory_stress_strain_groups().get(
+                            key or "",
+                            [],
+                        )
+                    )
+                )
             if hasattr(self, "open_fmr_button"):
                 self.open_fmr_button.setEnabled(
                     bool(enabled and self._ensure_fmr_groups().get(key or "", []))
@@ -19233,6 +19890,7 @@ class AssemblySection(QtWidgets.QWidget):
                 self.vsm_hysteresis_gallery.clear("Select a row to preview VSM hysteresis graphs.")
                 self.vsm_temperature_gallery.clear("Select a row to preview VSM temperature scans.")
                 self.dma_iso_gallery.clear("Select a row to preview DMA iso-stress graphs.")
+                self.shape_memory_gallery.clear("Select a row to preview shape-memory graphs.")
                 self.fmr_gallery.clear("Select a row to preview FMR graphs.")
                 return
             key = _row_to_microwire_key(row)
@@ -19247,6 +19905,7 @@ class AssemblySection(QtWidgets.QWidget):
                 self.vsm_hysteresis_gallery.clear(message)
                 self.vsm_temperature_gallery.clear(message)
                 self.dma_iso_gallery.clear(message)
+                self.shape_memory_gallery.clear(message)
                 self.fmr_gallery.clear(message)
                 return
             records = self._ensure_annealing_groups().get(key, [])
@@ -19302,6 +19961,18 @@ class AssemblySection(QtWidgets.QWidget):
             )
             self.dma_iso_gallery.set_items(
                 dma_items, "No DMA iso-stress graphs available for this microwire."
+            )
+
+            shape_memory_records = self._ensure_shape_memory_stress_strain_groups().get(key, [])
+            shape_memory_items = _shape_memory_stress_strain_preview_items(
+                shape_memory_records,
+                self.logger,
+                width_px=ANNEALING_GRAPH_WIDTH,
+                height_px=ANNEALING_GRAPH_HEIGHT,
+            )
+            self.shape_memory_gallery.set_items(
+                shape_memory_items,
+                "No shape-memory graphs available for this microwire.",
             )
 
             fmr_records = self._ensure_fmr_groups().get(key, [])
@@ -19403,6 +20074,7 @@ class AssemblySection(QtWidgets.QWidget):
         add("vsm_hysteresis", [VSM_HYSTERESIS_COLUMN])
         add("vsm_temperature_scan", [VSM_TEMPERATURE_SCAN_COLUMN])
         add("dma_iso_stress", [DMA_ISOSTRESS_COLUMN])
+        add("shape_memory_stress_strain", [SHAPE_MEMORY_STRESS_STRAIN_COLUMN])
         add("fmr", [FMR_COLUMN])
         return mapping
 
@@ -19443,6 +20115,10 @@ class AssemblySection(QtWidgets.QWidget):
         add_group("VSM temperature scan", section_map.get("vsm_temperature_scan", []))
         add_group("Transition temps", section_map.get("transition_temps", []))
         add_group("DMA iso-stress", section_map.get("dma_iso_stress", []))
+        add_group(
+            "Shape memory stress/strain",
+            section_map.get("shape_memory_stress_strain", []),
+        )
         add_group("FMR", section_map.get("fmr", []))
         add_group("Fabrication", section_map.get("fabrication", []))
         add_group("Videos", section_map.get("videos", []))
@@ -19651,6 +20327,16 @@ class AssemblySection(QtWidgets.QWidget):
                 height_px=GRAPH_PREVIEW_HEIGHT,
             )
             empty_message = "No DMA iso-stress graphs available."
+        elif kind == "shape_memory_stress_strain":
+            records = self._ensure_shape_memory_stress_strain_groups().get(key, [])
+            title = "Shape memory stress/strain graphs"
+            items = _shape_memory_stress_strain_preview_items(
+                records,
+                self.logger,
+                width_px=GRAPH_PREVIEW_WIDTH,
+                height_px=GRAPH_PREVIEW_HEIGHT,
+            )
+            empty_message = "No shape-memory graphs available."
         else:
             records = self._ensure_fmr_groups().get(key, [])
             title = "FMR graphs"
@@ -19913,12 +20599,14 @@ class AssemblySection(QtWidgets.QWidget):
         vsm_hyst_groups = self._ensure_vsm_hysteresis_groups()
         vsm_temp_groups = self._ensure_vsm_temperature_groups()
         dma_groups = self._ensure_dma_isostress_groups()
+        shape_memory_groups = self._ensure_shape_memory_stress_strain_groups()
         fmr_groups = self._ensure_fmr_groups()
         image_cache: Dict[Path, str] = {}
         graph_cache: Dict[str, str] = {}
         vsm_hyst_cache: Dict[str, str] = {}
         vsm_temp_cache: Dict[str, str] = {}
         dma_cache: Dict[str, str] = {}
+        shape_memory_cache: Dict[str, str] = {}
         fmr_cache: Dict[str, str] = {}
         rows_html: List[str] = []
         has_graphs = False
@@ -19926,6 +20614,7 @@ class AssemblySection(QtWidgets.QWidget):
         has_vsm_hyst = False
         has_vsm_temp = False
         has_dma = False
+        has_shape_memory = False
         has_fmr = False
         vsm_temp_processor = _get_vsm_temp_processor(self.logger) if vsm_temp_groups else None
 
@@ -20005,6 +20694,7 @@ class AssemblySection(QtWidgets.QWidget):
                 vsm_hyst_uris: List[str] = []
                 vsm_temp_uris: List[str] = []
                 dma_uris: List[str] = []
+                shape_memory_uris: List[str] = []
                 fmr_uris: List[str] = []
                 if key:
                     vsm_records = vsm_hyst_groups.get(key, [])
@@ -20056,6 +20746,21 @@ class AssemblySection(QtWidgets.QWidget):
                             dma_uris.append(uri)
                     if dma_uris:
                         has_dma = True
+                    shape_memory_records = shape_memory_groups.get(key, [])
+                    for record in shape_memory_records:
+                        uri = _record_to_data_uri(
+                            record,
+                            shape_memory_cache,
+                            lambda rec: _plot_shape_memory_stress_strain_figure(
+                                rec,
+                                width_px=GRAPH_PREVIEW_WIDTH,
+                                height_px=GRAPH_PREVIEW_HEIGHT,
+                            ),
+                        )
+                        if uri:
+                            shape_memory_uris.append(uri)
+                    if shape_memory_uris:
+                        has_shape_memory = True
                     fmr_records = fmr_groups.get(key, [])
                     for record in fmr_records:
                         uri = _record_to_data_uri(
@@ -20096,6 +20801,7 @@ class AssemblySection(QtWidgets.QWidget):
                 vsm_hyst_blob = "|".join(vsm_hyst_uris)
                 vsm_temp_blob = "|".join(vsm_temp_uris)
                 dma_blob = "|".join(dma_uris)
+                shape_memory_blob = "|".join(shape_memory_uris)
                 other_blob = "|".join(uri for uri in other_uris if uri)
                 fmr_blob = "|".join(fmr_uris)
                 attrs = [
@@ -20107,6 +20813,7 @@ class AssemblySection(QtWidgets.QWidget):
                     f'data-vsm-hyst="{html.escape(vsm_hyst_blob)}"',
                     f'data-vsm-temp="{html.escape(vsm_temp_blob)}"',
                     f'data-dma="{html.escape(dma_blob)}"',
+                    f'data-shape-memory="{html.escape(shape_memory_blob)}"',
                     f'data-fmr="{html.escape(fmr_blob)}"',
                 ]
                 rows_html.append(f"<tr {' '.join(attrs)}>{''.join(cells)}</tr>")
@@ -20187,6 +20894,15 @@ class AssemblySection(QtWidgets.QWidget):
               <div id="preview-dma-empty" class="preview-empty">No DMA iso-stress graphs</div>
             </div>
             """
+        shape_memory_section = ""
+        if has_shape_memory:
+            shape_memory_section = """
+            <div class="preview-section">
+              <div class="preview-title">Shape memory stress/strain</div>
+              <div id="preview-shape-memory" class="preview-stack"></div>
+              <div id="preview-shape-memory-empty" class="preview-empty">No shape-memory graphs</div>
+            </div>
+            """
         fmr_section = ""
         if has_fmr:
             fmr_section = """
@@ -20202,6 +20918,7 @@ class AssemblySection(QtWidgets.QWidget):
             and not vsm_hyst_section
             and not vsm_temp_section
             and not dma_section
+            and not shape_memory_section
             and not fmr_section
         ):
             preview_classes = f"{preview_class} empty"
@@ -20438,6 +21155,7 @@ class AssemblySection(QtWidgets.QWidget):
       {vsm_hyst_section}
       {vsm_temp_section}
       {dma_section}
+      {shape_memory_section}
       {fmr_section}
     </div>
   </div>
@@ -20468,6 +21186,8 @@ class AssemblySection(QtWidgets.QWidget):
       vsmTempEmpty: document.getElementById('preview-vsm-temp-empty'),
       dma: document.getElementById('preview-dma'),
       dmaEmpty: document.getElementById('preview-dma-empty'),
+      shapeMemory: document.getElementById('preview-shape-memory'),
+      shapeMemoryEmpty: document.getElementById('preview-shape-memory-empty'),
       fmr: document.getElementById('preview-fmr'),
       fmrEmpty: document.getElementById('preview-fmr-empty'),
     }};
@@ -20541,6 +21261,7 @@ class AssemblySection(QtWidgets.QWidget):
       setImageList(preview.vsmHyst, preview.vsmHystEmpty, row ? row.dataset.vsmHyst : '');
       setImageList(preview.vsmTemp, preview.vsmTempEmpty, row ? row.dataset.vsmTemp : '');
       setImageList(preview.dma, preview.dmaEmpty, row ? row.dataset.dma : '');
+      setImageList(preview.shapeMemory, preview.shapeMemoryEmpty, row ? row.dataset.shapeMemory : '');
       setImageList(preview.fmr, preview.fmrEmpty, row ? row.dataset.fmr : '');
     }}
 
@@ -20576,6 +21297,9 @@ class AssemblySection(QtWidgets.QWidget):
       }}
       if (field === 'DMA iso-stress graphs') {{
         return row.dataset.dma || '';
+      }}
+      if (field === 'Shape memory stress/strain graphs') {{
+        return row.dataset.shapeMemory || '';
       }}
       if (field === 'FMR graphs') {{
         return row.dataset.fmr || '';
@@ -20627,6 +21351,7 @@ class AssemblySection(QtWidgets.QWidget):
         'VSM hysteresis graphs',
         'VSM temperature scan graphs',
         'DMA iso-stress graphs',
+        'Shape memory stress/strain graphs',
         'FMR graphs',
       ]);
       const compare = document.createElement('table');
@@ -20803,6 +21528,7 @@ class AssemblySection(QtWidgets.QWidget):
             vsm_hysteresis_records,
             vsm_temperature_records,
             dma_isostress_records,
+            shape_memory_stress_strain_records,
             fmr_records,
             microscope_index,
             video_index,
@@ -20865,6 +21591,11 @@ class AssemblySection(QtWidgets.QWidget):
             "dma_iso_stress_records": (
                 dma_isostress_records if "dma_iso_stress" in selected else []
             ),
+            "shape_memory_stress_strain_records": (
+                shape_memory_stress_strain_records
+                if "shape_memory_stress_strain" in selected
+                else []
+            ),
             "fmr_records": fmr_records if "fmr" in selected else [],
             "microscope_index": microscope_index if "microscope" in selected else {},
             "video_index": video_index if "videos" in selected else {},
@@ -20923,6 +21654,7 @@ class AssemblySection(QtWidgets.QWidget):
             vsm_hysteresis_records,
             vsm_temperature_records,
             dma_isostress_records,
+            shape_memory_stress_strain_records,
             fmr_records,
             microscope_index,
             video_index,
@@ -20968,6 +21700,11 @@ class AssemblySection(QtWidgets.QWidget):
             ),
             "dma_iso_stress_records": (
                 dma_isostress_records if "dma_iso_stress" in selected else []
+            ),
+            "shape_memory_stress_strain_records": (
+                shape_memory_stress_strain_records
+                if "shape_memory_stress_strain" in selected
+                else []
             ),
             "fmr_records": fmr_records if "fmr" in selected else [],
             "microscope_index": microscope_index if "microscope" in selected else {},
@@ -21303,6 +22040,18 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.dma_iso_stress_section = DmaIsoStressSection(self.logger, _append_log)
         self.tab_widget.addTab(self.dma_iso_stress_section, "DMA iso-stress")
         self.sections["dma_iso_stress"] = self.dma_iso_stress_section
+        _pump_events()
+
+        self.shape_memory_stress_strain_section = ShapeMemoryStressStrainSection(
+            self.logger, _append_log
+        )
+        self.tab_widget.addTab(
+            self.shape_memory_stress_strain_section,
+            "Shape memory stress/strain",
+        )
+        self.sections["shape_memory_stress_strain"] = (
+            self.shape_memory_stress_strain_section
+        )
         _pump_events()
 
         self.fmr_section = FmrSection(self.logger, _append_log)

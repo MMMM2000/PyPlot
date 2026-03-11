@@ -42,6 +42,10 @@ _split_microwire_key = core._split_microwire_key
 _microwire_key_from_string = core._microwire_key_from_string
 OriginArtifact = core.OriginArtifact
 FabricationIndex = core.FabricationIndex
+MeasurementMetadata = core.MeasurementMetadata
+MeasurementRecord = core.MeasurementRecord
+ShapeMemoryStressStrainRecord = core.ShapeMemoryStressStrainRecord
+SHAPE_MEMORY_STRESS_STRAIN_COLUMN = core.SHAPE_MEMORY_STRESS_STRAIN_COLUMN
 _merged_header_row = core._merged_header_row
 _parse_piece_rows = core._parse_piece_rows
 _extract_microscope_diameters = core._extract_microscope_diameters
@@ -109,6 +113,94 @@ def test_render_measurement_pixmap_uses_readable_default_preview_size() -> None:
     assert not pixmap.isNull()
     assert pixmap.width() >= builder_ui.ANNEALING_GRAPH_WIDTH
     assert pixmap.height() >= builder_ui.ANNEALING_GRAPH_HEIGHT
+
+
+def test_shape_memory_preview_uses_dual_axis_overlay() -> None:
+    record = ShapeMemoryStressStrainRecord(
+        path=Path("loop.txt"),
+        sample="Ni50Fe27Ga23 5/4",
+        data=pd.DataFrame(
+            {
+                "displacement_mm": [0.0, 0.01, 0.02, 0.01],
+                "load_g": [0.0, 0.15, 0.25, 0.05],
+                "strain_pct": [0.0, 0.05, 0.10, 0.02],
+                "stress_mpa": [0.0, 1.1, 2.0, 0.4],
+            }
+        ),
+    )
+    figure = builder_ui._plot_shape_memory_stress_strain_figure(
+        record,
+        width_px=720,
+        height_px=360,
+    )
+    assert figure is not None
+    try:
+        assert len(figure.axes) == 3
+        assert figure.axes[0].get_xlabel() == "Displacement (mm)"
+    finally:
+        builder_ui.plt.close(figure)
+
+
+def test_build_database_populates_shape_memory_graph_column(tmp_path: Path) -> None:
+    anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
+    anneal_path.write_text("placeholder", encoding="utf-8")
+    metadata = MeasurementMetadata(
+        composition_token="Ni50Fe27Ga23",
+        draw_x=5,
+        piece_y=4,
+        setpoint_mA=1000,
+        alt_variant=False,
+        measurement_id="test-measurement",
+        file_name=anneal_path.name,
+        relpath=anneal_path.name,
+        timestamp_mtime_utc="2026-03-11T00:00:00+00:00",
+    )
+    measurement = MeasurementRecord(
+        path=anneal_path,
+        metadata=metadata,
+        dataframe=pd.DataFrame(
+            {
+                "I_A": [0.1, 0.2],
+                "V_V": [0.2, 0.4],
+                "R_ohm": [2.0, 2.0],
+                "I_mA": [100.0, 200.0],
+            }
+        ),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    shape_memory = ShapeMemoryStressStrainRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5-4 loop.txt",
+        sample="Ni50Fe27Ga23",
+        data=pd.DataFrame(
+            {
+                "displacement_mm": [0.0, 0.01, 0.02],
+                "load_g": [0.0, 0.1, 0.2],
+                "strain_pct": [0.0, 0.05, 0.10],
+                "stress_mpa": [0.0, 1.0, 2.0],
+            }
+        ),
+        key=("Ni50Fe27Ga23", 5, 4, None),
+        label="loop",
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path,
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+        ),
+        measurement_records=[measurement],
+        shape_memory_stress_strain_records=[shape_memory],
+        fabrication_index=FabricationIndex(),
+        skip_exports=True,
+    )
+
+    assert SHAPE_MEMORY_STRESS_STRAIN_COLUMN in result.dataframe.columns
+    assert result.dataframe.iloc[0][SHAPE_MEMORY_STRESS_STRAIN_COLUMN] == ["loop"]
 
 
 def test_assembly_exposes_compare_hook() -> None:
