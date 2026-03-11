@@ -21020,7 +21020,7 @@ class AssemblySection(QtWidgets.QWidget):
         return tuple((str(column), bool(ascending)) for column, ascending in self._sort_spec)
 
     def _export_preview_worksheet(self) -> None:
-        frame = self._ordered_preview_frame()
+        frame = self._preview_export_frame()
         if frame.empty:
             QtWidgets.QMessageBox.information(
                 self,
@@ -21028,11 +21028,6 @@ class AssemblySection(QtWidgets.QWidget):
                 "There is no preview data to export.",
             )
             return
-        export_frame = frame.copy()
-        for column in export_frame.columns:
-            series = export_frame[column]
-            if getattr(series, "dtype", None) == object:
-                export_frame[column] = series.map(self._serialise_preview_value)
         preferred_dir = self._output_dir
         start_dir = _dialog_start_directory(preferred_dir) if preferred_dir else _dialog_start_directory()
         default_name = _normalise_output_name(self._output_name or DEFAULT_OUTPUT_NAME)
@@ -21056,9 +21051,9 @@ class AssemblySection(QtWidgets.QWidget):
                 suffix = ".csv"
         try:
             if suffix == ".xlsx":
-                export_frame.to_excel(path, index=False)
+                frame.to_excel(path, index=False)
             else:
-                export_frame.to_csv(path, index=False)
+                frame.to_csv(path, index=False)
         except Exception as exc:
             self.logger.exception("Failed to export preview worksheet")
             QtWidgets.QMessageBox.critical(
@@ -21073,6 +21068,14 @@ class AssemblySection(QtWidgets.QWidget):
             "Export worksheet",
             f"Worksheet exported to:\n{path}",
         )
+
+    def _preview_export_frame(self) -> pd.DataFrame:
+        export_frame = self._ordered_preview_frame().copy()
+        for column in export_frame.columns:
+            series = export_frame[column]
+            if getattr(series, "dtype", None) == object:
+                export_frame[column] = series.map(self._serialise_preview_value)
+        return export_frame
 
     def _html_cell_value(self, value: Any) -> str:
         if value is None:
@@ -22435,15 +22438,28 @@ class AssemblySection(QtWidgets.QWidget):
             self.logger.error("Combine finished with unexpected result type: %s", type(result))
             return
         exports: Dict[str, Path] = dict(result.exports or {})
+        self._update_preview(result.dataframe)
+        export_frame = self._preview_export_frame()
+        output_dir = self._combine_output_dir or Path(self._output_dir or Path.cwd())
+        output_name = self._combine_output_name or _normalise_output_name(
+            self._output_name or DEFAULT_OUTPUT_NAME
+        )
+        csv_path = exports.get("csv")
+        if csv_path is not None:
+            try:
+                export_frame.to_csv(csv_path, index=False)
+            except Exception:
+                self.logger.exception("Failed to rewrite CSV export from Assemble preview")
+        excel_path = exports.get("excel")
+        if excel_path is not None:
+            try:
+                export_frame.to_excel(excel_path, index=False)
+            except Exception:
+                self.logger.exception("Failed to rewrite Excel export from Assemble preview")
         if self._export_html:
-            output_dir = self._combine_output_dir or Path(self._output_dir or Path.cwd())
-            output_name = self._combine_output_name or _normalise_output_name(
-                self._output_name or DEFAULT_OUTPUT_NAME
-            )
-            html_path = self._export_html_file(result.dataframe, output_dir, output_name)
+            html_path = self._export_html_file(export_frame, output_dir, output_name)
             if html_path is not None:
                 exports["html"] = html_path
-        self._update_preview(result.dataframe)
         if exports:
             lines = [f"{fmt.upper()}: {path}" for fmt, path in exports.items()]
             export_text = "\n".join(lines)

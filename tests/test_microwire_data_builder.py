@@ -413,6 +413,28 @@ def test_build_database_populates_shape_memory_value_columns(tmp_path: Path) -> 
     assert row[SHAPE_MEMORY_STRESS_COLUMN] == pytest.approx(0.9)
 
 
+def test_preview_export_frame_matches_visible_preview_order_and_values() -> None:
+    _ensure_qapp()
+    section = builder_ui.AssemblySection.__new__(builder_ui.AssemblySection)
+    frame = pd.DataFrame(
+        {
+            "First": [1],
+            "Graphs": [["A", "B"]],
+            "Second": ["x"],
+        }
+    )
+    section.preview_model = builder_ui.DataFrameModel(frame)
+    section.preview_table = QtWidgets.QTableView()
+    section.preview_table.setModel(section.preview_model)
+    header = section.preview_table.horizontalHeader()
+    header.moveSection(1, 0)
+
+    export_frame = builder_ui.AssemblySection._preview_export_frame(section)
+
+    assert list(export_frame.columns) == ["Graphs", "First", "Second"]
+    assert export_frame.iloc[0]["Graphs"] == "A, B"
+
+
 def test_assembly_exposes_compare_hook() -> None:
     from microwire_data_builder.ui import AssemblySection
 
