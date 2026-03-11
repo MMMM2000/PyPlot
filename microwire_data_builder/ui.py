@@ -4273,6 +4273,15 @@ class _GraphPreviewItem:
     actions: Tuple[_GraphPreviewAction, ...] = ()
 
 
+@dataclass(frozen=True)
+class _ShapeMemoryPointSelection:
+    index: int
+    displacement_mm: float
+    load_g: float
+    strain_pct: float
+    stress_mpa: float
+
+
 class _GraphGalleryWidget(QtWidgets.QWidget):
     def __init__(
         self,
@@ -4351,6 +4360,210 @@ class _GraphGalleryWidget(QtWidgets.QWidget):
         self._placeholder.setText(message)
         self._placeholder.setVisible(True)
         self._scroll.setVisible(False)
+
+
+class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
+    def __init__(
+        self,
+        logger: logging.Logger,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._logger = logger
+        self._canvas_records: Dict[FigureCanvasQTAgg, ShapeMemoryStressStrainRecord] = {}
+        self._canvas_connections: List[Tuple[FigureCanvasQTAgg, Optional[int], Optional[int]]] = []
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.header_label = QtWidgets.QLabel("Select a row to preview shape-memory graphs.")
+        self.header_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        layout.addWidget(self.header_label)
+
+        self._stack = QtWidgets.QStackedLayout()
+        self._placeholder = QtWidgets.QLabel(
+            "Select a row to preview shape-memory graphs."
+        )
+        self._placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setWordWrap(True)
+        self._tab_widget = QtWidgets.QTabWidget(self)
+        self._stack.addWidget(self._placeholder)
+        self._stack.addWidget(self._tab_widget)
+        layout.addLayout(self._stack, 1)
+
+        self.cursor_label = QtWidgets.QLabel(
+            "Hover: displacement/load or strain/stress values."
+        )
+        self.cursor_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        layout.addWidget(self.cursor_label)
+
+        picked_row = QtWidgets.QHBoxLayout()
+        picked_row.setContentsMargins(0, 0, 0, 0)
+        picked_row.setSpacing(10)
+        self._picked_labels: Dict[str, QtWidgets.QLabel] = {}
+        for key, title in (
+            ("displacement_mm", "Displacement"),
+            ("load_g", "Load"),
+            ("strain_pct", "Strain"),
+            ("stress_mpa", "Stress"),
+        ):
+            picked_row.addWidget(QtWidgets.QLabel(f"{title}:"))
+            label = QtWidgets.QLabel("unset")
+            self._picked_labels[key] = label
+            picked_row.addWidget(label)
+        picked_row.addStretch(1)
+        layout.addLayout(picked_row)
+
+    def update_selection(
+        self,
+        title: str,
+        records: Sequence[ShapeMemoryStressStrainRecord],
+    ) -> None:
+        current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
+        self.header_label.setText(title or "Shape memory stress/strain")
+        self._clear_tabs()
+        self._update_picked_labels(None)
+        if not records:
+            self._placeholder.setText("No shape-memory graphs available for this microwire.")
+            self._stack.setCurrentWidget(self._placeholder)
+            return
+        for record in records:
+            figure = _plot_shape_memory_stress_strain_figure(
+                record,
+                width_px=GRAPH_PREVIEW_WIDTH,
+                height_px=GRAPH_PREVIEW_HEIGHT,
+            )
+            if figure is None:
+                continue
+            canvas = FigureCanvasQTAgg(figure)
+            try:
+                canvas.setMouseTracking(True)
+            except Exception:
+                pass
+            motion_cid = None
+            click_cid = None
+            try:
+                motion_cid = canvas.mpl_connect("motion_notify_event", self._handle_motion)
+            except Exception:
+                motion_cid = None
+            try:
+                click_cid = canvas.mpl_connect("button_press_event", self._handle_click)
+            except Exception:
+                click_cid = None
+            self._canvas_records[canvas] = record
+            self._canvas_connections.append((canvas, motion_cid, click_cid))
+            page = QtWidgets.QWidget(self._tab_widget)
+            page_layout = QtWidgets.QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.addWidget(canvas, 1)
+            label = _record_label_for_display(record) or record.sample or "Shape memory"
+            self._tab_widget.addTab(page, label)
+        if self._tab_widget.count() == 0:
+            self._placeholder.setText("No shape-memory graphs available for this microwire.")
+            self._stack.setCurrentWidget(self._placeholder)
+        else:
+            if current_index >= 0:
+                self._tab_widget.setCurrentIndex(min(current_index, self._tab_widget.count() - 1))
+            self._stack.setCurrentWidget(self._tab_widget)
+
+    def clear(self, message: str) -> None:
+        self.header_label.setText("Shape memory stress/strain")
+        self._clear_tabs()
+        self._update_hover_label(None)
+        self._update_picked_labels(None)
+        self._placeholder.setText(message)
+        self._stack.setCurrentWidget(self._placeholder)
+
+    def _clear_tabs(self) -> None:
+        for canvas, motion_cid, click_cid in self._canvas_connections:
+            if motion_cid is not None:
+                try:
+                    canvas.mpl_disconnect(motion_cid)
+                except Exception:
+                    pass
+            if click_cid is not None:
+                try:
+                    canvas.mpl_disconnect(click_cid)
+                except Exception:
+                    pass
+        self._canvas_connections.clear()
+        self._canvas_records.clear()
+        while self._tab_widget.count():
+            widget = self._tab_widget.widget(0)
+            self._tab_widget.removeTab(0)
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _selection_from_event(self, event: Any) -> Optional[_ShapeMemoryPointSelection]:
+        if event is None or getattr(event, "inaxes", None) is None or getattr(event, "canvas", None) is None:
+            return None
+        canvas = event.canvas
+        if not isinstance(canvas, FigureCanvasQTAgg):
+            return None
+        record = self._canvas_records.get(canvas)
+        if record is None:
+            return None
+        axis = event.inaxes
+        if axis is None:
+            return None
+        axis_kind = "stress"
+        try:
+            axis_label = str(axis.get_xlabel() or "").strip().lower()
+        except Exception:
+            axis_label = ""
+        if "displacement" in axis_label:
+            axis_kind = "load"
+        return _shape_memory_point_selection(
+            record.data if isinstance(record.data, pd.DataFrame) else pd.DataFrame(),
+            axis_kind=axis_kind,
+            x_value=getattr(event, "xdata", None),
+            y_value=getattr(event, "ydata", None),
+        )
+
+    def _handle_motion(self, event: Any) -> None:
+        selection = self._selection_from_event(event)
+        self._update_hover_label(selection)
+
+    def _handle_click(self, event: Any) -> None:
+        if event is None or not getattr(event, "dblclick", False):
+            return
+        selection = self._selection_from_event(event)
+        self._update_hover_label(selection)
+        self._update_picked_labels(selection)
+
+    def _update_hover_label(self, selection: Optional[_ShapeMemoryPointSelection]) -> None:
+        if selection is None:
+            self.cursor_label.setText("Hover: displacement/load or strain/stress values.")
+            return
+        self.cursor_label.setText(
+            "Hover: "
+            f"{self._format_value(selection.displacement_mm, 'mm')} | "
+            f"{self._format_value(selection.load_g, 'g')} | "
+            f"{self._format_value(selection.strain_pct, '%')} | "
+            f"{self._format_value(selection.stress_mpa, 'MPa')}"
+        )
+
+    def _update_picked_labels(self, selection: Optional[_ShapeMemoryPointSelection]) -> None:
+        mapping = {
+            "displacement_mm": (selection.displacement_mm if selection else None, "mm"),
+            "load_g": (selection.load_g if selection else None, "g"),
+            "strain_pct": (selection.strain_pct if selection else None, "%"),
+            "stress_mpa": (selection.stress_mpa if selection else None, "MPa"),
+        }
+        for key, widget in self._picked_labels.items():
+            value, units = mapping[key]
+            widget.setText(self._format_value(value, units) if value is not None else "unset")
+
+    @staticmethod
+    def _format_value(value: float, units: str) -> str:
+        formatted = f"{float(value):.3f}".rstrip("0").rstrip(".")
+        return f"{formatted} {units}".strip()
 
 
 class _GraphGalleryDialog(QtWidgets.QDialog):
@@ -4695,6 +4908,52 @@ def _shape_memory_stress_strain_preview_items(
         )
         items.append(_GraphPreviewItem(title, pixmap, actions=actions))
     return items
+
+
+def _shape_memory_point_selection(
+    frame: pd.DataFrame,
+    *,
+    axis_kind: str,
+    x_value: object,
+    y_value: object | None = None,
+) -> Optional[_ShapeMemoryPointSelection]:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return None
+    try:
+        x_numeric = float(x_value)
+    except Exception:
+        return None
+    try:
+        y_numeric = float(y_value) if y_value is not None else None
+    except Exception:
+        y_numeric = None
+
+    points: list[tuple[float, int, float, float, float, float]] = []
+    for idx, row in frame.iterrows():
+        try:
+            displacement = float(row["displacement_mm"])
+            load = float(row["load_g"])
+            strain = float(row["strain_pct"])
+            stress = float(row["stress_mpa"])
+        except Exception:
+            continue
+        values = (displacement, load) if axis_kind == "load" else (strain, stress)
+        if not all(math.isfinite(value) for value in (displacement, load, strain, stress, *values)):
+            continue
+        distance = abs(values[0] - x_numeric)
+        if y_numeric is not None and math.isfinite(y_numeric):
+            distance += abs(values[1] - y_numeric)
+        points.append((distance, int(idx), displacement, load, strain, stress))
+    if not points:
+        return None
+    _, index, displacement, load, strain, stress = min(points, key=lambda item: item[0])
+    return _ShapeMemoryPointSelection(
+        index=index,
+        displacement_mm=displacement,
+        load_g=load,
+        strain_pct=strain,
+        stress_mpa=stress,
+    )
 
 
 def _fmr_preview_items(
@@ -13770,6 +14029,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._preview_group_count = 1
         self._preview_spacing = 6
         self._table_splitter: QtWidgets.QSplitter | None = None
+        self._preview_panel: _ShapeMemoryPreviewPanel | None = None
         super().__init__(logger, log_callback, parent)
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
@@ -13800,8 +14060,43 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             default_height = ANNEALING_GRAPH_HEIGHT + 24
             header.setDefaultSectionSize(default_height)
             header.setMinimumSectionSize(default_height)
+        selection_model = self.table_view.selectionModel() if self.table_view is not None else None
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(self._handle_selection_changed)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._update_preview()
+
+    def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        table = QtWidgets.QTableView(parent)
+        table.setModel(self.model)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setSortingEnabled(True)
+        self.table_view = table
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, parent)
+        splitter.setChildrenCollapsible(False)
+        splitter.setOpaqueResize(False)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.addWidget(table)
+        preview_panel = _ShapeMemoryPreviewPanel(self.logger, splitter)
+        splitter.addWidget(preview_panel)
+        self._preview_panel = preview_panel
+        self._table_splitter = splitter
+
+        container = QtWidgets.QWidget(parent)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(splitter, 1)
+        return container
 
     def process(
         self,
@@ -13888,6 +14183,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         super().refresh()
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._update_preview()
 
     def _load_hidden_paths(self) -> None:
         hidden = self.data.extra.get("hidden_paths")
@@ -13944,11 +14240,13 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         _drop_visible_sample_column(self)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._update_preview()
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._update_preview()
 
     def _refresh_record_groups(self) -> None:
         grouped: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
@@ -14089,6 +14387,36 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                     matched = self._record_groups_by_key.get(row_key, [])
             records.extend(matched)
         return records
+
+    def _selected_preview_records(self) -> List[ShapeMemoryStressStrainRecord]:
+        rows = self._selected_rows()
+        if not rows:
+            return []
+        series = self._row_series(rows[0])
+        if series is None:
+            return []
+        sample = _row_sample_value(series)
+        matched = self._record_groups.get(sample, []) if sample else []
+        if not matched:
+            row_key = _row_to_microwire_key(series)
+            if row_key:
+                matched = self._record_groups_by_key.get(row_key, [])
+        return list(matched)
+
+    def _update_preview(self) -> None:
+        panel = self._preview_panel
+        if panel is None:
+            return
+        records = self._selected_preview_records()
+        if not records:
+            panel.clear("Select a row to preview shape-memory graphs.")
+            return
+        first = records[0]
+        title = getattr(first, "sample", None) or self.section_title
+        panel.update_selection(str(title), records)
+
+    def _handle_selection_changed(self, *_args: Any) -> None:
+        self._update_preview()
 
     def _open_selected_graphs(self) -> None:
         records = self._selected_records()

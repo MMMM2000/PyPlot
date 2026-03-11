@@ -181,6 +181,75 @@ def test_shape_memory_section_groups_flat_folder_files_by_filename_sample(
         section.close()
 
 
+def test_shape_memory_point_selection_reads_load_and_stress_axes() -> None:
+    frame = pd.DataFrame(
+        {
+            "displacement_mm": [0.0, 0.01, 0.02],
+            "load_g": [0.0, 0.10, 0.20],
+            "strain_pct": [0.0, 0.05, 0.10],
+            "stress_mpa": [0.0, 0.9, 1.8],
+        }
+    )
+
+    load_pick = builder_ui._shape_memory_point_selection(
+        frame,
+        axis_kind="load",
+        x_value=0.0102,
+        y_value=0.11,
+    )
+    stress_pick = builder_ui._shape_memory_point_selection(
+        frame,
+        axis_kind="stress",
+        x_value=0.049,
+        y_value=0.95,
+    )
+
+    assert load_pick is not None
+    assert load_pick.index == 1
+    assert load_pick.load_g == pytest.approx(0.10)
+    assert stress_pick is not None
+    assert stress_pick.index == 1
+    assert stress_pick.stress_mpa == pytest.approx(0.9)
+
+
+def test_shape_memory_preview_panel_double_click_updates_picked_values() -> None:
+    _ensure_qapp()
+    panel = builder_ui._ShapeMemoryPreviewPanel(logging.getLogger("test"))
+    record = ShapeMemoryStressStrainRecord(
+        path=Path("loop.txt"),
+        sample="Ni50Fe27Ga23 5/4",
+        data=pd.DataFrame(
+            {
+                "displacement_mm": [0.0, 0.01, 0.02],
+                "load_g": [0.0, 0.10, 0.20],
+                "strain_pct": [0.0, 0.05, 0.10],
+                "stress_mpa": [0.0, 0.9, 1.8],
+            }
+        ),
+        label="loop",
+    )
+    panel.update_selection(record.sample, [record])
+    assert panel._tab_widget.count() == 1
+
+    canvas = next(iter(panel._canvas_records))
+    event = SimpleNamespace(
+        dblclick=True,
+        xdata=0.0101,
+        ydata=0.11,
+        inaxes=canvas.figure.axes[0],
+        canvas=canvas,
+    )
+    panel._handle_click(event)
+
+    assert panel._picked_labels["displacement_mm"].text() == "0.01 mm"
+    assert panel._picked_labels["load_g"].text() == "0.1 g"
+    assert panel._picked_labels["strain_pct"].text() == "0.05 %"
+    assert panel._picked_labels["stress_mpa"].text() == "0.9 MPa"
+
+    panel.clear("done")
+    panel.close()
+
+
 def test_build_database_populates_shape_memory_graph_column(tmp_path: Path) -> None:
     anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
     anneal_path.write_text("placeholder", encoding="utf-8")
