@@ -819,6 +819,114 @@ def test_microscope_prepopulate_images(tmp_path: Path) -> None:
     assert str(other_path) in images
 
 
+def test_microscope_section_auto_selects_first_row_and_loads_previews(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        core_path = tmp_path / "core.png"
+        glass_path = tmp_path / "glass.png"
+        for path, color in (
+            (core_path, QtGui.QColor("#1d4ed8")),
+            (glass_path, QtGui.QColor("#16a34a")),
+        ):
+            image = QtGui.QImage(32, 24, QtGui.QImage.Format.Format_RGB32)
+            image.fill(color)
+            assert image.save(str(path))
+
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni46Fe23Ga23Co8",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: 6.7,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 34.4,
+                    "d/D": 0.195,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "Ni46Fe23Ga23Co8|1|1",
+                    "_core_image": str(core_path),
+                    "_glass_image": str(glass_path),
+                    "_images": [str(core_path), str(glass_path)],
+                }
+            ]
+        )
+
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        _ensure_qapp().processEvents()
+
+        current = section.table_view.currentIndex()
+        assert current.isValid()
+        selected = section._selected_row()
+        assert selected is not None
+        assert selected["_key"] == "Ni46Fe23Ga23Co8|1|1"
+        assert bool(getattr(section.core_preview_label, "_pixmap", None))
+        assert bool(getattr(section.glass_preview_label, "_pixmap", None))
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_manual_enter_marks_reviewed_and_advances() -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni46Fe23Ga23Co8",
+                    "Microwire": "1/1oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "Ni46Fe23Ga23Co8|1|1|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+                {
+                    "Composition": "Ni46Fe23Ga23Co8",
+                    "Microwire": "1/2oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "Ni46Fe23Ga23Co8|1|2|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+            ]
+        )
+
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section._select_row_for_key("Ni46Fe23Ga23Co8|1|1|oe", builder_ui.MICROSCOPE_D_COLUMN)
+        _ensure_qapp().processEvents()
+
+        section.d_edit.setText("12.3")
+        section._apply_override(builder_ui.MICROSCOPE_D_COLUMN)
+        _ensure_qapp().processEvents()
+        row = section._selected_row()
+        assert row is not None
+        assert row["_key"] == "Ni46Fe23Ga23Co8|1|1|oe"
+
+        section.D_edit.setText("45.6")
+        section._apply_override(builder_ui.MICROSCOPE_CAP_D_COLUMN)
+        _ensure_qapp().processEvents()
+
+        row = section._selected_row()
+        assert row is not None
+        assert row["_key"] == "Ni46Fe23Ga23Co8|1|2|oe"
+        entry = section._validated["Ni46Fe23Ga23Co8|1|1|oe"]
+        assert entry["d_reviewed"] is True
+        assert entry["D_reviewed"] is True
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_safe_plot_stem_removes_path_separators() -> None:
     stem = _safe_plot_stem("Ni55Fe18Ga27 4/1 s1 1000mA")
     assert "/" not in stem

@@ -8921,6 +8921,8 @@ class MicroscopeSection(MiniDatabaseSection):
         self._update_hidden_columns()
         self._update_missing_summary()
         self._update_review_buttons()
+        self._connect_selection_model()
+        self._ensure_valid_selection()
         QtCore.QTimer.singleShot(0, self._ensure_table_autosized)
 
     def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
@@ -8929,6 +8931,21 @@ class MicroscopeSection(MiniDatabaseSection):
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(self._show_other_ends)
         self._search_proxy.set_row_predicate(self._row_visible)
+        self._connect_selection_model()
+        self._ensure_valid_selection()
+
+    def _connect_selection_model(self) -> None:
+        selection_model = self.table_view.selectionModel() if isinstance(self.table_view, QtWidgets.QTableView) else None
+        if selection_model is None:
+            return
+        try:
+            selection_model.selectionChanged.connect(self._handle_selection_changed)
+        except Exception:
+            pass
+        try:
+            selection_model.currentChanged.connect(self._handle_current_changed)
+        except Exception:
+            pass
 
     def _load_extra_state(self) -> None:
         stored_overrides = self.data.extra.get("overrides")
@@ -9007,6 +9024,8 @@ class MicroscopeSection(MiniDatabaseSection):
             selection_model.selectionChanged.connect(self._handle_selection_changed)
             selection_model.currentChanged.connect(self._handle_current_changed)
         table.installEventFilter(self)
+        table.clicked.connect(lambda *_args: self._handle_selection_changed())
+        table.pressed.connect(lambda *_args: self._handle_selection_changed())
         table.setTabKeyNavigation(False)
         self._tab_forward_shortcut = QtGui.QShortcut(
             QtGui.QKeySequence(QtCore.Qt.Key.Key_Tab),
@@ -9133,6 +9152,7 @@ class MicroscopeSection(MiniDatabaseSection):
         except Exception:
             pass
         self._search_proxy.set_row_predicate(self._row_visible)
+        self._ensure_valid_selection()
 
     def _row_visible(self, row: pd.Series) -> bool:  # type: ignore[override]
         if self._show_other_ends:
@@ -10193,6 +10213,52 @@ class MicroscopeSection(MiniDatabaseSection):
     def _source_row(self, proxy_row: int) -> Optional[int]:
         return self._search_proxy.map_row_to_source(proxy_row)
 
+    def _ensure_valid_selection(self, column_label: str | None = None) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        model = self.table_view.model()
+        selection = self.table_view.selectionModel()
+        if model is None or selection is None:
+            return
+        row_count = model.rowCount()
+        if row_count <= 0:
+            self._handle_selection_changed()
+            return
+        current = selection.currentIndex()
+        if current.isValid() and self._selected_row() is not None:
+            self._handle_selection_changed()
+            return
+        col_idx = 0
+        frame = self.model.frame()
+        if (
+            column_label
+            and hasattr(frame, "columns")
+            and column_label in frame.columns
+        ):
+            try:
+                col_idx = list(frame.columns).index(column_label)
+            except Exception:
+                col_idx = 0
+        target = model.index(0, max(0, col_idx))
+        if not target.isValid():
+            self._handle_selection_changed()
+            return
+        try:
+            selection.setCurrentIndex(
+                target,
+                QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
+            )
+        except Exception:
+            pass
+        try:
+            self.table_view.scrollTo(
+                target,
+                QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter,
+            )
+        except Exception:
+            pass
+        self._handle_selection_changed()
+
     def _selected_row(self) -> Optional[pd.Series]:
         index = self._current_index()
         if not index.isValid():
@@ -10858,6 +10924,7 @@ class MicroscopeSection(MiniDatabaseSection):
         super()._handle_worker_finished(result)
         self._update_missing_summary()
         self._update_review_buttons()
+        self._ensure_valid_selection()
 
     @property
     def overrides(self) -> Dict[str, Dict[str, float]]:
