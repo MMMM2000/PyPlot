@@ -9735,6 +9735,45 @@ class MicroscopeSection(MiniDatabaseSection):
         except Exception:
             pass
 
+    def _advance_to_next_pending(self, column_label: str) -> None:
+        frame = self.model.frame()
+        if frame.empty:
+            return
+        index = self._current_index()
+        if not index.isValid():
+            return
+        row = self._source_row(index.row())
+        if row is None:
+            return
+        order = [MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN]
+        try:
+            current_idx = order.index(column_label)
+        except ValueError:
+            current_idx = 0
+        candidates: List[Tuple[int, str]] = []
+        for row_idx in range(row, len(frame.index)):
+            start = current_idx + 1 if row_idx == row else 0
+            for label in order[start:]:
+                candidates.append((row_idx, label))
+        for row_idx in range(0, row + 1):
+            limit = current_idx if row_idx == row else len(order)
+            for label in order[:limit]:
+                candidates.append((row_idx, label))
+
+        for row_idx, label in candidates:
+            row_series = frame.iloc[row_idx]
+            key = str(row_series.get("_key") or "").strip()
+            if not key:
+                continue
+            value = row_series.get(label)
+            if (not self._is_valid_diameter(value)) or (not self._is_cell_reviewed(key, label)):
+                self._select_row_for_key(key, label)
+                try:
+                    self.table_view.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+                except Exception:
+                    pass
+                return
+
     def _close_table_editor(self) -> None:
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
@@ -9995,11 +10034,11 @@ class MicroscopeSection(MiniDatabaseSection):
         if row_idx is None:
             return
         if isinstance(self.table_view, QtWidgets.QTableView):
-            model = self.table_view.model()
             col_idx = 0
             if column_label and hasattr(frame, "columns") and column_label in frame.columns:
                 col_idx = list(frame.columns).index(column_label)
-            target = model.index(row_idx, col_idx) if model is not None else None
+            source_index = self.model.index(row_idx, col_idx)
+            target = self._search_proxy.mapFromSource(source_index)
             if target is not None and target.isValid():
                 selection = self.table_view.selectionModel()
                 if selection is not None:
@@ -10007,10 +10046,14 @@ class MicroscopeSection(MiniDatabaseSection):
                         target,
                         QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
                     )
-            self.table_view.scrollTo(
-                self.table_view.model().index(row_idx, col_idx),
-                QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter,
-            )
+                try:
+                    self.table_view.scrollTo(
+                        target,
+                        QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter,
+                    )
+                except Exception:
+                    pass
+                self._handle_selection_changed()
 
     def set_ocr_debug_enabled(self, enabled: bool) -> None:
         self._ocr_debug_enabled = bool(enabled)
@@ -10043,14 +10086,14 @@ class MicroscopeSection(MiniDatabaseSection):
     def _update_hidden_columns(self) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return
-        model = self.table_view.model()
-        if model is None:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame):
             return
         hidden_columns = ["_key", "_images", "_core_image", "_glass_image", "Reviewed"]
         hidden_columns.extend(MICROSCOPE_IMAGE_COLUMNS)
         for column_name in hidden_columns:
             try:
-                column_index = list(model.frame().columns).index(column_name)  # type: ignore[arg-type]
+                column_index = list(frame.columns).index(column_name)
             except Exception:
                 continue
             self.table_view.setColumnHidden(column_index, True)
@@ -10076,6 +10119,22 @@ class MicroscopeSection(MiniDatabaseSection):
                 continue
             if candidate not in sources:
                 sources.append(candidate)
+        key = str(row.get("_key") or "").strip()
+        entry = self._validated.get(key, {}) if key else {}
+        extra_sources = entry.get("sources") if isinstance(entry, dict) else None
+        if isinstance(extra_sources, list):
+            for item in extra_sources:
+                if not isinstance(item, dict):
+                    continue
+                path_text = item.get("path")
+                if not path_text:
+                    continue
+                try:
+                    candidate = Path(str(path_text))
+                except Exception:
+                    continue
+                if candidate not in sources:
+                    sources.append(candidate)
         return sources
 
     def _image_decoration(
@@ -10131,12 +10190,18 @@ class MicroscopeSection(MiniDatabaseSection):
         index = selection.currentIndex()
         return index if index.isValid() else QtCore.QModelIndex()
 
+    def _source_row(self, proxy_row: int) -> Optional[int]:
+        return self._search_proxy.map_row_to_source(proxy_row)
+
     def _selected_row(self) -> Optional[pd.Series]:
         index = self._current_index()
         if not index.isValid():
             return None
+        row = self._source_row(index.row())
+        if row is None:
+            return None
         try:
-            return self.model.frame().iloc[index.row()]
+            return self.model.frame().iloc[row]
         except Exception:
             return None
 
@@ -10208,6 +10273,15 @@ class MicroscopeSection(MiniDatabaseSection):
                     candidate = Path(path_value)
                 except Exception:
                     candidate = None
+            if candidate is None or not candidate.exists():
+                for source in self._row_sources(row):
+                    lower_name = source.name.lower()
+                    if column_name == "_core_image" and "core" in lower_name and source.exists():
+                        candidate = source
+                        break
+                    if column_name == "_glass_image" and "glass" in lower_name and source.exists():
+                        candidate = source
+                        break
             if (candidate is None or not candidate.exists()) and row.get("_images"):
                 try:
                     fallback = Path(row["_images"][0])
@@ -10237,12 +10311,7 @@ class MicroscopeSection(MiniDatabaseSection):
     def _apply_override(self, advance_column: str | None = None) -> None:
         if not self._selected_key:
             return
-        if advance_column:
-            self._queue_advance_after_restore(
-                self._selected_key,
-                advance_column,
-                mark_review=False,
-            )
+        selected_key = str(self._selected_key)
         d_text = self._normalized_decimal_text(self.d_edit)
         D_text = self._normalized_decimal_text(self.D_edit)
         override: Dict[str, float] = {}
@@ -10259,10 +10328,12 @@ class MicroscopeSection(MiniDatabaseSection):
                 QtWidgets.QMessageBox.warning(self, self.section_title, "Invalid D value.")
                 return
         if override:
-            self._overrides[self._selected_key] = override
+            self._overrides[selected_key] = override
         else:
-            self._overrides.pop(self._selected_key, None)
-        self._store_overrides()
+            self._overrides.pop(selected_key, None)
+        self._store_overrides(restore_selection=False)
+        self._select_row_for_key(selected_key, advance_column or MICROSCOPE_D_COLUMN)
+        self._selected_key = selected_key
         columns: set[str] = set()
         if "d" in override:
             columns.add(MICROSCOPE_D_COLUMN)
@@ -10270,6 +10341,8 @@ class MicroscopeSection(MiniDatabaseSection):
             columns.add(MICROSCOPE_CAP_D_COLUMN)
         if columns:
             self._mark_reviewed(auto=True, columns=columns)
+        if advance_column:
+            self._advance_to_next_pending(advance_column)
 
     def _clear_override(self) -> None:
         if not self._selected_key:
@@ -10467,20 +10540,21 @@ class MicroscopeSection(MiniDatabaseSection):
         self._force_ocr_next = True
         self.refresh()
 
-    def _store_overrides(self) -> None:
+    def _store_overrides(self, *, restore_selection: bool = True) -> None:
         self.data.extra["overrides"] = self._overrides
         self.store.save(self.data)
-        self._apply_overrides_to_table()
+        self._apply_overrides_to_table(restore_selection=restore_selection)
         self._update_hidden_columns()
         self._update_missing_summary()
         try:
             self.data_updated.emit()
         except Exception:
             pass
-        self._restore_selection()
+        if restore_selection:
+            self._restore_selection()
         self._ensure_table_autosized()
 
-    def _apply_overrides_to_table(self) -> None:
+    def _apply_overrides_to_table(self, *, restore_selection: bool = True) -> None:
         frame = self.data.table.copy()
         frame = frame.drop(columns=["Reviewed"], errors="ignore")
         if frame.empty:
@@ -10519,7 +10593,8 @@ class MicroscopeSection(MiniDatabaseSection):
         self._auto_fit_columns()
         self._update_missing_summary()
         self._update_review_buttons()
-        self._restore_selection()
+        if restore_selection:
+            self._restore_selection()
 
     def refresh(self) -> None:
         self._refresh_validations()
