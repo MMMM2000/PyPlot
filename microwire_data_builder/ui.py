@@ -9166,6 +9166,13 @@ class MicroscopeSection(MiniDatabaseSection):
 
     def _collect_candidates(self) -> List[Path]:  # type: ignore[override]
         base = MiniDatabaseSection._collect_candidates(self)
+        defer_ocr_checkbox = getattr(self, "defer_ocr_checkbox", None)
+        defer_ocr = bool(
+            isinstance(defer_ocr_checkbox, QtWidgets.QCheckBox)
+            and defer_ocr_checkbox.isChecked()
+        )
+        if defer_ocr and not self._force_ocr_next:
+            return base
         pending: List[Path] = []
         processed = self.data.processed
         for path in base:
@@ -9539,10 +9546,18 @@ class MicroscopeSection(MiniDatabaseSection):
                     frame[column] = pd.Series([None] * len(frame))
                 frame.at[idx, column] = value
         else:
-            if frame.empty:
-                frame = pd.DataFrame([row])
-            else:
-                frame = pd.concat([frame, pd.DataFrame([row])], ignore_index=True, sort=False)
+            existing_rows: List[Dict[str, Any]] = []
+            if not frame.empty:
+                try:
+                    cleaned_frame = frame.dropna(how="all")
+                except Exception:
+                    cleaned_frame = frame
+                if not cleaned_frame.empty:
+                    existing_rows = [
+                        dict(existing_row)
+                        for existing_row in cleaned_frame.to_dict(orient="records")
+                    ]
+            frame = pd.DataFrame(existing_rows + [row])
         for column in MICROSCOPE_TABLE_COLUMNS:
             if column not in frame.columns:
                 frame[column] = pd.Series([None] * len(frame))
@@ -10676,7 +10691,12 @@ class MicroscopeSection(MiniDatabaseSection):
         self._update_review_buttons()
 
     def _prepopulate_image_refs(self, candidates: Iterable[Path]) -> None:
-        expected = self._expected_keys_current or self._expected_microwire_keys()
+        candidate_list = [Path(path) for path in candidates]
+        expected = set(self._expected_keys_current or self._expected_microwire_keys())
+        for path in candidate_list:
+            key_tuple = _microscope_key(path)
+            if key_tuple is not None:
+                expected.add(key_tuple)
         allowed: Set[str] | None = None
         if expected:
             allowed = set()
@@ -10701,7 +10721,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     continue
                 allowed.add(key_token)
         grouped: Dict[str, Dict[str, Any]] = {}
-        for path in candidates:
+        for path in candidate_list:
             key_tuple = _microscope_key(path)
             if key_tuple is None:
                 continue

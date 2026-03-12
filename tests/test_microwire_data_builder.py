@@ -819,6 +819,59 @@ def test_microscope_prepopulate_images(tmp_path: Path) -> None:
     assert str(other_path) in images
 
 
+def test_microscope_prepopulate_keeps_other_end_images_when_not_in_expected_keys(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        section.reset_to_blank()
+        section._expected_keys_current = {("Ni46Fe23Ga23Co8", 1, 1, None)}
+
+        core_path = tmp_path / "Ni46Fe23Ga23Co8 1-1oe core.jpg"
+        glass_path = tmp_path / "Ni46Fe23Ga23Co8 1-1oe glass.jpg"
+        for path in (core_path, glass_path):
+            path.write_bytes(b"test")
+
+        section._prepopulate_image_refs([core_path, glass_path])
+
+        row = section._row_for_key("Ni46Fe23Ga23Co8|1|1|oe")
+        assert row is not None
+        assert row["_core_image"] == str(core_path)
+        assert row["_glass_image"] == str(glass_path)
+        assert section._row_missing_images(row) is False
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_collect_candidates_keeps_all_files_when_ocr_is_deferred(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        core_path = tmp_path / "Ni46Fe23Ga23Co8 1-1oe core.jpg"
+        glass_path = tmp_path / "Ni46Fe23Ga23Co8 1-1oe glass.jpg"
+        for path in (core_path, glass_path):
+            path.write_bytes(b"test")
+
+        section.set_sources([str(tmp_path)])
+        section.data.processed = {
+            str(core_path): core_path.stat().st_mtime,
+            str(glass_path): glass_path.stat().st_mtime,
+        }
+        section.defer_ocr_checkbox.setChecked(True)
+
+        candidates = section._collect_candidates()
+
+        assert core_path in candidates
+        assert glass_path in candidates
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_microscope_section_auto_selects_first_row_and_loads_previews(tmp_path: Path) -> None:
     _ensure_qapp()
     section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
