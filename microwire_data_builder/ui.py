@@ -9269,7 +9269,7 @@ class MicroscopeSection(MiniDatabaseSection):
     def _protected_key_tokens(self) -> Set[str]:
         return {str(key) for key in self._overrides.keys()} | {str(key) for key in self._validated.keys()}
 
-    def _prepare_initial_table(self, expected_keys: Set[MicrowireKey]) -> None:
+    def _build_initial_table_frame(self, expected_keys: Set[MicrowireKey]) -> pd.DataFrame:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         if frame.empty:
             frame = pd.DataFrame(columns=MICROSCOPE_TABLE_COLUMNS)
@@ -9351,6 +9351,10 @@ class MicroscopeSection(MiniDatabaseSection):
                 frame = pd.DataFrame(existing_rows + new_rows)
         frame = frame.loc[:, MICROSCOPE_TABLE_COLUMNS]
         frame = frame.sort_values(["Composition", "Microwire"]).reset_index(drop=True)
+        return frame
+
+    def _prepare_initial_table(self, expected_keys: Set[MicrowireKey]) -> None:
+        frame = self._build_initial_table_frame(expected_keys)
         self.data.table = frame
         self.model.set_frame(frame)
         self._auto_fit_columns()
@@ -10692,7 +10696,7 @@ class MicroscopeSection(MiniDatabaseSection):
             cache_lookup[path_key] = cache_entry
 
         if not run_ocr:
-            self._prepare_initial_table(expected_keys)
+            table = self._build_initial_table_frame(expected_keys)
             processed: Dict[str, float] = {}
             for path in unique_paths:
                 try:
@@ -10700,7 +10704,7 @@ class MicroscopeSection(MiniDatabaseSection):
                 except OSError:
                     continue
             return SectionProcessResult(
-                table=self.data.table,
+                table=table,
                 processed=processed,
                 payloads=self.data.extra.get("payloads", {}),
                 extra=self.data.extra,
