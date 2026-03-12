@@ -6150,6 +6150,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._pending_scan_generation = 0
         self._pending_scan_thread: QtCore.QThread | None = None
         self._pending_scan_worker: Optional[_PendingScanWorker] = None
+        self._progress_dialog: QtWidgets.QProgressDialog | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -6210,6 +6211,9 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.progress_eta_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         progress_row.addWidget(self.progress_eta_label)
         layout.addLayout(progress_row)
+        self.progress_bar.hide()
+        self.progress_label.hide()
+        self.progress_eta_label.hide()
         self._progress_total: int = 0
         self._progress_current: int = 0
         self._progress_start: float | None = None
@@ -6588,28 +6592,53 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._progress_total = max(int(total), 0)
         self._progress_current = 0
         self._progress_start = time.monotonic()
+        if self._progress_dialog is not None:
+            try:
+                self._progress_dialog.close()
+            except Exception:
+                pass
         if self._progress_total <= 0:
-            self.progress_bar.setRange(0, 0)
-            self.progress_bar.setValue(0)
-            self.progress_label.setText("Scanning…")
-            self.progress_eta_label.clear()
+            dialog = QtWidgets.QProgressDialog("Scanning files...", None, 0, 0, self)
+            dialog.setWindowTitle(self.section_title)
+            dialog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+            dialog.setCancelButton(None)
+            dialog.setMinimumDuration(0)
+            dialog.setAutoClose(False)
+            dialog.setAutoReset(False)
+            dialog.show()
+            self._progress_dialog = dialog
             return
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_label.setText(f"Processing 0/{self._progress_total}")
-        self.progress_eta_label.setText("Estimating…")
+        dialog = QtWidgets.QProgressDialog(
+            f"Processing 0/{self._progress_total}",
+            None,
+            0,
+            100,
+            self,
+        )
+        dialog.setWindowTitle(self.section_title)
+        dialog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        dialog.setCancelButton(None)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setValue(0)
+        dialog.show()
+        self._progress_dialog = dialog
 
     def _update_progress(self, current: int, total: Optional[int], message: Optional[str]) -> None:
         if total is not None:
             self._progress_total = max(int(total), 0)
         self._progress_current = max(int(current), 0)
         total_units = self._progress_total
+        dialog = self._progress_dialog
         if total_units <= 0:
-            self.progress_bar.setRange(0, 0)
+            if dialog is not None:
+                dialog.setRange(0, 0)
         else:
-            self.progress_bar.setRange(0, 100)
             percent = int(round(min(self._progress_current / total_units, 1.0) * 100)) if total_units else 0
-            self.progress_bar.setValue(max(0, min(100, percent)))
+            if dialog is not None:
+                dialog.setRange(0, 100)
+                dialog.setValue(max(0, min(100, percent)))
         parts: list[str] = []
         if message:
             parts.append(message)
@@ -6617,7 +6646,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             parts.append(f"{self._progress_current}/{total_units}")
         else:
             parts.append(f"{self._progress_current} processed")
-        self.progress_label.setText(" — ".join(parts))
+        label_text = " - ".join(parts)
         start = self._progress_start
         eta_text = ""
         if (
@@ -6636,7 +6665,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         ):
             elapsed = time.monotonic() - start
             eta_text = f"Elapsed {_format_duration(elapsed)}"
-        self.progress_eta_label.setText(eta_text)
+        if dialog is not None:
+            dialog.setLabelText("\n".join(part for part in (label_text, eta_text) if part))
         QtWidgets.QApplication.processEvents(
             QtCore.QEventLoop.ProcessEventsFlag.AllEvents
         )
@@ -6646,8 +6676,9 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             return
         self._cancel_requested = True
         self.stop_button.setEnabled(False)
-        self.progress_label.setText("Cancelling…")
-        self.progress_bar.setRange(0, 0)
+        if self._progress_dialog is not None:
+            self._progress_dialog.setRange(0, 0)
+            self._progress_dialog.setLabelText("Cancelling...")
         QtWidgets.QApplication.processEvents(
             QtCore.QEventLoop.ProcessEventsFlag.AllEvents
         )
@@ -6660,42 +6691,54 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             raise BuildCancelledError()
 
     def _finish_progress(self) -> None:
-        if self._progress_total > 0:
-            self.progress_bar.setRange(0, 100)
-            self.progress_bar.setValue(100)
-            self.progress_label.setText(
-                f"Complete — {self._progress_total} file(s)"
-            )
-        else:
-            self.progress_bar.setRange(0, 100)
-            self.progress_bar.setValue(100)
-            self.progress_label.setText("Complete")
-        start = self._progress_start
-        if start is not None:
-            elapsed = time.monotonic() - start
-            self.progress_eta_label.setText(f"Elapsed {_format_duration(elapsed)}")
-        else:
-            self.progress_eta_label.clear()
+        if self._progress_dialog is not None:
+            try:
+                self._progress_dialog.setRange(0, 100)
+                self._progress_dialog.setValue(100)
+                text = (
+                    f"Complete - {self._progress_total} file(s)"
+                    if self._progress_total > 0
+                    else "Complete"
+                )
+                start = self._progress_start
+                if start is not None:
+                    elapsed = time.monotonic() - start
+                    text = f"{text}\nElapsed {_format_duration(elapsed)}"
+                self._progress_dialog.setLabelText(text)
+                self._progress_dialog.close()
+            except Exception:
+                pass
+        self._progress_dialog = None
         self._progress_start = None
         self._cancel_requested = False
         self.stop_button.setEnabled(False)
         self._release_processing()
 
     def _fail_progress(self) -> None:
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_label.setText("Failed")
-        self.progress_eta_label.clear()
+        if self._progress_dialog is not None:
+            try:
+                self._progress_dialog.setRange(0, 100)
+                self._progress_dialog.setValue(0)
+                self._progress_dialog.setLabelText("Failed")
+                self._progress_dialog.close()
+            except Exception:
+                pass
+        self._progress_dialog = None
         self._progress_start = None
         self._cancel_requested = False
         self.stop_button.setEnabled(False)
         self._release_processing()
 
     def _cancel_progress(self) -> None:
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_label.setText("Cancelled")
-        self.progress_eta_label.clear()
+        if self._progress_dialog is not None:
+            try:
+                self._progress_dialog.setRange(0, 100)
+                self._progress_dialog.setValue(0)
+                self._progress_dialog.setLabelText("Cancelled")
+                self._progress_dialog.close()
+            except Exception:
+                pass
+        self._progress_dialog = None
         self._progress_start = None
         self._cancel_requested = False
         self.stop_button.setEnabled(False)
@@ -9296,7 +9339,18 @@ class MicroscopeSection(MiniDatabaseSection):
             if frame.empty:
                 frame = pd.DataFrame(new_rows)
             else:
-                frame = pd.concat([frame, pd.DataFrame(new_rows)], ignore_index=True, sort=False)
+                try:
+                    base_frame = frame.dropna(how="all")
+                except Exception:
+                    base_frame = frame
+                if base_frame.empty:
+                    frame = pd.DataFrame(new_rows)
+                else:
+                    frame = pd.concat(
+                        [base_frame, pd.DataFrame(new_rows)],
+                        ignore_index=True,
+                        sort=False,
+                    )
         frame = frame.loc[:, MICROSCOPE_TABLE_COLUMNS]
         frame = frame.sort_values(["Composition", "Microwire"]).reset_index(drop=True)
         self.data.table = frame
