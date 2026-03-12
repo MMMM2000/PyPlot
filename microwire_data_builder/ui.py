@@ -2890,6 +2890,88 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self.endResetModel()
 
 
+class _TableSearchProxyModel(QtCore.QSortFilterProxyModel):
+    def __init__(
+        self,
+        parent: QtCore.QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._search_text = ""
+        self._row_predicate: Optional[Callable[[pd.Series], bool]] = None
+
+    def set_search_text(self, text: str) -> None:
+        self._search_text = str(text or "").strip().lower()
+        self.invalidateFilter()
+
+    def set_row_predicate(
+        self,
+        predicate: Optional[Callable[[pd.Series], bool]],
+    ) -> None:
+        self._row_predicate = predicate
+        self.invalidateFilter()
+
+    def filterAcceptsRow(
+        self,
+        source_row: int,
+        source_parent: QtCore.QModelIndex,
+    ) -> bool:
+        model = self.sourceModel()
+        if not isinstance(model, DataFrameModel):
+            return True
+        frame = model.frame()
+        if source_row < 0 or source_row >= len(frame.index):
+            return False
+        try:
+            row = frame.iloc[source_row]
+        except Exception:
+            return False
+        predicate = self._row_predicate
+        if predicate is not None:
+            try:
+                if not predicate(row):
+                    return False
+            except Exception:
+                return False
+        if not self._search_text:
+            return True
+        for column in frame.columns:
+            name = str(column)
+            if name.startswith("_"):
+                continue
+            value = row.get(column)
+            if isinstance(value, (list, tuple, set)):
+                text = ", ".join(str(item) for item in value)
+            else:
+                text = "" if value is None else str(value)
+            if self._search_text in text.lower():
+                return True
+        return False
+
+    def map_row_to_source(self, row: int) -> Optional[int]:
+        index = self.index(row, 0)
+        if not index.isValid():
+            return None
+        source_index = self.mapToSource(index)
+        if not source_index.isValid():
+            return None
+        return int(source_index.row())
+
+    def lessThan(
+        self,
+        left: QtCore.QModelIndex,
+        right: QtCore.QModelIndex,
+    ) -> bool:
+        model = self.sourceModel()
+        if not isinstance(model, DataFrameModel):
+            return super().lessThan(left, right)
+        try:
+            left_value = model.frame().iat[left.row(), left.column()]
+            right_value = model.frame().iat[right.row(), right.column()]
+        except Exception:
+            return super().lessThan(left, right)
+        return model._sort_value(left_value) < model._sort_value(right_value)
+
+
 def _dimension_display(field: str, *records: Dict[str, Any]) -> Optional[str]:
     values: List[str] = []
     seen: Set[str] = set()
@@ -6050,8 +6132,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.store = MiniDatabaseStore(self.section_key)
         self.data = self.store.load()
         self.model = DataFrameModel(self.data.table)
+        self._search_proxy = _TableSearchProxyModel(self)
         self.table_view: QtWidgets.QTableView | None = None
         self._table_splitter: QtWidgets.QSplitter | None = None
+        self.search_edit: QtWidgets.QLineEdit | None = None
+        self.search_clear_button: QtWidgets.QPushButton | None = None
         self._cancel_requested = False
         self.log_emitted.connect(
             self._dispatch_log,
@@ -6096,6 +6181,21 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         layout.addLayout(controls)
         self.controls_layout = controls
 
+        search_row = QtWidgets.QHBoxLayout()
+        search_row.setContentsMargins(0, 0, 0, 0)
+        search_row.setSpacing(6)
+        search_row.addWidget(QtWidgets.QLabel("Search:"))
+        self.search_edit = QtWidgets.QLineEdit(self)
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setPlaceholderText("Filter rows across visible columns")
+        self.search_edit.textChanged.connect(self._handle_search_changed)
+        search_row.addWidget(self.search_edit, 1)
+        self.search_clear_button = QtWidgets.QPushButton("Clear")
+        self.search_clear_button.setEnabled(False)
+        self.search_clear_button.clicked.connect(self._clear_search)
+        search_row.addWidget(self.search_clear_button)
+        layout.addLayout(search_row)
+
         self.status_label = QtWidgets.QLabel()
         layout.addWidget(self.status_label)
 
@@ -6119,6 +6219,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
         right_panel = self.create_right_panel(self)
         layout.addWidget(right_panel, 1)
+        if isinstance(self.table_view, QtWidgets.QTableView):
+            self._search_proxy.setSourceModel(self.model)
+            self._search_proxy.set_row_predicate(self._row_visible)
+            self.table_view.setModel(self._search_proxy)
         self._configure_table_view()
 
         self._populate_sources_list()
@@ -6335,7 +6439,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     def _hide_columns(self, names: Sequence[str]) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return
-        model = getattr(self.table_view, "model", lambda: None)()
+        model = self.model
         frame: Optional[pd.DataFrame] = None
         if hasattr(model, "frame"):
             try:
@@ -6372,7 +6476,13 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         selection = self.table_view.selectionModel()
         if selection is None:
             return []
-        rows = {index.row() for index in selection.selectedRows()}
+        rows: Set[int] = set()
+        for index in selection.selectedRows():
+            if not index.isValid():
+                continue
+            source_row = self._search_proxy.map_row_to_source(index.row())
+            if source_row is not None:
+                rows.add(source_row)
         return sorted(rows)
 
     def _row_series(self, row: int) -> Optional[pd.Series]:
@@ -6394,6 +6504,20 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     def _row_sources(self, row: pd.Series) -> List[Path]:
         _ = row
         return []
+
+    def _row_visible(self, row: pd.Series) -> bool:
+        _ = row
+        return True
+
+    def _handle_search_changed(self, text: str) -> None:
+        self._search_proxy.set_search_text(text)
+        if isinstance(self.search_clear_button, QtWidgets.QPushButton):
+            self.search_clear_button.setEnabled(bool(str(text).strip()))
+        self._update_open_sources_enabled()
+
+    def _clear_search(self) -> None:
+        if isinstance(self.search_edit, QtWidgets.QLineEdit):
+            self.search_edit.clear()
 
     def _update_open_sources_enabled(self) -> None:
         if not hasattr(self, "open_sources_button"):
@@ -8701,12 +8825,17 @@ class MicroscopeSection(MiniDatabaseSection):
         self._pending_partial_rows: List[dict] = []
         self._pending_partial_flush = False
         super().__init__(logger, log_callback, parent)
+        self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
 
         # Removed the missing-items list UI; missing values are visible in the table.
         self._missing_summary_label = None  # type: ignore[assignment]
         self._missing_list = None  # type: ignore[assignment]
         if hasattr(self, "controls_layout"):
             try:
+                self.other_end_checkbox = QtWidgets.QCheckBox("Show other ends")
+                self.other_end_checkbox.setChecked(self._show_other_ends)
+                self.other_end_checkbox.toggled.connect(self._toggle_other_ends)
+                self.controls_layout.addWidget(self.other_end_checkbox)
                 self.defer_ocr_checkbox = QtWidgets.QCheckBox("Defer OCR")
                 self.defer_ocr_checkbox.setChecked(True)
                 self.controls_layout.addWidget(self.defer_ocr_checkbox)
@@ -8742,10 +8871,21 @@ class MicroscopeSection(MiniDatabaseSection):
         super().import_project_payload(payload)
         self._load_extra_state()
         self._apply_overrides_to_table()
+        self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
+        if hasattr(self, "other_end_checkbox"):
+            self.other_end_checkbox.setChecked(self._show_other_ends)
+        self._search_proxy.set_row_predicate(self._row_visible)
         self._update_hidden_columns()
         self._update_missing_summary()
         self._update_review_buttons()
         QtCore.QTimer.singleShot(0, self._ensure_table_autosized)
+
+    def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
+        super().apply_data(data)
+        self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
+        if hasattr(self, "other_end_checkbox"):
+            self.other_end_checkbox.setChecked(self._show_other_ends)
+        self._search_proxy.set_row_predicate(self._row_visible)
 
     def _load_extra_state(self) -> None:
         stored_overrides = self.data.extra.get("overrides")
@@ -8935,8 +9075,31 @@ class MicroscopeSection(MiniDatabaseSection):
         self._prepopulated_keys.clear()
         self._expected_keys_current = set()
         self._pixmap_cache.clear()
+        self._show_other_ends = True
+        if hasattr(self, "other_end_checkbox"):
+            self.other_end_checkbox.setChecked(True)
+        self._search_proxy.set_row_predicate(self._row_visible)
         self._update_missing_summary()
         self._update_review_buttons()
+
+    def _toggle_other_ends(self, checked: bool) -> None:
+        self._show_other_ends = bool(checked)
+        self.data.extra["show_other_ends"] = self._show_other_ends
+        try:
+            self.store.save(self.data)
+        except Exception:
+            pass
+        self._search_proxy.set_row_predicate(self._row_visible)
+
+    def _row_visible(self, row: pd.Series) -> bool:  # type: ignore[override]
+        if self._show_other_ends:
+            return True
+        microwire = str(row.get("Microwire") or "").strip()
+        parsed = _microwire_parts_from_label_safe(microwire)
+        if parsed is None:
+            return True
+        suffix = str(parsed[2] or "").strip().lower()
+        return suffix != "oe"
 
     def _collect_candidates(self) -> List[Path]:  # type: ignore[override]
         base = MiniDatabaseSection._collect_candidates(self)
@@ -10641,6 +10804,9 @@ class CurrentDensitySection(QtWidgets.QWidget):
         self._last_sources: List[str] = []
         self._table_splitter: QtWidgets.QSplitter | None = None
         self._preview_panel: _CurrentDensityPreviewPanel | None = None
+        self._search_proxy = _TableSearchProxyModel(self)
+        self.search_edit: QtWidgets.QLineEdit | None = None
+        self.search_clear_button: QtWidgets.QPushButton | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -10657,12 +10823,26 @@ class CurrentDensitySection(QtWidgets.QWidget):
         controls.addStretch(1)
         layout.addLayout(controls)
 
+        search_row = QtWidgets.QHBoxLayout()
+        search_row.addWidget(QtWidgets.QLabel("Search:"))
+        self.search_edit = QtWidgets.QLineEdit(self)
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setPlaceholderText("Filter rows across visible columns")
+        self.search_edit.textChanged.connect(self._handle_search_changed)
+        search_row.addWidget(self.search_edit, 1)
+        self.search_clear_button = QtWidgets.QPushButton("Clear")
+        self.search_clear_button.setEnabled(False)
+        self.search_clear_button.clicked.connect(lambda: self.search_edit.clear())
+        search_row.addWidget(self.search_clear_button)
+        layout.addLayout(search_row)
+
         self.status_label = QtWidgets.QLabel("Waiting for data.", self)
         layout.addWidget(self.status_label)
 
         self.model = DataFrameModel(self._current_frame)
         self.model.set_editable_columns(set(PHASE_POINT_COLUMN_MAP.values()))
         self.model.dataChanged.connect(self._handle_model_data_changed)
+        self._search_proxy.setSourceModel(self.model)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
         splitter.setChildrenCollapsible(False)
@@ -10693,6 +10873,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         vertical_bar = table.verticalScrollBar()
         if vertical_bar is not None:
             vertical_bar.setSingleStep(MiniDatabaseSection._SCROLL_SINGLE_STEP)
+        table.setModel(self._search_proxy)
         splitter.addWidget(table)
         self.table_view = table
 
@@ -10834,12 +11015,12 @@ class CurrentDensitySection(QtWidgets.QWidget):
             return None
         current_index = selection_model.currentIndex()
         if current_index.isValid():
-            row_index = current_index.row()
+            row_index = self._source_row(current_index.row())
         else:
             rows = selection_model.selectedRows()
             if not rows:
                 return None
-            row_index = rows[0].row()
+            row_index = self._source_row(rows[0].row())
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or row_index < 0 or row_index >= len(frame.index):
             return None
@@ -10864,9 +11045,11 @@ class CurrentDensitySection(QtWidgets.QWidget):
             return
         row = matches[0]
         try:
-            table.selectRow(int(row))
-            index = self.model.index(int(row), 0)
-            table.scrollTo(index, QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter)
+            source_index = self.model.index(int(row), 0)
+            index = self._search_proxy.mapFromSource(source_index)
+            if index.isValid():
+                table.selectRow(index.row())
+                table.scrollTo(index, QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter)
         except Exception:
             pass
 
@@ -10974,6 +11157,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         current_index = selection_model.currentIndex()
         column_index = None
         if current_index.isValid():
+            source_row = self._source_row(current_index.row())
             try:
                 current_label = str(frame.columns[current_index.column()])
             except Exception:
@@ -10984,11 +11168,11 @@ class CurrentDensitySection(QtWidgets.QWidget):
             column_index = self._column_index_for_kind(kind)
         if column_index is None:
             return
-        row = current_index.row() if current_index.isValid() else None
+        row = source_row if current_index.isValid() else None
         if row is None:
             rows = selection_model.selectedRows()
             if rows:
-                row = rows[0].row()
+                row = self._source_row(rows[0].row())
         if row is None or row < 0 or row >= len(frame.index):
             return
         target_index = current_index if (current_index.isValid() and current_index.column() == column_index) else self.model.index(row, column_index)
@@ -11002,6 +11186,14 @@ class CurrentDensitySection(QtWidgets.QWidget):
         except Exception:
             pass
         self._update_preview()
+
+    def _source_row(self, proxy_row: int) -> Optional[int]:
+        return self._search_proxy.map_row_to_source(proxy_row)
+
+    def _handle_search_changed(self, text: str) -> None:
+        self._search_proxy.set_search_text(text)
+        if isinstance(self.search_clear_button, QtWidgets.QPushButton):
+            self.search_clear_button.setEnabled(bool(str(text).strip()))
 
     @staticmethod
     def _coerce_phase_value(value: Any) -> Optional[float]:
@@ -11711,6 +11903,10 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self.model.set_editable_columns(set(TRANSITION_TEMP_COLUMN_MAP.values()))
         self.model.dataChanged.connect(self._handle_model_data_changed)
         self._preview_panel: _TransitionTempPreviewPanel | None = None
+        self._search_proxy = _TableSearchProxyModel(self)
+        self.search_edit: QtWidgets.QLineEdit | None = None
+        self.search_clear_button: QtWidgets.QPushButton | None = None
+        self._search_proxy.setSourceModel(self.model)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -11727,6 +11923,19 @@ class TransitionTempsSection(QtWidgets.QWidget):
         controls.addStretch(1)
         layout.addLayout(controls)
 
+        search_row = QtWidgets.QHBoxLayout()
+        search_row.addWidget(QtWidgets.QLabel("Search:"))
+        self.search_edit = QtWidgets.QLineEdit(self)
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setPlaceholderText("Filter rows across visible columns")
+        self.search_edit.textChanged.connect(self._handle_search_changed)
+        search_row.addWidget(self.search_edit, 1)
+        self.search_clear_button = QtWidgets.QPushButton("Clear")
+        self.search_clear_button.setEnabled(False)
+        self.search_clear_button.clicked.connect(lambda: self.search_edit.clear())
+        search_row.addWidget(self.search_clear_button)
+        layout.addLayout(search_row)
+
         self.status_label = QtWidgets.QLabel("Waiting for VSM temperature scan data.", self)
         layout.addWidget(self.status_label)
 
@@ -11738,7 +11947,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
         layout.addWidget(splitter, 1)
 
         table = QtWidgets.QTableView(splitter)
-        table.setModel(self.model)
+        table.setModel(self._search_proxy)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems)
         table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -11968,12 +12177,12 @@ class TransitionTempsSection(QtWidgets.QWidget):
             return None
         current_index = selection_model.currentIndex()
         if current_index.isValid():
-            row_index = current_index.row()
+            row_index = self._source_row(current_index.row())
         else:
             rows = selection_model.selectedRows()
             if not rows:
                 return None
-            row_index = rows[0].row()
+            row_index = self._source_row(rows[0].row())
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or row_index < 0 or row_index >= len(frame.index):
             return None
@@ -11999,9 +12208,11 @@ class TransitionTempsSection(QtWidgets.QWidget):
             return
         row = matches[0]
         try:
-            table.selectRow(int(row))
-            index = self.model.index(int(row), 0)
-            table.scrollTo(index, QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter)
+            source_index = self.model.index(int(row), 0)
+            index = self._search_proxy.mapFromSource(source_index)
+            if index.isValid():
+                table.selectRow(index.row())
+                table.scrollTo(index, QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter)
         except Exception:
             pass
 
@@ -12134,11 +12345,11 @@ class TransitionTempsSection(QtWidgets.QWidget):
         except Exception:
             return
         current_index = selection_model.currentIndex()
-        row = current_index.row() if current_index.isValid() else None
+        row = self._source_row(current_index.row()) if current_index.isValid() else None
         if row is None:
             rows = selection_model.selectedRows()
             if rows:
-                row = rows[0].row()
+                row = self._source_row(rows[0].row())
         if row is None or row < 0 or row >= len(frame.index):
             return
         target_index = (
@@ -12156,6 +12367,14 @@ class TransitionTempsSection(QtWidgets.QWidget):
         except Exception:
             pass
         self._update_preview()
+
+    def _source_row(self, proxy_row: int) -> Optional[int]:
+        return self._search_proxy.map_row_to_source(proxy_row)
+
+    def _handle_search_changed(self, text: str) -> None:
+        self._search_proxy.set_search_text(text)
+        if isinstance(self.search_clear_button, QtWidgets.QPushButton):
+            self.search_clear_button.setEnabled(bool(str(text).strip()))
 
     @staticmethod
     def _parse_group_key(value: object) -> Optional[MicrowireKey]:
@@ -14198,6 +14417,14 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
+
+    def _source_row(self, proxy_row: int) -> Optional[int]:
+        return self._search_proxy.map_row_to_source(proxy_row)
+
+    def _handle_search_changed(self, text: str) -> None:
+        self._search_proxy.set_search_text(text)
+        if isinstance(self.search_clear_button, QtWidgets.QPushButton):
+            self.search_clear_button.setEnabled(bool(str(text).strip()))
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         table = QtWidgets.QTableView(parent)
@@ -17680,8 +17907,32 @@ class CompareSection(MiniDatabaseSection):
             self._update_matrix_view()
             self._persist_compare_settings()
 
+    def _handle_search_changed(self, text: str) -> None:  # type: ignore[override]
+        super()._handle_search_changed(text)
+        self._update_matrix_view()
+
     def _build_matrix_frame(self) -> pd.DataFrame:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        query = ""
+        if isinstance(getattr(self, "search_edit", None), QtWidgets.QLineEdit):
+            query = self.search_edit.text().strip().lower()
+        if query and not frame.empty:
+            filtered_rows: List[int] = []
+            for idx, row in frame.iterrows():
+                for column in frame.columns:
+                    label = str(column)
+                    if label.startswith("_"):
+                        continue
+                    value = row.get(column)
+                    text = (
+                        ", ".join(str(item) for item in value)
+                        if isinstance(value, (list, tuple, set))
+                        else ("" if value is None else str(value))
+                    )
+                    if query in text.lower():
+                        filtered_rows.append(int(idx))
+                        break
+            frame = frame.loc[filtered_rows].reset_index(drop=True) if filtered_rows else pd.DataFrame(columns=frame.columns)
         if frame.empty:
             self._matrix_column_keys = {}
             self._matrix_graph_rows = set()

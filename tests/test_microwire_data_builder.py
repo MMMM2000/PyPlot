@@ -19,6 +19,7 @@ from PyQt6 import QtGui, QtWidgets
 from microwire_data_builder import ocr as ocr_module
 from microwire_data_builder import ui as builder_ui
 from microwire_data_builder.ui import BuilderWindow, MicroscopeSection
+from microwire_data_builder.storage import MiniDatabaseData
 from plotting.plugins.vsm_temperature_scan.core import VSMTemperatureScanProcessor
 
 CORE_PATH = Path(__file__).resolve().parent.parent / "microwire_data_builder" / "core.py"
@@ -231,6 +232,63 @@ def test_legacy_strain_formula_uses_reversed_ratio() -> None:
     value = builder_ui.StrainSection._compute_strain_percent(section, 10.0, 12.0)
 
     assert value == pytest.approx(-16.6666667)
+
+
+def test_search_filters_mini_database_section_rows(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        paths = []
+        for name in [
+            "Ni50Fe27Ga23 5-4 s1 loop.txt",
+            "Ni50Fe27Ga23 6-4 s1 loop.txt",
+        ]:
+            path = tmp_path / name
+            path.write_text(
+                "\n".join(
+                    [
+                        "Displacement\tLoad\tStrain\tStress",
+                        "mm\tg\t%\tMPa",
+                        "0\t0\t0\t0",
+                        "0.01\t0.10\t0.05\t0.9",
+                        "0.02\t0.20\t0.10\t1.8",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            paths.append(path)
+        section._active_candidates = paths
+        result = section.process(paths)
+        section._handle_worker_finished(result)
+
+        section.search_edit.setText("6/4")
+        assert section.table_view.model().rowCount() == 1
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_section_can_hide_other_ends() -> None:
+    _ensure_qapp()
+    section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {"Composition": "Ni46Fe23Ga23Co8", "Microwire": "1/1", "_key": "Ni46Fe23Ga23Co8|1|1"},
+                {"Composition": "Ni46Fe23Ga23Co8", "Microwire": "1/1oe", "_key": "Ni46Fe23Ga23Co8|1|1|oe"},
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={"show_other_ends": True}))
+        assert section.table_view.model().rowCount() == 2
+
+        section._toggle_other_ends(False)
+        assert section.table_view.model().rowCount() == 1
+    finally:
+        section._shutdown_background_threads()
+        section.close()
 
 
 def test_shape_memory_preview_panel_double_click_updates_picked_values() -> None:
