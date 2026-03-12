@@ -7580,6 +7580,30 @@ class FabricationSection(MiniDatabaseSection):
                 bucket = relevant.setdefault(composition_key, {})
                 piece_bucket = bucket.setdefault(draw_value, set())
                 piece_bucket.add(piece_value)
+        try:
+            microscope_data = MiniDatabaseStore("microscope").load()
+        except Exception:
+            microscope_data = None
+        microscope_table = (
+            microscope_data.table
+            if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
+            else pd.DataFrame()
+        )
+        if isinstance(microscope_table, pd.DataFrame) and not microscope_table.empty:
+            for _, row in microscope_table.iterrows():
+                composition_key = str(row.get("Composition") or "").strip()
+                microwire_label = str(row.get("Microwire") or "").strip()
+                if not composition_key or not microwire_label:
+                    continue
+                parsed = _microwire_parts_from_label_safe(microwire_label)
+                if parsed is None:
+                    continue
+                draw_value, piece_value, suffix = parsed
+                if str(suffix or "").strip().lower() == "oe":
+                    continue
+                bucket = relevant.setdefault(composition_key, {})
+                piece_bucket = bucket.setdefault(int(draw_value), set())
+                piece_bucket.add(int(piece_value))
         return relevant, set(relevant.keys())
 
     @staticmethod
@@ -10228,6 +10252,32 @@ class MicroscopeSection(MiniDatabaseSection):
     def _source_row(self, proxy_row: int) -> Optional[int]:
         return self._search_proxy.map_row_to_source(proxy_row)
 
+    def _selected_rows(self) -> List[int]:  # type: ignore[override]
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return []
+        selection = self.table_view.selectionModel()
+        if selection is None:
+            return []
+        rows: Set[int] = set()
+        for index in selection.selectedRows():
+            if not index.isValid():
+                continue
+            source_row = self._source_row(index.row())
+            if source_row is not None:
+                rows.add(source_row)
+        if not rows:
+            indexes = selection.selectedIndexes()
+            if not indexes:
+                current = selection.currentIndex()
+                indexes = [current] if current.isValid() else []
+            for index in indexes:
+                if not index.isValid():
+                    continue
+                source_row = self._source_row(index.row())
+                if source_row is not None:
+                    rows.add(source_row)
+        return sorted(rows)
+
     def _ensure_valid_selection(self, column_label: str | None = None) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return
@@ -10387,6 +10437,7 @@ class MicroscopeSection(MiniDatabaseSection):
             self.core_preview_label.setVisible(show_core)
             self.glass_preview_label.setVisible(show_glass)
 
+        self._update_open_sources_enabled()
         self._update_review_buttons()
 
     def _apply_override(self, advance_column: str | None = None) -> None:

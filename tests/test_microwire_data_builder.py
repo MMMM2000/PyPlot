@@ -14,7 +14,7 @@ import sys
 import pandas as pd
 import numpy as np
 import pytest
-from PyQt6 import QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtTest, QtWidgets
 
 from microwire_data_builder import ocr as ocr_module
 from microwire_data_builder import ui as builder_ui
@@ -926,27 +926,27 @@ def test_microscope_manual_enter_marks_reviewed_and_advances() -> None:
         frame = pd.DataFrame(
             [
                 {
-                    "Composition": "Ni46Fe23Ga23Co8",
+                    "Composition": "TestCompA",
                     "Microwire": "1/1oe",
                     builder_ui.MICROSCOPE_D_COLUMN: None,
                     builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
                     "d/D": None,
                     builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
-                    "_key": "Ni46Fe23Ga23Co8|1|1|oe",
+                    "_key": "TestCompA|1|1|oe",
                     "_core_image": None,
                     "_glass_image": None,
                     "_images": [],
                 },
                 {
-                    "Composition": "Ni46Fe23Ga23Co8",
+                    "Composition": "TestCompA",
                     "Microwire": "1/2oe",
                     builder_ui.MICROSCOPE_D_COLUMN: None,
                     builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
                     "d/D": None,
                     builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
-                    "_key": "Ni46Fe23Ga23Co8|1|2|oe",
+                    "_key": "TestCompA|1|2|oe",
                     "_core_image": None,
                     "_glass_image": None,
                     "_images": [],
@@ -955,7 +955,7 @@ def test_microscope_manual_enter_marks_reviewed_and_advances() -> None:
         )
 
         section.apply_data(MiniDatabaseData(table=frame, extra={}))
-        section._select_row_for_key("Ni46Fe23Ga23Co8|1|1|oe", builder_ui.MICROSCOPE_D_COLUMN)
+        section._select_row_for_key("TestCompA|1|1|oe", builder_ui.MICROSCOPE_D_COLUMN)
         _ensure_qapp().processEvents()
 
         section.d_edit.setText("12.3")
@@ -963,7 +963,7 @@ def test_microscope_manual_enter_marks_reviewed_and_advances() -> None:
         _ensure_qapp().processEvents()
         row = section._selected_row()
         assert row is not None
-        assert row["_key"] == "Ni46Fe23Ga23Co8|1|1|oe"
+        assert row["_key"] == "TestCompA|1|1|oe"
 
         section.D_edit.setText("45.6")
         section._apply_override(builder_ui.MICROSCOPE_CAP_D_COLUMN)
@@ -971,12 +971,127 @@ def test_microscope_manual_enter_marks_reviewed_and_advances() -> None:
 
         row = section._selected_row()
         assert row is not None
-        assert row["_key"] == "Ni46Fe23Ga23Co8|1|2|oe"
-        entry = section._validated["Ni46Fe23Ga23Co8|1|1|oe"]
+        assert row["_key"] == "TestCompA|1|2|oe"
+        entry = section._validated["TestCompA|1|1|oe"]
         assert entry["d_reviewed"] is True
         assert entry["D_reviewed"] is True
     finally:
         section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_open_sources_enabled_for_current_cell_selection(tmp_path: Path) -> None:
+    _ensure_qapp()
+    image_path = tmp_path / "TestCompB 1-1oe glass.jpg"
+    image_path.write_bytes(b"test")
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompB",
+                    "Microwire": "1/1oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: 8.1,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 32.7,
+                    "d/D": 0.248,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompB|1|1|oe",
+                    "_core_image": None,
+                    "_glass_image": str(image_path),
+                    "_images": [str(image_path)],
+                }
+            ]
+        )
+
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section._select_row_for_key("TestCompB|1|1|oe", builder_ui.MICROSCOPE_CAP_D_COLUMN)
+        _ensure_qapp().processEvents()
+
+        assert section.open_sources_button.isEnabled() is True
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_return_key_marks_reviewed_and_advances() -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompC",
+                    "Microwire": "1/1oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: 8.1,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 32.7,
+                    "d/D": 0.248,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompC|1|1|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+                {
+                    "Composition": "TestCompC",
+                    "Microwire": "2/3oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompC|2|3|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section._select_row_for_key("TestCompC|1|1|oe", builder_ui.MICROSCOPE_CAP_D_COLUMN)
+        _ensure_qapp().processEvents()
+
+        section.D_edit.setFocus()
+        section.D_edit.selectAll()
+        section.D_edit.setText("32.7")
+        QtTest.QTest.keyClick(section.D_edit, QtCore.Qt.Key.Key_Return)
+        _ensure_qapp().processEvents()
+
+        row = section._selected_row()
+        assert row is not None
+        assert row["_key"] == "TestCompC|2|3|oe"
+        entry = section._validated["TestCompC|1|1|oe"]
+        assert entry["D_reviewed"] is True
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_fabrication_relevant_map_includes_microscope_only_non_other_end() -> None:
+    _ensure_qapp()
+    microscope_store = builder_ui.MiniDatabaseStore("microscope")
+    microscope_original = microscope_store.load()
+    annealing_store = builder_ui.MiniDatabaseStore("annealing")
+    annealing_original = annealing_store.load()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        microscope_frame = pd.DataFrame(
+            [
+                {"Composition": "TestCompD", "Microwire": "1/1", "_key": "TestCompD|1|1"},
+                {"Composition": "TestCompD", "Microwire": "1/1oe", "_key": "TestCompD|1|1|oe"},
+            ]
+        )
+        microscope_store.save(MiniDatabaseData(table=microscope_frame))
+        annealing_store.save(MiniDatabaseData(table=pd.DataFrame()))
+
+        relevant_map, relevant_compositions = section._load_relevant_map()
+
+        assert "TestCompD" in relevant_compositions
+        assert relevant_map["TestCompD"][1] == {1}
+    finally:
+        microscope_store.save(microscope_original)
+        annealing_store.save(annealing_original)
         section.close()
 
 
