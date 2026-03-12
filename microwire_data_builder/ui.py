@@ -9343,14 +9343,12 @@ class MicroscopeSection(MiniDatabaseSection):
                     base_frame = frame.dropna(how="all")
                 except Exception:
                     base_frame = frame
-                if base_frame.empty:
-                    frame = pd.DataFrame(new_rows)
-                else:
-                    frame = pd.concat(
-                        [base_frame, pd.DataFrame(new_rows)],
-                        ignore_index=True,
-                        sort=False,
-                    )
+                existing_rows = (
+                    base_frame.to_dict(orient="records")
+                    if not base_frame.empty
+                    else []
+                )
+                frame = pd.DataFrame(existing_rows + new_rows)
         frame = frame.loc[:, MICROSCOPE_TABLE_COLUMNS]
         frame = frame.sort_values(["Composition", "Microwire"]).reset_index(drop=True)
         self.data.table = frame
@@ -10421,28 +10419,26 @@ class MicroscopeSection(MiniDatabaseSection):
             sources = payload.get("sources")
             allow_without_sources = bool(payload.get("allow_without_sources"))
             if not isinstance(sources, list) or (not sources and not allow_without_sources):
-                entry_changed = True
+                continue
             else:
                 for source in sources:
                     path_text = source.get("path")
                     if not path_text:
-                        entry_changed = True
-                        break
+                        continue
                     path_obj = Path(path_text)
                     try:
                         stat = path_obj.stat()
                     except OSError:
+                        continue
+                    if float(source.get("mtime", -1.0)) != float(stat.st_mtime):
+                        source["mtime"] = float(stat.st_mtime)
                         entry_changed = True
-                        break
-                    if (
-                        float(source.get("mtime", -1.0)) != float(stat.st_mtime)
-                        or int(source.get("size", -1)) != int(stat.st_size)
-                    ):
+                    if int(source.get("size", -1)) != int(stat.st_size):
+                        source["size"] = int(stat.st_size)
                         entry_changed = True
-                        break
                     source.setdefault("key", self._path_key(path_obj))
             if entry_changed:
-                self._validated.pop(key, None)
+                self._validated[key] = payload
                 changed = True
         if changed:
             self._store_validation()
@@ -10644,6 +10640,16 @@ class MicroscopeSection(MiniDatabaseSection):
 
         debug_cb = self._ocr_debug_callback if self._ocr_debug_enabled else None
         expected_keys = self._expected_keys_current or self._expected_microwire_keys()
+        discovered_keys: Set[MicrowireKey] = set()
+        for candidate in unique_paths:
+            try:
+                parsed_key = _microscope_key(Path(candidate))
+            except Exception:
+                parsed_key = None
+            if parsed_key is not None:
+                discovered_keys.add(parsed_key)
+        if discovered_keys:
+            expected_keys = set(expected_keys) | discovered_keys
 
         def _emit_partial(key: MicrowireKey, measurement: MicroscopeMeasurements) -> None:
             try:
@@ -22925,7 +22931,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.logger = logging.getLogger(LOGGER_NAME)
-        self.setWindowTitle("Microwire Data Builder")
+        self._base_title = "Microwire Data Builder"
+        self.setWindowTitle(self._base_title)
         self.resize(1100, 720)
 
         self._project_path: Optional[Path] = None
@@ -23242,6 +23249,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 section.reset_to_blank()
         self._suppress_dirty = False
         self._dirty = False
+        self._update_project_title()
         self._set_initial_geometry()
         self._retabify_primary_docks()
         QtCore.QTimer.singleShot(0, self._maybe_auto_open_last_project)
@@ -23805,6 +23813,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if self._save_project_as_action is not None:
             self._save_project_as_action.setEnabled(has_data)
 
+    def _update_project_title(self) -> None:
+        title = self._base_title
+        if isinstance(self._project_path, Path):
+            title = f"{self._base_title} - {self._project_path.name}"
+        self.setWindowTitle(title)
+
     def _setup_settings_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
         settings_menu = menu_bar.addMenu("Settings")
         auto_open_action = QtGui.QAction("Open last project on startup", self)
@@ -24016,6 +24030,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.settings.setValue(self._project_settings_key("last_path"), str(target))
         except Exception:
             pass
+        self._update_project_title()
         self._update_project_actions()
         self._dirty = False
         self.logger.info("Project saved to %s", target)
@@ -24291,6 +24306,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.settings.setValue(self._project_settings_key("last_path"), str(target))
             except Exception:
                 pass
+            self._update_project_title()
             self._refresh_sections_after_project_load()
             self._update_project_actions()
             self._dirty = False
