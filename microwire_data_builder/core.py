@@ -205,6 +205,7 @@ OUTPUT_COLUMNS = [
     "d (µm)",
     "D (µm)",
     "d/D",
+    "Brittle",
     "Legacy strain",
     *STRAIN_EXTRA_COLUMNS,
     "As (mA)",
@@ -249,6 +250,7 @@ OUTPUT_COLUMNS = [
 DIAMETER_COLUMN = "d (µm)"
 GLASS_DIAMETER_COLUMN = "D (µm)"
 DIAMETER_RATIO_COLUMN = "d/D"
+BRITTLE_COLUMN = "Brittle"
 
 MICROSCOPE_IMAGE_COLUMNS = (
     "d (µm) image",
@@ -1023,6 +1025,7 @@ class MicroscopeMeasurements:
     core: List[MicroscopeDetection] = field(default_factory=list)
     glass: List[MicroscopeDetection] = field(default_factory=list)
     other: List[MicroscopeDetection] = field(default_factory=list)
+    brittle: bool = False
 
     def _target(self, category: str) -> List[MicroscopeDetection]:
         if category == "core":
@@ -1929,6 +1932,13 @@ def _microscope_category(path: Path) -> str:
     if "glass" in stem:
         return "glass"
     return "other"
+
+
+def _microscope_is_brittle(path: Path) -> bool:
+    try:
+        return "brittle" in path.stem.lower()
+    except Exception:
+        return False
 
 
 def _iter_fragment_files(
@@ -3045,6 +3055,8 @@ def _group_microscope_measurements(
             continue
         category = _microscope_category(path)
         record = grouped.setdefault(key, MicroscopeMeasurements())
+        if _microscope_is_brittle(path):
+            record.brittle = True
 
         cache_token = _cache_key(path)
         cache_entry = cache_lookup.get(cache_token) or cache_lookup.get(str(path))
@@ -5277,6 +5289,7 @@ def build_database(
         row["d (µm)"] = None
         row["D (µm)"] = None
         row[ratio_column] = None
+        row[BRITTLE_COLUMN] = None
         row["Length (m)"] = _value_for_output(piece_info, "length_m")
         row["Production datetime"] = _value_for_output(draw_info, "production_datetime")
         row["Mass (g)"] = _value_for_output(draw_info, "mass_g")
@@ -5381,6 +5394,8 @@ def build_database(
             if microscope_data is None:
                 microscope_data = microscope_index.get((composition, draw_x, piece_y))
         if microscope_data:
+            if getattr(microscope_data, "brittle", False):
+                row[BRITTLE_COLUMN] = True
             if d_numeric is None:
                 d_detection = microscope_data.best_core_detection()
                 if (

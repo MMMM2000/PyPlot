@@ -54,6 +54,7 @@ SHAPE_MEMORY_STRESS_COLUMN = core.SHAPE_MEMORY_STRESS_COLUMN
 SHAPE_MEMORY_FRACTURE_LOAD_COLUMN = core.SHAPE_MEMORY_FRACTURE_LOAD_COLUMN
 SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN = core.SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN
 SHAPE_MEMORY_FRACTURE_STRESS_COLUMN = core.SHAPE_MEMORY_FRACTURE_STRESS_COLUMN
+BRITTLE_COLUMN = core.BRITTLE_COLUMN
 _merged_header_row = core._merged_header_row
 _parse_piece_rows = core._parse_piece_rows
 _extract_microscope_diameters = core._extract_microscope_diameters
@@ -845,6 +846,39 @@ def test_microscope_prepopulate_keeps_other_end_images_when_not_in_expected_keys
         section.close()
 
 
+def test_microscope_brittle_glass_only_row_is_not_treated_as_missing(tmp_path: Path) -> None:
+    _ensure_qapp()
+    glass_path = tmp_path / "TestCompG 1-1 glass brittle.jpg"
+    glass_path.write_bytes(b"test")
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompG",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 28.2,
+                    "d/D": None,
+                    BRITTLE_COLUMN: True,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompG|1|1",
+                    "_core_image": None,
+                    "_glass_image": str(glass_path),
+                    "_images": [str(glass_path)],
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        row = section._row_for_key("TestCompG|1|1")
+        assert row is not None
+        assert section._row_missing_images(row) is False
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_microscope_collect_candidates_keeps_all_files_when_ocr_is_deferred(
     tmp_path: Path,
 ) -> None:
@@ -1158,6 +1192,51 @@ def test_fabrication_relevant_map_includes_microscope_only_non_other_end() -> No
         microscope_store.save(microscope_original)
         annealing_store.save(annealing_original)
         section.close()
+
+
+def test_build_database_populates_brittle_column_from_microscope_index(tmp_path: Path) -> None:
+    record = MeasurementRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+        metadata=MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=5,
+            piece_y=4,
+            setpoint_mA=1000,
+            alt_variant=False,
+            file_name="Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+            measurement_id="m1",
+            relpath="Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+            timestamp_mtime_utc="2026-03-12T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame({"I_A": [1.0], "V_V": [1.0], "R_ohm": [1.0]}),
+        sanity_ok=True,
+        sanity_error=None,
+    )
+    microscope_index = {
+        ("Ni50Fe27Ga23", 5, 4, None): core.MicroscopeMeasurements(
+            glass=[
+                core.MicroscopeDetection(
+                    value=28.2,
+                    image_path=tmp_path / "Ni50Fe27Ga23 5-4 glass brittle.jpg",
+                    source="manual",
+                    category="glass",
+                )
+            ],
+            brittle=True,
+        )
+    }
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path / "out",
+        ),
+        measurement_records=[record],
+        microscope_index=microscope_index,
+        skip_exports=True,
+    )
+    assert BRITTLE_COLUMN in result.dataframe.columns
+    assert bool(result.dataframe.iloc[0][BRITTLE_COLUMN]) is True
 
 
 def test_safe_plot_stem_removes_path_separators() -> None:

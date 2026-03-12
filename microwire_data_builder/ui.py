@@ -64,6 +64,7 @@ from .core import (
     MicroscopeOCRResult,
     MicroscopeCacheEntry,
     MICROSCOPE_IMAGE_COLUMNS,
+    BRITTLE_COLUMN,
     MeasurementRecord,
     VideoMetricsSummary,
     FabricationIndex,
@@ -172,6 +173,7 @@ MICROSCOPE_TABLE_COLUMNS = [
     MICROSCOPE_D_COLUMN,
     MICROSCOPE_CAP_D_COLUMN,
     "d/D",
+    BRITTLE_COLUMN,
     MICROSCOPE_IMAGE_COLUMNS[0],
     MICROSCOPE_IMAGE_COLUMNS[1],
     "_key",
@@ -5570,6 +5572,7 @@ def _microscope_index_to_frame(
                 MICROSCOPE_D_COLUMN: d_value,
                 MICROSCOPE_CAP_D_COLUMN: D_value,
                 "d/D": ratio,
+                BRITTLE_COLUMN: bool(getattr(measurements, "brittle", False)),
                 MICROSCOPE_IMAGE_COLUMNS[0]: None,
                 MICROSCOPE_IMAGE_COLUMNS[1]: None,
                 "_key": key,
@@ -9382,6 +9385,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     MICROSCOPE_D_COLUMN: None,
                     MICROSCOPE_CAP_D_COLUMN: None,
                     "d/D": None,
+                    BRITTLE_COLUMN: None,
                     MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     MICROSCOPE_IMAGE_COLUMNS[1]: None,
                     "_key": key_str,
@@ -9966,6 +9970,7 @@ class MicroscopeSection(MiniDatabaseSection):
         return True
 
     def _row_missing_images(self, row: pd.Series) -> bool:
+        brittle = bool(row.get(BRITTLE_COLUMN))
         core_present = bool(row.get("_core_image"))
         glass_present = bool(row.get("_glass_image"))
         extras = row.get("_images")
@@ -9973,6 +9978,8 @@ class MicroscopeSection(MiniDatabaseSection):
             core_present = True
         if not glass_present and isinstance(extras, (list, tuple)) and extras:
             glass_present = True
+        if brittle:
+            return not glass_present
         return not (core_present and glass_present)
 
     def _row_for_key(self, key: str) -> Optional[pd.Series]:
@@ -10852,6 +10859,10 @@ class MicroscopeSection(MiniDatabaseSection):
                 MICROSCOPE_D_COLUMN: None,
                 MICROSCOPE_CAP_D_COLUMN: None,
                 "d/D": None,
+                BRITTLE_COLUMN: any(
+                    "brittle" in str(item).lower()
+                    for item in payload.get("_images", [])
+                ),
                 MICROSCOPE_IMAGE_COLUMNS[0]: None,
                 MICROSCOPE_IMAGE_COLUMNS[1]: None,
                 "_key": key,
@@ -21252,6 +21263,7 @@ class AssemblySection(QtWidgets.QWidget):
                 MICROSCOPE_D_COLUMN,
                 MICROSCOPE_CAP_D_COLUMN,
                 "d/D",
+                BRITTLE_COLUMN,
                 *MICROSCOPE_IMAGE_COLUMNS,
             ],
         )
