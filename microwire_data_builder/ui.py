@@ -6605,6 +6605,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             dialog.setMinimumDuration(0)
             dialog.setAutoClose(False)
             dialog.setAutoReset(False)
+            dialog.setMinimumWidth(320)
+            dialog.setLabelText("Scanning files...")
             dialog.show()
             self._progress_dialog = dialog
             return
@@ -6621,6 +6623,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         dialog.setMinimumDuration(0)
         dialog.setAutoClose(False)
         dialog.setAutoReset(False)
+        dialog.setMinimumWidth(320)
+        dialog.setLabelText(f"Processing 0/{self._progress_total}")
         dialog.setValue(0)
         dialog.show()
         self._progress_dialog = dialog
@@ -9731,11 +9735,7 @@ class MicroscopeSection(MiniDatabaseSection):
                                 raw_key = row.get("_key") if row is not None else None
                                 if raw_key is not None:
                                     key_value = str(raw_key)
-                            self._queue_advance_after_restore(
-                                key_value,
-                                column_label,
-                                mark_review=True,
-                            )
+                            self._queue_editor_commit_advance(key_value, column_label)
                             return False
                         self._mark_reviewed_and_advance(column_label)
                         return True
@@ -9745,12 +9745,29 @@ class MicroscopeSection(MiniDatabaseSection):
         self._select_row_for_key(key, column_label=column_label)
         self._mark_reviewed_and_advance(column_label)
 
+    def _queue_editor_commit_advance(self, key: Optional[str], column_label: str) -> None:
+        key_text = str(key).strip() if key else ""
+        if not key_text or not column_label:
+            return
+
+        def _advance() -> None:
+            row = self._row_for_key(key_text)
+            if row is None:
+                return
+            self._select_row_for_key(key_text, column_label=column_label)
+            self._selected_key = key_text
+            if self._is_valid_diameter(row.get(column_label)):
+                self._mark_reviewed(auto=True, columns={column_label})
+            self._advance_to_next_pending(column_label)
+
+        QtCore.QTimer.singleShot(75, _advance)
+
     def _mark_reviewed_and_advance(self, column_label: str) -> None:
         index = self._current_index()
         if not index.isValid():
             return
         self._mark_reviewed(auto=True, columns={column_label})
-        self._advance_after_review(index, column_label)
+        self._advance_to_next_pending(column_label)
 
     def _advance_after_review(self, index: QtCore.QModelIndex, column_label: str) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
@@ -10011,6 +10028,7 @@ class MicroscopeSection(MiniDatabaseSection):
         frame = self.model.frame()
         self.data.table = frame.copy()
         validation_changed = False
+        advance_request: Tuple[str, str] | None = None
         edited_rows = range(top_left.row(), bottom_right.row() + 1)
         for row_idx in edited_rows:
             try:
@@ -10018,6 +10036,23 @@ class MicroscopeSection(MiniDatabaseSection):
             except Exception:
                 continue
             key = str(row.get("_key", ""))
+            if (
+                advance_request is None
+                and self._pending_advance_column is None
+                and top_left.row() == bottom_right.row()
+                and top_left.column() == bottom_right.column()
+                and row_idx == top_left.row()
+            ):
+                try:
+                    column_label = str(frame.columns[top_left.column()])
+                except Exception:
+                    column_label = ""
+                if (
+                    key
+                    and column_label in {MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN}
+                    and self._is_valid_diameter(row.get(column_label))
+                ):
+                    advance_request = (key, column_label)
             override: Dict[str, float] = {}
             d_val = row.get(MICROSCOPE_D_COLUMN)
             D_val = row.get(MICROSCOPE_CAP_D_COLUMN)
@@ -10031,9 +10066,19 @@ class MicroscopeSection(MiniDatabaseSection):
                 self._overrides.pop(key, None)
             if self._sync_review_flags_for_row(key, row):
                 validation_changed = True
-        self._store_overrides()
+        self._store_overrides(
+            restore_selection=(
+                advance_request is None and self._pending_advance_column is None
+            )
+        )
         if validation_changed:
             self._store_validation()
+        if advance_request is not None:
+            key, column_label = advance_request
+            self._select_row_for_key(key, column_label)
+            self._selected_key = key
+            self._mark_reviewed(auto=True, columns={column_label})
+            self._advance_to_next_pending(column_label)
 
     def _queue_advance_after_restore(
         self,
@@ -10064,14 +10109,12 @@ class MicroscopeSection(MiniDatabaseSection):
                 column_label = self._pending_advance_column
                 if self._pending_advance_review:
                     self._mark_reviewed(auto=True, columns={column_label})
-                index = self._current_index()
-                if index.isValid():
-                    self._advance_after_review(index, column_label)
+                self._advance_to_next_pending(column_label)
                 self._pending_advance_key = None
                 self._pending_advance_column = None
                 self._pending_advance_review = False
 
-        QtCore.QTimer.singleShot(0, _restore)
+        QtCore.QTimer.singleShot(50, _restore)
 
     def _handle_missing_item_activated(self, item: QtWidgets.QListWidgetItem) -> None:
         key = item.data(QtCore.Qt.ItemDataRole.UserRole)

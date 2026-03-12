@@ -1068,6 +1068,71 @@ def test_microscope_return_key_marks_reviewed_and_advances() -> None:
         section.close()
 
 
+def test_microscope_table_cell_return_moves_to_next_unverified_cell() -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompF",
+                    "Microwire": "1/1oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompF|1|1|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+                {
+                    "Composition": "TestCompF",
+                    "Microwire": "1/2oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompF|1|2|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section.show()
+        _ensure_qapp().processEvents()
+
+        section._select_row_for_key("TestCompF|1|1|oe", builder_ui.MICROSCOPE_D_COLUMN)
+        _ensure_qapp().processEvents()
+        index = section.table_view.currentIndex()
+        section.table_view.edit(index)
+        _ensure_qapp().processEvents()
+        editor = section.table_view.focusWidget()
+        assert isinstance(editor, QtWidgets.QLineEdit)
+        editor.selectAll()
+        editor.setText("12.3")
+        QtTest.QTest.keyClick(editor, QtCore.Qt.Key.Key_Return)
+        _ensure_qapp().processEvents()
+        QtTest.QTest.qWait(200)
+        _ensure_qapp().processEvents()
+
+        row = section._selected_row()
+        assert row is not None
+        assert row["_key"] == "TestCompF|1|1|oe"
+        current = section.table_view.currentIndex()
+        assert current.isValid()
+        assert current.column() == list(section.model.frame().columns).index(builder_ui.MICROSCOPE_CAP_D_COLUMN)
+        entry = section._validated["TestCompF|1|1|oe"]
+        assert entry["d_reviewed"] is True
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_fabrication_relevant_map_includes_microscope_only_non_other_end() -> None:
     _ensure_qapp()
     microscope_store = builder_ui.MiniDatabaseStore("microscope")
