@@ -1194,6 +1194,30 @@ def test_fabrication_relevant_map_includes_microscope_only_non_other_end() -> No
         section.close()
 
 
+def test_assembly_import_dedupes_duplicate_columns() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    try:
+        payload = {
+            "columns": ["Composition", "Core temperature (°C)", "Core temperature (°C)"],
+            "rows": [
+                {
+                    "Composition": "Ni46Fe23Ga23Co8",
+                    "Core temperature (°C)": 123.4,
+                }
+            ],
+            "index": [0],
+        }
+
+        assembly.import_project_payload(payload)
+
+        frame = assembly._raw_preview_frame
+        assert isinstance(frame, pd.DataFrame)
+        assert list(frame.columns).count("Core temperature (°C)") == 1
+    finally:
+        assembly.close()
+
+
 def test_build_database_populates_brittle_column_from_microscope_index(tmp_path: Path) -> None:
     record = MeasurementRecord(
         path=tmp_path / "Ni50Fe27Ga23 5_4 s1 1000mA.txt",

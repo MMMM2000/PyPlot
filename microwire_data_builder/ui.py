@@ -19508,8 +19508,44 @@ class AssemblySection(QtWidgets.QWidget):
         frame = self._raw_preview_frame
         return isinstance(frame, pd.DataFrame) and not frame.empty
 
+    @staticmethod
+    def _dedupe_frame_columns(frame: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return frame
+        columns = [str(column) for column in frame.columns]
+        seen: Set[str] = set()
+        duplicates = [column for column in columns if column in seen or seen.add(column)]
+        if not duplicates:
+            return frame
+        deduped = pd.DataFrame(index=frame.index)
+        for column in columns:
+            if column in deduped.columns:
+                existing = deduped[column]
+                incoming = frame[column]
+                if isinstance(incoming, pd.DataFrame):
+                    for _, series in incoming.items():
+                        existing = existing.where(~(existing.isna() | (existing == "")), series)
+                    deduped[column] = existing
+                else:
+                    deduped[column] = existing.where(
+                        ~(existing.isna() | (existing == "")),
+                        incoming,
+                    )
+                continue
+            incoming = frame[column]
+            if isinstance(incoming, pd.DataFrame):
+                first = incoming.iloc[:, 0].copy()
+                for idx in range(1, incoming.shape[1]):
+                    series = incoming.iloc[:, idx]
+                    first = first.where(~(first.isna() | (first == "")), series)
+                deduped[column] = first
+            else:
+                deduped[column] = incoming.copy()
+        return deduped
+
     def export_project_payload(self) -> Dict[str, Any]:
         frame = self._raw_preview_frame if isinstance(self._raw_preview_frame, pd.DataFrame) else pd.DataFrame()
+        frame = self._dedupe_frame_columns(frame)
         columns = [str(col) for col in getattr(frame, "columns", [])]
         rows: List[Dict[str, Any]] = []
         if not frame.empty:
@@ -19624,6 +19660,8 @@ class AssemblySection(QtWidgets.QWidget):
             frame = pd.DataFrame(list(rows_payload), columns=column_names or None)
         else:
             frame = pd.DataFrame(columns=column_names)
+        if isinstance(frame, pd.DataFrame):
+            frame = self._dedupe_frame_columns(frame)
         index_payload = payload.get("index")
         if isinstance(index_payload, list) and len(index_payload) == len(frame.index):
             try:
@@ -20472,6 +20510,7 @@ class AssemblySection(QtWidgets.QWidget):
         return universe
 
     def _apply_column_universe(self, frame: pd.DataFrame) -> pd.DataFrame:
+        frame = self._dedupe_frame_columns(frame)
         universe = self._column_universe()
         if not universe:
             return frame
