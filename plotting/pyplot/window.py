@@ -35,11 +35,13 @@ import uuid
 from functools import partial
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+import matplotlib as mpl
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt import NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
+from matplotlib.patches import Ellipse, FancyArrowPatch, Patch, Rectangle
 from matplotlib.text import Text
 from matplotlib import colors as mcolors
 import pandas as pd
@@ -408,15 +410,45 @@ def create_toolbar_section(
 @dataclass
 class FormatToolbarControls:
     toolbar: QtWidgets.QToolBar | None = None
+    font_combo: QtWidgets.QComboBox | None = None
     size_spin: QtWidgets.QSpinBox | None = None
     bold_action: QtGui.QAction | None = None
     italic_action: QtGui.QAction | None = None
     underline_action: QtGui.QAction | None = None
+    subscript_action: QtGui.QAction | None = None
+    superscript_action: QtGui.QAction | None = None
+    subsup_action: QtGui.QAction | None = None
+    edit_text_action: QtGui.QAction | None = None
     color_button: QtWidgets.QToolButton | None = None
+    fill_color_button: QtWidgets.QToolButton | None = None
+    width_spin: QtWidgets.QDoubleSpinBox | None = None
     line_group: QtGui.QActionGroup | None = None
     line_action: QtGui.QAction | None = None
     scatter_action: QtGui.QAction | None = None
     line_symbol_action: QtGui.QAction | None = None
+
+
+@dataclass
+class AnnotationToolbarControls:
+    toolbar: QtWidgets.QToolBar | None = None
+    select_action: QtGui.QAction | None = None
+    text_action: QtGui.QAction | None = None
+    arrow_action: QtGui.QAction | None = None
+    line_action: QtGui.QAction | None = None
+    rectangle_action: QtGui.QAction | None = None
+    ellipse_action: QtGui.QAction | None = None
+    action_group: QtGui.QActionGroup | None = None
+
+
+@dataclass
+class _GraphTextDialogResult:
+    text: str
+    font_family: str
+    font_size: float
+    color: Any
+    bold: bool
+    italic: bool
+    underline: bool
 
 
 @dataclass
@@ -1556,6 +1588,185 @@ class TabDescriptor:
     stored_limits: Dict[str, tuple[float, float]] = field(default_factory=dict)
 
 
+class GraphTextDialog(QtWidgets.QDialog):
+    """Edit free text with mathtext-aware helpers."""
+
+    _FONT_CHOICES = (
+        "DejaVu Serif",
+        "STIXGeneral",
+        "Times New Roman",
+        "DejaVu Sans",
+        "Arial",
+    )
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        *,
+        title: str,
+        initial_text: str = "",
+        font_family: str = "DejaVu Serif",
+        font_size: float = 14.0,
+        color: QtGui.QColor | None = None,
+        bold: bool = False,
+        italic: bool = False,
+        underline: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(440, 220)
+        self._selected_color = QtGui.QColor(color) if color is not None else QtGui.QColor("#111111")
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        info = QtWidgets.QLabel(
+            "Matplotlib mathtext is supported. Use syntax like $H_{c}$, $10^{-10}$, or Greek letters such as $\\phi$."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.text_edit = QtWidgets.QLineEdit(initial_text, self)
+        layout.addWidget(self.text_edit)
+
+        helper_row = QtWidgets.QHBoxLayout()
+        helper_row.setSpacing(6)
+        sub_button = QtWidgets.QPushButton("Subscript...", self)
+        sup_button = QtWidgets.QPushButton("Superscript...", self)
+        both_button = QtWidgets.QPushButton("Sub + Sup...", self)
+        helper_row.addWidget(sub_button)
+        helper_row.addWidget(sup_button)
+        helper_row.addWidget(both_button)
+        helper_row.addStretch(1)
+        layout.addLayout(helper_row)
+
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+        layout.addLayout(form)
+
+        self.font_combo = QtWidgets.QComboBox(self)
+        self.font_combo.setEditable(True)
+        for entry in self._FONT_CHOICES:
+            self.font_combo.addItem(entry)
+        font_index = self.font_combo.findText(font_family)
+        if font_index >= 0:
+            self.font_combo.setCurrentIndex(font_index)
+        else:
+            self.font_combo.setEditText(font_family or "DejaVu Serif")
+        form.addRow("Font:", self.font_combo)
+
+        self.size_spin = QtWidgets.QDoubleSpinBox(self)
+        self.size_spin.setRange(6.0, 96.0)
+        self.size_spin.setDecimals(1)
+        self.size_spin.setValue(float(font_size))
+        form.addRow("Size:", self.size_spin)
+
+        style_row = QtWidgets.QHBoxLayout()
+        style_row.setSpacing(6)
+        self.bold_cb = QtWidgets.QCheckBox("Bold", self)
+        self.bold_cb.setChecked(bool(bold))
+        self.italic_cb = QtWidgets.QCheckBox("Italic", self)
+        self.italic_cb.setChecked(bool(italic))
+        self.underline_cb = QtWidgets.QCheckBox("Underline", self)
+        self.underline_cb.setChecked(bool(underline))
+        style_row.addWidget(self.bold_cb)
+        style_row.addWidget(self.italic_cb)
+        style_row.addWidget(self.underline_cb)
+        style_row.addStretch(1)
+        form.addRow("Style:", style_row)
+
+        self.color_button = QtWidgets.QToolButton(self)
+        self.color_button.setText("Text color…")
+        self.color_button.clicked.connect(self._choose_color)
+        form.addRow("Color:", self.color_button)
+        self._refresh_color_button()
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        sub_button.clicked.connect(self._insert_subscript)
+        sup_button.clicked.connect(self._insert_superscript)
+        both_button.clicked.connect(self._insert_subsuperscript)
+
+    @staticmethod
+    def _strip_outer_math(text: str) -> str:
+        stripped = str(text or "").strip()
+        if len(stripped) >= 2 and stripped.startswith("$") and stripped.endswith("$"):
+            return stripped[1:-1]
+        return stripped
+
+    def _refresh_color_button(self) -> None:
+        pixmap = QtGui.QPixmap(18, 18)
+        pixmap.fill(self._selected_color)
+        painter = QtGui.QPainter(pixmap)
+        painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 90)))
+        painter.drawRect(pixmap.rect().adjusted(0, 0, -1, -1))
+        painter.end()
+        self.color_button.setIcon(QtGui.QIcon(pixmap))
+
+    def _choose_color(self) -> None:
+        color = QtWidgets.QColorDialog.getColor(self._selected_color, self, "Select text color")
+        if not color.isValid():
+            return
+        self._selected_color = color
+        self._refresh_color_button()
+
+    def _prompt_script(self, title: str, label: str) -> str | None:
+        text, ok = QtWidgets.QInputDialog.getText(self, title, label)
+        if not ok:
+            return None
+        token = str(text).strip()
+        return token or None
+
+    def _insert_subscript(self) -> None:
+        script = self._prompt_script("Subscript", "Subscript text:")
+        if script is None:
+            return
+        base = self._strip_outer_math(self.text_edit.text()) or "x"
+        self.text_edit.setText(f"${base}_{{{script}}}$")
+
+    def _insert_superscript(self) -> None:
+        script = self._prompt_script("Superscript", "Superscript text:")
+        if script is None:
+            return
+        base = self._strip_outer_math(self.text_edit.text()) or "x"
+        self.text_edit.setText(f"${base}^{{{script}}}$")
+
+    def _insert_subsuperscript(self) -> None:
+        subscript = self._prompt_script("Subscript", "Subscript text:")
+        if subscript is None:
+            return
+        superscript = self._prompt_script("Superscript", "Superscript text:")
+        if superscript is None:
+            return
+        base = self._strip_outer_math(self.text_edit.text()) or "x"
+        self.text_edit.setText(f"${base}_{{{subscript}}}^{{{superscript}}}$")
+
+    def result_payload(self) -> _GraphTextDialogResult:
+        return _GraphTextDialogResult(
+            text=self.text_edit.text(),
+            font_family=self.font_combo.currentText().strip() or "DejaVu Serif",
+            font_size=float(self.size_spin.value()),
+            color=(
+                self._selected_color.redF(),
+                self._selected_color.greenF(),
+                self._selected_color.blueF(),
+                self._selected_color.alphaF(),
+            ),
+            bold=bool(self.bold_cb.isChecked()),
+            italic=bool(self.italic_cb.isChecked()),
+            underline=bool(self.underline_cb.isChecked()),
+        )
+
+
 class GraphSelectionDialog(QtWidgets.QDialog):
     """Offer choices for which plotted data series should be processed."""
 
@@ -2241,9 +2452,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._import_storage_key = self._project_settings_key("import_sources")
         self._connected_folder_storage_key = self._project_settings_key("connected_folders")
         self._format_controls = FormatToolbarControls()
+        self._annotation_controls = AnnotationToolbarControls()
         self._format_selection: tuple[str, Any] | None = None
         self._format_updating = False
         self._object_tree_updating = False
+        self._annotation_tool: str = "select"
+        self._annotation_tool_per_canvas: Dict[FigureCanvas, str] = {}
+        self._annotation_motion_connections: Dict[FigureCanvas, int] = {}
+        self._annotation_release_connections: Dict[FigureCanvas, int] = {}
+        self._annotation_interaction: Dict[str, Any] | None = None
+        self._graph_object_counter = 0
         self._tight_layout_warning_signatures: set[tuple[int, str]] = set()
         self._last_tight_layout_warning_message: str | None = None
         self._tight_layout_bulk_choice_by_context: Dict[str, str] = {}
@@ -2313,6 +2531,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._max_visible_windows = max(1, stored_max_windows)
 
         self._build_base_ui()
+        self._apply_scientific_text_defaults()
         try:
             self.tab_widget.set_max_visible_windows(self._max_visible_windows)
         except Exception:
@@ -5265,6 +5484,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._setup_action_toolbar()
         self._setup_navigation_toolbar()
         self._setup_format_toolbar()
+        self._setup_annotation_toolbar()
         QtCore.QTimer.singleShot(0, self._normalize_docks_initial)
         self._layout_fixed_once = False
         if isinstance(project_dock, QtWidgets.QDockWidget):
@@ -5397,6 +5617,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             graph_action.triggered.connect(create_graph)  # type: ignore[arg-type]
         else:
             graph_action.setEnabled(False)
+        compose_graph_action = new_menu.addAction("Compose Graph...")
+        compose_graph_action.triggered.connect(self._compose_graph_from_existing)
         if insert_before is not None:
             file_menu.insertMenu(insert_before, new_menu)
         else:
@@ -7523,6 +7745,16 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         controls.toolbar = toolbar
 
+        font_combo = QtWidgets.QComboBox(toolbar)
+        font_combo.setEditable(True)
+        for entry in ("DejaVu Serif", "STIXGeneral", "Times New Roman", "DejaVu Sans", "Arial"):
+            font_combo.addItem(entry)
+        font_combo.setCurrentText("DejaVu Serif")
+        font_combo.setEnabled(False)
+        font_combo.currentTextChanged.connect(self._apply_text_family)
+        controls.font_combo = font_combo
+        toolbar.addWidget(font_combo)
+
         size_spin = QtWidgets.QSpinBox(toolbar)
         size_spin.setRange(6, 96)
         size_spin.setValue(18)
@@ -7530,6 +7762,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         size_spin.valueChanged.connect(self._apply_text_size)
         controls.size_spin = size_spin
         toolbar.addWidget(size_spin)
+
+        width_spin = QtWidgets.QDoubleSpinBox(toolbar)
+        width_spin.setRange(0.1, 20.0)
+        width_spin.setDecimals(1)
+        width_spin.setSingleStep(0.1)
+        width_spin.setValue(1.5)
+        width_spin.setEnabled(False)
+        width_spin.valueChanged.connect(self._apply_stroke_width)
+        width_spin.setToolTip("Line width for selected lines/shapes")
+        controls.width_spin = width_spin
+        toolbar.addWidget(width_spin)
 
         bold_action = toolbar.addAction("B")
         bold_action.setCheckable(True)
@@ -7555,14 +7798,51 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         controls.underline_action = underline_action
         self._style_toolbar_button(toolbar, underline_action)
 
+        subscript_action = toolbar.addAction("Sub")
+        subscript_action.setEnabled(False)
+        subscript_action.triggered.connect(self._apply_text_subscript)
+        subscript_action.setToolTip("Wrap the selected text in a mathtext subscript")
+        controls.subscript_action = subscript_action
+        self._style_toolbar_button(toolbar, subscript_action)
+
+        superscript_action = toolbar.addAction("Sup")
+        superscript_action.setEnabled(False)
+        superscript_action.triggered.connect(self._apply_text_superscript)
+        superscript_action.setToolTip("Wrap the selected text in a mathtext superscript")
+        controls.superscript_action = superscript_action
+        self._style_toolbar_button(toolbar, superscript_action)
+
+        subsup_action = toolbar.addAction("Sub+Sup")
+        subsup_action.setEnabled(False)
+        subsup_action.triggered.connect(self._apply_text_subsuperscript)
+        subsup_action.setToolTip("Wrap the selected text in mathtext with both subscript and superscript")
+        controls.subsup_action = subsup_action
+        self._style_toolbar_button(toolbar, subsup_action)
+
+        edit_text_action = toolbar.addAction("Edit…")
+        edit_text_action.setEnabled(False)
+        edit_text_action.triggered.connect(self._edit_selected_text)
+        edit_text_action.setToolTip("Edit the selected text content with mathtext helpers")
+        controls.edit_text_action = edit_text_action
+        self._style_toolbar_button(toolbar, edit_text_action)
+
         color_button = QtWidgets.QToolButton(toolbar)
-        color_button.setText("Color...")
+        color_button.setText("Stroke…")
         color_button.setEnabled(False)
         color_button.clicked.connect(self._choose_format_color)
         color_button.setToolTip("Select an object to adjust its colour")
         controls.color_button = color_button
         toolbar.addWidget(color_button)
         self._style_toolbar_button(toolbar, color_button)
+
+        fill_color_button = QtWidgets.QToolButton(toolbar)
+        fill_color_button.setText("Fill…")
+        fill_color_button.setEnabled(False)
+        fill_color_button.clicked.connect(self._choose_fill_color)
+        fill_color_button.setToolTip("Adjust the selected shape fill colour")
+        controls.fill_color_button = fill_color_button
+        toolbar.addWidget(fill_color_button)
+        self._style_toolbar_button(toolbar, fill_color_button)
 
         toolbar.addSeparator()
 
@@ -7598,6 +7878,327 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         line_group.addAction(line_symbol_action)
         controls.line_symbol_action = line_symbol_action
         self._style_toolbar_button(toolbar, line_symbol_action)
+
+    def _setup_annotation_toolbar(self) -> None:
+        controls = self._annotation_controls
+        toolbar = QtWidgets.QToolBar("Annotate", self)
+        toolbar.setObjectName("mw_annotate_toolbar")
+        self._configure_toolbar(toolbar)
+        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
+        controls.toolbar = toolbar
+
+        group = QtGui.QActionGroup(toolbar)
+        group.setExclusive(True)
+        controls.action_group = group
+
+        def _add_tool(label: str, token: str, tooltip: str) -> QtGui.QAction:
+            action = toolbar.addAction(label)
+            action.setCheckable(True)
+            action.setToolTip(tooltip)
+            action.triggered.connect(lambda checked, t=token: self._set_annotation_tool(t if checked else "select"))
+            group.addAction(action)
+            self._style_toolbar_button(toolbar, action)
+            return action
+
+        controls.select_action = _add_tool("Select", "select", "Select annotation text, lines, arrows, and shapes")
+        controls.text_action = _add_tool("Text", "text", "Place a free text label on the graph")
+        controls.arrow_action = _add_tool("Arrow", "arrow", "Draw an arrow by dragging on the graph")
+        controls.line_action = _add_tool("Line", "shape_line", "Draw a line by dragging on the graph")
+        controls.rectangle_action = _add_tool("Rect", "rectangle", "Draw a rectangle by dragging on the graph")
+        controls.ellipse_action = _add_tool("Ellipse", "ellipse", "Draw an ellipse by dragging on the graph")
+        if controls.select_action is not None:
+            controls.select_action.setChecked(True)
+
+    def _apply_scientific_text_defaults(self) -> None:
+        try:
+            mpl.rcParams["font.family"] = ["DejaVu Serif"]
+            mpl.rcParams["mathtext.fontset"] = "stix"
+            mpl.rcParams["mathtext.default"] = "regular"
+        except Exception:
+            pass
+
+    def _set_annotation_tool(self, tool: str) -> None:
+        token = str(tool or "select").strip().lower()
+        if token not in {"select", "text", "arrow", "shape_line", "rectangle", "ellipse"}:
+            token = "select"
+        self._annotation_tool = token
+        if token == "select":
+            return
+        self._set_navigation_mode(None)
+
+    def _next_graph_object_id(self) -> str:
+        self._graph_object_counter += 1
+        return f"graph_object_{self._graph_object_counter}"
+
+    def _mark_graph_object(self, artist: Any, kind: str, *, label: str | None = None) -> None:
+        if artist is None:
+            return
+        try:
+            setattr(artist, "_mw_graph_object_kind", str(kind))
+            setattr(artist, "_mw_graph_object_id", self._next_graph_object_id())
+            if isinstance(label, str) and label.strip():
+                setattr(artist, "_mw_graph_object_label", label.strip())
+        except Exception:
+            return
+
+    @staticmethod
+    def _graph_object_kind(artist: Any) -> str | None:
+        kind = getattr(artist, "_mw_graph_object_kind", None)
+        return str(kind).strip() if isinstance(kind, str) and str(kind).strip() else None
+
+    def _iter_graph_object_texts(self, axes: Any) -> list[Text]:
+        texts: list[Text] = []
+        try:
+            entries = list(getattr(axes, "texts", []))
+        except Exception:
+            entries = []
+        for entry in entries:
+            if not isinstance(entry, Text):
+                continue
+            if self._graph_object_kind(entry) != "text":
+                continue
+            texts.append(entry)
+        return texts
+
+    def _iter_graph_object_shapes(self, axes: Any) -> list[Any]:
+        shapes: list[Any] = []
+        try:
+            for line in list(axes.get_lines()):
+                if isinstance(line, Line2D) and self._graph_object_kind(line) == "shape_line":
+                    shapes.append(line)
+        except Exception:
+            pass
+        try:
+            patches = list(getattr(axes, "patches", []))
+        except Exception:
+            patches = []
+        for patch in patches:
+            if self._graph_object_kind(patch) in {"arrow", "rectangle", "ellipse"}:
+                shapes.append(patch)
+        return shapes
+
+    def _graph_object_label(self, artist: Any, *, fallback: str) -> str:
+        explicit = getattr(artist, "_mw_graph_object_label", None)
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip()
+        if isinstance(artist, Text):
+            try:
+                text = str(artist.get_text() or "").strip()
+            except Exception:
+                text = ""
+            if text:
+                return text
+        kind = self._graph_object_kind(artist)
+        labels = {
+            "text": "Text",
+            "arrow": "Arrow",
+            "shape_line": "Line",
+            "rectangle": "Rectangle",
+            "ellipse": "Ellipse",
+        }
+        return labels.get(kind or "", fallback)
+
+    def _select_object_in_manager(self, artist: Any) -> None:
+        tree = getattr(self, "object_tree", None)
+        if not isinstance(tree, QtWidgets.QTreeWidget):
+            return
+
+        def _walk(item: QtWidgets.QTreeWidgetItem) -> QtWidgets.QTreeWidgetItem | None:
+            data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict) and data.get("object") is artist:
+                return item
+            for index in range(item.childCount()):
+                found = _walk(item.child(index))
+                if found is not None:
+                    return found
+            return None
+
+        found_item = None
+        for index in range(tree.topLevelItemCount()):
+            found_item = _walk(tree.topLevelItem(index))
+            if found_item is not None:
+                break
+        if found_item is None:
+            return
+        tree.blockSignals(True)
+        try:
+            tree.clearSelection()
+            found_item.setSelected(True)
+            tree.setCurrentItem(found_item)
+        finally:
+            tree.blockSignals(False)
+        self._handle_object_selection_changed()
+
+    @staticmethod
+    def _strip_outer_math(text: str) -> str:
+        token = str(text or "").strip()
+        if len(token) >= 2 and token.startswith("$") and token.endswith("$"):
+            return token[1:-1]
+        return token
+
+    def _serialize_graph_object_payloads_for_axes(self, axes: Any) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        if axes is None:
+            return payloads
+        for text_artist in self._iter_graph_object_texts(axes):
+            try:
+                families = list(text_artist.get_fontfamily())
+            except Exception:
+                families = []
+            payloads.append(
+                {
+                    "kind": "text",
+                    "x": float(text_artist.get_position()[0]),
+                    "y": float(text_artist.get_position()[1]),
+                    "text": str(getattr(text_artist, "_mw_raw_text", text_artist.get_text()) or ""),
+                    "font_family": str(families[0]) if families else "DejaVu Serif",
+                    "font_size": float(text_artist.get_fontsize()),
+                    "color": mcolors.to_rgba(text_artist.get_color()),
+                    "bold": self._text_is_bold(text_artist),
+                    "italic": self._text_is_italic(text_artist),
+                    "underline": bool(getattr(text_artist, "get_underline", lambda: False)()),
+                }
+            )
+        for artist in self._iter_graph_object_shapes(axes):
+            kind = self._graph_object_kind(artist)
+            if kind == "shape_line" and isinstance(artist, Line2D):
+                x_data = np.asarray(artist.get_xdata())
+                y_data = np.asarray(artist.get_ydata())
+                if x_data.size >= 2 and y_data.size >= 2:
+                    payloads.append(
+                        {
+                            "kind": "shape_line",
+                            "x0": float(x_data[0]),
+                            "y0": float(y_data[0]),
+                            "x1": float(x_data[-1]),
+                            "y1": float(y_data[-1]),
+                            "color": mcolors.to_rgba(artist.get_color()),
+                            "linewidth": float(artist.get_linewidth()),
+                            "linestyle": str(artist.get_linestyle() or "-"),
+                        }
+                    )
+            elif kind == "arrow" and isinstance(artist, FancyArrowPatch):
+                try:
+                    path = artist.get_path().vertices
+                except Exception:
+                    path = None
+                if path is not None and len(path) >= 2:
+                    payloads.append(
+                        {
+                            "kind": "arrow",
+                            "x0": float(path[0][0]),
+                            "y0": float(path[0][1]),
+                            "x1": float(path[-1][0]),
+                            "y1": float(path[-1][1]),
+                            "color": mcolors.to_rgba(artist.get_edgecolor()),
+                            "linewidth": float(artist.get_linewidth()),
+                        }
+                    )
+            elif kind == "rectangle" and isinstance(artist, Rectangle):
+                payloads.append(
+                    {
+                        "kind": "rectangle",
+                        "x": float(artist.get_x()),
+                        "y": float(artist.get_y()),
+                        "width": float(artist.get_width()),
+                        "height": float(artist.get_height()),
+                        "edgecolor": mcolors.to_rgba(artist.get_edgecolor()),
+                        "facecolor": mcolors.to_rgba(artist.get_facecolor()),
+                        "linewidth": float(artist.get_linewidth()),
+                    }
+                )
+            elif kind == "ellipse" and isinstance(artist, Ellipse):
+                payloads.append(
+                    {
+                        "kind": "ellipse",
+                        "center_x": float(artist.center[0]),
+                        "center_y": float(artist.center[1]),
+                        "width": float(artist.width),
+                        "height": float(artist.height),
+                        "edgecolor": mcolors.to_rgba(artist.get_edgecolor()),
+                        "facecolor": mcolors.to_rgba(artist.get_facecolor()),
+                        "linewidth": float(artist.get_linewidth()),
+                    }
+                )
+        return payloads
+
+    def _restore_graph_object_payloads_for_axes(self, axes: Any, payloads: Sequence[dict[str, Any]]) -> None:
+        if axes is None:
+            return
+        for entry in payloads:
+            if not isinstance(entry, dict):
+                continue
+            kind = str(entry.get("kind") or "").strip().lower()
+            if kind == "text":
+                payload = _GraphTextDialogResult(
+                    text=str(entry.get("text") or ""),
+                    font_family=str(entry.get("font_family") or "DejaVu Serif"),
+                    font_size=float(entry.get("font_size") or 14.0),
+                    color=entry.get("color") or "#111111",
+                    bold=bool(entry.get("bold", False)),
+                    italic=bool(entry.get("italic", False)),
+                    underline=bool(entry.get("underline", False)),
+                )
+                artist = self._create_text_annotation(
+                    axes,
+                    x=float(entry.get("x") or 0.0),
+                    y=float(entry.get("y") or 0.0),
+                    payload=payload,
+                )
+                if artist is not None:
+                    self._redraw_artist(artist)
+            elif kind == "shape_line":
+                artist = Line2D(
+                    [float(entry.get("x0") or 0.0), float(entry.get("x1") or 0.0)],
+                    [float(entry.get("y0") or 0.0), float(entry.get("y1") or 0.0)],
+                    color=entry.get("color") or "#111111",
+                    linewidth=float(entry.get("linewidth") or 1.2),
+                    linestyle=str(entry.get("linestyle") or "-"),
+                    zorder=10,
+                )
+                axes.add_line(artist)
+                self._mark_graph_object(artist, "shape_line", label="Line")
+                self._redraw_artist(artist)
+            elif kind == "arrow":
+                artist = FancyArrowPatch(
+                    (float(entry.get("x0") or 0.0), float(entry.get("y0") or 0.0)),
+                    (float(entry.get("x1") or 0.0), float(entry.get("y1") or 0.0)),
+                    arrowstyle="->",
+                    mutation_scale=12,
+                    color=entry.get("color") or "#111111",
+                    linewidth=float(entry.get("linewidth") or 1.2),
+                    zorder=10,
+                )
+                axes.add_patch(artist)
+                self._mark_graph_object(artist, "arrow", label="Arrow")
+                self._redraw_artist(artist)
+            elif kind == "rectangle":
+                artist = Rectangle(
+                    (float(entry.get("x") or 0.0), float(entry.get("y") or 0.0)),
+                    float(entry.get("width") or 0.0),
+                    float(entry.get("height") or 0.0),
+                    edgecolor=entry.get("edgecolor") or "#111111",
+                    facecolor=entry.get("facecolor") or (0.0, 0.0, 0.0, 0.0),
+                    linewidth=float(entry.get("linewidth") or 1.2),
+                    zorder=10,
+                )
+                axes.add_patch(artist)
+                self._mark_graph_object(artist, "rectangle", label="Rectangle")
+                self._redraw_artist(artist)
+            elif kind == "ellipse":
+                artist = Ellipse(
+                    (float(entry.get("center_x") or 0.0), float(entry.get("center_y") or 0.0)),
+                    float(entry.get("width") or 0.0),
+                    float(entry.get("height") or 0.0),
+                    edgecolor=entry.get("edgecolor") or "#111111",
+                    facecolor=entry.get("facecolor") or (0.0, 0.0, 0.0, 0.0),
+                    linewidth=float(entry.get("linewidth") or 1.2),
+                    zorder=10,
+                )
+                axes.add_patch(artist)
+                self._mark_graph_object(artist, "ellipse", label="Ellipse")
+                self._redraw_artist(artist)
 
     # ------------------------------------------------------------------ shared menu helpers
     def _project_settings_key(self, suffix: str) -> str:
@@ -7723,6 +8324,154 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         index = self.tab_widget.addTab(tab, "Graph")
         self.tab_widget.setCurrentIndex(index)
         self._register_plot_tab(tab, canvas, ax, descriptor)
+        self._mark_project_dirty()
+
+    def _compose_graph_from_existing(self) -> None:
+        entries: list[tuple[str, str, QtWidgets.QWidget]] = []
+        current = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        for tab, descriptor in self._tab_descriptors.items():
+            if descriptor is None:
+                continue
+            if descriptor.kind == "worksheet":
+                continue
+            axes = getattr(descriptor, "axes", None)
+            if axes is None:
+                continue
+            try:
+                lines = [line for line in axes.get_lines() if isinstance(line, Line2D) and line.get_label() != "_nolegend_"]
+            except Exception:
+                lines = []
+            if not lines:
+                continue
+            label = str(descriptor.title or self.tab_widget.tabText(self.tab_widget.indexOf(tab)) or "Graph")
+            detail = f"{label} ({len(lines)} series)"
+            entries.append((label, detail, tab))
+        if not entries:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Compose graph",
+                "Open at least one plotted graph before composing a combined graph.",
+            )
+            return
+        dialog = GraphSelectionDialog(
+            self,
+            entries=entries,
+            title="Compose graph",
+            prompt="Choose which plotted graphs to overlay into a new combined graph.",
+            current=current if isinstance(current, QtWidgets.QWidget) else None,
+        )
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+        selected_tabs = dialog.selected_tabs()
+        if not selected_tabs:
+            return
+
+        fig = Figure(figsize=(6.2, 4.2))
+        ax = fig.add_subplot(111)
+        composed_lines: Dict[tuple[str, float | str], GraphLineState] = {}
+        x_label = "X"
+        y_label = "Y"
+        title = "Composed Graph"
+        series_index = 0
+        for tab in selected_tabs:
+            descriptor = self._tab_descriptors.get(tab)
+            if descriptor is None:
+                continue
+            source_axes = getattr(descriptor, "axes", None)
+            if source_axes is None:
+                continue
+            if x_label == "X":
+                x_label = str(getattr(source_axes, "get_xlabel", lambda: "X")() or "X")
+            if y_label == "Y":
+                y_label = str(getattr(source_axes, "get_ylabel", lambda: "Y")() or "Y")
+            if title == "Composed Graph":
+                source_title = str(getattr(source_axes, "get_title", lambda: "")() or "")
+                if source_title:
+                    title = source_title
+            try:
+                source_lines = list(source_axes.get_lines())
+            except Exception:
+                source_lines = []
+            for line in source_lines:
+                if not isinstance(line, Line2D):
+                    continue
+                try:
+                    visible = bool(line.get_visible())
+                except Exception:
+                    visible = True
+                if not visible:
+                    continue
+                try:
+                    raw_label = str(line.get_label() or "")
+                except Exception:
+                    raw_label = ""
+                if raw_label.startswith("_") and raw_label != "_nolegend_":
+                    raw_label = ""
+                if raw_label == "_nolegend_":
+                    continue
+                x_data = np.asarray(line.get_xdata())
+                y_data = np.asarray(line.get_ydata())
+                if x_data.size == 0 or y_data.size == 0:
+                    continue
+                try:
+                    new_line = ax.plot(
+                        x_data,
+                        y_data,
+                        label=raw_label or f"Series {series_index + 1}",
+                        color=line.get_color(),
+                        linestyle=line.get_linestyle(),
+                        linewidth=float(line.get_linewidth()),
+                        marker=line.get_marker(),
+                        markersize=float(line.get_markersize()),
+                    )[0]
+                except Exception:
+                    new_line = ax.plot(x_data, y_data, label=raw_label or f"Series {series_index + 1}")[0]
+                key = (str(raw_label or f"Series {series_index + 1}"), series_index)
+                composed_lines[key] = GraphLineState(
+                    key=key,
+                    label=str(raw_label or f"Series {series_index + 1}"),
+                    line=new_line,
+                    base_x=x_data,
+                    base_y=y_data,
+                    full_x=x_data,
+                    full_y=y_data,
+                )
+                series_index += 1
+        if not composed_lines:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Compose graph",
+                "No visible plotted series were available to combine.",
+            )
+            return
+        ax.set_title(title or "Composed Graph")
+        ax.set_xlabel(x_label or "X")
+        ax.set_ylabel(y_label or "Y")
+        ax.grid(True)
+        try:
+            ax.legend(loc="best")
+        except Exception:
+            pass
+        canvas = FigureCanvas(fig)
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(canvas)
+        descriptor = TabDescriptor(
+            kind="composed_graph",
+            title=str(ax.get_title() or "Composed Graph"),
+            root_label="Composed Graph",
+            x_label=str(ax.get_xlabel() or ""),
+            y_label=str(ax.get_ylabel() or ""),
+            canvas=canvas,
+            axes=ax,
+            lines=composed_lines,
+            metadata={"source_titles": [self._tab_descriptors.get(tab_ref).title for tab_ref in selected_tabs if self._tab_descriptors.get(tab_ref) is not None]},
+        )
+        index = self.tab_widget.addTab(tab, "Composed Graph")
+        self.tab_widget.setCurrentIndex(index)
+        self._register_plot_tab(tab, canvas, ax, descriptor)
+        self._mark_project_dirty()
 
     def _register_plot_tab(
         self,
@@ -7771,6 +8520,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 lambda _event, c=canvas: self._handle_canvas_resize(c),
             )
             self._resize_connections[canvas] = resize_cid
+        except Exception:
+            pass
+        try:
+            motion_cid = canvas.mpl_connect(
+                "motion_notify_event", self._handle_canvas_motion
+            )
+            self._annotation_motion_connections[canvas] = motion_cid
+        except Exception:
+            pass
+        try:
+            release_cid = canvas.mpl_connect(
+                "button_release_event", self._handle_canvas_button_release
+            )
+            self._annotation_release_connections[canvas] = release_cid
         except Exception:
             pass
         try:
@@ -11022,7 +11785,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         kind = data.get("kind")
         target = data.get("object")
-        if kind not in {"legend", "line"}:
+        if kind not in {"legend", "line", "shape"}:
             return
         new_state = item.checkState(0)
         old_state = item.data(0, OBJECT_TREE_STATE_ROLE)
@@ -11032,6 +11795,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         changed = False
         try:
             if kind == "line" and isinstance(target, Line2D):
+                target.set_visible(visible)
+                changed = True
+            elif kind == "shape" and isinstance(target, (Line2D, Patch)):
                 target.set_visible(visible)
                 changed = True
             elif kind == "legend" and hasattr(target, "set_visible"):
@@ -11060,7 +11826,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         canvas.draw_idle()
                     except Exception:
                         pass
-            if kind in {"line", "legend"} and current_tab is not None:
+            if kind in {"line", "legend", "shape"} and current_tab is not None:
                 self._rebuild_object_manager_for_tab(current_tab)
             return
         self._object_tree_updating = True
@@ -11080,9 +11846,18 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
         if not isinstance(data, dict):
             return
-        if data.get("kind") != "legend":
+        kind = data.get("kind")
+        target = data.get("object")
+        if kind == "text" and isinstance(target, Text):
+            self._select_object_in_manager(target)
+            self._edit_selected_text()
             return
-        legend = data.get("object")
+        if kind == "shape" and isinstance(target, (Line2D, Patch)):
+            self._select_object_in_manager(target)
+            return
+        if kind != "legend":
+            return
+        legend = target
         if not isinstance(legend, Legend):
             return
         legend_axes = getattr(legend, "axes", None)
@@ -11164,18 +11939,47 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
         if not isinstance(data, dict):
             return
-        if data.get("kind") != "legend":
+        menu = QtWidgets.QMenu(tree)
+        kind = data.get("kind")
+        settings_action = None
+        reconstruct_action = None
+        delete_action = None
+        if kind == "legend":
+            settings_action = menu.addAction("Legend settings...")
+            reconstruct_action = menu.addAction("Reconstruct legend")
+        elif kind in {"text", "shape"}:
+            delete_action = menu.addAction("Delete")
+        else:
             return
 
-        menu = QtWidgets.QMenu(tree)
-        settings_action = menu.addAction("Legend settings...")
-        reconstruct_action = menu.addAction("Reconstruct legend")
-
         chosen = menu.exec(tree.viewport().mapToGlobal(pos))
-        if chosen is settings_action:
+        if settings_action is not None and chosen is settings_action:
             self._handle_object_item_double_click(item, 0)
-        elif chosen is reconstruct_action:
+        elif reconstruct_action is not None and chosen is reconstruct_action:
             self._reconstruct_legend_from_item(item)
+        elif delete_action is not None and chosen is delete_action:
+            self._delete_graph_object_item(item)
+
+    def _delete_graph_object_item(self, item: QtWidgets.QTreeWidgetItem) -> None:
+        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return
+        kind = data.get("kind")
+        target = data.get("object")
+        if kind == "text" and isinstance(target, Text):
+            axes = getattr(target, "axes", None)
+            try:
+                target.remove()
+            except Exception:
+                return
+            self._mark_graph_artist_changed(axes)
+        elif kind == "shape" and isinstance(target, (Line2D, Patch)):
+            axes = getattr(target, "axes", None)
+            try:
+                target.remove()
+            except Exception:
+                return
+            self._mark_graph_artist_changed(axes)
 
     def _dispatch_object_item_activation(
         self,
@@ -11274,7 +12078,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             )
             if kind and obj is not None:
                 item.setData(0, QtCore.Qt.ItemDataRole.UserRole, {"kind": kind, "object": obj})
-                if kind in {"legend", "line"}:
+                if kind in {"legend", "line", "shape"}:
                     visible = True
                     getter = getattr(obj, "get_visible", None)
                     if callable(getter):
@@ -11297,6 +12101,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 label = f"{label}: {axis_title}"
             axis_item = _make_item(label, kind="axes", obj=axis)
             root_item.addChild(axis_item)
+            title_item = _make_item(f"Title: {axis_title}" if axis_title else "Title")
+            title_artist = getattr(axis, "title", None)
+            if isinstance(title_artist, Text):
+                title_item.setData(
+                    0,
+                    QtCore.Qt.ItemDataRole.UserRole,
+                    {"kind": "text", "object": title_artist},
+                )
+            axis_item.addChild(title_item)
             try:
                 x_label = axis.get_xlabel()
             except Exception:
@@ -11358,6 +12171,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         visible = True
                 self._apply_object_item_visibility(line_item, visible)
                 axis_item.addChild(line_item)
+            for text_index, text_artist in enumerate(self._iter_graph_object_texts(axis), start=1):
+                text_item = _make_item(
+                    self._graph_object_label(text_artist, fallback=f"Text {text_index}"),
+                    kind="text",
+                    obj=text_artist,
+                )
+                axis_item.addChild(text_item)
+            for shape_index, shape_artist in enumerate(self._iter_graph_object_shapes(axis), start=1):
+                shape_item = _make_item(
+                    self._graph_object_label(shape_artist, fallback=f"Shape {shape_index}"),
+                    kind="shape",
+                    obj=shape_artist,
+                )
+                axis_item.addChild(shape_item)
         # add legends as top-level children under the figure root
         legend_seen: set[int] = set()
         for legend in legends + figure_legends:
@@ -11484,6 +12311,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         text_targets: list[Text] = []
         line_target: Line2D | None = None
+        shape_target: Any | None = None
         for item in tree.selectedItems():
             data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
             kind: str | None = None
@@ -11498,8 +12326,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 text_targets.append(target)
             elif kind == "line" and isinstance(target, Line2D):
                 line_target = target
+            elif kind == "shape" and isinstance(target, (Line2D, Patch)):
+                shape_target = target
         if text_targets:
             self._set_format_selection(("text", tuple(text_targets)))
+        elif shape_target is not None:
+            self._set_format_selection(("shape", shape_target))
         elif line_target is not None:
             self._set_format_selection(("line", line_target))
         else:
@@ -11516,6 +12348,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     selection = ("text", texts)
             elif kind == "line" and not isinstance(target, Line2D):
                 selection = None
+            elif kind == "shape" and not isinstance(target, (Line2D, Patch)):
+                selection = None
         self._format_selection = selection
         self._update_format_toolbar_state()
 
@@ -11523,10 +12357,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         controls = self._format_controls
         if controls.toolbar is None:
             return
+        font_combo = controls.font_combo
         size_spin = controls.size_spin
+        width_spin = controls.width_spin
         bold_action = controls.bold_action
         italic_action = controls.italic_action
         underline_action = controls.underline_action
+        subscript_action = controls.subscript_action
+        superscript_action = controls.superscript_action
+        subsup_action = controls.subsup_action
+        edit_text_action = controls.edit_text_action
+        fill_color_button = controls.fill_color_button
         line_actions = (
             (controls.line_action, "line"),
             (controls.scatter_action, "scatter"),
@@ -11536,11 +12377,27 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         try:
             selection = self._format_selection
             if selection is None:
+                if font_combo is not None:
+                    font_combo.blockSignals(True)
+                    font_combo.setEnabled(False)
+                    font_combo.blockSignals(False)
                 if size_spin is not None:
                     size_spin.blockSignals(True)
                     size_spin.setEnabled(False)
                     size_spin.blockSignals(False)
-                for action in (bold_action, italic_action, underline_action):
+                if width_spin is not None:
+                    width_spin.blockSignals(True)
+                    width_spin.setEnabled(False)
+                    width_spin.blockSignals(False)
+                for action in (
+                    bold_action,
+                    italic_action,
+                    underline_action,
+                    subscript_action,
+                    superscript_action,
+                    subsup_action,
+                    edit_text_action,
+                ):
                     if action is not None:
                         action.blockSignals(True)
                         action.setChecked(False)
@@ -11553,12 +12410,26 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         action.blockSignals(False)
                         action.setEnabled(False)
                 self._set_color_button_state(None, None)
+                if fill_color_button is not None:
+                    fill_color_button.setEnabled(False)
+                    fill_color_button.setText("Fill…")
+                    fill_color_button.setIcon(QtGui.QIcon())
                 return
             kind = selection[0]
             if kind == "text":
                 texts = selection[1]
                 text = texts[0] if isinstance(texts, tuple) and texts else None
                 if text is not None:
+                    if font_combo is not None:
+                        font_combo.blockSignals(True)
+                        families = []
+                        try:
+                            families = list(text.get_fontfamily())
+                        except Exception:
+                            families = []
+                        font_combo.setCurrentText(str(families[0]) if families else "DejaVu Serif")
+                        font_combo.blockSignals(False)
+                        font_combo.setEnabled(True)
                     if size_spin is not None:
                         size_spin.blockSignals(True)
                         try:
@@ -11587,6 +12458,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         underline_action.setChecked(underline)
                         underline_action.blockSignals(False)
                         underline_action.setEnabled(True)
+                    for action in (subscript_action, superscript_action, subsup_action, edit_text_action):
+                        if action is not None:
+                            action.setEnabled(True)
+                    if width_spin is not None:
+                        width_spin.blockSignals(True)
+                        width_spin.setEnabled(False)
+                        width_spin.blockSignals(False)
                     for action, _ in line_actions:
                         if action is not None:
                             action.blockSignals(True)
@@ -11594,19 +12472,38 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                             action.blockSignals(False)
                             action.setEnabled(False)
                     self._set_color_button_state("text", self._qcolor_from_mpl(text.get_color()))
+                    if fill_color_button is not None:
+                        fill_color_button.setEnabled(False)
+                        fill_color_button.setText("Fill…")
+                        fill_color_button.setIcon(QtGui.QIcon())
                     return
             elif kind == "line":
                 target = selection[1]
                 if isinstance(target, Line2D):
+                    if font_combo is not None:
+                        font_combo.blockSignals(True)
+                        font_combo.setEnabled(False)
+                        font_combo.blockSignals(False)
                     if size_spin is not None:
                         size_spin.blockSignals(True)
                         size_spin.setEnabled(False)
                         size_spin.blockSignals(False)
+                    if width_spin is not None:
+                        width_spin.blockSignals(True)
+                        try:
+                            width_spin.setValue(float(target.get_linewidth()))
+                        except Exception:
+                            pass
+                        width_spin.blockSignals(False)
+                        width_spin.setEnabled(True)
                     for action in (bold_action, italic_action, underline_action):
                         if action is not None:
                             action.blockSignals(True)
                             action.setChecked(False)
                             action.blockSignals(False)
+                            action.setEnabled(False)
+                    for action in (subscript_action, superscript_action, subsup_action, edit_text_action):
+                        if action is not None:
                             action.setEnabled(False)
                     style_key = self._line_style_key(target)
                     for action, key in line_actions:
@@ -11617,12 +12514,88 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         action.setChecked(style_key == key)
                         action.blockSignals(False)
                     self._set_color_button_state("line", self._qcolor_from_mpl(target.get_color()))
+                    if fill_color_button is not None:
+                        fill_color_button.setEnabled(False)
+                        fill_color_button.setText("Fill…")
+                        fill_color_button.setIcon(QtGui.QIcon())
                     return
+            elif kind == "shape":
+                target = selection[1]
+                if isinstance(target, (Line2D, Patch)):
+                    if font_combo is not None:
+                        font_combo.blockSignals(True)
+                        font_combo.setEnabled(False)
+                        font_combo.blockSignals(False)
+                    if size_spin is not None:
+                        size_spin.blockSignals(True)
+                        size_spin.setEnabled(False)
+                        size_spin.blockSignals(False)
+                    if width_spin is not None:
+                        width_spin.blockSignals(True)
+                        try:
+                            width_spin.setValue(float(getattr(target, "get_linewidth", lambda: 1.0)()))
+                        except Exception:
+                            pass
+                        width_spin.blockSignals(False)
+                        width_spin.setEnabled(True)
+                    for action in (bold_action, italic_action, underline_action):
+                        if action is not None:
+                            action.blockSignals(True)
+                            action.setChecked(False)
+                            action.blockSignals(False)
+                            action.setEnabled(False)
+                    for action in (subscript_action, superscript_action, subsup_action, edit_text_action):
+                        if action is not None:
+                            action.setEnabled(False)
+                    for action, _ in line_actions:
+                        if action is not None:
+                            action.blockSignals(True)
+                            action.setChecked(False)
+                            action.blockSignals(False)
+                            action.setEnabled(False)
+                    stroke_color = None
+                    try:
+                        stroke_color = target.get_color() if isinstance(target, Line2D) else target.get_edgecolor()
+                    except Exception:
+                        stroke_color = None
+                    self._set_color_button_state("shape", self._qcolor_from_mpl(stroke_color))
+                    if fill_color_button is not None:
+                        fill_color_button.setEnabled(isinstance(target, (Rectangle, Ellipse)))
+                        fill_color_button.setText("Fill…")
+                        fill_color_button.setIcon(QtGui.QIcon())
+                        if isinstance(target, (Rectangle, Ellipse)):
+                            try:
+                                fill_color = target.get_facecolor()
+                            except Exception:
+                                fill_color = None
+                            if isinstance(fill_color, (list, tuple)) and fill_color:
+                                fill_color = fill_color[0]
+                            if fill_color is not None:
+                                pixmap = QtGui.QPixmap(16, 16)
+                                pixmap.fill(self._qcolor_from_mpl(fill_color))
+                                fill_color_button.setIcon(QtGui.QIcon(pixmap))
+                    return
+            if font_combo is not None:
+                font_combo.blockSignals(True)
+                font_combo.setEnabled(False)
+                font_combo.blockSignals(False)
             if size_spin is not None:
                 size_spin.blockSignals(True)
                 size_spin.setEnabled(False)
                 size_spin.blockSignals(False)
-            for action in (bold_action, italic_action, underline_action):
+            if width_spin is not None:
+                width_spin.blockSignals(True)
+                width_spin.setEnabled(False)
+                width_spin.blockSignals(False)
+            for action in (
+                bold_action,
+                italic_action,
+                underline_action,
+                subscript_action,
+                superscript_action,
+                subsup_action,
+                edit_text_action,
+            ):
                 if action is not None:
                     action.blockSignals(True)
                     action.setChecked(False)
@@ -11635,6 +12608,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     action.blockSignals(False)
                     action.setEnabled(False)
             self._set_color_button_state(None, None)
+            if fill_color_button is not None:
+                fill_color_button.setEnabled(False)
+                fill_color_button.setText("Fill…")
+                fill_color_button.setIcon(QtGui.QIcon())
         finally:
             self._format_updating = False
 
@@ -11653,6 +12630,78 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return str(style).lower() in {"italic", "oblique"}
         except Exception:
             return False
+
+    def _apply_text_family(self, family: str) -> None:
+        if self._format_updating:
+            return
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return
+        token = str(family or "").strip() or "DejaVu Serif"
+        texts = selection[1]
+        for text in texts:
+            try:
+                text.set_fontfamily(token)
+            except Exception:
+                continue
+            self._redraw_artist(text)
+        self._update_format_toolbar_state()
+
+    def _edit_text_payload_for_selection(self) -> _GraphTextDialogResult | None:
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return None
+        texts = selection[1]
+        first_text = texts[0] if isinstance(texts, tuple) and texts else None
+        if not isinstance(first_text, Text):
+            return None
+        try:
+            families = list(first_text.get_fontfamily())
+        except Exception:
+            families = []
+        dialog = GraphTextDialog(
+            self,
+            title="Edit text",
+            initial_text=str(getattr(first_text, "_mw_raw_text", first_text.get_text()) or ""),
+            font_family=str(families[0]) if families else "DejaVu Serif",
+            font_size=float(first_text.get_fontsize()),
+            color=self._qcolor_from_mpl(first_text.get_color()),
+            bold=self._text_is_bold(first_text),
+            italic=self._text_is_italic(first_text),
+            underline=bool(getattr(first_text, "get_underline", lambda: False)()),
+        )
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return None
+        return dialog.result_payload()
+
+    def _apply_text_dialog_payload(self, payload: _GraphTextDialogResult) -> None:
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return
+        texts = selection[1]
+        for text in texts:
+            if not isinstance(text, Text):
+                continue
+            try:
+                setattr(text, "_mw_raw_text", payload.text)
+                setattr(text, "_mw_graph_object_label", payload.text)
+                text.set_text(payload.text)
+                text.set_fontfamily(payload.font_family)
+                text.set_fontsize(payload.font_size)
+                text.set_color(payload.color)
+                text.set_fontweight("bold" if payload.bold else "normal")
+                text.set_fontstyle("italic" if payload.italic else "normal")
+                text.set_underline(bool(payload.underline))
+            except Exception:
+                continue
+            self._redraw_artist(text)
+        self._update_format_toolbar_state()
+
+    def _edit_selected_text(self) -> None:
+        payload = self._edit_text_payload_for_selection()
+        if payload is None:
+            return
+        self._apply_text_dialog_payload(payload)
 
     def _line_style_key(self, line: Line2D) -> str:
         try:
@@ -11731,6 +12780,66 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             self._redraw_artist(text)
         self._update_format_toolbar_state()
 
+    def _apply_text_subscript(self) -> None:
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return
+        script, ok = QtWidgets.QInputDialog.getText(self, "Subscript", "Subscript text:")
+        if not ok or not str(script).strip():
+            return
+        for text in selection[1]:
+            base = self._strip_outer_math(str(getattr(text, "_mw_raw_text", text.get_text()) or "")) or "x"
+            raw = f"${base}_{{{str(script).strip()}}}$"
+            setattr(text, "_mw_raw_text", raw)
+            setattr(text, "_mw_graph_object_label", raw)
+            try:
+                text.set_text(raw)
+            except Exception:
+                continue
+            self._redraw_artist(text)
+        self._update_format_toolbar_state()
+
+    def _apply_text_superscript(self) -> None:
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return
+        script, ok = QtWidgets.QInputDialog.getText(self, "Superscript", "Superscript text:")
+        if not ok or not str(script).strip():
+            return
+        for text in selection[1]:
+            base = self._strip_outer_math(str(getattr(text, "_mw_raw_text", text.get_text()) or "")) or "x"
+            raw = f"${base}^{{{str(script).strip()}}}$"
+            setattr(text, "_mw_raw_text", raw)
+            setattr(text, "_mw_graph_object_label", raw)
+            try:
+                text.set_text(raw)
+            except Exception:
+                continue
+            self._redraw_artist(text)
+        self._update_format_toolbar_state()
+
+    def _apply_text_subsuperscript(self) -> None:
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return
+        subscript, ok = QtWidgets.QInputDialog.getText(self, "Subscript", "Subscript text:")
+        if not ok or not str(subscript).strip():
+            return
+        superscript, ok = QtWidgets.QInputDialog.getText(self, "Superscript", "Superscript text:")
+        if not ok or not str(superscript).strip():
+            return
+        for text in selection[1]:
+            base = self._strip_outer_math(str(getattr(text, "_mw_raw_text", text.get_text()) or "")) or "x"
+            raw = f"${base}_{{{str(subscript).strip()}}}^{{{str(superscript).strip()}}}$"
+            setattr(text, "_mw_raw_text", raw)
+            setattr(text, "_mw_graph_object_label", raw)
+            try:
+                text.set_text(raw)
+            except Exception:
+                continue
+            self._redraw_artist(text)
+        self._update_format_toolbar_state()
+
     def _choose_format_color(self) -> None:
         if self._format_updating:
             return
@@ -11746,6 +12855,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 initial = self._qcolor_from_mpl(first_text.get_color())
         elif role == "line" and isinstance(target, Line2D):
             initial = self._qcolor_from_mpl(target.get_color())
+        elif role == "shape":
+            try:
+                initial = self._qcolor_from_mpl(
+                    target.get_color() if isinstance(target, Line2D) else target.get_edgecolor()
+                )
+            except Exception:
+                initial = None
         else:
             return
         color = QtWidgets.QColorDialog.getColor(initial, self, "Select colour")
@@ -11768,6 +12884,66 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             except Exception:
                 return
             self._redraw_artist(target)
+        elif role == "shape":
+            try:
+                if isinstance(target, Line2D):
+                    target.set_color(mpl_color)
+                else:
+                    target.set_edgecolor(mpl_color)
+            except Exception:
+                return
+            self._redraw_artist(target)
+        self._update_format_toolbar_state()
+
+    def _choose_fill_color(self) -> None:
+        if self._format_updating:
+            return
+        selection = self._format_selection
+        if not selection or selection[0] != "shape":
+            return
+        target = selection[1]
+        if not isinstance(target, (Rectangle, Ellipse)):
+            return
+        initial = None
+        try:
+            fill_color = target.get_facecolor()
+        except Exception:
+            fill_color = None
+        if isinstance(fill_color, (list, tuple)) and fill_color:
+            fill_color = fill_color[0]
+        if fill_color is not None:
+            initial = self._qcolor_from_mpl(fill_color)
+        color = QtWidgets.QColorDialog.getColor(initial, self, "Select fill colour")
+        if not color.isValid():
+            return
+        try:
+            target.set_facecolor(self._mpl_color_from_qcolor(color))
+        except Exception:
+            return
+        self._redraw_artist(target)
+        self._update_format_toolbar_state()
+
+    def _apply_stroke_width(self, value: float) -> None:
+        if self._format_updating:
+            return
+        selection = self._format_selection
+        if not selection:
+            return
+        role, target = selection
+        if role == "line" and isinstance(target, Line2D):
+            try:
+                target.set_linewidth(float(value))
+            except Exception:
+                return
+            self._redraw_artist(target)
+        elif role == "shape" and isinstance(target, (Line2D, Patch)):
+            try:
+                target.set_linewidth(float(value))
+            except Exception:
+                return
+            self._redraw_artist(target)
+        else:
+            return
         self._update_format_toolbar_state()
 
     def _apply_line_style(self, style: str, checked: bool) -> None:
@@ -11815,19 +12991,22 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         if role is None:
             button.setEnabled(False)
-            button.setText("Color...")
+            button.setText("Stroke…")
             button.setToolTip("Select an object to adjust its colour")
             button.setIcon(QtGui.QIcon())
             return
         button.setEnabled(True)
         if role == "text":
-            button.setText("Text color...")
+            button.setText("Text…")
             button.setToolTip("Change the selected text colour")
         elif role == "line":
-            button.setText("Line color...")
+            button.setText("Stroke…")
             button.setToolTip("Change the selected line colour")
+        elif role == "shape":
+            button.setText("Stroke…")
+            button.setToolTip("Change the selected shape stroke colour")
         else:
-            button.setText("Color...")
+            button.setText("Stroke…")
             button.setToolTip("Change the selected object's colour")
         if color is None or not color.isValid():
             button.setIcon(QtGui.QIcon())
@@ -12850,14 +14029,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return False
         return bool(result)
 
-    def _handle_canvas_button_press(self, event: Any) -> None:
-        if self._is_canvas_context_click(event):
-            self._show_canvas_context_menu(event)
-            return
-        if not bool(getattr(event, "dblclick", False)):
-            return
-        if self._nav_mode in {"zoom", "pan"}:
-            return
+    def _event_candidate_axes(self, event: Any) -> list[Any]:
         event_axes = getattr(event, "inaxes", None)
         candidates: list[Any] = []
         if event_axes is not None:
@@ -12868,6 +14040,226 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             for axes in getattr(figure, "axes", []) if figure is not None else []:
                 if axes is not None and axes not in candidates:
                     candidates.append(axes)
+        return candidates
+
+    def _mark_graph_artist_changed(self, artist: Any) -> None:
+        self._redraw_artist(artist)
+        tab = self._tab_for_axes(getattr(artist, "axes", None))
+        if tab is not None:
+            self._rebuild_object_manager_for_tab(tab)
+        self._mark_project_dirty()
+
+    def _create_text_annotation(
+        self,
+        axes: Any,
+        *,
+        x: float,
+        y: float,
+        payload: _GraphTextDialogResult,
+    ) -> Text | None:
+        if axes is None:
+            return None
+        try:
+            artist = axes.text(
+                x,
+                y,
+                payload.text,
+                fontsize=payload.font_size,
+                fontfamily=payload.font_family,
+                color=payload.color,
+                fontweight="bold" if payload.bold else "normal",
+                fontstyle="italic" if payload.italic else "normal",
+                va="center",
+                ha="center",
+                zorder=10,
+            )
+        except Exception:
+            return None
+        try:
+            artist.set_underline(bool(payload.underline))
+        except Exception:
+            pass
+        setattr(artist, "_mw_raw_text", payload.text)
+        self._mark_graph_object(artist, "text", label=payload.text)
+        return artist
+
+    def _select_graph_object_from_canvas(self, event: Any, candidates: list[Any]) -> bool:
+        for axes in candidates:
+            for text_artist in self._iter_graph_object_texts(axes):
+                if self._artist_hit(text_artist, event):
+                    self._set_format_selection(("text", (text_artist,)))
+                    self._select_object_in_manager(text_artist)
+                    return True
+            for shape_artist in reversed(self._iter_graph_object_shapes(axes)):
+                if self._artist_hit(shape_artist, event):
+                    self._set_format_selection(("shape", shape_artist))
+                    self._select_object_in_manager(shape_artist)
+                    return True
+            try:
+                lines = list(axes.get_lines())
+            except Exception:
+                lines = []
+            for line in reversed(lines):
+                if not isinstance(line, Line2D):
+                    continue
+                if self._graph_object_kind(line) == "shape_line":
+                    continue
+                if self._artist_hit(line, event):
+                    self._set_format_selection(("line", line))
+                    return True
+        return False
+
+    def _start_annotation_drag(self, event: Any, tool: str, axes: Any) -> None:
+        x0 = getattr(event, "xdata", None)
+        y0 = getattr(event, "ydata", None)
+        if x0 is None or y0 is None:
+            return
+        preview = None
+        if tool == "shape_line":
+            preview = Line2D([x0, x0], [y0, y0], color="#111111", linewidth=1.2, zorder=10)
+            try:
+                axes.add_line(preview)
+            except Exception:
+                preview = None
+        elif tool == "arrow":
+            preview = FancyArrowPatch((x0, y0), (x0, y0), arrowstyle="->", mutation_scale=12, color="#111111", linewidth=1.2, zorder=10)
+            try:
+                axes.add_patch(preview)
+            except Exception:
+                preview = None
+        elif tool == "rectangle":
+            preview = Rectangle((x0, y0), 0.0, 0.0, fill=False, edgecolor="#111111", linewidth=1.2, zorder=10)
+            try:
+                axes.add_patch(preview)
+            except Exception:
+                preview = None
+        elif tool == "ellipse":
+            preview = Ellipse((x0, y0), 0.0, 0.0, fill=False, edgecolor="#111111", linewidth=1.2, zorder=10)
+            try:
+                axes.add_patch(preview)
+            except Exception:
+                preview = None
+        if preview is None:
+            return
+        self._annotation_interaction = {
+            "tool": tool,
+            "axes": axes,
+            "canvas": getattr(event, "canvas", None),
+            "start": (float(x0), float(y0)),
+            "preview": preview,
+        }
+        self._redraw_artist(preview)
+
+    def _update_annotation_preview_geometry(self, interaction: Dict[str, Any], x1: float, y1: float) -> None:
+        tool = str(interaction.get("tool") or "")
+        x0, y0 = interaction.get("start", (0.0, 0.0))
+        preview = interaction.get("preview")
+        if tool == "shape_line" and isinstance(preview, Line2D):
+            preview.set_data([x0, x1], [y0, y1])
+        elif tool == "arrow" and isinstance(preview, FancyArrowPatch):
+            preview.set_positions((x0, y0), (x1, y1))
+        elif tool == "rectangle" and isinstance(preview, Rectangle):
+            preview.set_x(min(x0, x1))
+            preview.set_y(min(y0, y1))
+            preview.set_width(abs(x1 - x0))
+            preview.set_height(abs(y1 - y0))
+        elif tool == "ellipse" and isinstance(preview, Ellipse):
+            preview.center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+            preview.width = abs(x1 - x0)
+            preview.height = abs(y1 - y0)
+
+    def _handle_canvas_motion(self, event: Any) -> None:
+        interaction = self._annotation_interaction
+        if not isinstance(interaction, dict):
+            return
+        if interaction.get("canvas") is not getattr(event, "canvas", None):
+            return
+        x1 = getattr(event, "xdata", None)
+        y1 = getattr(event, "ydata", None)
+        if x1 is None or y1 is None:
+            return
+        self._update_annotation_preview_geometry(interaction, float(x1), float(y1))
+        preview = interaction.get("preview")
+        if preview is not None:
+            self._redraw_artist(preview)
+
+    def _handle_canvas_button_release(self, event: Any) -> None:
+        interaction = self._annotation_interaction
+        if not isinstance(interaction, dict):
+            return
+        if interaction.get("canvas") is not getattr(event, "canvas", None):
+            return
+        x1 = getattr(event, "xdata", None)
+        y1 = getattr(event, "ydata", None)
+        preview = interaction.get("preview")
+        if preview is None:
+            self._annotation_interaction = None
+            return
+        if x1 is None or y1 is None:
+            try:
+                preview.remove()
+            except Exception:
+                pass
+            self._annotation_interaction = None
+            return
+        self._update_annotation_preview_geometry(interaction, float(x1), float(y1))
+        tool = str(interaction.get("tool") or "")
+        label_map = {
+            "shape_line": "Line",
+            "arrow": "Arrow",
+            "rectangle": "Rectangle",
+            "ellipse": "Ellipse",
+        }
+        self._mark_graph_object(preview, tool, label=label_map.get(tool))
+        self._annotation_interaction = None
+        self._mark_graph_artist_changed(preview)
+        self._set_format_selection(("shape", preview))
+        self._select_object_in_manager(preview)
+
+    def _handle_canvas_button_press(self, event: Any) -> None:
+        if self._is_canvas_context_click(event):
+            self._show_canvas_context_menu(event)
+            return
+        if self._nav_mode in {"zoom", "pan"}:
+            return
+        candidates = self._event_candidate_axes(event)
+        tool = str(self._annotation_tool or "select")
+        if tool == "select" and not bool(getattr(event, "dblclick", False)):
+            if self._select_graph_object_from_canvas(event, candidates):
+                return
+        if tool == "text":
+            if getattr(event, "button", None) == 1 and candidates:
+                axes = candidates[0]
+                x = getattr(event, "xdata", None)
+                y = getattr(event, "ydata", None)
+                if x is not None and y is not None:
+                    dialog = GraphTextDialog(
+                        self,
+                        title="Add text label",
+                        initial_text="",
+                        font_family="DejaVu Serif",
+                        font_size=14.0,
+                    )
+                    if dialog.exec() == int(QtWidgets.QDialog.DialogCode.Accepted):
+                        artist = self._create_text_annotation(
+                            axes,
+                            x=float(x),
+                            y=float(y),
+                            payload=dialog.result_payload(),
+                        )
+                        if artist is not None:
+                            self._mark_graph_artist_changed(artist)
+                            self._set_format_selection(("text", (artist,)))
+                            self._select_object_in_manager(artist)
+                    return
+        elif tool in {"arrow", "shape_line", "rectangle", "ellipse"}:
+            if getattr(event, "button", None) == 1 and candidates:
+                axes = candidates[0]
+                if getattr(event, "xdata", None) is not None and getattr(event, "ydata", None) is not None:
+                    self._start_annotation_drag(event, tool, axes)
+                    return
+        if not bool(getattr(event, "dblclick", False)):
+            return
         if not candidates:
             return
 
@@ -12885,6 +14277,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     )
                     if not opened:
                         self._edit_axes_text_from_double_click(axes, field)
+                    return
+            for text_artist in self._iter_graph_object_texts(axes):
+                if self._artist_hit(text_artist, event):
+                    self._set_format_selection(("text", (text_artist,)))
+                    self._select_object_in_manager(text_artist)
+                    self._edit_selected_text()
+                    return
+            for shape_artist in reversed(self._iter_graph_object_shapes(axes)):
+                if self._artist_hit(shape_artist, event):
+                    self._set_format_selection(("shape", shape_artist))
+                    self._select_object_in_manager(shape_artist)
                     return
 
         for axes in candidates:
@@ -13192,6 +14595,18 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if resize_cid is not None:
                 try:
                     canvas.mpl_disconnect(resize_cid)
+                except Exception:
+                    pass
+            motion_cid = self._annotation_motion_connections.pop(canvas, None)
+            if motion_cid is not None:
+                try:
+                    canvas.mpl_disconnect(motion_cid)
+                except Exception:
+                    pass
+            release_cid = self._annotation_release_connections.pop(canvas, None)
+            if release_cid is not None:
+                try:
+                    canvas.mpl_disconnect(release_cid)
                 except Exception:
                     pass
             copy_shortcut = self._canvas_copy_shortcuts.pop(canvas, None)

@@ -102,6 +102,14 @@ Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph forma
 - **Batch plot exports**: `exports.plot_images_dir` saves every visible plot tab as a deterministic PNG named `<tab_index>-<safe_tab_label>.png`, which is meant for replayable automation and test verification rather than human browsing.
 - **Current scope**: v1 automation is PyPlot-only. The shared recipe entrypoint reserves `kind: "builder"` for future Microwire Builder / `.pydpj` automation, but that mode is not implemented yet.
 
+## Annotation And Composition
+
+- **Annotate toolbar**: PyPlot now includes a shared `Annotate` toolbar with `Select`, `Text`, `Arrow`, `Line`, `Rect`, and `Ellipse` tools. Text labels are placed on click; arrows/shapes are created by dragging directly on the graph canvas.
+- **Object Manager integration**: free text labels and annotation shapes appear in Object Manager alongside axes, lines, and legends, so you can select, recolor, hide/show, or delete them after placement.
+- **Text formatting toolbar**: selected text objects now support font family, size, bold, italic, underline, direct colour changes, and mathtext helper actions for subscript, superscript, and combined sub+sup formatting. The richer `Edit…` action opens a text dialog that accepts Matplotlib mathtext syntax such as `$H_{c}$`, `$10^{-10}$`, or `$\\phi$`.
+- **Default scientific text look**: shared graph text now defaults to a serif scientific style (`DejaVu Serif` for regular text with STIX mathtext), which keeps Unicode labels working while still producing a paper-like look.
+- **Graph composition**: `File -> New -> Compose Graph...` lets you choose existing plotted tabs and overlay their visible series into a new shared PyPlot graph tab. Composed graphs behave like ordinary graph tabs and are saved with the project.
+
 ## Importing Data
 
 1. Use the **Import data…** button (or the Data menu) to select files/folders (multi-select folders are supported).

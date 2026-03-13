@@ -14,7 +14,11 @@ import time
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib import ticker as mticker
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 
+import numpy as np
 import pandas as pd
 
 from .window import (
@@ -1673,10 +1677,22 @@ class PyPlotWorkbench(PyPlotWindow):
             return True
         if bool(getattr(self, "_connected_data_folders", [])):
             return True
+        if any(
+            descriptor.kind in {"manual_graph", "composed_graph"}
+            for descriptor in getattr(self, "_tab_descriptors", {}).values()
+        ):
+            return True
         return bool(self._worksheets)
 
     def _reset_project_state(self) -> None:
         super()._reset_project_state()
+        for tab in list(self._tab_descriptors.keys()):
+            remover = getattr(self, "_remove_tab_internal", None)
+            if callable(remover):
+                try:
+                    remover(tab)
+                except Exception:
+                    pass
         self._clear_imported_data()
         self._selected_path_entries = []
         self._connected_data_folders = []
@@ -1783,6 +1799,196 @@ class PyPlotWorkbench(PyPlotWindow):
             return auto_load
         return bool(getattr(plugin, "auto_load_on_import", False))
 
+    def _descriptor_fingerprint(self, descriptor: TabDescriptor) -> dict[str, Any]:
+        axes = getattr(descriptor, "axes", None)
+        line_labels: list[str] = []
+        if axes is not None:
+            try:
+                for line in axes.get_lines():
+                    if not isinstance(line, Line2D):
+                        continue
+                    if getattr(self, "_graph_object_kind", lambda _value: None)(line) == "shape_line":
+                        continue
+                    label = str(line.get_label() or "").strip()
+                    if label and label != "_nolegend_" and not label.startswith("_"):
+                        line_labels.append(label)
+            except Exception:
+                pass
+        metadata = descriptor.metadata if isinstance(descriptor.metadata, dict) else {}
+        return {
+            "kind": descriptor.kind,
+            "title": descriptor.title,
+            "root_label": descriptor.root_label,
+            "x_label": descriptor.x_label,
+            "y_label": descriptor.y_label,
+            "plugin": metadata.get("plugin"),
+            "line_labels": sorted(line_labels),
+        }
+
+    def _serialize_manual_graph_tabs(self) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for tab, descriptor in self._tab_descriptors.items():
+            if descriptor.kind not in {"manual_graph", "composed_graph"}:
+                continue
+            axes = getattr(descriptor, "axes", None)
+            if axes is None:
+                continue
+            series_payload: list[dict[str, Any]] = []
+            try:
+                source_lines = list(axes.get_lines())
+            except Exception:
+                source_lines = []
+            for line in source_lines:
+                if not isinstance(line, Line2D):
+                    continue
+                if getattr(self, "_graph_object_kind", lambda _value: None)(line) == "shape_line":
+                    continue
+                x_data = np.asarray(line.get_xdata())
+                y_data = np.asarray(line.get_ydata())
+                if x_data.size == 0 or y_data.size == 0:
+                    continue
+                series_payload.append(
+                    {
+                        "label": str(line.get_label() or ""),
+                        "x": x_data.tolist(),
+                        "y": y_data.tolist(),
+                        "color": line.get_color(),
+                        "linestyle": str(line.get_linestyle() or "-"),
+                        "linewidth": float(line.get_linewidth()),
+                        "marker": str(line.get_marker() or "None"),
+                        "markersize": float(line.get_markersize()),
+                        "visible": bool(line.get_visible()),
+                    }
+                )
+            payloads.append(
+                {
+                    "kind": descriptor.kind,
+                    "tab_label": self.tab_widget.tabText(self.tab_widget.indexOf(tab)),
+                    "title": str(getattr(axes, "get_title", lambda: descriptor.title)() or descriptor.title),
+                    "x_label": str(getattr(axes, "get_xlabel", lambda: descriptor.x_label)() or descriptor.x_label),
+                    "y_label": str(getattr(axes, "get_ylabel", lambda: descriptor.y_label)() or descriptor.y_label),
+                    "series": series_payload,
+                    "metadata": dict(descriptor.metadata or {}),
+                    "graph_objects": self._serialize_graph_object_payloads_for_axes(axes),
+                }
+            )
+        return payloads
+
+    def _restore_manual_graph_tabs(self, payloads: Sequence[dict[str, Any]]) -> None:
+        for entry in payloads:
+            if not isinstance(entry, dict):
+                continue
+            series_entries = entry.get("series")
+            if not isinstance(series_entries, list):
+                continue
+            fig = Figure(figsize=(6.2, 4.2))
+            ax = fig.add_subplot(111)
+            lines: Dict[tuple[str, float | str], GraphLineState] = {}
+            for index, series in enumerate(series_entries):
+                if not isinstance(series, dict):
+                    continue
+                x_values = np.asarray(series.get("x") or [])
+                y_values = np.asarray(series.get("y") or [])
+                if x_values.size == 0 or y_values.size == 0:
+                    continue
+                try:
+                    line = ax.plot(
+                        x_values,
+                        y_values,
+                        label=str(series.get("label") or f"Series {index + 1}"),
+                        color=series.get("color"),
+                        linestyle=str(series.get("linestyle") or "-"),
+                        linewidth=float(series.get("linewidth") or 1.5),
+                        marker=str(series.get("marker") or "None"),
+                        markersize=float(series.get("markersize") or 6.0),
+                    )[0]
+                except Exception:
+                    line = ax.plot(x_values, y_values, label=str(series.get("label") or f"Series {index + 1}"))[0]
+                try:
+                    line.set_visible(bool(series.get("visible", True)))
+                except Exception:
+                    pass
+                key = (str(series.get("label") or f"Series {index + 1}"), index)
+                lines[key] = GraphLineState(
+                    key=key,
+                    label=str(series.get("label") or f"Series {index + 1}"),
+                    line=line,
+                    base_x=x_values,
+                    base_y=y_values,
+                    full_x=x_values,
+                    full_y=y_values,
+                )
+            ax.set_title(str(entry.get("title") or "Graph"))
+            ax.set_xlabel(str(entry.get("x_label") or "X"))
+            ax.set_ylabel(str(entry.get("y_label") or "Y"))
+            ax.grid(True)
+            try:
+                ax.legend(loc="best")
+            except Exception:
+                pass
+            canvas = FigureCanvas(fig)
+            tab = QtWidgets.QWidget()
+            layout = QtWidgets.QVBoxLayout(tab)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(canvas)
+            descriptor = TabDescriptor(
+                kind=str(entry.get("kind") or "manual_graph"),
+                title=str(ax.get_title() or "Graph"),
+                root_label="Composed Graph" if str(entry.get("kind")) == "composed_graph" else "Graph",
+                x_label=str(ax.get_xlabel() or ""),
+                y_label=str(ax.get_ylabel() or ""),
+                canvas=canvas,
+                axes=ax,
+                lines=lines,
+                metadata=dict(entry.get("metadata") or {}),
+            )
+            index = self.tab_widget.addTab(tab, str(entry.get("tab_label") or descriptor.title or "Graph"))
+            self.tab_widget.setCurrentIndex(index)
+            self._register_plot_tab(tab, canvas, ax, descriptor)
+            graph_objects = entry.get("graph_objects")
+            if isinstance(graph_objects, list):
+                self._restore_graph_object_payloads_for_axes(ax, graph_objects)
+
+    def _serialize_overlay_payloads(self) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for descriptor in self._tab_descriptors.values():
+            if descriptor.kind in {"manual_graph", "composed_graph"}:
+                continue
+            axes = getattr(descriptor, "axes", None)
+            if axes is None:
+                continue
+            graph_objects = self._serialize_graph_object_payloads_for_axes(axes)
+            if not graph_objects:
+                continue
+            payloads.append(
+                {
+                    "fingerprint": self._descriptor_fingerprint(descriptor),
+                    "graph_objects": graph_objects,
+                }
+            )
+        return payloads
+
+    def _restore_overlay_payloads(self, payloads: Sequence[dict[str, Any]]) -> None:
+        if not payloads:
+            return
+        available = list(self._tab_descriptors.values())
+        for entry in payloads:
+            if not isinstance(entry, dict):
+                continue
+            fingerprint = entry.get("fingerprint")
+            graph_objects = entry.get("graph_objects")
+            if not isinstance(fingerprint, dict) or not isinstance(graph_objects, list):
+                continue
+            target_descriptor = None
+            for descriptor in available:
+                if self._descriptor_fingerprint(descriptor) == fingerprint:
+                    target_descriptor = descriptor
+                    break
+            if target_descriptor is None:
+                continue
+            axes = getattr(target_descriptor, "axes", None)
+            self._restore_graph_object_payloads_for_axes(axes, graph_objects)
+
     def _build_project_payload(self, *, base_path: Path | None) -> Dict[str, Any]:
         selected_payload = [
             self._portable_path(path, base_path) for path in self._selected_path_entries
@@ -1845,11 +2051,15 @@ class PyPlotWorkbench(PyPlotWindow):
                 "worksheets": worksheets_payload,
             }
             workbooks_payload.append(workbook_payload)
+        manual_graphs = self._serialize_manual_graph_tabs()
+        graph_overlays = self._serialize_overlay_payloads()
         return {
             "selected_paths": selected_payload,
             "workbooks": workbooks_payload,
             "active_plugin": self._current_plotter_name,
             "active_plugin_state": active_plugin_state,
+            "manual_graphs": manual_graphs,
+            "graph_overlays": graph_overlays,
         }
 
     def _apply_project_payload(self, payload: Dict[str, Any], *, project_dir: Path) -> bool:
@@ -2001,6 +2211,13 @@ class PyPlotWorkbench(PyPlotWindow):
                     self._current_plotter_name,
                     exc_info=True,
                 )
+
+        manual_graphs = payload.get("manual_graphs")
+        if isinstance(manual_graphs, list):
+            self._restore_manual_graph_tabs(manual_graphs)
+        graph_overlays = payload.get("graph_overlays")
+        if isinstance(graph_overlays, list):
+            self._restore_overlay_payloads(graph_overlays)
 
         self._sync_selected_paths_with_imports()
         self._update_action_states()
