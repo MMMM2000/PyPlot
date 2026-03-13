@@ -4544,6 +4544,7 @@ class _GraphGalleryWidget(QtWidgets.QWidget):
 
 class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
     pointPicked = QtCore.pyqtSignal(str, object)
+    currentRecordChanged = QtCore.pyqtSignal()
 
     def __init__(
         self,
@@ -4575,6 +4576,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         self._placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setWordWrap(True)
         self._tab_widget = QtWidgets.QTabWidget(self)
+        self._tab_widget.currentChanged.connect(lambda *_: self.currentRecordChanged.emit())
         self._stack.addWidget(self._placeholder)
         self._stack.addWidget(self._tab_widget)
         layout.addLayout(self._stack, 1)
@@ -4628,53 +4630,57 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
     ) -> None:
         current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
         self.header_label.setText(title or "Shape memory stress/strain")
-        self._clear_tabs()
-        self._saved_standard_selection = None
-        self._saved_fracture_selection = None
-        self._update_picked_labels(None)
-        if not records:
-            self._placeholder.setText("No shape-memory graphs available for this microwire.")
-            self._stack.setCurrentWidget(self._placeholder)
-            return
-        for record in records:
-            figure = _plot_shape_memory_stress_strain_figure(
-                record,
-                width_px=GRAPH_PREVIEW_WIDTH,
-                height_px=GRAPH_PREVIEW_HEIGHT,
-            )
-            if figure is None:
-                continue
-            canvas = FigureCanvasQTAgg(figure)
-            try:
-                canvas.setMouseTracking(True)
-            except Exception:
-                pass
-            motion_cid = None
-            click_cid = None
-            try:
-                motion_cid = canvas.mpl_connect("motion_notify_event", self._handle_motion)
-            except Exception:
+        blocker = QtCore.QSignalBlocker(self._tab_widget)
+        try:
+            self._clear_tabs()
+            self._saved_standard_selection = None
+            self._saved_fracture_selection = None
+            self._update_picked_labels(None)
+            if not records:
+                self._placeholder.setText("No shape-memory graphs available for this microwire.")
+                self._stack.setCurrentWidget(self._placeholder)
+                return
+            for record in records:
+                figure = _plot_shape_memory_stress_strain_figure(
+                    record,
+                    width_px=GRAPH_PREVIEW_WIDTH,
+                    height_px=GRAPH_PREVIEW_HEIGHT,
+                )
+                if figure is None:
+                    continue
+                canvas = FigureCanvasQTAgg(figure)
+                try:
+                    canvas.setMouseTracking(True)
+                except Exception:
+                    pass
                 motion_cid = None
-            try:
-                click_cid = canvas.mpl_connect("button_press_event", self._handle_click)
-            except Exception:
                 click_cid = None
-            self._canvas_records[canvas] = record
-            self._canvas_connections.append((canvas, motion_cid, click_cid))
-            self._tab_canvases.append(canvas)
-            page = QtWidgets.QWidget(self._tab_widget)
-            page_layout = QtWidgets.QVBoxLayout(page)
-            page_layout.setContentsMargins(0, 0, 0, 0)
-            page_layout.addWidget(canvas, 1)
-            label = _record_label_for_display(record) or record.sample or "Shape memory"
-            self._tab_widget.addTab(page, label)
-        if self._tab_widget.count() == 0:
-            self._placeholder.setText("No shape-memory graphs available for this microwire.")
-            self._stack.setCurrentWidget(self._placeholder)
-        else:
-            if current_index >= 0:
-                self._tab_widget.setCurrentIndex(min(current_index, self._tab_widget.count() - 1))
-            self._stack.setCurrentWidget(self._tab_widget)
+                try:
+                    motion_cid = canvas.mpl_connect("motion_notify_event", self._handle_motion)
+                except Exception:
+                    motion_cid = None
+                try:
+                    click_cid = canvas.mpl_connect("button_press_event", self._handle_click)
+                except Exception:
+                    click_cid = None
+                self._canvas_records[canvas] = record
+                self._canvas_connections.append((canvas, motion_cid, click_cid))
+                self._tab_canvases.append(canvas)
+                page = QtWidgets.QWidget(self._tab_widget)
+                page_layout = QtWidgets.QVBoxLayout(page)
+                page_layout.setContentsMargins(0, 0, 0, 0)
+                page_layout.addWidget(canvas, 1)
+                label = _record_label_for_display(record) or record.sample or "Shape memory"
+                self._tab_widget.addTab(page, label)
+            if self._tab_widget.count() == 0:
+                self._placeholder.setText("No shape-memory graphs available for this microwire.")
+                self._stack.setCurrentWidget(self._placeholder)
+            else:
+                if current_index >= 0:
+                    self._tab_widget.setCurrentIndex(min(current_index, self._tab_widget.count() - 1))
+                self._stack.setCurrentWidget(self._tab_widget)
+        finally:
+            del blocker
 
     def current_record(self) -> Optional[ShapeMemoryStressStrainRecord]:
         current_index = self._tab_widget.currentIndex()
@@ -15045,6 +15051,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         splitter.addWidget(table)
         preview_panel = _ShapeMemoryPreviewPanel(self.logger, splitter)
         preview_panel.pointPicked.connect(self._apply_picked_selection)
+        preview_panel.currentRecordChanged.connect(self._update_preview)
         splitter.addWidget(preview_panel)
         self._preview_panel = preview_panel
         self._table_splitter = splitter
@@ -15402,8 +15409,15 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             except Exception:
                 selection_row = None
         if selection_row is not None:
-            standard = self._shape_memory_selection_from_row(selection_row, fracture=False)
-            fracture = self._shape_memory_selection_from_row(selection_row, fracture=True)
+            current_record = panel.current_record() if hasattr(panel, "current_record") else None
+            standard = self._shape_memory_selection_from_record_entry(
+                current_record,
+                fracture=False,
+            ) or self._shape_memory_selection_from_row(selection_row, fracture=False)
+            fracture = self._shape_memory_selection_from_record_entry(
+                current_record,
+                fracture=True,
+            ) or self._shape_memory_selection_from_row(selection_row, fracture=True)
             panel.set_saved_values(standard, fracture)
 
     def _handle_selection_changed(self, *_args: Any) -> None:
@@ -15473,6 +15487,50 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         except Exception:
             return None
         if not all(math.isfinite(value) for value in (load_g, strain_pct, stress_mpa)):
+            return None
+        try:
+            displacement_mm = float(displacement_value)
+        except Exception:
+            displacement_mm = math.nan
+        if not math.isfinite(displacement_mm):
+            displacement_mm = 0.0
+        return _ShapeMemoryPointSelection(
+            index=-1,
+            displacement_mm=displacement_mm,
+            load_g=load_g,
+            strain_pct=strain_pct,
+            stress_mpa=stress_mpa,
+        )
+
+    def _shape_memory_selection_from_record_entry(
+        self,
+        record: Optional[ShapeMemoryStressStrainRecord],
+        *,
+        fracture: bool,
+    ) -> Optional[_ShapeMemoryPointSelection]:
+        if record is None:
+            return None
+        path_key = _record_path_key(record)
+        if not path_key:
+            return None
+        entry = self.record_entries_snapshot().get(path_key, {})
+        if not entry:
+            return None
+        if fracture:
+            load_value = entry.get(SHAPE_MEMORY_FRACTURE_LOAD_COLUMN)
+            strain_value = entry.get(SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN)
+            stress_value = entry.get(SHAPE_MEMORY_FRACTURE_STRESS_COLUMN)
+            displacement_value = entry.get(SHAPE_MEMORY_DISPLACEMENT_COLUMN)
+        else:
+            load_value = entry.get(SHAPE_MEMORY_LOAD_COLUMN)
+            strain_value = entry.get(SHAPE_MEMORY_STRAIN_COLUMN)
+            stress_value = entry.get(SHAPE_MEMORY_STRESS_COLUMN)
+            displacement_value = entry.get(SHAPE_MEMORY_DISPLACEMENT_COLUMN)
+        try:
+            load_g = float(load_value)
+            strain_pct = float(strain_value)
+            stress_mpa = float(stress_value)
+        except Exception:
             return None
         try:
             displacement_mm = float(displacement_value)
