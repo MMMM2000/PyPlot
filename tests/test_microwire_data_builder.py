@@ -60,6 +60,11 @@ _parse_piece_rows = core._parse_piece_rows
 _extract_microscope_diameters = core._extract_microscope_diameters
 
 
+def test_microscope_key_preserves_decimal_composition_token() -> None:
+    parsed = core._microscope_key(Path("Mn58.1Ni4.3Si18.5Sn18.8 3_2 glass.jpg"))
+    assert parsed == ("Mn58.1Ni4.3Si18.5Sn18.8", 3, 2, None)
+
+
 def _ensure_qapp() -> QtWidgets.QApplication:
     global _APP_REF
     app = QtWidgets.QApplication.instance()
@@ -874,6 +879,38 @@ def test_microscope_brittle_glass_only_row_is_not_treated_as_missing(tmp_path: P
         row = section._row_for_key("TestCompG|1|1")
         assert row is not None
         assert section._row_missing_images(row) is False
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_apply_data_marks_existing_brittle_glass_rows(tmp_path: Path) -> None:
+    _ensure_qapp()
+    glass_path = tmp_path / "TestCompH 1-1 glass brittle.jpg"
+    glass_path.write_bytes(b"test")
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompH",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 28.2,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompH|1|1",
+                    "_core_image": None,
+                    "_glass_image": str(glass_path),
+                    "_images": [str(glass_path)],
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        row = section._row_for_key("TestCompH|1|1")
+        assert row is not None
+        assert bool(row.get(BRITTLE_COLUMN)) is True
     finally:
         section._shutdown_background_threads()
         section.close()

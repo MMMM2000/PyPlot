@@ -1821,10 +1821,11 @@ def _composition_from_path(path: Path) -> str:
 def _extract_composition_token(text: str) -> Optional[str]:
     if not text:
         return None
-    tokens = re.findall(r"[A-Za-z][A-Za-z0-9]+", text)
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9.]*", text)
     if not tokens:
         return None
-    return tokens[0]
+    token = tokens[0].rstrip(".")
+    return token or None
 
 
 def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]:

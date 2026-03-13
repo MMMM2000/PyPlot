@@ -95,6 +95,7 @@ from .core import (
     _metadata_from_path,
     _microscope_key,
     _microscope_category,
+    _microscope_is_brittle,
     _draw_key,
     _load_annealing,
     _resistance_sanity_check,
@@ -8924,6 +8925,7 @@ class MicroscopeSection(MiniDatabaseSection):
         # Always normalise the table after load so legacy "Reviewed" columns
         # are removed even when there are no overrides/validations stored.
         self._apply_overrides_to_table()
+        self._normalise_brittle_column()
         self._update_hidden_columns()
         self._update_missing_summary()
         self.partial_row_ready.connect(
@@ -8945,6 +8947,7 @@ class MicroscopeSection(MiniDatabaseSection):
         super().import_project_payload(payload)
         self._load_extra_state()
         self._apply_overrides_to_table()
+        self._normalise_brittle_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(self._show_other_ends)
@@ -8958,6 +8961,7 @@ class MicroscopeSection(MiniDatabaseSection):
 
     def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
         super().apply_data(data)
+        self._normalise_brittle_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(self._show_other_ends)
@@ -9011,6 +9015,47 @@ class MicroscopeSection(MiniDatabaseSection):
                     continue
                 cleaned[str(key)] = dict(payload)
             self._validated = cleaned
+
+    def _normalise_brittle_column(self) -> None:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if frame.empty:
+            return
+        updated = frame.copy()
+        if BRITTLE_COLUMN not in updated.columns:
+            updated[BRITTLE_COLUMN] = None
+        changed = False
+        for idx, row in updated.iterrows():
+            current = row.get(BRITTLE_COLUMN)
+            if isinstance(current, bool):
+                continue
+            sources: List[Path] = []
+            for path_value in row.get("_images") or []:
+                try:
+                    sources.append(Path(path_value))
+                except Exception:
+                    continue
+            for path_value in (row.get("_core_image"), row.get("_glass_image")):
+                if not path_value:
+                    continue
+                try:
+                    candidate = Path(path_value)
+                except Exception:
+                    continue
+                if candidate not in sources:
+                    sources.append(candidate)
+            brittle = any(_microscope_is_brittle(path) for path in sources)
+            if bool(current) != brittle:
+                updated.at[idx, BRITTLE_COLUMN] = brittle if brittle else None
+                changed = True
+        if not changed and list(updated.columns) == list(frame.columns):
+            return
+        updated = updated.loc[:, [column for column in MICROSCOPE_TABLE_COLUMNS if column in updated.columns]]
+        self.data.table = updated
+        self.model.set_frame(updated)
+        try:
+            self.store.save(self.data)
+        except Exception:
+            pass
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, parent)
