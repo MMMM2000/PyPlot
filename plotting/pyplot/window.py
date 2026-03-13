@@ -126,6 +126,34 @@ def _make_qpointer(obj: QtCore.QObject) -> PointerType:
     return cast(PointerType, weakref.ref(obj))
 
 
+def _json_friendly_project_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _json_friendly_project_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_json_friendly_project_value(item) for item in value]
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _json_friendly_project_value(item())
+        except Exception:
+            pass
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    return str(value)
+
+
 def _deref_qpointer(pointer: Any) -> Optional[QtCore.QObject]:
     """Dereference a Qt QPointer or weak reference safely."""
 
@@ -8349,7 +8377,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if "kind" not in payload:
             payload["kind"] = self.PROJECT_CODE or self.__class__.__name__
         try:
-            target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            serializable_payload = _json_friendly_project_value(payload)
+            target.write_text(
+                json.dumps(serializable_payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
                 self,

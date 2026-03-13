@@ -17,6 +17,22 @@ from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot.window import TabDescriptor
 
 
+def _write_hysteresis_source(path: Path) -> Path:
+    path.write_text(
+        "\n".join(
+            [
+                "150 6.2e-10",
+                "75 6.1e-10",
+                "0 -6.0e-10",
+                "-75 -6.1e-10",
+                "-150 -6.2e-10",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _ensure_app() -> QtWidgets.QApplication:
     app = QtWidgets.QApplication.instance()
     if app is None:
@@ -141,19 +157,7 @@ def test_launcher_detects_pyplot_automation_flags() -> None:
 
 def test_launcher_pyplot_automation_generates_summary_and_artifacts(tmp_path: Path) -> None:
     _ensure_app()
-    source = tmp_path / "250C sample.dat"
-    source.write_text(
-        "\n".join(
-            [
-                "150 6.2e-10",
-                "75 6.1e-10",
-                "0 -6.0e-10",
-                "-75 -6.1e-10",
-                "-150 -6.2e-10",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    source = _write_hysteresis_source(tmp_path / "250C sample.dat")
     screenshot_path = tmp_path / "window.png"
     plot_path = tmp_path / "plot.png"
     summary_path = tmp_path / "summary.json"
@@ -184,3 +188,170 @@ def test_launcher_pyplot_automation_generates_summary_and_artifacts(tmp_path: Pa
     assert summary["tab_count"] >= 1
     assert summary["current_tab_has_axes"] is True
     assert summary["graph_format_visible"] is True
+    assert summary["status"] == "ok"
+    assert summary["kind"] == "pyplot"
+    assert summary["version"] == 1
+    assert summary["window_image"] == str(screenshot_path.resolve())
+    assert summary["current_plot_image"] == str(plot_path.resolve())
+
+
+@pytest.mark.parametrize(
+    ("recipe_payload", "message_fragment"),
+    [
+        (None, "file not found"),
+        ("{not-json", "not valid JSON"),
+        ({"kind": "builder", "version": 1}, "reserved"),
+        ({"kind": "pyplot", "version": 99}, "Only version 1 is supported"),
+        ({"kind": "pyplot", "version": 1, "plugin": "Nope"}, "Unknown PyPlot plugin"),
+    ],
+)
+def test_automation_recipe_validation_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    recipe_payload: dict[str, object] | str | None,
+    message_fragment: str,
+) -> None:
+    recipe_path = tmp_path / "recipe.json"
+    if isinstance(recipe_payload, dict):
+        recipe_path.write_text(json.dumps(recipe_payload), encoding="utf-8")
+    elif isinstance(recipe_payload, str):
+        recipe_path.write_text(recipe_payload, encoding="utf-8")
+    args = argparse.Namespace(automation_recipe=str(recipe_path))
+
+    exit_code = launcher_module._run_automation_recipe(args, [])  # noqa: SLF001 - internal automation hook
+
+    assert exit_code == 2
+    assert message_fragment in capsys.readouterr().out
+
+
+def test_automation_recipe_rejects_origin_when_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "pyplot",
+                "version": 1,
+                "plugin": "Hysteresis Loops",
+                "open_origin": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(launcher_module, "_origin_is_available", lambda: False)
+    args = argparse.Namespace(automation_recipe=str(recipe_path))
+
+    exit_code = launcher_module._run_automation_recipe(args, [])  # noqa: SLF001 - internal automation hook
+
+    assert exit_code == 2
+    assert "Origin automation is unavailable" in capsys.readouterr().out
+
+
+def test_automation_recipe_generates_manifest_and_plot_exports(tmp_path: Path) -> None:
+    _ensure_app()
+    first = _write_hysteresis_source(tmp_path / "250C Sample A.dat")
+    second = _write_hysteresis_source(tmp_path / "300C Sample B.dat")
+    manifest_path = tmp_path / "artifacts" / "manifest.json"
+    window_path = tmp_path / "artifacts" / "window.png"
+    current_plot_path = tmp_path / "artifacts" / "current.png"
+    plot_dir = tmp_path / "artifacts" / "plots"
+    recipe_path = tmp_path / "job.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "pyplot",
+                "version": 1,
+                "plugin": "Hysteresis Loops",
+                "imports": [first.name, second.name],
+                "generate": True,
+                "exports": {
+                    "window_image": "artifacts/window.png",
+                    "current_plot_image": "artifacts/current.png",
+                    "plot_images_dir": "artifacts/plots",
+                },
+                "manifest_path": "artifacts/manifest.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(automation_recipe=str(recipe_path))
+
+    exit_code = launcher_module._run_automation_recipe(args, [])  # noqa: SLF001 - internal automation hook
+
+    assert exit_code == 0
+    assert manifest_path.exists()
+    assert window_path.exists()
+    assert current_plot_path.exists()
+    assert plot_dir.exists()
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "ok"
+    assert manifest["plugin"] == "Hysteresis Loops"
+    assert manifest["kind"] == "pyplot"
+    assert manifest["version"] == 1
+    assert manifest["window_image"] == str(window_path.resolve())
+    assert manifest["current_plot_image"] == str(current_plot_path.resolve())
+    assert manifest["imported_paths"] == [str(first.resolve()), str(second.resolve())]
+    assert manifest["plot_image_paths"]
+    for index, exported in enumerate(manifest["plot_image_paths"], start=1):
+        path = Path(exported)
+        assert path.exists()
+        assert path.name.startswith(f"{index:02d}-")
+
+
+def test_automation_recipe_can_save_and_reload_pyplot_project(tmp_path: Path) -> None:
+    _ensure_app()
+    source = _write_hysteresis_source(tmp_path / "250C sample.dat")
+    project_path = tmp_path / "artifacts" / "saved_project.pypj"
+    save_manifest_path = tmp_path / "artifacts" / "save_manifest.json"
+    load_manifest_path = tmp_path / "artifacts" / "load_manifest.json"
+
+    save_recipe = tmp_path / "save_job.json"
+    save_recipe.write_text(
+        json.dumps(
+            {
+                "kind": "pyplot",
+                "version": 1,
+                "plugin": "Hysteresis Loops",
+                "imports": [source.name],
+                "generate": True,
+                "save_project": "artifacts/saved_project.pypj",
+                "manifest_path": "artifacts/save_manifest.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_args = argparse.Namespace(automation_recipe=str(save_recipe))
+
+    save_exit_code = launcher_module._run_automation_recipe(save_args, [])  # noqa: SLF001 - internal automation hook
+
+    assert save_exit_code == 0
+    assert project_path.exists()
+
+    load_recipe = tmp_path / "load_job.json"
+    load_recipe.write_text(
+        json.dumps(
+            {
+                "kind": "pyplot",
+                "version": 1,
+                "load_project": "artifacts/saved_project.pypj",
+                "manifest_path": "artifacts/load_manifest.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    load_args = argparse.Namespace(automation_recipe=str(load_recipe))
+
+    load_exit_code = launcher_module._run_automation_recipe(load_args, [])  # noqa: SLF001 - internal automation hook
+
+    assert load_exit_code == 0
+    save_manifest = json.loads(save_manifest_path.read_text(encoding="utf-8"))
+    load_manifest = json.loads(load_manifest_path.read_text(encoding="utf-8"))
+    assert save_manifest["saved_project"] == str(project_path.resolve())
+    assert load_manifest["loaded_project"] == str(project_path.resolve())
+    assert load_manifest["plugin"] == "Hysteresis Loops"
+    assert load_manifest["tab_count"] >= 1
+    assert load_manifest["workbook_count"] >= 1

@@ -7,6 +7,7 @@ import time
 import logging
 import traceback
 import json
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
@@ -210,8 +211,263 @@ def _create_launcher_icon() -> QtGui.QIcon:
     return icon
 
 
+class _AutomationRecipeError(Exception):
+    """Raised when an automation recipe is invalid or unsupported."""
+
+
+@dataclass
+class _PyPlotAutomationRequest:
+    plugin_name: str | None = None
+    import_entries: list[Path] = field(default_factory=list)
+    load_project_path: Path | None = None
+    generate: bool = False
+    open_graph_format: bool = False
+    open_origin: bool = False
+    window_image_path: Path | None = None
+    current_plot_image_path: Path | None = None
+    plot_images_dir: Path | None = None
+    summary_path: Path | None = None
+    save_project_path: Path | None = None
+    show_window: bool = False
+    wait_ms: int = 0
+    manifest_kind: str = "pyplot"
+    manifest_version: int = 1
+
+
+def _absolute_path(path: Path | None) -> str | None:
+    if not isinstance(path, Path):
+        return None
+    try:
+        return str(path.resolve())
+    except Exception:
+        return str(path)
+
+
+def _safe_automation_label(value: str, fallback: str = "plot") -> str:
+    token = "".join(
+        ch if ch.isalnum() or ch in {" ", "-", "_"} else "_"
+        for ch in str(value).strip()
+    ).strip(" ._")
+    return token or fallback
+
+
+def _normalise_project_path(path: Path, *, suffix: str = ".pypj") -> Path:
+    if path.suffix.lower() == suffix.lower():
+        return path
+    return path.with_suffix(suffix)
+
+
+def _validate_pyplot_plugin_name(plugin_name: str | None) -> None:
+    if plugin_name is None:
+        return
+    _pyplot_main, plugin_names = _load_pyplot_metadata()
+    if plugin_name not in plugin_names:
+        raise _AutomationRecipeError(
+            f"Unknown PyPlot plugin '{plugin_name}'. "
+            f"Available plugins: {', '.join(plugin_names)}"
+        )
+
+
+def _origin_is_available() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import_module("originpro")
+    except Exception:
+        return False
+    return True
+
+
+def _validate_origin_request(enabled: bool) -> None:
+    if enabled and not _origin_is_available():
+        raise _AutomationRecipeError(
+            "Origin automation is unavailable in this environment. "
+            "It requires Windows with the 'originpro' dependency installed."
+        )
+
+
+def _resolve_recipe_path_value(
+    value: object,
+    *,
+    base_dir: Path,
+    field_name: str,
+) -> Path | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise _AutomationRecipeError(
+            f"Automation recipe field '{field_name}' must be a non-empty string when provided."
+        )
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    return path
+
+
+def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise _AutomationRecipeError(f"{label} file not found: {path}") from exc
+    except Exception as exc:
+        raise _AutomationRecipeError(f"Failed to read {label} file {path}: {exc}") from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise _AutomationRecipeError(f"{label} file is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise _AutomationRecipeError(f"{label} file must contain a JSON object.")
+    return payload
+
+
+def _validate_pyplot_project_file(path: Path) -> None:
+    payload = _load_json_object(path, label="PyPlot project")
+    if payload.get("kind") != "pyplot":
+        raise _AutomationRecipeError(
+            f"Project '{path}' is not a PyPlot project (expected kind 'pyplot')."
+        )
+    if payload.get("version") != 1:
+        raise _AutomationRecipeError(
+            f"Project '{path}' uses unsupported PyPlot project version {payload.get('version')!r}."
+        )
+
+
+def _load_automation_recipe_request(recipe_path: Path) -> _PyPlotAutomationRequest:
+    recipe = _load_json_object(recipe_path, label="Automation recipe")
+    base_dir = recipe_path.parent
+
+    kind = recipe.get("kind")
+    if kind != "pyplot":
+        if kind == "builder":
+            raise _AutomationRecipeError(
+                "Automation recipe kind 'builder' is reserved for future work and is not implemented yet."
+            )
+        raise _AutomationRecipeError(
+            f"Unsupported automation recipe kind {kind!r}. Only 'pyplot' is supported in v1."
+        )
+
+    version = recipe.get("version")
+    if version != 1:
+        raise _AutomationRecipeError(
+            f"Unsupported automation recipe version {version!r}. Only version 1 is supported."
+        )
+
+    plugin_name = recipe.get("plugin")
+    if plugin_name is not None and (not isinstance(plugin_name, str) or not plugin_name.strip()):
+        raise _AutomationRecipeError("Automation recipe field 'plugin' must be a non-empty string.")
+    if isinstance(plugin_name, str):
+        plugin_name = plugin_name.strip()
+    _validate_pyplot_plugin_name(plugin_name)
+
+    load_project_path = _resolve_recipe_path_value(
+        recipe.get("load_project"),
+        base_dir=base_dir,
+        field_name="load_project",
+    )
+    if isinstance(load_project_path, Path):
+        load_project_path = _normalise_project_path(load_project_path)
+        _validate_pyplot_project_file(load_project_path)
+
+    imports_raw = recipe.get("imports", [])
+    if imports_raw is None:
+        imports_raw = []
+    if not isinstance(imports_raw, list):
+        raise _AutomationRecipeError("Automation recipe field 'imports' must be an array of paths.")
+    import_entries: list[Path] = []
+    for index, entry in enumerate(imports_raw):
+        resolved = _resolve_recipe_path_value(
+            entry,
+            base_dir=base_dir,
+            field_name=f"imports[{index}]",
+        )
+        if resolved is None:
+            continue
+        if not resolved.exists():
+            raise _AutomationRecipeError(f"Automation import path does not exist: {resolved}")
+        import_entries.append(resolved)
+
+    generate = recipe.get("generate", False)
+    if not isinstance(generate, bool):
+        raise _AutomationRecipeError("Automation recipe field 'generate' must be true or false.")
+
+    open_origin = recipe.get("open_origin", False)
+    if not isinstance(open_origin, bool):
+        raise _AutomationRecipeError("Automation recipe field 'open_origin' must be true or false.")
+    _validate_origin_request(open_origin)
+
+    wait_ms = recipe.get("wait_ms", 0)
+    if not isinstance(wait_ms, int) or wait_ms < 0:
+        raise _AutomationRecipeError("Automation recipe field 'wait_ms' must be a non-negative integer.")
+
+    show_window = recipe.get("show_window", False)
+    if not isinstance(show_window, bool):
+        raise _AutomationRecipeError("Automation recipe field 'show_window' must be true or false.")
+
+    save_project_path = _resolve_recipe_path_value(
+        recipe.get("save_project"),
+        base_dir=base_dir,
+        field_name="save_project",
+    )
+    if isinstance(save_project_path, Path):
+        save_project_path = _normalise_project_path(save_project_path)
+
+    exports = recipe.get("exports", {})
+    if exports is None:
+        exports = {}
+    if not isinstance(exports, dict):
+        raise _AutomationRecipeError("Automation recipe field 'exports' must be an object.")
+
+    window_image_path = _resolve_recipe_path_value(
+        exports.get("window_image"),
+        base_dir=base_dir,
+        field_name="exports.window_image",
+    )
+    current_plot_image_path = _resolve_recipe_path_value(
+        exports.get("current_plot_image"),
+        base_dir=base_dir,
+        field_name="exports.current_plot_image",
+    )
+    plot_images_dir = _resolve_recipe_path_value(
+        exports.get("plot_images_dir"),
+        base_dir=base_dir,
+        field_name="exports.plot_images_dir",
+    )
+    summary_path = _resolve_recipe_path_value(
+        recipe.get("manifest_path"),
+        base_dir=base_dir,
+        field_name="manifest_path",
+    )
+
+    if plugin_name is None and (import_entries or generate or open_origin):
+        raise _AutomationRecipeError(
+            "Automation recipe field 'plugin' is required when imports, generate, or open_origin are requested."
+        )
+
+    return _PyPlotAutomationRequest(
+        plugin_name=plugin_name,
+        import_entries=import_entries,
+        load_project_path=load_project_path,
+        generate=generate,
+        open_origin=open_origin,
+        window_image_path=window_image_path,
+        current_plot_image_path=current_plot_image_path,
+        plot_images_dir=plot_images_dir,
+        summary_path=summary_path,
+        save_project_path=save_project_path,
+        show_window=show_window,
+        wait_ms=wait_ms,
+        manifest_kind="pyplot",
+        manifest_version=1,
+    )
+
+
 def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument(
+        "--automation-recipe",
+        default=None,
+        help="Run a machine-facing automation recipe JSON file.",
+    )
     parser.add_argument(
         "--pyplot-list-plugins",
         action="store_true",
@@ -457,20 +713,83 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def _run_pyplot_automation(args: argparse.Namespace, qt_args: list[str]) -> int:
+def _select_pyplot_plugin(window: "PyPlotWorkbench", plugin_name: str) -> None:
+    current = getattr(window, "_current_plotter_name", None)
+    if current == plugin_name and getattr(window, "_current_plugin", None) is not None:
+        return
+    combo = getattr(window, "_plotter_combo", None)
+    if isinstance(combo, QtWidgets.QComboBox):
+        index = combo.findData(plugin_name)
+        if index < 0:
+            raise RuntimeError(f"PyPlot plugin '{plugin_name}' is not available in this session.")
+        combo.setCurrentIndex(index)
+    if getattr(window, "_current_plotter_name", None) == plugin_name:
+        return
+    apply_selected = getattr(window, "_apply_selected_plotter", None)
+    if callable(apply_selected):
+        apply_selected()
+    if getattr(window, "_current_plotter_name", None) != plugin_name:
+        raise RuntimeError(f"Failed to activate PyPlot plugin '{plugin_name}'.")
+
+
+def _export_visible_plot_images(
+    window: "PyPlotWorkbench",
+    app: QtWidgets.QApplication,
+    output_dir: Path,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    exported: list[Path] = []
+    current_tab = window.tab_widget.currentWidget()
+    visible_checker = getattr(window, "_is_tab_visible", None)
+    export_index = 0
+    try:
+        for index in range(window.tab_widget.count()):
+            tab = window.tab_widget.widget(index)
+            if not isinstance(tab, QtWidgets.QWidget):
+                continue
+            descriptor = getattr(window, "_tab_descriptors", {}).get(tab)
+            if descriptor is None:
+                continue
+            if callable(visible_checker) and not bool(visible_checker(tab)):
+                continue
+            canvas = getattr(descriptor, "canvas", None)
+            figure = getattr(canvas, "figure", None)
+            if figure is None:
+                continue
+            export_index += 1
+            label = ""
+            try:
+                label = window.tab_widget.tabText(index)
+            except Exception:
+                label = ""
+            if not label:
+                label = str(getattr(descriptor, "title", "") or f"plot_{export_index}")
+            safe_label = _safe_automation_label(label, fallback=f"plot_{export_index:02d}")
+            target = output_dir / f"{export_index:02d}-{safe_label}.png"
+            window.tab_widget.setCurrentWidget(tab)
+            _pump_qt_events(app, rounds=3)
+            figure.savefig(target, dpi=160)
+            exported.append(target)
+    finally:
+        if current_tab is not None:
+            try:
+                window.tab_widget.setCurrentWidget(current_tab)
+            except Exception:
+                pass
+            _pump_qt_events(app, rounds=2)
+    return exported
+
+
+def _execute_pyplot_automation_request(
+    request: _PyPlotAutomationRequest,
+    qt_args: list[str],
+) -> dict[str, Any]:
     from plotting.pyplot.app import PyPlotWorkbench
 
-    if getattr(args, "pyplot_list_plugins", False):
-        _pyplot_main, plugin_names = _load_pyplot_metadata()
-        for name in plugin_names:
-            print(name)
-        return 0
-
-    plugin_name = getattr(args, "pyplot_plugin", None)
     created_app = False
     app = QtWidgets.QApplication.instance()
     if not isinstance(app, QtWidgets.QApplication):
-        if not getattr(args, "pyplot_show_window", False):
+        if not request.show_window:
             os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         app = QtWidgets.QApplication([sys.argv[0], *qt_args])
         created_app = True
@@ -479,73 +798,104 @@ def _run_pyplot_automation(args: argparse.Namespace, qt_args: list[str]) -> int:
         except Exception:
             pass
         _schedule_theme_application(app)
+    baseline_top_level_widgets = set(app.topLevelWidgets()) if isinstance(app, QtWidgets.QApplication) else set()
 
     window: PyPlotWorkbench | None = None
+    imported_paths: list[Path] = []
+    exported_plot_paths: list[Path] = []
+    saved_project_path: Path | None = None
     try:
-        window = PyPlotWorkbench(initial_plotter=plugin_name)
-        if getattr(args, "pyplot_show_window", False) or getattr(args, "pyplot_screenshot", None):
+        window = PyPlotWorkbench(initial_plotter=request.plugin_name)
+        if request.show_window or request.window_image_path is not None:
             window.show()
         _pump_qt_events(app, rounds=4)
 
-        import_entries = [Path(str(entry)).expanduser() for entry in (getattr(args, "pyplot_import", []) or [])]
-        if import_entries:
-            window._import_paths(import_entries)  # type: ignore[attr-defined]
+        if isinstance(request.load_project_path, Path):
+            window._load_project_from_path(request.load_project_path)  # type: ignore[attr-defined]
+            _pump_qt_events(app, rounds=8)
+            if getattr(window, "_project_path", None) != request.load_project_path:
+                raise RuntimeError(f"Failed to load PyPlot project {request.load_project_path}")
+
+        if request.plugin_name:
+            _select_pyplot_plugin(window, request.plugin_name)
+            _pump_qt_events(app, rounds=4)
+
+        if request.import_entries:
+            window._import_paths(request.import_entries)  # type: ignore[attr-defined]
             _pump_qt_events(app, rounds=6)
+            imported_paths = list(request.import_entries)
 
         plugin = getattr(window, "_current_plugin", None)
-        if getattr(args, "pyplot_plot", False):
+        if request.generate:
             if plugin is None:
-                raise RuntimeError("No active PyPlot plugin selected for --pyplot-plot.")
+                raise RuntimeError("No active PyPlot plugin selected for generate.")
             plugin.generate()
             _pump_qt_events(app, rounds=8)
 
-        if getattr(args, "pyplot_open_graph_format", False):
+        if request.open_graph_format:
             opener = getattr(window, "_open_graph_format_dialog", None)
             if callable(opener):
                 opener()
             _pump_qt_events(app, rounds=4)
 
-        if getattr(args, "pyplot_open_origin", False):
+        if request.open_origin:
             if plugin is None:
-                raise RuntimeError("No active PyPlot plugin selected for --pyplot-open-origin.")
+                raise RuntimeError("No active PyPlot plugin selected for Origin export.")
             plugin.open_origin()
             _pump_qt_events(app, rounds=6)
 
-        wait_ms = max(0, int(getattr(args, "pyplot_wait_ms", 0) or 0))
+        wait_ms = max(0, int(request.wait_ms or 0))
         if wait_ms > 0:
             deadline = time.time() + wait_ms / 1000.0
             while time.time() < deadline:
                 _pump_qt_events(app, rounds=1)
                 time.sleep(min(0.02, max(0.0, deadline - time.time())))
 
-        screenshot_path = getattr(args, "pyplot_screenshot", None)
-        if isinstance(screenshot_path, str) and screenshot_path.strip():
-            target = Path(screenshot_path).expanduser()
+        if isinstance(request.window_image_path, Path):
+            target = request.window_image_path
             target.parent.mkdir(parents=True, exist_ok=True)
             _pump_qt_events(app, rounds=4)
             if not window.grab().save(str(target)):
                 raise RuntimeError(f"Failed to save PyPlot screenshot to {target}")
 
-        plot_image_path = getattr(args, "pyplot_plot_image", None)
-        if isinstance(plot_image_path, str) and plot_image_path.strip():
+        if isinstance(request.current_plot_image_path, Path):
             axes = window._current_axes()  # type: ignore[attr-defined]
             if axes is None or getattr(axes, "figure", None) is None:
-                raise RuntimeError("No active plot is available for --pyplot-plot-image.")
-            target = Path(plot_image_path).expanduser()
+                raise RuntimeError("No active plot is available for current_plot_image export.")
+            target = request.current_plot_image_path
             target.parent.mkdir(parents=True, exist_ok=True)
             axes.figure.savefig(target, dpi=160)
 
-        summary = _pyplot_summary(window, plugin_name)
-        summary_path = getattr(args, "pyplot_summary_json", None)
-        if isinstance(summary_path, str) and summary_path.strip():
-            _write_json(Path(summary_path).expanduser(), summary)
-        else:
-            print(json.dumps(summary, ensure_ascii=False))
-        return 0
-    except Exception as exc:
-        message = f"[pyplot-cli] {type(exc).__name__}: {exc}"
-        print(message)
-        return 1
+        if isinstance(request.plot_images_dir, Path):
+            exported_plot_paths = _export_visible_plot_images(window, app, request.plot_images_dir)
+
+        if isinstance(request.save_project_path, Path):
+            target = _normalise_project_path(request.save_project_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            window._write_project_file(target)  # type: ignore[attr-defined]
+            _pump_qt_events(app, rounds=4)
+            if getattr(window, "_project_path", None) != target or not target.exists():
+                raise RuntimeError(f"Failed to save PyPlot project to {target}")
+            saved_project_path = target
+
+        active_plugin_name = getattr(window, "_current_plotter_name", None) or request.plugin_name
+        summary = _pyplot_summary(window, active_plugin_name)
+        summary.update(
+            {
+                "status": "ok",
+                "kind": request.manifest_kind,
+                "version": request.manifest_version,
+                "loaded_project": _absolute_path(request.load_project_path),
+                "saved_project": _absolute_path(saved_project_path),
+                "imported_paths": _path_payload(imported_paths),
+                "plot_image_paths": _path_payload(exported_plot_paths),
+                "window_image": _absolute_path(request.window_image_path),
+                "current_plot_image": _absolute_path(request.current_plot_image_path),
+                "warnings": [],
+                "errors": [],
+            }
+        )
+        return summary
     finally:
         if window is not None:
             try:
@@ -559,12 +909,90 @@ def _run_pyplot_automation(args: argparse.Namespace, qt_args: list[str]) -> int:
             except Exception:
                 pass
         if isinstance(app, QtWidgets.QApplication):
+            for widget in list(app.topLevelWidgets()):
+                if widget in baseline_top_level_widgets:
+                    continue
+                if not isinstance(widget, QtWidgets.QWidget):
+                    continue
+                try:
+                    widget.close()
+                except Exception:
+                    pass
             _pump_qt_events(app, rounds=4)
             if created_app:
                 try:
                     app.quit()
                 except Exception:
                     pass
+
+
+def _pyplot_request_from_legacy_args(args: argparse.Namespace) -> _PyPlotAutomationRequest:
+    request = _PyPlotAutomationRequest(
+        plugin_name=getattr(args, "pyplot_plugin", None),
+        import_entries=[
+            Path(str(entry)).expanduser()
+            for entry in (getattr(args, "pyplot_import", []) or [])
+        ],
+        generate=bool(getattr(args, "pyplot_plot", False)),
+        open_graph_format=bool(getattr(args, "pyplot_open_graph_format", False)),
+        open_origin=bool(getattr(args, "pyplot_open_origin", False)),
+        show_window=bool(getattr(args, "pyplot_show_window", False)),
+        wait_ms=max(0, int(getattr(args, "pyplot_wait_ms", 0) or 0)),
+    )
+    screenshot_path = getattr(args, "pyplot_screenshot", None)
+    if isinstance(screenshot_path, str) and screenshot_path.strip():
+        request.window_image_path = Path(screenshot_path).expanduser()
+    plot_image_path = getattr(args, "pyplot_plot_image", None)
+    if isinstance(plot_image_path, str) and plot_image_path.strip():
+        request.current_plot_image_path = Path(plot_image_path).expanduser()
+    summary_path = getattr(args, "pyplot_summary_json", None)
+    if isinstance(summary_path, str) and summary_path.strip():
+        request.summary_path = Path(summary_path).expanduser()
+    return request
+
+
+def _run_pyplot_automation_request(
+    request: _PyPlotAutomationRequest,
+    qt_args: list[str],
+) -> int:
+    try:
+        summary = _execute_pyplot_automation_request(request, qt_args)
+    except _AutomationRecipeError as exc:
+        print(f"[pyplot-cli] recipe error: {exc}")
+        return 2
+    except Exception as exc:
+        message = f"[pyplot-cli] {type(exc).__name__}: {exc}"
+        print(message)
+        return 1
+
+    if isinstance(request.summary_path, Path):
+        _write_json(request.summary_path, summary)
+    else:
+        print(json.dumps(summary, ensure_ascii=False))
+    return 0
+
+
+def _run_automation_recipe(args: argparse.Namespace, qt_args: list[str]) -> int:
+    recipe_value = getattr(args, "automation_recipe", None)
+    if not isinstance(recipe_value, str) or not recipe_value.strip():
+        return 2
+    try:
+        recipe_path = Path(recipe_value).expanduser()
+        request = _load_automation_recipe_request(recipe_path)
+    except _AutomationRecipeError as exc:
+        print(f"[automation-recipe] {exc}")
+        return 2
+    return _run_pyplot_automation_request(request, qt_args)
+
+
+def _run_pyplot_automation(args: argparse.Namespace, qt_args: list[str]) -> int:
+    if getattr(args, "pyplot_list_plugins", False):
+        _pyplot_main, plugin_names = _load_pyplot_metadata()
+        for name in plugin_names:
+            print(name)
+        return 0
+    request = _pyplot_request_from_legacy_args(args)
+    return _run_pyplot_automation_request(request, qt_args)
 
 LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": _lazy("data_logging.data_logger", "main"),
@@ -1222,6 +1650,8 @@ def main(argv: list[str] | None = None) -> None:
     args, qt_args = _parse_launcher_args(argv_list[1:])
     if args.visual_check:
         raise SystemExit(_run_visual_check(args))
+    if getattr(args, "automation_recipe", None):
+        raise SystemExit(_run_automation_recipe(args, qt_args))
     if _is_pyplot_automation_requested(args):
         raise SystemExit(_run_pyplot_automation(args, qt_args))
     _install_crash_log_hook()

@@ -50,6 +50,12 @@ if (Test-Path $venvPython) {
 [[actions]]
 name = "Run"
 icon = "run"
+command = ".venv/bin/python launcher.py"
+platform = "darwin"
+
+[[actions]]
+name = "Run"
+icon = "run"
 command = '''
 .\.venv\Scripts\Activate.ps1
 python -m launcher

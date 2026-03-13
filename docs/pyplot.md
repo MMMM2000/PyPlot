@@ -94,6 +94,14 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Provide `requires_imported_data = True` if the plug-in needs imported worksheets before plotting, and give its Plot button a descriptive label such as “Plot Temperature Sensitivity” so users always know what the action will generate.
 Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph formatting`, `TXT export`, shared `Open in Origin`, and shared plot-workbooks) and only override per-plugin behavior when the workflow truly needs custom handling. Use `PyPlotPlugin.apply_shared_action_state(...)`, `PyPlotPlugin.clear_plot_tabs(...)`, and `PyPlotPlugin.run_origin_export(...)` to avoid repeating boilerplate per plugin. If a plugin already manages its own workbook lifecycle, set `uses_shared_plot_workbooks = False`.
 
+## Automation
+
+- **Machine-facing recipes**: `launcher.py --automation-recipe <job.json>` runs PyPlot in a Codex-oriented batch mode. The recipe can load an existing `.pypj`, activate a plug-in, import files/folders, generate plots, export artifacts, and save a project without going through the interactive launcher.
+- **Relative paths**: recipe input and output paths are resolved relative to the recipe file location, which keeps workspace-local jobs portable when they are stored next to sample data or an `artifacts/` folder.
+- **Manifest output**: runs can write a machine-readable manifest JSON with the active plugin, loaded/saved project paths, imported paths, workbook/tab counts, current tab details, and exported image paths. When no manifest path is provided, the JSON is printed to stdout.
+- **Batch plot exports**: `exports.plot_images_dir` saves every visible plot tab as a deterministic PNG named `<tab_index>-<safe_tab_label>.png`, which is meant for replayable automation and test verification rather than human browsing.
+- **Current scope**: v1 automation is PyPlot-only. The shared recipe entrypoint reserves `kind: "builder"` for future Microwire Builder / `.pydpj` automation, but that mode is not implemented yet.
+
 ## Importing Data
 
 1. Use the **Import data…** button (or the Data menu) to select files/folders (multi-select folders are supported).
