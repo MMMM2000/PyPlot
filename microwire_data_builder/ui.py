@@ -7456,6 +7456,7 @@ class FabricationSection(MiniDatabaseSection):
     ) -> None:
         self._table_splitter: QtWidgets.QSplitter | None = None
         self._separate_imported = False
+        self._microscope_snapshot: pd.DataFrame | None = None
         super().__init__(logger, log_callback, parent)
         self._normalize_temperature_columns()
         self._hide_columns(["_source_paths", "_source_path"])
@@ -7679,15 +7680,21 @@ class FabricationSection(MiniDatabaseSection):
                 bucket = relevant.setdefault(composition_key, {})
                 piece_bucket = bucket.setdefault(draw_value, set())
                 piece_bucket.add(piece_value)
-        try:
-            microscope_data = MiniDatabaseStore("microscope").load()
-        except Exception:
-            microscope_data = None
         microscope_table = (
-            microscope_data.table
-            if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
+            self._microscope_snapshot.copy()
+            if isinstance(self._microscope_snapshot, pd.DataFrame)
             else pd.DataFrame()
         )
+        if microscope_table.empty:
+            try:
+                microscope_data = MiniDatabaseStore("microscope").load()
+            except Exception:
+                microscope_data = None
+            microscope_table = (
+                microscope_data.table
+                if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
+                else pd.DataFrame()
+            )
         if isinstance(microscope_table, pd.DataFrame) and not microscope_table.empty:
             for _, row in microscope_table.iterrows():
                 composition_key = str(row.get("Composition") or "").strip()
@@ -7704,6 +7711,17 @@ class FabricationSection(MiniDatabaseSection):
                 piece_bucket = bucket.setdefault(int(draw_value), set())
                 piece_bucket.add(int(piece_value))
         return relevant, set(relevant.keys())
+
+    def set_microscope_snapshot(self, frame: pd.DataFrame | None) -> None:
+        self._microscope_snapshot = frame.copy() if isinstance(frame, pd.DataFrame) else None
+        table = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        relevant_map, _ = self._load_relevant_map()
+        if isinstance(table, pd.DataFrame):
+            updated = self._augment_table_with_relevant_microscope_rows(table, relevant_map)
+            if not updated.equals(table):
+                self.data.table = updated
+                self.model.set_frame(updated)
+                self._hide_columns(["_source_paths", "_source_path"])
 
     @staticmethod
     def _allow_draw(
@@ -14946,6 +14964,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._record_groups_by_key: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
         self._hidden_paths: Set[str] = set()
         self._all_records: List[ShapeMemoryStressStrainRecord] = []
+        self._microscope_snapshot: pd.DataFrame | None = None
         self._preview_group_count = 1
         self._preview_spacing = 6
         self._table_splitter: QtWidgets.QSplitter | None = None
@@ -15427,6 +15446,11 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 snapshot[key] = cleaned
         return snapshot
 
+    def set_microscope_snapshot(self, frame: pd.DataFrame | None) -> None:
+        self._microscope_snapshot = frame.copy() if isinstance(frame, pd.DataFrame) else None
+        self._normalise_value_columns()
+        self._update_preview()
+
     def _shape_memory_selection_from_row(
         self, row: pd.Series, *, fracture: bool
     ) -> Optional[_ShapeMemoryPointSelection]:
@@ -15482,7 +15506,11 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             if column not in updated.columns:
                 updated[column] = None
                 changed = True
-        microscope_frame = MiniDatabaseStore("microscope").load().table
+        microscope_frame = (
+            self._microscope_snapshot.copy()
+            if isinstance(self._microscope_snapshot, pd.DataFrame)
+            else MiniDatabaseStore("microscope").load().table
+        )
         microscope_lookup: Dict[str, Optional[float]] = {}
         if isinstance(microscope_frame, pd.DataFrame) and not microscope_frame.empty and "_key" in microscope_frame.columns:
             for _, row in microscope_frame.iterrows():
@@ -24106,6 +24134,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._handle_fabrication_sources_changed
         )
         self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+        self._sync_microscope_dependent_sections()
+        try:
+            self.microscope_section.data_updated.connect(self._sync_microscope_dependent_sections)
+        except Exception:
+            pass
         try:
             self.fabrication_section.data_updated.connect(self.video_section.sync_with_fabrication)
         except Exception:
@@ -24323,6 +24356,21 @@ class BuilderWindow(QtWidgets.QMainWindow):
         video = getattr(self, "video_section", None)
         if isinstance(video, MiniDatabaseSection):
             video.set_sources(sources)
+
+    def _sync_microscope_dependent_sections(self) -> None:
+        microscope = getattr(self, "microscope_section", None)
+        microscope_frame = (
+            microscope.data.table.copy()
+            if isinstance(microscope, MicroscopeSection)
+            and isinstance(microscope.data.table, pd.DataFrame)
+            else None
+        )
+        fabrication = getattr(self, "fabrication_section", None)
+        if isinstance(fabrication, FabricationSection):
+            fabrication.set_microscope_snapshot(microscope_frame)
+        shape_memory = getattr(self, "shape_memory_stress_strain_section", None)
+        if isinstance(shape_memory, ShapeMemoryStressStrainSection):
+            shape_memory.set_microscope_snapshot(microscope_frame)
 
     def _collect_primary_docks(self) -> List[QtWidgets.QDockWidget]:
         docks: List[QtWidgets.QDockWidget] = []
