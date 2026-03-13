@@ -13,6 +13,9 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - VSM temperature scan: multiple graphs per sample row (sub-versions in the same row).
 - Transition temps: pick As/Af/Ms/Mf from VSM temperature graphs without switching away from the active graph.
 - DMA iso-stress: multiple graphs per sample row (sub-versions in the same row).
+- Shape memory stress/strain: multiple dual-axis overlay graphs per sample row from manual stress/strain logger TXT files. The section includes an optional side preview panel; double-clicking a preview picks displacement/load/strain/stress values into dedicated columns that can be carried into Assemble, and the picker can target either the standard shape-memory columns or the fracture load/strain/stress columns.
+- Section search: all builder tables now expose a search box that filters rows across visible columns, including the graph/data sections and the custom Current density, Transition temps, and Compare views.
+- Microscope other ends: filenames with an `oe` suffix (for example `Ni46Fe23Ga23Co8 1-1oe core`) are treated as separate samples, and the Microscope tab can show or hide those `oe` rows without deleting them.
 - FMR: Field vs X/Y voltage plots from CSV files; multiple graphs per sample row.
 - Strain: stress/strain entries tied to composition + microwire; d auto-filled from microscope when available.
 - Assemble: combined preview and export configuration.
@@ -56,7 +59,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - Column order, visibility, and multi-column sort are persisted in the `.pydpj` project.
 - Assemble preview includes a quick search box that filters rows across currently visible columns; saved projects keep the active search text.
 - Microwire sorting is numeric (10/5 comes after 5/4).
-- Graph preview panel is optional. When enabled, selecting a row shows current annealing, VSM, and DMA previews for that row.
+- Graph preview panel is optional. When enabled, selecting a row shows current annealing, VSM, DMA, shape-memory, and FMR previews for that row.
 - "Add to compare" uses the current row selection and populates the Compare tab.
 - Multi-graph previews in non-Compare sections are laid out horizontally; Compare stacks graphs vertically with rows tall enough to show full-size plots.
 

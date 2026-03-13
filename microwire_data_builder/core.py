@@ -104,6 +104,34 @@ CURRENT_DENSITY_EXTRA_COLUMNS = [
     "Sources",
 ]
 
+SHAPE_MEMORY_VALUE_COLUMNS = [
+    "Displacement (mm)",
+    "Load (g)",
+    "Strain (%)",
+    "Stress (MPa)",
+]
+
+SHAPE_MEMORY_FRACTURE_COLUMNS = [
+    "Fracture load (g)",
+    "Fracture strain (%)",
+    "Fracture stress (MPa)",
+]
+
+SHAPE_MEMORY_ENTRY_ALIASES = {
+    "Shape memory displacement (mm)": "Displacement (mm)",
+    "Shape memory load (g)": "Load (g)",
+    "Shape memory strain (%)": "Strain (%)",
+    "Shape memory stress (MPa)": "Stress (MPa)",
+    "Shape memory fracture load (g)": "Fracture load (g)",
+    "Shape memory fracture strain (%)": "Fracture strain (%)",
+    "Shape memory fracture stress (MPa)": "Fracture stress (MPa)",
+}
+
+STRAIN_ENTRY_ALIASES = {
+    "Strain": "Legacy strain",
+    "Stress (MPa)": "Legacy stress (MPa)",
+}
+
 EA_VALENCE = {
     "Ni": 10,
     "Fe": 8,
@@ -156,7 +184,7 @@ STRAIN_EXTRA_COLUMNS = [
     "Calc mode",
     "Clamp span (mm)",
     "m",
-    "Stress (MPa)",
+    "Legacy stress (MPa)",
     "M length",
     "A length",
     "Broke",
@@ -177,7 +205,8 @@ OUTPUT_COLUMNS = [
     "d (µm)",
     "D (µm)",
     "d/D",
-    "Strain",
+    "Brittle",
+    "Legacy strain",
     *STRAIN_EXTRA_COLUMNS,
     "As (mA)",
     "Ms (mA)",
@@ -212,12 +241,16 @@ OUTPUT_COLUMNS = [
     "VSM hysteresis graphs",
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
+    "Shape memory stress/strain graphs",
+    *SHAPE_MEMORY_VALUE_COLUMNS,
+    *SHAPE_MEMORY_FRACTURE_COLUMNS,
     "FMR graphs",
 ]
 
 DIAMETER_COLUMN = "d (µm)"
 GLASS_DIAMETER_COLUMN = "D (µm)"
 DIAMETER_RATIO_COLUMN = "d/D"
+BRITTLE_COLUMN = "Brittle"
 
 MICROSCOPE_IMAGE_COLUMNS = (
     "d (µm) image",
@@ -233,6 +266,14 @@ FIGURE_COLUMNS = (
 VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
+SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
+SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Displacement (mm)"
+SHAPE_MEMORY_LOAD_COLUMN = "Load (g)"
+SHAPE_MEMORY_STRAIN_COLUMN = "Strain (%)"
+SHAPE_MEMORY_STRESS_COLUMN = "Stress (MPa)"
+SHAPE_MEMORY_FRACTURE_LOAD_COLUMN = "Fracture load (g)"
+SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN = "Fracture strain (%)"
+SHAPE_MEMORY_FRACTURE_STRESS_COLUMN = "Fracture stress (MPa)"
 FMR_COLUMN = "FMR graphs"
 
 TRANSITION_TEMP_AS_COLUMN = "As (°C)"
@@ -246,7 +287,7 @@ TRANSITION_TEMP_COLUMNS = (
     TRANSITION_TEMP_MF_COLUMN,
 )
 
-STRAIN_COLUMN = "Strain"
+STRAIN_COLUMN = "Legacy strain"
 
 ORIGIN_FIGURE_COLUMNS = tuple(
     column
@@ -669,6 +710,17 @@ class DmaIsoStressRecord:
 
 
 @dataclass
+class ShapeMemoryStressStrainRecord:
+    """Parsed shape-memory stress/strain measurement for a single file."""
+
+    path: Path
+    sample: str
+    data: pd.DataFrame
+    key: Optional[Tuple[str, int, int]] = None
+    label: Optional[str] = None
+
+
+@dataclass
 class FmrRecord:
     """Parsed FMR measurement for a single file."""
 
@@ -973,6 +1025,7 @@ class MicroscopeMeasurements:
     core: List[MicroscopeDetection] = field(default_factory=list)
     glass: List[MicroscopeDetection] = field(default_factory=list)
     other: List[MicroscopeDetection] = field(default_factory=list)
+    brittle: bool = False
 
     def _target(self, category: str) -> List[MicroscopeDetection]:
         if category == "core":
@@ -1768,10 +1821,11 @@ def _composition_from_path(path: Path) -> str:
 def _extract_composition_token(text: str) -> Optional[str]:
     if not text:
         return None
-    tokens = re.findall(r"[A-Za-z][A-Za-z0-9]+", text)
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9.]*", text)
     if not tokens:
         return None
-    return tokens[0]
+    token = tokens[0].rstrip(".")
+    return token or None
 
 
 def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]:
@@ -1879,6 +1933,13 @@ def _microscope_category(path: Path) -> str:
     if "glass" in stem:
         return "glass"
     return "other"
+
+
+def _microscope_is_brittle(path: Path) -> bool:
+    try:
+        return "brittle" in path.stem.lower()
+    except Exception:
+        return False
 
 
 def _iter_fragment_files(
@@ -2995,6 +3056,8 @@ def _group_microscope_measurements(
             continue
         category = _microscope_category(path)
         record = grouped.setdefault(key, MicroscopeMeasurements())
+        if _microscope_is_brittle(path):
+            record.brittle = True
 
         cache_token = _cache_key(path)
         cache_entry = cache_lookup.get(cache_token) or cache_lookup.get(str(path))
@@ -3109,6 +3172,10 @@ def _group_microscope_measurements(
         cache_entry_final.path = cache_token
         updated_cache[cache_token] = cache_entry_final
         _notify()
+
+    for record in grouped.values():
+        if not getattr(record, "brittle", False) and not record.core and bool(record.glass):
+            record.brittle = True
 
     missing_references: List[str] = []
     mismatched_references: List[str] = []
@@ -4759,6 +4826,10 @@ def build_database(
     vsm_hysteresis_records: Optional[Iterable[VsmHysteresisRecord]] = None,
     vsm_temperature_scan_records: Optional[Iterable[VsmTemperatureScanRecord]] = None,
     dma_iso_stress_records: Optional[Iterable[DmaIsoStressRecord]] = None,
+    shape_memory_stress_strain_records: Optional[
+        Iterable[ShapeMemoryStressStrainRecord]
+    ] = None,
+    shape_memory_entries: Optional[Dict[str, Dict[str, object]]] = None,
     fmr_records: Optional[Iterable[FmrRecord]] = None,
     phase_points: Optional[Dict[str, Dict[str, float]]] = None,
     transition_temps: Optional[Dict[str, Dict[str, float]]] = None,
@@ -4943,6 +5014,9 @@ def build_database(
     vsm_hysteresis_groups = _group_records(vsm_hysteresis_records)
     vsm_temperature_groups = _group_records(vsm_temperature_scan_records)
     dma_isostress_groups = _group_records(dma_iso_stress_records)
+    shape_memory_stress_strain_groups = _group_records(
+        shape_memory_stress_strain_records
+    )
     fmr_groups = _group_records(fmr_records)
 
     phase_points_map: Dict[str, Dict[str, float]] = {}
@@ -4997,6 +5071,27 @@ def build_database(
                 current_density_map[_microwire_key_to_str(key_parts)] = entry
     current_density_map = dict(current_density_map)
 
+    shape_memory_entry_map: Dict[str, Dict[str, object]] = {}
+    if shape_memory_entries:
+        for key, payload in shape_memory_entries.items():
+            if not isinstance(key, str) or not isinstance(payload, dict):
+                continue
+            key_parts = _microwire_key_from_string(key)
+            if key_parts is None:
+                continue
+            entry: Dict[str, object] = {}
+            for column in SHAPE_MEMORY_VALUE_COLUMNS + SHAPE_MEMORY_FRACTURE_COLUMNS:
+                if column in payload:
+                    entry[column] = payload.get(column)
+                    continue
+                for old_name, new_name in SHAPE_MEMORY_ENTRY_ALIASES.items():
+                    if new_name == column and old_name in payload:
+                        entry[column] = payload.get(old_name)
+                        break
+            if entry:
+                shape_memory_entry_map[_microwire_key_to_str(key_parts)] = entry
+    shape_memory_entry_map = dict(shape_memory_entry_map)
+
     strain_entry_map: Dict[str, Dict[str, object]] = {}
     if strain_entries:
         for key, payload in strain_entries.items():
@@ -5009,6 +5104,11 @@ def build_database(
             for column in list(STRAIN_EXTRA_COLUMNS) + [STRAIN_COLUMN]:
                 if column in payload:
                     entry[column] = payload.get(column)
+                    continue
+                for old_name, new_name in STRAIN_ENTRY_ALIASES.items():
+                    if new_name == column and old_name in payload:
+                        entry[column] = payload.get(old_name)
+                        break
             if entry:
                 strain_entry_map[_microwire_key_to_str(key_parts)] = entry
     elif strain_records:
@@ -5194,6 +5294,7 @@ def build_database(
         row["d (µm)"] = None
         row["D (µm)"] = None
         row[ratio_column] = None
+        row[BRITTLE_COLUMN] = None
         row["Length (m)"] = _value_for_output(piece_info, "length_m")
         row["Production datetime"] = _value_for_output(draw_info, "production_datetime")
         row["Mass (g)"] = _value_for_output(draw_info, "mass_g")
@@ -5298,6 +5399,8 @@ def build_database(
             if microscope_data is None:
                 microscope_data = microscope_index.get((composition, draw_x, piece_y))
         if microscope_data:
+            if getattr(microscope_data, "brittle", False):
+                row[BRITTLE_COLUMN] = "brittle"
             if d_numeric is None:
                 d_detection = microscope_data.best_core_detection()
                 if (
@@ -5460,6 +5563,34 @@ def build_database(
             labels = [_record_label(record) for record in dma_records if _record_label(record)]
             if labels:
                 row[DMA_ISOSTRESS_COLUMN] = list(dict.fromkeys(labels))
+        shape_memory_records = shape_memory_stress_strain_groups.get(key, [])
+        if not shape_memory_records:
+            shape_memory_records = shape_memory_stress_strain_groups.get(
+                (composition, draw_x, piece_y, None),
+                [],
+            )
+        if not shape_memory_records:
+            shape_memory_records = shape_memory_stress_strain_groups.get(
+                (composition, draw_x, piece_y),
+                [],
+            )
+        if shape_memory_records:
+            labels = [
+                _record_label(record)
+                for record in shape_memory_records
+                if _record_label(record)
+            ]
+            if labels:
+                row[SHAPE_MEMORY_STRESS_STRAIN_COLUMN] = list(dict.fromkeys(labels))
+        shape_memory_entry = shape_memory_entry_map.get(key_str, {})
+        if shape_memory_entry:
+            for column in SHAPE_MEMORY_VALUE_COLUMNS + SHAPE_MEMORY_FRACTURE_COLUMNS:
+                if column not in output_columns:
+                    continue
+                value = shape_memory_entry.get(column)
+                if value in (None, ""):
+                    continue
+                row[column] = value
         fmr_entries = fmr_groups.get(key, [])
         if not fmr_entries:
             fmr_entries = fmr_groups.get((composition, draw_x, piece_y, None), [])
@@ -5830,10 +5961,19 @@ __all__ = [
     "VsmHysteresisRecord",
     "VsmTemperatureScanRecord",
     "DmaIsoStressRecord",
+    "ShapeMemoryStressStrainRecord",
     "FmrRecord",
     "VSM_HYSTERESIS_COLUMN",
     "VSM_TEMPERATURE_SCAN_COLUMN",
     "DMA_ISOSTRESS_COLUMN",
+    "SHAPE_MEMORY_STRESS_STRAIN_COLUMN",
+    "SHAPE_MEMORY_DISPLACEMENT_COLUMN",
+    "SHAPE_MEMORY_LOAD_COLUMN",
+    "SHAPE_MEMORY_STRAIN_COLUMN",
+    "SHAPE_MEMORY_STRESS_COLUMN",
+    "SHAPE_MEMORY_FRACTURE_LOAD_COLUMN",
+    "SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN",
+    "SHAPE_MEMORY_FRACTURE_STRESS_COLUMN",
     "FMR_COLUMN",
     "build_database",
     "build_fabrication_index",

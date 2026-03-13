@@ -14,11 +14,12 @@ import sys
 import pandas as pd
 import numpy as np
 import pytest
-from PyQt6 import QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtTest, QtWidgets
 
 from microwire_data_builder import ocr as ocr_module
 from microwire_data_builder import ui as builder_ui
 from microwire_data_builder.ui import BuilderWindow, MicroscopeSection
+from microwire_data_builder.storage import MiniDatabaseData
 from plotting.plugins.vsm_temperature_scan.core import VSMTemperatureScanProcessor
 
 CORE_PATH = Path(__file__).resolve().parent.parent / "microwire_data_builder" / "core.py"
@@ -42,9 +43,26 @@ _split_microwire_key = core._split_microwire_key
 _microwire_key_from_string = core._microwire_key_from_string
 OriginArtifact = core.OriginArtifact
 FabricationIndex = core.FabricationIndex
+MeasurementMetadata = core.MeasurementMetadata
+MeasurementRecord = core.MeasurementRecord
+ShapeMemoryStressStrainRecord = core.ShapeMemoryStressStrainRecord
+SHAPE_MEMORY_STRESS_STRAIN_COLUMN = core.SHAPE_MEMORY_STRESS_STRAIN_COLUMN
+SHAPE_MEMORY_DISPLACEMENT_COLUMN = core.SHAPE_MEMORY_DISPLACEMENT_COLUMN
+SHAPE_MEMORY_LOAD_COLUMN = core.SHAPE_MEMORY_LOAD_COLUMN
+SHAPE_MEMORY_STRAIN_COLUMN = core.SHAPE_MEMORY_STRAIN_COLUMN
+SHAPE_MEMORY_STRESS_COLUMN = core.SHAPE_MEMORY_STRESS_COLUMN
+SHAPE_MEMORY_FRACTURE_LOAD_COLUMN = core.SHAPE_MEMORY_FRACTURE_LOAD_COLUMN
+SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN = core.SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN
+SHAPE_MEMORY_FRACTURE_STRESS_COLUMN = core.SHAPE_MEMORY_FRACTURE_STRESS_COLUMN
+BRITTLE_COLUMN = core.BRITTLE_COLUMN
 _merged_header_row = core._merged_header_row
 _parse_piece_rows = core._parse_piece_rows
 _extract_microscope_diameters = core._extract_microscope_diameters
+
+
+def test_microscope_key_preserves_decimal_composition_token() -> None:
+    parsed = core._microscope_key(Path("Mn58.1Ni4.3Si18.5Sn18.8 3_2 glass.jpg"))
+    assert parsed == ("Mn58.1Ni4.3Si18.5Sn18.8", 3, 2, None)
 
 
 def _ensure_qapp() -> QtWidgets.QApplication:
@@ -109,6 +127,461 @@ def test_render_measurement_pixmap_uses_readable_default_preview_size() -> None:
     assert not pixmap.isNull()
     assert pixmap.width() >= builder_ui.ANNEALING_GRAPH_WIDTH
     assert pixmap.height() >= builder_ui.ANNEALING_GRAPH_HEIGHT
+
+
+def test_shape_memory_preview_uses_dual_axis_overlay() -> None:
+    record = ShapeMemoryStressStrainRecord(
+        path=Path("loop.txt"),
+        sample="Ni50Fe27Ga23 5/4",
+        data=pd.DataFrame(
+            {
+                "displacement_mm": [0.0, 0.01, 0.02, 0.01],
+                "load_g": [0.0, 0.15, 0.25, 0.05],
+                "strain_pct": [0.0, 0.05, 0.10, 0.02],
+                "stress_mpa": [0.0, 1.1, 2.0, 0.4],
+            }
+        ),
+    )
+    figure = builder_ui._plot_shape_memory_stress_strain_figure(
+        record,
+        width_px=720,
+        height_px=360,
+    )
+    assert figure is not None
+    try:
+        assert len(figure.axes) == 3
+        assert figure.axes[0].get_xlabel() == "Displacement (mm)"
+    finally:
+        builder_ui.plt.close(figure)
+
+
+def test_shape_memory_section_groups_flat_folder_files_by_filename_sample(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    logger = logging.getLogger("test")
+    section = builder_ui.ShapeMemoryStressStrainSection(logger, lambda *_args: None)
+    try:
+        paths = []
+        for name in [
+            "Ni50Fe27Ga23 5-4 s1 loop.txt",
+            "Ni50Fe27Ga23 6-4 s1 loop.txt",
+        ]:
+            path = tmp_path / name
+            path.write_text(
+                "\n".join(
+                    [
+                        "Displacement\tLoad\tStrain\tStress",
+                        "mm\tg\t%\tMPa",
+                        "0\t0\t0\t0",
+                        "0.01\t0.10\t0.05\t0.9",
+                        "0.02\t0.20\t0.10\t1.8",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            paths.append(path)
+
+        section._active_candidates = paths
+        result = section.process(paths)
+        section._handle_worker_finished(result)
+
+        frame = section.model.frame()
+        assert isinstance(frame, pd.DataFrame)
+        assert len(frame.index) == 2
+        assert set(frame["Microwire"].tolist()) == {"5/4", "6/4"}
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_shape_memory_point_selection_reads_load_and_stress_axes() -> None:
+    frame = pd.DataFrame(
+        {
+            "displacement_mm": [0.0, 0.01, 0.02],
+            "load_g": [0.0, 0.10, 0.20],
+            "strain_pct": [0.0, 0.05, 0.10],
+            "stress_mpa": [0.0, 0.9, 1.8],
+        }
+    )
+
+    load_pick = builder_ui._shape_memory_point_selection(
+        frame,
+        axis_kind="load",
+        x_value=0.0102,
+        y_value=0.11,
+    )
+    stress_pick = builder_ui._shape_memory_point_selection(
+        frame,
+        axis_kind="stress",
+        x_value=0.049,
+        y_value=0.95,
+    )
+
+    assert load_pick is not None
+    assert load_pick.index == 1
+    assert load_pick.load_g == pytest.approx(0.10)
+    assert stress_pick is not None
+    assert stress_pick.index == 1
+    assert stress_pick.stress_mpa == pytest.approx(0.9)
+
+
+def test_legacy_strain_formula_uses_reversed_ratio() -> None:
+    section = builder_ui.StrainSection.__new__(builder_ui.StrainSection)
+    section._strain_mode = builder_ui.StrainSection.STRAIN_MODE_LINEAR
+    section._strain_offsets = {
+        builder_ui.StrainSection.STRAIN_MODE_LINEAR: 0.0,
+        builder_ui.StrainSection.STRAIN_MODE_DUAL_SUPPORT: 0.0,
+    }
+    section._clamp_span_mm = 0.0
+
+    value = builder_ui.StrainSection._compute_strain_percent(section, 10.0, 12.0)
+
+    assert value == pytest.approx(-16.6666667)
+
+
+def test_search_filters_mini_database_section_rows(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        paths = []
+        for name in [
+            "Ni50Fe27Ga23 5-4 s1 loop.txt",
+            "Ni50Fe27Ga23 6-4 s1 loop.txt",
+        ]:
+            path = tmp_path / name
+            path.write_text(
+                "\n".join(
+                    [
+                        "Displacement\tLoad\tStrain\tStress",
+                        "mm\tg\t%\tMPa",
+                        "0\t0\t0\t0",
+                        "0.01\t0.10\t0.05\t0.9",
+                        "0.02\t0.20\t0.10\t1.8",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            paths.append(path)
+        section._active_candidates = paths
+        result = section.process(paths)
+        section._handle_worker_finished(result)
+
+        section.search_edit.setText("6/4")
+        assert section.table_view.model().rowCount() == 1
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_section_can_hide_other_ends() -> None:
+    _ensure_qapp()
+    section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {"Composition": "Ni46Fe23Ga23Co8", "Microwire": "1/1", "_key": "Ni46Fe23Ga23Co8|1|1"},
+                {"Composition": "Ni46Fe23Ga23Co8", "Microwire": "1/1oe", "_key": "Ni46Fe23Ga23Co8|1|1|oe"},
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={"show_other_ends": True}))
+        assert section.table_view.model().rowCount() == 2
+
+        section._toggle_other_ends(False)
+        assert section.table_view.model().rowCount() == 1
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_shape_memory_preview_panel_double_click_updates_picked_values() -> None:
+    _ensure_qapp()
+    panel = builder_ui._ShapeMemoryPreviewPanel(logging.getLogger("test"))
+    record = ShapeMemoryStressStrainRecord(
+        path=Path("loop.txt"),
+        sample="Ni50Fe27Ga23 5/4",
+        data=pd.DataFrame(
+            {
+                "displacement_mm": [0.0, 0.01, 0.02],
+                "load_g": [0.0, 0.10, 0.20],
+                "strain_pct": [0.0, 0.05, 0.10],
+                "stress_mpa": [0.0, 0.9, 1.8],
+            }
+        ),
+        label="loop",
+    )
+    panel.update_selection(record.sample, [record])
+    assert panel._tab_widget.count() == 1
+
+    canvas = next(iter(panel._canvas_records))
+    event = SimpleNamespace(
+        dblclick=True,
+        xdata=0.0101,
+        ydata=0.11,
+        inaxes=canvas.figure.axes[0],
+        canvas=canvas,
+    )
+    panel._handle_click(event)
+
+    assert panel._picked_labels["displacement_mm"].text() == "0.01 mm"
+    assert panel._picked_labels["load_g"].text() == "0.1 g"
+    assert panel._picked_labels["strain_pct"].text() == "0.05 %"
+    assert panel._picked_labels["stress_mpa"].text() == "0.9 MPa"
+
+    panel.clear("done")
+    panel.close()
+
+
+def test_shape_memory_section_double_click_stores_value_columns(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        path = tmp_path / "Ni50Fe27Ga23 5-4 s1 loop.txt"
+        path.write_text(
+            "\n".join(
+                [
+                    "Displacement\tLoad\tStrain\tStress",
+                    "mm\tg\t%\tMPa",
+                    "0\t0\t0\t0",
+                    "0.01\t0.10\t0.05\t0.9",
+                    "0.02\t0.20\t0.10\t1.8",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        section._active_candidates = [path]
+        result = section.process([path])
+        section._handle_worker_finished(result)
+        section.table_view.selectRow(0)
+        section._apply_picked_selection(
+            "standard",
+            builder_ui._ShapeMemoryPointSelection(
+                index=1,
+                displacement_mm=0.01,
+                load_g=0.10,
+                strain_pct=0.05,
+                stress_mpa=0.9,
+            )
+        )
+
+        frame = section.model.frame()
+        assert frame.at[0, SHAPE_MEMORY_DISPLACEMENT_COLUMN] == pytest.approx(0.01)
+        assert frame.at[0, SHAPE_MEMORY_LOAD_COLUMN] == pytest.approx(0.10)
+        assert frame.at[0, SHAPE_MEMORY_STRAIN_COLUMN] == pytest.approx(0.05)
+        assert frame.at[0, SHAPE_MEMORY_STRESS_COLUMN] == pytest.approx(0.9)
+
+        section._apply_picked_selection(
+            "fracture",
+            builder_ui._ShapeMemoryPointSelection(
+                index=1,
+                displacement_mm=0.01,
+                load_g=0.10,
+                strain_pct=0.05,
+                stress_mpa=0.9,
+            ),
+        )
+        frame = section.model.frame()
+        assert frame.at[0, SHAPE_MEMORY_FRACTURE_LOAD_COLUMN] == pytest.approx(0.10)
+        assert frame.at[0, SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN] == pytest.approx(0.05)
+        assert frame.at[0, SHAPE_MEMORY_FRACTURE_STRESS_COLUMN] == pytest.approx(0.9)
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_build_database_populates_shape_memory_graph_column(tmp_path: Path) -> None:
+    anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
+    anneal_path.write_text("placeholder", encoding="utf-8")
+    metadata = MeasurementMetadata(
+        composition_token="Ni50Fe27Ga23",
+        draw_x=5,
+        piece_y=4,
+        setpoint_mA=1000,
+        alt_variant=False,
+        measurement_id="test-measurement",
+        file_name=anneal_path.name,
+        relpath=anneal_path.name,
+        timestamp_mtime_utc="2026-03-11T00:00:00+00:00",
+    )
+    measurement = MeasurementRecord(
+        path=anneal_path,
+        metadata=metadata,
+        dataframe=pd.DataFrame(
+            {
+                "I_A": [0.1, 0.2],
+                "V_V": [0.2, 0.4],
+                "R_ohm": [2.0, 2.0],
+                "I_mA": [100.0, 200.0],
+            }
+        ),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    shape_memory = ShapeMemoryStressStrainRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5-4 loop.txt",
+        sample="Ni50Fe27Ga23",
+        data=pd.DataFrame(
+            {
+                "displacement_mm": [0.0, 0.01, 0.02],
+                "load_g": [0.0, 0.1, 0.2],
+                "strain_pct": [0.0, 0.05, 0.10],
+                "stress_mpa": [0.0, 1.0, 2.0],
+            }
+        ),
+        key=("Ni50Fe27Ga23", 5, 4, None),
+        label="loop",
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path,
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+        ),
+        measurement_records=[measurement],
+        shape_memory_stress_strain_records=[shape_memory],
+        fabrication_index=FabricationIndex(),
+        skip_exports=True,
+    )
+
+    assert SHAPE_MEMORY_STRESS_STRAIN_COLUMN in result.dataframe.columns
+    assert result.dataframe.iloc[0][SHAPE_MEMORY_STRESS_STRAIN_COLUMN] == ["loop"]
+
+
+def test_build_database_populates_shape_memory_value_columns(tmp_path: Path) -> None:
+    anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
+    anneal_path.write_text("placeholder", encoding="utf-8")
+    metadata = MeasurementMetadata(
+        composition_token="Ni50Fe27Ga23",
+        draw_x=5,
+        piece_y=4,
+        setpoint_mA=1000,
+        alt_variant=False,
+        measurement_id="test-measurement",
+        file_name=anneal_path.name,
+        relpath=anneal_path.name,
+        timestamp_mtime_utc="2026-03-11T00:00:00+00:00",
+    )
+    measurement = MeasurementRecord(
+        path=anneal_path,
+        metadata=metadata,
+        dataframe=pd.DataFrame(
+            {"I_A": [0.1], "V_V": [0.2], "R_ohm": [2.0], "I_mA": [100.0]}
+        ),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path,
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+        ),
+        measurement_records=[measurement],
+        shape_memory_entries={
+            "Ni50Fe27Ga23|5|4": {
+                SHAPE_MEMORY_DISPLACEMENT_COLUMN: 0.01,
+                SHAPE_MEMORY_LOAD_COLUMN: 0.1,
+                SHAPE_MEMORY_STRAIN_COLUMN: 0.05,
+                SHAPE_MEMORY_STRESS_COLUMN: 0.9,
+            }
+        },
+        fabrication_index=FabricationIndex(),
+        skip_exports=True,
+    )
+
+    row = result.dataframe.iloc[0]
+    assert row[SHAPE_MEMORY_DISPLACEMENT_COLUMN] == pytest.approx(0.01)
+    assert row[SHAPE_MEMORY_LOAD_COLUMN] == pytest.approx(0.1)
+    assert row[SHAPE_MEMORY_STRAIN_COLUMN] == pytest.approx(0.05)
+    assert row[SHAPE_MEMORY_STRESS_COLUMN] == pytest.approx(0.9)
+    assert row[SHAPE_MEMORY_FRACTURE_LOAD_COLUMN] in (None, "")
+
+
+def test_build_database_populates_shape_memory_fracture_columns(tmp_path: Path) -> None:
+    anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
+    anneal_path.write_text("placeholder", encoding="utf-8")
+    metadata = MeasurementMetadata(
+        composition_token="Ni50Fe27Ga23",
+        draw_x=5,
+        piece_y=4,
+        setpoint_mA=1000,
+        alt_variant=False,
+        measurement_id="test-measurement",
+        file_name=anneal_path.name,
+        relpath=anneal_path.name,
+        timestamp_mtime_utc="2026-03-11T00:00:00+00:00",
+    )
+    measurement = MeasurementRecord(
+        path=anneal_path,
+        metadata=metadata,
+        dataframe=pd.DataFrame(
+            {"I_A": [0.1], "V_V": [0.2], "R_ohm": [2.0], "I_mA": [100.0]}
+        ),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path,
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+        ),
+        measurement_records=[measurement],
+        shape_memory_entries={
+            "Ni50Fe27Ga23|5|4": {
+                SHAPE_MEMORY_FRACTURE_LOAD_COLUMN: 1.5,
+                SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN: 8.2,
+                SHAPE_MEMORY_FRACTURE_STRESS_COLUMN: 320.0,
+            }
+        },
+        fabrication_index=FabricationIndex(),
+        skip_exports=True,
+    )
+
+    row = result.dataframe.iloc[0]
+    assert row[SHAPE_MEMORY_FRACTURE_LOAD_COLUMN] == pytest.approx(1.5)
+    assert row[SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN] == pytest.approx(8.2)
+    assert row[SHAPE_MEMORY_FRACTURE_STRESS_COLUMN] == pytest.approx(320.0)
+
+
+def test_preview_export_frame_matches_visible_preview_order_and_values() -> None:
+    _ensure_qapp()
+    section = builder_ui.AssemblySection.__new__(builder_ui.AssemblySection)
+    frame = pd.DataFrame(
+        {
+            "First": [1],
+            "Graphs": [["A", "B"]],
+            "Second": ["x"],
+        }
+    )
+    section.preview_model = builder_ui.DataFrameModel(frame)
+    section.preview_table = QtWidgets.QTableView()
+    section.preview_table.setModel(section.preview_model)
+    header = section.preview_table.horizontalHeader()
+    header.moveSection(1, 0)
+
+    export_frame = builder_ui.AssemblySection._preview_export_frame(section)
+
+    assert list(export_frame.columns) == ["Graphs", "First", "Second"]
+    assert export_frame.iloc[0]["Graphs"] == "A, B"
 
 
 def test_assembly_exposes_compare_hook() -> None:
@@ -350,6 +823,723 @@ def test_microscope_prepopulate_images(tmp_path: Path) -> None:
     assert str(core_path) in images
     assert str(glass_path) in images
     assert str(other_path) in images
+
+
+def test_microscope_prepopulate_keeps_other_end_images_when_not_in_expected_keys(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        section.reset_to_blank()
+        section._expected_keys_current = {("Ni46Fe23Ga23Co8", 1, 1, None)}
+
+        core_path = tmp_path / "Ni46Fe23Ga23Co8 1-1oe core.jpg"
+        glass_path = tmp_path / "Ni46Fe23Ga23Co8 1-1oe glass.jpg"
+        for path in (core_path, glass_path):
+            path.write_bytes(b"test")
+
+        section._prepopulate_image_refs([core_path, glass_path])
+
+        row = section._row_for_key("Ni46Fe23Ga23Co8|1|1|oe")
+        assert row is not None
+        assert row["_core_image"] == str(core_path)
+        assert row["_glass_image"] == str(glass_path)
+        assert section._row_missing_images(row) is False
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_brittle_glass_only_row_is_not_treated_as_missing(tmp_path: Path) -> None:
+    _ensure_qapp()
+    glass_path = tmp_path / "TestCompG 1-1 glass brittle.jpg"
+    glass_path.write_bytes(b"test")
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompG",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 28.2,
+                    "d/D": None,
+                    BRITTLE_COLUMN: "brittle",
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompG|1|1",
+                    "_core_image": None,
+                    "_glass_image": str(glass_path),
+                    "_images": [str(glass_path)],
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        row = section._row_for_key("TestCompG|1|1")
+        assert row is not None
+        assert section._row_missing_images(row) is False
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_apply_data_marks_existing_brittle_glass_rows(tmp_path: Path) -> None:
+    _ensure_qapp()
+    glass_path = tmp_path / "TestCompH 1-1 glass brittle.jpg"
+    glass_path.write_bytes(b"test")
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompH",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 28.2,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompH|1|1",
+                    "_core_image": None,
+                    "_glass_image": str(glass_path),
+                    "_images": [str(glass_path)],
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        row = section._row_for_key("TestCompH|1|1")
+        assert row is not None
+        assert row.get(BRITTLE_COLUMN) == "brittle"
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_collect_candidates_keeps_all_files_when_ocr_is_deferred(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        core_path = tmp_path / "Ni46Fe23Ga23Co8 1-1oe core.jpg"
+        glass_path = tmp_path / "Ni46Fe23Ga23Co8 1-1oe glass.jpg"
+        for path in (core_path, glass_path):
+            path.write_bytes(b"test")
+
+        section.set_sources([str(tmp_path)])
+        section.data.processed = {
+            str(core_path): core_path.stat().st_mtime,
+            str(glass_path): glass_path.stat().st_mtime,
+        }
+        section.defer_ocr_checkbox.setChecked(True)
+
+        candidates = section._collect_candidates()
+
+        assert core_path in candidates
+        assert glass_path in candidates
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_section_auto_selects_first_row_and_loads_previews(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        core_path = tmp_path / "core.png"
+        glass_path = tmp_path / "glass.png"
+        for path, color in (
+            (core_path, QtGui.QColor("#1d4ed8")),
+            (glass_path, QtGui.QColor("#16a34a")),
+        ):
+            image = QtGui.QImage(32, 24, QtGui.QImage.Format.Format_RGB32)
+            image.fill(color)
+            assert image.save(str(path))
+
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni46Fe23Ga23Co8",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: 6.7,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 34.4,
+                    "d/D": 0.195,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "Ni46Fe23Ga23Co8|1|1",
+                    "_core_image": str(core_path),
+                    "_glass_image": str(glass_path),
+                    "_images": [str(core_path), str(glass_path)],
+                }
+            ]
+        )
+
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        _ensure_qapp().processEvents()
+
+        current = section.table_view.currentIndex()
+        assert current.isValid()
+        selected = section._selected_row()
+        assert selected is not None
+        assert selected["_key"] == "Ni46Fe23Ga23Co8|1|1"
+        assert bool(getattr(section.core_preview_label, "_pixmap", None))
+        assert bool(getattr(section.glass_preview_label, "_pixmap", None))
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_manual_enter_marks_reviewed_and_advances() -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompA",
+                    "Microwire": "1/1oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompA|1|1|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+                {
+                    "Composition": "TestCompA",
+                    "Microwire": "1/2oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompA|1|2|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+            ]
+        )
+
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section._select_row_for_key("TestCompA|1|1|oe", builder_ui.MICROSCOPE_D_COLUMN)
+        _ensure_qapp().processEvents()
+
+        section.d_edit.setText("12.3")
+        section._apply_override(builder_ui.MICROSCOPE_D_COLUMN)
+        _ensure_qapp().processEvents()
+        row = section._selected_row()
+        assert row is not None
+        assert row["_key"] == "TestCompA|1|1|oe"
+
+        section.D_edit.setText("45.6")
+        section._apply_override(builder_ui.MICROSCOPE_CAP_D_COLUMN)
+        _ensure_qapp().processEvents()
+
+        row = section._selected_row()
+        assert row is not None
+        assert row["_key"] == "TestCompA|1|2|oe"
+        entry = section._validated["TestCompA|1|1|oe"]
+        assert entry["d_reviewed"] is True
+        assert entry["D_reviewed"] is True
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_open_sources_enabled_for_current_cell_selection(tmp_path: Path) -> None:
+    _ensure_qapp()
+    image_path = tmp_path / "TestCompB 1-1oe glass.jpg"
+    image_path.write_bytes(b"test")
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompB",
+                    "Microwire": "1/1oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: 8.1,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 32.7,
+                    "d/D": 0.248,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompB|1|1|oe",
+                    "_core_image": None,
+                    "_glass_image": str(image_path),
+                    "_images": [str(image_path)],
+                }
+            ]
+        )
+
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section._select_row_for_key("TestCompB|1|1|oe", builder_ui.MICROSCOPE_CAP_D_COLUMN)
+        _ensure_qapp().processEvents()
+
+        assert section.open_sources_button.isEnabled() is True
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_return_key_marks_reviewed_and_advances() -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompC",
+                    "Microwire": "1/1oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: 8.1,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 32.7,
+                    "d/D": 0.248,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompC|1|1|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+                {
+                    "Composition": "TestCompC",
+                    "Microwire": "2/3oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompC|2|3|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section._select_row_for_key("TestCompC|1|1|oe", builder_ui.MICROSCOPE_CAP_D_COLUMN)
+        _ensure_qapp().processEvents()
+
+        section.D_edit.setFocus()
+        section.D_edit.selectAll()
+        section.D_edit.setText("32.7")
+        QtTest.QTest.keyClick(section.D_edit, QtCore.Qt.Key.Key_Return)
+        _ensure_qapp().processEvents()
+
+        row = section._selected_row()
+        assert row is not None
+        assert row["_key"] == "TestCompC|2|3|oe"
+        entry = section._validated["TestCompC|1|1|oe"]
+        assert entry["D_reviewed"] is True
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_table_cell_return_moves_to_next_unverified_cell() -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompF",
+                    "Microwire": "1/1oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompF|1|1|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+                {
+                    "Composition": "TestCompF",
+                    "Microwire": "1/2oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "TestCompF|1|2|oe",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section.show()
+        _ensure_qapp().processEvents()
+
+        section._select_row_for_key("TestCompF|1|1|oe", builder_ui.MICROSCOPE_D_COLUMN)
+        _ensure_qapp().processEvents()
+        index = section.table_view.currentIndex()
+        section.table_view.edit(index)
+        _ensure_qapp().processEvents()
+        editor = section.table_view.focusWidget()
+        assert isinstance(editor, QtWidgets.QLineEdit)
+        editor.selectAll()
+        editor.setText("12.3")
+        QtTest.QTest.keyClick(editor, QtCore.Qt.Key.Key_Return)
+        _ensure_qapp().processEvents()
+        QtTest.QTest.qWait(200)
+        _ensure_qapp().processEvents()
+
+        row = section._selected_row()
+        assert row is not None
+        assert row["_key"] == "TestCompF|1|1|oe"
+        current = section.table_view.currentIndex()
+        assert current.isValid()
+        assert current.column() == list(section.model.frame().columns).index(builder_ui.MICROSCOPE_CAP_D_COLUMN)
+        entry = section._validated["TestCompF|1|1|oe"]
+        assert entry["d_reviewed"] is True
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_fabrication_relevant_map_includes_microscope_only_non_other_end() -> None:
+    _ensure_qapp()
+    microscope_store = builder_ui.MiniDatabaseStore("microscope")
+    microscope_original = microscope_store.load()
+    annealing_store = builder_ui.MiniDatabaseStore("annealing")
+    annealing_original = annealing_store.load()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        microscope_frame = pd.DataFrame(
+            [
+                {"Composition": "TestCompD", "Microwire": "1/1", "_key": "TestCompD|1|1"},
+                {"Composition": "TestCompD", "Microwire": "1/1oe", "_key": "TestCompD|1|1|oe"},
+            ]
+        )
+        microscope_store.save(MiniDatabaseData(table=microscope_frame))
+        annealing_store.save(MiniDatabaseData(table=pd.DataFrame()))
+
+        relevant_map, relevant_compositions = section._load_relevant_map()
+
+        assert "TestCompD" in relevant_compositions
+        assert relevant_map["TestCompD"][1] == {1}
+    finally:
+        microscope_store.save(microscope_original)
+        annealing_store.save(annealing_original)
+        section.close()
+
+
+def test_fabrication_augments_rows_for_microscope_only_samples() -> None:
+    _ensure_qapp()
+    microscope_store = builder_ui.MiniDatabaseStore("microscope")
+    microscope_original = microscope_store.load()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        microscope_frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompI",
+                    "Microwire": "3/2",
+                    builder_ui.MICROSCOPE_D_COLUMN: 7.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 25.0,
+                    "d/D": 0.28,
+                    "_key": "TestCompI|3|2",
+                }
+            ]
+        )
+        microscope_store.save(MiniDatabaseData(table=microscope_frame))
+
+        base = pd.DataFrame(columns=builder_ui._fabrication_index_to_frame(FabricationIndex()).columns)
+        relevant_map = {"TestCompI": {3: {2}}}
+        updated = section._augment_table_with_relevant_microscope_rows(base, relevant_map)
+
+        assert len(updated.index) == 1
+        row = updated.iloc[0]
+        assert row["Composition"] == "TestCompI"
+        assert row["Draw"] == 3
+        assert row["Piece"] == 2
+        assert row["Data source"] == "Microscope only"
+        assert row[builder_ui.MICROSCOPE_D_COLUMN] == 7.0
+    finally:
+        microscope_store.save(microscope_original)
+        section.close()
+
+
+def test_assembly_import_dedupes_duplicate_columns() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    try:
+        payload = {
+            "columns": ["Composition", "Core temperature (°C)", "Core temperature (°C)"],
+            "rows": [
+                {
+                    "Composition": "Ni46Fe23Ga23Co8",
+                    "Core temperature (°C)": 123.4,
+                }
+            ],
+            "index": [0],
+        }
+
+        assembly.import_project_payload(payload)
+
+        frame = assembly._raw_preview_frame
+        assert isinstance(frame, pd.DataFrame)
+        assert list(frame.columns).count("Core temperature (°C)") == 1
+    finally:
+        assembly.close()
+
+
+def test_build_database_populates_brittle_column_from_microscope_index(tmp_path: Path) -> None:
+    record = MeasurementRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+        metadata=MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=5,
+            piece_y=4,
+            setpoint_mA=1000,
+            alt_variant=False,
+            file_name="Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+            measurement_id="m1",
+            relpath="Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+            timestamp_mtime_utc="2026-03-12T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame({"I_A": [1.0], "V_V": [1.0], "R_ohm": [1.0]}),
+        sanity_ok=True,
+        sanity_error=None,
+    )
+    microscope_index = {
+        ("Ni50Fe27Ga23", 5, 4, None): core.MicroscopeMeasurements(
+            glass=[
+                core.MicroscopeDetection(
+                    value=28.2,
+                    image_path=tmp_path / "Ni50Fe27Ga23 5-4 glass brittle.jpg",
+                    source="manual",
+                    category="glass",
+                )
+            ],
+            brittle=True,
+        )
+    }
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path / "out",
+        ),
+        measurement_records=[record],
+        microscope_index=microscope_index,
+        skip_exports=True,
+    )
+    assert BRITTLE_COLUMN in result.dataframe.columns
+    assert result.dataframe.iloc[0][BRITTLE_COLUMN] == "brittle"
+
+
+def test_shape_memory_section_normalises_current_columns_from_sources(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    "_group_key": "Ni50Fe27Ga23|10|1",
+                    "_sources": [
+                        str(tmp_path / "Ni50Fe27Ga23 10_1 30mA fracture.txt"),
+                        str(tmp_path / "Ni50Fe27Ga23 10_1 30mA.txt"),
+                    ],
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.8,
+                    SHAPE_MEMORY_LOAD_COLUMN: 7.0,
+                    SHAPE_MEMORY_STRAIN_COLUMN: 18.59,
+                    SHAPE_MEMORY_STRESS_COLUMN: 568.4,
+                    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN: 11.52,
+                    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN: 21.05,
+                    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN: 935.3,
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        row = section.model.frame().iloc[0]
+        assert row[builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == 30.0
+        assert row[builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] == 30.0
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_shape_memory_preview_panel_shows_saved_row_values(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        record = ShapeMemoryStressStrainRecord(
+            path=tmp_path / "Ni50Fe27Ga23 10_1 30mA.txt",
+            sample="Ni50Fe27Ga23 10/1",
+            data=pd.DataFrame(
+                {
+                    "displacement_mm": [0.0, 0.01],
+                    "load_g": [0.0, 0.10],
+                    "strain_pct": [0.0, 0.05],
+                    "stress_mpa": [0.0, 0.9],
+                }
+            ),
+            key=("Ni50Fe27Ga23", 10, 1),
+            label="30mA",
+        )
+        section._record_groups = {"Ni50Fe27Ga23 10/1": [record]}
+        section._record_groups_by_key = {"Ni50Fe27Ga23|10|1": [record]}
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    "_group_key": "Ni50Fe27Ga23|10|1",
+                    "_sources": [str(record.path)],
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.8,
+                    SHAPE_MEMORY_LOAD_COLUMN: 7.0,
+                    SHAPE_MEMORY_STRAIN_COLUMN: 18.59,
+                    SHAPE_MEMORY_STRESS_COLUMN: 568.4,
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section._record_groups = {"Ni50Fe27Ga23 10/1": [record]}
+        section._record_groups_by_key = {"Ni50Fe27Ga23|10|1": [record]}
+        section.table_view.selectRow(0)
+        _ensure_qapp().processEvents()
+        section._update_preview()
+        panel = section._preview_panel
+        assert panel is not None
+        assert panel._picked_labels["displacement_mm"].text() == "3.8 mm"
+        assert panel._picked_labels["load_g"].text() == "7 g"
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_assembly_expands_shape_memory_rows_per_current() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/4",
+                    builder_ui.MICROSCOPE_D_COLUMN: 13.7,
+                    "d/D": 0.194,
+                    SHAPE_MEMORY_STRESS_STRAIN_COLUMN: ["25mA fracture", "25mA", "40mA"],
+                }
+            ]
+        )
+        fracture_record = ShapeMemoryStressStrainRecord(
+            path=Path("Ni50Fe27Ga23 10_4 25mA fracture.txt"),
+            sample="Ni50Fe27Ga23 10/4",
+            data=pd.DataFrame(),
+            key=("Ni50Fe27Ga23", 10, 4),
+            label="25mA fracture",
+        )
+        standard_25 = ShapeMemoryStressStrainRecord(
+            path=Path("Ni50Fe27Ga23 10_4 25mA.txt"),
+            sample="Ni50Fe27Ga23 10/4",
+            data=pd.DataFrame(),
+            key=("Ni50Fe27Ga23", 10, 4),
+            label="25mA",
+        )
+        standard_40 = ShapeMemoryStressStrainRecord(
+            path=Path("Ni50Fe27Ga23 10_4 40mA.txt"),
+            sample="Ni50Fe27Ga23 10/4",
+            data=pd.DataFrame(),
+            key=("Ni50Fe27Ga23", 10, 4),
+            label="40mA",
+        )
+        assembly._cached_shape_memory_stress_strain_groups = {
+            "Ni50Fe27Ga23|10|4": [fracture_record, standard_25, standard_40]
+        }
+        assembly._cached_shape_memory_entries = {}
+        assembly._cached_shape_memory_record_entries = {
+            str(standard_25.path): {
+                SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.7,
+                SHAPE_MEMORY_LOAD_COLUMN: 7.715,
+                SHAPE_MEMORY_STRAIN_COLUMN: 13.628,
+                SHAPE_MEMORY_STRESS_COLUMN: 513.246,
+            },
+            str(fracture_record.path): {
+                SHAPE_MEMORY_FRACTURE_LOAD_COLUMN: 18.834,
+                SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN: 22.994,
+                SHAPE_MEMORY_FRACTURE_STRESS_COLUMN: 1252.946,
+            },
+            str(standard_40.path): {
+                SHAPE_MEMORY_DISPLACEMENT_COLUMN: 4.1,
+                SHAPE_MEMORY_LOAD_COLUMN: 8.4,
+                SHAPE_MEMORY_STRAIN_COLUMN: 15.1,
+                SHAPE_MEMORY_STRESS_COLUMN: 580.0,
+            },
+        }
+
+        expanded = assembly._expand_shape_memory_preview_rows(frame)
+
+        assert len(expanded.index) == 2
+        first = expanded.iloc[0]
+        second = expanded.iloc[1]
+        assert first[builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == 25.0
+        assert first[builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] == 25.0
+        assert first[SHAPE_MEMORY_STRAIN_COLUMN] == pytest.approx(13.628)
+        assert first[SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN] == pytest.approx(22.994)
+        assert second[builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == 40.0
+        assert pd.isna(second[builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN])
+        assert second[SHAPE_MEMORY_STRAIN_COLUMN] == pytest.approx(15.1)
+    finally:
+        assembly.close()
+
+
+def test_assembly_shape_memory_sort_keeps_sample_rows_grouped() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "A",
+                    "Microwire": "1/1",
+                    builder_ui.SHAPE_MEMORY_CURRENT_COLUMN: 25.0,
+                    builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN: "A|1|1",
+                    builder_ui._SHAPE_MEMORY_GROUP_ORDER_COLUMN: 0,
+                },
+                {
+                    "Composition": "A",
+                    "Microwire": "1/1",
+                    builder_ui.SHAPE_MEMORY_CURRENT_COLUMN: 40.0,
+                    builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN: "A|1|1",
+                    builder_ui._SHAPE_MEMORY_GROUP_ORDER_COLUMN: 1,
+                },
+                {
+                    "Composition": "B",
+                    "Microwire": "1/1",
+                    builder_ui.SHAPE_MEMORY_CURRENT_COLUMN: 30.0,
+                    builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN: "B|1|1",
+                    builder_ui._SHAPE_MEMORY_GROUP_ORDER_COLUMN: 0,
+                },
+            ]
+        )
+        assembly._sort_spec = [(builder_ui.SHAPE_MEMORY_CURRENT_COLUMN, False)]
+
+        sorted_frame, _ = assembly._apply_sort_spec(frame)
+
+        group_keys = sorted_frame[builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN].tolist()
+        assert group_keys in (
+            ["B|1|1", "A|1|1", "A|1|1"],
+            ["A|1|1", "A|1|1", "B|1|1"],
+        )
+    finally:
+        assembly.close()
 
 
 def test_safe_plot_stem_removes_path_separators() -> None:
