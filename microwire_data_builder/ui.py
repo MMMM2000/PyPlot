@@ -277,6 +277,8 @@ SHAPE_MEMORY_CURRENT_COLUMN = "Current (mA)"
 SHAPE_MEMORY_CURRENT_DENSITY_COLUMN = "Current density (A/mm^2)"
 SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN = "Fracture current (mA)"
 SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN = "Fracture current density (A/mm^2)"
+_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN = "_shape_memory_standard_source"
+_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN = "_shape_memory_fracture_source"
 _SHAPE_MEMORY_GROUP_KEY_COLUMN = "_shape_memory_group_key"
 _SHAPE_MEMORY_GROUP_ORDER_COLUMN = "_shape_memory_group_order"
 
@@ -15506,6 +15508,13 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             if column not in updated.columns:
                 updated[column] = None
                 changed = True
+        for column in (
+            _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN,
+            _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
+        ):
+            if column not in updated.columns:
+                updated[column] = None
+                changed = True
         microscope_frame = (
             self._microscope_snapshot.copy()
             if isinstance(self._microscope_snapshot, pd.DataFrame)
@@ -15545,40 +15554,46 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 else:
                     standard_currents.append(current)
 
-            def _assign_current(column: str, density_column: str, values: List[float]) -> None:
-                if values and (updated.at[row_index, column] in (None, "")):
-                    unique = list(dict.fromkeys(float(v) for v in values))
-                    updated.at[row_index, column] = unique[0] if len(unique) == 1 else ", ".join(
-                        f"{value:g}" for value in unique
+            def _assign_current(
+                column: str,
+                density_column: str,
+                source_column: str,
+                values: List[float],
+            ) -> None:
+                source_text = str(updated.at[row_index, source_column] or "").strip()
+                chosen_current: Optional[float] = None
+                if source_text:
+                    chosen_current = _shape_memory_current_mA_from_record(
+                        ShapeMemoryStressStrainRecord(path=Path(source_text), sample="", data=pd.DataFrame())
                     )
-                    changed = True
-                if updated.at[row_index, density_column] in (None, "") and row_key:
+                elif values:
+                    unique = list(dict.fromkeys(float(v) for v in values))
+                    if len(unique) == 1:
+                        chosen_current = unique[0]
+                if updated.at[row_index, column] in (None, ""):
+                    updated.at[row_index, column] = chosen_current
+                    if chosen_current is not None:
+                        changed = True
+                if updated.at[row_index, density_column] in (None, "") and row_key and chosen_current is not None:
                     diameter_um = microscope_lookup.get(row_key)
                     if diameter_um is None:
                         return
-                    unique = list(dict.fromkeys(float(v) for v in values))
-                    densities = [
-                        _current_density_from_diameter_um(value, diameter_um)
-                        for value in unique
-                    ]
-                    densities = [value for value in densities if value is not None]
-                    if not densities:
+                    density = _current_density_from_diameter_um(chosen_current, diameter_um)
+                    if density is None:
                         return
-                    updated.at[row_index, density_column] = (
-                        densities[0]
-                        if len(densities) == 1
-                        else ", ".join(f"{value:.3f}" for value in densities)
-                    )
+                    updated.at[row_index, density_column] = density
                     changed = True
 
             _assign_current(
                 SHAPE_MEMORY_CURRENT_COLUMN,
                 SHAPE_MEMORY_CURRENT_DENSITY_COLUMN,
+                _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN,
                 standard_currents,
             )
             _assign_current(
                 SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
                 SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
+                _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
                 fracture_currents,
             )
         if changed or not frame.columns.equals(updated.columns) or not updated.equals(frame):
@@ -15681,9 +15696,11 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         if target == "fracture":
             updates[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = current_mA
             updates[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = density
+            updates[_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN] = _record_path_key(current_record)
         else:
             updates[SHAPE_MEMORY_CURRENT_COLUMN] = current_mA
             updates[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = density
+            updates[_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] = _record_path_key(current_record)
         updated = frame.copy()
         for column, value in updates.items():
             if column not in updated.columns:
