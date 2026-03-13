@@ -3173,6 +3173,10 @@ def _group_microscope_measurements(
         updated_cache[cache_token] = cache_entry_final
         _notify()
 
+    for record in grouped.values():
+        if not getattr(record, "brittle", False) and not record.core and bool(record.glass):
+            record.brittle = True
+
     missing_references: List[str] = []
     mismatched_references: List[str] = []
     for key, override in MANUAL_DIAMETER_OVERRIDES.items():
@@ -5396,7 +5400,7 @@ def build_database(
                 microscope_data = microscope_index.get((composition, draw_x, piece_y))
         if microscope_data:
             if getattr(microscope_data, "brittle", False):
-                row[BRITTLE_COLUMN] = True
+                row[BRITTLE_COLUMN] = "brittle"
             if d_numeric is None:
                 d_detection = microscope_data.best_core_detection()
                 if (

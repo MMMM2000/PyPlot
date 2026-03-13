@@ -865,7 +865,7 @@ def test_microscope_brittle_glass_only_row_is_not_treated_as_missing(tmp_path: P
                     builder_ui.MICROSCOPE_D_COLUMN: None,
                     builder_ui.MICROSCOPE_CAP_D_COLUMN: 28.2,
                     "d/D": None,
-                    BRITTLE_COLUMN: True,
+                    BRITTLE_COLUMN: "brittle",
                     builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
                     "_key": "TestCompG|1|1",
@@ -910,7 +910,7 @@ def test_microscope_apply_data_marks_existing_brittle_glass_rows(tmp_path: Path)
         section.apply_data(MiniDatabaseData(table=frame, extra={}))
         row = section._row_for_key("TestCompH|1|1")
         assert row is not None
-        assert bool(row.get(BRITTLE_COLUMN)) is True
+        assert row.get(BRITTLE_COLUMN) == "brittle"
     finally:
         section._shutdown_background_threads()
         section.close()
@@ -1297,7 +1297,7 @@ def test_build_database_populates_brittle_column_from_microscope_index(tmp_path:
         skip_exports=True,
     )
     assert BRITTLE_COLUMN in result.dataframe.columns
-    assert bool(result.dataframe.iloc[0][BRITTLE_COLUMN]) is True
+    assert result.dataframe.iloc[0][BRITTLE_COLUMN] == "brittle"
 
 
 def test_safe_plot_stem_removes_path_separators() -> None:

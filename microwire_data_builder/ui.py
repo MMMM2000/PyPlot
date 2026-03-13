@@ -5573,7 +5573,7 @@ def _microscope_index_to_frame(
                 MICROSCOPE_D_COLUMN: d_value,
                 MICROSCOPE_CAP_D_COLUMN: D_value,
                 "d/D": ratio,
-                BRITTLE_COLUMN: bool(getattr(measurements, "brittle", False)),
+                BRITTLE_COLUMN: "brittle" if getattr(measurements, "brittle", False) else None,
                 MICROSCOPE_IMAGE_COLUMNS[0]: None,
                 MICROSCOPE_IMAGE_COLUMNS[1]: None,
                 "_key": key,
@@ -9026,7 +9026,7 @@ class MicroscopeSection(MiniDatabaseSection):
         changed = False
         for idx, row in updated.iterrows():
             current = row.get(BRITTLE_COLUMN)
-            if isinstance(current, bool):
+            if str(current).strip().lower() == "brittle":
                 continue
             sources: List[Path] = []
             for path_value in row.get("_images") or []:
@@ -9043,9 +9043,13 @@ class MicroscopeSection(MiniDatabaseSection):
                     continue
                 if candidate not in sources:
                     sources.append(candidate)
-            brittle = any(_microscope_is_brittle(path) for path in sources)
-            if bool(current) != brittle:
-                updated.at[idx, BRITTLE_COLUMN] = brittle if brittle else None
+            core_present = bool(row.get("_core_image"))
+            glass_present = bool(row.get("_glass_image"))
+            brittle = any(_microscope_is_brittle(path) for path in sources) or (
+                glass_present and not core_present
+            )
+            if (str(current).strip().lower() == "brittle") != brittle:
+                updated.at[idx, BRITTLE_COLUMN] = "brittle" if brittle else None
                 changed = True
         if not changed and list(updated.columns) == list(frame.columns):
             return
@@ -10904,9 +10908,16 @@ class MicroscopeSection(MiniDatabaseSection):
                 MICROSCOPE_D_COLUMN: None,
                 MICROSCOPE_CAP_D_COLUMN: None,
                 "d/D": None,
-                BRITTLE_COLUMN: any(
-                    "brittle" in str(item).lower()
-                    for item in payload.get("_images", [])
+                BRITTLE_COLUMN: (
+                    "brittle"
+                    if (
+                        any("brittle" in str(item).lower() for item in payload.get("_images", []))
+                        or (
+                            payload.get("_glass_image")
+                            and not payload.get("_core_image")
+                        )
+                    )
+                    else None
                 ),
                 MICROSCOPE_IMAGE_COLUMNS[0]: None,
                 MICROSCOPE_IMAGE_COLUMNS[1]: None,
