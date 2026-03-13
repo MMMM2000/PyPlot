@@ -1231,6 +1231,42 @@ def test_fabrication_relevant_map_includes_microscope_only_non_other_end() -> No
         section.close()
 
 
+def test_fabrication_augments_rows_for_microscope_only_samples() -> None:
+    _ensure_qapp()
+    microscope_store = builder_ui.MiniDatabaseStore("microscope")
+    microscope_original = microscope_store.load()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        microscope_frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompI",
+                    "Microwire": "3/2",
+                    builder_ui.MICROSCOPE_D_COLUMN: 7.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 25.0,
+                    "d/D": 0.28,
+                    "_key": "TestCompI|3|2",
+                }
+            ]
+        )
+        microscope_store.save(MiniDatabaseData(table=microscope_frame))
+
+        base = pd.DataFrame(columns=builder_ui._fabrication_index_to_frame(FabricationIndex()).columns)
+        relevant_map = {"TestCompI": {3: {2}}}
+        updated = section._augment_table_with_relevant_microscope_rows(base, relevant_map)
+
+        assert len(updated.index) == 1
+        row = updated.iloc[0]
+        assert row["Composition"] == "TestCompI"
+        assert row["Draw"] == 3
+        assert row["Piece"] == 2
+        assert row["Data source"] == "Microscope only"
+        assert row[builder_ui.MICROSCOPE_D_COLUMN] == 7.0
+    finally:
+        microscope_store.save(microscope_original)
+        section.close()
+
+
 def test_assembly_import_dedupes_duplicate_columns() -> None:
     _ensure_qapp()
     assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
@@ -1298,6 +1334,94 @@ def test_build_database_populates_brittle_column_from_microscope_index(tmp_path:
     )
     assert BRITTLE_COLUMN in result.dataframe.columns
     assert result.dataframe.iloc[0][BRITTLE_COLUMN] == "brittle"
+
+
+def test_shape_memory_section_normalises_current_columns_from_sources(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    "_group_key": "Ni50Fe27Ga23|10|1",
+                    "_sources": [
+                        str(tmp_path / "Ni50Fe27Ga23 10_1 30mA fracture.txt"),
+                        str(tmp_path / "Ni50Fe27Ga23 10_1 30mA.txt"),
+                    ],
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.8,
+                    SHAPE_MEMORY_LOAD_COLUMN: 7.0,
+                    SHAPE_MEMORY_STRAIN_COLUMN: 18.59,
+                    SHAPE_MEMORY_STRESS_COLUMN: 568.4,
+                    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN: 11.52,
+                    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN: 21.05,
+                    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN: 935.3,
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        row = section.model.frame().iloc[0]
+        assert row[builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == 30.0
+        assert row[builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] == 30.0
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_shape_memory_preview_panel_shows_saved_row_values(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        record = ShapeMemoryStressStrainRecord(
+            path=tmp_path / "Ni50Fe27Ga23 10_1 30mA.txt",
+            sample="Ni50Fe27Ga23 10/1",
+            data=pd.DataFrame(
+                {
+                    "displacement_mm": [0.0, 0.01],
+                    "load_g": [0.0, 0.10],
+                    "strain_pct": [0.0, 0.05],
+                    "stress_mpa": [0.0, 0.9],
+                }
+            ),
+            key=("Ni50Fe27Ga23", 10, 1),
+            label="30mA",
+        )
+        section._record_groups = {"Ni50Fe27Ga23 10/1": [record]}
+        section._record_groups_by_key = {"Ni50Fe27Ga23|10|1": [record]}
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    "_group_key": "Ni50Fe27Ga23|10|1",
+                    "_sources": [str(record.path)],
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.8,
+                    SHAPE_MEMORY_LOAD_COLUMN: 7.0,
+                    SHAPE_MEMORY_STRAIN_COLUMN: 18.59,
+                    SHAPE_MEMORY_STRESS_COLUMN: 568.4,
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section._record_groups = {"Ni50Fe27Ga23 10/1": [record]}
+        section._record_groups_by_key = {"Ni50Fe27Ga23|10|1": [record]}
+        section.table_view.selectRow(0)
+        _ensure_qapp().processEvents()
+        section._update_preview()
+        panel = section._preview_panel
+        assert panel is not None
+        assert panel._picked_labels["displacement_mm"].text() == "3.8 mm"
+        assert panel._picked_labels["load_g"].text() == "7 g"
+    finally:
+        section._shutdown_background_threads()
+        section.close()
 
 
 def test_assembly_expands_shape_memory_rows_per_current() -> None:

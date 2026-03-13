@@ -4552,6 +4552,9 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         self._logger = logger
         self._canvas_records: Dict[FigureCanvasQTAgg, ShapeMemoryStressStrainRecord] = {}
         self._canvas_connections: List[Tuple[FigureCanvasQTAgg, Optional[int], Optional[int]]] = []
+        self._tab_canvases: List[FigureCanvasQTAgg] = []
+        self._saved_standard_selection: Optional[_ShapeMemoryPointSelection] = None
+        self._saved_fracture_selection: Optional[_ShapeMemoryPointSelection] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -4592,6 +4595,8 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         fracture_button = QtWidgets.QRadioButton("Fracture values")
         self._target_buttons["standard"] = normal_button
         self._target_buttons["fracture"] = fracture_button
+        normal_button.toggled.connect(self._refresh_saved_picked_labels)
+        fracture_button.toggled.connect(self._refresh_saved_picked_labels)
         target_row.addWidget(normal_button)
         target_row.addWidget(fracture_button)
         target_row.addStretch(1)
@@ -4622,6 +4627,8 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
         self.header_label.setText(title or "Shape memory stress/strain")
         self._clear_tabs()
+        self._saved_standard_selection = None
+        self._saved_fracture_selection = None
         self._update_picked_labels(None)
         if not records:
             self._placeholder.setText("No shape-memory graphs available for this microwire.")
@@ -4652,6 +4659,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
                 click_cid = None
             self._canvas_records[canvas] = record
             self._canvas_connections.append((canvas, motion_cid, click_cid))
+            self._tab_canvases.append(canvas)
             page = QtWidgets.QWidget(self._tab_widget)
             page_layout = QtWidgets.QVBoxLayout(page)
             page_layout.setContentsMargins(0, 0, 0, 0)
@@ -4665,6 +4673,22 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
             if current_index >= 0:
                 self._tab_widget.setCurrentIndex(min(current_index, self._tab_widget.count() - 1))
             self._stack.setCurrentWidget(self._tab_widget)
+
+    def current_record(self) -> Optional[ShapeMemoryStressStrainRecord]:
+        current_index = self._tab_widget.currentIndex()
+        if current_index < 0 or current_index >= len(self._tab_canvases):
+            return None
+        canvas = self._tab_canvases[current_index]
+        return self._canvas_records.get(canvas)
+
+    def set_saved_values(
+        self,
+        standard: Optional[_ShapeMemoryPointSelection],
+        fracture: Optional[_ShapeMemoryPointSelection],
+    ) -> None:
+        self._saved_standard_selection = standard
+        self._saved_fracture_selection = fracture
+        self._refresh_saved_picked_labels()
 
     def clear(self, message: str) -> None:
         self.header_label.setText("Shape memory stress/strain")
@@ -4688,6 +4712,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
                     pass
         self._canvas_connections.clear()
         self._canvas_records.clear()
+        self._tab_canvases.clear()
         while self._tab_widget.count():
             widget = self._tab_widget.widget(0)
             self._tab_widget.removeTab(0)
@@ -4731,6 +4756,10 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         selection = self._selection_from_event(event)
         self._update_hover_label(selection)
         self._update_picked_labels(selection)
+        if self._current_target() == "fracture":
+            self._saved_fracture_selection = selection
+        else:
+            self._saved_standard_selection = selection
         if selection is not None:
             try:
                 self.pointPicked.emit(self._current_target(), selection)
@@ -4765,6 +4794,14 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         for key, widget in self._picked_labels.items():
             value, units = mapping[key]
             widget.setText(self._format_value(value, units) if value is not None else "unset")
+
+    def _refresh_saved_picked_labels(self) -> None:
+        selection = (
+            self._saved_fracture_selection
+            if self._current_target() == "fracture"
+            else self._saved_standard_selection
+        )
+        self._update_picked_labels(selection)
 
     @staticmethod
     def _format_value(value: float, units: str) -> str:
@@ -7732,6 +7769,95 @@ class FabricationSection(MiniDatabaseSection):
             filtered.set_piece(comp_key, draw_int, piece_int, dict(piece_data))
         return filtered
 
+    def _augment_table_with_relevant_microscope_rows(
+        self,
+        frame: pd.DataFrame,
+        relevant_map: Dict[str, Dict[Optional[int], Set[Optional[int]]]],
+    ) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame):
+            frame = pd.DataFrame()
+        columns = list(frame.columns) if not frame.empty else list(_fabrication_index_to_frame(FabricationIndex()).columns)
+        updated = frame.copy() if not frame.empty else pd.DataFrame(columns=columns)
+        existing: Set[Tuple[str, int, int]] = set()
+        if not updated.empty:
+            for _, row in updated.iterrows():
+                comp = str(row.get("Composition") or "").strip()
+                try:
+                    draw = int(row.get("Draw"))
+                    piece = int(row.get("Piece"))
+                except Exception:
+                    continue
+                if comp:
+                    existing.add((comp, draw, piece))
+
+        microscope_data = MiniDatabaseStore("microscope").load()
+        microscope_table = (
+            microscope_data.table
+            if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
+            else pd.DataFrame()
+        )
+        microscope_lookup: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+        if not microscope_table.empty:
+            for _, row in microscope_table.iterrows():
+                comp = str(row.get("Composition") or "").strip()
+                microwire = str(row.get("Microwire") or "").strip()
+                if not comp or not microwire or microwire.lower().endswith("oe"):
+                    continue
+                parsed = _microwire_parts_from_label_safe(microwire)
+                if parsed is None:
+                    continue
+                draw, piece, _suffix = parsed
+                microscope_lookup[(comp, int(draw), int(piece))] = dict(row)
+
+        new_rows: List[Dict[str, Any]] = []
+        for composition, draws in relevant_map.items():
+            comp_key = str(composition).strip()
+            if not comp_key:
+                continue
+            for draw, pieces in draws.items():
+                if draw is None:
+                    continue
+                for piece in pieces:
+                    if piece is None:
+                        continue
+                    key = (comp_key, int(draw), int(piece))
+                    if key in existing:
+                        continue
+                    row: Dict[str, Any] = {column: None for column in columns}
+                    row["Composition"] = comp_key
+                    row["Data source"] = "Microscope only"
+                    row["e/a"] = _compute_ea_from_composition(comp_key)
+                    row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(row["e/a"])
+                    row["Draw"] = int(draw)
+                    row["Piece"] = int(piece)
+                    microscope_row = microscope_lookup.get(key, {})
+                    for column in (MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN, "d/D"):
+                        if column in row and column in microscope_row:
+                            row[column] = microscope_row.get(column)
+                    new_rows.append(row)
+        if not new_rows:
+            return updated
+        appended = pd.DataFrame(new_rows)
+        for column in columns:
+            if column not in appended.columns:
+                appended[column] = None
+        existing_rows: List[Dict[str, Any]] = []
+        if not updated.empty:
+            try:
+                cleaned_updated = updated.dropna(how="all")
+            except Exception:
+                cleaned_updated = updated
+            if not cleaned_updated.empty:
+                existing_rows = [
+                    dict(existing_row)
+                    for existing_row in cleaned_updated.to_dict(orient="records")
+                ]
+        new_rows = [
+            dict(row)
+            for row in appended.loc[:, columns].to_dict(orient="records")
+        ]
+        return pd.DataFrame(existing_rows + new_rows, columns=columns)
+
     @staticmethod
     def _normalise_token(text: str) -> str:
         return re.sub(r"[^a-z0-9]", "", str(text).lower())
@@ -7838,6 +7964,7 @@ class FabricationSection(MiniDatabaseSection):
                     % (removed_draws, removed_pieces)
                 )
         table = _fabrication_index_to_frame(index)
+        table = self._augment_table_with_relevant_microscope_rows(table, relevant_map)
         table = self._apply_imported_separation(table)
         processed: Dict[str, float] = {}
         for path in filtered_paths:
@@ -7855,6 +7982,8 @@ class FabricationSection(MiniDatabaseSection):
         super().refresh()
         table = self.data.table
         if isinstance(table, pd.DataFrame):
+            relevant_map, _ = self._load_relevant_map()
+            table = self._augment_table_with_relevant_microscope_rows(table, relevant_map)
             if "Temperature (°C)" in table.columns and CORE_TEMPERATURE_COLUMN not in table.columns:
                 table = table.rename(columns={"Temperature (°C)": CORE_TEMPERATURE_COLUMN})
                 table[GLASS_TEMPERATURE_COLUMN] = None
@@ -7881,6 +8010,8 @@ class FabricationSection(MiniDatabaseSection):
         self._normalize_temperature_columns()
         table = self.data.table
         if isinstance(table, pd.DataFrame):
+            relevant_map, _ = self._load_relevant_map()
+            table = self._augment_table_with_relevant_microscope_rows(table, relevant_map)
             self.data.table = self._apply_imported_separation(table)
             self.model.set_frame(self.data.table)
         self._hide_columns(["_source_paths", "_source_path"])
@@ -15242,6 +15373,17 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         first = records[0]
         title = getattr(first, "sample", None) or self.section_title
         panel.update_selection(str(title), records)
+        rows = self._selected_rows()
+        selection_row = None
+        if rows:
+            try:
+                selection_row = self.model.frame().iloc[rows[0]]
+            except Exception:
+                selection_row = None
+        if selection_row is not None:
+            standard = self._shape_memory_selection_from_row(selection_row, fracture=False)
+            fracture = self._shape_memory_selection_from_row(selection_row, fracture=True)
+            panel.set_saved_values(standard, fracture)
 
     def _handle_selection_changed(self, *_args: Any) -> None:
         self._update_preview()
@@ -15285,12 +15427,47 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 snapshot[key] = cleaned
         return snapshot
 
+    def _shape_memory_selection_from_row(
+        self, row: pd.Series, *, fracture: bool
+    ) -> Optional[_ShapeMemoryPointSelection]:
+        if fracture:
+            load_value = row.get(SHAPE_MEMORY_FRACTURE_LOAD_COLUMN)
+            strain_value = row.get(SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN)
+            stress_value = row.get(SHAPE_MEMORY_FRACTURE_STRESS_COLUMN)
+            displacement_value = row.get(SHAPE_MEMORY_DISPLACEMENT_COLUMN)
+        else:
+            load_value = row.get(SHAPE_MEMORY_LOAD_COLUMN)
+            strain_value = row.get(SHAPE_MEMORY_STRAIN_COLUMN)
+            stress_value = row.get(SHAPE_MEMORY_STRESS_COLUMN)
+            displacement_value = row.get(SHAPE_MEMORY_DISPLACEMENT_COLUMN)
+        try:
+            load_g = float(load_value)
+            strain_pct = float(strain_value)
+            stress_mpa = float(stress_value)
+        except Exception:
+            return None
+        if not all(math.isfinite(value) for value in (load_g, strain_pct, stress_mpa)):
+            return None
+        try:
+            displacement_mm = float(displacement_value)
+        except Exception:
+            displacement_mm = math.nan
+        if not math.isfinite(displacement_mm):
+            displacement_mm = 0.0
+        return _ShapeMemoryPointSelection(
+            index=-1,
+            displacement_mm=displacement_mm,
+            load_g=load_g,
+            strain_pct=strain_pct,
+            stress_mpa=stress_mpa,
+        )
+
     def _normalise_value_columns(self) -> None:
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame):
             return
         updated = frame.copy()
-        renamed = False
+        changed = False
         for old_name, new_name in _SHAPE_MEMORY_COLUMN_ALIASES.items():
             if old_name not in updated.columns:
                 continue
@@ -15300,17 +15477,97 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 mask = updated[new_name].isna() | (updated[new_name] == "")
                 updated.loc[mask, new_name] = updated.loc[mask, old_name]
                 updated = updated.drop(columns=[old_name])
-            renamed = True
+            changed = True
         for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
             if column not in updated.columns:
                 updated[column] = None
-        if renamed or not frame.columns.equals(updated.columns):
+                changed = True
+        microscope_frame = MiniDatabaseStore("microscope").load().table
+        microscope_lookup: Dict[str, Optional[float]] = {}
+        if isinstance(microscope_frame, pd.DataFrame) and not microscope_frame.empty and "_key" in microscope_frame.columns:
+            for _, row in microscope_frame.iterrows():
+                key = _row_to_microwire_key(row)
+                if not key:
+                    continue
+                try:
+                    d_value = float(row.get(MICROSCOPE_D_COLUMN))
+                except Exception:
+                    d_value = math.nan
+                microscope_lookup[key] = d_value if math.isfinite(d_value) and d_value > 0 else None
+        for row_index, row in updated.iterrows():
+            row_key = _row_to_microwire_key(row)
+            sources = row.get("_sources")
+            source_paths: List[Path] = []
+            if isinstance(sources, (list, tuple, set)):
+                for source in sources:
+                    try:
+                        source_paths.append(Path(source))
+                    except Exception:
+                        continue
+            standard_currents: List[float] = []
+            fracture_currents: List[float] = []
+            for source in source_paths:
+                current = _shape_memory_current_mA_from_record(
+                    ShapeMemoryStressStrainRecord(path=source, sample="", data=pd.DataFrame())
+                )
+                if current is None:
+                    continue
+                if "fracture" in source.stem.casefold():
+                    fracture_currents.append(current)
+                else:
+                    standard_currents.append(current)
+
+            def _assign_current(column: str, density_column: str, values: List[float]) -> None:
+                if values and (updated.at[row_index, column] in (None, "")):
+                    unique = list(dict.fromkeys(float(v) for v in values))
+                    updated.at[row_index, column] = unique[0] if len(unique) == 1 else ", ".join(
+                        f"{value:g}" for value in unique
+                    )
+                    changed = True
+                if updated.at[row_index, density_column] in (None, "") and row_key:
+                    diameter_um = microscope_lookup.get(row_key)
+                    if diameter_um is None:
+                        return
+                    unique = list(dict.fromkeys(float(v) for v in values))
+                    densities = [
+                        _current_density_from_diameter_um(value, diameter_um)
+                        for value in unique
+                    ]
+                    densities = [value for value in densities if value is not None]
+                    if not densities:
+                        return
+                    updated.at[row_index, density_column] = (
+                        densities[0]
+                        if len(densities) == 1
+                        else ", ".join(f"{value:.3f}" for value in densities)
+                    )
+                    changed = True
+
+            _assign_current(
+                SHAPE_MEMORY_CURRENT_COLUMN,
+                SHAPE_MEMORY_CURRENT_DENSITY_COLUMN,
+                standard_currents,
+            )
+            _assign_current(
+                SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
+                SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
+                fracture_currents,
+            )
+        if changed or not frame.columns.equals(updated.columns) or not updated.equals(frame):
             self.data.table = updated
             self.model.set_frame(updated)
             try:
                 self.store.save(self.data)
             except Exception:
                 pass
+
+    def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
+        super().apply_data(data)
+        self._normalise_value_columns()
+        self._refresh_record_groups()
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._toggle_preview_panel(self._preview_panel_visible())
+        self._update_preview()
 
     def _preview_panel_visible(self) -> bool:
         extra = self.data.extra if isinstance(self.data.extra, dict) else {}
