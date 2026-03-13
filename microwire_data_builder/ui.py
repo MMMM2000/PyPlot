@@ -273,6 +273,13 @@ _SHAPE_MEMORY_COLUMN_ALIASES = {
     "Shape memory fracture stress (MPa)": SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
 }
 
+SHAPE_MEMORY_CURRENT_COLUMN = "Current (mA)"
+SHAPE_MEMORY_CURRENT_DENSITY_COLUMN = "Current density (A/mm^2)"
+SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN = "Fracture current (mA)"
+SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN = "Fracture current density (A/mm^2)"
+_SHAPE_MEMORY_GROUP_KEY_COLUMN = "_shape_memory_group_key"
+_SHAPE_MEMORY_GROUP_ORDER_COLUMN = "_shape_memory_group_order"
+
 
 _STAGE_LABELS = {
     "prep": "Preparing support files",
@@ -5904,6 +5911,53 @@ def _record_path_key(record: object) -> Optional[str]:
     if isinstance(path, str) and path:
         return path
     return None
+
+
+def _shape_memory_current_mA_from_record(record: ShapeMemoryStressStrainRecord) -> Optional[float]:
+    path = getattr(record, "path", None)
+    text = ""
+    if isinstance(path, Path):
+        text = path.stem
+    elif isinstance(path, str):
+        text = Path(path).stem
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*mA", text, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except Exception:
+        return None
+
+
+def _shape_memory_is_fracture_record(record: ShapeMemoryStressStrainRecord) -> bool:
+    path = getattr(record, "path", None)
+    text = ""
+    if isinstance(path, Path):
+        text = path.stem
+    elif isinstance(path, str):
+        text = Path(path).stem
+    label = getattr(record, "label", None)
+    return "fracture" in text.casefold() or (
+        isinstance(label, str) and "fracture" in label.casefold()
+    )
+
+
+def _current_density_from_diameter_um(
+    current_mA: Optional[float], diameter_um: Optional[float]
+) -> Optional[float]:
+    if current_mA is None or diameter_um is None:
+        return None
+    try:
+        current_a = float(current_mA) / 1000.0
+        diameter_mm = float(diameter_um) / 1000.0
+    except Exception:
+        return None
+    if not math.isfinite(current_a) or not math.isfinite(diameter_mm) or diameter_mm <= 0:
+        return None
+    area_mm2 = math.pi * (diameter_mm / 2.0) ** 2
+    if area_mm2 <= 0:
+        return None
+    return current_a / area_mm2
 
 
 def _visibility_items_from_records(records: Sequence[object]) -> List[Tuple[str, str]]:
@@ -14739,11 +14793,15 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         SHAPE_MEMORY_LOAD_COLUMN,
         SHAPE_MEMORY_STRAIN_COLUMN,
         SHAPE_MEMORY_STRESS_COLUMN,
+        SHAPE_MEMORY_CURRENT_COLUMN,
+        SHAPE_MEMORY_CURRENT_DENSITY_COLUMN,
     ]
     FRACTURE_COLUMNS = [
         SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
         SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
         SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+        SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
+        SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
     ]
 
     def __init__(
@@ -15207,6 +15265,26 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 snapshot[key] = entry
         return snapshot
 
+    def record_entries_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        raw = self.data.extra.get("record_entries")
+        if not isinstance(raw, dict):
+            return {}
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str) or not isinstance(value, dict):
+                continue
+            cleaned: Dict[str, Any] = {}
+            for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
+                if column not in value:
+                    continue
+                payload = value.get(column)
+                if payload in (None, ""):
+                    continue
+                cleaned[column] = payload
+            if cleaned:
+                snapshot[key] = cleaned
+        return snapshot
+
     def _normalise_value_columns(self) -> None:
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame):
@@ -15284,6 +15362,43 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 SHAPE_MEMORY_STRAIN_COLUMN: round(selection.strain_pct, 6),
                 SHAPE_MEMORY_STRESS_COLUMN: round(selection.stress_mpa, 6),
             }
+        current_record = (
+            self._preview_panel.current_record()
+            if self._preview_panel is not None and hasattr(self._preview_panel, "current_record")
+            else None
+        )
+        current_mA = (
+            _shape_memory_current_mA_from_record(current_record)
+            if isinstance(current_record, ShapeMemoryStressStrainRecord)
+            else None
+        )
+        density = None
+        try:
+            row_key = _row_to_microwire_key(frame.iloc[row_index])
+            microscope_section = MiniDatabaseStore("microscope").load()
+            microscope_frame = (
+                microscope_section.table
+                if isinstance(microscope_section.table, pd.DataFrame)
+                else pd.DataFrame()
+            )
+            d_um = None
+            if row_key and not microscope_frame.empty and "_key" in microscope_frame.columns:
+                matches = microscope_frame.index[microscope_frame["_key"] == row_key].tolist()
+                if matches:
+                    d_value = microscope_frame.iloc[matches[0]].get(MICROSCOPE_D_COLUMN)
+                    try:
+                        d_um = float(d_value) if d_value is not None else None
+                    except Exception:
+                        d_um = None
+            density = _current_density_from_diameter_um(current_mA, d_um)
+        except Exception:
+            density = None
+        if target == "fracture":
+            updates[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = current_mA
+            updates[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = density
+        else:
+            updates[SHAPE_MEMORY_CURRENT_COLUMN] = current_mA
+            updates[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = density
         updated = frame.copy()
         for column, value in updates.items():
             if column not in updated.columns:
@@ -15301,6 +15416,20 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             pass
+        if isinstance(current_record, ShapeMemoryStressStrainRecord):
+            path_key = _record_path_key(current_record)
+            if path_key:
+                record_entries = self.record_entries_snapshot()
+                entry = dict(record_entries.get(path_key, {}))
+                entry.update({key: value for key, value in updates.items() if value not in (None, "")})
+                raw = self.data.extra.get("record_entries")
+                raw_entries = dict(raw) if isinstance(raw, dict) else {}
+                raw_entries[path_key] = entry
+                self.data.extra["record_entries"] = raw_entries
+                try:
+                    self.store.save(self.data)
+                except Exception:
+                    pass
         try:
             self.data_updated.emit()
         except Exception:
@@ -17865,6 +17994,8 @@ class CompareSection(MiniDatabaseSection):
         self._cached_dma_isostress_groups: Dict[str, List[DmaIsoStressRecord]] = {}
         self._cached_shape_memory_stress_strain_records: List[ShapeMemoryStressStrainRecord] = []
         self._cached_shape_memory_stress_strain_groups: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
+        self._cached_shape_memory_entries: Dict[str, Dict[str, Any]] = {}
+        self._cached_shape_memory_record_entries: Dict[str, Dict[str, Any]] = {}
         self._cached_fmr_records: List[FmrRecord] = []
         self._cached_fmr_groups: Dict[str, List[FmrRecord]] = {}
         self._row_keys: Set[str] = set()
@@ -19284,6 +19415,8 @@ class AssemblySection(QtWidgets.QWidget):
         self._cached_dma_isostress_groups: Dict[str, List[DmaIsoStressRecord]] = {}
         self._cached_shape_memory_stress_strain_records: List[ShapeMemoryStressStrainRecord] = []
         self._cached_shape_memory_stress_strain_groups: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
+        self._cached_shape_memory_entries: Dict[str, Dict[str, Any]] = {}
+        self._cached_shape_memory_record_entries: Dict[str, Dict[str, Any]] = {}
         self._cached_fmr_records: List[FmrRecord] = []
         self._cached_fmr_groups: Dict[str, List[FmrRecord]] = {}
         self._compare_section: Optional["CompareSection"] = None
@@ -20324,6 +20457,12 @@ class AssemblySection(QtWidgets.QWidget):
             section = self.sections.get("shape_memory_stress_strain")
             if isinstance(section, ShapeMemoryStressStrainSection):
                 shape_memory_entries = section.entries_snapshot()
+                self._cached_shape_memory_record_entries = section.record_entries_snapshot()
+            else:
+                self._cached_shape_memory_record_entries = {}
+        else:
+            self._cached_shape_memory_record_entries = {}
+        self._cached_shape_memory_entries = dict(shape_memory_entries)
 
         fmr_records: List[FmrRecord] = []
         if "fmr" in selected:
@@ -20530,6 +20669,7 @@ class AssemblySection(QtWidgets.QWidget):
             self._column_order = list(previous_order)
         self._graph_pixmap_cache.clear()
         if isinstance(frame, pd.DataFrame):
+            frame = self._expand_shape_memory_preview_rows(frame)
             frame = self._apply_column_universe(frame)
             self._raw_preview_frame = frame.copy()
         else:
@@ -20579,6 +20719,141 @@ class AssemblySection(QtWidgets.QWidget):
             if column not in ordered:
                 ordered.append(column)
         return updated.loc[:, ordered]
+
+    def _expand_shape_memory_preview_rows(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return frame
+        groups = self._ensure_shape_memory_stress_strain_groups()
+        if not groups:
+            updated = frame.copy()
+            updated[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = [
+                _row_to_microwire_key(row) or f"row-{idx}"
+                for idx, (_, row) in enumerate(updated.iterrows())
+            ]
+            updated[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = 0
+            return updated
+
+        expanded_rows: List[Dict[str, Any]] = []
+        for idx, row in frame.iterrows():
+            row_dict = dict(row)
+            row_key = _row_to_microwire_key(pd.Series(row_dict))
+            if not row_key:
+                row_dict[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = f"row-{idx}"
+                row_dict[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = 0
+                expanded_rows.append(row_dict)
+                continue
+            records = list(groups.get(row_key, []))
+            if not records:
+                row_dict[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = row_key
+                row_dict[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = 0
+                expanded_rows.append(row_dict)
+                continue
+
+            by_current: Dict[Tuple[int, float], List[ShapeMemoryStressStrainRecord]] = {}
+            for record in records:
+                current = _shape_memory_current_mA_from_record(record)
+                current_sort = float(current) if current is not None else math.inf
+                by_current.setdefault((0 if current is not None else 1, current_sort), []).append(record)
+
+            sample_entry = self._cached_shape_memory_entries.get(row_key, {})
+            sorted_groups = sorted(by_current.items(), key=lambda item: item[0])
+            d_value = row_dict.get(MICROSCOPE_D_COLUMN)
+            try:
+                diameter_um = float(d_value) if d_value is not None else None
+            except Exception:
+                diameter_um = None
+
+            for order, ((_, current_sort), current_records) in enumerate(sorted_groups):
+                current_value = None if math.isinf(current_sort) else current_sort
+                current_labels = [
+                    _record_label_for_display(record)
+                    for record in current_records
+                    if _record_label_for_display(record)
+                ]
+                new_row = dict(row_dict)
+                new_row[SHAPE_MEMORY_CURRENT_COLUMN] = current_value
+                new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = _current_density_from_diameter_um(
+                    current_value,
+                    diameter_um,
+                )
+                new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+                if current_labels:
+                    new_row[SHAPE_MEMORY_STRESS_STRAIN_COLUMN] = list(dict.fromkeys(current_labels))
+
+                standard_entry: Dict[str, Any] = {}
+                fracture_entry: Dict[str, Any] = {}
+                has_fracture_record = False
+                for record in current_records:
+                    path_key = _record_path_key(record)
+                    entry = (
+                        self._cached_shape_memory_record_entries.get(path_key or "", {})
+                        if path_key
+                        else {}
+                    )
+                    if _shape_memory_is_fracture_record(record):
+                        has_fracture_record = True
+                        for column in (
+                            SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                            SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                            SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                        ):
+                            if column in entry and column not in fracture_entry:
+                                fracture_entry[column] = entry[column]
+                    else:
+                        for column in (
+                            SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                            SHAPE_MEMORY_LOAD_COLUMN,
+                            SHAPE_MEMORY_STRAIN_COLUMN,
+                            SHAPE_MEMORY_STRESS_COLUMN,
+                        ):
+                            if column in entry and column not in standard_entry:
+                                standard_entry[column] = entry[column]
+
+                if len(sorted_groups) == 1 and sample_entry:
+                    for column in (
+                        SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                        SHAPE_MEMORY_LOAD_COLUMN,
+                        SHAPE_MEMORY_STRAIN_COLUMN,
+                        SHAPE_MEMORY_STRESS_COLUMN,
+                    ):
+                        if column not in standard_entry and column in sample_entry:
+                            standard_entry[column] = sample_entry[column]
+                    for column in (
+                        SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                    ):
+                        if column not in fracture_entry and column in sample_entry:
+                            fracture_entry[column] = sample_entry[column]
+
+                for column in (
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                    SHAPE_MEMORY_LOAD_COLUMN,
+                    SHAPE_MEMORY_STRAIN_COLUMN,
+                    SHAPE_MEMORY_STRESS_COLUMN,
+                ):
+                    new_row[column] = standard_entry.get(column)
+                for column in (
+                    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                ):
+                    new_row[column] = fracture_entry.get(column)
+                if has_fracture_record:
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = current_value
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = _current_density_from_diameter_um(
+                        current_value,
+                        diameter_um,
+                    )
+
+                new_row[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = row_key
+                new_row[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
+                expanded_rows.append(new_row)
+
+        if not expanded_rows:
+            return frame.copy()
+        return pd.DataFrame(expanded_rows)
 
     def _refresh_preview_frame(self) -> None:
         raw_frame = self._raw_preview_frame
@@ -20725,10 +21000,16 @@ class AssemblySection(QtWidgets.QWidget):
         column_names = [str(column) for column in columns]
         if self._selected_columns is None:
             self._selected_columns = {
-                column for column in column_names if column not in self._graph_columns
+                column
+                for column in column_names
+                if column not in self._graph_columns and not column.startswith("_")
             }
         else:
-            new_columns = [col for col in column_names if col not in self._known_columns]
+            new_columns = [
+                col
+                for col in column_names
+                if col not in self._known_columns and not col.startswith("_")
+            ]
             self._selected_columns.update(
                 column for column in new_columns if column not in self._graph_columns
             )
@@ -20738,6 +21019,56 @@ class AssemblySection(QtWidgets.QWidget):
         return [column for column in column_names if column in self._selected_columns]
 
     def _apply_sort_spec(self, frame: pd.DataFrame) -> Tuple[pd.DataFrame, List[int]]:
+        if (
+            isinstance(frame, pd.DataFrame)
+            and not frame.empty
+            and _SHAPE_MEMORY_GROUP_KEY_COLUMN in frame.columns
+            and _SHAPE_MEMORY_GROUP_ORDER_COLUMN in frame.columns
+        ):
+            indexed = frame.copy()
+            indexed["_source_row_index"] = list(range(len(indexed.index)))
+            first_rows = (
+                indexed.sort_values(
+                    by=[_SHAPE_MEMORY_GROUP_ORDER_COLUMN],
+                    ascending=[True],
+                    kind="mergesort",
+                )
+                .drop_duplicates(subset=[_SHAPE_MEMORY_GROUP_KEY_COLUMN], keep="first")
+            )
+            if self._sort_spec:
+                sort_columns: List[str] = []
+                ascending: List[bool] = []
+                for column, is_ascending in self._sort_spec:
+                    if (
+                        column in first_rows.columns
+                        and column not in sort_columns
+                        and not str(column).startswith("_")
+                    ):
+                        sort_columns.append(column)
+                        ascending.append(bool(is_ascending))
+                if sort_columns:
+                    first_rows = first_rows.sort_values(
+                        by=sort_columns,
+                        ascending=ascending,
+                        kind="mergesort",
+                        key=lambda col: col.map(DataFrameModel._sort_value) if hasattr(col, "map") else col,
+                    )
+            block_order = {
+                str(row[_SHAPE_MEMORY_GROUP_KEY_COLUMN]): idx
+                for idx, (_, row) in enumerate(first_rows.iterrows())
+            }
+            indexed["_block_sort_index"] = indexed[_SHAPE_MEMORY_GROUP_KEY_COLUMN].map(
+                lambda value: block_order.get(str(value), len(block_order))
+            )
+            sorted_frame = indexed.sort_values(
+                by=["_block_sort_index", _SHAPE_MEMORY_GROUP_ORDER_COLUMN],
+                ascending=[True, True],
+                kind="mergesort",
+            ).reset_index(drop=True)
+            row_map = [int(value) for value in sorted_frame["_source_row_index"].tolist()]
+            sorted_frame = sorted_frame.drop(columns=["_source_row_index", "_block_sort_index"])
+            return sorted_frame, row_map
+
         def _index_position(index: pd.Index, value: Any, fallback: int) -> int:
             try:
                 return int(value)
@@ -21428,10 +21759,14 @@ class AssemblySection(QtWidgets.QWidget):
             "shape_memory_stress_strain",
             [
                 SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+                SHAPE_MEMORY_CURRENT_COLUMN,
+                SHAPE_MEMORY_CURRENT_DENSITY_COLUMN,
                 SHAPE_MEMORY_DISPLACEMENT_COLUMN,
                 SHAPE_MEMORY_LOAD_COLUMN,
                 SHAPE_MEMORY_STRAIN_COLUMN,
                 SHAPE_MEMORY_STRESS_COLUMN,
+                SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
+                SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
                 SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
                 SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
                 SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,

@@ -1300,6 +1300,124 @@ def test_build_database_populates_brittle_column_from_microscope_index(tmp_path:
     assert result.dataframe.iloc[0][BRITTLE_COLUMN] == "brittle"
 
 
+def test_assembly_expands_shape_memory_rows_per_current() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/4",
+                    builder_ui.MICROSCOPE_D_COLUMN: 13.7,
+                    "d/D": 0.194,
+                    SHAPE_MEMORY_STRESS_STRAIN_COLUMN: ["25mA fracture", "25mA", "40mA"],
+                }
+            ]
+        )
+        fracture_record = ShapeMemoryStressStrainRecord(
+            path=Path("Ni50Fe27Ga23 10_4 25mA fracture.txt"),
+            sample="Ni50Fe27Ga23 10/4",
+            data=pd.DataFrame(),
+            key=("Ni50Fe27Ga23", 10, 4),
+            label="25mA fracture",
+        )
+        standard_25 = ShapeMemoryStressStrainRecord(
+            path=Path("Ni50Fe27Ga23 10_4 25mA.txt"),
+            sample="Ni50Fe27Ga23 10/4",
+            data=pd.DataFrame(),
+            key=("Ni50Fe27Ga23", 10, 4),
+            label="25mA",
+        )
+        standard_40 = ShapeMemoryStressStrainRecord(
+            path=Path("Ni50Fe27Ga23 10_4 40mA.txt"),
+            sample="Ni50Fe27Ga23 10/4",
+            data=pd.DataFrame(),
+            key=("Ni50Fe27Ga23", 10, 4),
+            label="40mA",
+        )
+        assembly._cached_shape_memory_stress_strain_groups = {
+            "Ni50Fe27Ga23|10|4": [fracture_record, standard_25, standard_40]
+        }
+        assembly._cached_shape_memory_entries = {}
+        assembly._cached_shape_memory_record_entries = {
+            str(standard_25.path): {
+                SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.7,
+                SHAPE_MEMORY_LOAD_COLUMN: 7.715,
+                SHAPE_MEMORY_STRAIN_COLUMN: 13.628,
+                SHAPE_MEMORY_STRESS_COLUMN: 513.246,
+            },
+            str(fracture_record.path): {
+                SHAPE_MEMORY_FRACTURE_LOAD_COLUMN: 18.834,
+                SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN: 22.994,
+                SHAPE_MEMORY_FRACTURE_STRESS_COLUMN: 1252.946,
+            },
+            str(standard_40.path): {
+                SHAPE_MEMORY_DISPLACEMENT_COLUMN: 4.1,
+                SHAPE_MEMORY_LOAD_COLUMN: 8.4,
+                SHAPE_MEMORY_STRAIN_COLUMN: 15.1,
+                SHAPE_MEMORY_STRESS_COLUMN: 580.0,
+            },
+        }
+
+        expanded = assembly._expand_shape_memory_preview_rows(frame)
+
+        assert len(expanded.index) == 2
+        first = expanded.iloc[0]
+        second = expanded.iloc[1]
+        assert first[builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == 25.0
+        assert first[builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] == 25.0
+        assert first[SHAPE_MEMORY_STRAIN_COLUMN] == pytest.approx(13.628)
+        assert first[SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN] == pytest.approx(22.994)
+        assert second[builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == 40.0
+        assert pd.isna(second[builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN])
+        assert second[SHAPE_MEMORY_STRAIN_COLUMN] == pytest.approx(15.1)
+    finally:
+        assembly.close()
+
+
+def test_assembly_shape_memory_sort_keeps_sample_rows_grouped() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "A",
+                    "Microwire": "1/1",
+                    builder_ui.SHAPE_MEMORY_CURRENT_COLUMN: 25.0,
+                    builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN: "A|1|1",
+                    builder_ui._SHAPE_MEMORY_GROUP_ORDER_COLUMN: 0,
+                },
+                {
+                    "Composition": "A",
+                    "Microwire": "1/1",
+                    builder_ui.SHAPE_MEMORY_CURRENT_COLUMN: 40.0,
+                    builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN: "A|1|1",
+                    builder_ui._SHAPE_MEMORY_GROUP_ORDER_COLUMN: 1,
+                },
+                {
+                    "Composition": "B",
+                    "Microwire": "1/1",
+                    builder_ui.SHAPE_MEMORY_CURRENT_COLUMN: 30.0,
+                    builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN: "B|1|1",
+                    builder_ui._SHAPE_MEMORY_GROUP_ORDER_COLUMN: 0,
+                },
+            ]
+        )
+        assembly._sort_spec = [(builder_ui.SHAPE_MEMORY_CURRENT_COLUMN, False)]
+
+        sorted_frame, _ = assembly._apply_sort_spec(frame)
+
+        group_keys = sorted_frame[builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN].tolist()
+        assert group_keys in (
+            ["B|1|1", "A|1|1", "A|1|1"],
+            ["A|1|1", "A|1|1", "B|1|1"],
+        )
+    finally:
+        assembly.close()
+
+
 def test_safe_plot_stem_removes_path_separators() -> None:
     stem = _safe_plot_stem("Ni55Fe18Ga27 4/1 s1 1000mA")
     assert "/" not in stem
