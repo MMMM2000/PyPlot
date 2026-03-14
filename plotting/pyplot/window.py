@@ -184,6 +184,18 @@ def _install_safe_qt_traceback_printer() -> None:
 
     _backend_qt._mw_original_print_exc = original  # type: ignore[attr-defined]
     _backend_qt.traceback.print_exc = _safe_print_exc
+    for canvas_cls in (
+        getattr(_backend_qt, "FigureCanvasQT", None),
+        getattr(_backend_qtagg, "FigureCanvasQTAgg", None),
+    ):
+        if canvas_cls is None:
+            continue
+        draw_idle = getattr(canvas_cls, "_draw_idle", None)
+        globals_dict = getattr(draw_idle, "__globals__", None)
+        if isinstance(globals_dict, dict):
+            traceback_module = globals_dict.get("traceback")
+            if traceback_module is not None and hasattr(traceback_module, "print_exc"):
+                globals_dict["traceback"].print_exc = _safe_print_exc
 
 
 _install_safe_qt_traceback_printer()
@@ -506,6 +518,7 @@ class FormatToolbarControls:
     fill_color_button: QtWidgets.QToolButton | None = None
     width_spin: QtWidgets.QDoubleSpinBox | None = None
     arrow_style_combo: QtWidgets.QComboBox | None = None
+    zorder_spin: QtWidgets.QDoubleSpinBox | None = None
     line_group: QtGui.QActionGroup | None = None
     line_action: QtGui.QAction | None = None
     scatter_action: QtGui.QAction | None = None
@@ -8970,6 +8983,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         controls.arrow_style_combo = arrow_style_combo
         toolbar.addWidget(arrow_style_combo)
 
+        zorder_spin = QtWidgets.QDoubleSpinBox(toolbar)
+        zorder_spin.setRange(-20.0, 50.0)
+        zorder_spin.setDecimals(1)
+        zorder_spin.setSingleStep(0.5)
+        zorder_spin.setValue(2.0)
+        zorder_spin.setEnabled(False)
+        zorder_spin.valueChanged.connect(self._apply_selected_zorder)
+        zorder_spin.setToolTip("Drawing order for the selected line or shape")
+        controls.zorder_spin = zorder_spin
+        toolbar.addWidget(zorder_spin)
+
         bold_action = toolbar.addAction("B")
         bold_action.setCheckable(True)
         bold_action.setEnabled(False)
@@ -14858,6 +14882,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         font_combo = controls.font_combo
         size_spin = controls.size_spin
         width_spin = controls.width_spin
+        zorder_spin = controls.zorder_spin
         bold_action = controls.bold_action
         italic_action = controls.italic_action
         underline_action = controls.underline_action
@@ -14900,6 +14925,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     width_spin.blockSignals(True)
                     width_spin.setEnabled(False)
                     width_spin.blockSignals(False)
+                if zorder_spin is not None:
+                    zorder_spin.blockSignals(True)
+                    zorder_spin.setEnabled(False)
+                    zorder_spin.blockSignals(False)
                 for action in (
                     bold_action,
                     italic_action,
@@ -14998,6 +15027,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         width_spin.blockSignals(True)
                         width_spin.setEnabled(False)
                         width_spin.blockSignals(False)
+                    if zorder_spin is not None:
+                        zorder_spin.blockSignals(True)
+                        zorder_spin.setEnabled(False)
+                        zorder_spin.blockSignals(False)
                     for action, _ in line_actions:
                         if action is not None:
                             action.blockSignals(True)
@@ -15033,6 +15066,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                             pass
                         width_spin.blockSignals(False)
                         width_spin.setEnabled(True)
+                    if zorder_spin is not None:
+                        zorder_spin.blockSignals(True)
+                        try:
+                            zorder_spin.setValue(float(target.get_zorder()))
+                        except Exception:
+                            pass
+                        zorder_spin.blockSignals(False)
+                        zorder_spin.setEnabled(True)
                     for action in (bold_action, italic_action, underline_action):
                         if action is not None:
                             action.blockSignals(True)
@@ -15090,6 +15131,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                             pass
                         width_spin.blockSignals(False)
                         width_spin.setEnabled(True)
+                    if zorder_spin is not None:
+                        zorder_spin.blockSignals(True)
+                        try:
+                            zorder_spin.setValue(float(getattr(target, "get_zorder", lambda: 2.0)()))
+                        except Exception:
+                            pass
+                        zorder_spin.blockSignals(False)
+                        zorder_spin.setEnabled(True)
                     for action in (bold_action, italic_action, underline_action):
                         if action is not None:
                             action.blockSignals(True)
@@ -15161,6 +15210,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 width_spin.blockSignals(True)
                 width_spin.setEnabled(False)
                 width_spin.blockSignals(False)
+            if zorder_spin is not None:
+                zorder_spin.blockSignals(True)
+                zorder_spin.setEnabled(False)
+                zorder_spin.blockSignals(False)
             for action in (
                 bold_action,
                 italic_action,
@@ -15724,6 +15777,29 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         elif role == "shape" and isinstance(target, (Line2D, Patch)):
             try:
                 target.set_linewidth(float(value))
+            except Exception:
+                return
+            self._redraw_artist(target)
+        else:
+            return
+        self._update_format_toolbar_state()
+
+    def _apply_selected_zorder(self, value: float) -> None:
+        if self._format_updating:
+            return
+        selection = self._format_selection
+        if not selection:
+            return
+        role, target = selection
+        if role == "line" and isinstance(target, Line2D):
+            try:
+                target.set_zorder(float(value))
+            except Exception:
+                return
+            self._redraw_artist(target)
+        elif role == "shape" and isinstance(target, (Line2D, Patch)):
+            try:
+                target.set_zorder(float(value))
             except Exception:
                 return
             self._redraw_artist(target)

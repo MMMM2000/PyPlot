@@ -231,6 +231,33 @@ def test_arrow_style_persists_in_payload() -> None:
         app.processEvents()
 
 
+def test_shape_selection_can_adjust_zorder() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+        window._set_annotation_tool("rectangle")  # noqa: SLF001
+        canvas = window._current_canvas()  # noqa: SLF001
+        press = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=0.5, ydata=1.0, dblclick=False)
+        move = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=2.5, ydata=3.0, dblclick=False)
+        release = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=2.5, ydata=3.0, dblclick=False)
+        window._handle_canvas_button_press(press)  # noqa: SLF001
+        window._handle_canvas_motion(move)  # noqa: SLF001
+        window._handle_canvas_button_release(release)  # noqa: SLF001
+        shape = next(iter(window._iter_graph_object_shapes(axes)))  # noqa: SLF001
+        window._set_format_selection(("shape", shape))  # noqa: SLF001
+        spin = window._format_controls.zorder_spin  # noqa: SLF001
+        assert spin is not None
+        spin.setValue(15.0)
+        assert shape.get_zorder() == 15.0
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
 def test_annotation_paste_targets_selected_panel_axes() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(plotters={})
