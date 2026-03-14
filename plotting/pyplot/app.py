@@ -1914,7 +1914,26 @@ class PyPlotWorkbench(PyPlotWindow):
                         panel_label_mode=str(config.get("panel_labels") or "none"),
                         figure_width=float(config.get("figure_width") or 7.10),
                         figure_height=float(config.get("figure_height") or 4.80),
+                        external_legend=bool(config.get("external_legend", False)),
+                        legend_placement=str(config.get("legend_placement") or "right"),
+                        panel_titles=list(config.get("panel_titles") or []),
+                        wspace=float(config.get("wspace") or 0.18),
+                        hspace=float(config.get("hspace") or 0.25),
+                        left_margin=float(config.get("left_margin") or 0.10),
+                        right_margin=float(config.get("right_margin") or 0.96),
+                        top_margin=float(config.get("top_margin") or 0.90),
+                        bottom_margin=float(config.get("bottom_margin") or 0.12),
                         metadata=metadata,
+                        style_preset=str(config.get("style_preset") or "default"),
+                        minor_ticks=bool(config.get("minor_ticks", False)),
+                        tick_direction=str(config.get("tick_direction") or "out"),
+                        notation=str(config.get("notation") or "plain"),
+                        panel_label_position=str(config.get("panel_label_position") or "tl"),
+                        panel_label_size=float(config.get("panel_label_size") or 14.0),
+                        x_decimals=int(config.get("x_decimals", -1)),
+                        y_decimals=int(config.get("y_decimals", -1)),
+                        x_ticks=list(config.get("x_ticks") or []),
+                        y_ticks=list(config.get("y_ticks") or []),
                     )
                 continue
             series_entries = entry.get("series")
@@ -1962,7 +1981,8 @@ class PyPlotWorkbench(PyPlotWindow):
             ax.set_ylabel(str(entry.get("y_label") or "Y"))
             ax.grid(True)
             try:
-                ax.legend(loc="best")
+                if any(str(line.get_label() or "").strip() and str(line.get_label() or "").strip() != "_nolegend_" for line in ax.get_lines()):
+                    ax.legend(loc="best")
             except Exception:
                 pass
             canvas = FigureCanvas(fig)

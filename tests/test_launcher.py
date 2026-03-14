@@ -427,3 +427,115 @@ def test_automation_recipe_can_build_graphs_and_layout_figure(tmp_path: Path) ->
     assert manifest["tab_count"] >= 3
     assert "Two Panel Figure" in manifest["tab_labels"]
     assert plot_dir.exists()
+
+
+def test_automation_recipe_can_export_all_figures_batch(tmp_path: Path) -> None:
+    _ensure_app()
+    csv_path = tmp_path / "batch.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "field,flux_a,flux_b",
+                "0,1.0,3.5",
+                "1,2.0,2.7",
+                "2,3.2,1.9",
+                "3,4.0,1.2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    recipe_path = tmp_path / "batch_job.json"
+    manifest_path = tmp_path / "batch_manifest.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "pyplot",
+                "version": 1,
+                "imports": [csv_path.name],
+                "build_graphs": [
+                    {
+                        "title": "Batch Graph",
+                        "series": [
+                            {"workbook": "batch.csv", "worksheet": "batch", "x_column": "field", "y_column": "flux_a", "label": "A"},
+                            {"workbook": "batch.csv", "worksheet": "batch", "x_column": "field", "y_column": "flux_b", "label": "B"},
+                        ],
+                    }
+                ],
+                "exports": {
+                    "all_figures": {
+                        "dir": "exports",
+                        "format": "png",
+                        "dpi": 200
+                    }
+                },
+                "manifest_path": "batch_manifest.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["all_figure_export_paths"]
+    for exported in manifest["all_figure_export_paths"]:
+        assert Path(exported).exists()
+
+
+def test_automation_recipe_can_capture_review_screenshots(tmp_path: Path) -> None:
+    _ensure_app()
+    csv_path = tmp_path / "review.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "field,flux_a",
+                "0,1.0",
+                "1,2.0",
+                "2,3.2",
+                "3,4.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    recipe_path = tmp_path / "review_job.json"
+    manifest_path = tmp_path / "review_manifest.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "pyplot",
+                "version": 1,
+                "imports": [csv_path.name],
+                "build_graphs": [
+                    {
+                        "title": "Review Graph",
+                        "series": [
+                            {"workbook": "review.csv", "worksheet": "review", "x_column": "field", "y_column": "flux_a", "label": "A"},
+                        ],
+                    }
+                ],
+                "exports": {
+                    "review_screenshots": {
+                        "dir": "review_artifacts",
+                        "dark_gui": True
+                    }
+                },
+                "manifest_path": "review_manifest.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["review_paths"]
+    for exported in manifest["review_paths"]:
+        assert Path(exported).exists()

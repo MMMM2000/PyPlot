@@ -228,6 +228,12 @@ class _PyPlotAutomationRequest:
     window_image_path: Path | None = None
     current_plot_image_path: Path | None = None
     plot_images_dir: Path | None = None
+    export_all_figures_dir: Path | None = None
+    export_all_figures_format: str | None = None
+    export_all_figures_dpi: float | None = None
+    export_all_figures_transparent: bool = False
+    review_output_dir: Path | None = None
+    review_dark_gui: bool = False
     summary_path: Path | None = None
     save_project_path: Path | None = None
     show_window: bool = False
@@ -434,6 +440,41 @@ def _load_automation_recipe_request(recipe_path: Path) -> _PyPlotAutomationReque
         base_dir=base_dir,
         field_name="exports.plot_images_dir",
     )
+    export_all_figures = exports.get("all_figures")
+    export_all_figures_dir = None
+    export_all_figures_format = None
+    export_all_figures_dpi = None
+    export_all_figures_transparent = False
+    if export_all_figures is not None:
+        if not isinstance(export_all_figures, dict):
+            raise _AutomationRecipeError("Automation recipe field 'exports.all_figures' must be an object.")
+        export_all_figures_dir = _resolve_recipe_path_value(
+            export_all_figures.get("dir"),
+            base_dir=base_dir,
+            field_name="exports.all_figures.dir",
+        )
+        export_all_figures_format = str(export_all_figures.get("format") or "png").strip().lower()
+        if export_all_figures_format not in {"png", "pdf", "svg", "tif", "eps"}:
+            raise _AutomationRecipeError("Automation recipe exports.all_figures.format must be one of png/pdf/svg/tif/eps.")
+        dpi_value = export_all_figures.get("dpi")
+        if dpi_value is not None:
+            try:
+                export_all_figures_dpi = float(dpi_value)
+            except Exception as exc:
+                raise _AutomationRecipeError("Automation recipe exports.all_figures.dpi must be numeric.") from exc
+        export_all_figures_transparent = bool(export_all_figures.get("transparent", False))
+    review_output_dir = None
+    review_dark_gui = False
+    review_capture = exports.get("review_screenshots")
+    if review_capture is not None:
+        if not isinstance(review_capture, dict):
+            raise _AutomationRecipeError("Automation recipe field 'exports.review_screenshots' must be an object.")
+        review_output_dir = _resolve_recipe_path_value(
+            review_capture.get("dir"),
+            base_dir=base_dir,
+            field_name="exports.review_screenshots.dir",
+        )
+        review_dark_gui = bool(review_capture.get("dark_gui", False))
     summary_path = _resolve_recipe_path_value(
         recipe.get("manifest_path"),
         base_dir=base_dir,
@@ -468,6 +509,12 @@ def _load_automation_recipe_request(recipe_path: Path) -> _PyPlotAutomationReque
         window_image_path=window_image_path,
         current_plot_image_path=current_plot_image_path,
         plot_images_dir=plot_images_dir,
+        export_all_figures_dir=export_all_figures_dir,
+        export_all_figures_format=export_all_figures_format,
+        export_all_figures_dpi=export_all_figures_dpi,
+        export_all_figures_transparent=export_all_figures_transparent,
+        review_output_dir=review_output_dir,
+        review_dark_gui=review_dark_gui,
         summary_path=summary_path,
         save_project_path=save_project_path,
         show_window=show_window,
@@ -801,6 +848,7 @@ def _execute_pyplot_automation_request(
     qt_args: list[str],
 ) -> dict[str, Any]:
     from plotting.pyplot.app import PyPlotWorkbench
+    from plotting.shared.toolkit import theme_manager
 
     created_app = False
     app = QtWidgets.QApplication.instance()
@@ -819,6 +867,8 @@ def _execute_pyplot_automation_request(
     window: PyPlotWorkbench | None = None
     imported_paths: list[Path] = []
     exported_plot_paths: list[Path] = []
+    exported_all_figure_paths: list[Path] = []
+    review_paths: list[Path] = []
     saved_project_path: Path | None = None
     try:
         window = PyPlotWorkbench(initial_plotter=request.plugin_name)
@@ -899,6 +949,37 @@ def _execute_pyplot_automation_request(
         if isinstance(request.plot_images_dir, Path):
             exported_plot_paths = _export_visible_plot_images(window, app, request.plot_images_dir)
 
+        if isinstance(request.export_all_figures_dir, Path) and isinstance(request.export_all_figures_format, str):
+            exporter = getattr(window, "_automation_export_all_figures", None)
+            if not callable(exporter):
+                raise RuntimeError("PyPlot batch figure export automation is unavailable.")
+            exported_all_figure_paths = exporter(
+                output_dir=request.export_all_figures_dir,
+                fmt=request.export_all_figures_format,
+                dpi=request.export_all_figures_dpi,
+                transparent=bool(request.export_all_figures_transparent),
+            )
+
+        if isinstance(request.review_output_dir, Path):
+            request.review_output_dir.mkdir(parents=True, exist_ok=True)
+            theme = theme_manager()
+            previous_mode = theme.current_mode()
+            if request.review_dark_gui:
+                theme.set_mode("dark")
+                _pump_qt_events(app, rounds=4)
+            try:
+                if window.grab().save(str(request.review_output_dir / "pyplot-gui.png")):
+                    review_paths.append(request.review_output_dir / "pyplot-gui.png")
+                axes = window._current_axes()  # type: ignore[attr-defined]
+                if axes is not None and getattr(axes, "figure", None) is not None:
+                    target = request.review_output_dir / "current-figure.png"
+                    axes.figure.savefig(target, dpi=180)
+                    review_paths.append(target)
+            finally:
+                if request.review_dark_gui:
+                    theme.set_mode(previous_mode)
+                    _pump_qt_events(app, rounds=4)
+
         if isinstance(request.save_project_path, Path):
             target = _normalise_project_path(request.save_project_path)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -919,6 +1000,8 @@ def _execute_pyplot_automation_request(
                 "saved_project": _absolute_path(saved_project_path),
                 "imported_paths": _path_payload(imported_paths),
                 "plot_image_paths": _path_payload(exported_plot_paths),
+                "all_figure_export_paths": _path_payload(exported_all_figure_paths),
+                "review_paths": _path_payload(review_paths),
                 "window_image": _absolute_path(request.window_image_path),
                 "current_plot_image": _absolute_path(request.current_plot_image_path),
                 "warnings": [],

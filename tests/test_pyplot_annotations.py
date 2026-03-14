@@ -5,13 +5,14 @@ import sys
 from types import SimpleNamespace
 
 import pandas as pd
-from PyQt6 import QtWidgets
+from PyQt6 import QtCore, QtWidgets
 
 from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot.window import (
     CreateGraphDialog,
     FigureLayoutDialog,
     GraphSelectionDialog,
+    TabDescriptor,
     WorkbookData,
     WorksheetColumnMeta,
     WorksheetData,
@@ -83,6 +84,198 @@ def test_blank_graph_supports_text_annotations_and_mathtext_formatting(monkeypat
         )
         window._apply_text_subscript()  # noqa: SLF001
         assert artist.get_text() == "$H_{c}$"
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_annotation_text_alignment_moves_selected_labels() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+        first = window._create_text_annotation(  # noqa: SLF001
+            axes,
+            x=1.0,
+            y=2.0,
+            payload=_GraphTextDialogResult(
+                text="A",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=False,
+                italic=False,
+                underline=False,
+            ),
+        )
+        second = window._create_text_annotation(  # noqa: SLF001
+            axes,
+            x=3.0,
+            y=4.0,
+            payload=_GraphTextDialogResult(
+                text="B",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=False,
+                italic=False,
+                underline=False,
+            ),
+        )
+        assert first is not None and second is not None
+        window._set_format_selection(("text", (first, second)))  # noqa: SLF001
+        window._align_selected_text_annotations("left")  # noqa: SLF001
+        assert first.get_position()[0] == second.get_position()[0] == 1.0
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_annotation_snap_helper_uses_existing_text_positions() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+        existing = window._create_text_annotation(  # noqa: SLF001
+            axes,
+            x=1.0,
+            y=1.0,
+            payload=_GraphTextDialogResult(
+                text="A",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=False,
+                italic=False,
+                underline=False,
+            ),
+        )
+        assert existing is not None
+        snapped_x, snapped_y, guide_x, guide_y = window._snap_annotation_point(axes, 1.01, 1.02)  # noqa: SLF001
+        assert snapped_x == 1.0
+        assert snapped_y == 1.0
+        assert guide_x == 1.0
+        assert guide_y == 1.0
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_annotation_copy_paste_and_duplicate() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+        artist = window._create_text_annotation(  # noqa: SLF001
+            axes,
+            x=1.0,
+            y=2.0,
+            payload=_GraphTextDialogResult(
+                text="A",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=False,
+                italic=False,
+                underline=False,
+            ),
+        )
+        assert artist is not None
+        window._set_format_selection(("text", (artist,)))  # noqa: SLF001
+        window._copy_selected_graph_objects()  # noqa: SLF001
+        window._paste_graph_objects()  # noqa: SLF001
+        window._duplicate_selected_graph_objects()  # noqa: SLF001
+        texts = window._iter_graph_object_texts(axes)  # noqa: SLF001
+        assert len(texts) == 3
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_arrow_style_persists_in_payload() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+        window._set_annotation_tool("arrow")  # noqa: SLF001
+        canvas = window._current_canvas()  # noqa: SLF001
+        press = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=0.5, ydata=1.0, dblclick=False)
+        move = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=2.5, ydata=1.0, dblclick=False)
+        release = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=2.5, ydata=1.0, dblclick=False)
+        window._handle_canvas_button_press(press)  # noqa: SLF001
+        window._handle_canvas_motion(move)  # noqa: SLF001
+        window._handle_canvas_button_release(release)  # noqa: SLF001
+        arrow = next(shape for shape in window._iter_graph_object_shapes(axes) if shape.__class__.__name__ == "FancyArrowPatch")  # noqa: SLF001
+        window._set_format_selection(("shape", arrow))  # noqa: SLF001
+        combo = window._format_controls.arrow_style_combo  # noqa: SLF001
+        assert combo is not None
+        combo.setCurrentIndex(combo.findData("<->"))
+        payloads = window._serialize_graph_object_payloads_for_axes(axes)  # noqa: SLF001
+        arrow_payload = next(entry for entry in payloads if entry.get("kind") == "arrow")
+        assert arrow_payload["arrowstyle"] == "<->"
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_annotation_paste_targets_selected_panel_axes() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        first_axes = window._current_axes()  # noqa: SLF001
+        assert first_axes is not None
+        first = window._create_text_annotation(  # noqa: SLF001
+            first_axes,
+            x=1.0,
+            y=1.0,
+            payload=_GraphTextDialogResult(
+                text="A",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=False,
+                italic=False,
+                underline=False,
+            ),
+        )
+        window._create_blank_graph()  # noqa: SLF001
+        second_axes = window._current_axes()  # noqa: SLF001
+        assert second_axes is not None
+        second = window._create_text_annotation(  # noqa: SLF001
+            second_axes,
+            x=0.5,
+            y=0.5,
+            payload=_GraphTextDialogResult(
+                text="B",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=False,
+                italic=False,
+                underline=False,
+            ),
+        )
+        assert first is not None and second is not None
+        window._set_format_selection(("text", (first,)))  # noqa: SLF001
+        window._copy_selected_graph_objects()  # noqa: SLF001
+        window._set_format_selection(("text", (second,)))  # noqa: SLF001
+        window._paste_graph_objects()  # noqa: SLF001
+        assert len(window._iter_graph_object_texts(first_axes)) == 1  # noqa: SLF001
+        assert len(window._iter_graph_object_texts(second_axes)) == 2  # noqa: SLF001
     finally:
         window._clear_project_dirty()  # noqa: SLF001
         window.close()
@@ -370,6 +563,48 @@ def test_plugin_graph_annotation_persists_in_project(tmp_path) -> None:
         app.processEvents()
 
 
+def test_callout_annotation_serializes_as_boxed_text(tmp_path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    restored = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        artist = window._create_text_annotation(  # noqa: SLF001
+            axes,
+            x=1.0,
+            y=1.0,
+            payload=_GraphTextDialogResult(
+                text="Note",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=False,
+                italic=False,
+                underline=False,
+            ),
+        )
+        assert artist is not None
+        artist.set_bbox({"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "#444444", "linewidth": 0.8})
+        setattr(artist, "_mw_callout_box", True)
+        payloads = window._serialize_graph_object_payloads_for_axes(axes)  # noqa: SLF001
+        assert any(entry.get("callout_box") for entry in payloads)
+        project_path = tmp_path / "callout_graph.pypj"
+        window._write_project_file(project_path)  # noqa: SLF001
+        restored._load_project_from_path(project_path)  # noqa: SLF001
+        restored_axes = restored._current_axes()  # noqa: SLF001
+        assert restored_axes is not None
+        callouts = [text for text in restored_axes.texts if text.get_text() == "Note"]
+        assert callouts
+        assert callouts[0].get_bbox_patch() is not None
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        restored._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        restored.close()
+        app.processEvents()
+
+
 def test_create_figure_builder_creates_shared_layout(monkeypatch) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(plotters={})
@@ -498,9 +733,10 @@ def test_layout_graph_persists_in_project(tmp_path, monkeypatch) -> None:
 
 def test_figure_layout_dialog_defaults_to_mm_and_converts_to_inches() -> None:
     app = _ensure_app()
+    payload_tab = QtWidgets.QWidget()
     dialog = FigureLayoutDialog(
         None,
-        entries=[],
+        entries=[("Graph 1", "Graph 1", payload_tab)],
     )
     try:
         assert dialog.units_combo.currentData() == "mm"
@@ -509,18 +745,6 @@ def test_figure_layout_dialog_defaults_to_mm_and_converts_to_inches() -> None:
         dialog.title_edit.setText("Figure")
         dialog.rows_spin.setValue(1)
         dialog.cols_spin.setValue(1)
-        payload_tab = QtWidgets.QWidget()
-        item = dialog.tabs_list.item(0) if dialog.tabs_list.count() else None
-        if item is None:
-            from PyQt6 import QtCore
-            item = QtWidgets.QListWidgetItem("Graph 1")
-            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(QtCore.Qt.CheckState.Checked)
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, payload_tab)
-            dialog.tabs_list.addItem(item)
-        else:
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, payload_tab)
-            item.setCheckState(QtCore.Qt.CheckState.Checked)
         dialog.width_spin.setValue(25.4)
         dialog.height_spin.setValue(50.8)
         dialog.accept()
@@ -529,6 +753,292 @@ def test_figure_layout_dialog_defaults_to_mm_and_converts_to_inches() -> None:
         assert payload["figure_units"] == "mm"
         assert payload["figure_width"] == 1.0
         assert payload["figure_height"] == 2.0
+        assert payload["panels"][0]["tab"] is payload_tab
     finally:
         dialog.close()
         app.processEvents()
+
+
+def test_figure_layout_external_legend_and_panel_override(monkeypatch) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        first_tab = window.tab_widget.currentWidget()
+        first_axes = window._current_axes()  # noqa: SLF001
+        assert first_axes is not None
+        first_axes.set_title("First")
+        first_axes.plot([0, 1, 2], [1, 2, 3], label="A")
+
+        window._create_blank_graph()  # noqa: SLF001
+        second_tab = window.tab_widget.currentWidget()
+        second_axes = window._current_axes()  # noqa: SLF001
+        assert second_axes is not None
+        second_axes.set_title("Second")
+        second_axes.plot([0, 1, 2], [3, 2, 1], label="B")
+
+        monkeypatch.setattr(
+            FigureLayoutDialog,
+            "exec",
+            lambda self: int(QtWidgets.QDialog.DialogCode.Accepted),
+        )
+        monkeypatch.setattr(
+            FigureLayoutDialog,
+            "payload",
+            lambda self: {
+                "title": "Legend Figure",
+                "rows": 2,
+                "cols": 1,
+                "share_x": True,
+                "share_y": False,
+                "panel_labels": "lower",
+                "external_legend": True,
+                "legend_placement": "right",
+                "figure_units": "mm",
+                "figure_width": 180 / 25.4,
+                "figure_height": 120 / 25.4,
+                "style_preset": "mono",
+                "minor_ticks": True,
+                "tick_direction": "in",
+                "notation": "scientific",
+                "x_ticks": "0,1,2",
+                "y_ticks": "",
+                "wspace": 0.12,
+                "hspace": 0.18,
+                "left_margin": 0.08,
+                "right_margin": 0.82,
+                "top_margin": 0.90,
+                "bottom_margin": 0.12,
+                "panels": [
+                    {"tab": first_tab, "panel_title": "Panel One"},
+                    {"tab": second_tab, "panel_title": "Panel Two"},
+                ],
+            },
+        )
+
+        window._open_create_figure_dialog()  # noqa: SLF001
+
+        descriptor = window._tab_descriptors.get(window.tab_widget.currentWidget())  # noqa: SLF001
+        assert descriptor is not None
+        assert descriptor.kind == "layout_graph"
+        figure = descriptor.axes.figure
+        visible_axes = [axes for axes in figure.axes if axes.get_visible()]
+        assert visible_axes[0].get_title() == "Panel One"
+        assert visible_axes[1].get_title() == "Panel Two"
+        assert figure.legends
+        assert list(visible_axes[0].get_xticks())[:3] == [0.0, 1.0, 2.0]
+        assert str(visible_axes[0].lines[0].get_color()).lower() in {"#111111", "#555555", "#888888", "#bbbbbb"}
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_refresh_layout_figure_reuses_updated_source_data(monkeypatch) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        first_tab = window.tab_widget.currentWidget()
+        first_axes = window._current_axes()  # noqa: SLF001
+        assert first_axes is not None
+        first_axes.set_title("First")
+        first_axes.plot([0, 1, 2], [1, 2, 3], label="A")
+
+        window._create_blank_graph()  # noqa: SLF001
+        second_tab = window.tab_widget.currentWidget()
+        second_axes = window._current_axes()  # noqa: SLF001
+        assert second_axes is not None
+        second_axes.set_title("Second")
+        second_axes.plot([0, 1, 2], [3, 2, 1], label="B")
+
+        monkeypatch.setattr(
+            FigureLayoutDialog,
+            "exec",
+            lambda self: int(QtWidgets.QDialog.DialogCode.Accepted),
+        )
+        monkeypatch.setattr(
+            FigureLayoutDialog,
+            "payload",
+            lambda self: {
+                "title": "Refreshable Figure",
+                "rows": 2,
+                "cols": 1,
+                "share_x": True,
+                "share_y": True,
+                "panel_labels": "lower",
+                "external_legend": False,
+                "legend_placement": "right",
+                "figure_units": "mm",
+                "figure_width": 180 / 25.4,
+                "figure_height": 120 / 25.4,
+                "wspace": 0.12,
+                "hspace": 0.18,
+                "left_margin": 0.08,
+                "right_margin": 0.90,
+                "top_margin": 0.90,
+                "bottom_margin": 0.12,
+                "panels": [
+                    {"tab": first_tab, "panel_title": "First"},
+                    {"tab": second_tab, "panel_title": "Second"},
+                ],
+            },
+        )
+        window._open_create_figure_dialog()  # noqa: SLF001
+
+        # update source graph after layout creation
+        first_axes.lines[0].set_ydata([10, 11, 12])
+        window._refresh_current_layout_figure()  # noqa: SLF001
+
+        descriptor = window._tab_descriptors.get(window.tab_widget.currentWidget())  # noqa: SLF001
+        assert descriptor is not None
+        figure = descriptor.axes.figure
+        visible_axes = [axes for axes in figure.axes if axes.get_visible()]
+        refreshed_y = list(visible_axes[0].lines[0].get_ydata())
+        assert refreshed_y == [10, 11, 12]
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_clone_layout_figure_creates_copy(monkeypatch) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        first_tab = window.tab_widget.currentWidget()
+        first_axes = window._current_axes()  # noqa: SLF001
+        assert first_axes is not None
+        first_axes.set_title("First")
+        first_axes.plot([0, 1, 2], [1, 2, 3], label="A")
+
+        monkeypatch.setattr(
+            FigureLayoutDialog,
+            "exec",
+            lambda self: int(QtWidgets.QDialog.DialogCode.Accepted),
+        )
+        monkeypatch.setattr(
+            FigureLayoutDialog,
+            "payload",
+            lambda self: {
+                "title": "Cloneable Figure",
+                "rows": 1,
+                "cols": 1,
+                "share_x": False,
+                "share_y": False,
+                "panel_labels": "none",
+                "external_legend": False,
+                "legend_placement": "right",
+                "figure_units": "mm",
+                "figure_width": 120.0,
+                "figure_height": 80.0,
+                "wspace": 0.10,
+                "hspace": 0.10,
+                "left_margin": 0.10,
+                "right_margin": 0.95,
+                "top_margin": 0.90,
+                "bottom_margin": 0.12,
+                "panels": [
+                    {"tab": first_tab, "panel_title": "Panel A"},
+                ],
+            },
+        )
+        window._open_create_figure_dialog()  # noqa: SLF001
+        before = len(window._tab_descriptors)  # noqa: SLF001
+        window._clone_current_layout_figure()  # noqa: SLF001
+        after = len(window._tab_descriptors)  # noqa: SLF001
+        assert after == before + 1
+        titles = [descriptor.title for descriptor in window._tab_descriptors.values()]  # noqa: SLF001
+        assert "Cloneable Figure (copy)" in titles
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_figure_layout_dialog_can_save_and_load_house_style() -> None:
+    app = _ensure_app()
+    dialog = FigureLayoutDialog(None, entries=[])
+    try:
+        dialog.external_legend_cb.setChecked(True)
+        dialog.legend_placement_combo.setCurrentIndex(dialog.legend_placement_combo.findData("bottom"))
+        dialog.style_preset_combo.setCurrentIndex(dialog.style_preset_combo.findData("mono"))
+        dialog.minor_ticks_cb.setChecked(True)
+        dialog.tick_direction_combo.setCurrentIndex(dialog.tick_direction_combo.findData("in"))
+        dialog.notation_combo.setCurrentIndex(dialog.notation_combo.findData("scientific"))
+        dialog.x_ticks_edit.setText("0, 1, 2")
+        dialog.y_ticks_edit.setText("10, 20")
+        dialog._save_house_style()  # noqa: SLF001
+
+        restored = FigureLayoutDialog(None, entries=[])
+        try:
+            restored._load_house_style()  # noqa: SLF001
+            assert restored.external_legend_cb.isChecked() is True
+            assert restored.legend_placement_combo.currentData() == "bottom"
+            assert restored.style_preset_combo.currentData() == "mono"
+            assert restored.minor_ticks_cb.isChecked() is True
+            assert restored.tick_direction_combo.currentData() == "in"
+            assert restored.notation_combo.currentData() == "scientific"
+            assert restored.x_ticks_edit.text() == "0, 1, 2"
+            assert restored.y_ticks_edit.text() == "10, 20"
+        finally:
+            restored.close()
+    finally:
+        dialog.close()
+        app.processEvents()
+
+
+def test_figure_layout_dialog_can_save_and_load_template(monkeypatch) -> None:
+    app = _ensure_app()
+    source_tab = QtWidgets.QWidget()
+    dialog = FigureLayoutDialog(None, entries=[("Graph 1", "Graph 1", source_tab)])
+    try:
+        dialog.title_edit.setText("Template Figure")
+        title_item = dialog.panels_table.item(0, 2)
+        assert title_item is not None
+        title_item.setText("Panel A")
+        dialog.rows_spin.setValue(2)
+        dialog.cols_spin.setValue(1)
+        monkeypatch.setattr(
+            QtWidgets.QInputDialog,
+            "getText",
+            lambda *args, **kwargs: ("My Template", True),
+        )
+        dialog._save_figure_template()  # noqa: SLF001
+
+        restored = FigureLayoutDialog(None, entries=[("Graph X", "Graph X", QtWidgets.QWidget())])
+        try:
+            monkeypatch.setattr(
+                QtWidgets.QInputDialog,
+                "getItem",
+                lambda *args, **kwargs: ("My Template", True),
+            )
+            restored._load_figure_template()  # noqa: SLF001
+            assert restored.title_edit.text() == "Template Figure"
+            assert restored.rows_spin.value() == 2
+            assert restored.cols_spin.value() == 1
+            restored_title = restored.panels_table.item(0, 2)
+            assert restored_title is not None
+            assert restored_title.text() == "Panel A"
+        finally:
+            restored.close()
+    finally:
+        dialog.close()
+        app.processEvents()
+
+
+def test_export_stem_for_descriptor_is_deterministic() -> None:
+    descriptor = TabDescriptor(
+        kind="layout_graph",
+        title="Figure Alpha",
+        root_label="Figure Layout",
+        x_label="X",
+        y_label="Y",
+        canvas=None,  # type: ignore[arg-type]
+        axes=None,
+        lines={},
+        metadata={},
+    )
+    stem = PyPlotWorkbench._export_stem_for_descriptor(3, descriptor)  # noqa: SLF001
+    assert stem == "03-Figure_Alpha"

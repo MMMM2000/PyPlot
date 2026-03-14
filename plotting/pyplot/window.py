@@ -37,7 +37,9 @@ from functools import partial
 from PyQt6 import QtCore, QtGui, QtWidgets
 import matplotlib as mpl
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends import backend_qtagg as _backend_qtagg
 from matplotlib.backends.backend_qt import NavigationToolbar2QT
+from matplotlib.backends import backend_qt as _backend_qt
 from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
@@ -114,6 +116,77 @@ ORIGIN_EXPORT_LAYER_TOP = 20.0
 ORIGIN_EXPORT_LAYER_BOTTOM = 20.0
 
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
+
+
+def _install_safe_qt_draw_idle() -> None:
+    """Suppress known offscreen Qt font-metric crashes during deferred redraw."""
+
+    for module, class_name in (
+        (_backend_qt, "FigureCanvasQT"),
+        (_backend_qtagg, "FigureCanvasQTAgg"),
+    ):
+        canvas_cls = getattr(module, class_name, None)
+        if canvas_cls is None:
+            continue
+        original = getattr(canvas_cls, "_draw_idle", None)
+        if not callable(original):
+            continue
+        if bool(getattr(canvas_cls, "_mw_safe_draw_idle_installed", False)):
+            continue
+
+        def _safe_draw_idle(self, *args: Any, _module=module, **kwargs: Any) -> None:  # type: ignore[override]
+            with self._idle_draw_cntx():
+                if not self._draw_pending:
+                    return
+                self._draw_pending = False
+                if _module._isdeleted(self) or self.height() <= 0 or self.width() <= 0:
+                    return
+                try:
+                    self.draw()
+                except RuntimeError as exc:
+                    if "invalid ppem value" in str(exc).lower():
+                        return
+                    raise
+                except Exception:
+                    _module.traceback.print_exc()
+
+        setattr(canvas_cls, "_draw_idle", _safe_draw_idle)
+        setattr(canvas_cls, "_mw_safe_draw_idle_installed", True)
+
+
+_install_safe_qt_draw_idle()
+
+
+def _install_safe_qt_traceback_printer() -> None:
+    existing = getattr(_backend_qt, "_mw_original_print_exc", None)
+    if existing is not None:
+        return
+    original = _backend_qt.traceback.print_exc
+
+    def _safe_print_exc(*args: Any, **kwargs: Any) -> None:
+        app = QtWidgets.QApplication.instance()
+        platform_name = ""
+        if app is not None:
+            try:
+                platform_name = str(app.platformName() or "").strip().lower()
+            except Exception:
+                platform_name = ""
+        exc_type, exc_value, _exc_tb = sys.exc_info()
+        if (
+            platform_name in {"offscreen", "minimal", "headless"}
+            and exc_type is not None
+            and issubclass(exc_type, RuntimeError)
+            and exc_value is not None
+            and "invalid ppem value" in str(exc_value).lower()
+        ):
+            return
+        original(*args, **kwargs)
+
+    _backend_qt._mw_original_print_exc = original  # type: ignore[attr-defined]
+    _backend_qt.traceback.print_exc = _safe_print_exc
+
+
+_install_safe_qt_traceback_printer()
 
 
 def _make_qpointer(obj: QtCore.QObject) -> PointerType:
@@ -419,9 +492,20 @@ class FormatToolbarControls:
     superscript_action: QtGui.QAction | None = None
     subsup_action: QtGui.QAction | None = None
     edit_text_action: QtGui.QAction | None = None
+    position_text_action: QtGui.QAction | None = None
+    align_left_action: QtGui.QAction | None = None
+    align_hcenter_action: QtGui.QAction | None = None
+    align_right_action: QtGui.QAction | None = None
+    align_top_action: QtGui.QAction | None = None
+    align_vcenter_action: QtGui.QAction | None = None
+    align_bottom_action: QtGui.QAction | None = None
+    copy_action: QtGui.QAction | None = None
+    paste_action: QtGui.QAction | None = None
+    duplicate_action: QtGui.QAction | None = None
     color_button: QtWidgets.QToolButton | None = None
     fill_color_button: QtWidgets.QToolButton | None = None
     width_spin: QtWidgets.QDoubleSpinBox | None = None
+    arrow_style_combo: QtWidgets.QComboBox | None = None
     line_group: QtGui.QActionGroup | None = None
     line_action: QtGui.QAction | None = None
     scatter_action: QtGui.QAction | None = None
@@ -433,6 +517,7 @@ class AnnotationToolbarControls:
     toolbar: QtWidgets.QToolBar | None = None
     select_action: QtGui.QAction | None = None
     text_action: QtGui.QAction | None = None
+    callout_action: QtGui.QAction | None = None
     arrow_action: QtGui.QAction | None = None
     line_action: QtGui.QAction | None = None
     rectangle_action: QtGui.QAction | None = None
@@ -2103,6 +2188,7 @@ class FigureLayoutDialog(QtWidgets.QDialog):
 
     _SIZE_PRESETS: tuple[tuple[str, float, float], ...] = (
         ("Single column", 3.35, 4.40),
+        ("1.5 column", 5.20, 4.80),
         ("Double column", 7.10, 4.80),
         ("Presentation", 10.0, 6.0),
         ("Custom", 7.10, 4.80),
@@ -2118,7 +2204,6 @@ class FigureLayoutDialog(QtWidgets.QDialog):
         self.setWindowTitle("Create Figure")
         self.resize(760, 460)
         self._entries = list(entries)
-        self._selected_tabs: list[QtWidgets.QWidget] = []
         self._payload: dict[str, Any] | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -2172,6 +2257,45 @@ class FigureLayoutDialog(QtWidgets.QDialog):
         self.panel_label_combo.addItem("(A), (B), (C)", "upper")
         form.addRow("Panel labels:", self.panel_label_combo)
 
+        panel_style_row = QtWidgets.QWidget(self)
+        panel_style_layout = QtWidgets.QHBoxLayout(panel_style_row)
+        panel_style_layout.setContentsMargins(0, 0, 0, 0)
+        panel_style_layout.setSpacing(6)
+        self.panel_label_position_combo = QtWidgets.QComboBox(self)
+        self.panel_label_position_combo.addItem("Top-left", "tl")
+        self.panel_label_position_combo.addItem("Top-right", "tr")
+        self.panel_label_position_combo.addItem("Bottom-left", "bl")
+        self.panel_label_position_combo.addItem("Bottom-right", "br")
+        self.panel_label_size_spin = QtWidgets.QDoubleSpinBox(self)
+        self.panel_label_size_spin.setRange(6.0, 36.0)
+        self.panel_label_size_spin.setDecimals(1)
+        self.panel_label_size_spin.setValue(14.0)
+        panel_style_layout.addWidget(QtWidgets.QLabel("Position"))
+        panel_style_layout.addWidget(self.panel_label_position_combo)
+        panel_style_layout.addWidget(QtWidgets.QLabel("Size"))
+        panel_style_layout.addWidget(self.panel_label_size_spin)
+        panel_style_layout.addStretch(1)
+        form.addRow("Panel label style:", panel_style_row)
+
+        self.style_preset_combo = QtWidgets.QComboBox(self)
+        self.style_preset_combo.addItem("Default", "default")
+        self.style_preset_combo.addItem("Colorblind safe", "colorblind")
+        self.style_preset_combo.addItem("Monochrome print", "mono")
+        form.addRow("Style preset:", self.style_preset_combo)
+
+        legend_row = QtWidgets.QWidget(self)
+        legend_layout = QtWidgets.QHBoxLayout(legend_row)
+        legend_layout.setContentsMargins(0, 0, 0, 0)
+        legend_layout.setSpacing(6)
+        self.external_legend_cb = QtWidgets.QCheckBox("One shared external legend", self)
+        self.legend_placement_combo = QtWidgets.QComboBox(self)
+        self.legend_placement_combo.addItem("Right", "right")
+        self.legend_placement_combo.addItem("Bottom", "bottom")
+        legend_layout.addWidget(self.external_legend_cb)
+        legend_layout.addWidget(self.legend_placement_combo)
+        legend_layout.addStretch(1)
+        form.addRow("Legend:", legend_row)
+
         self.units_combo = QtWidgets.QComboBox(self)
         self.units_combo.addItem("mm", "mm")
         self.units_combo.addItem("in", "in")
@@ -2201,16 +2325,157 @@ class FigureLayoutDialog(QtWidgets.QDialog):
         size_layout.addStretch(1)
         form.addRow("Figure size:", size_row)
 
-        self.tabs_list = QtWidgets.QListWidget(self)
-        self.tabs_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        spacing_row = QtWidgets.QWidget(self)
+        spacing_layout = QtWidgets.QHBoxLayout(spacing_row)
+        spacing_layout.setContentsMargins(0, 0, 0, 0)
+        spacing_layout.setSpacing(6)
+        self.wspace_spin = QtWidgets.QDoubleSpinBox(self)
+        self.wspace_spin.setRange(0.0, 1.5)
+        self.wspace_spin.setDecimals(2)
+        self.wspace_spin.setValue(0.18)
+        self.hspace_spin = QtWidgets.QDoubleSpinBox(self)
+        self.hspace_spin.setRange(0.0, 1.5)
+        self.hspace_spin.setDecimals(2)
+        self.hspace_spin.setValue(0.25)
+        spacing_layout.addWidget(QtWidgets.QLabel("wspace"))
+        spacing_layout.addWidget(self.wspace_spin)
+        spacing_layout.addWidget(QtWidgets.QLabel("hspace"))
+        spacing_layout.addWidget(self.hspace_spin)
+        spacing_layout.addStretch(1)
+        form.addRow("Spacing:", spacing_row)
+
+        tick_row = QtWidgets.QWidget(self)
+        tick_layout = QtWidgets.QHBoxLayout(tick_row)
+        tick_layout.setContentsMargins(0, 0, 0, 0)
+        tick_layout.setSpacing(6)
+        self.minor_ticks_cb = QtWidgets.QCheckBox("Minor ticks", self)
+        self.tick_direction_combo = QtWidgets.QComboBox(self)
+        self.tick_direction_combo.addItem("Out", "out")
+        self.tick_direction_combo.addItem("In", "in")
+        self.tick_direction_combo.addItem("In/Out", "inout")
+        self.notation_combo = QtWidgets.QComboBox(self)
+        self.notation_combo.addItem("Plain", "plain")
+        self.notation_combo.addItem("Scientific", "scientific")
+        tick_layout.addWidget(self.minor_ticks_cb)
+        tick_layout.addWidget(QtWidgets.QLabel("Direction"))
+        tick_layout.addWidget(self.tick_direction_combo)
+        tick_layout.addWidget(QtWidgets.QLabel("Notation"))
+        tick_layout.addWidget(self.notation_combo)
+        tick_layout.addStretch(1)
+        form.addRow("Ticks:", tick_row)
+
+        decimals_row = QtWidgets.QWidget(self)
+        decimals_layout = QtWidgets.QHBoxLayout(decimals_row)
+        decimals_layout.setContentsMargins(0, 0, 0, 0)
+        decimals_layout.setSpacing(6)
+        self.x_decimals_spin = QtWidgets.QSpinBox(self)
+        self.x_decimals_spin.setRange(-1, 8)
+        self.x_decimals_spin.setValue(-1)
+        self.x_decimals_spin.setSpecialValueText("auto")
+        self.y_decimals_spin = QtWidgets.QSpinBox(self)
+        self.y_decimals_spin.setRange(-1, 8)
+        self.y_decimals_spin.setValue(-1)
+        self.y_decimals_spin.setSpecialValueText("auto")
+        decimals_layout.addWidget(QtWidgets.QLabel("X decimals"))
+        decimals_layout.addWidget(self.x_decimals_spin)
+        decimals_layout.addWidget(QtWidgets.QLabel("Y decimals"))
+        decimals_layout.addWidget(self.y_decimals_spin)
+        decimals_layout.addStretch(1)
+        form.addRow("Decimal format:", decimals_row)
+
+        tick_list_row = QtWidgets.QWidget(self)
+        tick_list_layout = QtWidgets.QHBoxLayout(tick_list_row)
+        tick_list_layout.setContentsMargins(0, 0, 0, 0)
+        tick_list_layout.setSpacing(6)
+        self.x_ticks_edit = QtWidgets.QLineEdit(self)
+        self.x_ticks_edit.setPlaceholderText("auto or comma list")
+        self.y_ticks_edit = QtWidgets.QLineEdit(self)
+        self.y_ticks_edit.setPlaceholderText("auto or comma list")
+        tick_list_layout.addWidget(QtWidgets.QLabel("X"))
+        tick_list_layout.addWidget(self.x_ticks_edit, 1)
+        tick_list_layout.addWidget(QtWidgets.QLabel("Y"))
+        tick_list_layout.addWidget(self.y_ticks_edit, 1)
+        form.addRow("Tick lists:", tick_list_row)
+
+        margins_row = QtWidgets.QWidget(self)
+        margins_layout = QtWidgets.QHBoxLayout(margins_row)
+        margins_layout.setContentsMargins(0, 0, 0, 0)
+        margins_layout.setSpacing(6)
+        self.left_margin_spin = QtWidgets.QDoubleSpinBox(self)
+        self.right_margin_spin = QtWidgets.QDoubleSpinBox(self)
+        self.top_margin_spin = QtWidgets.QDoubleSpinBox(self)
+        self.bottom_margin_spin = QtWidgets.QDoubleSpinBox(self)
+        for spin, value in (
+            (self.left_margin_spin, 0.10),
+            (self.right_margin_spin, 0.96),
+            (self.top_margin_spin, 0.90),
+            (self.bottom_margin_spin, 0.12),
+        ):
+            spin.setRange(0.0, 1.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.01)
+            spin.setValue(value)
+        margins_layout.addWidget(QtWidgets.QLabel("Left"))
+        margins_layout.addWidget(self.left_margin_spin)
+        margins_layout.addWidget(QtWidgets.QLabel("Right"))
+        margins_layout.addWidget(self.right_margin_spin)
+        margins_layout.addWidget(QtWidgets.QLabel("Top"))
+        margins_layout.addWidget(self.top_margin_spin)
+        margins_layout.addWidget(QtWidgets.QLabel("Bottom"))
+        margins_layout.addWidget(self.bottom_margin_spin)
+        margins_layout.addStretch(1)
+        form.addRow("Margins:", margins_row)
+
+        table_row = QtWidgets.QHBoxLayout()
+        self.panels_table = QtWidgets.QTableWidget(0, 3, self)
+        self.panels_table.setHorizontalHeaderLabels(["Use", "Source graph", "Panel title"])
+        self.panels_table.verticalHeader().setVisible(False)
+        self.panels_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.panels_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.panels_table.setDragEnabled(True)
+        self.panels_table.viewport().setAcceptDrops(True)
+        self.panels_table.setDropIndicatorShown(True)
+        self.panels_table.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
+        self.panels_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+            | QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        header = self.panels_table.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        table_row.addWidget(self.panels_table, 1)
+
+        order_column = QtWidgets.QVBoxLayout()
+        order_column.setSpacing(6)
+        self.move_up_button = QtWidgets.QPushButton("Move up", self)
+        self.move_down_button = QtWidgets.QPushButton("Move down", self)
+        order_column.addWidget(self.move_up_button)
+        order_column.addWidget(self.move_down_button)
+        order_column.addStretch(1)
+        table_row.addLayout(order_column)
+        layout.addLayout(table_row, 1)
+
         for label, detail, tab in self._entries:
-            item = QtWidgets.QListWidgetItem(label or "Graph")
-            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(QtCore.Qt.CheckState.Checked)
-            item.setToolTip(detail)
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, tab)
-            self.tabs_list.addItem(item)
-        layout.addWidget(self.tabs_list, 1)
+            self._append_panel_row(label=label, detail=detail, tab=tab)
+
+        template_row = QtWidgets.QHBoxLayout()
+        template_row.setSpacing(6)
+        save_style_button = QtWidgets.QPushButton("Save house style", self)
+        load_style_button = QtWidgets.QPushButton("Load house style", self)
+        save_template_button = QtWidgets.QPushButton("Save figure template", self)
+        load_template_button = QtWidgets.QPushButton("Load figure template", self)
+        save_style_button.clicked.connect(self._save_house_style)
+        load_style_button.clicked.connect(self._load_house_style)
+        save_template_button.clicked.connect(self._save_figure_template)
+        load_template_button.clicked.connect(self._load_figure_template)
+        template_row.addWidget(save_style_button)
+        template_row.addWidget(load_style_button)
+        template_row.addWidget(save_template_button)
+        template_row.addWidget(load_template_button)
+        template_row.addStretch(1)
+        layout.addLayout(template_row)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -2223,8 +2488,222 @@ class FigureLayoutDialog(QtWidgets.QDialog):
 
         self.units_combo.currentIndexChanged.connect(self._sync_unit_display)
         self.size_preset_combo.currentIndexChanged.connect(self._apply_size_preset)
+        self.external_legend_cb.toggled.connect(self.legend_placement_combo.setEnabled)
+        self.move_up_button.clicked.connect(self._move_selected_panel_up)
+        self.move_down_button.clicked.connect(self._move_selected_panel_down)
+        self.legend_placement_combo.setEnabled(False)
         self._sync_unit_display()
         self._apply_size_preset(self.size_preset_combo.currentIndex())
+        self._load_house_style()
+
+    def _append_panel_row(self, *, label: str, detail: str, tab: QtWidgets.QWidget) -> None:
+        row = self.panels_table.rowCount()
+        self.panels_table.insertRow(row)
+        use_item = QtWidgets.QTableWidgetItem()
+        use_item.setFlags(
+            QtCore.Qt.ItemFlag.ItemIsUserCheckable
+            | QtCore.Qt.ItemFlag.ItemIsEnabled
+            | QtCore.Qt.ItemFlag.ItemIsSelectable
+        )
+        use_item.setCheckState(QtCore.Qt.CheckState.Checked)
+        use_item.setData(QtCore.Qt.ItemDataRole.UserRole, tab)
+        self.panels_table.setItem(row, 0, use_item)
+
+        source_item = QtWidgets.QTableWidgetItem(label or "Graph")
+        source_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+        source_item.setToolTip(detail)
+        self.panels_table.setItem(row, 1, source_item)
+
+        title_item = QtWidgets.QTableWidgetItem(label or "Graph")
+        title_item.setToolTip("Override the panel title if needed.")
+        self.panels_table.setItem(row, 2, title_item)
+
+    def _move_selected_panel(self, offset: int) -> None:
+        row = self.panels_table.currentRow()
+        if row < 0:
+            return
+        target = row + offset
+        if target < 0 or target >= self.panels_table.rowCount():
+            return
+        values = [self.panels_table.takeItem(row, column) for column in range(self.panels_table.columnCount())]
+        self.panels_table.removeRow(row)
+        self.panels_table.insertRow(target)
+        for column, item in enumerate(values):
+            self.panels_table.setItem(target, column, item)
+        self.panels_table.selectRow(target)
+
+    def _move_selected_panel_up(self) -> None:
+        self._move_selected_panel(-1)
+
+    def _move_selected_panel_down(self) -> None:
+        self._move_selected_panel(1)
+
+    def _style_settings_payload(self) -> dict[str, Any]:
+        return {
+            "share_x": bool(self.share_x_cb.isChecked()),
+            "share_y": bool(self.share_y_cb.isChecked()),
+            "panel_labels": str(self.panel_label_combo.currentData() or "none"),
+            "panel_label_position": str(self.panel_label_position_combo.currentData() or "tl"),
+            "panel_label_size": float(self.panel_label_size_spin.value()),
+            "external_legend": bool(self.external_legend_cb.isChecked()),
+            "legend_placement": str(self.legend_placement_combo.currentData() or "right"),
+            "figure_units": self._unit_token(),
+            "figure_width": float(self.width_spin.value()),
+            "figure_height": float(self.height_spin.value()),
+            "style_preset": str(self.style_preset_combo.currentData() or "default"),
+            "minor_ticks": bool(self.minor_ticks_cb.isChecked()),
+            "tick_direction": str(self.tick_direction_combo.currentData() or "out"),
+            "notation": str(self.notation_combo.currentData() or "plain"),
+            "x_decimals": int(self.x_decimals_spin.value()),
+            "y_decimals": int(self.y_decimals_spin.value()),
+            "x_ticks": self.x_ticks_edit.text().strip(),
+            "y_ticks": self.y_ticks_edit.text().strip(),
+            "wspace": float(self.wspace_spin.value()),
+            "hspace": float(self.hspace_spin.value()),
+            "left_margin": float(self.left_margin_spin.value()),
+            "right_margin": float(self.right_margin_spin.value()),
+            "top_margin": float(self.top_margin_spin.value()),
+            "bottom_margin": float(self.bottom_margin_spin.value()),
+        }
+
+    def _apply_style_settings_payload(self, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        self.share_x_cb.setChecked(bool(payload.get("share_x", False)))
+        self.share_y_cb.setChecked(bool(payload.get("share_y", False)))
+        index = self.panel_label_combo.findData(str(payload.get("panel_labels") or "none"))
+        if index >= 0:
+            self.panel_label_combo.setCurrentIndex(index)
+        index = self.panel_label_position_combo.findData(str(payload.get("panel_label_position") or "tl"))
+        if index >= 0:
+            self.panel_label_position_combo.setCurrentIndex(index)
+        self.panel_label_size_spin.setValue(float(payload.get("panel_label_size") or self.panel_label_size_spin.value()))
+        self.external_legend_cb.setChecked(bool(payload.get("external_legend", False)))
+        index = self.legend_placement_combo.findData(str(payload.get("legend_placement") or "right"))
+        if index >= 0:
+            self.legend_placement_combo.setCurrentIndex(index)
+        units_index = self.units_combo.findData(str(payload.get("figure_units") or "mm"))
+        if units_index >= 0:
+            self.units_combo.setCurrentIndex(units_index)
+        self.width_spin.setValue(float(payload.get("figure_width") or self.width_spin.value()))
+        self.height_spin.setValue(float(payload.get("figure_height") or self.height_spin.value()))
+        index = self.style_preset_combo.findData(str(payload.get("style_preset") or "default"))
+        if index >= 0:
+            self.style_preset_combo.setCurrentIndex(index)
+        self.minor_ticks_cb.setChecked(bool(payload.get("minor_ticks", False)))
+        index = self.tick_direction_combo.findData(str(payload.get("tick_direction") or "out"))
+        if index >= 0:
+            self.tick_direction_combo.setCurrentIndex(index)
+        index = self.notation_combo.findData(str(payload.get("notation") or "plain"))
+        if index >= 0:
+            self.notation_combo.setCurrentIndex(index)
+        self.x_decimals_spin.setValue(int(payload.get("x_decimals", self.x_decimals_spin.value())))
+        self.y_decimals_spin.setValue(int(payload.get("y_decimals", self.y_decimals_spin.value())))
+        self.x_ticks_edit.setText(str(payload.get("x_ticks") or ""))
+        self.y_ticks_edit.setText(str(payload.get("y_ticks") or ""))
+        self.wspace_spin.setValue(float(payload.get("wspace") or self.wspace_spin.value()))
+        self.hspace_spin.setValue(float(payload.get("hspace") or self.hspace_spin.value()))
+        self.left_margin_spin.setValue(float(payload.get("left_margin") or self.left_margin_spin.value()))
+        self.right_margin_spin.setValue(float(payload.get("right_margin") or self.right_margin_spin.value()))
+        self.top_margin_spin.setValue(float(payload.get("top_margin") or self.top_margin_spin.value()))
+        self.bottom_margin_spin.setValue(float(payload.get("bottom_margin") or self.bottom_margin_spin.value()))
+
+    def _save_house_style(self) -> None:
+        settings = QtCore.QSettings("microwire", "plotting")
+        try:
+            settings.setValue("figure_layout_house_style", json.dumps(self._style_settings_payload()))
+            settings.sync()
+        except Exception:
+            return
+
+    @staticmethod
+    def _stored_house_style_payload() -> dict[str, Any] | None:
+        settings = QtCore.QSettings("microwire", "plotting")
+        stored = settings.value("figure_layout_house_style", "")
+        if not isinstance(stored, str) or not stored.strip():
+            return None
+        try:
+            payload = json.loads(stored)
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _load_house_style(self) -> None:
+        payload = self._stored_house_style_payload()
+        if isinstance(payload, dict):
+            self._apply_style_settings_payload(payload)
+
+    def _template_settings_payload(self) -> dict[str, Any]:
+        payload = self._style_settings_payload()
+        payload.update(
+            {
+                "rows": int(self.rows_spin.value()),
+                "cols": int(self.cols_spin.value()),
+                "title": self.title_edit.text().strip(),
+                "panel_title_count": int(self.panels_table.rowCount()),
+                "panel_titles": [
+                    str(self.panels_table.item(row, 2).text() if self.panels_table.item(row, 2) is not None else "")
+                    for row in range(self.panels_table.rowCount())
+                ],
+            }
+        )
+        return payload
+
+    def _apply_template_settings_payload(self, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        self._apply_style_settings_payload(payload)
+        self.rows_spin.setValue(int(payload.get("rows") or self.rows_spin.value()))
+        self.cols_spin.setValue(int(payload.get("cols") or self.cols_spin.value()))
+        self.title_edit.setText(str(payload.get("title") or self.title_edit.text()))
+        panel_titles = [str(title) for title in payload.get("panel_titles", []) if isinstance(title, str)]
+        for row, panel_title in enumerate(panel_titles):
+            if row >= self.panels_table.rowCount():
+                break
+            item = self.panels_table.item(row, 2)
+            if item is not None:
+                item.setText(panel_title)
+
+    def _save_figure_template(self) -> None:
+        name, ok = QtWidgets.QInputDialog.getText(self, "Save Figure Template", "Template name:")
+        template_name = str(name).strip()
+        if not ok or not template_name:
+            return
+        settings = QtCore.QSettings("microwire", "plotting")
+        raw = settings.value("figure_layout_templates", "{}")
+        try:
+            templates = json.loads(raw) if isinstance(raw, str) else {}
+        except Exception:
+            templates = {}
+        if not isinstance(templates, dict):
+            templates = {}
+        templates[template_name] = self._template_settings_payload()
+        settings.setValue("figure_layout_templates", json.dumps(templates))
+        settings.sync()
+
+    def _load_figure_template(self) -> None:
+        settings = QtCore.QSettings("microwire", "plotting")
+        raw = settings.value("figure_layout_templates", "{}")
+        try:
+            templates = json.loads(raw) if isinstance(raw, str) else {}
+        except Exception:
+            templates = {}
+        if not isinstance(templates, dict) or not templates:
+            return
+        names = sorted(str(name) for name in templates.keys())
+        name, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Load Figure Template",
+            "Template:",
+            names,
+            0,
+            False,
+        )
+        if not ok or not str(name).strip():
+            return
+        payload = templates.get(str(name))
+        if isinstance(payload, dict):
+            self._apply_template_settings_payload(payload)
 
     def _unit_token(self) -> str:
         return str(self.units_combo.currentData() or "mm").strip().lower()
@@ -2278,15 +2757,17 @@ class FigureLayoutDialog(QtWidgets.QDialog):
         return self._payload
 
     def accept(self) -> None:  # type: ignore[override]
-        selected_tabs: list[QtWidgets.QWidget] = []
-        for index in range(self.tabs_list.count()):
-            item = self.tabs_list.item(index)
+        selected_panels: list[dict[str, Any]] = []
+        for row in range(self.panels_table.rowCount()):
+            item = self.panels_table.item(row, 0)
             if item is None or item.checkState() != QtCore.Qt.CheckState.Checked:
                 continue
             tab = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            title_item = self.panels_table.item(row, 2)
+            panel_title = title_item.text().strip() if title_item is not None else ""
             if isinstance(tab, QtWidgets.QWidget):
-                selected_tabs.append(tab)
-        if not selected_tabs:
+                selected_panels.append({"tab": tab, "panel_title": panel_title})
+        if not selected_panels:
             QtWidgets.QMessageBox.information(
                 self,
                 "Create Figure",
@@ -2295,7 +2776,7 @@ class FigureLayoutDialog(QtWidgets.QDialog):
             return
         rows = int(self.rows_spin.value())
         cols = int(self.cols_spin.value())
-        if rows * cols < len(selected_tabs):
+        if rows * cols < len(selected_panels):
             QtWidgets.QMessageBox.information(
                 self,
                 "Create Figure",
@@ -2309,10 +2790,28 @@ class FigureLayoutDialog(QtWidgets.QDialog):
             "share_x": bool(self.share_x_cb.isChecked()),
             "share_y": bool(self.share_y_cb.isChecked()),
             "panel_labels": str(self.panel_label_combo.currentData() or "none"),
+            "panel_label_position": str(self.panel_label_position_combo.currentData() or "tl"),
+            "panel_label_size": float(self.panel_label_size_spin.value()),
+            "style_preset": str(self.style_preset_combo.currentData() or "default"),
+            "external_legend": bool(self.external_legend_cb.isChecked()),
+            "legend_placement": str(self.legend_placement_combo.currentData() or "right"),
             "figure_units": self._unit_token(),
             "figure_width": self._display_to_inches(float(self.width_spin.value())),
             "figure_height": self._display_to_inches(float(self.height_spin.value())),
-            "source_tabs": selected_tabs,
+            "minor_ticks": bool(self.minor_ticks_cb.isChecked()),
+            "tick_direction": str(self.tick_direction_combo.currentData() or "out"),
+            "notation": str(self.notation_combo.currentData() or "plain"),
+            "x_decimals": int(self.x_decimals_spin.value()),
+            "y_decimals": int(self.y_decimals_spin.value()),
+            "x_ticks": self.x_ticks_edit.text().strip(),
+            "y_ticks": self.y_ticks_edit.text().strip(),
+            "wspace": float(self.wspace_spin.value()),
+            "hspace": float(self.hspace_spin.value()),
+            "left_margin": float(self.left_margin_spin.value()),
+            "right_margin": float(self.right_margin_spin.value()),
+            "top_margin": float(self.top_margin_spin.value()),
+            "bottom_margin": float(self.bottom_margin_spin.value()),
+            "panels": selected_panels,
         }
         super().accept()
 
@@ -2876,6 +3375,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._new_workbook_action: QtGui.QAction | None = None
         self._paper_png_action: QtGui.QAction | None = None
         self._paper_pdf_action: QtGui.QAction | None = None
+        self._paper_tiff_action: QtGui.QAction | None = None
+        self._paper_eps_action: QtGui.QAction | None = None
+        self._transparent_png_action: QtGui.QAction | None = None
+        self._export_all_figures_action: QtGui.QAction | None = None
+        self._refresh_figure_action: QtGui.QAction | None = None
+        self._clone_figure_action: QtGui.QAction | None = None
+        self._figure_sources_action: QtGui.QAction | None = None
         self._add_column_before_action: QtGui.QAction | None = None
         self._add_column_after_action: QtGui.QAction | None = None
         self._delete_column_action: QtGui.QAction | None = None
@@ -2899,6 +3405,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._annotation_motion_connections: Dict[FigureCanvas, int] = {}
         self._annotation_release_connections: Dict[FigureCanvas, int] = {}
         self._annotation_interaction: Dict[str, Any] | None = None
+        self._copied_graph_object_payloads: list[dict[str, Any]] = []
+        self._annotation_guides: list[Any] = []
         self._graph_object_counter = 0
         self._tight_layout_warning_signatures: set[tuple[int, str]] = set()
         self._last_tight_layout_warning_message: str | None = None
@@ -3493,6 +4001,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         parent: QtWidgets.QWidget | None = None,
         preferred_suffix: str | None = None,
         dpi_override: float | None = None,
+        transparent: bool = False,
     ) -> bool:
         """Persist the currently visible graph to an image file."""
 
@@ -3555,7 +4064,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if not isinstance(last_saved_format, str):
             last_saved_format = ".png"
         preferred = (preferred_suffix or last_saved_format or ".png").strip().lower()
-        if preferred not in {".png", ".pdf", ".svg"}:
+        if preferred not in {".png", ".pdf", ".svg", ".tif", ".tiff", ".eps"}:
             preferred = ".png"
         suggested_filename = _clean_stem(default_name) + preferred
 
@@ -3569,13 +4078,19 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         suggested_path = Path(start_dir) / suggested_filename
 
         if preferred == ".pdf":
-            filters = "PDF Document (*.pdf);;PNG Image (*.png);;SVG Image (*.svg);;All files (*)"
+            filters = "PDF Document (*.pdf);;PNG Image (*.png);;TIFF Image (*.tif *.tiff);;SVG Image (*.svg);;EPS Document (*.eps);;All files (*)"
             initial_filter = "PDF Document (*.pdf)"
+        elif preferred in {".tif", ".tiff"}:
+            filters = "TIFF Image (*.tif *.tiff);;PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg);;EPS Document (*.eps);;All files (*)"
+            initial_filter = "TIFF Image (*.tif *.tiff)"
+        elif preferred == ".eps":
+            filters = "EPS Document (*.eps);;PDF Document (*.pdf);;PNG Image (*.png);;TIFF Image (*.tif *.tiff);;SVG Image (*.svg);;All files (*)"
+            initial_filter = "EPS Document (*.eps)"
         elif preferred == ".svg":
-            filters = "SVG Image (*.svg);;PNG Image (*.png);;PDF Document (*.pdf);;All files (*)"
+            filters = "SVG Image (*.svg);;PNG Image (*.png);;PDF Document (*.pdf);;TIFF Image (*.tif *.tiff);;EPS Document (*.eps);;All files (*)"
             initial_filter = "SVG Image (*.svg)"
         else:
-            filters = "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg);;All files (*)"
+            filters = "PNG Image (*.png);;PDF Document (*.pdf);;TIFF Image (*.tif *.tiff);;SVG Image (*.svg);;EPS Document (*.eps);;All files (*)"
             initial_filter = "PNG Image (*.png)"
         path_str, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
             target,
@@ -3591,9 +4106,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         filter_map = {
             "PNG Image (*.png)": ".png",
             "PDF Document (*.pdf)": ".pdf",
+            "TIFF Image (*.tif *.tiff)": ".tif",
             "SVG Image (*.svg)": ".svg",
+            "EPS Document (*.eps)": ".eps",
         }
-        valid_exts = {".png", ".pdf", ".svg"}
+        valid_exts = {".png", ".pdf", ".svg", ".tif", ".tiff", ".eps"}
         suffix = path.suffix.lower()
         if suffix not in valid_exts:
             chosen_ext = filter_map.get(selected_filter, ".png")
@@ -3606,7 +4123,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             save_kwargs: dict[str, Any] = {}
             if isinstance(dpi_override, (int, float)) and float(dpi_override) > 0:
                 save_kwargs["dpi"] = float(dpi_override)
-            figure.savefig(str(path), **save_kwargs)
+            if transparent:
+                save_kwargs["transparent"] = True
+            with mpl.rc_context(
+                {
+                    "pdf.fonttype": 42,
+                    "ps.fonttype": 42,
+                    "svg.fonttype": "none",
+                }
+            ):
+                figure.savefig(str(path), **save_kwargs)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
                 target,
@@ -3649,6 +4175,132 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
     def _export_current_graph_paper_pdf(self) -> None:
         self._save_graph_for_current_tab(preferred_suffix=".pdf")
+
+    def _export_current_graph_paper_tiff(self) -> None:
+        self._save_graph_for_current_tab(preferred_suffix=".tif", dpi_override=600.0)
+
+    def _export_current_graph_paper_eps(self) -> None:
+        self._save_graph_for_current_tab(preferred_suffix=".eps")
+
+    def _export_current_graph_transparent_png(self) -> None:
+        self._save_graph_for_current_tab(preferred_suffix=".png", dpi_override=300.0, transparent=True)
+
+    @staticmethod
+    def _export_stem_for_descriptor(index: int, descriptor: TabDescriptor | None) -> str:
+        title = ""
+        if descriptor is not None:
+            title = str(descriptor.title or descriptor.root_label or "").strip()
+        if not title:
+            title = f"figure_{index:02d}"
+        stem_chars = [ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in title]
+        stem = "".join(stem_chars).strip("._")
+        stem = stem or f"figure_{index:02d}"
+        return f"{index:02d}-{stem}"
+
+    def _export_all_figures_dialog(self) -> None:
+        descriptors = [
+            (tab, descriptor)
+            for tab, descriptor in self._tab_descriptors.items()
+            if isinstance(tab, QtWidgets.QWidget) and descriptor is not None
+        ]
+        if not descriptors:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export all figures",
+                "No graph tabs are available to export.",
+            )
+            return
+        start_dir = self._preferred_export_directory(
+            getattr(self, "_current_plotter_name", None),
+            getattr(self, "_last_graph_dir", None),
+            getattr(self, "_project_path", None).parent if isinstance(getattr(self, "_project_path", None), Path) else None,
+        )
+        target_dir = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Export all figures",
+            str(start_dir),
+        )
+        if not target_dir:
+            return
+        format_choice, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Export all figures",
+            "Format:",
+            ["png", "pdf", "tif", "eps", "svg"],
+            0,
+            False,
+        )
+        if not ok:
+            return
+        ext = f".{str(format_choice).strip().lower()}"
+        dpi = 600.0 if ext in {".png", ".tif"} else None
+        exported = 0
+        output_dir = Path(target_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for index, (tab, descriptor) in enumerate(descriptors, start=1):
+            canvas = self._canvas_by_tab.get(tab)
+            figure = getattr(canvas, "figure", None) if canvas is not None else None
+            if figure is None and descriptor is not None:
+                figure = getattr(getattr(descriptor, "axes", None), "figure", None)
+            if figure is None:
+                continue
+            path = output_dir / f"{self._export_stem_for_descriptor(index, descriptor)}{ext}"
+            save_kwargs: dict[str, Any] = {}
+            if dpi is not None:
+                save_kwargs["dpi"] = dpi
+            try:
+                figure.savefig(str(path), **save_kwargs)
+            except Exception:
+                continue
+            exported += 1
+        if exported:
+            try:
+                self.statusBar().showMessage(f"Exported {exported} figure(s) to {output_dir}", 5000)
+            except Exception:
+                pass
+
+    def _automation_export_all_figures(
+        self,
+        *,
+        output_dir: Path,
+        fmt: str,
+        dpi: float | None = None,
+        transparent: bool = False,
+    ) -> list[Path]:
+        descriptors = [
+            (tab, descriptor)
+            for tab, descriptor in self._tab_descriptors.items()
+            if isinstance(tab, QtWidgets.QWidget) and descriptor is not None
+        ]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ext = f".{str(fmt).strip().lower().lstrip('.')}"
+        exported: list[Path] = []
+        for index, (tab, descriptor) in enumerate(descriptors, start=1):
+            canvas = self._canvas_by_tab.get(tab)
+            figure = getattr(canvas, "figure", None) if canvas is not None else None
+            if figure is None and descriptor is not None:
+                figure = getattr(getattr(descriptor, "axes", None), "figure", None)
+            if figure is None:
+                continue
+            path = output_dir / f"{self._export_stem_for_descriptor(index, descriptor)}{ext}"
+            save_kwargs: dict[str, Any] = {}
+            if isinstance(dpi, (int, float)) and float(dpi) > 0:
+                save_kwargs["dpi"] = float(dpi)
+            if transparent:
+                save_kwargs["transparent"] = True
+            try:
+                with mpl.rc_context(
+                    {
+                        "pdf.fonttype": 42,
+                        "ps.fonttype": 42,
+                        "svg.fonttype": "none",
+                    }
+                ):
+                    figure.savefig(str(path), **save_kwargs)
+            except Exception:
+                continue
+            exported.append(path)
+        return exported
 
     def _normalize_current_graph(self) -> None:
         raise NotImplementedError
@@ -6983,6 +7635,24 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         create_figure_action.triggered.connect(self._open_create_figure_dialog)
         self._style_toolbar_button(toolbar, create_figure_action)
 
+        refresh_figure_action = toolbar.addAction("Refresh figure")
+        refresh_figure_action.setEnabled(False)
+        refresh_figure_action.triggered.connect(self._refresh_current_layout_figure)
+        self._refresh_figure_action = refresh_figure_action
+        self._style_toolbar_button(toolbar, refresh_figure_action)
+
+        clone_figure_action = toolbar.addAction("Clone figure")
+        clone_figure_action.setEnabled(False)
+        clone_figure_action.triggered.connect(self._clone_current_layout_figure)
+        self._clone_figure_action = clone_figure_action
+        self._style_toolbar_button(toolbar, clone_figure_action)
+
+        figure_sources_action = toolbar.addAction("Figure sources")
+        figure_sources_action.setEnabled(False)
+        figure_sources_action.triggered.connect(self._show_current_layout_sources)
+        self._figure_sources_action = figure_sources_action
+        self._style_toolbar_button(toolbar, figure_sources_action)
+
         connect_action = toolbar.addAction("Connect folders")
         connect_action.triggered.connect(self._connect_data_from_folder)
         self._connect_folder_action = connect_action
@@ -7012,6 +7682,24 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._paper_pdf_action = paper_pdf_action
         self._style_toolbar_button(toolbar, paper_pdf_action)
 
+        paper_tiff_action = toolbar.addAction("Paper TIFF")
+        paper_tiff_action.setEnabled(False)
+        paper_tiff_action.triggered.connect(self._export_current_graph_paper_tiff)
+        self._paper_tiff_action = paper_tiff_action
+        self._style_toolbar_button(toolbar, paper_tiff_action)
+
+        paper_eps_action = toolbar.addAction("Paper EPS")
+        paper_eps_action.setEnabled(False)
+        paper_eps_action.triggered.connect(self._export_current_graph_paper_eps)
+        self._paper_eps_action = paper_eps_action
+        self._style_toolbar_button(toolbar, paper_eps_action)
+
+        transparent_png_action = toolbar.addAction("Transparent PNG")
+        transparent_png_action.setEnabled(False)
+        transparent_png_action.triggered.connect(self._export_current_graph_transparent_png)
+        self._transparent_png_action = transparent_png_action
+        self._style_toolbar_button(toolbar, transparent_png_action)
+
         normalize_action = toolbar.addAction("Normalize Y")
         normalize_action.setEnabled(False)
         normalize_action.triggered.connect(self._normalize_current_graph)
@@ -7035,6 +7723,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         export_workbooks_action.triggered.connect(self._export_workbooks_to_origin)
         self.export_origin_button = export_workbooks_action
         self._style_toolbar_button(toolbar, export_workbooks_action)
+
+        export_all_figures_action = toolbar.addAction("Export all figures...")
+        export_all_figures_action.setEnabled(False)
+        export_all_figures_action.triggered.connect(self._export_all_figures_dialog)
+        self._export_all_figures_action = export_all_figures_action
+        self._style_toolbar_button(toolbar, export_all_figures_action)
 
         check_outliers_action = toolbar.addAction("Check outliers...")
         check_outliers_action.setEnabled(False)
@@ -8194,16 +8888,30 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def _update_save_graph_enabled(self) -> None:
         enabled = bool(self._tab_descriptors)
+        current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        descriptor = self._tab_descriptors.get(current_tab) if isinstance(current_tab, QtWidgets.QWidget) else None
+        is_layout_graph = bool(descriptor is not None and descriptor.kind == "layout_graph")
         for button in (
             getattr(self, "save_graph_button", None),
             getattr(self, "_paper_png_action", None),
             getattr(self, "_paper_pdf_action", None),
+            getattr(self, "_paper_tiff_action", None),
+            getattr(self, "_paper_eps_action", None),
+            getattr(self, "_transparent_png_action", None),
+            getattr(self, "_export_all_figures_action", None),
         ):
             if hasattr(button, "setEnabled"):
                 try:
                     button.setEnabled(enabled)
                 except Exception:
                     pass
+        for action in (
+            getattr(self, "_refresh_figure_action", None),
+            getattr(self, "_clone_figure_action", None),
+            getattr(self, "_figure_sources_action", None),
+        ):
+            if isinstance(action, QtGui.QAction):
+                action.setEnabled(is_layout_graph)
 
     def _update_normalize_enabled(self) -> None:
         button = getattr(self, "normalize_button", None)
@@ -8250,6 +8958,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         width_spin.setToolTip("Line width for selected lines/shapes")
         controls.width_spin = width_spin
         toolbar.addWidget(width_spin)
+
+        arrow_style_combo = QtWidgets.QComboBox(toolbar)
+        arrow_style_combo.addItem("Arrow", "->")
+        arrow_style_combo.addItem("Double", "<->")
+        arrow_style_combo.addItem("Bar", "-|>")
+        arrow_style_combo.addItem("Wedge", "simple")
+        arrow_style_combo.setEnabled(False)
+        arrow_style_combo.currentIndexChanged.connect(self._apply_arrow_style)
+        arrow_style_combo.setToolTip("Arrow style for selected arrow annotations")
+        controls.arrow_style_combo = arrow_style_combo
+        toolbar.addWidget(arrow_style_combo)
 
         bold_action = toolbar.addAction("B")
         bold_action.setCheckable(True)
@@ -8302,6 +9021,71 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         edit_text_action.setToolTip("Edit the selected text content with mathtext helpers")
         controls.edit_text_action = edit_text_action
         self._style_toolbar_button(toolbar, edit_text_action)
+
+        position_text_action = toolbar.addAction("Position…")
+        position_text_action.setEnabled(False)
+        position_text_action.triggered.connect(self._position_selected_text_annotations)
+        position_text_action.setToolTip("Set the position and rotation of selected annotation text numerically")
+        controls.position_text_action = position_text_action
+        self._style_toolbar_button(toolbar, position_text_action)
+
+        toolbar.addSeparator()
+
+        align_left_action = toolbar.addAction("Left")
+        align_left_action.setEnabled(False)
+        align_left_action.triggered.connect(lambda: self._align_selected_text_annotations("left"))
+        controls.align_left_action = align_left_action
+        self._style_toolbar_button(toolbar, align_left_action)
+
+        align_hcenter_action = toolbar.addAction("Center")
+        align_hcenter_action.setEnabled(False)
+        align_hcenter_action.triggered.connect(lambda: self._align_selected_text_annotations("hcenter"))
+        controls.align_hcenter_action = align_hcenter_action
+        self._style_toolbar_button(toolbar, align_hcenter_action)
+
+        align_right_action = toolbar.addAction("Right")
+        align_right_action.setEnabled(False)
+        align_right_action.triggered.connect(lambda: self._align_selected_text_annotations("right"))
+        controls.align_right_action = align_right_action
+        self._style_toolbar_button(toolbar, align_right_action)
+
+        align_top_action = toolbar.addAction("Top")
+        align_top_action.setEnabled(False)
+        align_top_action.triggered.connect(lambda: self._align_selected_text_annotations("top"))
+        controls.align_top_action = align_top_action
+        self._style_toolbar_button(toolbar, align_top_action)
+
+        align_vcenter_action = toolbar.addAction("Middle")
+        align_vcenter_action.setEnabled(False)
+        align_vcenter_action.triggered.connect(lambda: self._align_selected_text_annotations("vcenter"))
+        controls.align_vcenter_action = align_vcenter_action
+        self._style_toolbar_button(toolbar, align_vcenter_action)
+
+        align_bottom_action = toolbar.addAction("Bottom")
+        align_bottom_action.setEnabled(False)
+        align_bottom_action.triggered.connect(lambda: self._align_selected_text_annotations("bottom"))
+        controls.align_bottom_action = align_bottom_action
+        self._style_toolbar_button(toolbar, align_bottom_action)
+
+        toolbar.addSeparator()
+
+        copy_action = toolbar.addAction("Copy")
+        copy_action.setEnabled(False)
+        copy_action.triggered.connect(self._copy_selected_graph_objects)
+        controls.copy_action = copy_action
+        self._style_toolbar_button(toolbar, copy_action)
+
+        paste_action = toolbar.addAction("Paste")
+        paste_action.setEnabled(False)
+        paste_action.triggered.connect(self._paste_graph_objects)
+        controls.paste_action = paste_action
+        self._style_toolbar_button(toolbar, paste_action)
+
+        duplicate_action = toolbar.addAction("Duplicate")
+        duplicate_action.setEnabled(False)
+        duplicate_action.triggered.connect(self._duplicate_selected_graph_objects)
+        controls.duplicate_action = duplicate_action
+        self._style_toolbar_button(toolbar, duplicate_action)
 
         color_button = QtWidgets.QToolButton(toolbar)
         color_button.setText("Stroke…")
@@ -8380,6 +9164,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
         controls.select_action = _add_tool("Select", "select", "Select annotation text, lines, arrows, and shapes")
         controls.text_action = _add_tool("Text", "text", "Place a free text label on the graph")
+        controls.callout_action = _add_tool("Callout", "callout", "Place a boxed callout label on the graph")
         controls.arrow_action = _add_tool("Arrow", "arrow", "Draw an arrow by dragging on the graph")
         controls.line_action = _add_tool("Line", "shape_line", "Draw a line by dragging on the graph")
         controls.rectangle_action = _add_tool("Rect", "rectangle", "Draw a rectangle by dragging on the graph")
@@ -8397,7 +9182,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def _set_annotation_tool(self, tool: str) -> None:
         token = str(tool or "select").strip().lower()
-        if token not in {"select", "text", "arrow", "shape_line", "rectangle", "ellipse"}:
+        if token not in {"select", "text", "callout", "arrow", "shape_line", "rectangle", "ellipse"}:
             token = "select"
         self._annotation_tool = token
         if token == "select":
@@ -8535,6 +9320,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     "bold": self._text_is_bold(text_artist),
                     "italic": self._text_is_italic(text_artist),
                     "underline": bool(getattr(text_artist, "get_underline", lambda: False)()),
+                    "callout_box": bool(getattr(text_artist, "_mw_callout_box", False)),
                 }
             )
         for artist in self._iter_graph_object_shapes(axes):
@@ -8562,16 +9348,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     path = None
                 if path is not None and len(path) >= 2:
                     payloads.append(
-                        {
-                            "kind": "arrow",
-                            "x0": float(path[0][0]),
-                            "y0": float(path[0][1]),
-                            "x1": float(path[-1][0]),
-                            "y1": float(path[-1][1]),
-                            "color": mcolors.to_rgba(artist.get_edgecolor()),
-                            "linewidth": float(artist.get_linewidth()),
-                        }
-                    )
+                    {
+                        "kind": "arrow",
+                        "x0": float(path[0][0]),
+                        "y0": float(path[0][1]),
+                        "x1": float(path[-1][0]),
+                        "y1": float(path[-1][1]),
+                        "color": mcolors.to_rgba(artist.get_edgecolor()),
+                        "linewidth": float(artist.get_linewidth()),
+                        "arrowstyle": str(getattr(artist, "_mw_arrowstyle", "->")),
+                    }
+                )
             elif kind == "rectangle" and isinstance(artist, Rectangle):
                 payloads.append(
                     {
@@ -8600,9 +9387,63 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 )
         return payloads
 
-    def _restore_graph_object_payloads_for_axes(self, axes: Any, payloads: Sequence[dict[str, Any]]) -> None:
+    def _graph_object_payload_for_artist(self, artist: Any) -> dict[str, Any] | None:
+        axes = getattr(artist, "axes", None)
+        for payload in self._serialize_graph_object_payloads_for_axes(axes):
+            kind = str(payload.get("kind") or "")
+            artist_kind = self._graph_object_kind(artist) or ("text" if isinstance(artist, Text) else "")
+            if kind != artist_kind:
+                continue
+            if isinstance(artist, Text):
+                try:
+                    x_value, y_value = artist.get_position()
+                except Exception:
+                    continue
+                if abs(float(payload.get("x", 0.0)) - float(x_value)) < 1e-9 and abs(float(payload.get("y", 0.0)) - float(y_value)) < 1e-9:
+                    return dict(payload)
+            elif isinstance(artist, Line2D) and kind == "shape_line":
+                try:
+                    x_data = artist.get_xdata()
+                    y_data = artist.get_ydata()
+                except Exception:
+                    continue
+                if len(x_data) >= 2 and len(y_data) >= 2:
+                    if (
+                        abs(float(payload.get("x0", 0.0)) - float(x_data[0])) < 1e-9
+                        and abs(float(payload.get("y0", 0.0)) - float(y_data[0])) < 1e-9
+                    ):
+                        return dict(payload)
+            elif isinstance(artist, FancyArrowPatch) and kind == "arrow":
+                return dict(payload)
+            elif isinstance(artist, Rectangle) and kind == "rectangle":
+                return dict(payload)
+            elif isinstance(artist, Ellipse) and kind == "ellipse":
+                return dict(payload)
+        return None
+
+    def _offset_graph_object_payload(self, payload: dict[str, Any], *, dx: float, dy: float) -> dict[str, Any]:
+        shifted = dict(payload)
+        kind = str(shifted.get("kind") or "").strip().lower()
+        if kind == "text":
+            shifted["x"] = float(shifted.get("x", 0.0)) + dx
+            shifted["y"] = float(shifted.get("y", 0.0)) + dy
+        elif kind in {"shape_line", "arrow"}:
+            shifted["x0"] = float(shifted.get("x0", 0.0)) + dx
+            shifted["y0"] = float(shifted.get("y0", 0.0)) + dy
+            shifted["x1"] = float(shifted.get("x1", 0.0)) + dx
+            shifted["y1"] = float(shifted.get("y1", 0.0)) + dy
+        elif kind == "rectangle":
+            shifted["x"] = float(shifted.get("x", 0.0)) + dx
+            shifted["y"] = float(shifted.get("y", 0.0)) + dy
+        elif kind == "ellipse":
+            shifted["center_x"] = float(shifted.get("center_x", 0.0)) + dx
+            shifted["center_y"] = float(shifted.get("center_y", 0.0)) + dy
+        return shifted
+
+    def _restore_graph_object_payloads_for_axes(self, axes: Any, payloads: Sequence[dict[str, Any]]) -> list[Any]:
         if axes is None:
-            return
+            return []
+        created: list[Any] = []
         for entry in payloads:
             if not isinstance(entry, dict):
                 continue
@@ -8624,7 +9465,21 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     payload=payload,
                 )
                 if artist is not None:
+                    if bool(entry.get("callout_box", False)):
+                        try:
+                            artist.set_bbox(
+                                {
+                                    "boxstyle": "round,pad=0.25",
+                                    "facecolor": "white",
+                                    "edgecolor": "#444444",
+                                    "linewidth": 0.8,
+                                }
+                            )
+                            setattr(artist, "_mw_callout_box", True)
+                        except Exception:
+                            pass
                     self._redraw_artist(artist)
+                    created.append(artist)
             elif kind == "shape_line":
                 artist = Line2D(
                     [float(entry.get("x0") or 0.0), float(entry.get("x1") or 0.0)],
@@ -8637,19 +9492,22 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 axes.add_line(artist)
                 self._mark_graph_object(artist, "shape_line", label="Line")
                 self._redraw_artist(artist)
+                created.append(artist)
             elif kind == "arrow":
                 artist = FancyArrowPatch(
                     (float(entry.get("x0") or 0.0), float(entry.get("y0") or 0.0)),
                     (float(entry.get("x1") or 0.0), float(entry.get("y1") or 0.0)),
-                    arrowstyle="->",
+                    arrowstyle=str(entry.get("arrowstyle") or "->"),
                     mutation_scale=12,
                     color=entry.get("color") or "#111111",
                     linewidth=float(entry.get("linewidth") or 1.2),
                     zorder=10,
                 )
                 axes.add_patch(artist)
+                setattr(artist, "_mw_arrowstyle", str(entry.get("arrowstyle") or "->"))
                 self._mark_graph_object(artist, "arrow", label="Arrow")
                 self._redraw_artist(artist)
+                created.append(artist)
             elif kind == "rectangle":
                 artist = Rectangle(
                     (float(entry.get("x") or 0.0), float(entry.get("y") or 0.0)),
@@ -8663,6 +9521,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 axes.add_patch(artist)
                 self._mark_graph_object(artist, "rectangle", label="Rectangle")
                 self._redraw_artist(artist)
+                created.append(artist)
             elif kind == "ellipse":
                 artist = Ellipse(
                     (float(entry.get("center_x") or 0.0), float(entry.get("center_y") or 0.0)),
@@ -8676,7 +9535,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 axes.add_patch(artist)
                 self._mark_graph_object(artist, "ellipse", label="Ellipse")
                 self._redraw_artist(artist)
-
+                created.append(artist)
+        return created
     # ------------------------------------------------------------------ shared menu helpers
     def _project_settings_key(self, suffix: str) -> str:
         prefix = getattr(self, "PROJECT_SETTINGS_PREFIX", "project") or ""
@@ -8845,6 +9705,18 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if worksheet_token or workbook_token:
                 return worksheet
         return None
+
+    @staticmethod
+    def _stored_house_style_payload_for_automation() -> dict[str, Any] | None:
+        settings = QtCore.QSettings("microwire", "plotting")
+        stored = settings.value("figure_layout_house_style", "")
+        if not isinstance(stored, str) or not stored.strip():
+            return None
+        try:
+            payload = json.loads(stored)
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def _build_graph_from_series_specs(
         self,
@@ -9253,6 +10125,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return f"({chr(ord('A') + index)})"
         return ""
 
+    @staticmethod
+    def _panel_label_anchor(position: str) -> tuple[float, float, str, str]:
+        token = str(position or "tl").strip().lower()
+        if token == "tr":
+            return 0.98, 0.98, "right", "top"
+        if token == "bl":
+            return 0.02, 0.02, "left", "bottom"
+        if token == "br":
+            return 0.98, 0.02, "right", "bottom"
+        return 0.02, 0.98, "left", "top"
+
     def _build_layout_graph_from_panels(
         self,
         panel_specs: Sequence[dict[str, Any]],
@@ -9265,6 +10148,25 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         panel_label_mode: str,
         figure_width: float,
         figure_height: float,
+        external_legend: bool = False,
+        legend_placement: str = "right",
+        panel_titles: Sequence[str] | None = None,
+        wspace: float = 0.18,
+        hspace: float = 0.25,
+        left_margin: float = 0.10,
+        right_margin: float = 0.96,
+        top_margin: float = 0.90,
+        bottom_margin: float = 0.12,
+        style_preset: str = "default",
+        minor_ticks: bool = False,
+        tick_direction: str = "out",
+        notation: str = "plain",
+        panel_label_position: str = "tl",
+        panel_label_size: float = 14.0,
+        x_decimals: int = -1,
+        y_decimals: int = -1,
+        x_ticks: Sequence[float] | None = None,
+        y_ticks: Sequence[float] | None = None,
         metadata: Dict[str, Any] | None = None,
     ) -> QtWidgets.QWidget | None:
         if not panel_specs:
@@ -9282,6 +10184,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         line_states: Dict[tuple[str, float | str], GraphLineState] = {}
         first_x_label = ""
         first_y_label = ""
+        panel_title_values = list(panel_titles or [])
+        style_token = str(style_preset or "default").strip().lower()
+        colorblind_cycle = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#56B4E9", "#E69F00"]
+        mono_cycle = ["#111111", "#555555", "#888888", "#bbbbbb"]
+        mono_markers = ["o", "s", "^", "D", "v", "P"]
+        mono_linestyles = ["-", "--", "-.", ":"]
+        series_counter = 0
         for panel_index, (panel_spec, axes) in enumerate(zip(panel_specs, used_axes)):
             if not isinstance(panel_spec, dict):
                 continue
@@ -9289,8 +10198,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 first_x_label = str(panel_spec.get("x_label") or "")
             if not first_y_label:
                 first_y_label = str(panel_spec.get("y_label") or "")
+            resolved_panel_title = (
+                str(panel_title_values[panel_index]).strip()
+                if panel_index < len(panel_title_values)
+                else ""
+            )
+            if not resolved_panel_title:
+                resolved_panel_title = str(panel_spec.get("title") or "")
             try:
-                axes.set_title(str(panel_spec.get("title") or ""))
+                axes.set_title(resolved_panel_title)
             except Exception:
                 pass
             if not share_x:
@@ -9326,6 +10242,16 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 except Exception:
                     line = axes.plot(x_values, y_values, label=label)[0]
                 try:
+                    if style_token == "colorblind":
+                        line.set_color(colorblind_cycle[series_counter % len(colorblind_cycle)])
+                    elif style_token == "mono":
+                        line.set_color(mono_cycle[series_counter % len(mono_cycle)])
+                        line.set_marker(mono_markers[series_counter % len(mono_markers)])
+                        line.set_linestyle(mono_linestyles[series_counter % len(mono_linestyles)])
+                        self._ensure_marker_size(line)
+                except Exception:
+                    pass
+                try:
                     line.set_visible(bool(series.get("visible", True)))
                 except Exception:
                     pass
@@ -9339,11 +10265,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     full_x=x_values,
                     full_y=y_values,
                 )
+                series_counter += 1
             graph_objects = panel_spec.get("graph_objects")
             if isinstance(graph_objects, list):
                 self._restore_graph_object_payloads_for_axes(axes, graph_objects)
             legend_state = panel_spec.get("legend_state")
-            if isinstance(legend_state, dict):
+            if isinstance(legend_state, dict) and not external_legend:
                 legend = self._sync_axes_legend_with_visible_lines(axes, plugin_name=None)
                 if legend is not None:
                     self._apply_legend_snapshot(legend, legend_state)
@@ -9353,14 +10280,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         pass
             panel_label = self._panel_label_text(panel_index, panel_label_mode)
             if panel_label:
+                anchor_x, anchor_y, h_align, v_align = self._panel_label_anchor(panel_label_position)
                 axes.text(
-                    0.02,
-                    0.98,
+                    anchor_x,
+                    anchor_y,
                     panel_label,
                     transform=axes.transAxes,
-                    ha="left",
-                    va="top",
-                    fontsize=14,
+                    ha=h_align,
+                    va=v_align,
+                    fontsize=float(panel_label_size),
                     fontweight="bold",
                 )
         for extra_axes in all_axes[len(panel_specs):]:
@@ -9385,13 +10313,70 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     axes.label_outer()
                 except Exception:
                     pass
+        resolved_tick_direction = str(tick_direction or "out").strip().lower()
+        if resolved_tick_direction not in {"in", "out", "inout"}:
+            resolved_tick_direction = "out"
+        for axes in used_axes:
+            try:
+                axes.tick_params(axis="both", which="both", direction=resolved_tick_direction)
+                if minor_ticks:
+                    axes.minorticks_on()
+                else:
+                    axes.minorticks_off()
+            except Exception:
+                pass
+            try:
+                if notation == "scientific":
+                    formatter_x = mticker.ScalarFormatter(useMathText=True)
+                    formatter_x.set_scientific(True)
+                    formatter_x.set_powerlimits((0, 0))
+                    axes.xaxis.set_major_formatter(formatter_x)
+                    formatter_y = mticker.ScalarFormatter(useMathText=True)
+                    formatter_y.set_scientific(True)
+                    formatter_y.set_powerlimits((0, 0))
+                    axes.yaxis.set_major_formatter(formatter_y)
+                else:
+                    axes.ticklabel_format(style="plain", axis="both", useOffset=False)
+                offset_x = axes.xaxis.get_offset_text()
+                offset_y = axes.yaxis.get_offset_text()
+                offset_x.set_visible(False)
+                offset_y.set_visible(False)
+            except Exception:
+                pass
+            if x_decimals >= 0:
+                try:
+                    axes.xaxis.set_major_formatter(mticker.FormatStrFormatter(f"%.{int(x_decimals)}f"))
+                except Exception:
+                    pass
+            if y_decimals >= 0:
+                try:
+                    axes.yaxis.set_major_formatter(mticker.FormatStrFormatter(f"%.{int(y_decimals)}f"))
+                except Exception:
+                    pass
+            if x_ticks:
+                try:
+                    axes.set_xticks(list(x_ticks))
+                except Exception:
+                    pass
+            if y_ticks:
+                try:
+                    axes.set_yticks(list(y_ticks))
+                except Exception:
+                    pass
         if title:
             try:
                 fig.suptitle(title)
             except Exception:
                 pass
         try:
-            fig.tight_layout()
+            fig.subplots_adjust(
+                left=max(0.0, min(float(left_margin), 0.95)),
+                right=max(0.05, min(float(right_margin), 1.0)),
+                top=max(0.05, min(float(top_margin), 1.0)),
+                bottom=max(0.0, min(float(bottom_margin), 0.95)),
+                wspace=max(0.0, float(wspace)),
+                hspace=max(0.0, float(hspace)),
+            )
         except Exception:
             pass
         canvas = FigureCanvas(fig)
@@ -9418,15 +10403,111 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 "share_x": share_x,
                 "share_y": share_y,
                 "panel_labels": panel_label_mode,
+                "external_legend": external_legend,
+                "legend_placement": legend_placement,
                 "figure_width": figure_width,
                 "figure_height": figure_height,
+                "panel_titles": panel_title_values,
+                "wspace": wspace,
+                "hspace": hspace,
+                "left_margin": left_margin,
+                "right_margin": right_margin,
+                "top_margin": top_margin,
+                "bottom_margin": bottom_margin,
+                "style_preset": style_token,
+                "minor_ticks": minor_ticks,
+                "tick_direction": resolved_tick_direction,
+                "notation": str(notation or "plain"),
+                "panel_label_position": str(panel_label_position or "tl"),
+                "panel_label_size": float(panel_label_size),
+                "x_decimals": int(x_decimals),
+                "y_decimals": int(y_decimals),
+                "x_ticks": list(x_ticks or []),
+                "y_ticks": list(y_ticks or []),
             },
         )
         index = self.tab_widget.addTab(tab, title or "Figure Layout")
         self.tab_widget.setCurrentIndex(index)
         self._register_plot_tab(tab, canvas, used_axes[0], descriptor)
+        if external_legend:
+            self._apply_external_layout_legend(
+                fig,
+                used_axes,
+                placement=legend_placement,
+            )
         self._mark_project_dirty()
         return tab
+
+    def _apply_external_layout_legend(
+        self,
+        figure: Any,
+        axes_list: Sequence[Any],
+        *,
+        placement: str,
+    ) -> None:
+        if figure is None:
+            return
+        for axes in axes_list:
+            try:
+                legend = axes.get_legend()
+            except Exception:
+                legend = None
+            if legend is not None:
+                try:
+                    legend.remove()
+                except Exception:
+                    pass
+        try:
+            existing = list(getattr(figure, "legends", []))
+        except Exception:
+            existing = []
+        for legend in existing:
+            try:
+                legend.remove()
+            except Exception:
+                pass
+        handles: list[Any] = []
+        labels: list[str] = []
+        seen: set[str] = set()
+        for axes in axes_list:
+            try:
+                source_handles, source_labels = axes.get_legend_handles_labels()
+            except Exception:
+                source_handles, source_labels = [], []
+            for handle, label in zip(source_handles, source_labels):
+                token = str(label or "").strip()
+                if not token:
+                    continue
+                key = token.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                handles.append(handle)
+                labels.append(token)
+        if not handles:
+            return
+        placement_token = str(placement or "right").strip().lower()
+        try:
+            if placement_token == "bottom":
+                figure.legend(
+                    handles,
+                    labels,
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, 0.01),
+                    ncol=min(max(1, len(labels)), 4),
+                    frameon=True,
+                )
+            else:
+                figure.legend(
+                    handles,
+                    labels,
+                    loc="center left",
+                    bbox_to_anchor=(1.01, 0.5),
+                    ncol=1,
+                    frameon=True,
+                )
+        except Exception:
+            return
 
     def _open_create_figure_dialog(self) -> None:
         entries = self._eligible_layout_source_entries()
@@ -9443,17 +10524,51 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         payload = dialog.payload()
         if not isinstance(payload, dict):
             return
-        selected_tabs = payload.get("source_tabs")
-        if not isinstance(selected_tabs, list):
-            return
+        panels_payload = payload.get("panels")
+        if not isinstance(panels_payload, list):
+            source_tabs = payload.get("source_tabs")
+            if isinstance(source_tabs, list):
+                panels_payload = [{"tab": tab, "panel_title": ""} for tab in source_tabs]
+            else:
+                return
         panel_specs: list[dict[str, Any]] = []
         source_titles: list[str] = []
-        for tab in selected_tabs:
+        panel_titles: list[str] = []
+        for entry in panels_payload:
+            if not isinstance(entry, dict):
+                continue
+            tab = entry.get("tab")
             descriptor = self._tab_descriptors.get(tab)
             if descriptor is None:
                 continue
-            panel_specs.append(self._panel_spec_from_axes(descriptor.axes))
+            panel_spec = self._panel_spec_from_axes(descriptor.axes)
+            panel_specs.append(panel_spec)
             source_titles.append(descriptor.title)
+            panel_titles.append(str(entry.get("panel_title") or descriptor.title or ""))
+        unit_token = str(payload.get("figure_units") or "in").strip().lower()
+        width_value = float(payload.get("figure_width") or 7.10)
+        height_value = float(payload.get("figure_height") or 4.80)
+        if unit_token == "mm":
+            width_value /= 25.4
+            height_value /= 25.4
+        def _parse_ticks(value: Any) -> list[float] | None:
+            if isinstance(value, list):
+                ticks = []
+                for entry in value:
+                    try:
+                        ticks.append(float(entry))
+                    except Exception:
+                        continue
+                return ticks or None
+            if isinstance(value, str) and value.strip():
+                ticks = []
+                for token in value.split(","):
+                    try:
+                        ticks.append(float(token.strip()))
+                    except Exception:
+                        continue
+                return ticks or None
+            return None
         self._build_layout_graph_from_panels(
             panel_specs,
             title=str(payload.get("title") or "Figure Layout"),
@@ -9462,16 +10577,42 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             share_x=bool(payload.get("share_x", False)),
             share_y=bool(payload.get("share_y", False)),
             panel_label_mode=str(payload.get("panel_labels") or "none"),
-            figure_width=float(payload.get("figure_width") or 7.10),
-            figure_height=float(payload.get("figure_height") or 4.80),
-            metadata={"source_titles": source_titles},
+            figure_width=width_value,
+            figure_height=height_value,
+            external_legend=bool(payload.get("external_legend", False)),
+            legend_placement=str(payload.get("legend_placement") or "right"),
+            panel_titles=panel_titles,
+            wspace=float(payload.get("wspace") or 0.18),
+            hspace=float(payload.get("hspace") or 0.25),
+            left_margin=float(payload.get("left_margin") or 0.10),
+            right_margin=float(payload.get("right_margin") or 0.96),
+            top_margin=float(payload.get("top_margin") or 0.90),
+            bottom_margin=float(payload.get("bottom_margin") or 0.12),
+            style_preset=str(payload.get("style_preset") or "default"),
+            minor_ticks=bool(payload.get("minor_ticks", False)),
+            tick_direction=str(payload.get("tick_direction") or "out"),
+            notation=str(payload.get("notation") or "plain"),
+            panel_label_position=str(payload.get("panel_label_position") or "tl"),
+            panel_label_size=float(payload.get("panel_label_size") or 14.0),
+            x_decimals=int(payload.get("x_decimals", -1)),
+            y_decimals=int(payload.get("y_decimals", -1)),
+            x_ticks=_parse_ticks(payload.get("x_ticks")),
+            y_ticks=_parse_ticks(payload.get("y_ticks")),
+            metadata={"source_titles": source_titles, "panel_titles": panel_titles},
         )
 
     def _automation_create_figure(self, payload: Dict[str, Any]) -> QtWidgets.QWidget | None:
         if not isinstance(payload, dict):
             raise ValueError("Figure layout payload must be an object.")
+        merged_payload = dict(payload)
+        use_house_style = bool(merged_payload.get("use_house_style", True))
+        if use_house_style:
+            stored_style = self._stored_house_style_payload_for_automation()
+            if isinstance(stored_style, dict):
+                for key, value in stored_style.items():
+                    merged_payload.setdefault(key, value)
         source_tabs: list[QtWidgets.QWidget] = []
-        title_tokens = [str(token).strip().casefold() for token in payload.get("source_titles", []) if isinstance(token, str)]
+        title_tokens = [str(token).strip().casefold() for token in merged_payload.get("source_titles", []) if isinstance(token, str)]
         if title_tokens:
             for tab, descriptor in self._tab_descriptors.items():
                 if descriptor is None or descriptor.kind == "layout_graph":
@@ -9489,26 +10630,229 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             ]
         if not source_tabs:
             raise ValueError("No source graphs are available for figure layout.")
-        unit_token = str(payload.get("figure_units") or "in").strip().lower()
-        width_value = float(payload.get("figure_width") or 7.10)
-        height_value = float(payload.get("figure_height") or 4.80)
+        unit_token = str(merged_payload.get("figure_units") or "in").strip().lower()
+        width_value = float(merged_payload.get("figure_width") or 7.10)
+        height_value = float(merged_payload.get("figure_height") or 4.80)
         if unit_token == "mm":
             width_value /= 25.4
             height_value /= 25.4
+        def _parse_ticks(value: Any) -> list[float] | None:
+            if isinstance(value, list):
+                ticks = []
+                for entry in value:
+                    try:
+                        ticks.append(float(entry))
+                    except Exception:
+                        continue
+                return ticks or None
+            if isinstance(value, str) and value.strip():
+                ticks = []
+                for token in value.split(","):
+                    try:
+                        ticks.append(float(token.strip()))
+                    except Exception:
+                        continue
+                return ticks or None
+            return None
         panel_specs = [self._panel_spec_from_axes(self._tab_descriptors[tab].axes) for tab in source_tabs if tab in self._tab_descriptors]
         if not panel_specs:
             raise ValueError("Figure layout payload did not resolve any source panel data.")
+        panel_titles = [str(title) for title in merged_payload.get("panel_titles", []) if isinstance(title, str)]
         return self._build_layout_graph_from_panels(
             panel_specs,
-            title=str(payload.get("title") or "Figure Layout"),
-            rows=int(payload.get("rows") or 1),
-            cols=int(payload.get("cols") or max(1, len(panel_specs))),
-            share_x=bool(payload.get("share_x", False)),
-            share_y=bool(payload.get("share_y", False)),
-            panel_label_mode=str(payload.get("panel_labels") or "none"),
+            title=str(merged_payload.get("title") or "Figure Layout"),
+            rows=int(merged_payload.get("rows") or 1),
+            cols=int(merged_payload.get("cols") or max(1, len(panel_specs))),
+            share_x=bool(merged_payload.get("share_x", False)),
+            share_y=bool(merged_payload.get("share_y", False)),
+            panel_label_mode=str(merged_payload.get("panel_labels") or "none"),
             figure_width=width_value,
             figure_height=height_value,
-            metadata={"source_titles": [self._tab_descriptors[tab].title for tab in source_tabs if tab in self._tab_descriptors]},
+            external_legend=bool(merged_payload.get("external_legend", False)),
+            legend_placement=str(merged_payload.get("legend_placement") or "right"),
+            panel_titles=panel_titles,
+            wspace=float(merged_payload.get("wspace") or 0.18),
+            hspace=float(merged_payload.get("hspace") or 0.25),
+            left_margin=float(merged_payload.get("left_margin") or 0.10),
+            right_margin=float(merged_payload.get("right_margin") or 0.96),
+            top_margin=float(merged_payload.get("top_margin") or 0.90),
+            bottom_margin=float(merged_payload.get("bottom_margin") or 0.12),
+            style_preset=str(merged_payload.get("style_preset") or "default"),
+            minor_ticks=bool(merged_payload.get("minor_ticks", False)),
+            tick_direction=str(merged_payload.get("tick_direction") or "out"),
+            notation=str(merged_payload.get("notation") or "plain"),
+            panel_label_position=str(merged_payload.get("panel_label_position") or "tl"),
+            panel_label_size=float(merged_payload.get("panel_label_size") or 14.0),
+            x_decimals=int(merged_payload.get("x_decimals", -1)),
+            y_decimals=int(merged_payload.get("y_decimals", -1)),
+            x_ticks=_parse_ticks(merged_payload.get("x_ticks")),
+            y_ticks=_parse_ticks(merged_payload.get("y_ticks")),
+            metadata={
+                "source_titles": [self._tab_descriptors[tab].title for tab in source_tabs if tab in self._tab_descriptors],
+                "panel_titles": panel_titles,
+            },
+        )
+
+    def _resolve_layout_source_tabs(self, source_titles: Sequence[str], *, exclude: QtWidgets.QWidget | None = None) -> list[QtWidgets.QWidget]:
+        resolved: list[QtWidgets.QWidget] = []
+        for token in source_titles:
+            target = str(token or "").strip().casefold()
+            if not target:
+                continue
+            found = None
+            for tab, descriptor in self._tab_descriptors.items():
+                if tab is exclude or descriptor is None or descriptor.kind == "layout_graph":
+                    continue
+                title = str(descriptor.title or "").strip().casefold()
+                tab_text = str(self.tab_widget.tabText(self.tab_widget.indexOf(tab)) or "").strip().casefold()
+                if target in {title, tab_text}:
+                    found = tab
+                    break
+            if found is not None:
+                resolved.append(found)
+        return resolved
+
+    def _refresh_current_layout_figure(self) -> None:
+        current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        if not isinstance(current_tab, QtWidgets.QWidget):
+            return
+        descriptor = self._tab_descriptors.get(current_tab)
+        if descriptor is None or descriptor.kind != "layout_graph":
+            return
+        figure = getattr(getattr(descriptor, "axes", None), "figure", None)
+        if figure is None:
+            return
+        metadata = dict(descriptor.metadata or {})
+        config = metadata.get("layout_config") if isinstance(metadata.get("layout_config"), dict) else {}
+        source_titles = [str(token) for token in metadata.get("source_titles", []) if isinstance(token, str)]
+        source_tabs = self._resolve_layout_source_tabs(source_titles, exclude=current_tab)
+        if not source_tabs:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Refresh figure",
+                "Could not find the source graphs for this layout figure.",
+            )
+            return
+        current_axes = [axes for axes in list(getattr(figure, "axes", [])) if axes is not None and bool(getattr(axes, 'get_visible', lambda: True)())]
+        preserved_specs = [self._panel_spec_from_axes(axes) for axes in current_axes]
+        new_panel_specs = [self._panel_spec_from_axes(self._tab_descriptors[tab].axes) for tab in source_tabs if tab in self._tab_descriptors]
+        if not new_panel_specs:
+            return
+        for index, panel_spec in enumerate(new_panel_specs):
+            if index >= len(preserved_specs):
+                break
+            panel_spec["graph_objects"] = preserved_specs[index].get("graph_objects", [])
+            if preserved_specs[index].get("legend_state") is not None:
+                panel_spec["legend_state"] = preserved_specs[index]["legend_state"]
+        new_tab = self._build_layout_graph_from_panels(
+            new_panel_specs,
+            title=str(descriptor.title or "Figure Layout"),
+            rows=int(config.get("rows") or 1),
+            cols=int(config.get("cols") or max(1, len(new_panel_specs))),
+            share_x=bool(config.get("share_x", False)),
+            share_y=bool(config.get("share_y", False)),
+            panel_label_mode=str(config.get("panel_labels") or "none"),
+            figure_width=float(config.get("figure_width") or 7.10),
+            figure_height=float(config.get("figure_height") or 4.80),
+            external_legend=bool(config.get("external_legend", False)),
+            legend_placement=str(config.get("legend_placement") or "right"),
+            panel_titles=list(config.get("panel_titles") or []),
+            wspace=float(config.get("wspace") or 0.18),
+            hspace=float(config.get("hspace") or 0.25),
+            left_margin=float(config.get("left_margin") or 0.10),
+            right_margin=float(config.get("right_margin") or 0.96),
+            top_margin=float(config.get("top_margin") or 0.90),
+            bottom_margin=float(config.get("bottom_margin") or 0.12),
+            style_preset=str(config.get("style_preset") or "default"),
+            minor_ticks=bool(config.get("minor_ticks", False)),
+            tick_direction=str(config.get("tick_direction") or "out"),
+            notation=str(config.get("notation") or "plain"),
+            panel_label_position=str(config.get("panel_label_position") or "tl"),
+            panel_label_size=float(config.get("panel_label_size") or 14.0),
+            x_decimals=int(config.get("x_decimals", -1)),
+            y_decimals=int(config.get("y_decimals", -1)),
+            x_ticks=list(config.get("x_ticks") or []),
+            y_ticks=list(config.get("y_ticks") or []),
+            metadata=metadata,
+        )
+        remover = getattr(self, "_remove_tab_internal", None)
+        if callable(remover):
+            try:
+                remover(current_tab)
+            except Exception:
+                pass
+        if isinstance(new_tab, QtWidgets.QWidget):
+            self.tab_widget.setCurrentWidget(new_tab)
+
+    def _clone_current_layout_figure(self) -> None:
+        current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        if not isinstance(current_tab, QtWidgets.QWidget):
+            return
+        descriptor = self._tab_descriptors.get(current_tab)
+        if descriptor is None or descriptor.kind != "layout_graph":
+            return
+        figure = getattr(getattr(descriptor, "axes", None), "figure", None)
+        if figure is None:
+            return
+        visible_axes = [axes for axes in list(getattr(figure, "axes", [])) if axes is not None and bool(getattr(axes, "get_visible", lambda: True)())]
+        panel_specs = [self._panel_spec_from_axes(axes) for axes in visible_axes]
+        metadata = dict(descriptor.metadata or {})
+        config = metadata.get("layout_config") if isinstance(metadata.get("layout_config"), dict) else {}
+        title = str(descriptor.title or "Figure Layout")
+        if not title.endswith(" (copy)"):
+            title = f"{title} (copy)"
+        self._build_layout_graph_from_panels(
+            panel_specs,
+            title=title,
+            rows=int(config.get("rows") or 1),
+            cols=int(config.get("cols") or max(1, len(panel_specs))),
+            share_x=bool(config.get("share_x", False)),
+            share_y=bool(config.get("share_y", False)),
+            panel_label_mode=str(config.get("panel_labels") or "none"),
+            figure_width=float(config.get("figure_width") or 7.10),
+            figure_height=float(config.get("figure_height") or 4.80),
+            external_legend=bool(config.get("external_legend", False)),
+            legend_placement=str(config.get("legend_placement") or "right"),
+            panel_titles=list(config.get("panel_titles") or []),
+            wspace=float(config.get("wspace") or 0.18),
+            hspace=float(config.get("hspace") or 0.25),
+            left_margin=float(config.get("left_margin") or 0.10),
+            right_margin=float(config.get("right_margin") or 0.96),
+            top_margin=float(config.get("top_margin") or 0.90),
+            bottom_margin=float(config.get("bottom_margin") or 0.12),
+            style_preset=str(config.get("style_preset") or "default"),
+            minor_ticks=bool(config.get("minor_ticks", False)),
+            tick_direction=str(config.get("tick_direction") or "out"),
+            notation=str(config.get("notation") or "plain"),
+            panel_label_position=str(config.get("panel_label_position") or "tl"),
+            panel_label_size=float(config.get("panel_label_size") or 14.0),
+            x_decimals=int(config.get("x_decimals", -1)),
+            y_decimals=int(config.get("y_decimals", -1)),
+            x_ticks=list(config.get("x_ticks") or []),
+            y_ticks=list(config.get("y_ticks") or []),
+            metadata=metadata,
+        )
+
+    def _show_current_layout_sources(self) -> None:
+        current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        if not isinstance(current_tab, QtWidgets.QWidget):
+            return
+        descriptor = self._tab_descriptors.get(current_tab)
+        if descriptor is None or descriptor.kind != "layout_graph":
+            return
+        metadata = dict(descriptor.metadata or {})
+        source_titles = [str(title) for title in metadata.get("source_titles", []) if isinstance(title, str)]
+        panel_titles = [str(title) for title in metadata.get("panel_titles", []) if isinstance(title, str)]
+        lines = []
+        for index, source_title in enumerate(source_titles, start=1):
+            panel_title = panel_titles[index - 1] if index - 1 < len(panel_titles) else source_title
+            lines.append(f"Panel {index}: {panel_title} <- {source_title}")
+        if not lines:
+            lines.append("No stored source graph titles were found for this layout figure.")
+        QtWidgets.QMessageBox.information(
+            self,
+            "Figure sources",
+            "\n".join(lines),
         )
 
     def _compose_graph_from_existing(self) -> None:
@@ -13521,7 +14865,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         superscript_action = controls.superscript_action
         subsup_action = controls.subsup_action
         edit_text_action = controls.edit_text_action
+        position_text_action = controls.position_text_action
+        align_actions = (
+            controls.align_left_action,
+            controls.align_hcenter_action,
+            controls.align_right_action,
+            controls.align_top_action,
+            controls.align_vcenter_action,
+            controls.align_bottom_action,
+        )
+        copy_action = controls.copy_action
+        paste_action = controls.paste_action
+        duplicate_action = controls.duplicate_action
         fill_color_button = controls.fill_color_button
+        arrow_style_combo = controls.arrow_style_combo
         line_actions = (
             (controls.line_action, "line"),
             (controls.scatter_action, "scatter"),
@@ -13564,10 +14921,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         action.blockSignals(False)
                         action.setEnabled(False)
                 self._set_color_button_state(None, None)
+                if copy_action is not None:
+                    copy_action.setEnabled(False)
+                if duplicate_action is not None:
+                    duplicate_action.setEnabled(False)
+                if paste_action is not None:
+                    paste_action.setEnabled(bool(self._copied_graph_object_payloads))
                 if fill_color_button is not None:
                     fill_color_button.setEnabled(False)
                     fill_color_button.setText("Fill…")
                     fill_color_button.setIcon(QtGui.QIcon())
+                if arrow_style_combo is not None:
+                    arrow_style_combo.blockSignals(True)
+                    arrow_style_combo.setEnabled(False)
+                    arrow_style_combo.blockSignals(False)
                 return
             kind = selection[0]
             if kind == "text":
@@ -13615,6 +14982,18 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     for action in (subscript_action, superscript_action, subsup_action, edit_text_action):
                         if action is not None:
                             action.setEnabled(True)
+                    annotation_texts = self._selected_annotation_texts()
+                    if position_text_action is not None:
+                        position_text_action.setEnabled(bool(annotation_texts))
+                    for action in align_actions:
+                        if action is not None:
+                            action.setEnabled(len(annotation_texts) >= 2)
+                    if copy_action is not None:
+                        copy_action.setEnabled(bool(annotation_texts))
+                    if duplicate_action is not None:
+                        duplicate_action.setEnabled(bool(annotation_texts))
+                    if paste_action is not None:
+                        paste_action.setEnabled(bool(self._copied_graph_object_payloads))
                     if width_spin is not None:
                         width_spin.blockSignals(True)
                         width_spin.setEnabled(False)
@@ -13630,6 +15009,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         fill_color_button.setEnabled(False)
                         fill_color_button.setText("Fill…")
                         fill_color_button.setIcon(QtGui.QIcon())
+                    if arrow_style_combo is not None:
+                        arrow_style_combo.blockSignals(True)
+                        arrow_style_combo.setEnabled(False)
+                        arrow_style_combo.blockSignals(False)
                     return
             elif kind == "line":
                 target = selection[1]
@@ -13659,6 +15042,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     for action in (subscript_action, superscript_action, subsup_action, edit_text_action):
                         if action is not None:
                             action.setEnabled(False)
+                    if position_text_action is not None:
+                        position_text_action.setEnabled(False)
+                    for action in align_actions:
+                        if action is not None:
+                            action.setEnabled(False)
                     style_key = self._line_style_key(target)
                     for action, key in line_actions:
                         if action is None:
@@ -13668,10 +15056,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         action.setChecked(style_key == key)
                         action.blockSignals(False)
                     self._set_color_button_state("line", self._qcolor_from_mpl(target.get_color()))
+                    if copy_action is not None:
+                        copy_action.setEnabled(False)
+                    if duplicate_action is not None:
+                        duplicate_action.setEnabled(False)
+                    if paste_action is not None:
+                        paste_action.setEnabled(bool(self._copied_graph_object_payloads))
                     if fill_color_button is not None:
                         fill_color_button.setEnabled(False)
                         fill_color_button.setText("Fill…")
                         fill_color_button.setIcon(QtGui.QIcon())
+                    if arrow_style_combo is not None:
+                        arrow_style_combo.blockSignals(True)
+                        arrow_style_combo.setEnabled(False)
+                        arrow_style_combo.blockSignals(False)
                     return
             elif kind == "shape":
                 target = selection[1]
@@ -13701,6 +15099,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     for action in (subscript_action, superscript_action, subsup_action, edit_text_action):
                         if action is not None:
                             action.setEnabled(False)
+                    if position_text_action is not None:
+                        position_text_action.setEnabled(False)
+                    for action in align_actions:
+                        if action is not None:
+                            action.setEnabled(False)
                     for action, _ in line_actions:
                         if action is not None:
                             action.blockSignals(True)
@@ -13713,6 +15116,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     except Exception:
                         stroke_color = None
                     self._set_color_button_state("shape", self._qcolor_from_mpl(stroke_color))
+                    if copy_action is not None:
+                        copy_action.setEnabled(True)
+                    if duplicate_action is not None:
+                        duplicate_action.setEnabled(True)
+                    if paste_action is not None:
+                        paste_action.setEnabled(bool(self._copied_graph_object_payloads))
                     if fill_color_button is not None:
                         fill_color_button.setEnabled(isinstance(target, (Rectangle, Ellipse)))
                         fill_color_button.setText("Fill…")
@@ -13728,6 +15137,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                                 pixmap = QtGui.QPixmap(16, 16)
                                 pixmap.fill(self._qcolor_from_mpl(fill_color))
                                 fill_color_button.setIcon(QtGui.QIcon(pixmap))
+                    if arrow_style_combo is not None:
+                        arrow_style_combo.blockSignals(True)
+                        if isinstance(target, FancyArrowPatch):
+                            arrow_style_combo.setEnabled(True)
+                            arrow_style = str(getattr(target, "_mw_arrowstyle", "->"))
+                            index = arrow_style_combo.findData(arrow_style)
+                            if index >= 0:
+                                arrow_style_combo.setCurrentIndex(index)
+                        else:
+                            arrow_style_combo.setEnabled(False)
+                        arrow_style_combo.blockSignals(False)
                     return
             if font_combo is not None:
                 font_combo.blockSignals(True)
@@ -13749,11 +15169,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 superscript_action,
                 subsup_action,
                 edit_text_action,
+                position_text_action,
             ):
                 if action is not None:
                     action.blockSignals(True)
                     action.setChecked(False)
                     action.blockSignals(False)
+                    action.setEnabled(False)
+            for action in align_actions:
+                if action is not None:
                     action.setEnabled(False)
             for action, _ in line_actions:
                 if action is not None:
@@ -13762,10 +15186,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     action.blockSignals(False)
                     action.setEnabled(False)
             self._set_color_button_state(None, None)
+            if copy_action is not None:
+                copy_action.setEnabled(False)
+            if duplicate_action is not None:
+                duplicate_action.setEnabled(False)
+            if paste_action is not None:
+                paste_action.setEnabled(bool(self._copied_graph_object_payloads))
             if fill_color_button is not None:
                 fill_color_button.setEnabled(False)
                 fill_color_button.setText("Fill…")
                 fill_color_button.setIcon(QtGui.QIcon())
+            if arrow_style_combo is not None:
+                arrow_style_combo.blockSignals(True)
+                arrow_style_combo.setEnabled(False)
+                arrow_style_combo.blockSignals(False)
         finally:
             self._format_updating = False
 
@@ -13784,6 +15218,16 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return str(style).lower() in {"italic", "oblique"}
         except Exception:
             return False
+
+    def _selected_annotation_texts(self) -> tuple[Text, ...]:
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return ()
+        texts = tuple(text for text in selection[1] if isinstance(text, Text))
+        annotation_texts = tuple(
+            text for text in texts if self._graph_object_kind(text) == "text"
+        )
+        return annotation_texts
 
     def _apply_text_family(self, family: str) -> None:
         if self._format_updating:
@@ -13856,6 +15300,193 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if payload is None:
             return
         self._apply_text_dialog_payload(payload)
+
+    def _position_selected_text_annotations(self) -> None:
+        texts = self._selected_annotation_texts()
+        if not texts:
+            return
+        first = texts[0]
+        try:
+            x_value, y_value = first.get_position()
+        except Exception:
+            return
+        try:
+            rotation_value = float(first.get_rotation() or 0.0)
+        except Exception:
+            rotation_value = 0.0
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Position text annotations")
+        layout = QtWidgets.QFormLayout(dialog)
+        x_spin = QtWidgets.QDoubleSpinBox(dialog)
+        y_spin = QtWidgets.QDoubleSpinBox(dialog)
+        rotation_spin = QtWidgets.QDoubleSpinBox(dialog)
+        for spin, value in ((x_spin, x_value), (y_spin, y_value)):
+            spin.setRange(-1_000_000_000.0, 1_000_000_000.0)
+            spin.setDecimals(6)
+            spin.setValue(float(value))
+        rotation_spin.setRange(-360.0, 360.0)
+        rotation_spin.setDecimals(1)
+        rotation_spin.setValue(rotation_value)
+        layout.addRow("X:", x_spin)
+        layout.addRow("Y:", y_spin)
+        layout.addRow("Rotation:", rotation_spin)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+        delta_x = float(x_spin.value()) - float(x_value)
+        delta_y = float(y_spin.value()) - float(y_value)
+        rotation = float(rotation_spin.value())
+        for text in texts:
+            try:
+                current_x, current_y = text.get_position()
+                text.set_position((float(current_x) + delta_x, float(current_y) + delta_y))
+                text.set_rotation(rotation)
+            except Exception:
+                continue
+            self._redraw_artist(text)
+
+    def _align_selected_text_annotations(self, mode: str) -> None:
+        texts = self._selected_annotation_texts()
+        if len(texts) < 2:
+            return
+        positions: list[tuple[Text, float, float]] = []
+        for text in texts:
+            try:
+                x_value, y_value = text.get_position()
+            except Exception:
+                continue
+            positions.append((text, float(x_value), float(y_value)))
+        if len(positions) < 2:
+            return
+        xs = [x_value for _text, x_value, _y_value in positions]
+        ys = [y_value for _text, _x_value, y_value in positions]
+        token = str(mode or "").strip().lower()
+        if token == "left":
+            target_x = min(xs)
+            for text, _x_value, y_value in positions:
+                text.set_position((target_x, y_value))
+                self._redraw_artist(text)
+        elif token == "hcenter":
+            target_x = sum(xs) / len(xs)
+            for text, _x_value, y_value in positions:
+                text.set_position((target_x, y_value))
+                self._redraw_artist(text)
+        elif token == "right":
+            target_x = max(xs)
+            for text, _x_value, y_value in positions:
+                text.set_position((target_x, y_value))
+                self._redraw_artist(text)
+        elif token == "top":
+            target_y = max(ys)
+            for text, x_value, _y_value in positions:
+                text.set_position((x_value, target_y))
+                self._redraw_artist(text)
+        elif token == "vcenter":
+            target_y = sum(ys) / len(ys)
+            for text, x_value, _y_value in positions:
+                text.set_position((x_value, target_y))
+                self._redraw_artist(text)
+        elif token == "bottom":
+            target_y = min(ys)
+            for text, x_value, _y_value in positions:
+                text.set_position((x_value, target_y))
+                self._redraw_artist(text)
+
+    def _selected_graph_object_payloads(self) -> list[dict[str, Any]]:
+        selection = self._format_selection
+        if not selection:
+            return []
+        role, target = selection
+        payloads: list[dict[str, Any]] = []
+        if role == "text":
+            texts = target if isinstance(target, tuple) else (target,)
+            for text in texts:
+                if not isinstance(text, Text):
+                    continue
+                payload = self._graph_object_payload_for_artist(text)
+                if isinstance(payload, dict):
+                    payloads.append(payload)
+        elif role == "shape" and isinstance(target, (Line2D, Patch)):
+            payload = self._graph_object_payload_for_artist(target)
+            if isinstance(payload, dict):
+                payloads.append(payload)
+        return payloads
+
+    def _graph_object_target_axes(self) -> Any | None:
+        selection = self._format_selection
+        if not selection:
+            return self._current_axes()
+        role, target = selection
+        if role == "text":
+            texts = target if isinstance(target, tuple) else (target,)
+            for text in texts:
+                axes = getattr(text, "axes", None)
+                if axes is not None:
+                    return axes
+        elif role in {"shape", "line"}:
+            axes = getattr(target, "axes", None)
+            if axes is not None:
+                return axes
+        return self._current_axes()
+
+    def _copy_selected_graph_objects(self) -> None:
+        payloads = self._selected_graph_object_payloads()
+        if not payloads:
+            return
+        self._copied_graph_object_payloads = [dict(entry) for entry in payloads]
+        self._update_format_toolbar_state()
+
+    def _paste_graph_objects(self) -> None:
+        if not self._copied_graph_object_payloads:
+            return
+        axes = self._graph_object_target_axes()
+        if axes is None:
+            return
+        shifted = [
+            self._offset_graph_object_payload(dict(payload), dx=0.05, dy=0.05)
+            for payload in self._copied_graph_object_payloads
+        ]
+        created = self._restore_graph_object_payloads_for_axes(axes, shifted)
+        tab = self._tab_for_axes(axes)
+        if tab is not None:
+            self._rebuild_object_manager_for_tab(tab)
+        if created:
+            first = created[0]
+            if isinstance(first, Text):
+                self._set_format_selection(("text", tuple(entry for entry in created if isinstance(entry, Text))))
+            elif isinstance(first, (Line2D, Patch)):
+                self._set_format_selection(("shape", first))
+        self._mark_project_dirty()
+
+    def _duplicate_selected_graph_objects(self) -> None:
+        payloads = self._selected_graph_object_payloads()
+        if not payloads:
+            return
+        axes = self._graph_object_target_axes()
+        if axes is None:
+            return
+        shifted = [
+            self._offset_graph_object_payload(dict(payload), dx=0.10, dy=0.10)
+            for payload in payloads
+        ]
+        created = self._restore_graph_object_payloads_for_axes(axes, shifted)
+        tab = self._tab_for_axes(axes)
+        if tab is not None:
+            self._rebuild_object_manager_for_tab(tab)
+        if created:
+            first = created[0]
+            if isinstance(first, Text):
+                self._set_format_selection(("text", tuple(entry for entry in created if isinstance(entry, Text))))
+            elif isinstance(first, (Line2D, Patch)):
+                self._set_format_selection(("shape", first))
+        self._mark_project_dirty()
 
     def _line_style_key(self, line: Line2D) -> str:
         try:
@@ -14098,6 +15729,25 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             self._redraw_artist(target)
         else:
             return
+        self._update_format_toolbar_state()
+
+    def _apply_arrow_style(self, _index: int) -> None:
+        if self._format_updating:
+            return
+        selection = self._format_selection
+        if not selection or selection[0] != "shape":
+            return
+        target = selection[1]
+        combo = self._format_controls.arrow_style_combo
+        if not isinstance(target, FancyArrowPatch) or not isinstance(combo, QtWidgets.QComboBox):
+            return
+        style = str(combo.currentData() or "->")
+        try:
+            target.set_arrowstyle(style)
+            setattr(target, "_mw_arrowstyle", style)
+        except Exception:
+            return
+        self._redraw_artist(target)
         self._update_format_toolbar_state()
 
     def _apply_line_style(self, style: str, checked: bool) -> None:
@@ -14712,8 +16362,18 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         canvas = getattr(figure, "canvas", None) if figure is not None else None
         if canvas is None:
             return
+        app = QtWidgets.QApplication.instance()
+        platform_name = ""
+        if app is not None:
+            try:
+                platform_name = str(app.platformName() or "").strip().lower()
+            except Exception:
+                platform_name = ""
         try:
-            canvas.draw_idle()
+            if platform_name in {"offscreen", "minimal", "headless"}:
+                canvas.draw()
+            else:
+                canvas.draw_idle()
         except Exception:
             try:
                 canvas.draw()
@@ -15196,6 +16856,101 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     candidates.append(axes)
         return candidates
 
+    def _clear_annotation_guides(self) -> None:
+        guides = list(getattr(self, "_annotation_guides", []))
+        self._annotation_guides = []
+        for guide in guides:
+            try:
+                guide.remove()
+            except Exception:
+                pass
+
+    def _snap_annotation_point(
+        self,
+        axes: Any,
+        x_value: float,
+        y_value: float,
+    ) -> tuple[float, float, float | None, float | None]:
+        if axes is None:
+            return x_value, y_value, None, None
+        snap_x = None
+        snap_y = None
+        try:
+            x_min, x_max = axes.get_xlim()
+            y_min, y_max = axes.get_ylim()
+        except Exception:
+            return x_value, y_value, None, None
+        x_tol = abs(float(x_max) - float(x_min)) * 0.03
+        y_tol = abs(float(y_max) - float(y_min)) * 0.03
+        x_candidates = [float(x_min), float(x_max)]
+        y_candidates = [float(y_min), float(y_max)]
+        try:
+            for text in self._iter_graph_object_texts(axes):
+                tx, ty = text.get_position()
+                x_candidates.append(float(tx))
+                y_candidates.append(float(ty))
+        except Exception:
+            pass
+        nearest_x = min(x_candidates, key=lambda candidate: abs(candidate - x_value)) if x_candidates else None
+        nearest_y = min(y_candidates, key=lambda candidate: abs(candidate - y_value)) if y_candidates else None
+        resolved_x = x_value
+        resolved_y = y_value
+        if nearest_x is not None and abs(nearest_x - x_value) <= max(x_tol, 1e-12):
+            resolved_x = float(nearest_x)
+            snap_x = resolved_x
+        if nearest_y is not None and abs(nearest_y - y_value) <= max(y_tol, 1e-12):
+            resolved_y = float(nearest_y)
+            snap_y = resolved_y
+        return resolved_x, resolved_y, snap_x, snap_y
+
+    def _update_annotation_guides_for_axes(
+        self,
+        axes: Any,
+        *,
+        snap_x: float | None,
+        snap_y: float | None,
+    ) -> None:
+        self._clear_annotation_guides()
+        if axes is None:
+            return
+        guides: list[Any] = []
+        try:
+            x_min, x_max = axes.get_xlim()
+            y_min, y_max = axes.get_ylim()
+        except Exception:
+            x_min = x_max = y_min = y_max = 0.0
+        if snap_x is not None:
+            guide = Line2D(
+                [snap_x, snap_x],
+                [y_min, y_max],
+                color="#6ca0ff",
+                linestyle="--",
+                linewidth=0.8,
+                alpha=0.7,
+                zorder=5,
+            )
+            try:
+                axes.add_line(guide)
+                guides.append(guide)
+            except Exception:
+                pass
+        if snap_y is not None:
+            guide = Line2D(
+                [x_min, x_max],
+                [snap_y, snap_y],
+                color="#6ca0ff",
+                linestyle="--",
+                linewidth=0.8,
+                alpha=0.7,
+                zorder=5,
+            )
+            try:
+                axes.add_line(guide)
+                guides.append(guide)
+            except Exception:
+                pass
+        self._annotation_guides = guides
+
     def _mark_graph_artist_changed(self, artist: Any) -> None:
         self._redraw_artist(artist)
         tab = self._tab_for_axes(getattr(artist, "axes", None))
@@ -15279,6 +17034,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             preview = FancyArrowPatch((x0, y0), (x0, y0), arrowstyle="->", mutation_scale=12, color="#111111", linewidth=1.2, zorder=10)
             try:
                 axes.add_patch(preview)
+                setattr(preview, "_mw_arrowstyle", "->")
             except Exception:
                 preview = None
         elif tool == "rectangle":
@@ -15332,7 +17088,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         y1 = getattr(event, "ydata", None)
         if x1 is None or y1 is None:
             return
-        self._update_annotation_preview_geometry(interaction, float(x1), float(y1))
+        axes = interaction.get("axes")
+        snapped_x, snapped_y, snap_x, snap_y = self._snap_annotation_point(
+            axes,
+            float(x1),
+            float(y1),
+        )
+        self._update_annotation_preview_geometry(interaction, snapped_x, snapped_y)
+        self._update_annotation_guides_for_axes(axes, snap_x=snap_x, snap_y=snap_y)
         preview = interaction.get("preview")
         if preview is not None:
             self._redraw_artist(preview)
@@ -15354,9 +17117,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 preview.remove()
             except Exception:
                 pass
+            self._clear_annotation_guides()
             self._annotation_interaction = None
             return
-        self._update_annotation_preview_geometry(interaction, float(x1), float(y1))
+        axes = interaction.get("axes")
+        snapped_x, snapped_y, snap_x, snap_y = self._snap_annotation_point(
+            axes,
+            float(x1),
+            float(y1),
+        )
+        self._update_annotation_preview_geometry(interaction, snapped_x, snapped_y)
+        self._clear_annotation_guides()
         tool = str(interaction.get("tool") or "")
         label_map = {
             "shape_line": "Line",
@@ -15379,14 +17150,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         candidates = self._event_candidate_axes(event)
         tool = str(self._annotation_tool or "select")
         if tool == "select" and not bool(getattr(event, "dblclick", False)):
+            self._clear_annotation_guides()
             if self._select_graph_object_from_canvas(event, candidates):
                 return
-        if tool == "text":
+        if tool in {"text", "callout"}:
             if getattr(event, "button", None) == 1 and candidates:
                 axes = candidates[0]
                 x = getattr(event, "xdata", None)
                 y = getattr(event, "ydata", None)
                 if x is not None and y is not None:
+                    snapped_x, snapped_y, _snap_x, _snap_y = self._snap_annotation_point(
+                        axes,
+                        float(x),
+                        float(y),
+                    )
                     dialog = GraphTextDialog(
                         self,
                         title="Add text label",
@@ -15397,11 +17174,24 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     if dialog.exec() == int(QtWidgets.QDialog.DialogCode.Accepted):
                         artist = self._create_text_annotation(
                             axes,
-                            x=float(x),
-                            y=float(y),
+                            x=snapped_x,
+                            y=snapped_y,
                             payload=dialog.result_payload(),
                         )
                         if artist is not None:
+                            if tool == "callout":
+                                try:
+                                    artist.set_bbox(
+                                        {
+                                            "boxstyle": "round,pad=0.25",
+                                            "facecolor": "white",
+                                            "edgecolor": "#444444",
+                                            "linewidth": 0.8,
+                                        }
+                                    )
+                                    setattr(artist, "_mw_callout_box", True)
+                                except Exception:
+                                    pass
                             self._mark_graph_artist_changed(artist)
                             self._set_format_selection(("text", (artist,)))
                             self._select_object_in_manager(artist)
