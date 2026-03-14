@@ -4,10 +4,18 @@ import os
 import sys
 from types import SimpleNamespace
 
+import pandas as pd
 from PyQt6 import QtWidgets
 
 from plotting.pyplot.app import PyPlotWorkbench
-from plotting.pyplot.window import GraphSelectionDialog, _GraphTextDialogResult
+from plotting.pyplot.window import (
+    CreateGraphDialog,
+    GraphSelectionDialog,
+    WorkbookData,
+    WorksheetColumnMeta,
+    WorksheetData,
+    _GraphTextDialogResult,
+)
 
 
 def _ensure_app() -> QtWidgets.QApplication:
@@ -190,6 +198,169 @@ def test_manual_graph_and_annotations_persist_in_project(tmp_path) -> None:
         restored_axes = restored._current_axes()  # noqa: SLF001
         assert restored_axes is not None
         assert any(text.get_text() == "$H_{c}$" for text in restored_axes.texts)
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        restored._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        restored.close()
+        app.processEvents()
+
+
+def test_create_graph_dialog_builds_exact_xy_series(monkeypatch) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        workbook = WorkbookData(key=("manual", "builder"), name="Builder Workbook", worksheets=[])
+        worksheet = WorksheetData(
+            key=(workbook.key, "Sheet1"),
+            name="Sheet1",
+            dataframe=pd.DataFrame(
+                {
+                    "field": [0.0, 1.0, 2.0],
+                    "flux_a": [1.0, 2.0, 3.0],
+                    "flux_b": [3.0, 2.0, 1.0],
+                }
+            ),
+            columns={
+                "field": WorksheetColumnMeta(long_name="Field", units="A/m"),
+                "flux_a": WorksheetColumnMeta(long_name="Flux A", units="Wb"),
+                "flux_b": WorksheetColumnMeta(long_name="Flux B", units="Wb"),
+            },
+            workbook_key=workbook.key,
+            axis_roles="XYY",
+        )
+        workbook.worksheets = [worksheet.key]
+        window._register_imported_workbook(workbook, [worksheet])  # noqa: SLF001
+
+        monkeypatch.setattr(
+            CreateGraphDialog,
+            "exec",
+            lambda self: int(QtWidgets.QDialog.DialogCode.Accepted),
+        )
+        monkeypatch.setattr(
+            CreateGraphDialog,
+            "payload",
+            lambda self: {
+                "title": "Built Graph",
+                "x_label": "",
+                "y_label": "",
+                "show_grid": True,
+                "series": [
+                    {"worksheet": worksheet, "x_column": "field", "y_column": "flux_a", "label": "A"},
+                    {"worksheet": worksheet, "x_column": "field", "y_column": "flux_b", "label": "B"},
+                ],
+            },
+        )
+
+        window._open_create_graph_dialog()  # noqa: SLF001
+
+        descriptor = window._tab_descriptors.get(window.tab_widget.currentWidget())  # noqa: SLF001
+        assert descriptor is not None
+        assert descriptor.kind == "manual_graph"
+        assert descriptor.title == "Built Graph"
+        assert descriptor.x_label == "Field [A/m]"
+        assert descriptor.y_label == "Flux A [Wb]"
+        assert len(descriptor.axes.get_lines()) == 2
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_composed_graph_persists_in_project(tmp_path, monkeypatch) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    restored = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        first_tab = window.tab_widget.currentWidget()
+        first_axes = window._current_axes()  # noqa: SLF001
+        assert first_axes is not None
+        first_axes.set_title("First")
+        first_axes.set_xlabel("Field")
+        first_axes.set_ylabel("Flux")
+        first_axes.plot([0, 1, 2], [1, 2, 3], label="A")
+
+        window._create_blank_graph()  # noqa: SLF001
+        second_tab = window.tab_widget.currentWidget()
+        second_axes = window._current_axes()  # noqa: SLF001
+        assert second_axes is not None
+        second_axes.plot([0, 1, 2], [3, 2, 1], label="B")
+
+        monkeypatch.setattr(
+            GraphSelectionDialog,
+            "exec",
+            lambda self: int(QtWidgets.QDialog.DialogCode.Accepted),
+        )
+        monkeypatch.setattr(
+            GraphSelectionDialog,
+            "selected_tabs",
+            lambda self: [first_tab, second_tab],
+        )
+        window._compose_graph_from_existing()  # noqa: SLF001
+
+        project_path = tmp_path / "composed_graph.pypj"
+        window._write_project_file(project_path)  # noqa: SLF001
+        restored._load_project_from_path(project_path)  # noqa: SLF001
+
+        descriptors = list(restored._tab_descriptors.values())  # noqa: SLF001
+        composed = [descriptor for descriptor in descriptors if descriptor.kind == "composed_graph"]
+        assert composed
+        assert len(composed[0].axes.get_lines()) == 2
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        restored._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        restored.close()
+        app.processEvents()
+
+
+def test_plugin_graph_annotation_persists_in_project(tmp_path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="Hysteresis Loops")
+    restored = PyPlotWorkbench(initial_plotter="Hysteresis Loops")
+    try:
+        source = tmp_path / "250C sample.dat"
+        source.write_text(
+            "\n".join(
+                [
+                    "150 6.2e-10",
+                    "75 6.1e-10",
+                    "0 -6.0e-10",
+                    "-75 -6.1e-10",
+                    "-150 -6.2e-10",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        window._import_paths([source])  # noqa: SLF001
+        app.processEvents()
+        window._current_plugin.generate()
+        app.processEvents()
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+        artist = window._create_text_annotation(  # noqa: SLF001
+            axes,
+            x=0.0,
+            y=5.5e-10,
+            payload=_GraphTextDialogResult(
+                text="HH",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=True,
+                italic=False,
+                underline=False,
+            ),
+        )
+        assert artist is not None
+        project_path = tmp_path / "plugin_annotation.pypj"
+        window._write_project_file(project_path)  # noqa: SLF001
+
+        restored._load_project_from_path(project_path)  # noqa: SLF001
+        restored_axes = restored._current_axes()  # noqa: SLF001
+        assert restored_axes is not None
+        assert any(text.get_text() == "HH" for text in restored_axes.texts)
     finally:
         window._clear_project_dirty()  # noqa: SLF001
         restored._clear_project_dirty()  # noqa: SLF001

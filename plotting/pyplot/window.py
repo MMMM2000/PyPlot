@@ -1881,6 +1881,223 @@ class GraphSelectionDialog(QtWidgets.QDialog):
         super().accept()
 
 
+class _CreateGraphSeriesRow(QtWidgets.QWidget):
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        *,
+        worksheet_entries: Sequence[tuple[Hashable, str]],
+        worksheet_lookup: Dict[Hashable, WorksheetData],
+        remove_callback: Callable[["_CreateGraphSeriesRow"], None],
+    ) -> None:
+        super().__init__(parent)
+        self._worksheet_lookup = worksheet_lookup
+        self._remove_callback = remove_callback
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.worksheet_combo = QtWidgets.QComboBox(self)
+        for key, label in worksheet_entries:
+            self.worksheet_combo.addItem(label, key)
+        layout.addWidget(self.worksheet_combo, 3)
+
+        self.x_combo = QtWidgets.QComboBox(self)
+        layout.addWidget(self.x_combo, 2)
+        self.y_combo = QtWidgets.QComboBox(self)
+        layout.addWidget(self.y_combo, 2)
+
+        self.label_edit = QtWidgets.QLineEdit(self)
+        self.label_edit.setPlaceholderText("Optional label override")
+        layout.addWidget(self.label_edit, 2)
+
+        remove_button = QtWidgets.QToolButton(self)
+        remove_button.setText("Remove")
+        remove_button.clicked.connect(lambda: self._remove_callback(self))
+        layout.addWidget(remove_button)
+
+        self.worksheet_combo.currentIndexChanged.connect(self._populate_columns)
+        self._populate_columns()
+
+    def _populate_columns(self) -> None:
+        self.x_combo.clear()
+        self.y_combo.clear()
+        worksheet = self.worksheet()
+        if worksheet is None:
+            return
+        for column in worksheet.dataframe.columns:
+            meta = worksheet.columns.get(str(column), WorksheetColumnMeta(long_name=str(column)))
+            label = meta.long_name or str(column)
+            units = str(meta.units or "").strip()
+            display = f"{label} [{units}]" if units else label
+            self.x_combo.addItem(display, str(column))
+            self.y_combo.addItem(display, str(column))
+        roles = str(getattr(worksheet, "axis_roles", "") or "")
+        if roles:
+            try:
+                x_index = roles.index("X")
+            except ValueError:
+                x_index = -1
+            if x_index >= 0 and x_index < self.x_combo.count():
+                self.x_combo.setCurrentIndex(x_index)
+            try:
+                y_index = roles.index("Y")
+            except ValueError:
+                y_index = 1 if self.y_combo.count() > 1 else 0
+            if y_index >= 0 and y_index < self.y_combo.count():
+                self.y_combo.setCurrentIndex(y_index)
+        elif self.y_combo.count() > 1:
+            self.y_combo.setCurrentIndex(1)
+
+    def worksheet(self) -> WorksheetData | None:
+        key = self.worksheet_combo.currentData()
+        return self._worksheet_lookup.get(key)
+
+    def payload(self) -> dict[str, Any] | None:
+        worksheet = self.worksheet()
+        if worksheet is None:
+            return None
+        x_column = self.x_combo.currentData()
+        y_column = self.y_combo.currentData()
+        if not isinstance(x_column, str) or not isinstance(y_column, str):
+            return None
+        return {
+            "worksheet": worksheet,
+            "x_column": x_column,
+            "y_column": y_column,
+            "label": self.label_edit.text().strip(),
+        }
+
+
+class CreateGraphDialog(QtWidgets.QDialog):
+    """Choose exact worksheet X/Y series for a new manual graph."""
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        *,
+        worksheet_entries: Sequence[tuple[Hashable, str]],
+        worksheet_lookup: Dict[Hashable, WorksheetData],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Create Graph")
+        self.resize(760, 360)
+        self._worksheet_entries = list(worksheet_entries)
+        self._worksheet_lookup = dict(worksheet_lookup)
+        self._rows: list[_CreateGraphSeriesRow] = []
+        self._payload: dict[str, Any] | None = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        info = QtWidgets.QLabel(
+            "Build a new graph from worksheet columns. Add one or more series rows and choose the exact X/Y columns for each plotted line."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+        layout.addLayout(form)
+
+        self.title_edit = QtWidgets.QLineEdit(self)
+        self.title_edit.setPlaceholderText("Optional graph title")
+        form.addRow("Title:", self.title_edit)
+
+        self.x_label_edit = QtWidgets.QLineEdit(self)
+        self.x_label_edit.setPlaceholderText("Optional X label override")
+        form.addRow("X label:", self.x_label_edit)
+
+        self.y_label_edit = QtWidgets.QLineEdit(self)
+        self.y_label_edit.setPlaceholderText("Optional Y label override")
+        form.addRow("Y label:", self.y_label_edit)
+
+        self.grid_cb = QtWidgets.QCheckBox("Show grid", self)
+        self.grid_cb.setChecked(True)
+        form.addRow("", self.grid_cb)
+
+        header = QtWidgets.QHBoxLayout()
+        header.addWidget(QtWidgets.QLabel("Worksheet / sheet"))
+        header.addStretch(2)
+        header.addWidget(QtWidgets.QLabel("X"))
+        header.addStretch(1)
+        header.addWidget(QtWidgets.QLabel("Y"))
+        header.addStretch(1)
+        header.addWidget(QtWidgets.QLabel("Legend label"))
+        header.addStretch(2)
+        layout.addLayout(header)
+
+        self.rows_container = QtWidgets.QWidget(self)
+        self.rows_layout = QtWidgets.QVBoxLayout(self.rows_container)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(6)
+        layout.addWidget(self.rows_container, 1)
+
+        controls = QtWidgets.QHBoxLayout()
+        add_row_button = QtWidgets.QPushButton("Add series", self)
+        add_row_button.clicked.connect(self._add_row)
+        controls.addWidget(add_row_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._add_row()
+
+    def _add_row(self) -> None:
+        row = _CreateGraphSeriesRow(
+            self.rows_container,
+            worksheet_entries=self._worksheet_entries,
+            worksheet_lookup=self._worksheet_lookup,
+            remove_callback=self._remove_row,
+        )
+        self._rows.append(row)
+        self.rows_layout.addWidget(row)
+
+    def _remove_row(self, row: _CreateGraphSeriesRow) -> None:
+        if len(self._rows) <= 1:
+            return
+        self._rows = [entry for entry in self._rows if entry is not row]
+        row.setParent(None)
+        row.deleteLater()
+
+    def payload(self) -> dict[str, Any] | None:
+        return self._payload
+
+    def accept(self) -> None:  # type: ignore[override]
+        series: list[dict[str, Any]] = []
+        for row in self._rows:
+            payload = row.payload()
+            if payload is None:
+                continue
+            series.append(payload)
+        if not series:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Create Graph",
+                "Add at least one valid X/Y series before creating the graph.",
+            )
+            return
+        self._payload = {
+            "title": self.title_edit.text().strip(),
+            "x_label": self.x_label_edit.text().strip(),
+            "y_label": self.y_label_edit.text().strip(),
+            "show_grid": bool(self.grid_cb.isChecked()),
+            "series": series,
+        }
+        super().accept()
+
+
 class LegendSettingsDialog(QtWidgets.QDialog):
     """Configure appearance and layout options for a Matplotlib legend."""
 
@@ -5611,12 +5828,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             new_window_action.setEnabled(False)
         workbook_action = new_menu.addAction("Workbook")
         workbook_action.triggered.connect(self._create_new_workbook)
-        graph_action = new_menu.addAction("Graph")
+        graph_action = new_menu.addAction("Blank Graph")
         create_graph = getattr(self, "_create_blank_graph", None)
         if callable(create_graph):
             graph_action.triggered.connect(create_graph)  # type: ignore[arg-type]
         else:
             graph_action.setEnabled(False)
+        create_graph_action = new_menu.addAction("Create Graph...")
+        create_graph_action.triggered.connect(self._open_create_graph_dialog)
         compose_graph_action = new_menu.addAction("Compose Graph...")
         compose_graph_action.triggered.connect(self._compose_graph_from_existing)
         if insert_before is not None:
@@ -6522,6 +6741,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         import_action.triggered.connect(self._prompt_import_data)
         self.import_data_button = import_action
         self._style_toolbar_button(toolbar, import_action)
+
+        create_graph_action = toolbar.addAction("Create graph...")
+        create_graph_action.triggered.connect(self._open_create_graph_dialog)
+        self._style_toolbar_button(toolbar, create_graph_action)
 
         connect_action = toolbar.addAction("Connect folders")
         connect_action.triggered.connect(self._connect_data_from_folder)
@@ -8326,6 +8549,184 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._register_plot_tab(tab, canvas, ax, descriptor)
         self._mark_project_dirty()
 
+    def _worksheet_display_label(self, worksheet: WorksheetData) -> str:
+        workbook = self._workbooks.get(worksheet.workbook_key)
+        workbook_name = workbook.name if isinstance(workbook, WorkbookData) else "Workbook"
+        return f"{workbook_name} / {worksheet.name}"
+
+    def _build_graph_from_series_specs(
+        self,
+        series_specs: Sequence[dict[str, Any]],
+        *,
+        title: str,
+        x_label: str,
+        y_label: str,
+        show_grid: bool,
+        kind: str,
+        root_label: str,
+        tab_label: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> QtWidgets.QWidget | None:
+        fig = Figure(figsize=(6.2, 4.2))
+        ax = fig.add_subplot(111)
+        line_states: Dict[tuple[str, float | str], GraphLineState] = {}
+        series_index = 0
+        for spec in series_specs:
+            if not isinstance(spec, dict):
+                continue
+            x_values = np.asarray(spec.get("x") or [])
+            y_values = np.asarray(spec.get("y") or [])
+            if x_values.size == 0 or y_values.size == 0:
+                continue
+            label = str(spec.get("label") or f"Series {series_index + 1}")
+            plot_kwargs = {
+                "label": label,
+                "color": spec.get("color"),
+                "linestyle": spec.get("linestyle"),
+                "linewidth": spec.get("linewidth"),
+                "marker": spec.get("marker"),
+                "markersize": spec.get("markersize"),
+            }
+            try:
+                line = ax.plot(x_values, y_values, **{k: v for k, v in plot_kwargs.items() if v is not None})[0]
+            except Exception:
+                line = ax.plot(x_values, y_values, label=label)[0]
+            try:
+                line.set_visible(bool(spec.get("visible", True)))
+            except Exception:
+                pass
+            key = (label, series_index)
+            line_states[key] = GraphLineState(
+                key=key,
+                label=label,
+                line=line,
+                base_x=x_values,
+                base_y=y_values,
+                full_x=x_values,
+                full_y=y_values,
+            )
+            series_index += 1
+        if not line_states:
+            return None
+        ax.set_title(title or "Graph")
+        ax.set_xlabel(x_label or "X")
+        ax.set_ylabel(y_label or "Y")
+        ax.grid(bool(show_grid))
+        try:
+            ax.legend(loc="best")
+        except Exception:
+            pass
+        canvas = FigureCanvas(fig)
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(canvas)
+        descriptor = TabDescriptor(
+            kind=kind,
+            title=str(ax.get_title() or "Graph"),
+            root_label=root_label,
+            x_label=str(ax.get_xlabel() or ""),
+            y_label=str(ax.get_ylabel() or ""),
+            canvas=canvas,
+            axes=ax,
+            lines=line_states,
+            metadata=dict(metadata or {}),
+        )
+        index = self.tab_widget.addTab(tab, tab_label or descriptor.title or "Graph")
+        self.tab_widget.setCurrentIndex(index)
+        self._register_plot_tab(tab, canvas, ax, descriptor)
+        self._mark_project_dirty()
+        return tab
+
+    def _open_create_graph_dialog(self) -> None:
+        worksheet_lookup = {
+            key: worksheet
+            for key, worksheet in self._worksheets.items()
+            if isinstance(worksheet, WorksheetData)
+        }
+        if not worksheet_lookup:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Create Graph",
+                "Import or create at least one worksheet before building a graph from worksheet columns.",
+            )
+            return
+        worksheet_entries = [
+            (key, self._worksheet_display_label(worksheet))
+            for key, worksheet in worksheet_lookup.items()
+        ]
+        dialog = CreateGraphDialog(
+            self,
+            worksheet_entries=worksheet_entries,
+            worksheet_lookup=worksheet_lookup,
+        )
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+        payload = dialog.payload()
+        if not isinstance(payload, dict):
+            return
+        series_specs: list[dict[str, Any]] = []
+        default_x_label = payload.get("x_label") or ""
+        default_y_label = payload.get("y_label") or ""
+        for entry in payload.get("series", []):
+            if not isinstance(entry, dict):
+                continue
+            worksheet = entry.get("worksheet")
+            if not isinstance(worksheet, WorksheetData):
+                continue
+            x_column = str(entry.get("x_column") or "")
+            y_column = str(entry.get("y_column") or "")
+            if not x_column or not y_column:
+                continue
+            x_series = pd.to_numeric(worksheet.dataframe.get(x_column), errors="coerce")
+            y_series = pd.to_numeric(worksheet.dataframe.get(y_column), errors="coerce")
+            if x_series is None or y_series is None:
+                continue
+            mask = x_series.notna() & y_series.notna()
+            x_values = x_series[mask].to_numpy()
+            y_values = y_series[mask].to_numpy()
+            if x_values.size == 0 or y_values.size == 0:
+                continue
+            x_meta = worksheet.columns.get(x_column, WorksheetColumnMeta(long_name=x_column))
+            y_meta = worksheet.columns.get(y_column, WorksheetColumnMeta(long_name=y_column))
+            if not default_x_label:
+                default_x_label = (
+                    f"{x_meta.long_name} [{x_meta.units}]".strip()
+                    if str(x_meta.units or "").strip()
+                    else str(x_meta.long_name or x_column)
+                )
+            if not default_y_label:
+                default_y_label = (
+                    f"{y_meta.long_name} [{y_meta.units}]".strip()
+                    if str(y_meta.units or "").strip()
+                    else str(y_meta.long_name or y_column)
+                )
+            series_specs.append(
+                {
+                    "label": entry.get("label") or str(y_meta.long_name or y_column),
+                    "x": x_values.tolist(),
+                    "y": y_values.tolist(),
+                }
+            )
+        if not series_specs:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Create Graph",
+                "The selected X/Y pairs did not contain any plottable numeric data.",
+            )
+            return
+        self._build_graph_from_series_specs(
+            series_specs,
+            title=str(payload.get("title") or "Graph"),
+            x_label=str(default_x_label or "X"),
+            y_label=str(default_y_label or "Y"),
+            show_grid=bool(payload.get("show_grid", True)),
+            kind="manual_graph",
+            root_label="Graph",
+            tab_label=str(payload.get("title") or "Graph"),
+            metadata={"builder": "worksheet_xy"},
+        )
+
     def _compose_graph_from_existing(self) -> None:
         entries: list[tuple[str, str, QtWidgets.QWidget]] = []
         current = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
@@ -8366,13 +8767,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not selected_tabs:
             return
 
-        fig = Figure(figsize=(6.2, 4.2))
-        ax = fig.add_subplot(111)
-        composed_lines: Dict[tuple[str, float | str], GraphLineState] = {}
+        series_specs: list[dict[str, Any]] = []
         x_label = "X"
         y_label = "Y"
         title = "Composed Graph"
-        series_index = 0
         for tab in selected_tabs:
             descriptor = self._tab_descriptors.get(tab)
             if descriptor is None:
@@ -8413,65 +8811,37 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 y_data = np.asarray(line.get_ydata())
                 if x_data.size == 0 or y_data.size == 0:
                     continue
-                try:
-                    new_line = ax.plot(
-                        x_data,
-                        y_data,
-                        label=raw_label or f"Series {series_index + 1}",
-                        color=line.get_color(),
-                        linestyle=line.get_linestyle(),
-                        linewidth=float(line.get_linewidth()),
-                        marker=line.get_marker(),
-                        markersize=float(line.get_markersize()),
-                    )[0]
-                except Exception:
-                    new_line = ax.plot(x_data, y_data, label=raw_label or f"Series {series_index + 1}")[0]
-                key = (str(raw_label or f"Series {series_index + 1}"), series_index)
-                composed_lines[key] = GraphLineState(
-                    key=key,
-                    label=str(raw_label or f"Series {series_index + 1}"),
-                    line=new_line,
-                    base_x=x_data,
-                    base_y=y_data,
-                    full_x=x_data,
-                    full_y=y_data,
+                series_specs.append(
+                    {
+                        "label": raw_label or f"Series {len(series_specs) + 1}",
+                        "x": x_data.tolist(),
+                        "y": y_data.tolist(),
+                        "color": line.get_color(),
+                        "linestyle": line.get_linestyle(),
+                        "linewidth": float(line.get_linewidth()),
+                        "marker": line.get_marker(),
+                        "markersize": float(line.get_markersize()),
+                        "visible": bool(line.get_visible()),
+                    }
                 )
-                series_index += 1
-        if not composed_lines:
+        if not series_specs:
             QtWidgets.QMessageBox.information(
                 self,
                 "Compose graph",
                 "No visible plotted series were available to combine.",
             )
             return
-        ax.set_title(title or "Composed Graph")
-        ax.set_xlabel(x_label or "X")
-        ax.set_ylabel(y_label or "Y")
-        ax.grid(True)
-        try:
-            ax.legend(loc="best")
-        except Exception:
-            pass
-        canvas = FigureCanvas(fig)
-        tab = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(tab)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(canvas)
-        descriptor = TabDescriptor(
+        self._build_graph_from_series_specs(
+            series_specs,
+            title=title or "Composed Graph",
+            x_label=x_label or "X",
+            y_label=y_label or "Y",
+            show_grid=True,
             kind="composed_graph",
-            title=str(ax.get_title() or "Composed Graph"),
             root_label="Composed Graph",
-            x_label=str(ax.get_xlabel() or ""),
-            y_label=str(ax.get_ylabel() or ""),
-            canvas=canvas,
-            axes=ax,
-            lines=composed_lines,
+            tab_label="Composed Graph",
             metadata={"source_titles": [self._tab_descriptors.get(tab_ref).title for tab_ref in selected_tabs if self._tab_descriptors.get(tab_ref) is not None]},
         )
-        index = self.tab_widget.addTab(tab, "Composed Graph")
-        self.tab_widget.setCurrentIndex(index)
-        self._register_plot_tab(tab, canvas, ax, descriptor)
-        self._mark_project_dirty()
 
     def _register_plot_tab(
         self,

@@ -109,6 +109,7 @@ Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph forma
 - **Text formatting toolbar**: selected text objects now support font family, size, bold, italic, underline, direct colour changes, and mathtext helper actions for subscript, superscript, and combined sub+sup formatting. The richer `Edit…` action opens a text dialog that accepts Matplotlib mathtext syntax such as `$H_{c}$`, `$10^{-10}$`, or `$\\phi$`.
 - **Default scientific text look**: shared graph text now defaults to a serif scientific style (`DejaVu Serif` for regular text with STIX mathtext), which keeps Unicode labels working while still producing a paper-like look.
 - **Graph composition**: `File -> New -> Compose Graph...` lets you choose existing plotted tabs and overlay their visible series into a new shared PyPlot graph tab. Composed graphs behave like ordinary graph tabs and are saved with the project.
+- **X/Y graph builder**: `Create graph...` on the Plot actions toolbar and `File -> New -> Create Graph...` open a worksheet-backed builder where each series row chooses an exact worksheet, X column, Y column, and optional legend label. Built graphs use one shared set of axes, so all added series automatically share the same X/Y scale inside the resulting graph.
 
 ## Importing Data
 
