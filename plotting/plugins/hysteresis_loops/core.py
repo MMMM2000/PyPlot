@@ -34,7 +34,7 @@ SHOW_TICK_LABELS = bool(_CFG.get("SHOW_TICK_LABELS", True))
 SHOW_AXIS_LABELS = bool(_CFG.get("SHOW_AXIS_LABELS", True))
 SHOW_TITLE = bool(_CFG.get("SHOW_TITLE", True))
 
-X_AXIS_LABEL = "Magnetic field [A/m]"
+X_AXIS_LABEL = "Magnetic field [Am⁻¹]"
 Y_AXIS_LABEL = "Magnetic flux [Wb]"
 
 _TEMP_RE = re.compile(r"(\d+)\s*([°]?[Cc])", re.IGNORECASE)
@@ -303,7 +303,7 @@ def _origin_plot_combined(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) 
 
     try:
         graph.activate()
-        origin_any.lt_exec('lab -xb "H [A/m]";')
+        origin_any.lt_exec('lab -xb "H [Am⁻¹]";')
         origin_any.lt_exec('lab -yl "F [Wb]";')
         if base_title:
             safe_title = base_title.replace('"', "'")
@@ -337,7 +337,7 @@ def _origin_plot_separate(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) 
             graph.activate()
             safe_title = f"{base} - {label}".replace('"', "'")
             origin_any.lt_exec(f'title -s "{safe_title}";')
-            origin_any.lt_exec('lab -xb "H [A/m]";')
+            origin_any.lt_exec('lab -xb "H [Am⁻¹]";')
             origin_any.lt_exec('lab -yl "F [Wb]";')
         except Exception:
             pass

@@ -31,6 +31,10 @@
 - Run `launcher.py` as a smoke check when practical, or note if skipped.
 - For graph-generation changes, always create real output graphs and visually verify results before finishing.
 - Apply that visual verification rule to both Matplotlib graphs and Origin-exported graphs, and continue iterating until output is correct.
+- When a task changes visible PyPlot/UI behavior and the result is meant for user review, capture final review screenshots after verification.
+- For PyPlot GUI review screenshots, use a fullscreen or clearly maximized window layout so docks, toolbars, and graph content are readable; do not save cramped window captures as the final review artifact.
+- By default, show final review screenshots inline in the chat using absolute local image paths so the user can review them immediately.
+- Save final review screenshots to `~/Downloads` only when the user explicitly asks for saved files there, asks for a path, or when inline screenshots alone would be insufficient.
 - Store temporary visual-check outputs under a workspace `artifacts/` folder (create it when needed).
 - Remove temporary PNG artifacts and other transient visual-check files after validation, then remove `artifacts/` when it only contains those temporary checks.
 - Remove temporary visual-check artifacts left in other locations (for example probe dumps, one-off summaries, and debug folders in `logs/`) once validation is complete.
