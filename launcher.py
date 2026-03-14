@@ -220,6 +220,8 @@ class _PyPlotAutomationRequest:
     plugin_name: str | None = None
     import_entries: list[Path] = field(default_factory=list)
     load_project_path: Path | None = None
+    build_graphs: list[dict[str, Any]] = field(default_factory=list)
+    create_figures: list[dict[str, Any]] = field(default_factory=list)
     generate: bool = False
     open_graph_format: bool = False
     open_origin: bool = False
@@ -438,15 +440,29 @@ def _load_automation_recipe_request(recipe_path: Path) -> _PyPlotAutomationReque
         field_name="manifest_path",
     )
 
-    if plugin_name is None and (import_entries or generate or open_origin):
+    if plugin_name is None and (generate or open_origin):
         raise _AutomationRecipeError(
-            "Automation recipe field 'plugin' is required when imports, generate, or open_origin are requested."
+            "Automation recipe field 'plugin' is required when generate or open_origin are requested."
         )
+
+    build_graphs = recipe.get("build_graphs", [])
+    if build_graphs is None:
+        build_graphs = []
+    if not isinstance(build_graphs, list) or not all(isinstance(entry, dict) for entry in build_graphs):
+        raise _AutomationRecipeError("Automation recipe field 'build_graphs' must be an array of objects.")
+
+    create_figures = recipe.get("create_figures", [])
+    if create_figures is None:
+        create_figures = []
+    if not isinstance(create_figures, list) or not all(isinstance(entry, dict) for entry in create_figures):
+        raise _AutomationRecipeError("Automation recipe field 'create_figures' must be an array of objects.")
 
     return _PyPlotAutomationRequest(
         plugin_name=plugin_name,
         import_entries=import_entries,
         load_project_path=load_project_path,
+        build_graphs=[dict(entry) for entry in build_graphs],
+        create_figures=[dict(entry) for entry in create_figures],
         generate=generate,
         open_origin=open_origin,
         window_image_path=window_image_path,
@@ -831,6 +847,20 @@ def _execute_pyplot_automation_request(
                 raise RuntimeError("No active PyPlot plugin selected for generate.")
             plugin.generate()
             _pump_qt_events(app, rounds=8)
+
+        for graph_payload in request.build_graphs:
+            creator = getattr(window, "_automation_create_graph", None)
+            if not callable(creator):
+                raise RuntimeError("PyPlot graph builder automation is unavailable.")
+            creator(graph_payload)
+            _pump_qt_events(app, rounds=6)
+
+        for figure_payload in request.create_figures:
+            creator = getattr(window, "_automation_create_figure", None)
+            if not callable(creator):
+                raise RuntimeError("PyPlot figure layout automation is unavailable.")
+            creator(figure_payload)
+            _pump_qt_events(app, rounds=6)
 
         if request.open_graph_format:
             opener = getattr(window, "_open_graph_format_dialog", None)

@@ -1678,7 +1678,7 @@ class PyPlotWorkbench(PyPlotWindow):
         if bool(getattr(self, "_connected_data_folders", [])):
             return True
         if any(
-            descriptor.kind in {"manual_graph", "composed_graph"}
+            descriptor.kind in {"manual_graph", "composed_graph", "layout_graph"}
             for descriptor in getattr(self, "_tab_descriptors", {}).values()
         ):
             return True
@@ -1828,7 +1828,28 @@ class PyPlotWorkbench(PyPlotWindow):
     def _serialize_manual_graph_tabs(self) -> list[dict[str, Any]]:
         payloads: list[dict[str, Any]] = []
         for tab, descriptor in self._tab_descriptors.items():
-            if descriptor.kind not in {"manual_graph", "composed_graph"}:
+            if descriptor.kind not in {"manual_graph", "composed_graph", "layout_graph"}:
+                continue
+            if descriptor.kind == "layout_graph":
+                figure = getattr(getattr(descriptor, "axes", None), "figure", None)
+                if figure is None:
+                    continue
+                try:
+                    axes_list = [axis for axis in list(figure.axes) if axis is not None and bool(axis.get_visible())]
+                except Exception:
+                    axes_list = []
+                panels: list[dict[str, Any]] = []
+                for axes in axes_list:
+                    panels.append(self._panel_spec_from_axes(axes))
+                payloads.append(
+                    {
+                        "kind": descriptor.kind,
+                        "tab_label": self.tab_widget.tabText(self.tab_widget.indexOf(tab)),
+                        "title": descriptor.title,
+                        "metadata": dict(descriptor.metadata or {}),
+                        "panels": panels,
+                    }
+                )
                 continue
             axes = getattr(descriptor, "axes", None)
             if axes is None:
@@ -1877,6 +1898,24 @@ class PyPlotWorkbench(PyPlotWindow):
     def _restore_manual_graph_tabs(self, payloads: Sequence[dict[str, Any]]) -> None:
         for entry in payloads:
             if not isinstance(entry, dict):
+                continue
+            if str(entry.get("kind") or "") == "layout_graph":
+                panels = entry.get("panels")
+                metadata = dict(entry.get("metadata") or {})
+                config = metadata.get("layout_config") if isinstance(metadata.get("layout_config"), dict) else {}
+                if isinstance(panels, list) and panels:
+                    self._build_layout_graph_from_panels(
+                        panels,
+                        title=str(entry.get("title") or "Figure Layout"),
+                        rows=int(config.get("rows") or 1),
+                        cols=int(config.get("cols") or max(1, len(panels))),
+                        share_x=bool(config.get("share_x", False)),
+                        share_y=bool(config.get("share_y", False)),
+                        panel_label_mode=str(config.get("panel_labels") or "none"),
+                        figure_width=float(config.get("figure_width") or 7.10),
+                        figure_height=float(config.get("figure_height") or 4.80),
+                        metadata=metadata,
+                    )
                 continue
             series_entries = entry.get("series")
             if not isinstance(series_entries, list):

@@ -100,6 +100,7 @@ Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph forma
 - **Relative paths**: recipe input and output paths are resolved relative to the recipe file location, which keeps workspace-local jobs portable when they are stored next to sample data or an `artifacts/` folder.
 - **Manifest output**: runs can write a machine-readable manifest JSON with the active plugin, loaded/saved project paths, imported paths, workbook/tab counts, current tab details, and exported image paths. When no manifest path is provided, the JSON is printed to stdout.
 - **Batch plot exports**: `exports.plot_images_dir` saves every visible plot tab as a deterministic PNG named `<tab_index>-<safe_tab_label>.png`, which is meant for replayable automation and test verification rather than human browsing.
+- **Graph/figure automation**: recipe runs can now build worksheet-backed graphs (`build_graphs`) and assemble multi-panel figures (`create_figures`) without using the interactive dialogs, so agent-authored jobs can import tabular data, create exact X/Y plots, and then arrange them into shared-axis layouts in one pass.
 - **Current scope**: v1 automation is PyPlot-only. The shared recipe entrypoint reserves `kind: "builder"` for future Microwire Builder / `.pydpj` automation, but that mode is not implemented yet.
 
 ## Annotation And Composition
@@ -110,6 +111,8 @@ Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph forma
 - **Default scientific text look**: shared graph text now defaults to a serif scientific style (`DejaVu Serif` for regular text with STIX mathtext), which keeps Unicode labels working while still producing a paper-like look.
 - **Graph composition**: `File -> New -> Compose Graph...` lets you choose existing plotted tabs and overlay their visible series into a new shared PyPlot graph tab. Composed graphs behave like ordinary graph tabs and are saved with the project.
 - **X/Y graph builder**: `Create graph...` on the Plot actions toolbar and `File -> New -> Create Graph...` open a worksheet-backed builder where each series row chooses an exact worksheet, X column, Y column, and optional legend label. Built graphs use one shared set of axes, so all added series automatically share the same X/Y scale inside the resulting graph.
+- **Figure layout builder**: `Create figure...` on the Plot actions toolbar and `File -> New -> Create Figure...` arrange existing single-panel graph tabs into a new multi-panel figure. The builder supports configurable rows/columns, shared X and/or Y scales, panel labels (`(a)`, `(b)`, ...), and paper-oriented size presets. Layout figures are saved with the project as shared `layout_graph` tabs.
+- **Paper export shortcuts**: the Plot actions toolbar now includes `Paper PNG` and `Paper PDF` shortcuts for the current graph/figure tab so publication-sized figures can be exported with fewer manual save-format steps.
 
 ## Importing Data
 

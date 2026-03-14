@@ -355,3 +355,75 @@ def test_automation_recipe_can_save_and_reload_pyplot_project(tmp_path: Path) ->
     assert load_manifest["plugin"] == "Hysteresis Loops"
     assert load_manifest["tab_count"] >= 1
     assert load_manifest["workbook_count"] >= 1
+
+
+def test_automation_recipe_can_build_graphs_and_layout_figure(tmp_path: Path) -> None:
+    _ensure_app()
+    csv_path = tmp_path / "builder.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "field,flux_a,flux_b,flux_c,flux_d",
+                "0,1.0,3.5,0.8,2.6",
+                "1,2.0,2.7,1.4,2.3",
+                "2,3.2,1.9,1.8,1.7",
+                "3,4.0,1.2,2.1,1.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    recipe_path = tmp_path / "layout_job.json"
+    manifest_path = tmp_path / "layout_manifest.json"
+    plot_dir = tmp_path / "plots"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "pyplot",
+                "version": 1,
+                "imports": [csv_path.name],
+                "build_graphs": [
+                    {
+                        "title": "Graph 1",
+                        "series": [
+                            {"workbook": "builder.csv", "worksheet": "builder", "x_column": "field", "y_column": "flux_a", "label": "A"},
+                            {"workbook": "builder.csv", "worksheet": "builder", "x_column": "field", "y_column": "flux_b", "label": "B"},
+                        ],
+                    },
+                    {
+                        "title": "Graph 2",
+                        "series": [
+                            {"workbook": "builder.csv", "worksheet": "builder", "x_column": "field", "y_column": "flux_c", "label": "C"},
+                            {"workbook": "builder.csv", "worksheet": "builder", "x_column": "field", "y_column": "flux_d", "label": "D"},
+                        ],
+                    },
+                ],
+                "create_figures": [
+                    {
+                        "title": "Two Panel Figure",
+                        "rows": 2,
+                        "cols": 1,
+                        "share_x": True,
+                        "share_y": True,
+                        "panel_labels": "lower",
+                        "source_titles": ["Graph 1", "Graph 2"],
+                    }
+                ],
+                "exports": {
+                    "plot_images_dir": "plots"
+                },
+                "manifest_path": "layout_manifest.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001 - internal automation hook
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["tab_count"] >= 3
+    assert "Two Panel Figure" in manifest["tab_labels"]
+    assert plot_dir.exists()

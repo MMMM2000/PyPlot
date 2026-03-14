@@ -10,6 +10,7 @@ from PyQt6 import QtWidgets
 from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot.window import (
     CreateGraphDialog,
+    FigureLayoutDialog,
     GraphSelectionDialog,
     WorkbookData,
     WorksheetColumnMeta,
@@ -366,4 +367,168 @@ def test_plugin_graph_annotation_persists_in_project(tmp_path) -> None:
         restored._clear_project_dirty()  # noqa: SLF001
         window.close()
         restored.close()
+        app.processEvents()
+
+
+def test_create_figure_builder_creates_shared_layout(monkeypatch) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        first_tab = window.tab_widget.currentWidget()
+        first_axes = window._current_axes()  # noqa: SLF001
+        assert first_axes is not None
+        first_axes.set_title("First")
+        first_axes.set_xlabel("Field")
+        first_axes.set_ylabel("Flux")
+        first_axes.plot([0, 1, 2], [1, 2, 3], label="A")
+
+        window._create_blank_graph()  # noqa: SLF001
+        second_tab = window.tab_widget.currentWidget()
+        second_axes = window._current_axes()  # noqa: SLF001
+        assert second_axes is not None
+        second_axes.set_title("Second")
+        second_axes.set_xlabel("Field")
+        second_axes.set_ylabel("Flux")
+        second_axes.plot([0, 1, 2], [3, 2, 1], label="B")
+
+        monkeypatch.setattr(
+            FigureLayoutDialog,
+            "exec",
+            lambda self: int(QtWidgets.QDialog.DialogCode.Accepted),
+        )
+        monkeypatch.setattr(
+            FigureLayoutDialog,
+            "payload",
+            lambda self: {
+                "title": "Two Panel Figure",
+                "rows": 2,
+                "cols": 1,
+                "share_x": True,
+                "share_y": True,
+                "panel_labels": "lower",
+                "figure_width": 7.10,
+                "figure_height": 4.80,
+                "source_tabs": [first_tab, second_tab],
+            },
+        )
+
+        window._open_create_figure_dialog()  # noqa: SLF001
+
+        descriptor = window._tab_descriptors.get(window.tab_widget.currentWidget())  # noqa: SLF001
+        assert descriptor is not None
+        assert descriptor.kind == "layout_graph"
+        figure = descriptor.axes.figure
+        visible_axes = [axes for axes in figure.axes if axes.get_visible()]
+        assert len(visible_axes) == 2
+        xlims = [tuple(float(v) for v in axes.get_xlim()) for axes in visible_axes]
+        ylims = [tuple(float(v) for v in axes.get_ylim()) for axes in visible_axes]
+        assert xlims[0] == xlims[1]
+        assert ylims[0] == ylims[1]
+        assert any(text.get_text() == "(a)" for text in visible_axes[0].texts)
+        assert any(text.get_text() == "(b)" for text in visible_axes[1].texts)
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_layout_graph_persists_in_project(tmp_path, monkeypatch) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    restored = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        first_tab = window.tab_widget.currentWidget()
+        first_axes = window._current_axes()  # noqa: SLF001
+        assert first_axes is not None
+        first_axes.set_title("First")
+        first_axes.set_xlabel("Field")
+        first_axes.set_ylabel("Flux")
+        first_axes.plot([0, 1, 2], [1, 2, 3], label="A")
+
+        window._create_blank_graph()  # noqa: SLF001
+        second_tab = window.tab_widget.currentWidget()
+        second_axes = window._current_axes()  # noqa: SLF001
+        assert second_axes is not None
+        second_axes.set_title("Second")
+        second_axes.set_xlabel("Field")
+        second_axes.set_ylabel("Flux")
+        second_axes.plot([0, 1, 2], [3, 2, 1], label="B")
+
+        monkeypatch.setattr(
+            FigureLayoutDialog,
+            "exec",
+            lambda self: int(QtWidgets.QDialog.DialogCode.Accepted),
+        )
+        monkeypatch.setattr(
+            FigureLayoutDialog,
+            "payload",
+            lambda self: {
+                "title": "Two Panel Figure",
+                "rows": 2,
+                "cols": 1,
+                "share_x": True,
+                "share_y": True,
+                "panel_labels": "lower",
+                "figure_width": 7.10,
+                "figure_height": 4.80,
+                "source_tabs": [first_tab, second_tab],
+            },
+        )
+        window._open_create_figure_dialog()  # noqa: SLF001
+        project_path = tmp_path / "layout_graph.pypj"
+        window._write_project_file(project_path)  # noqa: SLF001
+
+        restored._load_project_from_path(project_path)  # noqa: SLF001
+        descriptors = list(restored._tab_descriptors.values())  # noqa: SLF001
+        layouts = [descriptor for descriptor in descriptors if descriptor.kind == "layout_graph"]
+        assert layouts
+        figure = layouts[0].axes.figure
+        visible_axes = [axes for axes in figure.axes if axes.get_visible()]
+        assert len(visible_axes) == 2
+        assert any(text.get_text() == "(a)" for text in visible_axes[0].texts)
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        restored._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        restored.close()
+        app.processEvents()
+
+
+def test_figure_layout_dialog_defaults_to_mm_and_converts_to_inches() -> None:
+    app = _ensure_app()
+    dialog = FigureLayoutDialog(
+        None,
+        entries=[],
+    )
+    try:
+        assert dialog.units_combo.currentData() == "mm"
+        assert dialog.width_label.text() == "Width (mm)"
+        assert dialog.height_label.text() == "Height (mm)"
+        dialog.title_edit.setText("Figure")
+        dialog.rows_spin.setValue(1)
+        dialog.cols_spin.setValue(1)
+        payload_tab = QtWidgets.QWidget()
+        item = dialog.tabs_list.item(0) if dialog.tabs_list.count() else None
+        if item is None:
+            from PyQt6 import QtCore
+            item = QtWidgets.QListWidgetItem("Graph 1")
+            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.CheckState.Checked)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, payload_tab)
+            dialog.tabs_list.addItem(item)
+        else:
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, payload_tab)
+            item.setCheckState(QtCore.Qt.CheckState.Checked)
+        dialog.width_spin.setValue(25.4)
+        dialog.height_spin.setValue(50.8)
+        dialog.accept()
+        payload = dialog.payload()
+        assert payload is not None
+        assert payload["figure_units"] == "mm"
+        assert payload["figure_width"] == 1.0
+        assert payload["figure_height"] == 2.0
+    finally:
+        dialog.close()
         app.processEvents()
