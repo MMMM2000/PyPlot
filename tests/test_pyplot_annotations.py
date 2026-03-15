@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from types import SimpleNamespace
 
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
+from matplotlib import ticker as mticker
+from PIL import Image
 
 from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot.window import (
@@ -87,6 +90,48 @@ def test_blank_graph_supports_text_annotations_and_mathtext_formatting(monkeypat
     finally:
         window._clear_project_dirty()  # noqa: SLF001
         window.close()
+        app.processEvents()
+
+
+def test_text_strikethrough_toggle_and_persistence(tmp_path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    restored = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        artist = window._create_text_annotation(  # noqa: SLF001
+            axes,
+            x=1.0,
+            y=1.0,
+            payload=_GraphTextDialogResult(
+                text="Strike",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=False,
+                italic=False,
+                underline=False,
+                strikethrough=False,
+            ),
+        )
+        assert artist is not None
+        window._set_format_selection(("text", (artist,)))  # noqa: SLF001
+        window._apply_text_strikethrough(True)  # noqa: SLF001
+        assert getattr(artist, "_mw_strikethrough", False) is True
+        assert "\u0336" in artist.get_text()
+        project_path = tmp_path / "strike_graph.pypj"
+        window._write_project_file(project_path)  # noqa: SLF001
+        restored._load_project_from_path(project_path)  # noqa: SLF001
+        restored_axes = restored._current_axes()  # noqa: SLF001
+        assert restored_axes is not None
+        strikes = [text for text in restored_axes.texts if getattr(text, "_mw_strikethrough", False)]
+        assert strikes
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        restored._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        restored.close()
         app.processEvents()
 
 
@@ -196,6 +241,37 @@ def test_annotation_copy_paste_and_duplicate() -> None:
         window._duplicate_selected_graph_objects()  # noqa: SLF001
         texts = window._iter_graph_object_texts(axes)  # noqa: SLF001
         assert len(texts) == 3
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_single_visible_graph_subwindow_uses_half_workspace_width() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window.resize(1600, 980)
+        window.show()
+        app.processEvents()
+        window._create_blank_graph()  # noqa: SLF001
+        app.processEvents()
+
+        arranger = getattr(window.tab_widget, "_arrange_subwindows", None)
+        if callable(arranger):
+            arranger()
+        app.processEvents()
+
+        current = window.tab_widget.currentWidget()
+        assert current is not None
+        subwindow_for = getattr(window.tab_widget, "_subwindow_for", None)
+        assert callable(subwindow_for)
+        sub = subwindow_for(current)
+        assert sub is not None
+        viewport = window.tab_widget._mdi.viewport().rect()  # noqa: SLF001
+        assert viewport.width() > 0
+        expected_max = max(1, (viewport.width() - 24) // 2)
+        assert sub.width() <= expected_max + 6
     finally:
         window._clear_project_dirty()  # noqa: SLF001
         window.close()
@@ -683,6 +759,9 @@ def test_create_figure_builder_creates_shared_layout(monkeypatch) -> None:
         figure = descriptor.axes.figure
         visible_axes = [axes for axes in figure.axes if axes.get_visible()]
         assert len(visible_axes) == 2
+        size = figure.get_size_inches()
+        assert round(float(size[0]), 2) == 7.10
+        assert round(float(size[1]), 2) == 4.80
         xlims = [tuple(float(v) for v in axes.get_xlim()) for axes in visible_axes]
         ylims = [tuple(float(v) for v in axes.get_ylim()) for axes in visible_axes]
         assert xlims[0] == xlims[1]
@@ -855,6 +934,198 @@ def test_figure_layout_external_legend_and_panel_override(monkeypatch) -> None:
         assert figure.legends
         assert list(visible_axes[0].get_xticks())[:3] == [0.0, 1.0, 2.0]
         assert str(visible_axes[0].lines[0].get_color()).lower() in {"#111111", "#555555", "#888888", "#bbbbbb"}
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_layout_graph_plain_notation_resets_scaled_tick_formatters() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        first_tab = window.tab_widget.currentWidget()
+        first_axes = window._current_axes()  # noqa: SLF001
+        assert first_axes is not None
+        first_axes.set_title("First")
+        if first_tab is not None:
+            descriptor = window._tab_descriptors.get(first_tab)  # noqa: SLF001
+            if descriptor is not None:
+                descriptor.title = "First"
+            index = window.tab_widget.indexOf(first_tab)
+            if index >= 0:
+                window.tab_widget.setTabText(index, "First")
+        first_axes.plot([0, 1, 2], [0.2, 0.4, 0.6], label="A")
+        first_axes.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda value, _pos: f"{value * 100:.0f}")
+        )
+
+        window._create_blank_graph()  # noqa: SLF001
+        second_tab = window.tab_widget.currentWidget()
+        second_axes = window._current_axes()  # noqa: SLF001
+        assert second_axes is not None
+        second_axes.set_title("Second")
+        if second_tab is not None:
+            descriptor = window._tab_descriptors.get(second_tab)  # noqa: SLF001
+            if descriptor is not None:
+                descriptor.title = "Second"
+            index = window.tab_widget.indexOf(second_tab)
+            if index >= 0:
+                window.tab_widget.setTabText(index, "Second")
+        second_axes.plot([0, 1, 2], [0.3, 0.5, 0.7], label="B")
+        second_axes.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda value, _pos: f"{value * 100:.0f}")
+        )
+
+        payload = {
+            "title": "Layout",
+            "source_titles": ["First", "Second"],
+            "rows": 1,
+            "cols": 2,
+            "share_x": True,
+            "share_y": True,
+            "panel_labels": "lower",
+            "figure_units": "mm",
+            "figure_width": 120,
+            "figure_height": 70,
+            "notation": "plain",
+        }
+        window._automation_create_figure(payload)  # noqa: SLF001
+        figure = window._current_axes().figure  # noqa: SLF001
+        visible_axes = [axes for axes in figure.axes if axes.get_visible()]
+        assert visible_axes
+        assert float(visible_axes[0].get_ylim()[1]) < 2.0
+        formatter = visible_axes[0].yaxis.get_major_formatter()
+        assert isinstance(formatter, mticker.ScalarFormatter)
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_automation_house_style_ignores_manual_tick_lists() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    settings = QtCore.QSettings("microwire", "plotting")
+    original = settings.value("figure_layout_house_style", "")
+    try:
+        settings.setValue(
+            "figure_layout_house_style",
+            json.dumps(
+                {
+                    "external_legend": True,
+                    "legend_placement": "bottom",
+                    "x_ticks": "0, 1, 2",
+                    "y_ticks": "10, 20",
+                    "style_preset": "mono",
+                }
+            ),
+        )
+        settings.sync()
+
+        window._create_blank_graph()  # noqa: SLF001
+        first_tab = window.tab_widget.currentWidget()
+        first_axes = window._current_axes()  # noqa: SLF001
+        assert first_axes is not None
+        first_axes.set_title("First")
+        first_axes.plot([0, 1, 2], [0.2, 0.4, 0.6], label="A")
+        if first_tab is not None:
+            descriptor = window._tab_descriptors.get(first_tab)  # noqa: SLF001
+            if descriptor is not None:
+                descriptor.title = "First"
+            index = window.tab_widget.indexOf(first_tab)
+            if index >= 0:
+                window.tab_widget.setTabText(index, "First")
+
+        window._create_blank_graph()  # noqa: SLF001
+        second_tab = window.tab_widget.currentWidget()
+        second_axes = window._current_axes()  # noqa: SLF001
+        assert second_axes is not None
+        second_axes.set_title("Second")
+        second_axes.plot([0, 1, 2], [0.3, 0.5, 0.7], label="B")
+        if second_tab is not None:
+            descriptor = window._tab_descriptors.get(second_tab)  # noqa: SLF001
+            if descriptor is not None:
+                descriptor.title = "Second"
+            index = window.tab_widget.indexOf(second_tab)
+            if index >= 0:
+                window.tab_widget.setTabText(index, "Second")
+
+        window._automation_create_figure(  # noqa: SLF001
+            {
+                "title": "Layout",
+                "source_titles": ["First", "Second"],
+                "rows": 1,
+                "cols": 2,
+                "share_x": True,
+                "share_y": True,
+                "panel_labels": "lower",
+            }
+        )
+        figure = window._current_axes().figure  # noqa: SLF001
+        visible_axes = [axes for axes in figure.axes if axes.get_visible()]
+        assert visible_axes
+        assert float(visible_axes[0].get_ylim()[1]) < 2.0
+        assert list(float(tick) for tick in visible_axes[0].get_yticks()) != [10.0, 20.0]
+    finally:
+        settings.setValue("figure_layout_house_style", original)
+        settings.sync()
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_layout_export_uses_paper_figure_size(tmp_path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        for title, y_values in (
+            ("First", [0.2, 0.4, 0.6]),
+            ("Second", [0.3, 0.5, 0.7]),
+            ("Third", [0.4, 0.6, 0.8]),
+            ("Fourth", [0.5, 0.7, 0.9]),
+        ):
+            window._create_blank_graph()  # noqa: SLF001
+            tab = window.tab_widget.currentWidget()
+            axes = window._current_axes()  # noqa: SLF001
+            assert axes is not None
+            axes.set_title(title)
+            axes.plot([0, 1, 2], y_values, label=title)
+            if tab is not None:
+                descriptor = window._tab_descriptors.get(tab)  # noqa: SLF001
+                if descriptor is not None:
+                    descriptor.title = title
+                index = window.tab_widget.indexOf(tab)
+                if index >= 0:
+                    window.tab_widget.setTabText(index, title)
+
+        window._automation_create_figure(  # noqa: SLF001
+            {
+                "title": "Layout",
+                "source_titles": ["First", "Second", "Third", "Fourth"],
+                "rows": 2,
+                "cols": 2,
+                "share_x": True,
+                "share_y": True,
+                "panel_labels": "lower",
+                "figure_units": "mm",
+                "figure_width": 180,
+                "figure_height": 120,
+                "use_house_style": False,
+            }
+        )
+        export_dir = tmp_path / "exports"
+        export_paths = window._automation_export_all_figures(  # noqa: SLF001
+            output_dir=export_dir,
+            fmt="png",
+            dpi=300,
+        )
+        layout_exports = [path for path in export_paths if "Layout" in path.name]
+        assert layout_exports
+        image = Image.open(layout_exports[0])
+        assert image.size[0] >= 2000
+        assert image.size[1] >= 1300
     finally:
         window._clear_project_dirty()  # noqa: SLF001
         window.close()

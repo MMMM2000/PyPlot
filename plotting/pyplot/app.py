@@ -23,11 +23,13 @@ import pandas as pd
 
 from .window import (
     GraphLineState,
+    PlotFigureCanvas,
     PyPlotWindow,
     WorksheetColumnMeta,
     WorksheetData,
     WorkbookData,
     TabDescriptor,
+    create_plot_tab_container,
     create_toolbar_section,
 )
 from plotting.shared.utils import (
@@ -245,6 +247,7 @@ class PyPlotWorkbench(PyPlotWindow):
             axes,
             plugin_name=plugin_name,
             adjust_subwindow=False,
+            preserve_figure_size=bool(descriptor is not None and descriptor.kind == "layout_graph"),
         )
 
     def _load_plotter_history(self) -> list[str]:
@@ -1064,6 +1067,7 @@ class PyPlotWorkbench(PyPlotWindow):
         *,
         plugin_name: str | None,
         adjust_subwindow: bool = True,
+        preserve_figure_size: bool = False,
     ) -> None:
         if axes is None:
             return
@@ -1086,15 +1090,25 @@ class PyPlotWorkbench(PyPlotWindow):
             )
         except Exception:
             figure_aspect_ratio = float(self.GRAPH_OPTION_DEFAULTS["figure_aspect_ratio"])
-        figure_width, figure_height = self._resolve_figure_size_inches(
-            figure=figure,
-            width_in=figure_width,
-            height_in=figure_height,
-            width_auto=figure_width_auto,
-            height_auto=figure_height_auto,
-            aspect_mode=figure_aspect_mode,
-            aspect_ratio=figure_aspect_ratio,
-        )
+        if preserve_figure_size and figure is not None:
+            try:
+                existing_size = figure.get_size_inches()
+                figure_width = float(existing_size[0])
+                figure_height = float(existing_size[1])
+                figure_width_auto = False
+                figure_height_auto = False
+            except Exception:
+                preserve_figure_size = False
+        if not preserve_figure_size:
+            figure_width, figure_height = self._resolve_figure_size_inches(
+                figure=figure,
+                width_in=figure_width,
+                height_in=figure_height,
+                width_auto=figure_width_auto,
+                height_auto=figure_height_auto,
+                aspect_mode=figure_aspect_mode,
+                aspect_ratio=figure_aspect_ratio,
+            )
         if figure is not None:
             try:
                 figure.set_size_inches(
@@ -1985,11 +1999,8 @@ class PyPlotWorkbench(PyPlotWindow):
                     ax.legend(loc="best")
             except Exception:
                 pass
-            canvas = FigureCanvas(fig)
-            tab = QtWidgets.QWidget()
-            layout = QtWidgets.QVBoxLayout(tab)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.addWidget(canvas)
+            canvas = PlotFigureCanvas(fig)
+            tab = create_plot_tab_container(canvas)
             descriptor = TabDescriptor(
                 kind=str(entry.get("kind") or "manual_graph"),
                 title=str(ax.get_title() or "Graph"),

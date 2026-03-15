@@ -15,6 +15,7 @@ from matplotlib.figure import Figure
 import launcher as launcher_module
 from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot.window import TabDescriptor
+from plotting.shared.toolkit import theme_manager
 
 
 def _write_hysteresis_source(path: Path) -> Path:
@@ -539,3 +540,84 @@ def test_automation_recipe_can_capture_review_screenshots(tmp_path: Path) -> Non
     assert manifest["review_paths"]
     for exported in manifest["review_paths"]:
         assert Path(exported).exists()
+
+
+def test_review_capture_collapses_extra_tabs_and_restores_visibility(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window.resize(1500, 960)
+        window.show()
+        app.processEvents()
+
+        def _add_plot(title: str, offset: float) -> QtWidgets.QWidget:
+            fig = Figure(figsize=(4.8, 3.2))
+            axes = fig.add_subplot(111)
+            axes.plot([0.0, 1.0, 2.0], [offset, offset + 0.8, offset + 1.6], label=title)
+            axes.set_title(title)
+            axes.set_xlabel("X")
+            axes.set_ylabel("Y")
+            canvas = FigureCanvas(fig)
+            tab = QtWidgets.QWidget()
+            layout = QtWidgets.QVBoxLayout(tab)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(canvas)
+            descriptor = TabDescriptor(
+                kind="unit_test",
+                title=title,
+                root_label=title,
+                x_label="X",
+                y_label="Y",
+                canvas=canvas,
+                axes=axes,
+                lines={},
+                metadata={"plugin": "Unit Test Plugin"},
+            )
+            index = window.tab_widget.addTab(tab, title)
+            window.tab_widget.setCurrentIndex(index)
+            window._register_plot_tab(tab, canvas, axes, descriptor)  # noqa: SLF001
+            return tab
+
+        first = _add_plot("First Graph", 0.0)
+        second = _add_plot("Second Graph", 1.0)
+        window.tab_widget.setCurrentWidget(second)
+        app.processEvents()
+
+        visibility_before = [
+            bool(window.tab_widget.isTabVisible(index))
+            for index in range(window.tab_widget.count())
+        ]
+        review_paths = launcher_module._capture_review_screenshots(  # noqa: SLF001
+            window,
+            app,
+            tmp_path,
+        )
+
+        assert review_paths
+        assert (tmp_path / "pyplot-gui.png").exists()
+        assert (tmp_path / "current-figure.png").exists()
+        assert window.tab_widget.currentWidget() is second
+        visibility_after = [
+            bool(window.tab_widget.isTabVisible(index))
+            for index in range(window.tab_widget.count())
+        ]
+        assert visibility_after == visibility_before
+        assert first is not None
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_forced_dark_theme_applies_dark_palette() -> None:
+    app = _ensure_app()
+    manager = theme_manager()
+    previous = manager.current_mode()
+    try:
+        manager.set_mode("dark")
+        app.processEvents()
+        color = app.palette().color(app.palette().ColorRole.Window)
+        assert color.lightness() < 100
+    finally:
+        manager.set_mode(previous)
+        app.processEvents()

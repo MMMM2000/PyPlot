@@ -463,6 +463,18 @@ class _LogViewWatcher(QtCore.QObject):
 TOOLBAR_SECTION_PROPERTY = "mw_toolbar_section_title"
 
 
+class PlotFigureCanvas(FigureCanvas):
+    """Figure canvas that clears any unused widget area to paper white."""
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # type: ignore[override]
+        painter = QtGui.QPainter(self)
+        try:
+            painter.fillRect(self.rect(), QtGui.QColor("#ffffff"))
+        finally:
+            painter.end()
+        super().paintEvent(event)
+
+
 def create_toolbar_section(
     title: str,
     *,
@@ -492,6 +504,66 @@ def create_toolbar_section(
     return section, layout
 
 
+def create_plot_tab_container(
+    canvas: FigureCanvas,
+    *,
+    background: str = "#ffffff",
+) -> QtWidgets.QWidget:
+    tab = QtWidgets.QWidget()
+    try:
+        tab.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+    except Exception:
+        pass
+    try:
+        tab.setAutoFillBackground(True)
+    except Exception:
+        pass
+    color = QtGui.QColor(background)
+    if color.isValid():
+        try:
+            palette = tab.palette()
+            palette.setColor(QtGui.QPalette.ColorRole.Window, color)
+            tab.setPalette(palette)
+        except Exception:
+            pass
+        try:
+            tab.setStyleSheet(f"background: {color.name()};")
+        except Exception:
+            pass
+    try:
+        canvas.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+    except Exception:
+        pass
+    try:
+        canvas.setAutoFillBackground(True)
+    except Exception:
+        pass
+    if color.isValid():
+        try:
+            palette = canvas.palette()
+            palette.setColor(QtGui.QPalette.ColorRole.Window, color)
+            palette.setColor(QtGui.QPalette.ColorRole.Base, color)
+            canvas.setPalette(palette)
+        except Exception:
+            pass
+    try:
+        canvas.setAttribute(QtCore.Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+    except Exception:
+        pass
+    try:
+        canvas.setStyleSheet(f"background: {color.name() if color.isValid() else background};")
+    except Exception:
+        pass
+    layout = QtWidgets.QVBoxLayout(tab)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+    layout.addWidget(canvas, 1)
+    return tab
+
+
 @dataclass
 class FormatToolbarControls:
     toolbar: QtWidgets.QToolBar | None = None
@@ -500,6 +572,7 @@ class FormatToolbarControls:
     bold_action: QtGui.QAction | None = None
     italic_action: QtGui.QAction | None = None
     underline_action: QtGui.QAction | None = None
+    strikethrough_action: QtGui.QAction | None = None
     subscript_action: QtGui.QAction | None = None
     superscript_action: QtGui.QAction | None = None
     subsup_action: QtGui.QAction | None = None
@@ -547,6 +620,7 @@ class _GraphTextDialogResult:
     bold: bool
     italic: bool
     underline: bool
+    strikethrough: bool = False
 
 
 @dataclass
@@ -1709,6 +1783,7 @@ class GraphTextDialog(QtWidgets.QDialog):
         bold: bool = False,
         italic: bool = False,
         underline: bool = False,
+        strikethrough: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -1769,9 +1844,12 @@ class GraphTextDialog(QtWidgets.QDialog):
         self.italic_cb.setChecked(bool(italic))
         self.underline_cb = QtWidgets.QCheckBox("Underline", self)
         self.underline_cb.setChecked(bool(underline))
+        self.strike_cb = QtWidgets.QCheckBox("Strike", self)
+        self.strike_cb.setChecked(bool(strikethrough))
         style_row.addWidget(self.bold_cb)
         style_row.addWidget(self.italic_cb)
         style_row.addWidget(self.underline_cb)
+        style_row.addWidget(self.strike_cb)
         style_row.addStretch(1)
         form.addRow("Style:", style_row)
 
@@ -1862,6 +1940,7 @@ class GraphTextDialog(QtWidgets.QDialog):
             bold=bool(self.bold_cb.isChecked()),
             italic=bool(self.italic_cb.isChecked()),
             underline=bool(self.underline_cb.isChecked()),
+            strikethrough=bool(self.strike_cb.isChecked()),
         )
 
 
@@ -4301,6 +4380,26 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 save_kwargs["dpi"] = float(dpi)
             if transparent:
                 save_kwargs["transparent"] = True
+            restore_size: tuple[float, float] | None = None
+            if descriptor is not None and str(getattr(descriptor, "kind", "") or "") == "layout_graph":
+                metadata = getattr(descriptor, "metadata", {}) or {}
+                config = metadata.get("layout_config") if isinstance(metadata, dict) else None
+                if isinstance(config, dict):
+                    try:
+                        export_w = float(config.get("figure_width") or 0.0)
+                        export_h = float(config.get("figure_height") or 0.0)
+                    except Exception:
+                        export_w = export_h = 0.0
+                    if export_w > 0.0 and export_h > 0.0:
+                        try:
+                            size = figure.get_size_inches()
+                            restore_size = (float(size[0]), float(size[1]))
+                        except Exception:
+                            restore_size = None
+                        try:
+                            figure.set_size_inches(export_w, export_h, forward=False)
+                        except Exception:
+                            restore_size = None
             try:
                 with mpl.rc_context(
                     {
@@ -4312,6 +4411,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     figure.savefig(str(path), **save_kwargs)
             except Exception:
                 continue
+            finally:
+                if restore_size is not None:
+                    try:
+                        figure.set_size_inches(restore_size[0], restore_size[1], forward=False)
+                    except Exception:
+                        pass
             exported.append(path)
         return exported
 
@@ -9018,6 +9123,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         controls.underline_action = underline_action
         self._style_toolbar_button(toolbar, underline_action)
 
+        strikethrough_action = toolbar.addAction("S")
+        strikethrough_action.setCheckable(True)
+        strikethrough_action.setEnabled(False)
+        strikethrough_action.triggered.connect(self._apply_text_strikethrough)
+        strikethrough_action.setToolTip("Toggle strikethrough text")
+        controls.strikethrough_action = strikethrough_action
+        self._style_toolbar_button(toolbar, strikethrough_action)
+
         subscript_action = toolbar.addAction("Sub")
         subscript_action.setEnabled(False)
         subscript_action.triggered.connect(self._apply_text_subscript)
@@ -9344,6 +9457,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     "bold": self._text_is_bold(text_artist),
                     "italic": self._text_is_italic(text_artist),
                     "underline": bool(getattr(text_artist, "get_underline", lambda: False)()),
+                    "strikethrough": bool(getattr(text_artist, "_mw_strikethrough", False)),
                     "callout_box": bool(getattr(text_artist, "_mw_callout_box", False)),
                 }
             )
@@ -9481,6 +9595,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     bold=bool(entry.get("bold", False)),
                     italic=bool(entry.get("italic", False)),
                     underline=bool(entry.get("underline", False)),
+                    strikethrough=bool(entry.get("strikethrough", False)),
                 )
                 artist = self._create_text_annotation(
                     axes,
@@ -9666,11 +9781,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.grid(True)
-        canvas = FigureCanvas(fig)
-        tab = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(tab)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(canvas)
+        canvas = PlotFigureCanvas(fig)
+        tab = create_plot_tab_container(canvas)
         descriptor = TabDescriptor(
             kind="manual_graph",
             title=ax.get_title(),
@@ -9740,7 +9852,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             payload = json.loads(stored)
         except Exception:
             return None
-        return payload if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        # House styles are meant to be reusable visual defaults. Avoid
+        # auto-applying data-specific tick lists that can distort unrelated
+        # figures when automation reuses a saved style.
+        filtered = dict(payload)
+        filtered.pop("x_ticks", None)
+        filtered.pop("y_ticks", None)
+        return filtered
 
     def _build_graph_from_series_specs(
         self,
@@ -9804,11 +9924,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             ax.legend(loc="best")
         except Exception:
             pass
-        canvas = FigureCanvas(fig)
-        tab = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(tab)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(canvas)
+        canvas = PlotFigureCanvas(fig)
+        tab = create_plot_tab_container(canvas)
         descriptor = TabDescriptor(
             kind=kind,
             title=str(ax.get_title() or "Graph"),
@@ -10360,7 +10477,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     formatter_y.set_powerlimits((0, 0))
                     axes.yaxis.set_major_formatter(formatter_y)
                 else:
-                    axes.ticklabel_format(style="plain", axis="both", useOffset=False)
+                    formatter_x = mticker.ScalarFormatter(useMathText=False)
+                    formatter_x.set_scientific(False)
+                    formatter_x.set_useOffset(False)
+                    axes.xaxis.set_major_formatter(formatter_x)
+                    formatter_y = mticker.ScalarFormatter(useMathText=False)
+                    formatter_y.set_scientific(False)
+                    formatter_y.set_useOffset(False)
+                    axes.yaxis.set_major_formatter(formatter_y)
                 offset_x = axes.xaxis.get_offset_text()
                 offset_y = axes.yaxis.get_offset_text()
                 offset_x.set_visible(False)
@@ -10387,6 +10511,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     axes.set_yticks(list(y_ticks))
                 except Exception:
                     pass
+        # Some inherited formatter/tick state can perturb autoscaled limits on
+        # shared layout figures; re-apply the resolved shared limits after the
+        # formatting pass so the combined figure keeps the intended data range.
+        self._apply_shared_panel_limits(used_axes, share_x=share_x, share_y=share_y)
         if title:
             try:
                 fig.suptitle(title)
@@ -10403,11 +10531,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             )
         except Exception:
             pass
-        canvas = FigureCanvas(fig)
-        tab = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(tab)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(canvas)
+        canvas = PlotFigureCanvas(fig)
+        tab = create_plot_tab_container(canvas)
         descriptor = TabDescriptor(
             kind="layout_graph",
             title=title or "Figure Layout",
@@ -14886,6 +15011,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         bold_action = controls.bold_action
         italic_action = controls.italic_action
         underline_action = controls.underline_action
+        strikethrough_action = controls.strikethrough_action
         subscript_action = controls.subscript_action
         superscript_action = controls.superscript_action
         subsup_action = controls.subsup_action
@@ -14933,6 +15059,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     bold_action,
                     italic_action,
                     underline_action,
+                    strikethrough_action,
                     subscript_action,
                     superscript_action,
                     subsup_action,
@@ -15008,6 +15135,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         underline_action.setChecked(underline)
                         underline_action.blockSignals(False)
                         underline_action.setEnabled(True)
+                    if strikethrough_action is not None:
+                        strikethrough_action.blockSignals(True)
+                        strikethrough_action.setChecked(self._text_has_strikethrough(text))
+                        strikethrough_action.blockSignals(False)
+                        strikethrough_action.setEnabled(True)
                     for action in (subscript_action, superscript_action, subsup_action, edit_text_action):
                         if action is not None:
                             action.setEnabled(True)
@@ -15080,6 +15212,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                             action.setChecked(False)
                             action.blockSignals(False)
                             action.setEnabled(False)
+                    if strikethrough_action is not None:
+                        strikethrough_action.blockSignals(True)
+                        strikethrough_action.setChecked(False)
+                        strikethrough_action.blockSignals(False)
+                        strikethrough_action.setEnabled(False)
                     for action in (subscript_action, superscript_action, subsup_action, edit_text_action):
                         if action is not None:
                             action.setEnabled(False)
@@ -15145,6 +15282,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                             action.setChecked(False)
                             action.blockSignals(False)
                             action.setEnabled(False)
+                    if strikethrough_action is not None:
+                        strikethrough_action.blockSignals(True)
+                        strikethrough_action.setChecked(False)
+                        strikethrough_action.blockSignals(False)
+                        strikethrough_action.setEnabled(False)
                     for action in (subscript_action, superscript_action, subsup_action, edit_text_action):
                         if action is not None:
                             action.setEnabled(False)
@@ -15218,6 +15360,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 bold_action,
                 italic_action,
                 underline_action,
+                strikethrough_action,
                 subscript_action,
                 superscript_action,
                 subsup_action,
@@ -15272,6 +15415,21 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             return False
 
+    @staticmethod
+    def _display_text_for_style(raw_text: str, *, strikethrough: bool) -> str:
+        text = str(raw_text or "")
+        if not strikethrough:
+            return text
+        if "$" in text:
+            return text
+        return "".join(
+            ("\n" if ch == "\n" else f"{ch}\u0336")
+            for ch in text
+        )
+
+    def _text_has_strikethrough(self, text: Text) -> bool:
+        return bool(getattr(text, "_mw_strikethrough", False))
+
     def _selected_annotation_texts(self) -> tuple[Text, ...]:
         selection = self._format_selection
         if not selection or selection[0] != "text":
@@ -15320,6 +15478,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             bold=self._text_is_bold(first_text),
             italic=self._text_is_italic(first_text),
             underline=bool(getattr(first_text, "get_underline", lambda: False)()),
+            strikethrough=self._text_has_strikethrough(first_text),
         )
         if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
             return None
@@ -15336,13 +15495,42 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             try:
                 setattr(text, "_mw_raw_text", payload.text)
                 setattr(text, "_mw_graph_object_label", payload.text)
-                text.set_text(payload.text)
+                setattr(text, "_mw_strikethrough", bool(payload.strikethrough))
+                text.set_text(
+                    self._display_text_for_style(
+                        payload.text,
+                        strikethrough=bool(payload.strikethrough),
+                    )
+                )
                 text.set_fontfamily(payload.font_family)
                 text.set_fontsize(payload.font_size)
                 text.set_color(payload.color)
                 text.set_fontweight("bold" if payload.bold else "normal")
                 text.set_fontstyle("italic" if payload.italic else "normal")
                 text.set_underline(bool(payload.underline))
+            except Exception:
+                continue
+            self._redraw_artist(text)
+        self._update_format_toolbar_state()
+
+    def _apply_text_strikethrough(self, checked: bool) -> None:
+        if self._format_updating:
+            return
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return
+        texts = selection[1]
+        for text in texts:
+            raw = str(getattr(text, "_mw_raw_text", text.get_text()) or "")
+            setattr(text, "_mw_raw_text", raw)
+            setattr(text, "_mw_strikethrough", bool(checked))
+            try:
+                text.set_text(
+                    self._display_text_for_style(
+                        raw,
+                        strikethrough=bool(checked),
+                    )
+                )
             except Exception:
                 continue
             self._redraw_artist(text)
@@ -17048,7 +17236,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             artist = axes.text(
                 x,
                 y,
-                payload.text,
+                self._display_text_for_style(
+                    payload.text,
+                    strikethrough=bool(payload.strikethrough),
+                ),
                 fontsize=payload.font_size,
                 fontfamily=payload.font_family,
                 color=payload.color,
@@ -17065,6 +17256,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             pass
         setattr(artist, "_mw_raw_text", payload.text)
+        setattr(artist, "_mw_strikethrough", bool(payload.strikethrough))
         self._mark_graph_object(artist, "text", label=payload.text)
         return artist
 
@@ -17738,6 +17930,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def _normalize_single_visible_graph_subwindow(self) -> None:
         tab_widget = getattr(self, "tab_widget", None)
         visible_getter = getattr(tab_widget, "_ordered_visible_subwindows", None)
+        fitter = getattr(tab_widget, "_fit_subwindow", None)
         visible_count: int | None = None
         visible = None
         if callable(visible_getter):
@@ -17752,6 +17945,21 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         # Preserve user-managed subwindow geometry; only refresh figure layout.
         if isinstance(visible, (list, tuple)) and len(visible) == 1:
             sub = visible[0]
+            user_sized = bool(getattr(sub, "_mw_user_sized", False))
+            if callable(fitter) and not user_sized:
+                try:
+                    QtCore.QTimer.singleShot(
+                        0,
+                        lambda s=sub, f=fitter: f(
+                            s,
+                            use_half_width=True,
+                            preferred_width=None,
+                            remember_manual=False,
+                        ),
+                    )
+                    return
+                except Exception:
+                    pass
             refresher = getattr(tab_widget, "_refresh_subwindow_figure_layout", None)
             if callable(refresher):
                 try:
@@ -18966,15 +19174,13 @@ class _MdiTabProxy(QtWidgets.QWidget):
             return
         margin = self._layout_margin
         count = len(visible_subwindows)
-        if count == 1 and self._arrangement_mode == "cascade":
-            self._arrange_cascade_visible(visible_subwindows)
-            return
         if count == 1:
             sub = visible_subwindows[0]
+            available_width = max(1, viewport.width() - margin * 2)
             cell = QtCore.QRect(
                 viewport.left() + margin,
                 viewport.top() + margin,
-                max(1, viewport.width() - margin * 2),
+                max(1, available_width // 2),
                 max(1, viewport.height() - margin * 2),
             )
             aspect = self._subwindow_aspect_ratio(sub)
@@ -19037,7 +19243,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
                         if needs_fit:
                             self._fit_subwindow(
                                 sub,
-                                use_half_width=False,
+                                use_half_width=True,
                                 remember_manual=False,
                             )
                         elif not user_sized:
@@ -19270,7 +19476,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
                         if needs_fit:
                             self._fit_subwindow(
                                 sub,
-                                use_half_width=False,
+                                use_half_width=True,
                                 remember_manual=False,
                             )
                     self._refresh_subwindow_figure_layout(sub, deferred=True)

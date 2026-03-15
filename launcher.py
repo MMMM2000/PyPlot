@@ -7,6 +7,7 @@ import time
 import logging
 import traceback
 import json
+import io
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -843,6 +844,180 @@ def _export_visible_plot_images(
     return exported
 
 
+def _capture_review_screenshots(
+    window: "PyPlotWorkbench",
+    app: QtWidgets.QApplication,
+    output_dir: Path,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    review_paths: list[Path] = []
+    tab_widget = getattr(window, "tab_widget", None)
+    current_index = -1
+    current_widget: QtWidgets.QWidget | None = None
+    visibility_state: list[tuple[int, bool]] = []
+    previous_size = window.size()
+    if isinstance(tab_widget, QtWidgets.QWidget):
+        try:
+            current_index = int(tab_widget.currentIndex())
+        except Exception:
+            current_index = -1
+        try:
+            current_widget = tab_widget.currentWidget()
+        except Exception:
+            current_widget = None
+        for index in range(getattr(tab_widget, "count", lambda: 0)()):
+            visible = True
+            try:
+                visible = bool(tab_widget.isTabVisible(index))
+            except Exception:
+                pass
+            visibility_state.append((index, visible))
+        if current_widget is not None:
+            for index, was_visible in visibility_state:
+                widget = None
+                try:
+                    widget = tab_widget.widget(index)
+                except Exception:
+                    widget = None
+                should_show = bool(was_visible and widget is current_widget)
+                try:
+                    tab_widget.setTabVisible(index, should_show)
+                except Exception:
+                    if isinstance(widget, QtWidgets.QWidget):
+                        widget.setVisible(should_show)
+            if current_index >= 0:
+                try:
+                    tab_widget.setCurrentIndex(current_index)
+                except Exception:
+                    pass
+    try:
+        window.resize(max(previous_size.width(), 1720), max(previous_size.height(), 1080))
+        window.show()
+        try:
+            window.raise_()
+            window.activateWindow()
+        except Exception:
+            pass
+        arranger = getattr(tab_widget, "_arrange_subwindows", None)
+        if callable(arranger):
+            try:
+                arranger()
+            except Exception:
+                pass
+        _pump_qt_events(app, rounds=6)
+        for sub in list(getattr(tab_widget, "_ordered_visible_subwindows", lambda: [])() if tab_widget is not None else []):
+            try:
+                canvas = getattr(tab_widget, "_canvas_for_subwindow", lambda _sub: None)(sub)
+            except Exception:
+                canvas = None
+            if canvas is None:
+                continue
+            try:
+                canvas.draw()
+            except Exception:
+                try:
+                    canvas.draw_idle()
+                except Exception:
+                    pass
+            try:
+                canvas.repaint()
+            except Exception:
+                pass
+        try:
+            window.repaint()
+        except Exception:
+            pass
+        _pump_qt_events(app, rounds=8)
+        gui_target = output_dir / "pyplot-gui.png"
+        window_pixmap = window.grab()
+        if not window_pixmap.isNull() and current_widget is not None:
+            subwindow_for = getattr(tab_widget, "_subwindow_for", None)
+            if callable(subwindow_for):
+                try:
+                    subwindow = subwindow_for(current_widget)
+                except Exception:
+                    subwindow = None
+                if isinstance(subwindow, QtWidgets.QWidget):
+                    subwindow_pixmap = subwindow.grab()
+                    if not subwindow_pixmap.isNull():
+                        try:
+                            origin = subwindow.mapTo(window, QtCore.QPoint(0, 0))
+                            painter = QtGui.QPainter(window_pixmap)
+                            painter.drawPixmap(
+                                QtCore.QRect(
+                                    origin.x(),
+                                    origin.y(),
+                                    subwindow.width(),
+                                    subwindow.height(),
+                                ),
+                                subwindow_pixmap,
+                            )
+                            painter.end()
+                        except Exception:
+                            pass
+            current_canvas = None
+            try:
+                current_canvas = window._current_canvas()  # type: ignore[attr-defined]
+            except Exception:
+                current_canvas = None
+            current_figure = getattr(current_canvas, "figure", None) if current_canvas is not None else None
+            if current_canvas is not None and current_figure is not None:
+                try:
+                    buffer = io.BytesIO()
+                    target_dpi = max(72.0, float(getattr(current_figure, "dpi", 72.0) or 72.0))
+                    current_figure.savefig(buffer, format="png", dpi=target_dpi)
+                    overlay = QtGui.QPixmap()
+                    if overlay.loadFromData(buffer.getvalue(), "PNG"):
+                        origin = current_canvas.mapTo(window, QtCore.QPoint(0, 0))
+                        painter = QtGui.QPainter(window_pixmap)
+                        painter.drawPixmap(
+                            QtCore.QRect(
+                                origin.x(),
+                                origin.y(),
+                                current_canvas.width(),
+                                current_canvas.height(),
+                            ),
+                            overlay,
+                        )
+                        painter.end()
+                except Exception:
+                    pass
+        if not window_pixmap.isNull() and window_pixmap.save(str(gui_target)):
+            review_paths.append(gui_target)
+        axes = window._current_axes()  # type: ignore[attr-defined]
+        if axes is not None and getattr(axes, "figure", None) is not None:
+            target = output_dir / "current-figure.png"
+            axes.figure.savefig(target, dpi=180)
+            review_paths.append(target)
+    finally:
+        if isinstance(tab_widget, QtWidgets.QWidget):
+            for index, visible in visibility_state:
+                widget = None
+                try:
+                    widget = tab_widget.widget(index)
+                except Exception:
+                    widget = None
+                try:
+                    tab_widget.setTabVisible(index, visible)
+                except Exception:
+                    if isinstance(widget, QtWidgets.QWidget):
+                        widget.setVisible(visible)
+            if current_index >= 0:
+                try:
+                    tab_widget.setCurrentIndex(current_index)
+                except Exception:
+                    pass
+            arranger = getattr(tab_widget, "_arrange_subwindows", None)
+            if callable(arranger):
+                try:
+                    arranger()
+                except Exception:
+                    pass
+        window.resize(previous_size)
+        _pump_qt_events(app, rounds=4)
+    return review_paths
+
+
 def _execute_pyplot_automation_request(
     request: _PyPlotAutomationRequest,
     qt_args: list[str],
@@ -872,7 +1047,11 @@ def _execute_pyplot_automation_request(
     saved_project_path: Path | None = None
     try:
         window = PyPlotWorkbench(initial_plotter=request.plugin_name)
-        if request.show_window or request.window_image_path is not None:
+        if (
+            request.show_window
+            or request.window_image_path is not None
+            or request.review_output_dir is not None
+        ):
             window.show()
         _pump_qt_events(app, rounds=4)
 
@@ -961,20 +1140,19 @@ def _execute_pyplot_automation_request(
             )
 
         if isinstance(request.review_output_dir, Path):
-            request.review_output_dir.mkdir(parents=True, exist_ok=True)
             theme = theme_manager()
             previous_mode = theme.current_mode()
             if request.review_dark_gui:
                 theme.set_mode("dark")
                 _pump_qt_events(app, rounds=4)
             try:
-                if window.grab().save(str(request.review_output_dir / "pyplot-gui.png")):
-                    review_paths.append(request.review_output_dir / "pyplot-gui.png")
-                axes = window._current_axes()  # type: ignore[attr-defined]
-                if axes is not None and getattr(axes, "figure", None) is not None:
-                    target = request.review_output_dir / "current-figure.png"
-                    axes.figure.savefig(target, dpi=180)
-                    review_paths.append(target)
+                review_paths.extend(
+                    _capture_review_screenshots(
+                        window,
+                        app,
+                        request.review_output_dir,
+                    )
+                )
             finally:
                 if request.review_dark_gui:
                     theme.set_mode(previous_mode)
