@@ -46,6 +46,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Ellipse, FancyArrowPatch, Patch, Rectangle
 from matplotlib.text import Text
 from matplotlib import colors as mcolors
+from matplotlib.backend_bases import ResizeEvent
 import pandas as pd
 from pandas.api.types import is_bool_dtype, is_numeric_dtype
 
@@ -465,6 +466,25 @@ TOOLBAR_SECTION_PROPERTY = "mw_toolbar_section_title"
 
 class PlotFigureCanvas(FigureCanvas):
     """Figure canvas that clears any unused widget area to paper white."""
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
+        # Keep the underlying figure size static. Shared PyPlot display scaling
+        # adjusts DPI separately so the visible contents scale with the widget
+        # without mutating the real figure dimensions used for exports.
+        QtWidgets.QWidget.resizeEvent(self, event)
+        if self.figure is None:
+            return
+        try:
+            ResizeEvent("resize_event", self)._process()
+        except Exception:
+            pass
+        try:
+            self.draw_idle()
+        except Exception:
+            try:
+                self.draw()
+            except Exception:
+                pass
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # type: ignore[override]
         painter = QtGui.QPainter(self)

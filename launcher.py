@@ -7,7 +7,7 @@ import time
 import logging
 import traceback
 import json
-import io
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +16,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple, cast, Protocol
 
 from PyQt6 import QtWidgets, QtGui, QtCore
+from PIL import Image
 
 
 LauncherFactory = Callable[..., QtWidgets.QWidget | None]
@@ -930,64 +931,122 @@ def _capture_review_screenshots(
         _pump_qt_events(app, rounds=8)
         gui_target = output_dir / "pyplot-gui.png"
         window_pixmap = window.grab()
-        if not window_pixmap.isNull() and current_widget is not None:
-            subwindow_for = getattr(tab_widget, "_subwindow_for", None)
-            if callable(subwindow_for):
-                try:
-                    subwindow = subwindow_for(current_widget)
-                except Exception:
-                    subwindow = None
-                if isinstance(subwindow, QtWidgets.QWidget):
-                    subwindow_pixmap = subwindow.grab()
-                    if not subwindow_pixmap.isNull():
-                        try:
-                            origin = subwindow.mapTo(window, QtCore.QPoint(0, 0))
-                            painter = QtGui.QPainter(window_pixmap)
-                            painter.drawPixmap(
-                                QtCore.QRect(
-                                    origin.x(),
-                                    origin.y(),
-                                    subwindow.width(),
-                                    subwindow.height(),
-                                ),
-                                subwindow_pixmap,
-                            )
-                            painter.end()
-                        except Exception:
-                            pass
-            current_canvas = None
+        if not window_pixmap.isNull():
+            temp_gui_path: Path | None = None
+            temp_overlay_path: Path | None = None
             try:
-                current_canvas = window._current_canvas()  # type: ignore[attr-defined]
-            except Exception:
-                current_canvas = None
-            current_figure = getattr(current_canvas, "figure", None) if current_canvas is not None else None
-            if current_canvas is not None and current_figure is not None:
-                try:
-                    buffer = io.BytesIO()
-                    target_dpi = max(72.0, float(getattr(current_figure, "dpi", 72.0) or 72.0))
-                    current_figure.savefig(buffer, format="png", dpi=target_dpi)
-                    overlay = QtGui.QPixmap()
-                    if overlay.loadFromData(buffer.getvalue(), "PNG"):
+                fd_gui, temp_gui_name = tempfile.mkstemp(prefix="codex-review-gui-", suffix=".png")
+                os.close(fd_gui)
+                temp_gui_path = Path(temp_gui_name)
+                if window_pixmap.save(str(temp_gui_path)):
+                    current_canvas = None
+                    try:
+                        current_canvas = window._current_canvas()  # type: ignore[attr-defined]
+                    except Exception:
+                        current_canvas = None
+                    current_figure = getattr(current_canvas, "figure", None) if current_canvas is not None else None
+                    current_descriptor = None
+                    try:
+                        current_descriptor = getattr(window, "_tab_descriptors", {}).get(current_widget)
+                    except Exception:
+                        current_descriptor = None
+                    if current_canvas is not None and current_figure is not None:
+                        fd_overlay, temp_overlay_name = tempfile.mkstemp(prefix="codex-review-fig-", suffix=".png")
+                        os.close(fd_overlay)
+                        temp_overlay_path = Path(temp_overlay_name)
+                        restore_size: tuple[float, float] | None = None
+                        if (
+                            current_descriptor is not None
+                            and str(getattr(current_descriptor, "kind", "") or "") == "layout_graph"
+                        ):
+                            metadata = getattr(current_descriptor, "metadata", {}) or {}
+                            config = metadata.get("layout_config") if isinstance(metadata, dict) else None
+                            if isinstance(config, dict):
+                                try:
+                                    export_w = float(config.get("figure_width") or 0.0)
+                                    export_h = float(config.get("figure_height") or 0.0)
+                                except Exception:
+                                    export_w = export_h = 0.0
+                                if export_w > 0.0 and export_h > 0.0:
+                                    try:
+                                        size = current_figure.get_size_inches()
+                                        restore_size = (float(size[0]), float(size[1]))
+                                        current_figure.set_size_inches(export_w, export_h, forward=False)
+                                    except Exception:
+                                        restore_size = None
+                        try:
+                            current_figure.savefig(temp_overlay_path, dpi=300)
+                        finally:
+                            if restore_size is not None:
+                                try:
+                                    current_figure.set_size_inches(restore_size[0], restore_size[1], forward=False)
+                                except Exception:
+                                    pass
+                        base = Image.open(temp_gui_path).convert("RGBA")
+                        overlay = Image.open(temp_overlay_path).convert("RGBA")
                         origin = current_canvas.mapTo(window, QtCore.QPoint(0, 0))
-                        painter = QtGui.QPainter(window_pixmap)
-                        painter.drawPixmap(
-                            QtCore.QRect(
-                                origin.x(),
-                                origin.y(),
-                                current_canvas.width(),
-                                current_canvas.height(),
-                            ),
-                            overlay,
-                        )
-                        painter.end()
+                        canvas_w = max(1, int(current_canvas.width()))
+                        canvas_h = max(1, int(current_canvas.height()))
+                        scale = min(canvas_w / overlay.width, canvas_h / overlay.height)
+                        scale *= 0.92
+                        scaled_w = max(1, int(round(overlay.width * scale)))
+                        scaled_h = max(1, int(round(overlay.height * scale)))
+                        overlay = overlay.resize((scaled_w, scaled_h), Image.Resampling.LANCZOS)
+                        background = Image.new("RGBA", (canvas_w, canvas_h), (255, 255, 255, 255))
+                        paste_x = max(0, (canvas_w - scaled_w) // 2)
+                        paste_y = max(0, (canvas_h - scaled_h) // 2)
+                        background.alpha_composite(overlay, (paste_x, paste_y))
+                        base.alpha_composite(background, (int(origin.x()), int(origin.y())))
+                        base.save(gui_target)
+                    else:
+                        temp_gui_path.replace(gui_target)
+                    review_paths.append(gui_target)
+            except Exception:
+                try:
+                    if window_pixmap.save(str(gui_target)):
+                        review_paths.append(gui_target)
                 except Exception:
                     pass
-        if not window_pixmap.isNull() and window_pixmap.save(str(gui_target)):
-            review_paths.append(gui_target)
+            finally:
+                for temp_path in (temp_gui_path, temp_overlay_path):
+                    if temp_path is not None and temp_path.exists():
+                        try:
+                            temp_path.unlink()
+                        except Exception:
+                            pass
         axes = window._current_axes()  # type: ignore[attr-defined]
         if axes is not None and getattr(axes, "figure", None) is not None:
             target = output_dir / "current-figure.png"
-            axes.figure.savefig(target, dpi=180)
+            descriptor = None
+            try:
+                descriptor = getattr(window, "_tab_descriptors", {}).get(current_widget)
+            except Exception:
+                descriptor = None
+            restore_size: tuple[float, float] | None = None
+            if descriptor is not None and str(getattr(descriptor, "kind", "") or "") == "layout_graph":
+                metadata = getattr(descriptor, "metadata", {}) or {}
+                config = metadata.get("layout_config") if isinstance(metadata, dict) else None
+                if isinstance(config, dict):
+                    try:
+                        export_w = float(config.get("figure_width") or 0.0)
+                        export_h = float(config.get("figure_height") or 0.0)
+                    except Exception:
+                        export_w = export_h = 0.0
+                    if export_w > 0.0 and export_h > 0.0:
+                        try:
+                            size = axes.figure.get_size_inches()
+                            restore_size = (float(size[0]), float(size[1]))
+                            axes.figure.set_size_inches(export_w, export_h, forward=False)
+                        except Exception:
+                            restore_size = None
+            try:
+                axes.figure.savefig(target, dpi=180)
+            finally:
+                if restore_size is not None:
+                    try:
+                        axes.figure.set_size_inches(restore_size[0], restore_size[1], forward=False)
+                    except Exception:
+                        pass
             review_paths.append(target)
     finally:
         if isinstance(tab_widget, QtWidgets.QWidget):
