@@ -1,5 +1,215 @@
 # Changelog
 
+## 2026-03-14 01:20 UTC
+
+- Expanded the figure-layout workflow with panel-label placement/size controls, style presets, minor-tick/tick-direction/scientific-notation controls, manual tick lists, decimal formatting, and reusable figure-template save/load support.
+- Added manuscript-oriented workflow actions for `Clone figure`, `Refresh figure`, `Figure sources`, deterministic `Export all figures...` batch export, and automatic house-style application in the figure workflow and automation path, alongside additional paper export formats (`EPS`) and transparent PNG export.
+- Added callout-box support plus copy/paste/duplicate annotation tools, snap-to-position guides, arrow style presets, and z-order control so paper annotations can be reused and refined more efficiently across graph revisions and panels.
+
+## 2026-03-14 00:35 UTC
+
+- Extended PyPlot automation recipes so agent-authored jobs can build worksheet-backed graphs from exact X/Y column selections and assemble multi-panel figures from existing graph tabs.
+- Added `Paper PNG`, `Paper PDF`, `Paper TIFF`, and `Transparent PNG` shortcuts for faster export of publication-oriented graph and figure tabs.
+- Made the figure-layout builder use unit-selectable sizing with `mm` as the default display unit instead of inch-only inputs.
+- Added regression coverage for recipe-driven graph/figure creation on top of the new layout builder and persistence support.
+
+## 2026-03-14 00:05 UTC
+
+- Added a shared `Create Figure...` workflow for arranging existing graph tabs into multi-panel publication figures with configurable rows/columns, panel ordering, per-panel title overrides, shared/external legend support, shared X/Y scales, panel labels, spacing/margin controls, and paper-size presets.
+- Persisted layout-figure tabs in `.pypj` projects so multi-panel figures reopen with their copied data, legends, and annotation objects intact, and added a `Refresh figure` workflow to rebuild them from updated source graphs while keeping the layout configuration.
+- Added regression coverage for layout-figure creation and project round-trip restore alongside the existing graph builder and annotation tests.
+
+## 2026-03-13 21:07 UTC
+
+- Added a shared PyPlot annotation toolbar with text, arrow, line, rectangle, and ellipse tools, plus Object Manager integration so annotation objects can be selected, shown/hidden, recolored, and deleted after placement.
+- Expanded the shared format toolbar for graph text and shape editing with font-family selection, stroke width, fill colour for shapes, and mathtext helpers for subscript/superscript text editing.
+- Added `File -> New -> Compose Graph...` to overlay visible series from existing plotted tabs into a new composed graph tab, plus a worksheet-backed `Create Graph...` builder for choosing exact X/Y columns and legend labels when creating new graphs.
+- Persisted manual/composed graphs and their annotation objects in `.pypj` projects so the extra layout/annotation work survives reopen.
+
+## 2026-03-13 17:26 UTC
+
+- Added a canonical `launcher.py --automation-recipe <job.json>` entrypoint for PyPlot machine-facing automation, including recipe validation, hidden/offscreen execution, `.pypj` load/save support, and machine-readable manifest output.
+- Added deterministic batch plot-image export support for automation runs so visible PyPlot tabs can be saved as numbered PNGs for replayable testing and agent workflows.
+- Reserved recipe `kind: "builder"` for future `.pydpj` automation without implementing that mode yet.
+
+## 2026-03-10 17:58 UTC
+
+- Fixed PyPlot MDI focus/geometry regressions so project-tree keyboard navigation keeps focus in the tree and resized subwindows reliably refresh their embedded canvases.
+- Tightened graph default sizing for the remaining shared PyPlot plugin views used during Origin verification, reducing layout warnings during visual checks.
+
+## 2026-03-10 09:14 UTC
+
+- Simplified contributor guidance to use a single project `.venv` instead of a separate `.venv-wsl` workflow.
+- Documented that Codex should create, refresh, or recreate `.venv` and reinstall dependencies when the environment is missing, stale, or on the wrong Python version.
+- Clarified that Windows setups must install `requirements.txt` before layering `requirements-win.txt` on top.
+
+## 2026-03-10 08:46 UTC
+
+- FMR Origin export now writes explicit X/Y axis titles, applies per-trace legend labels, and enables anti-aliased non-speed-mode rendering for closer parity with the PyPlot graph view.
+
+## 2026-03-03 08:04 UTC
+
+- Hardened VSM hysteresis crossing calculations against non-scalar/object-array values to prevent scalar-conversion crashes during metrics and plot generation.
+- Fixed imported workbook merge handling in the microwire Assembly section so `pd.NA` values no longer trigger ambiguous-boolean exceptions when filling missing fields.
+- Hardened microwire key parsing so malformed/non-integral draw/piece indices no longer coerce into unintended grouping keys during database build paths.
+- Removed duplicate FMR preview rendering work in the compare graph preview refresh path.
+- Added regression tests for VSM coercion edge cases, microwire import-merge `pd.NA` scenarios, and VSM project payload/close-event rebinding safety.
+- Extracted shared cursor readout formatting into `plotting/pyplot/cursor_status.py` and improved status-bar readout behavior under tight layouts.
+- Added VSM Temperature Scan “smoothed derivative only” behavior so smoothed derivative plots/workbooks can be generated without forcing raw derivative outputs.
+- Added VSM Temperature Scan project-state persistence for split/combine flags, derivative toggles, overlay mode, and smoothing-window settings.
+- Added Object Manager regression coverage to ensure line-item hide/show controls keep legend entries synchronized even when legends are explicitly present.
+- Extended shared navigation/rescale regression coverage to include VSM Temperature Scan canvases (not only FMR-hosted canvases).
+- Updated shared navigation mode handling so active `Zoom`/`Pan` follows the selected graph tab instead of resetting on tab switch.
+- Hardened subwindow layout redraw to avoid queued Matplotlib idle-draw callbacks hitting deleted Qt canvases during rapid tab/window teardown.
+- Added microwire builder coverage for current-density/transition-temp merge behavior and column-group visibility in Assemble output workflows.
+- Added VSM Temperature Scan outlier-workflow coverage through shared PyPlot worksheet outlier detection/removal paths.
+- Added responsive status-bar width balancing so the cursor readout keeps a readable minimum width while task progress widgets are visible.
+- Refined VSM Temperature Scan non-Origin legends/colors: field-pair colors are now deterministic (red/blue then orange/green), legends keep section-order traces, and export legend text no longer embeds section prose.
+- Enlarged builder embedded preview defaults for annealing and VSM temperature scans, and expanded regression coverage for preview rendering and dual-axis legend ordering.
+- Hardened Current Annealing Matplotlib legend styling so legend text color follows line color after all readability/style passes.
+- Modernized the legacy Hysteresis Loops plugin into a native shared PyPlot workflow with `.dat` / `.txt` import support, shared graph formatting, Project Explorer integration, and grouped combined/separate/stacked plotting modes.
+- Extended shared import support to `.dat` files so hysteresis loop datasets can be loaded through the standard PyPlot file/folder import actions.
+- Updated Hysteresis Loops defaults to use line+symbol traces, `Magnetic field` / `Magnetic flux` axis labels, and reflected scientific-scale units in the Y label instead of a detached Matplotlib offset banner.
+- Improved shared graph editing UX: the floating Graph formatting window now keeps its top tab bar fixed/visible, double-clicking plotted curves opens line/marker controls, legend visibility toggles in Object Manager redraw immediately, and legend context menus now expose `Reconstruct legend`.
+- Added shared smoke coverage for the Temperature Dependence, Temperature Sensitivity, Stress Dependence, and Stress Sensitivity PyPlot plugins to keep their import-and-generate flows exercised with sample data.
+- Added internal launcher CLI automation for PyPlot testing, including plugin selection, path import, plot generation, graph-format opening, screenshots, plot image capture, and JSON summaries for headless validation.
+- Migrated the remaining legacy embedded PyPlot entries (`Hsw Distribution`, `Hsw Load Compare`, `Maxion Continuous`, `PDF Plotter`, and `Strain 3D Plot`) onto native shared-plugin wrappers so the registry now runs through the shared PyPlot shell instead of embedded legacy dialogs.
+- Added shared connected-folder sources with automatic refresh/import polling plus a manual `Refresh connected` action, and introduced shared `Plot new` / `Replot all` behavior so newly imported files can be graphed incrementally without rebuilding every existing plot.
+- Fixed the PaddleOCR PDF experiment so it can be run directly as a CLI script, streams output page-by-page instead of holding the entire document in RAM, and can stop early on low-memory systems before forcing a macOS restart.
+- Modernized core runtime dependencies in `pyproject.toml` and regenerated `requirements.txt` from the project spec for lock alignment.
+- Updated project runtime metadata to Python `>=3.13,<3.14` to match the supported environment and dependency lock workflow.
+- Compatibility note: Origin automation runtime checks remain Windows-only (`originpro`), so Origin export parity validation continues to require a Windows environment.
+
+## 2026-03-02 09:50 UTC
+
+- PyPlot `Check outliers...` now opens a visual preview dialog (tabbed per worksheet) showing the exact flagged rows and highlighted trigger columns before removal.
+- VSM Temperature Scan plotting now preserves first-measured order for field/series plotting and legends instead of forcing high-field-first ordering.
+- VSM Temperature Scan colors are now direction-aware: heating segments always use warm tones and cooling segments always use cold tones.
+- Data Builder VSM Temperature Scan grouping now keeps the parser-provided sample label (including orientation/variants), so samples like `... no glass` and `... no glass 2` remain separate entries.
+
+## 2026-03-02 07:20 UTC
+
+- Fixed shared Project Explorer worksheet activation to open worksheet entries by key (not only path-backed items), and worksheet-group nodes now open their first worksheet when available.
+- Hardened shared workbook/worksheet cleanup and Project Explorer focus sync against stale/deleted tree items to prevent runtime errors after closing/removing workbooks or switching tabs.
+- Updated tight-layout warning handling so saved plugin graph-option overrides are auto-applied instead of repeatedly prompting for the same plugin.
+- VSM Temperature Scan now appends filename-derived orientation tokens (for example `a000`, `a090`) to sample labels when header metadata does not include angle, keeping 0°/90° runs distinct.
+- VSM Hysteresis metadata normalization now snaps near-integer temperatures (for example `-29.6`) to integer setpoints (for example `-30`) to avoid duplicate temperature groups/titles.
+- Updated visual-check helper to snapshot and restore PyPlot QSettings so temporary visual validation runs do not overwrite the user’s saved import/export directory history.
+- Fixed VSM Hysteresis plugin initialization to keep plugin-local settings separate from shared PyPlot settings, so global Graph options remain shared across plugins and persist across sessions.
+
+## 2026-03-01 20:00 UTC
+
+- Shared graph canvas resizing now keeps the configured figure width/height as fixed base/export dimensions and scales display via DPI, so graph content (text/lines/markers) zooms proportionally instead of being compressed.
+- Resizing behavior is applied from the shared PyPlot window layer, so all plugins using Matplotlib graph tabs inherit the same fixed-dimension + proportional-zoom behavior.
+- Added regression tests for resize-driven display scaling with fixed figure inches and for preserving Graph formatting dimensions after subwindow resizes.
+
+## 2026-03-01 08:55 UTC
+
+- Switched PyPlot plotting workflows to the shared status-bar progress API (removed modal per-plugin progress dialogs in Current Annealing, Stress Dependence, and Stress Sensitivity).
+- Updated shared import progress to use the status-bar progress bar instead of a separate modal progress window.
+- Reordered status-bar widgets so task progress appears to the right of the live `x/y` cursor indicator.
+- Project Explorer now switches graphs on selection change, enabling quick Up/Down keyboard traversal between plot tabs.
+- Project Explorer graph selection now preserves tree focus after tab activation so repeated Up/Down traversal keeps working.
+- Optimized large Current Annealing plot batches by throttling progress/event updates and reducing repaint overhead while tabs are created.
+- Added shared graph-canvas quick actions: `Cmd/Ctrl+C` copies the active graph as PNG to clipboard, and right-click shows `Copy graph as PNG` / `Export graph...`.
+- Improved shared graph rescale robustness (including FMR): when Matplotlib autoscale does not update limits, PyPlot now falls back to visible line-data bounds.
+
+## 2026-02-28 19:59 UTC
+
+- Fixed macOS fullscreen graph switching in the shared MDI tab proxy so switching between graphs keeps a single fullscreen subwindow instead of dropping into stacked/cascaded small windows.
+- Fullscreen graph geometry now fills the available MDI viewport instead of aspect-fitting to a reduced letterboxed window.
+- Current Annealing project persistence now saves and restores loaded data sources plus open/active plot tabs in `.pypj` files.
+- Project load now auto-loads data for `auto_load_on_import` plugins when paths/workbooks are present but plugin runtime data has not been restored yet, preventing disabled Plot actions after reopen.
+- Added a shared plugin project-state wrapper in PyPlot host save/load flow so all plugins persist/restore common source-selection state consistently, including plugins that also keep custom project state.
+- Shared project restore now tracks whether plugin plots were open and regenerates graphs when needed, so plugins without custom tab serialization still reopen with plots available.
+- VSM Hysteresis Loops now uses shared PyPlot project persistence/versioning instead of legacy overrides, restoring `.pypj` compatibility with shared host save/load.
+
+## 2026-02-28 19:22 UTC
+
+- Added a Project Explorer search box in PyPlot that filters visible tree items by name, details, and full tooltip/path text.
+- Matching child rows now keep their parent branches visible while filtering, and the filter is reapplied automatically as tree content updates.
+
+## 2026-02-28 19:15 UTC
+
+- PyPlot MDI behavior: switching between graph/workbook subwindows now preserves maximize/fullscreen state on macOS instead of dropping back to windowed mode.
+- PyPlot graph sizing: activating or resizing shared MDI subwindows now re-fits Matplotlib figure layout to the active canvas, reducing large empty regions after fullscreen/arrangement/tab-switch transitions across plugins (including VSM Temperature Scan).
+- Tight-layout warning dialog now supports applying the selected action (keep sizes, auto-fit, or plugin override) to all affected graphs in the current batch.
+- Current Annealing plugin plotting now updates the shared status-bar task progress (`_begin_task_progress` / `_update_task_progress` / `_end_task_progress`) during graph generation.
+- macOS UI polish: toolbar/tab control buttons now use more native behavior/icons (platform default disabled styling, native titlebar glyphs for tab hide/close controls, and mac-friendly toolbutton raise behavior).
+
+## ﻿2026-02-27 08:20 UTC
+
+- VSM Hysteresis Loops now groups plotted/exported data by sample plus temperature, fixing cross-sample temperature merges in graphs and Origin export selection.
+- Added shared PyPlot status-bar task progress for long-running operations, and wired it into shared data import and shared workbook-to-Origin export flows.
+- Tight-layout warnings now provide recommended font targets and direct actions (keep sizes, auto-fit current graph, or apply plugin graph-options override).
+- VSM legend/theme behavior was aligned with shared graph formatting and dark-mode handling so plugin plots follow shared controls more consistently.
+
+## 2026-02-27 06:44 UTC
+
+- Fixed VSM Hysteresis Loops tab registration and legend refresh paths to apply shared PyPlot graph options (grid, fonts, legend settings) instead of bypassing them.
+- Updated VSM plot theme refresh to keep shared `show_grid` and shared font-size defaults intact when legends/theme are rebuilt.
+- Fixed shared dark-graph theme toggling to preserve each graph's original grid visibility state instead of forcing grids on.
+- Added shared tight-layout warning handling in PyPlot: when Matplotlib cannot apply tight layout, PyPlot now reports the likely oversized text object with the exact font size and logs the full size summary.
+
+## 2026-02-26 18:22 UTC
+
+- Removed the VSM Hysteresis Loops plug-in "Appearance" settings section so it no longer duplicates shared PyPlot graph controls.
+- Switched VSM Hysteresis Loops to shared PyPlot workbook/Origin export flow, including shared `Open in Origin...` action routing.
+- Updated VSM hysteresis settings/theme handling to remain compatible when legacy style/dark widget controls are absent.
+- Updated VSM default loop axes to prefer varying `Applied Field For Plot [Oe]` / `Signal X direction [emu]` columns and kept automatic plot-time fallback to varying axes when selections are flat.
+- Fixed VSM metadata parsing so explicit `Set Sample Temperature ...` entries are not skipped by earlier fallback tokens, preventing stray one-off temperature groups (for example `26 °C` outliers).
+- Improved shared graph dark-theme restoration so legends reliably return to light styling when `Dark graphs` is turned off, even if legends were created while dark mode was active.
+- Added shared Graph formatting legend orientation controls (`Auto`, `Vertical`, `Horizontal`) and wired them into both per-graph formatting applies and saved graph-option defaults.
+- Added a shared activation-time subwindow normalization pass for the single-visible-graph case to avoid occasional narrow graph windows after app switching.
+- Kept VSM bound methods from overriding shared PyPlot graph/object-manager handlers, so graph names, object manager behavior, and shared graph-format interactions remain consistent.
+
+## 2026-02-24 18:18 UTC
+
+- Added automatic rotation for workspace `logs/message_log.txt` and `logs/crash_log.txt` with a default 1 MiB size cap and five numbered backups.
+- Wired both PyPlot and Microwire Data Builder log writers through the shared rotating-log helper so long sessions no longer grow logs without bound.
+- Documented the new log-retention behavior in `docs/pyplot.md`.
+
+## 2026-02-23 07:50 UTC
+
+- Shared `Open in Origin` export now creates/updates graph titles through layer-scoped `label -s -n title "..."` plus object-API positioning, improving title visibility reliability across Origin 2026 builds.
+- Shared Origin title export no longer uses `title.show` or root-level LabTalk fallbacks, preventing `TITLE.SHOW is illegal name` and worksheet-context `Math cannot be performed on Text column` errors.
+- Shared Origin title export now uses `label -s -n title "..."` (plus an object-API/manual-label fallback) instead of `title -s`, matching Origin 2026 behavior where `title -s` can be parsed inconsistently from worksheet context.
+- Shared Origin title commands are now executed strictly through the primary layer context and then re-applied after layer rescale, with title position computed from layer ranges so the title reliably renders at top-center in Origin 2026.
+- Shared Origin title export no longer writes unsupported `title.just`/page-attach commands, preventing repeated `TITLE.JUST is illegal name` errors.
+- Shared Origin graph creation now prefers the `line` template before `ORIGIN`/`scatter` fallbacks to reduce recurring template-side `LEGEND.SMARTPOS` warnings in affected Origin 2026 setups.
+- Shared Origin dual-axis export again prefers `add_layer(4)` (`TopXRightY`) first so top/right axes stay linked to the primary layer scales; plain-layer fallback remains for runtimes where preset creation fails.
+- Shared Origin export explicitly rescales layers after plotting so load/stress axes are not left in incorrect default ranges.
+
+## 2026-02-20 08:52 UTC
+
+- Manual Stress/Strain Logger: dual-axis overlay cursor readout now always shows both coordinate pairs in one line: `L/D (x, y)` and `S/S (x, y)`.
+
+## 2026-02-19 12:19 UTC
+
+- Shared Origin export: replaced fragile axis-title LabTalk syntax with direct axis-title commands (`label -xb/-yl/-xt/-yr`) so top/right titles for dual-axis overlays apply reliably.
+- Shared Origin export: graph title now uses an explicit centered page label (`label -p ... -j 1 -n title`) with large font sizing, avoiding scale-attached title drift.
+- Shared Origin export: title placement now explicitly uses page attachment (`title.attach=1`) with fixed centered coordinates (`x=50`, `y=102`) so sample titles stay centered/high regardless of axis ranges.
+- Shared Origin export: dual-axis secondary layer now prefers `graph.add_layer(4)` (`TopXRightY`) and applies final axis visibility via direct layer properties (`x/y showAxes/showLabels`) after title assignment, preventing interleaved duplicate tick labels.
+- Shared Origin export: removed `layadd` fallback and now relies on `graph.add_layer(4)` only for dual-axis layers, avoiding Origin template-side `LEGEND.SMARTPOS` expression errors in affected builds.
+- Shared Origin export: avoids writing `layer.*.showLabels=2` on secondary layers (Origin 2026 can flip `x2/y2` label mode to duplicated labels); side visibility is now enforced via `x.showlabel/x2.showlabel` and `y.showlabel/y2.showlabel`.
+- Shared Origin export: prefers built-in templates (`line`, `scatter`) first and only falls back to `ORIGIN`/`<Origin EXE>\\ORIGIN.OTP`, reducing template-script side effects (including recurring legend smart-position errors on some setups).
+- Shared Origin export: dual-axis overlays now apply explicit plot colour cycling and auto-hide duplicate secondary-layer traces (stress/strain duplicates of load/displacement labels) after rescale, so legends and visible curves stay uncluttered by default.
+- Shared Origin export: logs per-graph template and dual-axis layer-axis snapshots into PyPlot Message Log for runtime diagnosis.
+- Shared Origin session startup: now prefers `originpro.attach()` before `set_show()` and verifies automation health early, so `Open in Origin` fails with a clear runtime message instead of delayed OriginExt pointer crashes on stale COM handles.
+- Shared Origin export: template resolution now avoids querying `origin.path('e')` during graph creation, preventing side-effect popups on unstable automation sessions.
+- Shared Origin export: removed `layer -aa 1` in dual-axis export; on Origin 2026 this command can force both-side axes/labels (`showAxes=3`), producing duplicated/interleaved tick labels.
+- Shape Memory parser: drop leading zero-load rows until the first non-zero load point so pre-load baseline zeros are excluded from segmented plotting/export.
+
+## 2026-03-11 08:43 UTC
+
+- Added a Shape Memory Stress/Strain section to Microwire Data Builder with static dual-axis graph previews, visibility controls, and PyPlot/Origin handoff actions.
+- Included shape-memory graph columns in Assemble, Compare, and HTML export previews so selected microwires can carry the new measurement set alongside DMA, VSM, and FMR graphs.
+- Added interactive shape-memory point picking in the builder preview so double-clicked displacement/load/strain/stress values are stored in dedicated columns and can be included in Assemble exports.
+- Added fracture-target picking for shape-memory previews so fracture load/strain/stress can be stored separately from the standard picked values and exported through Assemble.
+- Renamed the picked shape-memory value columns to plain `Displacement/Load/Strain/Stress` labels, and renamed the older Strain-section outputs to `Legacy strain` / `Legacy stress (MPa)` to distinguish the workflows.
+- Added table search across the Microwire Data Builder sections, including the base data/graph tabs and the custom Current density, Transition temps, and Compare views.
+- Microscope `oe` filenames are now treated as separate samples, with a Microscope-tab toggle to show or hide those other-end rows.
+
 ## 2026-02-19 11:59 UTC
 
 - Shared Origin export: replaced fragile axis-title labtalk syntax with direct axis-title commands (`label -xb/-yl/-xt/-yr`) so top/right titles for dual-axis overlays apply reliably.

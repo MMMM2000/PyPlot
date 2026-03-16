@@ -1,4 +1,0 @@
-2026-03-14 01:20
-- Expanded the figure-layout workflow with panel-label placement/size controls, style presets, minor-tick/tick-direction/scientific-notation controls, manual tick lists, decimal formatting, and reusable figure-template save/load support.
-- Added manuscript-oriented workflow actions for `Clone figure`, `Refresh figure`, `Figure sources`, deterministic `Export all figures...` batch export, and automatic house-style application in the figure workflow and automation path, alongside additional paper export formats (`EPS`) and transparent PNG export.
-- Added callout-box support plus copy/paste/duplicate annotation tools, snap-to-position guides, arrow style presets, and z-order control so paper annotations can be reused and refined more efficiently across graph revisions and panels.
