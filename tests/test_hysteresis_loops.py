@@ -152,7 +152,7 @@ def test_hysteresis_loops_generate_creates_plot_tabs_with_shared_labels(tmp_path
             app.processEvents()
         axes = window._current_axes()  # noqa: SLF001 - test hook
         assert axes is not None
-        assert axes.get_xlabel() == "Magnetic field [A/m]"
+        assert axes.get_xlabel() == "Magnetic field [Am⁻¹]"
         y_label = axes.get_ylabel()
         assert "Magnetic flux" in y_label
         assert "Wb" in y_label

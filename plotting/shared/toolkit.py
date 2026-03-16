@@ -199,11 +199,25 @@ def apply_theme(app: QtWidgets.QApplication, mode: str = "system") -> None:
         style = "windowsvista" if scheme == QtCore.Qt.ColorScheme.Light else "Fusion"
         app.setStyle(style)
     elif sys.platform == "darwin":
-        if "macos" in QtWidgets.QStyleFactory.keys():
-            app.setStyle("macos")
+        # The native macOS style does not reliably honor a forced light/dark
+        # override for in-app review captures, so prefer Fusion when a
+        # non-system mode is chosen.
+        app.setStyle("Fusion")
     else:
         app.setStyle("Fusion")
-    _apply_color_scheme(app, scheme)
+    if sys.platform == "darwin":
+        style = app.style()
+        standard_palette = (
+            style.standardPalette() if style is not None else QtGui.QPalette()
+        )
+        accent = standard_palette.color(QtGui.QPalette.ColorRole.Highlight)
+        app.setPalette(
+            _dark_palette(accent)
+            if scheme == QtCore.Qt.ColorScheme.Dark
+            else standard_palette
+        )
+    else:
+        _apply_color_scheme(app, scheme)
 
 
 def apply_dark_theme(app: QtWidgets.QApplication) -> None:
@@ -927,11 +941,14 @@ class _ThemeManager(QtCore.QObject):
         mode = (mode or "system").lower()
         if mode not in {"system", "light", "dark"}:
             mode = "system"
+        app = QtWidgets.QApplication.instance()
         if mode == self._mode:
+            if isinstance(app, QtWidgets.QApplication):
+                apply_theme(app, self._mode)
+                self._sync_actions()
             return
         self._mode = mode
         self._settings.setValue("theme_mode", self._mode)
-        app = QtWidgets.QApplication.instance()
         if isinstance(app, QtWidgets.QApplication):
             apply_theme(app, self._mode)
         self._sync_actions()
@@ -980,6 +997,11 @@ def theme_manager() -> _ThemeManager:
     """Return the shared :class:`_ThemeManager` singleton."""
 
     global _THEME_MANAGER
+    if _THEME_MANAGER is not None:
+        try:
+            _THEME_MANAGER.current_mode()
+        except RuntimeError:
+            _THEME_MANAGER = None
     if _THEME_MANAGER is None:
         _THEME_MANAGER = _ThemeManager()
     return _THEME_MANAGER
@@ -1104,6 +1126,11 @@ def developer_options() -> _DeveloperOptions:
     """Return the shared :class:`_DeveloperOptions` singleton."""
 
     global _DEVELOPER_OPTIONS
+    if _DEVELOPER_OPTIONS is not None:
+        try:
+            _ = _DEVELOPER_OPTIONS.keep_files_changed
+        except RuntimeError:
+            _DEVELOPER_OPTIONS = None
     if _DEVELOPER_OPTIONS is None:
         _DEVELOPER_OPTIONS = _DeveloperOptions()
     return _DEVELOPER_OPTIONS
