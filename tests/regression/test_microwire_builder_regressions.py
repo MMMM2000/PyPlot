@@ -173,6 +173,7 @@ def test_video_section_filters_candidates_to_measured_wires(tmp_path: Path) -> N
     candidates = [
         tmp_path / "Ni50Fe27Ga23" / "3.Ni50Fe27Ga23 17042024 0850" / "2024-04-17 08-44-39.mkv",
         tmp_path / "Co69" / "9.Co69 01012024 0800" / "2024-01-01 08-00-00.mkv",
+        tmp_path / "Ni50Fe27Ga23" / "3.Ni50Fe27Ga23 17042024 0850" / "Ni50Fe27Ga23 3_2 detail.mkv",
     ]
     filtered = section._filter_candidates_for_relevance(
         candidates,
@@ -180,4 +181,4 @@ def test_video_section_filters_candidates_to_measured_wires(tmp_path: Path) -> N
         {"Ni50Fe27Ga23"},
     )
 
-    assert filtered == [candidates[0]]
+    assert filtered == [candidates[0], candidates[2]]

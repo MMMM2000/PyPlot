@@ -13502,40 +13502,31 @@ class VideoSection(MiniDatabaseSection):
     ) -> List[Path]:
         if not relevant_compositions:
             return candidates
-        composition_tokens = {
-            comp: self._normalise_token(comp)
-            for comp in relevant_compositions
-            if self._normalise_token(comp)
-        }
-        if not composition_tokens:
-            return candidates
-        draw_tokens: Dict[str, Set[str]] = {}
-        for comp, draw_map in relevant_map.items():
-            comp_key = self._normalise_token(comp)
-            if not comp_key:
-                continue
-            bucket = draw_tokens.setdefault(comp_key, set())
-            for draw, pieces in draw_map.items():
-                if draw is not None:
-                    bucket.add(self._normalise_token(draw))
-                for piece in pieces:
-                    if piece is not None:
-                        bucket.add(self._normalise_token(f"{draw}{piece}"))
         filtered: List[Path] = []
         for path in candidates:
-            text = self._normalise_token(path)
-            if not text:
+            key = _microscope_key(path)
+            if key is not None:
+                composition, draw, piece, _suffix = key
+                draw_map = relevant_map.get(str(composition).strip())
+                if not draw_map:
+                    continue
+                allowed = draw_map.get(int(draw))
+                fallback = draw_map.get(None)
+                if allowed and int(piece) in {int(value) for value in allowed if value is not None}:
+                    filtered.append(path)
+                    continue
+                if fallback and int(piece) in {int(value) for value in fallback if value is not None}:
+                    filtered.append(path)
+                    continue
                 continue
-            matched = False
-            for _composition, token in composition_tokens.items():
-                if token and token in text:
-                    matched = True
-                    break
-                draw_set = draw_tokens.get(token)
-                if draw_set and any(draw_token in text for draw_token in draw_set if draw_token):
-                    matched = True
-                    break
-            if matched:
+            draw_key = _draw_key(path)
+            if draw_key is None:
+                continue
+            composition, draw = draw_key
+            draw_map = relevant_map.get(str(composition).strip())
+            if not draw_map:
+                continue
+            if int(draw) in draw_map or None in draw_map:
                 filtered.append(path)
         return filtered
 
