@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
 
-from microwire_data_builder.ui import AssemblySection, VideoSection, _row_to_microwire_key
+from microwire_data_builder.ui import AssemblySection, FabricationSection, VideoSection, _row_to_microwire_key
 
 
 def _assembly_stub() -> AssemblySection:
@@ -182,3 +182,20 @@ def test_video_section_filters_candidates_to_measured_wires(tmp_path: Path) -> N
     )
 
     assert filtered == [candidates[0], candidates[2]]
+
+
+def test_fabrication_rows_with_missing_source_files_highlight_red() -> None:
+    section = FabricationSection.__new__(FabricationSection)
+    row = pd.Series(
+        {
+            "Composition": "Ni48Fe25Ga23Co4",
+            "Data source": "Microscope only",
+            "_source_paths": [],
+        }
+    )
+
+    background = section._background_brush_for_cell(row, "Composition")
+    foreground = section._foreground_brush_for_cell(row, "Composition")
+
+    assert background is not None and background.color().name() == "#3a0a0a"
+    assert foreground is not None and foreground.color().name() == "#ffd6d6"

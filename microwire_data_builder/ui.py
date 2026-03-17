@@ -7592,6 +7592,8 @@ class FabricationSection(MiniDatabaseSection):
         self._hide_columns(["_source_paths", "_source_path"])
         self.model.set_editable_columns(self._editable_columns())
         self.model.set_text_columns({GLASS_PULL_COLUMN, "Notes"})
+        self.model.set_background_provider(self._background_brush_for_cell)
+        self.model.set_foreground_provider(self._foreground_brush_for_cell)
         try:
             self.model.dataChanged.connect(self._handle_cell_edited)
         except Exception:
@@ -8321,6 +8323,31 @@ class FabricationSection(MiniDatabaseSection):
             except Exception:
                 continue
         return sources
+
+    def _row_missing_source_files(self, row: pd.Series) -> bool:
+        data_source = str(row.get("Data source") or "").strip()
+        if "Imported" in data_source:
+            return False
+        sources = self._row_sources(row)
+        if not sources:
+            return True
+        for path in sources:
+            try:
+                if path.exists():
+                    return False
+            except OSError:
+                continue
+        return True
+
+    def _background_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        if self._row_missing_source_files(row):
+            return QtGui.QBrush(QtGui.QColor("#3a0a0a"))
+        return None
+
+    def _foreground_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        if self._row_missing_source_files(row):
+            return QtGui.QBrush(QtGui.QColor("#ffd6d6"))
+        return None
 
     def set_import_separation(self, enabled: bool) -> None:
         self._separate_imported = bool(enabled)
