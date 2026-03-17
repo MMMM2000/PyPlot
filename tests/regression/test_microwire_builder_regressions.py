@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 import pandas as pd
+from PyQt6 import QtCore, QtWidgets
 
 from microwire_data_builder.ui import AssemblySection, VideoSection, _row_to_microwire_key
 
@@ -68,6 +72,7 @@ def test_merge_imported_payload_handles_pd_na_existing_values() -> None:
 def test_video_overrides_tolerate_missing_composition_column() -> None:
     section = VideoSection.__new__(VideoSection)
     section._overrides = {}
+    section._fabrication_lookup_cache = {}
     section._fabrication_table = lambda: pd.DataFrame()
 
     frame = pd.DataFrame(
@@ -84,3 +89,80 @@ def test_video_overrides_tolerate_missing_composition_column() -> None:
 
     assert "Composition" in updated.columns
     assert updated.at[0, "Composition"] == ""
+
+
+def test_video_completion_colours_follow_missing_and_filled_cells() -> None:
+    section = VideoSection.__new__(VideoSection)
+    section._overrides = {}
+    section._fabrication_lookup_cache = {
+        "Ni50Fe27Ga23|6|2": {
+            "Length (m)": None,
+            "Winding speed (m/min)": 71.0,
+        }
+    }
+
+    missing_row = pd.Series(
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Draw": 6,
+            "Piece": 2,
+            "_group_key": "Ni50Fe27Ga23|6|2",
+            "Length (m)": None,
+            "Winding speed (m/min)": 71.0,
+            "Video end length (m)": None,
+            "Video microwire length (m)": None,
+        }
+    )
+    filled_row = missing_row.copy()
+    filled_row["Length (m)"] = 27.88
+    filled_row["Video end length (m)"] = 42.0
+    filled_row["Video microwire length (m)"] = 14.12
+
+    missing_bg = section._background_brush_for_cell(missing_row, "Length (m)")
+    filled_bg = section._background_brush_for_cell(filled_row, "Length (m)")
+    end_bg = section._background_brush_for_cell(filled_row, "Video end length (m)")
+
+    assert missing_bg is not None and missing_bg.color().name() == "#3a0a0a"
+    assert filled_bg is not None and filled_bg.color().name() == "#0f3b26"
+    assert end_bg is not None and end_bg.color().name() == "#0f3b26"
+
+
+def test_video_section_open_button_enables_and_opens_selected_sources(tmp_path: Path) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = VideoSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        source_path = tmp_path / "sample.mkv"
+        source_path.write_bytes(b"video")
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "6/2",
+                    "Draw": 6,
+                    "Piece": 2,
+                    "_group_key": "Ni50Fe27Ga23|6|2",
+                    "_sources": [str(source_path)],
+                }
+            ]
+        )
+        section.model.set_frame(frame)
+        opened: list[Path] = []
+        section._open_file = lambda path: opened.append(Path(path)) or True  # type: ignore[method-assign]
+
+        proxy_index = section._search_proxy.index(0, 0)
+        assert proxy_index.isValid()
+        section.table_view.selectionModel().select(
+            proxy_index,
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
+        )
+        section._update_open_sources_enabled()
+
+        assert section.open_sources_button.isEnabled() is True
+
+        section._open_selected_sources()
+
+        assert opened == [source_path]
+    finally:
+        section.close()

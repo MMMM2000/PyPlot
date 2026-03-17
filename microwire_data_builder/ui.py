@@ -100,7 +100,7 @@ from .core import (
     _load_annealing,
     _resistance_sanity_check,
     _group_microscope_measurements,
-    _collect_video_metrics,
+    _collect_video_sources,
     _microwire_label,
     _microwire_parts_from_label,
     _microwire_tuple_from_label,
@@ -3011,9 +3011,8 @@ def _dimension_display(field: str, *records: Dict[str, Any]) -> Optional[str]:
         return None
     return "\n".join(values)
 
-
-def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
-    columns = [
+def _fabrication_frame_columns() -> List[str]:
+    return [
         "Composition",
         "Data source",
         "e/a",
@@ -3037,9 +3036,89 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         "Production datetime",
         "_source_paths",
     ]
+
+
+def _fabrication_row_from_records(
+    composition: str,
+    draw: int,
+    piece: int,
+    piece_record: Optional[Mapping[str, Any]],
+    draw_record: Optional[Mapping[str, Any]],
+    *,
+    columns: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    row_columns = list(columns) if columns is not None else _fabrication_frame_columns()
+    row: Dict[str, Any] = {column: None for column in row_columns}
+    piece_record_map = piece_record if isinstance(piece_record, Mapping) else {}
+    draw_record_map = draw_record if isinstance(draw_record, Mapping) else {}
+    row["Composition"] = composition
+    row["Data source"] = None
+    ea_value = _compute_ea_from_composition(composition)
+    row["e/a"] = ea_value
+    row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(ea_value)
+    row["Draw"] = draw
+    row["Piece"] = piece
+    row["Length (m)"] = _value_for_output(piece_record_map, "length_m")
+    row["Piece date"] = _value_for_output(piece_record_map, "piece_date")
+    row[MICROSCOPE_D_COLUMN] = _dimension_display("d_um", piece_record_map, draw_record_map)
+    row[MICROSCOPE_CAP_D_COLUMN] = _dimension_display("D_um", piece_record_map, draw_record_map)
+    row["d/D"] = _dimension_display("d_over_D", piece_record_map, draw_record_map)
+    piece_resistance = _value_for_output(piece_record_map, "fabrication_resistance_ohm")
+    draw_resistance = _value_for_output(draw_record_map, "fabrication_resistance_ohm")
+    row["Resistance (Ω)"] = piece_resistance if piece_resistance is not None else draw_resistance
+    row[CORE_TEMPERATURE_COLUMN] = _value_for_output(
+        draw_record_map,
+        "fabrication_temperature_c",
+    )
+    row[GLASS_TEMPERATURE_COLUMN] = _value_for_output(
+        draw_record_map,
+        "fabrication_glass_temperature_c",
+    )
+    row["Mass (g)"] = _value_for_output(draw_record_map, "mass_g")
+    row["Winding speed (m/min)"] = _value_for_output(draw_record_map, "winding_speed_m_per_min")
+    row["Glass feeding (mm/min)"] = _value_for_output(draw_record_map, "glass_feed_mm_per_min")
+    row["Underpressure"] = _value_for_output(draw_record_map, "underpressure")
+    pull_value = _value_for_output(piece_record_map, "glass_pull_off")
+    if pull_value is None:
+        pull_value = _value_for_output(draw_record_map, "glass_pull_off")
+    row[GLASS_PULL_COLUMN] = pull_value
+    row["Notes"] = _compose_notes(draw_record_map, piece_record_map)
+    row["Production datetime"] = _value_for_output(draw_record_map, "production_datetime")
+    sources: List[str] = []
+    for record in (piece_record_map, draw_record_map):
+        path_value = record.get("_source_path") if isinstance(record, Mapping) else None
+        if not path_value:
+            continue
+        try:
+            resolved = str(Path(path_value))
+        except Exception:
+            resolved = str(path_value)
+        if resolved and resolved not in sources:
+            sources.append(resolved)
+    row["_source_paths"] = sources
+    if any("Imported" in source for source in sources):
+        row["Data source"] = "Imported"
+    elif sources:
+        row["Data source"] = "Measured"
+    return row
+
+
+def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
+    columns = _fabrication_frame_columns()
     rows: List[Dict[str, Any]] = []
     for (composition, draw, piece), piece_record in sorted(index.piece_level.items()):
         draw_record = index.get_draw(composition, draw)
+        rows.append(
+            _fabrication_row_from_records(
+                composition,
+                draw,
+                piece,
+                piece_record,
+                draw_record,
+                columns=columns,
+            )
+        )
+        continue
         row: Dict[str, Any] = {column: None for column in columns}
         row["Composition"] = composition
         row["Data source"] = None
@@ -5685,6 +5764,11 @@ def _video_index_to_frame(
             "Notes",
             "Production datetime",
         ]
+    for column in _fabrication_frame_columns():
+        if str(column).startswith("_"):
+            continue
+        if column not in base_columns:
+            base_columns.append(column)
     if "Microwire" not in base_columns:
         base_columns.insert(1, "Microwire")
     if "Draw" not in base_columns:
@@ -5708,9 +5792,21 @@ def _video_index_to_frame(
             except (TypeError, ValueError):
                 continue
             fabrication_lookup[(composition, draw, piece)] = row
+    piece_summaries: Dict[Tuple[str, int, int], VideoMetricsSummary] = {}
+    draw_summaries: Dict[Tuple[str, int], VideoMetricsSummary] = {}
+    for (composition, draw, piece), summary in sorted(index.items()):
+        if piece is None:
+            draw_summaries[(composition, draw)] = summary
+        else:
+            piece_summaries[(composition, draw, piece)] = summary
     rows: List[Dict[str, Any]] = []
     seen_keys: Set[Tuple[str, int, int]] = set()
     for (composition, draw, piece), summary in sorted(index.items()):
+        if piece is None and any(
+            key_comp == composition and key_draw == draw
+            for key_comp, key_draw, _key_piece in fabrication_lookup.keys()
+        ):
+            continue
         row: Dict[str, Any] = {column: None for column in columns}
         row["Composition"] = composition
         row["Draw"] = draw
@@ -5753,6 +5849,9 @@ def _video_index_to_frame(
     for (composition, draw, piece), fabrication_row in sorted(fabrication_lookup.items()):
         if (composition, draw, piece) in seen_keys:
             continue
+        summary = piece_summaries.get((composition, draw, piece))
+        if summary is None:
+            summary = draw_summaries.get((composition, draw))
         row: Dict[str, Any] = {column: None for column in columns}
         row["Composition"] = composition
         row["Draw"] = draw
@@ -5771,7 +5870,18 @@ def _video_index_to_frame(
                 row[column] = candidate
         if row.get(ESTIMATED_TRANSITION_COLUMN) in (None, ""):
             row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(row.get("e/a"))
-        row["_sources"] = []
+        if summary is not None:
+            if row.get(CORE_TEMPERATURE_COLUMN) in (None, ""):
+                row[CORE_TEMPERATURE_COLUMN] = summary.temperature()
+            if row.get("Underpressure") in (None, ""):
+                row["Underpressure"] = summary.underpressure()
+            if row.get("Winding speed (m/min)") in (None, ""):
+                row["Winding speed (m/min)"] = summary.winding_speed()
+            if row.get("Glass feeding (mm/min)") in (None, ""):
+                row["Glass feeding (mm/min)"] = summary.glass_feed()
+            row["_sources"] = sorted(str(path) for path in getattr(summary, "sources", set()))
+        else:
+            row["_sources"] = []
         row["_group_key"] = _microwire_key_to_str((composition, draw, piece, None))
         rows.append(row)
     if not rows:
@@ -7455,6 +7565,7 @@ class FabricationSection(MiniDatabaseSection):
     section_key = "fabrication"
     section_title = "Fabrication data"
     supported_suffixes = (".xlsx", ".xls", ".xlsm")
+    raw_index_payload_name = "fabrication_index_raw"
 
     def __init__(
         self,
@@ -7474,6 +7585,79 @@ class FabricationSection(MiniDatabaseSection):
             self.model.dataChanged.connect(self._handle_cell_edited)
         except Exception:
             pass
+
+    def _load_raw_index(self) -> Optional[FabricationIndex]:
+        try:
+            raw_index = self.store.load_payload(self.raw_index_payload_name)
+        except Exception:
+            raw_index = None
+        if isinstance(raw_index, FabricationIndex):
+            return raw_index
+        try:
+            visible_index = self.store.load_payload("fabrication_index")
+        except Exception:
+            visible_index = None
+        if isinstance(visible_index, FabricationIndex):
+            return visible_index
+        return None
+
+    def _store_indexes(
+        self,
+        visible_index: FabricationIndex,
+        *,
+        raw_index: Optional[FabricationIndex] = None,
+    ) -> None:
+        raw_payload = raw_index if isinstance(raw_index, FabricationIndex) else visible_index
+        self.store.save_payload("fabrication_index", visible_index)
+        self.store.save_payload(self.raw_index_payload_name, raw_payload)
+        payload_map = dict(self.data.extra.get("payloads", {}))
+        payload_map["fabrication_index"] = "fabrication_index"
+        payload_map[self.raw_index_payload_name] = self.raw_index_payload_name
+        self.data.extra["payloads"] = payload_map
+
+    def _build_visible_table_from_index(
+        self,
+        raw_index: FabricationIndex,
+        *,
+        relevant_map: Optional[Dict[str, Dict[Optional[int], Set[Optional[int]]]]] = None,
+        relevant_compositions: Optional[Set[str]] = None,
+    ) -> Tuple[pd.DataFrame, FabricationIndex, int, int]:
+        if relevant_map is None or relevant_compositions is None:
+            relevant_map, relevant_compositions = self._load_relevant_map()
+        filtered_index = raw_index
+        removed_draws = 0
+        removed_pieces = 0
+        if relevant_compositions:
+            original_draws = len(raw_index.draw_level)
+            original_pieces = len(raw_index.piece_level)
+            filtered_index = self._filter_index(raw_index, relevant_map, relevant_compositions)
+            removed_draws = original_draws - len(filtered_index.draw_level)
+            removed_pieces = original_pieces - len(filtered_index.piece_level)
+        table = _fabrication_index_to_frame(filtered_index)
+        table = self._augment_table_with_relevant_microscope_rows(
+            table,
+            relevant_map,
+            source_index=raw_index,
+        )
+        table = self._apply_imported_separation(table)
+        return table, filtered_index, removed_draws, removed_pieces
+
+    def _rebuild_table_from_raw_index(self) -> bool:
+        raw_index = self._load_raw_index()
+        if not isinstance(raw_index, FabricationIndex):
+            return False
+        table, filtered_index, _removed_draws, _removed_pieces = self._build_visible_table_from_index(
+            raw_index
+        )
+        self.data.table = table
+        self._store_indexes(filtered_index, raw_index=raw_index)
+        self.store.save(self.data)
+        self.model.set_frame(table)
+        self._normalize_temperature_columns()
+        self._hide_columns(["_source_paths", "_source_path"])
+        self._auto_fit_columns()
+        self._update_status()
+        return True
 
     def _normalize_temperature_columns(self) -> None:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else None
@@ -7722,6 +7906,8 @@ class FabricationSection(MiniDatabaseSection):
 
     def set_microscope_snapshot(self, frame: pd.DataFrame | None) -> None:
         self._microscope_snapshot = frame.copy() if isinstance(frame, pd.DataFrame) else None
+        if self._rebuild_table_from_raw_index():
+            return
         table = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         relevant_map, _ = self._load_relevant_map()
         if isinstance(table, pd.DataFrame):
@@ -7799,10 +7985,12 @@ class FabricationSection(MiniDatabaseSection):
         self,
         frame: pd.DataFrame,
         relevant_map: Dict[str, Dict[Optional[int], Set[Optional[int]]]],
+        *,
+        source_index: Optional[FabricationIndex] = None,
     ) -> pd.DataFrame:
         if not isinstance(frame, pd.DataFrame):
             frame = pd.DataFrame()
-        columns = list(frame.columns) if not frame.empty else list(_fabrication_index_to_frame(FabricationIndex()).columns)
+        columns = list(frame.columns) if not frame.empty else list(_fabrication_frame_columns())
         updated = frame.copy() if not frame.empty else pd.DataFrame(columns=columns)
         existing: Set[Tuple[str, int, int]] = set()
         if not updated.empty:
@@ -7849,13 +8037,26 @@ class FabricationSection(MiniDatabaseSection):
                     key = (comp_key, int(draw), int(piece))
                     if key in existing:
                         continue
-                    row: Dict[str, Any] = {column: None for column in columns}
-                    row["Composition"] = comp_key
-                    row["Data source"] = "Microscope only"
-                    row["e/a"] = _compute_ea_from_composition(comp_key)
-                    row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(row["e/a"])
-                    row["Draw"] = int(draw)
-                    row["Piece"] = int(piece)
+                    piece_record = (
+                        source_index.get_piece(comp_key, int(draw), int(piece))
+                        if isinstance(source_index, FabricationIndex)
+                        else None
+                    )
+                    draw_record = (
+                        source_index.get_draw(comp_key, int(draw))
+                        if isinstance(source_index, FabricationIndex)
+                        else None
+                    )
+                    row = _fabrication_row_from_records(
+                        comp_key,
+                        int(draw),
+                        int(piece),
+                        piece_record,
+                        draw_record,
+                        columns=columns,
+                    )
+                    if row.get("Data source") in (None, ""):
+                        row["Data source"] = "Microscope only"
                     microscope_row = microscope_lookup.get(key, {})
                     for column in (MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN, "d/D"):
                         if column in row and column in microscope_row:
@@ -7971,27 +8172,23 @@ class FabricationSection(MiniDatabaseSection):
             except Exception:
                 pass
 
-        index = build_fabrication_index(
+        raw_index = build_fabrication_index(
             filtered_paths,
             self.logger,
             progress_callback=_progress,
             cancel_callback=self.is_cancelled,
         )
         self._check_cancelled()
-        if relevant_compositions:
-            original_draws = len(index.draw_level)
-            original_pieces = len(index.piece_level)
-            index = self._filter_index(index, relevant_map, relevant_compositions)
-            removed_draws = original_draws - len(index.draw_level)
-            removed_pieces = original_pieces - len(index.piece_level)
-            if removed_draws > 0 or removed_pieces > 0:
-                self.log(
-                    "Fabrication data: skipped %d draw(s) and %d piece(s) without matching current annealing records."
-                    % (removed_draws, removed_pieces)
-                )
-        table = _fabrication_index_to_frame(index)
-        table = self._augment_table_with_relevant_microscope_rows(table, relevant_map)
-        table = self._apply_imported_separation(table)
+        table, index, removed_draws, removed_pieces = self._build_visible_table_from_index(
+            raw_index,
+            relevant_map=relevant_map,
+            relevant_compositions=relevant_compositions,
+        )
+        if removed_draws > 0 or removed_pieces > 0:
+            self.log(
+                "Fabrication data: skipped %d draw(s) and %d piece(s) without matching current annealing records."
+                % (removed_draws, removed_pieces)
+            )
         processed: Dict[str, float] = {}
         for path in filtered_paths:
             try:
@@ -8001,11 +8198,16 @@ class FabricationSection(MiniDatabaseSection):
         return SectionProcessResult(
             table=table,
             processed=processed,
-            payloads={"fabrication_index": index},
+            payloads={
+                "fabrication_index": index,
+                self.raw_index_payload_name: raw_index,
+            },
         )
 
     def refresh(self) -> None:
         super().refresh()
+        if self._rebuild_table_from_raw_index():
+            return
         table = self.data.table
         if isinstance(table, pd.DataFrame):
             relevant_map, _ = self._load_relevant_map()
@@ -8034,6 +8236,8 @@ class FabricationSection(MiniDatabaseSection):
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
         self._normalize_temperature_columns()
+        if self._rebuild_table_from_raw_index():
+            return
         table = self.data.table
         if isinstance(table, pd.DataFrame):
             relevant_map, _ = self._load_relevant_map()
@@ -8060,6 +8264,8 @@ class FabricationSection(MiniDatabaseSection):
 
     def set_import_separation(self, enabled: bool) -> None:
         self._separate_imported = bool(enabled)
+        if self._rebuild_table_from_raw_index():
+            return
         try:
             index = self.store.load_payload("fabrication_index")
         except Exception:
@@ -8127,6 +8333,9 @@ class FabricationSection(MiniDatabaseSection):
             index = None
         if not isinstance(index, FabricationIndex):
             index = FabricationIndex()
+        raw_index = self._load_raw_index()
+        if not isinstance(raw_index, FabricationIndex):
+            raw_index = index
         updated_any = False
         for row_idx in range(top_left.row(), bottom_right.row() + 1):
             if row_idx < 0 or row_idx >= len(frame.index):
@@ -8141,7 +8350,8 @@ class FabricationSection(MiniDatabaseSection):
             except (TypeError, ValueError):
                 continue
             key = (composition, draw, piece)
-            piece_data = dict(index.piece_level.get(key, {}))
+            existing_piece_data = raw_index.piece_level.get(key, index.piece_level.get(key, {}))
+            piece_data = dict(existing_piece_data)
             row_updated = False
             for column in columns:
                 if column not in relevant:
@@ -8157,19 +8367,23 @@ class FabricationSection(MiniDatabaseSection):
             if row_updated:
                 if piece_data:
                     piece_data.setdefault("_source_path", piece_data.get("_source_path") or "Manual")
-                index.piece_level[key] = piece_data
+                    index.piece_level[key] = dict(piece_data)
+                    raw_index.piece_level[key] = dict(piece_data)
+                else:
+                    index.piece_level.pop(key, None)
+                    raw_index.piece_level.pop(key, None)
         if updated_any:
             self.data.table = frame
-            self.store.save_payload("fabrication_index", index)
-            payload_map = dict(self.data.extra.get("payloads", {}))
-            payload_map["fabrication_index"] = "fabrication_index"
-            self.data.extra["payloads"] = payload_map
+            self._store_indexes(index, raw_index=raw_index)
             self.store.save(self.data)
 
     def apply_imported_samples(self, records: Iterable[Dict[str, Any]]) -> int:
         index = self.store.load_payload("fabrication_index")
         if not isinstance(index, FabricationIndex):
             index = FabricationIndex()
+        raw_index = self._load_raw_index()
+        if not isinstance(raw_index, FabricationIndex):
+            raw_index = index
         added = 0
         for record in records:
             composition = str(record.get("Composition") or "").strip()
@@ -8207,15 +8421,15 @@ class FabricationSection(MiniDatabaseSection):
             before = bool(index.get_piece(composition, draw_x, piece_y))
             index.set_piece(composition, int(draw_x), int(piece_y), piece_data)
             index.set_draw(composition, int(draw_x), draw_data)
+            raw_index.set_piece(composition, int(draw_x), int(piece_y), dict(piece_data))
+            raw_index.set_draw(composition, int(draw_x), dict(draw_data))
             if not before:
                 added += 1
-        table = _fabrication_index_to_frame(index)
-        table = self._apply_imported_separation(table)
+        table, index, _removed_draws, _removed_pieces = self._build_visible_table_from_index(
+            raw_index
+        )
         self.data.table = table
-        self.store.save_payload("fabrication_index", index)
-        payload_map = dict(self.data.extra.get("payloads", {}))
-        payload_map["fabrication_index"] = "fabrication_index"
-        self.data.extra["payloads"] = payload_map
+        self._store_indexes(index, raw_index=raw_index)
         self.store.save(self.data)
         self.model.set_frame(table)
         self._auto_fit_columns()
@@ -13109,9 +13323,10 @@ class VideoSection(MiniDatabaseSection):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._overrides: Dict[str, Dict[str, Any]] = {}
+        self._fabrication_lookup_cache: Dict[str, Mapping[str, Any]] = {}
         super().__init__(logger, log_callback, parent)
         self.source_button.hide()
-        self.refresh_button.setText("Start video OCR")
+        self.refresh_button.setText("Refresh videos")
         self.open_sources_button.setText("Open video(s)")
         self.open_sources_button.setToolTip("Open the selected video files.")
         self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
@@ -13120,6 +13335,8 @@ class VideoSection(MiniDatabaseSection):
         self._apply_overrides_to_model()
         self.model.set_editable_columns(self._editable_columns())
         self.model.set_text_columns({"Notes", "Piece date", "Production datetime"})
+        self.model.set_background_provider(self._background_brush_for_cell)
+        self.model.set_foreground_provider(self._foreground_brush_for_cell)
         try:
             self.model.dataChanged.connect(self._handle_cell_edited)
         except Exception:
@@ -13169,7 +13386,7 @@ class VideoSection(MiniDatabaseSection):
             except Exception:
                 pass
 
-        index = _collect_video_metrics(
+        index = _collect_video_sources(
             unique_paths,
             self.logger,
             progress_callback=_progress if progress is not None else None,
@@ -13392,6 +13609,57 @@ class VideoSection(MiniDatabaseSection):
             return payload
         return {}
 
+    def _refresh_fabrication_lookup_cache(self) -> None:
+        table = self._fabrication_table()
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            self._fabrication_lookup_cache = {}
+            return
+        lookup: Dict[str, Mapping[str, Any]] = {}
+        for _, row in table.iterrows():
+            composition = str(row.get("Composition") or "").strip()
+            if not composition or composition == "Imported data:":
+                continue
+            try:
+                draw = int(row.get("Draw"))
+                piece = int(row.get("Piece"))
+            except (TypeError, ValueError):
+                continue
+            key = _microwire_key_to_str((composition, draw, piece, None))
+            if key:
+                lookup[key] = row
+        self._fabrication_lookup_cache = lookup
+
+    def _completion_state(self, row: pd.Series, column: str) -> Optional[bool]:
+        key_raw = row.get("_group_key")
+        key = str(key_raw).strip() if key_raw not in (None, "") else ""
+        if column == VIDEO_END_LENGTH_COLUMN:
+            return not self._is_missing(row.get(column))
+        if column == VIDEO_MW_LENGTH_COLUMN:
+            end_length = row.get(VIDEO_END_LENGTH_COLUMN)
+            return None if self._is_missing(end_length) else not self._is_missing(row.get(column))
+        editable = self._editable_columns()
+        if column not in editable:
+            return None
+        fabrication_row = self._fabrication_lookup_cache.get(key) if key else None
+        if fabrication_row is None:
+            return not self._is_missing(row.get(column))
+        base_missing = self._is_missing(fabrication_row.get(column))
+        if not base_missing:
+            return None
+        return not self._is_missing(row.get(column))
+
+    def _background_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        state = self._completion_state(row, column)
+        if state is None:
+            return None
+        return QtGui.QBrush(QtGui.QColor("#0f3b26" if state else "#3a0a0a"))
+
+    def _foreground_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        state = self._completion_state(row, column)
+        if state is None:
+            return None
+        return QtGui.QBrush(QtGui.QColor("#22c55e" if state else "#ef4444"))
+
     def _store_overrides(self) -> None:
         self.data.extra["overrides"] = self._overrides
         try:
@@ -13435,6 +13703,7 @@ class VideoSection(MiniDatabaseSection):
     def _apply_overrides_to_model(self) -> None:
         frame = self.model.frame()
         fabrication_frame = self._fabrication_table()
+        self._refresh_fabrication_lookup_cache()
         index = self._load_video_index()
         if (
             (isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty)
