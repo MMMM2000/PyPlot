@@ -1353,10 +1353,12 @@ def test_fabrication_augments_rows_for_microscope_only_samples() -> None:
         section.close()
 
 
-def test_fabrication_does_not_append_microscope_only_placeholder_without_fabrication_data() -> None:
+def test_fabrication_appends_placeholder_for_measured_wire_without_fabrication_data() -> None:
     _ensure_qapp()
     microscope_store = builder_ui.MiniDatabaseStore("microscope")
     microscope_original = microscope_store.load()
+    annealing_store = builder_ui.MiniDatabaseStore("annealing")
+    annealing_original = annealing_store.load()
     section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
     try:
         microscope_frame = pd.DataFrame(
@@ -1372,6 +1374,7 @@ def test_fabrication_does_not_append_microscope_only_placeholder_without_fabrica
             ]
         )
         microscope_store.save(MiniDatabaseData(table=microscope_frame))
+        annealing_store.save(MiniDatabaseData(table=pd.DataFrame()))
 
         base = pd.DataFrame(columns=builder_ui._fabrication_index_to_frame(builder_ui.FabricationIndex()).columns)
         relevant_map = {"TestCompJ": {4: {7}}}
@@ -1381,9 +1384,16 @@ def test_fabrication_does_not_append_microscope_only_placeholder_without_fabrica
             source_index=builder_ui.FabricationIndex(),
         )
 
-        assert updated.empty
+        assert len(updated.index) == 1
+        row = updated.iloc[0]
+        assert row["Composition"] == "TestCompJ"
+        assert row["Data source"] == "Microscope only"
+        assert pd.isna(row[builder_ui.MICROSCOPE_D_COLUMN])
+        assert pd.isna(row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
+        assert pd.isna(row["d/D"])
     finally:
         microscope_store.save(microscope_original)
+        annealing_store.save(annealing_original)
         section.close()
 
 

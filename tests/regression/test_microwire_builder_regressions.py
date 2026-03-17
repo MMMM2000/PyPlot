@@ -166,3 +166,18 @@ def test_video_section_open_button_enables_and_opens_selected_sources(tmp_path: 
         assert opened == [source_path]
     finally:
         section.close()
+
+
+def test_video_section_filters_candidates_to_measured_wires(tmp_path: Path) -> None:
+    section = VideoSection.__new__(VideoSection)
+    candidates = [
+        tmp_path / "Ni50Fe27Ga23" / "3.Ni50Fe27Ga23 17042024 0850" / "2024-04-17 08-44-39.mkv",
+        tmp_path / "Co69" / "9.Co69 01012024 0800" / "2024-01-01 08-00-00.mkv",
+    ]
+    filtered = section._filter_candidates_for_relevance(
+        candidates,
+        {"Ni50Fe27Ga23": {3: {2}}},
+        {"Ni50Fe27Ga23"},
+    )
+
+    assert filtered == [candidates[0]]

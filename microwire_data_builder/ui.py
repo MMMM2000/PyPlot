@@ -3103,6 +3103,17 @@ def _fabrication_row_from_records(
     return row
 
 
+def _is_blank(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    try:
+        return bool(pd.isna(value))
+    except Exception:
+        return False
+
+
 def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
     columns = _fabrication_frame_columns()
     rows: List[Dict[str, Any]] = []
@@ -7585,6 +7596,12 @@ class FabricationSection(MiniDatabaseSection):
             self.model.dataChanged.connect(self._handle_cell_edited)
         except Exception:
             pass
+        self.missing_data_button = QtWidgets.QPushButton("Missing data…", self)
+        self.missing_data_button.clicked.connect(self._show_missing_data_dialog)
+        try:
+            self.controls_layout.insertWidget(2, self.missing_data_button)
+        except Exception:
+            pass
 
     def _load_raw_index(self) -> Optional[FabricationIndex]:
         try:
@@ -7777,61 +7794,24 @@ class FabricationSection(MiniDatabaseSection):
 
     def _update_status(self) -> None:  # type: ignore[override]
         super()._update_status()
-        missing = self._missing_microwires()
-        if not missing:
+        missing_entries = self._missing_data_entries()
+        if not missing_entries:
             return
         base_message = self.status_label.text()
-        preview = ", ".join(missing[:3])
-        if len(missing) > 3:
+        preview = ", ".join(
+            f"{entry['Composition']} {entry['Microwire']}"
+            for entry in missing_entries[:3]
+        )
+        if len(missing_entries) > 3:
             preview += ", …"
-        message = f"{base_message} — Missing {len(missing)} annealing record(s): {preview}"
+        message = (
+            f"{base_message} — Missing fabrication data for {len(missing_entries)} measured wire(s): {preview}"
+        )
         self.status_label.setText(message)
         try:
             self.status_changed.emit(message)
         except Exception:
             pass
-
-    def _missing_microwires(self) -> List[str]:
-        expected_map, _ = self._load_relevant_map()
-        expected: Set[Tuple[str, int, int]] = set()
-        for composition, draws in expected_map.items():
-            for draw, pieces in draws.items():
-                for piece in pieces:
-                    if piece is None:
-                        continue
-                    try:
-                        expected.add((str(composition), int(draw), int(piece)))
-                    except (TypeError, ValueError):
-                        continue
-        if not expected:
-            return []
-        present: Set[Tuple[str, int, int]] = set()
-        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
-        if isinstance(frame, pd.DataFrame) and not frame.empty:
-            if "_group_key" in frame.columns:
-                for value in frame["_group_key"]:
-                    if value in (None, "", "None"):
-                        continue
-                    key_parts = _microwire_key_from_string(str(value))
-                    if key_parts is None:
-                        continue
-                    comp, draw_val, piece_val, _suffix = key_parts
-                    present.add((comp, draw_val, piece_val))
-            else:
-                for _, row in frame.iterrows():
-                    comp = str(row.get("Composition", "")).strip()
-                    microwire = str(row.get("Microwire", "")).strip()
-                    parsed = _microwire_parts_from_label_safe(microwire)
-                    if parsed is None:
-                        continue
-                    draw_val, piece_val, _suffix = parsed
-                    present.add((comp, int(draw_val), int(piece_val)))
-        missing = [
-            f"{composition} {draw}/{piece}"
-            for composition, draw, piece in sorted(expected)
-            if (composition, draw, piece) not in present
-        ]
-        return missing
 
     @staticmethod
     def _normalise_int(value: object) -> Optional[int]:
@@ -7847,31 +7827,28 @@ class FabricationSection(MiniDatabaseSection):
             return None
         return int(numeric)
 
-    def _load_relevant_map(
+    def _measured_keys_by_source(
         self,
-    ) -> Tuple[Dict[str, Dict[Optional[int], Set[Optional[int]]]], Set[str]]:
+    ) -> Tuple[Set[Tuple[str, int, int]], Set[Tuple[str, int, int]]]:
+        annealing_keys: Set[Tuple[str, int, int]] = set()
+        microscope_keys: Set[Tuple[str, int, int]] = set()
         try:
             store = MiniDatabaseStore("annealing")
             records = store.load_payload("annealing_records")
         except Exception:
             records = None
-        relevant: Dict[str, Dict[Optional[int], Set[Optional[int]]]] = {}
         if isinstance(records, list):
             for record in records:
                 metadata = getattr(record, "metadata", None)
                 if metadata is None:
                     continue
                 composition = getattr(metadata, "composition_token", None)
-                if not composition:
-                    continue
-                composition_key = str(composition).strip()
-                if not composition_key:
-                    continue
                 draw_value = self._normalise_int(getattr(metadata, "draw_x", None))
                 piece_value = self._normalise_int(getattr(metadata, "piece_y", None))
-                bucket = relevant.setdefault(composition_key, {})
-                piece_bucket = bucket.setdefault(draw_value, set())
-                piece_bucket.add(piece_value)
+                composition_key = str(composition or "").strip()
+                if not composition_key or draw_value is None or piece_value is None:
+                    continue
+                annealing_keys.add((composition_key, int(draw_value), int(piece_value)))
         microscope_table = (
             self._microscope_snapshot.copy()
             if isinstance(self._microscope_snapshot, pd.DataFrame)
@@ -7899,10 +7876,111 @@ class FabricationSection(MiniDatabaseSection):
                 draw_value, piece_value, suffix = parsed
                 if str(suffix or "").strip().lower() == "oe":
                     continue
-                bucket = relevant.setdefault(composition_key, {})
-                piece_bucket = bucket.setdefault(int(draw_value), set())
-                piece_bucket.add(int(piece_value))
+                microscope_keys.add((composition_key, int(draw_value), int(piece_value)))
+        return annealing_keys, microscope_keys
+
+    def _source_label_for_key(
+        self,
+        key: Tuple[str, int, int],
+        annealing_keys: Set[Tuple[str, int, int]],
+        microscope_keys: Set[Tuple[str, int, int]],
+    ) -> str:
+        in_annealing = key in annealing_keys
+        in_microscope = key in microscope_keys
+        if in_annealing and in_microscope:
+            return "Current annealing + microscope"
+        if in_annealing:
+            return "Current annealing only"
+        if in_microscope:
+            return "Microscope only"
+        return "Measured only"
+
+    def _load_relevant_map(
+        self,
+    ) -> Tuple[Dict[str, Dict[Optional[int], Set[Optional[int]]]], Set[str]]:
+        relevant: Dict[str, Dict[Optional[int], Set[Optional[int]]]] = {}
+        annealing_keys, microscope_keys = self._measured_keys_by_source()
+        for composition_key, draw_value, piece_value in sorted(annealing_keys | microscope_keys):
+            bucket = relevant.setdefault(composition_key, {})
+            piece_bucket = bucket.setdefault(int(draw_value), set())
+            piece_bucket.add(int(piece_value))
         return relevant, set(relevant.keys())
+
+    def _missing_data_entries(self) -> List[Dict[str, str]]:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return []
+        watched_columns = [
+            "Length (m)",
+            "Piece date",
+            "Resistance (Ω)",
+            CORE_TEMPERATURE_COLUMN,
+            "Mass (g)",
+            "Winding speed (m/min)",
+            "Glass feeding (mm/min)",
+            "Underpressure",
+        ]
+        entries: List[Dict[str, str]] = []
+        for _, row in frame.iterrows():
+            composition = str(row.get("Composition") or "").strip()
+            if not composition or composition == "Imported data:":
+                continue
+            microwire = str(row.get("Microwire") or "").strip()
+            if not microwire:
+                try:
+                    microwire = f"{int(row.get('Draw'))}/{int(row.get('Piece'))}"
+                except Exception:
+                    microwire = ""
+            missing_fields = [
+                column for column in watched_columns if column in frame.columns and _is_blank(row.get(column))
+            ]
+            if not missing_fields:
+                continue
+            entries.append(
+                {
+                    "Composition": composition,
+                    "Microwire": microwire,
+                    "Data source": str(row.get("Data source") or "").strip(),
+                    "Missing fields": ", ".join(missing_fields),
+                }
+            )
+        return entries
+
+    def _show_missing_data_dialog(self) -> None:
+        entries = self._missing_data_entries()
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Fabrication Missing Data")
+        dialog.resize(980, 640)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        summary = QtWidgets.QLabel(
+            f"{len(entries)} measured wire(s) still have missing fabrication fields."
+            if entries
+            else "No measured wires are currently missing fabrication fields."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        table = QtWidgets.QTableWidget(dialog)
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels(["Composition", "Microwire", "Data source", "Missing fields"])
+        table.setRowCount(len(entries))
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        table.setSortingEnabled(False)
+        for row_index, entry in enumerate(entries):
+            for column_index, key in enumerate(("Composition", "Microwire", "Data source", "Missing fields")):
+                item = QtWidgets.QTableWidgetItem(entry.get(key, ""))
+                table.setItem(row_index, column_index, item)
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(True)
+        table.resizeColumnsToContents()
+        layout.addWidget(table, 1)
+        button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close, dialog)
+        button_box.rejected.connect(dialog.reject)
+        button_box.accepted.connect(dialog.accept)
+        layout.addWidget(button_box)
+        dialog.exec()
 
     def set_microscope_snapshot(self, frame: pd.DataFrame | None) -> None:
         self._microscope_snapshot = frame.copy() if isinstance(frame, pd.DataFrame) else None
@@ -7992,6 +8070,7 @@ class FabricationSection(MiniDatabaseSection):
             frame = pd.DataFrame()
         columns = list(frame.columns) if not frame.empty else list(_fabrication_frame_columns())
         updated = frame.copy() if not frame.empty else pd.DataFrame(columns=columns)
+        annealing_keys, microscope_keys = self._measured_keys_by_source()
         existing: Set[Tuple[str, int, int]] = set()
         if not updated.empty:
             for _, row in updated.iterrows():
@@ -8028,8 +8107,6 @@ class FabricationSection(MiniDatabaseSection):
                         if isinstance(source_index, FabricationIndex)
                         else None
                     )
-                    if not piece_record and not draw_record:
-                        continue
                     row = _fabrication_row_from_records(
                         comp_key,
                         int(draw),
@@ -8038,6 +8115,12 @@ class FabricationSection(MiniDatabaseSection):
                         draw_record,
                         columns=columns,
                     )
+                    if row.get("Data source") in (None, ""):
+                        row["Data source"] = self._source_label_for_key(
+                            key,
+                            annealing_keys,
+                            microscope_keys,
+                        )
                     new_rows.append(row)
         if not new_rows:
             return updated
@@ -13343,6 +13426,128 @@ class VideoSection(MiniDatabaseSection):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(table, 1)
         return container
+
+    @staticmethod
+    def _normalise_int(value: object) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return int(value)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(numeric):
+            return None
+        return int(numeric)
+
+    @staticmethod
+    def _normalise_token(text: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+    def _load_relevant_map(
+        self,
+    ) -> Tuple[Dict[str, Dict[Optional[int], Set[Optional[int]]]], Set[str]]:
+        relevant: Dict[str, Dict[Optional[int], Set[Optional[int]]]] = {}
+        try:
+            store = MiniDatabaseStore("annealing")
+            records = store.load_payload("annealing_records")
+        except Exception:
+            records = None
+        if isinstance(records, list):
+            for record in records:
+                metadata = getattr(record, "metadata", None)
+                if metadata is None:
+                    continue
+                composition = getattr(metadata, "composition_token", None)
+                draw_value = self._normalise_int(getattr(metadata, "draw_x", None))
+                piece_value = self._normalise_int(getattr(metadata, "piece_y", None))
+                composition_key = str(composition or "").strip()
+                if not composition_key or draw_value is None or piece_value is None:
+                    continue
+                bucket = relevant.setdefault(composition_key, {})
+                piece_bucket = bucket.setdefault(int(draw_value), set())
+                piece_bucket.add(int(piece_value))
+        try:
+            microscope_data = MiniDatabaseStore("microscope").load()
+        except Exception:
+            microscope_data = None
+        microscope_table = (
+            microscope_data.table
+            if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
+            else pd.DataFrame()
+        )
+        if isinstance(microscope_table, pd.DataFrame) and not microscope_table.empty:
+            for _, row in microscope_table.iterrows():
+                composition_key = str(row.get("Composition") or "").strip()
+                microwire_label = str(row.get("Microwire") or "").strip()
+                if not composition_key or not microwire_label:
+                    continue
+                parsed = _microwire_parts_from_label_safe(microwire_label)
+                if parsed is None:
+                    continue
+                draw_value, piece_value, suffix = parsed
+                if str(suffix or "").strip().lower() == "oe":
+                    continue
+                bucket = relevant.setdefault(composition_key, {})
+                piece_bucket = bucket.setdefault(int(draw_value), set())
+                piece_bucket.add(int(piece_value))
+        return relevant, set(relevant.keys())
+
+    def _filter_candidates_for_relevance(
+        self,
+        candidates: List[Path],
+        relevant_map: Dict[str, Dict[Optional[int], Set[Optional[int]]]],
+        relevant_compositions: Set[str],
+    ) -> List[Path]:
+        if not relevant_compositions:
+            return candidates
+        composition_tokens = {
+            comp: self._normalise_token(comp)
+            for comp in relevant_compositions
+            if self._normalise_token(comp)
+        }
+        if not composition_tokens:
+            return candidates
+        draw_tokens: Dict[str, Set[str]] = {}
+        for comp, draw_map in relevant_map.items():
+            comp_key = self._normalise_token(comp)
+            if not comp_key:
+                continue
+            bucket = draw_tokens.setdefault(comp_key, set())
+            for draw, pieces in draw_map.items():
+                if draw is not None:
+                    bucket.add(self._normalise_token(draw))
+                for piece in pieces:
+                    if piece is not None:
+                        bucket.add(self._normalise_token(f"{draw}{piece}"))
+        filtered: List[Path] = []
+        for path in candidates:
+            text = self._normalise_token(path)
+            if not text:
+                continue
+            matched = False
+            for _composition, token in composition_tokens.items():
+                if token and token in text:
+                    matched = True
+                    break
+                draw_set = draw_tokens.get(token)
+                if draw_set and any(draw_token in text for draw_token in draw_set if draw_token):
+                    matched = True
+                    break
+            if matched:
+                filtered.append(path)
+        return filtered
+
+    def _collect_candidates(self) -> List[Path]:
+        candidates = super()._collect_candidates()
+        relevant_map, relevant_compositions = self._load_relevant_map()
+        filtered = self._filter_candidates_for_relevance(
+            candidates,
+            relevant_map,
+            relevant_compositions,
+        )
+        return filtered or candidates
 
     def process(
         self,
