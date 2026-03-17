@@ -1342,10 +1342,46 @@ def test_fabrication_augments_rows_for_microscope_only_samples() -> None:
         assert row["Draw"] == 3
         assert row["Piece"] == 2
         assert row["Data source"] == "Measured"
-        assert row[builder_ui.MICROSCOPE_D_COLUMN] == 7.0
+        assert pd.isna(row[builder_ui.MICROSCOPE_D_COLUMN])
+        assert pd.isna(row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
+        assert pd.isna(row["d/D"])
         assert row["Length (m)"] == pytest.approx(12.5)
         assert row[builder_ui.CORE_TEMPERATURE_COLUMN] == pytest.approx(405.0)
         assert row["Mass (g)"] == pytest.approx(2.3)
+    finally:
+        microscope_store.save(microscope_original)
+        section.close()
+
+
+def test_fabrication_does_not_append_microscope_only_placeholder_without_fabrication_data() -> None:
+    _ensure_qapp()
+    microscope_store = builder_ui.MiniDatabaseStore("microscope")
+    microscope_original = microscope_store.load()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        microscope_frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompJ",
+                    "Microwire": "4/7",
+                    builder_ui.MICROSCOPE_D_COLUMN: 11.2,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 44.1,
+                    "d/D": 0.254,
+                    "_key": "TestCompJ|4|7",
+                }
+            ]
+        )
+        microscope_store.save(MiniDatabaseData(table=microscope_frame))
+
+        base = pd.DataFrame(columns=builder_ui._fabrication_index_to_frame(builder_ui.FabricationIndex()).columns)
+        relevant_map = {"TestCompJ": {4: {7}}}
+        updated = section._augment_table_with_relevant_microscope_rows(
+            base,
+            relevant_map,
+            source_index=builder_ui.FabricationIndex(),
+        )
+
+        assert updated.empty
     finally:
         microscope_store.save(microscope_original)
         section.close()

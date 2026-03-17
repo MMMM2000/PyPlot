@@ -8004,25 +8004,6 @@ class FabricationSection(MiniDatabaseSection):
                 if comp:
                     existing.add((comp, draw, piece))
 
-        microscope_data = MiniDatabaseStore("microscope").load()
-        microscope_table = (
-            microscope_data.table
-            if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
-            else pd.DataFrame()
-        )
-        microscope_lookup: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
-        if not microscope_table.empty:
-            for _, row in microscope_table.iterrows():
-                comp = str(row.get("Composition") or "").strip()
-                microwire = str(row.get("Microwire") or "").strip()
-                if not comp or not microwire or microwire.lower().endswith("oe"):
-                    continue
-                parsed = _microwire_parts_from_label_safe(microwire)
-                if parsed is None:
-                    continue
-                draw, piece, _suffix = parsed
-                microscope_lookup[(comp, int(draw), int(piece))] = dict(row)
-
         new_rows: List[Dict[str, Any]] = []
         for composition, draws in relevant_map.items():
             comp_key = str(composition).strip()
@@ -8047,6 +8028,8 @@ class FabricationSection(MiniDatabaseSection):
                         if isinstance(source_index, FabricationIndex)
                         else None
                     )
+                    if not piece_record and not draw_record:
+                        continue
                     row = _fabrication_row_from_records(
                         comp_key,
                         int(draw),
@@ -8055,12 +8038,6 @@ class FabricationSection(MiniDatabaseSection):
                         draw_record,
                         columns=columns,
                     )
-                    if row.get("Data source") in (None, ""):
-                        row["Data source"] = "Microscope only"
-                    microscope_row = microscope_lookup.get(key, {})
-                    for column in (MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN, "d/D"):
-                        if column in row and column in microscope_row:
-                            row[column] = microscope_row.get(column)
                     new_rows.append(row)
         if not new_rows:
             return updated
