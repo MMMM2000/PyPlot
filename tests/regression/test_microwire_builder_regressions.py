@@ -6,7 +6,13 @@ from pathlib import Path
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
 
-from microwire_data_builder.ui import AssemblySection, FabricationSection, VideoSection, _row_to_microwire_key
+from microwire_data_builder.ui import (
+    AssemblySection,
+    FabricationSection,
+    VideoSection,
+    _possible_source_mismatches,
+    _row_to_microwire_key,
+)
 
 
 def _assembly_stub() -> AssemblySection:
@@ -199,3 +205,16 @@ def test_fabrication_rows_with_missing_source_files_highlight_red() -> None:
 
     assert background is not None and background.color().name() == "#3a0a0a"
     assert foreground is not None and foreground.color().name() == "#ffd6d6"
+
+
+def test_possible_source_mismatches_suggests_nearby_folders(tmp_path: Path) -> None:
+    (tmp_path / "Ni54Fe17Ga27Co2").mkdir()
+    (tmp_path / "Ni48Fe27Ga21Cu2").mkdir()
+    (tmp_path / "Co69").mkdir()
+
+    matches = _possible_source_mismatches(
+        "Ni54Fe17Ga23Co2",
+        [str(tmp_path)],
+    )
+
+    assert "Ni54Fe17Ga27Co2" in matches

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import difflib
 import faulthandler
 import html
 import io
@@ -3112,6 +3113,49 @@ def _is_blank(value: Any) -> bool:
         return bool(pd.isna(value))
     except Exception:
         return False
+
+
+def _normalise_match_token(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+def _possible_source_mismatches(
+    composition: str,
+    source_roots: Iterable[str],
+    *,
+    limit: int = 3,
+) -> List[str]:
+    target = _normalise_match_token(composition)
+    if not target:
+        return []
+    scored: List[Tuple[float, str]] = []
+    seen: Set[str] = set()
+    for source in source_roots:
+        root = Path(source).expanduser()
+        if not root.exists():
+            continue
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir():
+                continue
+            candidate_name = str(child.name)
+            if candidate_name in seen:
+                continue
+            candidate_norm = _normalise_match_token(candidate_name)
+            if not candidate_norm:
+                continue
+            score = difflib.SequenceMatcher(None, target, candidate_norm).ratio()
+            if target in candidate_norm or candidate_norm in target:
+                score = max(score, 0.95)
+            if score < 0.82:
+                continue
+            seen.add(candidate_name)
+            scored.append((score, candidate_name))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [name for _score, name in scored[:limit]]
 
 
 def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
@@ -7938,11 +7982,19 @@ class FabricationSection(MiniDatabaseSection):
             ]
             if not missing_fields:
                 continue
+            source_missing = self._row_missing_source_files(row)
+            possible_mismatch = (
+                ", ".join(_possible_source_mismatches(composition, self.data.sources))
+                if source_missing
+                else ""
+            )
             entries.append(
                 {
                     "Composition": composition,
                     "Microwire": microwire,
                     "Data source": str(row.get("Data source") or "").strip(),
+                    "Source files": "Missing" if source_missing else "Present",
+                    "Possible mismatch": possible_mismatch,
                     "Missing fields": ", ".join(missing_fields),
                 }
             )
@@ -7962,15 +8014,19 @@ class FabricationSection(MiniDatabaseSection):
         summary.setWordWrap(True)
         layout.addWidget(summary)
         table = QtWidgets.QTableWidget(dialog)
-        table.setColumnCount(4)
-        table.setHorizontalHeaderLabels(["Composition", "Microwire", "Data source", "Missing fields"])
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels(
+            ["Composition", "Microwire", "Data source", "Source files", "Possible mismatch", "Missing fields"]
+        )
         table.setRowCount(len(entries))
         table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         table.setSortingEnabled(False)
         for row_index, entry in enumerate(entries):
-            for column_index, key in enumerate(("Composition", "Microwire", "Data source", "Missing fields")):
+            for column_index, key in enumerate(
+                ("Composition", "Microwire", "Data source", "Source files", "Possible mismatch", "Missing fields")
+            ):
                 item = QtWidgets.QTableWidgetItem(entry.get(key, ""))
                 table.setItem(row_index, column_index, item)
         header = table.horizontalHeader()

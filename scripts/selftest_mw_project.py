@@ -21,6 +21,7 @@ from microwire_data_builder.storage import MiniDatabaseData, MiniDatabaseStore
 from microwire_data_builder.ui import (
     FabricationSection,
     VideoSection,
+    _possible_source_mismatches,
     _microwire_parts_from_label_safe,
 )
 
@@ -74,7 +75,7 @@ def _keys_from_frame(frame: pd.DataFrame) -> Set[Tuple[str, int, int]]:
     return keys
 
 
-def _rows_without_sources(frame: pd.DataFrame) -> List[Dict[str, str]]:
+def _rows_without_sources(frame: pd.DataFrame, source_roots: Iterable[str]) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return rows
@@ -92,6 +93,7 @@ def _rows_without_sources(frame: pd.DataFrame) -> List[Dict[str, str]]:
                 "Composition": composition,
                 "Microwire": microwire,
                 "Data source": str(row.get("Data source") or "").strip(),
+                "Possible mismatch": ", ".join(_possible_source_mismatches(composition, source_roots)),
             }
         )
     return rows
@@ -207,7 +209,7 @@ def run_selftest(project_path: Path, output_dir: Path) -> Dict[str, Any]:
             f"{composition} {draw}/{piece}"
             for composition, draw, piece in sorted(expected_keys - fabrication_keys)
         ],
-        "fabrication_rows_without_sources": _rows_without_sources(fabrication_frame),
+        "fabrication_rows_without_sources": _rows_without_sources(fabrication_frame, fabrication.data.sources),
         "fabrication_missing_data_entries": missing_entries,
         "video_candidates": len(video_candidates),
         "video_rows": len(video_frame.index),
