@@ -13,6 +13,7 @@ from microwire_data_builder.ui import (
     FabricationSection,
     VideoSection,
     VIDEO_END_LENGTH_COLUMN,
+    VIDEO_MW_LENGTH_COLUMN,
     _VideoReviewDialog,
     _TableSearchProxyModel,
     _possible_source_mismatches,
@@ -294,11 +295,22 @@ def test_video_review_dialog_updates_total_length_and_advances(tmp_path: Path) -
         dialog.load_source_row(0, open_video=True)
         assert opened == [first]
 
-        widget = dialog._field_widgets[VIDEO_END_LENGTH_COLUMN]
-        assert isinstance(widget, QtWidgets.QLineEdit)
-        widget.setText("12.5")
-        assert dialog.apply_changes() is True
+        col_idx = next(
+            index
+            for index, (column, _label, _editable) in enumerate(dialog._DISPLAY_COLUMNS)
+            if column == VIDEO_END_LENGTH_COLUMN
+        )
+        item = dialog.table.item(0, col_idx)
+        assert item is not None
+        item.setText("12.5")
         assert float(section.model.frame().iloc[0][VIDEO_END_LENGTH_COLUMN]) == 12.5
+        computed_idx = next(
+            index
+            for index, (column, _label, _editable) in enumerate(dialog._DISPLAY_COLUMNS)
+            if column == VIDEO_MW_LENGTH_COLUMN
+        )
+        computed_item = dialog.table.item(0, computed_idx)
+        assert computed_item is not None
 
         dialog._open_next_video()
         assert opened[-1] == second

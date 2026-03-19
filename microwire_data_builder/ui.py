@@ -14120,6 +14120,37 @@ class VideoSection(MiniDatabaseSection):
                 else:
                     keys.append("")
             updated["_group_key"] = keys
+        preferred = [
+            "Composition",
+            "Microwire",
+            "Data source",
+            "e/a",
+            ESTIMATED_TRANSITION_COLUMN,
+            "Draw",
+            "Piece",
+            VIDEO_END_LENGTH_COLUMN,
+            VIDEO_MW_LENGTH_COLUMN,
+            "Length (m)",
+            "Piece date",
+            MICROSCOPE_D_COLUMN,
+            MICROSCOPE_CAP_D_COLUMN,
+            "d/D",
+            "Resistance (Ω)",
+            CORE_TEMPERATURE_COLUMN,
+            GLASS_TEMPERATURE_COLUMN,
+            "Mass (g)",
+            "Winding speed (m/min)",
+            "Glass feeding (mm/min)",
+            "Underpressure",
+            "Production datetime",
+            "Notes",
+            "_sources",
+            "_group_key",
+            "_cumulative_length_m",
+        ]
+        ordered_columns = [column for column in preferred if column in updated.columns]
+        ordered_columns.extend(column for column in updated.columns if column not in ordered_columns)
+        updated = updated.loc[:, ordered_columns]
         frame = updated
         updated = self._apply_overrides_to_table(frame)
         self.data.table = updated
@@ -14309,29 +14340,33 @@ class VideoSection(MiniDatabaseSection):
 
 
 class _VideoReviewDialog(QtWidgets.QDialog):
-    _EDITABLE_ORDER: Tuple[str, ...] = (
-        VIDEO_END_LENGTH_COLUMN,
-        "Length (m)",
-        "Piece date",
-        "Resistance (Ω)",
-        CORE_TEMPERATURE_COLUMN,
-        GLASS_TEMPERATURE_COLUMN,
-        "Mass (g)",
-        "Winding speed (m/min)",
-        "Glass feeding (mm/min)",
-        "Underpressure",
-        "Production datetime",
-        "Notes",
+    _DISPLAY_COLUMNS: Tuple[Tuple[str, str, bool], ...] = (
+        (VIDEO_END_LENGTH_COLUMN, "Video total length (m)", True),
+        (VIDEO_MW_LENGTH_COLUMN, "Video wire-piece length (m)", False),
+        ("Length (m)", "Length (m)", True),
+        ("Piece date", "Piece date", True),
+        ("Resistance (Ω)", "Resistance (Ω)", True),
+        (CORE_TEMPERATURE_COLUMN, "Core temperature (°C)", True),
+        (GLASS_TEMPERATURE_COLUMN, "Glass temperature (°C)", True),
+        ("Mass (g)", "Mass (g)", True),
+        ("Winding speed (m/min)", "Winding speed (m/min)", True),
+        ("Glass feeding (mm/min)", "Glass feeding (mm/min)", True),
+        ("Underpressure", "Underpressure", True),
+        ("Production datetime", "Production datetime", True),
+        ("Notes", "Notes", True),
     )
 
     def __init__(self, section: VideoSection) -> None:
-        super().__init__(section)
+        super().__init__(None)
         self.section = section
         self._current_source_row: Optional[int] = None
-        self._field_widgets: Dict[str, QtWidgets.QWidget] = {}
+        self._updating_table = False
         self.setWindowTitle("Video review")
-        self.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
-        self.resize(540, 760)
+        self.setWindowFlags(
+            QtCore.Qt.WindowType.Window
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.resize(1360, 320)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -14347,38 +14382,35 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         layout.addWidget(self.sources_label)
 
         hint = QtWidgets.QLabel(
-            "Enter the total wire length shown in the video into "
-            f"'{VIDEO_END_LENGTH_COLUMN}'. The wire-piece length is computed automatically."
+            "Enter the total wire length from the video into 'Video total length (m)'. "
+            "The wire-piece length is computed automatically."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        form = QtWidgets.QFormLayout()
-        form.setHorizontalSpacing(10)
-        form.setVerticalSpacing(6)
-        for column in self._EDITABLE_ORDER:
-            if column == "Notes":
-                widget: QtWidgets.QWidget = QtWidgets.QPlainTextEdit(self)
-                cast_widget = cast(QtWidgets.QPlainTextEdit, widget)
-                cast_widget.setFixedHeight(90)
-            else:
-                widget = QtWidgets.QLineEdit(self)
-            self._field_widgets[column] = widget
-            form.addRow(column, widget)
-
-        self.computed_length_label = QtWidgets.QLabel("")
-        self.computed_length_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        form.addRow(VIDEO_MW_LENGTH_COLUMN, self.computed_length_label)
-        layout.addLayout(form)
+        self.table = QtWidgets.QTableWidget(self)
+        self.table.setRowCount(1)
+        self.table.setColumnCount(len(self._DISPLAY_COLUMNS))
+        self.table.setHorizontalHeaderLabels([label for _column, label, _editable in self._DISPLAY_COLUMNS])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+            | QtWidgets.QAbstractItemView.EditTrigger.AnyKeyPressed
+        )
+        self.table.itemChanged.connect(self._handle_item_changed)
+        header = self.table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(True)
+        layout.addWidget(self.table, 1)
 
         button_row = QtWidgets.QHBoxLayout()
         self.reopen_button = QtWidgets.QPushButton("Reopen video")
         self.reopen_button.clicked.connect(self._reopen_video)
         button_row.addWidget(self.reopen_button)
-
-        self.apply_button = QtWidgets.QPushButton("Apply")
-        self.apply_button.clicked.connect(self.apply_changes)
-        button_row.addWidget(self.apply_button)
 
         self.next_button = QtWidgets.QPushButton("Next video")
         self.next_button.clicked.connect(self._open_next_video)
@@ -14403,7 +14435,6 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         return self.section._row_series(row)
 
     def load_source_row(self, source_row: int, *, open_video: bool = False) -> None:
-        self.apply_changes()
         self._current_source_row = source_row
         self.section._select_source_row(source_row)
         series = self.section._row_series(source_row)
@@ -14419,43 +14450,55 @@ class _VideoReviewDialog(QtWidgets.QDialog):
             self.sources_label.setText("\n".join(str(path) for path in sources))
         else:
             self.sources_label.setText("No video file is currently matched to this row.")
-        for column, widget in self._field_widgets.items():
-            value = series.get(column)
-            text = "" if value is None or (isinstance(value, float) and math.isnan(value)) else str(value)
-            if isinstance(widget, QtWidgets.QPlainTextEdit):
-                blocker = QtCore.QSignalBlocker(widget)
-                widget.setPlainText(text)
-                del blocker
-            elif isinstance(widget, QtWidgets.QLineEdit):
-                blocker = QtCore.QSignalBlocker(widget)
-                widget.setText(text)
-                del blocker
-        computed_value = series.get(VIDEO_MW_LENGTH_COLUMN)
-        self.computed_length_label.setText("" if computed_value in (None, "") else str(computed_value))
+        self._populate_table(series)
         self.reopen_button.setEnabled(bool(sources))
         self.next_button.setEnabled(self.section._next_source_row_with_video(source_row) is not None)
         if open_video:
             self._reopen_video()
 
-    def apply_changes(self) -> bool:
+    def _populate_table(self, series: pd.Series) -> None:
+        self._updating_table = True
+        try:
+            for column_index, (column, _label, editable) in enumerate(self._DISPLAY_COLUMNS):
+                value = series.get(column)
+                text = "" if value is None or (isinstance(value, float) and math.isnan(value)) else str(value)
+                item = self.table.item(0, column_index)
+                if item is None:
+                    item = QtWidgets.QTableWidgetItem()
+                    self.table.setItem(0, column_index, item)
+                item.setText(text)
+                flags = item.flags()
+                if editable:
+                    item.setFlags(flags | QtCore.Qt.ItemFlag.ItemIsEditable)
+                else:
+                    item.setFlags(flags & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                self._style_item(item, series, column)
+            self.table.resizeColumnsToContents()
+        finally:
+            self._updating_table = False
+
+    def _style_item(self, item: QtWidgets.QTableWidgetItem, series: pd.Series, column: str) -> None:
+        background = self.section._background_brush_for_cell(series, column)
+        foreground = self.section._foreground_brush_for_cell(series, column)
+        item.setBackground(background if background is not None else QtGui.QBrush())
+        item.setForeground(foreground if foreground is not None else QtGui.QBrush())
+
+    def _handle_item_changed(self, item: QtWidgets.QTableWidgetItem) -> None:
+        if self._updating_table:
+            return
         source_row = self._current_source_row
         if source_row is None:
-            return False
-        changed = False
-        for column, widget in self._field_widgets.items():
-            if isinstance(widget, QtWidgets.QPlainTextEdit):
-                value = widget.toPlainText()
-            elif isinstance(widget, QtWidgets.QLineEdit):
-                value = widget.text()
-            else:
-                continue
-            if self.section._set_source_row_value(source_row, column, value):
-                changed = True
+            return
+        try:
+            column, _label, editable = self._DISPLAY_COLUMNS[item.column()]
+        except Exception:
+            return
+        if not editable:
+            return
+        self.section._set_source_row_value(source_row, column, item.text())
         updated_series = self.section._row_series(source_row)
         if updated_series is not None:
-            computed_value = updated_series.get(VIDEO_MW_LENGTH_COLUMN)
-            self.computed_length_label.setText("" if computed_value in (None, "") else str(computed_value))
-        return changed
+            self._populate_table(updated_series)
 
     def _reopen_video(self) -> None:
         source_row = self._current_source_row
@@ -14473,7 +14516,6 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         source_row = self._current_source_row
         if source_row is None:
             return
-        self.apply_changes()
         next_row = self.section._next_source_row_with_video(source_row)
         if next_row is None:
             QtWidgets.QMessageBox.information(
