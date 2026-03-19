@@ -14366,27 +14366,33 @@ class _VideoReviewDialog(QtWidgets.QDialog):
             QtCore.Qt.WindowType.Window
             | QtCore.Qt.WindowType.WindowStaysOnTopHint
         )
-        self.resize(1360, 320)
+        self.resize(1500, 180)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
+
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
 
         self.header_label = QtWidgets.QLabel("Select a video row to review.")
-        self.header_label.setWordWrap(True)
-        layout.addWidget(self.header_label)
+        self.header_label.setWordWrap(False)
+        top_row.addWidget(self.header_label, 1)
 
-        self.sources_label = QtWidgets.QLabel("")
-        self.sources_label.setWordWrap(True)
-        self.sources_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.sources_label)
+        self.reopen_button = QtWidgets.QPushButton("Reopen video")
+        self.reopen_button.clicked.connect(self._reopen_video)
+        top_row.addWidget(self.reopen_button)
 
-        hint = QtWidgets.QLabel(
-            "Enter the total wire length from the video into 'Video total length (m)'. "
-            "The wire-piece length is computed automatically."
-        )
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        self.next_button = QtWidgets.QPushButton("Next video")
+        self.next_button.clicked.connect(self._open_next_video)
+        top_row.addWidget(self.next_button)
+
+        self.close_button = QtWidgets.QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        top_row.addWidget(self.close_button)
+
+        layout.addLayout(top_row)
 
         self.table = QtWidgets.QTableWidget(self)
         self.table.setRowCount(1)
@@ -14395,6 +14401,7 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
             | QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked
@@ -14402,26 +14409,15 @@ class _VideoReviewDialog(QtWidgets.QDialog):
             | QtWidgets.QAbstractItemView.EditTrigger.AnyKeyPressed
         )
         self.table.itemChanged.connect(self._handle_item_changed)
+        self.table.itemActivated.connect(lambda *_args: self._open_next_video())
         header = self.table.horizontalHeader()
         if header is not None:
             header.setStretchLastSection(True)
-        layout.addWidget(self.table, 1)
-
-        button_row = QtWidgets.QHBoxLayout()
-        self.reopen_button = QtWidgets.QPushButton("Reopen video")
-        self.reopen_button.clicked.connect(self._reopen_video)
-        button_row.addWidget(self.reopen_button)
-
-        self.next_button = QtWidgets.QPushButton("Next video")
-        self.next_button.clicked.connect(self._open_next_video)
-        button_row.addWidget(self.next_button)
-
-        button_row.addStretch(1)
-
-        self.close_button = QtWidgets.QPushButton("Close")
-        self.close_button.clicked.connect(self.close)
-        button_row.addWidget(self.close_button)
-        layout.addLayout(button_row)
+        self.table.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        layout.addWidget(self.table, 0)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         if getattr(self.section, "_review_dialog", None) is self:
@@ -14440,16 +14436,11 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         series = self.section._row_series(source_row)
         if series is None:
             self.header_label.setText("Unable to load the selected row.")
-            self.sources_label.setText("")
             return
         composition = str(series.get("Composition") or "").strip()
         microwire = str(series.get("Microwire") or "").strip()
         self.header_label.setText(f"{composition} {microwire}".strip() or f"Row {source_row + 1}")
         sources = self.section._row_sources(series)
-        if sources:
-            self.sources_label.setText("\n".join(str(path) for path in sources))
-        else:
-            self.sources_label.setText("No video file is currently matched to this row.")
         self._populate_table(series)
         self.reopen_button.setEnabled(bool(sources))
         self.next_button.setEnabled(self.section._next_source_row_with_video(source_row) is not None)
@@ -14474,8 +14465,30 @@ class _VideoReviewDialog(QtWidgets.QDialog):
                     item.setFlags(flags & ~QtCore.Qt.ItemFlag.ItemIsEditable)
                 self._style_item(item, series, column)
             self.table.resizeColumnsToContents()
+            self._update_table_height()
         finally:
             self._updating_table = False
+
+    def _update_table_height(self) -> None:
+        header = self.table.horizontalHeader()
+        header_height = header.height() if header is not None else 24
+        row_height = self.table.rowHeight(0) if self.table.rowCount() else 28
+        frame = self.table.frameWidth() * 2
+        target_height = header_height + row_height + frame + 4
+        self.table.setFixedHeight(target_height)
+        layout = self.layout()
+        if isinstance(layout, QtWidgets.QVBoxLayout):
+            margins = layout.contentsMargins()
+            spacing = layout.spacing()
+            top_row_height = max(
+                self.header_label.sizeHint().height(),
+                self.reopen_button.sizeHint().height(),
+                self.next_button.sizeHint().height(),
+                self.close_button.sizeHint().height(),
+            )
+            total = margins.top() + top_row_height + spacing + target_height + margins.bottom()
+            self.setMinimumHeight(total)
+            self.setMaximumHeight(total)
 
     def _style_item(self, item: QtWidgets.QTableWidgetItem, series: pd.Series, column: str) -> None:
         background = self.section._background_brush_for_cell(series, column)
