@@ -5,3 +5,5 @@
 - Stopped the Fabrication tab from borrowing `d`, `D`, and `d/D` from microscope rows; those values now come only from fabrication spreadsheets and remain blank otherwise.
 - Scoped Videos refreshes to measured wires only and added a dedicated Fabrication missing-data dialog so long missing-wire lists are readable instead of being truncated in the status text.
 - Added possible-source-mismatch suggestions for fabrication rows that still have no matched source files, and highlighted those rows red in the fabrication table.
+- Optimized large project loads by batching section imports in memory, suppressing per-section pending scans during restore, and fixed the proxy sort `numpy.bool` error.
+- Fixed Videos row actions after sorting/filtering and highlighted entire video rows red when no video source files are available.

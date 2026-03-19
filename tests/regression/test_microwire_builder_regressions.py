@@ -12,6 +12,8 @@ from microwire_data_builder.ui import (
     DataFrameModel,
     FabricationSection,
     VideoSection,
+    VIDEO_END_LENGTH_COLUMN,
+    _VideoReviewDialog,
     _TableSearchProxyModel,
     _possible_source_mismatches,
     _row_to_microwire_key,
@@ -247,6 +249,60 @@ def test_video_section_selection_maps_proxy_rows_back_to_source_rows(tmp_path: P
         section._open_selected_sources()
 
         assert opened == [second]
+    finally:
+        section.close()
+
+
+def test_video_review_dialog_updates_total_length_and_advances(tmp_path: Path) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = VideoSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        first = tmp_path / "first.mkv"
+        second = tmp_path / "second.mkv"
+        first.write_bytes(b"video")
+        second.write_bytes(b"video")
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "_group_key": "CompA|1|1",
+                    "_sources": [str(first)],
+                    VIDEO_END_LENGTH_COLUMN: None,
+                },
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/2",
+                    "Draw": 1,
+                    "Piece": 2,
+                    "_group_key": "CompA|1|2",
+                    "_sources": [str(second)],
+                    VIDEO_END_LENGTH_COLUMN: None,
+                },
+            ]
+        )
+        section.model.set_frame(frame)
+        section.data.table = frame.copy()
+        dialog = _VideoReviewDialog(section)
+        opened: list[Path] = []
+        section._open_file = lambda path: opened.append(Path(path)) or True  # type: ignore[method-assign]
+
+        dialog.load_source_row(0, open_video=True)
+        assert opened == [first]
+
+        widget = dialog._field_widgets[VIDEO_END_LENGTH_COLUMN]
+        assert isinstance(widget, QtWidgets.QLineEdit)
+        widget.setText("12.5")
+        assert dialog.apply_changes() is True
+        assert float(section.model.frame().iloc[0][VIDEO_END_LENGTH_COLUMN]) == 12.5
+
+        dialog._open_next_video()
+        assert opened[-1] == second
+        assert dialog._current_source_row == 1
     finally:
         section.close()
 

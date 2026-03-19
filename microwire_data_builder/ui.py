@@ -13492,6 +13492,7 @@ class VideoSection(MiniDatabaseSection):
         self._overrides: Dict[str, Dict[str, Any]] = {}
         self._fabrication_lookup_cache: Dict[str, Mapping[str, Any]] = {}
         self._video_source_status_cache: Dict[Tuple[str, ...], bool] = {}
+        self._review_dialog: Optional["_VideoReviewDialog"] = None
         super().__init__(logger, log_callback, parent)
         self.source_button.hide()
         self.refresh_button.setText("Refresh videos")
@@ -13509,6 +13510,16 @@ class VideoSection(MiniDatabaseSection):
             self.model.dataChanged.connect(self._handle_cell_edited)
         except Exception:
             pass
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        dialog = self._review_dialog
+        self._review_dialog = None
+        if dialog is not None:
+            try:
+                dialog.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         table = QtWidgets.QTableView(parent)
@@ -13704,6 +13715,94 @@ class VideoSection(MiniDatabaseSection):
                     continue
         return sources
 
+    def _first_selected_source_row(self) -> Optional[int]:
+        rows = self._selected_rows()
+        if rows:
+            return rows[0]
+        return None
+
+    def _select_source_row(self, source_row: int) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        target = self.model.index(source_row, 0)
+        if not target.isValid():
+            return
+        proxy_target = self._search_proxy.mapFromSource(target)
+        if not proxy_target.isValid():
+            proxy_target = self._search_proxy.index(source_row, 0)
+        if not proxy_target.isValid():
+            return
+        selection = self.table_view.selectionModel()
+        if selection is None:
+            return
+        try:
+            selection.setCurrentIndex(
+                proxy_target,
+                QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
+            )
+            self.table_view.scrollTo(
+                proxy_target,
+                QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible,
+            )
+        except Exception:
+            pass
+
+    def _open_video_sources_for_row(self, source_row: int) -> Tuple[bool, List[Path], str]:
+        series = self._row_series(source_row)
+        if series is None:
+            return False, [], f"Row {source_row + 1}"
+        sources = self._row_sources(series)
+        composition = str(series.get("Composition") or "").strip()
+        microwire = str(series.get("Microwire") or "").strip()
+        label = f"{composition} {microwire}".strip() or f"Row {source_row + 1}"
+        if not sources:
+            return False, [], label
+        opened_any = False
+        missing: List[Path] = []
+        for path in sources:
+            if self._open_file(path):
+                opened_any = True
+            else:
+                missing.append(path)
+        return opened_any, missing, label
+
+    def _next_source_row_with_video(self, current_row: int) -> Optional[int]:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return None
+        row_count = len(frame.index)
+        if row_count <= 0:
+            return None
+        for offset in range(1, row_count + 1):
+            row_idx = (current_row + offset) % row_count
+            try:
+                series = frame.iloc[row_idx]
+            except Exception:
+                continue
+            if not self._row_missing_video_files(series):
+                return row_idx
+        return None
+
+    def _set_source_row_value(self, source_row: int, column: str, value: Any) -> bool:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or source_row < 0 or source_row >= len(frame.index):
+            return False
+        try:
+            column_index = int(frame.columns.get_loc(column))
+        except Exception:
+            return False
+        model_index = self.model.index(source_row, column_index)
+        if not model_index.isValid():
+            return False
+        return bool(self.model.setData(model_index, value, QtCore.Qt.ItemDataRole.EditRole))
+
+    def _ensure_review_dialog(self) -> "_VideoReviewDialog":
+        dialog = self._review_dialog
+        if dialog is None:
+            dialog = _VideoReviewDialog(self)
+            self._review_dialog = dialog
+        return dialog
+
     def _source_paths_exist(self, sources: Sequence[Path]) -> bool:
         key = tuple(str(path) for path in sources)
         if key in self._video_source_status_cache:
@@ -13750,54 +13849,20 @@ class VideoSection(MiniDatabaseSection):
         self.open_sources_button.setEnabled(bool(rows))
 
     def _open_selected_sources(self) -> None:
-        rows = self._selected_rows()
-        if not rows:
+        source_row = self._first_selected_source_row()
+        if source_row is None:
             QtWidgets.QMessageBox.information(
                 self,
                 self.section_title,
-                "Select one or more rows to open their video files.",
+                "Select a row to open its video and review fields.",
             )
             return
-        opened_any = False
-        missing_paths: List[Path] = []
-        missing_labels: List[str] = []
-        seen: set[Path] = set()
-        for row_index in rows:
-            series = self._row_series(row_index)
-            if series is None:
-                continue
-            sources = self._row_sources(series)
-            if not sources:
-                composition = str(series.get("Composition") or "").strip()
-                microwire = str(series.get("Microwire") or "").strip()
-                label = f"{composition} {microwire}".strip()
-                missing_labels.append(label or f"Row {row_index + 1}")
-                continue
-            for path in sources:
-                if path in seen:
-                    continue
-                seen.add(path)
-                if self._open_file(path):
-                    opened_any = True
-                else:
-                    missing_paths.append(path)
-        if opened_any:
-            return
-        details: List[str] = []
-        if missing_labels:
-            preview = ", ".join(missing_labels[:5])
-            if len(missing_labels) > 5:
-                preview += ", …"
-            details.append(f"No video found for: {preview}")
-        if missing_paths:
-            path_preview = "\n".join(str(p) for p in missing_paths[:5])
-            if len(missing_paths) > 5:
-                path_preview += "\n…"
-            details.append(f"Missing files:\n{path_preview}")
-        message = "No video files are available for the selected row(s)."
-        if details:
-            message = f"{message}\n\n" + "\n".join(details)
-        QtWidgets.QMessageBox.warning(self, self.section_title, message)
+        self._select_source_row(source_row)
+        dialog = self._ensure_review_dialog()
+        dialog.load_source_row(source_row, open_video=True)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
@@ -14241,6 +14306,183 @@ class VideoSection(MiniDatabaseSection):
                         )
                     except Exception:
                         pass
+
+
+class _VideoReviewDialog(QtWidgets.QDialog):
+    _EDITABLE_ORDER: Tuple[str, ...] = (
+        VIDEO_END_LENGTH_COLUMN,
+        "Length (m)",
+        "Piece date",
+        "Resistance (Ω)",
+        CORE_TEMPERATURE_COLUMN,
+        GLASS_TEMPERATURE_COLUMN,
+        "Mass (g)",
+        "Winding speed (m/min)",
+        "Glass feeding (mm/min)",
+        "Underpressure",
+        "Production datetime",
+        "Notes",
+    )
+
+    def __init__(self, section: VideoSection) -> None:
+        super().__init__(section)
+        self.section = section
+        self._current_source_row: Optional[int] = None
+        self._field_widgets: Dict[str, QtWidgets.QWidget] = {}
+        self.setWindowTitle("Video review")
+        self.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
+        self.resize(540, 760)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        self.header_label = QtWidgets.QLabel("Select a video row to review.")
+        self.header_label.setWordWrap(True)
+        layout.addWidget(self.header_label)
+
+        self.sources_label = QtWidgets.QLabel("")
+        self.sources_label.setWordWrap(True)
+        self.sources_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.sources_label)
+
+        hint = QtWidgets.QLabel(
+            "Enter the total wire length shown in the video into "
+            f"'{VIDEO_END_LENGTH_COLUMN}'. The wire-piece length is computed automatically."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        form = QtWidgets.QFormLayout()
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(6)
+        for column in self._EDITABLE_ORDER:
+            if column == "Notes":
+                widget: QtWidgets.QWidget = QtWidgets.QPlainTextEdit(self)
+                cast_widget = cast(QtWidgets.QPlainTextEdit, widget)
+                cast_widget.setFixedHeight(90)
+            else:
+                widget = QtWidgets.QLineEdit(self)
+            self._field_widgets[column] = widget
+            form.addRow(column, widget)
+
+        self.computed_length_label = QtWidgets.QLabel("")
+        self.computed_length_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addRow(VIDEO_MW_LENGTH_COLUMN, self.computed_length_label)
+        layout.addLayout(form)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.reopen_button = QtWidgets.QPushButton("Reopen video")
+        self.reopen_button.clicked.connect(self._reopen_video)
+        button_row.addWidget(self.reopen_button)
+
+        self.apply_button = QtWidgets.QPushButton("Apply")
+        self.apply_button.clicked.connect(self.apply_changes)
+        button_row.addWidget(self.apply_button)
+
+        self.next_button = QtWidgets.QPushButton("Next video")
+        self.next_button.clicked.connect(self._open_next_video)
+        button_row.addWidget(self.next_button)
+
+        button_row.addStretch(1)
+
+        self.close_button = QtWidgets.QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        button_row.addWidget(self.close_button)
+        layout.addLayout(button_row)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if getattr(self.section, "_review_dialog", None) is self:
+            self.section._review_dialog = None
+        super().closeEvent(event)
+
+    def _series_for_current_row(self) -> Optional[pd.Series]:
+        row = self._current_source_row
+        if row is None:
+            return None
+        return self.section._row_series(row)
+
+    def load_source_row(self, source_row: int, *, open_video: bool = False) -> None:
+        self.apply_changes()
+        self._current_source_row = source_row
+        self.section._select_source_row(source_row)
+        series = self.section._row_series(source_row)
+        if series is None:
+            self.header_label.setText("Unable to load the selected row.")
+            self.sources_label.setText("")
+            return
+        composition = str(series.get("Composition") or "").strip()
+        microwire = str(series.get("Microwire") or "").strip()
+        self.header_label.setText(f"{composition} {microwire}".strip() or f"Row {source_row + 1}")
+        sources = self.section._row_sources(series)
+        if sources:
+            self.sources_label.setText("\n".join(str(path) for path in sources))
+        else:
+            self.sources_label.setText("No video file is currently matched to this row.")
+        for column, widget in self._field_widgets.items():
+            value = series.get(column)
+            text = "" if value is None or (isinstance(value, float) and math.isnan(value)) else str(value)
+            if isinstance(widget, QtWidgets.QPlainTextEdit):
+                blocker = QtCore.QSignalBlocker(widget)
+                widget.setPlainText(text)
+                del blocker
+            elif isinstance(widget, QtWidgets.QLineEdit):
+                blocker = QtCore.QSignalBlocker(widget)
+                widget.setText(text)
+                del blocker
+        computed_value = series.get(VIDEO_MW_LENGTH_COLUMN)
+        self.computed_length_label.setText("" if computed_value in (None, "") else str(computed_value))
+        self.reopen_button.setEnabled(bool(sources))
+        self.next_button.setEnabled(self.section._next_source_row_with_video(source_row) is not None)
+        if open_video:
+            self._reopen_video()
+
+    def apply_changes(self) -> bool:
+        source_row = self._current_source_row
+        if source_row is None:
+            return False
+        changed = False
+        for column, widget in self._field_widgets.items():
+            if isinstance(widget, QtWidgets.QPlainTextEdit):
+                value = widget.toPlainText()
+            elif isinstance(widget, QtWidgets.QLineEdit):
+                value = widget.text()
+            else:
+                continue
+            if self.section._set_source_row_value(source_row, column, value):
+                changed = True
+        updated_series = self.section._row_series(source_row)
+        if updated_series is not None:
+            computed_value = updated_series.get(VIDEO_MW_LENGTH_COLUMN)
+            self.computed_length_label.setText("" if computed_value in (None, "") else str(computed_value))
+        return changed
+
+    def _reopen_video(self) -> None:
+        source_row = self._current_source_row
+        if source_row is None:
+            return
+        opened, missing_paths, label = self.section._open_video_sources_for_row(source_row)
+        if opened:
+            return
+        details: List[str] = [f"No video found for: {label}"]
+        if missing_paths:
+            details.append("Missing files:\n" + "\n".join(str(path) for path in missing_paths[:5]))
+        QtWidgets.QMessageBox.warning(self, self.section.section_title, "\n\n".join(details))
+
+    def _open_next_video(self) -> None:
+        source_row = self._current_source_row
+        if source_row is None:
+            return
+        self.apply_changes()
+        next_row = self.section._next_source_row_with_video(source_row)
+        if next_row is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section.section_title,
+                "No next available video was found.",
+            )
+            return
+        self.load_source_row(next_row, open_video=True)
 
 
 class VsmHysteresisSection(MiniDatabaseSection):
