@@ -2795,6 +2795,19 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             if "." in text:
                 text = text.rstrip("0").rstrip(".")
             return text
+        if role == QtCore.Qt.ItemDataRole.DisplayRole and isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                try:
+                    numeric = float(stripped.replace(",", "."))
+                except ValueError:
+                    return stripped
+                if math.isfinite(numeric):
+                    text = f"{numeric:.3f}"
+                    if "." in text:
+                        text = text.rstrip("0").rstrip(".")
+                    return text
+            return stripped
         return str(value) if value is not None else ""
 
     def flags(self, index: QtCore.QModelIndex) -> QtCore.Qt.ItemFlags:  # type: ignore[override]
@@ -14658,9 +14671,10 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         )
         self.table.itemChanged.connect(self._handle_item_changed)
         self.table.itemActivated.connect(lambda *_args: self._advance_from_current_selection())
+        self.table.installEventFilter(self)
         header = self.table.horizontalHeader()
         if header is not None:
-            header.setStretchLastSection(False)
+            header.setStretchLastSection(True)
         self.table.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
@@ -14671,6 +14685,13 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         if getattr(self.section, "_review_dialog", None) is self:
             self.section._review_dialog = None
         super().closeEvent(event)
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if obj is self.table and event.type() == QtCore.QEvent.Type.KeyPress:
+            key_event = cast(QtGui.QKeyEvent, event)
+            if key_event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                QtCore.QTimer.singleShot(0, self._advance_from_current_selection)
+        return super().eventFilter(obj, event)
 
     def _series_for_current_row(self) -> Optional[pd.Series]:
         row = self._current_source_row
