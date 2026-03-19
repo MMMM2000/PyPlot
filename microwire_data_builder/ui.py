@@ -2791,7 +2791,10 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if isinstance(value, float):
             if math.isnan(value):
                 return ""
-            return f"{value:.4g}"
+            text = f"{value:.3f}"
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+            return text
         return str(value) if value is not None else ""
 
     def flags(self, index: QtCore.QModelIndex) -> QtCore.Qt.ItemFlags:  # type: ignore[override]
@@ -5624,6 +5627,30 @@ class _SectionWorker(QtCore.QObject):
                 pass
 
 
+class _CandidateCollectWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(object)
+
+    def __init__(self, section: "MiniDatabaseSection") -> None:
+        super().__init__()
+        self._section = section
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:  # pragma: no cover - runs in worker thread
+        try:
+            candidates = self._section._collect_candidates()
+        except Exception as exc:
+            try:
+                self.failed.emit(exc)
+            except Exception:
+                pass
+        else:
+            try:
+                self.finished.emit(candidates)
+            except Exception:
+                pass
+
+
 class _PendingScanWorker(QtCore.QObject):
     """Background worker that counts pending files for a section."""
 
@@ -6407,6 +6434,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         )
         self._worker_thread: QtCore.QThread | None = None
         self._worker: Optional["_SectionWorker"] = None
+        self._candidate_thread: QtCore.QThread | None = None
+        self._candidate_worker: Optional[_CandidateCollectWorker] = None
         self._active_candidates: List[Path] = []
         self._pending_count_cache: int | None = None
         self._pending_scan_in_progress = False
@@ -6603,6 +6632,35 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             current = table.columnWidth(idx)
             target = graph_width if graph_width > current else current
             if target > 0:
+                table.setColumnWidth(idx, target)
+
+        numeric_width_hints = {
+            VIDEO_END_LENGTH_COLUMN,
+            VIDEO_MW_LENGTH_COLUMN,
+            "Length (m)",
+            "Piece date",
+            "Resistance (Ω)",
+            CORE_TEMPERATURE_COLUMN,
+            GLASS_TEMPERATURE_COLUMN,
+            "Mass (g)",
+            "Winding speed (m/min)",
+            "Glass feeding (mm/min)",
+            "Underpressure",
+            "Production datetime",
+        }
+        try:
+            metrics = table.fontMetrics()
+        except Exception:
+            metrics = None
+        for idx, column_name in enumerate(frame.columns):
+            label = str(column_name)
+            if label not in numeric_width_hints:
+                continue
+            if metrics is None:
+                continue
+            target = max(90, metrics.horizontalAdvance(label) + 28)
+            current = table.columnWidth(idx)
+            if current > target:
                 table.setColumnWidth(idx, target)
 
         header = table.horizontalHeader()
@@ -6943,6 +7001,16 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             return
         self._cancel_requested = True
         self.stop_button.setEnabled(False)
+        candidate_thread = self._candidate_thread
+        if candidate_thread is not None:
+            try:
+                candidate_thread.requestInterruption()
+            except Exception:
+                pass
+            try:
+                candidate_thread.quit()
+            except Exception:
+                pass
         if self._progress_dialog is not None:
             self._progress_dialog.setRange(0, 0)
             self._progress_dialog.setLabelText("Cancelling...")
@@ -7441,21 +7509,6 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         return bool(self.data.extra)
 
     def refresh(self) -> None:
-        candidates = self._collect_candidates()
-        if not candidates:
-            self.log(f"{self.section_title}: no files found in connected folders.")
-            self.data.processed = {}
-            self.data.table = pd.DataFrame()
-            self.store.save(self.data)
-            self.model.set_frame(self.data.table)
-            self._auto_fit_columns()
-            self._update_status()
-            self._reset_progress_ui()
-            try:
-                self.data_updated.emit()
-            except Exception:
-                pass
-            return
         self._cancel_requested = False
         self.stop_button.setEnabled(True)
         owner = MiniDatabaseSection._processing_owner
@@ -7475,7 +7528,75 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self._reset_progress_ui()
             self.stop_button.setEnabled(False)
             return
+        self._start_progress(0)
+        try:
+            QtWidgets.QApplication.processEvents(
+                QtCore.QEventLoop.ProcessEventsFlag.AllEvents
+            )
+        except Exception:
+            pass
         MiniDatabaseSection._processing_owner = self
+        status_message = "Scanning files..."
+        self.status_label.setText(status_message)
+        try:
+            self.status_changed.emit(status_message)
+        except Exception:
+            pass
+        self._start_candidate_worker()
+
+    def _start_candidate_worker(self) -> None:
+        if self._candidate_thread is not None and self._candidate_thread.isRunning():
+            try:
+                self._candidate_thread.quit()
+                self._candidate_thread.wait(100)
+            except Exception:
+                pass
+        self._cleanup_candidate_thread()
+        thread = QtCore.QThread(self)
+        worker = _CandidateCollectWorker(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._handle_candidate_scan_finished)
+        worker.failed.connect(self._handle_candidate_scan_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._candidate_thread = thread
+        self._candidate_worker = worker
+        thread.start()
+
+    def _cleanup_candidate_thread(self) -> None:
+        thread = self._candidate_thread
+        self._candidate_thread = None
+        self._candidate_worker = None
+        if thread is None:
+            return
+        try:
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(100)
+        except Exception:
+            pass
+
+    def _handle_candidate_scan_finished(self, payload: object) -> None:
+        self._cleanup_candidate_thread()
+        candidates = [Path(path) for path in payload] if isinstance(payload, list) else []
+        if not candidates:
+            self.log(f"{self.section_title}: no files found in connected folders.")
+            self.data.processed = {}
+            self.data.table = pd.DataFrame()
+            self.store.save(self.data)
+            self.model.set_frame(self.data.table)
+            self._auto_fit_columns()
+            self._update_status()
+            self._reset_progress_ui()
+            self._release_processing()
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
+            return
         status_message = f"Processing {len(candidates)} file(s)."
         self.status_label.setText(status_message)
         try:
@@ -7484,6 +7605,22 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             pass
         self._start_progress(len(candidates))
         self._start_section_worker(candidates)
+
+    def _handle_candidate_scan_failed(self, exc: object) -> None:
+        self._cleanup_candidate_thread()
+        self._active_candidates = []
+        self._fail_progress()
+        if isinstance(exc, Exception):
+            self.logger.exception("%s candidate scan failed", self.section_title, exc_info=exc)
+            detail = str(exc) if str(exc) else exc.__class__.__name__
+        else:
+            self.logger.error("%s candidate scan failed: %s", self.section_title, exc)
+            detail = str(exc)
+        QtWidgets.QMessageBox.critical(
+            self,
+            self.section_title,
+            f"Failed to scan connected files:\\n{detail}",
+        )
 
     def _start_section_worker(self, candidates: List[Path]) -> None:
         self._active_candidates = list(candidates)
@@ -11837,7 +11974,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         )
         header = table.horizontalHeader()
         if header is not None:
-            header.setStretchLastSection(True)
+            header.setStretchLastSection(False)
             header.setSectionsMovable(True)
             header.setSectionsClickable(True)
         vertical_bar = table.verticalScrollBar()
@@ -13874,6 +14011,10 @@ class VideoSection(MiniDatabaseSection):
         self._video_source_status_cache.clear()
         self._apply_overrides_to_model()
         self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+        try:
+            self._auto_fit_columns()
+        except Exception:
+            pass
 
     @staticmethod
     def _is_missing(value: Any) -> bool:
@@ -13971,6 +14112,37 @@ class VideoSection(MiniDatabaseSection):
                     running += length_val
                     cumulative_map[(composition, draw, piece)] = running
         return cumulative_map
+
+    def _compute_video_range(
+        self,
+        row: pd.Series,
+        cumulative_map: Dict[Tuple[str, int, int], Optional[float]],
+    ) -> Optional[str]:
+        end_length = self._coerce_float(row.get(VIDEO_END_LENGTH_COLUMN))
+        if end_length is None:
+            return None
+        try:
+            composition = str(row.get("Composition") or "").strip()
+            draw = int(row.get("Draw"))
+            piece = int(row.get("Piece"))
+        except (TypeError, ValueError):
+            return None
+        cumulative_current = cumulative_map.get((composition, draw, piece))
+        if cumulative_current is None:
+            return None
+        length_value = self._coerce_float(row.get("Length (m)"))
+        if length_value is None:
+            return None
+        cumulative_previous = cumulative_current - length_value
+        start_value = end_length - cumulative_previous
+        end_value = end_length - cumulative_current
+        if not (math.isfinite(start_value) and math.isfinite(end_value)):
+            return None
+        low_value = min(start_value, end_value)
+        high_value = max(start_value, end_value)
+        low_int = int(round(low_value))
+        high_int = int(round(high_value))
+        return f"{low_int}-{high_int}"
 
     def _load_overrides(self) -> None:
         stored = self.data.extra.get("overrides")
@@ -14087,7 +14259,10 @@ class VideoSection(MiniDatabaseSection):
             else:
                 cumulative = cumulative_map.get((composition, draw, piece))
             updated.at[idx, "_cumulative_length_m"] = cumulative
-            updated.at[idx, VIDEO_MW_LENGTH_COLUMN] = self._compute_video_length(updated.loc[idx])
+            updated.at[idx, VIDEO_MW_LENGTH_COLUMN] = self._compute_video_range(
+                updated.loc[idx],
+                cumulative_map,
+            )
         return updated
 
     def _apply_overrides_to_model(self) -> None:
@@ -14315,7 +14490,7 @@ class VideoSection(MiniDatabaseSection):
                     if composition:
                         changed_draws.add((composition, draw))
             if VIDEO_END_LENGTH_COLUMN in columns or "Length (m)" in columns:
-                computed = self._compute_video_length(series)
+                computed = None
                 frame.at[row_idx, VIDEO_MW_LENGTH_COLUMN] = computed
                 bucket[VIDEO_MW_LENGTH_COLUMN] = computed
         if updated_any:
@@ -14354,8 +14529,9 @@ class VideoSection(MiniDatabaseSection):
                         continue
                     cumulative = cumulative_map.get((composition, draw, piece))
                     frame.at[idx, "_cumulative_length_m"] = cumulative
-                    frame.at[idx, VIDEO_MW_LENGTH_COLUMN] = self._compute_video_length(
-                        frame.loc[idx]
+                    frame.at[idx, VIDEO_MW_LENGTH_COLUMN] = self._compute_video_range(
+                        frame.loc[idx],
+                        cumulative_map,
                     )
             self.data.table = frame
             self._store_overrides()
@@ -14420,14 +14596,20 @@ class _VideoReviewDialog(QtWidgets.QDialog):
 
         self.reopen_button = QtWidgets.QPushButton("Reopen video")
         self.reopen_button.clicked.connect(self._reopen_video)
+        self.reopen_button.setAutoDefault(False)
+        self.reopen_button.setDefault(False)
         top_row.addWidget(self.reopen_button)
 
         self.next_button = QtWidgets.QPushButton("Next video")
         self.next_button.clicked.connect(self._open_next_video)
+        self.next_button.setAutoDefault(False)
+        self.next_button.setDefault(False)
         top_row.addWidget(self.next_button)
 
         self.close_button = QtWidgets.QPushButton("Close")
         self.close_button.clicked.connect(self.close)
+        self.close_button.setAutoDefault(False)
+        self.close_button.setDefault(False)
         top_row.addWidget(self.close_button)
 
         layout.addLayout(top_row)
@@ -14449,7 +14631,7 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         self.table.itemChanged.connect(self._handle_item_changed)
         header = self.table.horizontalHeader()
         if header is not None:
-            header.setStretchLastSection(True)
+            header.setStretchLastSection(False)
         self.table.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
@@ -25374,6 +25556,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         video = getattr(self, "video_section", None)
         if isinstance(video, MiniDatabaseSection):
             video.set_sources(sources)
+        if isinstance(video, VideoSection):
+            try:
+                video.sync_with_fabrication()
+            except Exception:
+                pass
 
     def _sync_microscope_dependent_sections(self) -> None:
         microscope = getattr(self, "microscope_section", None)

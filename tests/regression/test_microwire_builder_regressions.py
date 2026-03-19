@@ -125,14 +125,14 @@ def test_video_completion_colours_follow_missing_and_filled_cells() -> None:
             "Length (m)": None,
             "Winding speed (m/min)": 71.0,
             "Video end length (m)": None,
-            "Video microwire length (m)": None,
+            "Video wire range (m)": None,
             "_sources": list(source_key),
         }
     )
     filled_row = missing_row.copy()
     filled_row["Length (m)"] = 27.88
     filled_row["Video end length (m)"] = 42.0
-    filled_row["Video microwire length (m)"] = 14.12
+    filled_row["Video wire range (m)"] = "42-14"
 
     missing_bg = section._background_brush_for_cell(missing_row, "Length (m)")
     filled_bg = section._background_brush_for_cell(filled_row, "Length (m)")
@@ -403,8 +403,8 @@ def test_video_cumulative_length_uses_raw_fabrication_pieces_not_just_visible_ro
 
         updated = section._apply_overrides_to_table(frame)
 
-        assert float(updated.iloc[0][VIDEO_MW_LENGTH_COLUMN]) == 345.6
-        assert float(updated.iloc[1][VIDEO_MW_LENGTH_COLUMN]) == 275.6
+        assert updated.iloc[0][VIDEO_MW_LENGTH_COLUMN] == "346-396"
+        assert updated.iloc[1][VIDEO_MW_LENGTH_COLUMN] == "276-346"
     finally:
         fabrication_store.save(original_data)
         if original_raw is not None:

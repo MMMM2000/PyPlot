@@ -195,7 +195,7 @@ GLASS_TEMPERATURE_COLUMN = "Glass temperature (°C)"
 ESTIMATED_TRANSITION_COLUMN = "Tt est (°C)"
 GLASS_PULL_COLUMN = "Glass pull-off"
 VIDEO_END_LENGTH_COLUMN = "Video end length (m)"
-VIDEO_MW_LENGTH_COLUMN = "Video microwire length (m)"
+VIDEO_MW_LENGTH_COLUMN = "Video wire range (m)"
 
 OUTPUT_COLUMNS = [
     "Composition",
