@@ -319,6 +319,48 @@ def test_video_review_dialog_updates_total_length_and_advances(tmp_path: Path) -
         section.close()
 
 
+def test_video_end_length_propagates_to_all_rows_in_same_draw() -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = VideoSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "_group_key": "CompA|1|1",
+                    "_sources": [str(Path("C:/videos/one.mkv"))],
+                    "Length (m)": 6.0,
+                    VIDEO_END_LENGTH_COLUMN: None,
+                },
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/2",
+                    "Draw": 1,
+                    "Piece": 2,
+                    "_group_key": "CompA|1|2",
+                    "_sources": [str(Path("C:/videos/one.mkv"))],
+                    "Length (m)": 8.0,
+                    VIDEO_END_LENGTH_COLUMN: None,
+                },
+            ]
+        )
+        section.model.set_frame(frame)
+        section.data.table = frame.copy()
+        top_left = section.model.index(0, frame.columns.get_loc(VIDEO_END_LENGTH_COLUMN))
+        section.model.setData(top_left, "25.0")
+
+        updated = section.model.frame()
+        assert float(updated.iloc[0][VIDEO_END_LENGTH_COLUMN]) == 25.0
+        assert float(updated.iloc[1][VIDEO_END_LENGTH_COLUMN]) == 25.0
+    finally:
+        section.close()
+
+
 def test_video_section_filters_candidates_to_measured_wires(tmp_path: Path) -> None:
     section = VideoSection.__new__(VideoSection)
     candidates = [

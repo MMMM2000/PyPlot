@@ -14262,6 +14262,7 @@ class VideoSection(MiniDatabaseSection):
             return
         updated_any = False
         changed_draws: Set[Tuple[str, int]] = set()
+        shared_video_end_lengths: Dict[Tuple[str, int], Any] = {}
         for row_idx in range(top_left.row(), bottom_right.row() + 1):
             if row_idx < 0 or row_idx >= len(frame.index):
                 continue
@@ -14280,6 +14281,14 @@ class VideoSection(MiniDatabaseSection):
                 else:
                     bucket[column] = value
                 updated_any = True
+                if column == VIDEO_END_LENGTH_COLUMN:
+                    try:
+                        composition = str(series.get("Composition") or "").strip()
+                        draw = int(series.get("Draw"))
+                    except (TypeError, ValueError):
+                        continue
+                    if composition:
+                        shared_video_end_lengths[(composition, draw)] = value
                 if column in {"Length (m)", VIDEO_END_LENGTH_COLUMN}:
                     try:
                         composition = str(series.get("Composition") or "").strip()
@@ -14293,6 +14302,27 @@ class VideoSection(MiniDatabaseSection):
                 frame.at[row_idx, VIDEO_MW_LENGTH_COLUMN] = computed
                 bucket[VIDEO_MW_LENGTH_COLUMN] = computed
         if updated_any:
+            if shared_video_end_lengths:
+                for idx, row in frame.iterrows():
+                    try:
+                        composition = str(row.get("Composition") or "").strip()
+                        draw = int(row.get("Draw"))
+                    except (TypeError, ValueError):
+                        continue
+                    shared_value = shared_video_end_lengths.get((composition, draw))
+                    if (composition, draw) not in shared_video_end_lengths:
+                        continue
+                    key_raw = row.get("_group_key")
+                    key = str(key_raw).strip() if key_raw not in (None, "") else ""
+                    if not key:
+                        continue
+                    bucket = self._overrides.setdefault(key, {})
+                    if self._is_missing(shared_value):
+                        frame.at[idx, VIDEO_END_LENGTH_COLUMN] = None
+                        bucket[VIDEO_END_LENGTH_COLUMN] = None
+                    else:
+                        frame.at[idx, VIDEO_END_LENGTH_COLUMN] = shared_value
+                        bucket[VIDEO_END_LENGTH_COLUMN] = shared_value
             if changed_draws:
                 fabrication_frame = self._fabrication_table()
                 cumulative_map = self._build_cumulative_lengths(frame, fabrication_frame)
