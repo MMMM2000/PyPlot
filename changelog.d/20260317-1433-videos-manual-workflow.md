@@ -7,3 +7,4 @@
 - Added possible-source-mismatch suggestions for fabrication rows that still have no matched source files, and highlighted those rows red in the fabrication table.
 - Optimized large project loads by batching section imports in memory, suppressing per-section pending scans during restore, and fixed the proxy sort `numpy.bool` error.
 - Fixed Videos row actions after sorting/filtering and highlighted entire video rows red when no video source files are available.
+- Reworked the Videos review popup into a compact single-row editor with always-on-top behavior, inline total/video-piece length columns, and Enter-to-advance editing flow.

@@ -5860,19 +5860,13 @@ def _video_index_to_frame(
     rows: List[Dict[str, Any]] = []
     seen_keys: Set[Tuple[str, int, int]] = set()
     for (composition, draw, piece), summary in sorted(index.items()):
-        if piece is None and any(
-            key_comp == composition and key_draw == draw
-            for key_comp, key_draw, _key_piece in fabrication_lookup.keys()
-        ):
+        if piece is None:
             continue
         row: Dict[str, Any] = {column: None for column in columns}
         row["Composition"] = composition
         row["Draw"] = draw
         row["Piece"] = piece
-        if piece is None:
-            row["Microwire"] = f"{draw}/?"
-        else:
-            row["Microwire"] = _microwire_label(draw, piece, None)
+        row["Microwire"] = _microwire_label(draw, piece, None)
         ea_value = _compute_ea_from_composition(composition)
         row["e/a"] = ea_value
         row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(ea_value)
@@ -5899,10 +5893,7 @@ def _video_index_to_frame(
         if row.get("Glass feeding (mm/min)") in (None, ""):
             row["Glass feeding (mm/min)"] = summary.glass_feed()
         row["_sources"] = sorted(str(path) for path in getattr(summary, "sources", set()))
-        if piece is None:
-            row["_group_key"] = ""
-        else:
-            row["_group_key"] = _microwire_key_to_str((composition, draw, piece, None))
+        row["_group_key"] = _microwire_key_to_str((composition, draw, piece, None))
         rows.append(row)
     for (composition, draw, piece), fabrication_row in sorted(fabrication_lookup.items()):
         if (composition, draw, piece) in seen_keys:
@@ -14409,7 +14400,6 @@ class _VideoReviewDialog(QtWidgets.QDialog):
             | QtWidgets.QAbstractItemView.EditTrigger.AnyKeyPressed
         )
         self.table.itemChanged.connect(self._handle_item_changed)
-        self.table.itemActivated.connect(lambda *_args: self._open_next_video())
         header = self.table.horizontalHeader()
         if header is not None:
             header.setStretchLastSection(True)
@@ -14512,6 +14502,29 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         updated_series = self.section._row_series(source_row)
         if updated_series is not None:
             self._populate_table(updated_series)
+            self._advance_after_commit(item.column(), updated_series)
+
+    def _advance_after_commit(self, current_column: int, series: pd.Series) -> None:
+        next_column: Optional[int] = None
+        for column_index in range(current_column + 1, len(self._DISPLAY_COLUMNS)):
+            column, _label, editable = self._DISPLAY_COLUMNS[column_index]
+            if not editable:
+                continue
+            if self.section._is_missing(series.get(column)):
+                next_column = column_index
+                break
+        if next_column is None:
+            self.next_button.setFocus(QtCore.Qt.FocusReason.TabFocusReason)
+            return
+        try:
+            self.table.setCurrentCell(0, next_column)
+            self.table.scrollToItem(
+                self.table.item(0, next_column),
+                QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible,
+            )
+            self.table.editItem(self.table.item(0, next_column))
+        except Exception:
+            pass
 
     def _reopen_video(self) -> None:
         source_row = self._current_source_row
