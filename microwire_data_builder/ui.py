@@ -6921,7 +6921,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         if self._progress_total <= 0:
             dialog = QtWidgets.QProgressDialog("Scanning files...", None, 0, 0, self)
             dialog.setWindowTitle(self.section_title)
-            dialog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+            dialog.setWindowModality(QtCore.Qt.WindowModality.NonModal)
             dialog.setCancelButton(None)
             dialog.setMinimumDuration(0)
             dialog.setAutoClose(False)
@@ -6939,7 +6939,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self,
         )
         dialog.setWindowTitle(self.section_title)
-        dialog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        dialog.setWindowModality(QtCore.Qt.WindowModality.NonModal)
         dialog.setCancelButton(None)
         dialog.setMinimumDuration(0)
         dialog.setAutoClose(False)
@@ -11977,6 +11977,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
             header.setStretchLastSection(False)
             header.setSectionsMovable(True)
             header.setSectionsClickable(True)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         vertical_bar = table.verticalScrollBar()
         if vertical_bar is not None:
             vertical_bar.setSingleStep(MiniDatabaseSection._SCROLL_SINGLE_STEP)
@@ -13911,6 +13912,29 @@ class VideoSection(MiniDatabaseSection):
                 return row_idx
         return None
 
+    def _row_has_review_gaps(self, row: pd.Series) -> bool:
+        if self._row_missing_video_files(row):
+            return False
+        required_columns = [VIDEO_END_LENGTH_COLUMN, *[column for column in self._editable_columns() if column != VIDEO_END_LENGTH_COLUMN]]
+        for column in required_columns:
+            if self._is_missing(row.get(column)):
+                return True
+        return False
+
+    def _remaining_review_rows_after(self, current_row: int) -> int:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return 0
+        remaining = 0
+        for row_idx in range(current_row + 1, len(frame.index)):
+            try:
+                row = frame.iloc[row_idx]
+            except Exception:
+                continue
+            if self._row_has_review_gaps(row):
+                remaining += 1
+        return remaining
+
     def _set_source_row_value(self, source_row: int, column: str, value: Any) -> bool:
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or source_row < 0 or source_row >= len(frame.index):
@@ -14594,6 +14618,10 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         self.header_label.setWordWrap(False)
         top_row.addWidget(self.header_label, 1)
 
+        self.remaining_label = QtWidgets.QLabel("")
+        self.remaining_label.setWordWrap(False)
+        top_row.addWidget(self.remaining_label)
+
         self.reopen_button = QtWidgets.QPushButton("Reopen video")
         self.reopen_button.clicked.connect(self._reopen_video)
         self.reopen_button.setAutoDefault(False)
@@ -14629,6 +14657,7 @@ class _VideoReviewDialog(QtWidgets.QDialog):
             | QtWidgets.QAbstractItemView.EditTrigger.AnyKeyPressed
         )
         self.table.itemChanged.connect(self._handle_item_changed)
+        self.table.itemActivated.connect(lambda *_args: self._advance_from_current_selection())
         header = self.table.horizontalHeader()
         if header is not None:
             header.setStretchLastSection(False)
@@ -14659,6 +14688,8 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         composition = str(series.get("Composition") or "").strip()
         microwire = str(series.get("Microwire") or "").strip()
         self.header_label.setText(f"{composition} {microwire}".strip() or f"Row {source_row + 1}")
+        remaining = self.section._remaining_review_rows_after(source_row)
+        self.remaining_label.setText(f"{remaining} left")
         sources = self.section._row_sources(series)
         self._populate_table(series)
         self.reopen_button.setEnabled(bool(sources))
@@ -14754,6 +14785,15 @@ class _VideoReviewDialog(QtWidgets.QDialog):
             self.table.editItem(self.table.item(0, next_column))
         except Exception:
             pass
+
+    def _advance_from_current_selection(self) -> None:
+        current_column = self.table.currentColumn()
+        if current_column < 0:
+            return
+        series = self._series_for_current_row()
+        if series is None:
+            return
+        self._advance_after_commit(current_column, series)
 
     def _reopen_video(self) -> None:
         source_row = self._current_source_row
