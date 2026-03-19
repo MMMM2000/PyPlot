@@ -2982,7 +2982,10 @@ class _TableSearchProxyModel(QtCore.QSortFilterProxyModel):
             right_value = model.frame().iat[right.row(), right.column()]
         except Exception:
             return super().lessThan(left, right)
-        return model._sort_value(left_value) < model._sort_value(right_value)
+        try:
+            return bool(model._sort_value(left_value) < model._sort_value(right_value))
+        except Exception:
+            return super().lessThan(left, right)
 
 
 def _dimension_display(field: str, *records: Dict[str, Any]) -> Optional[str]:
@@ -6386,6 +6389,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     log_emitted = QtCore.pyqtSignal(int, str)
     _processing_owner: ClassVar[Optional["MiniDatabaseSection"]] = None
     _refresh_queue: ClassVar[List["MiniDatabaseSection"]] = []
+    _project_load_batch_mode: ClassVar[bool] = False
     _SCROLL_SINGLE_STEP = 12
 
     def __init__(
@@ -7250,6 +7254,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             message = "Connect one or more folders to begin."
             self.refresh_button.setEnabled(False)
             self._pending_count_cache = 0
+        elif self._project_load_batch_mode:
+            self.refresh_button.setEnabled(True)
+            if not self.data.table.empty:
+                message = f"Up to date ({len(self.data.table)} record(s))."
+            else:
+                message = "No processed data available yet."
         else:
             self.refresh_button.setEnabled(True)
             if pending_count is None:
@@ -7382,8 +7392,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
         self.data = MiniDatabaseData(sources=sources, processed=processed, table=frame, extra=extra)
         self.model.set_frame(frame)
+        self._pending_count_cache = 0
         self.store.save(self.data)
         self._populate_sources_list()
+        if self._project_load_batch_mode:
+            self._reset_progress_ui()
+            return
         self._auto_fit_columns()
         self._update_status()
         self._update_open_sources_enabled()
@@ -7631,6 +7645,7 @@ class FabricationSection(MiniDatabaseSection):
         self._table_splitter: QtWidgets.QSplitter | None = None
         self._separate_imported = False
         self._microscope_snapshot: pd.DataFrame | None = None
+        self._source_status_cache: Dict[Tuple[str, ...], bool] = {}
         super().__init__(logger, log_callback, parent)
         self._normalize_temperature_columns()
         self._hide_columns(["_source_paths", "_source_path"])
@@ -7952,7 +7967,7 @@ class FabricationSection(MiniDatabaseSection):
             piece_bucket.add(int(piece_value))
         return relevant, set(relevant.keys())
 
-    def _missing_data_entries(self) -> List[Dict[str, str]]:
+    def _missing_data_entries(self, *, include_possible_mismatch: bool = False) -> List[Dict[str, str]]:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return []
@@ -7983,11 +7998,9 @@ class FabricationSection(MiniDatabaseSection):
             if not missing_fields:
                 continue
             source_missing = self._row_missing_source_files(row)
-            possible_mismatch = (
-                ", ".join(_possible_source_mismatches(composition, self.data.sources))
-                if source_missing
-                else ""
-            )
+            possible_mismatch = ""
+            if include_possible_mismatch and source_missing:
+                possible_mismatch = ", ".join(_possible_source_mismatches(composition, self.data.sources))
             entries.append(
                 {
                     "Composition": composition,
@@ -8001,7 +8014,7 @@ class FabricationSection(MiniDatabaseSection):
         return entries
 
     def _show_missing_data_dialog(self) -> None:
-        entries = self._missing_data_entries()
+        entries = self._missing_data_entries(include_possible_mismatch=True)
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Fabrication Missing Data")
         dialog.resize(980, 640)
@@ -8324,6 +8337,7 @@ class FabricationSection(MiniDatabaseSection):
 
     def refresh(self) -> None:
         super().refresh()
+        self._source_status_cache.clear()
         if self._rebuild_table_from_raw_index():
             return
         table = self.data.table
@@ -8353,6 +8367,7 @@ class FabricationSection(MiniDatabaseSection):
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._source_status_cache.clear()
         self._normalize_temperature_columns()
         if self._rebuild_table_from_raw_index():
             return
@@ -8380,6 +8395,21 @@ class FabricationSection(MiniDatabaseSection):
                 continue
         return sources
 
+    def _source_paths_exist(self, sources: Sequence[Path]) -> bool:
+        key = tuple(str(path) for path in sources)
+        if key in self._source_status_cache:
+            return self._source_status_cache[key]
+        exists = False
+        for path in sources:
+            try:
+                if path.exists():
+                    exists = True
+                    break
+            except OSError:
+                continue
+        self._source_status_cache[key] = exists
+        return exists
+
     def _row_missing_source_files(self, row: pd.Series) -> bool:
         data_source = str(row.get("Data source") or "").strip()
         if "Imported" in data_source:
@@ -8387,13 +8417,7 @@ class FabricationSection(MiniDatabaseSection):
         sources = self._row_sources(row)
         if not sources:
             return True
-        for path in sources:
-            try:
-                if path.exists():
-                    return False
-            except OSError:
-                continue
-        return True
+        return not self._source_paths_exist(sources)
 
     def _background_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
         if self._row_missing_source_files(row):
@@ -13467,6 +13491,7 @@ class VideoSection(MiniDatabaseSection):
     ) -> None:
         self._overrides: Dict[str, Dict[str, Any]] = {}
         self._fabrication_lookup_cache: Dict[str, Mapping[str, Any]] = {}
+        self._video_source_status_cache: Dict[Tuple[str, ...], bool] = {}
         super().__init__(logger, log_callback, parent)
         self.source_button.hide()
         self.refresh_button.setText("Refresh videos")
@@ -13679,6 +13704,27 @@ class VideoSection(MiniDatabaseSection):
                     continue
         return sources
 
+    def _source_paths_exist(self, sources: Sequence[Path]) -> bool:
+        key = tuple(str(path) for path in sources)
+        if key in self._video_source_status_cache:
+            return self._video_source_status_cache[key]
+        exists = False
+        for path in sources:
+            try:
+                if path.exists():
+                    exists = True
+                    break
+            except OSError:
+                continue
+        self._video_source_status_cache[key] = exists
+        return exists
+
+    def _row_missing_video_files(self, row: pd.Series) -> bool:
+        sources = self._row_sources(row)
+        if not sources:
+            return True
+        return not self._source_paths_exist(sources)
+
     def _selected_rows(self) -> List[int]:
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return []
@@ -13688,7 +13734,13 @@ class VideoSection(MiniDatabaseSection):
         indexes = selection.selectedIndexes()
         if not indexes:
             return []
-        rows = {index.row() for index in indexes if index.isValid()}
+        rows: Set[int] = set()
+        for index in indexes:
+            if not index.isValid():
+                continue
+            source_row = self._search_proxy.map_row_to_source(index.row())
+            if source_row is not None:
+                rows.add(source_row)
         return sorted(rows)
 
     def _update_open_sources_enabled(self) -> None:
@@ -13749,6 +13801,7 @@ class VideoSection(MiniDatabaseSection):
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._video_source_status_cache.clear()
         self._load_overrides()
         self._normalize_temperature_columns()
         self._apply_overrides_to_model()
@@ -13756,11 +13809,13 @@ class VideoSection(MiniDatabaseSection):
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
+        self._video_source_status_cache.clear()
         self._normalize_temperature_columns()
         self._apply_overrides_to_model()
         self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
 
     def sync_with_fabrication(self) -> None:
+        self._video_source_status_cache.clear()
         self._apply_overrides_to_model()
         self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
 
@@ -13886,6 +13941,8 @@ class VideoSection(MiniDatabaseSection):
         self._fabrication_lookup_cache = lookup
 
     def _completion_state(self, row: pd.Series, column: str) -> Optional[bool]:
+        if self._row_missing_video_files(row):
+            return None
         key_raw = row.get("_group_key")
         key = str(key_raw).strip() if key_raw not in (None, "") else ""
         if column == VIDEO_END_LENGTH_COLUMN:
@@ -13905,12 +13962,16 @@ class VideoSection(MiniDatabaseSection):
         return not self._is_missing(row.get(column))
 
     def _background_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        if self._row_missing_video_files(row):
+            return QtGui.QBrush(QtGui.QColor("#3a0a0a"))
         state = self._completion_state(row, column)
         if state is None:
             return None
         return QtGui.QBrush(QtGui.QColor("#0f3b26" if state else "#3a0a0a"))
 
     def _foreground_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        if self._row_missing_video_files(row):
+            return QtGui.QBrush(QtGui.QColor("#ffd6d6"))
         state = self._completion_state(row, column)
         if state is None:
             return None
@@ -25869,29 +25930,32 @@ class BuilderWindow(QtWidgets.QMainWindow):
             if not isinstance(sections_payload, Mapping):
                 sections_payload = {}
 
-            for index, (key, section) in enumerate(self.sections.items(), start=1):
-                label = getattr(section, "section_title", key)
-                _pump_events(index - 1, f"Loading {label}…")
-                importer = getattr(section, "import_project_payload", None)
-                if callable(importer):
-                    if isinstance(section, MiniDatabaseSection):
-                        section.reset_to_blank()
-                    section_payload = sections_payload.get(key)
-                    try:
-                        importer(section_payload or {})
-                    except Exception as exc:
-                        self.logger.error("Failed to load section %s from project: %s", key, exc)
-                _pump_events(index)
+            MiniDatabaseSection._project_load_batch_mode = True
+            with MiniDatabaseStore.suspend_disk_writes():
+                for index, (key, section) in enumerate(self.sections.items(), start=1):
+                    label = getattr(section, "section_title", key)
+                    _pump_events(index - 1, f"Loading {label}…")
+                    importer = getattr(section, "import_project_payload", None)
+                    if callable(importer):
+                        if isinstance(section, MiniDatabaseSection):
+                            section.reset_to_blank()
+                        section_payload = sections_payload.get(key)
+                        try:
+                            importer(section_payload or {})
+                        except Exception as exc:
+                            self.logger.error("Failed to load section %s from project: %s", key, exc)
+                    _pump_events(index)
 
-            assembly_payload = sections_payload.get("assemble")
-            assembly = getattr(self, "assembly_section", None)
-            if assembly is not None:
-                importer = getattr(assembly, "import_project_payload", None)
-                if callable(importer):
-                    try:
-                        importer(assembly_payload or {})
-                    except Exception as exc:
-                        self.logger.error("Failed to load section assemble: %s", exc)
+                assembly_payload = sections_payload.get("assemble")
+                assembly = getattr(self, "assembly_section", None)
+                if assembly is not None:
+                    importer = getattr(assembly, "import_project_payload", None)
+                    if callable(importer):
+                        try:
+                            importer(assembly_payload or {})
+                        except Exception as exc:
+                            self.logger.error("Failed to load section assemble: %s", exc)
+            MiniDatabaseSection._project_load_batch_mode = False
             self._update_imported_data_item()
             if isinstance(assembly, AssemblySection):
                 show_imported = getattr(assembly, "_show_imported", True)
@@ -25932,6 +25996,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 f"Failed to load project file:\n{exc}",
             )
         finally:
+            MiniDatabaseSection._project_load_batch_mode = False
             self._suppress_dirty = False
             if progress_dialog is not None:
                 try:
@@ -25944,6 +26009,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
     def _refresh_sections_after_project_load(self) -> None:
         for key, section in self.sections.items():
+            if isinstance(section, MiniDatabaseSection):
+                try:
+                    section._pending_count_cache = 0
+                    section._reset_progress_ui()
+                    section._update_status()
+                    section._update_open_sources_enabled()
+                except Exception:
+                    pass
             status_text = ""
             status_label = getattr(section, "status_label", None)
             if isinstance(status_label, QtWidgets.QLabel):

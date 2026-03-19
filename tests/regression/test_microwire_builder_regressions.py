@@ -4,12 +4,15 @@ import logging
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 from PyQt6 import QtCore, QtWidgets
 
 from microwire_data_builder.ui import (
     AssemblySection,
+    DataFrameModel,
     FabricationSection,
     VideoSection,
+    _TableSearchProxyModel,
     _possible_source_mismatches,
     _row_to_microwire_key,
 )
@@ -106,6 +109,8 @@ def test_video_completion_colours_follow_missing_and_filled_cells() -> None:
             "Winding speed (m/min)": 71.0,
         }
     }
+    source_key = (str(Path("C:/videos/source.mkv")),)
+    section._video_source_status_cache = {source_key: True}
 
     missing_row = pd.Series(
         {
@@ -117,6 +122,7 @@ def test_video_completion_colours_follow_missing_and_filled_cells() -> None:
             "Winding speed (m/min)": 71.0,
             "Video end length (m)": None,
             "Video microwire length (m)": None,
+            "_sources": list(source_key),
         }
     )
     filled_row = missing_row.copy()
@@ -131,6 +137,26 @@ def test_video_completion_colours_follow_missing_and_filled_cells() -> None:
     assert missing_bg is not None and missing_bg.color().name() == "#3a0a0a"
     assert filled_bg is not None and filled_bg.color().name() == "#0f3b26"
     assert end_bg is not None and end_bg.color().name() == "#0f3b26"
+
+
+def test_video_missing_sources_highlight_whole_row_red() -> None:
+    section = VideoSection.__new__(VideoSection)
+    section._overrides = {}
+    section._fabrication_lookup_cache = {}
+    section._video_source_status_cache = {}
+    row = pd.Series(
+        {
+            "Composition": "Mn58.1Ni4.3Si18.5Sn18.8",
+            "Microwire": "3/2",
+            "_sources": [],
+        }
+    )
+
+    background = section._background_brush_for_cell(row, "Composition")
+    foreground = section._foreground_brush_for_cell(row, "Composition")
+
+    assert background is not None and background.color().name() == "#3a0a0a"
+    assert foreground is not None and foreground.color().name() == "#ffd6d6"
 
 
 def test_video_section_open_button_enables_and_opens_selected_sources(tmp_path: Path) -> None:
@@ -174,6 +200,57 @@ def test_video_section_open_button_enables_and_opens_selected_sources(tmp_path: 
         section.close()
 
 
+def test_video_section_selection_maps_proxy_rows_back_to_source_rows(tmp_path: Path) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = VideoSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        first = tmp_path / "first.mkv"
+        second = tmp_path / "second.mkv"
+        first.write_bytes(b"video")
+        second.write_bytes(b"video")
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "BComp",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "_group_key": "BComp|1|1",
+                    "_sources": [str(first)],
+                },
+                {
+                    "Composition": "AComp",
+                    "Microwire": "1/2",
+                    "Draw": 1,
+                    "Piece": 2,
+                    "_group_key": "AComp|1|2",
+                    "_sources": [str(second)],
+                },
+            ]
+        )
+        section.model.set_frame(frame)
+        section._video_source_status_cache.clear()
+        section.table_view.sortByColumn(0, QtCore.Qt.SortOrder.AscendingOrder)
+        app.processEvents()
+
+        proxy_index = section._search_proxy.index(0, 0)
+        assert proxy_index.isValid()
+        section.table_view.selectionModel().select(
+            proxy_index,
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
+        )
+        opened: list[Path] = []
+        section._open_file = lambda path: opened.append(Path(path)) or True  # type: ignore[method-assign]
+
+        section._open_selected_sources()
+
+        assert opened == [second]
+    finally:
+        section.close()
+
+
 def test_video_section_filters_candidates_to_measured_wires(tmp_path: Path) -> None:
     section = VideoSection.__new__(VideoSection)
     candidates = [
@@ -192,6 +269,7 @@ def test_video_section_filters_candidates_to_measured_wires(tmp_path: Path) -> N
 
 def test_fabrication_rows_with_missing_source_files_highlight_red() -> None:
     section = FabricationSection.__new__(FabricationSection)
+    section._source_status_cache = {}
     row = pd.Series(
         {
             "Composition": "Ni48Fe25Ga23Co4",
@@ -218,3 +296,13 @@ def test_possible_source_mismatches_suggests_nearby_folders(tmp_path: Path) -> N
     )
 
     assert "Ni54Fe17Ga27Co2" in matches
+
+
+def test_table_search_proxy_less_than_returns_python_bool() -> None:
+    model = DataFrameModel(pd.DataFrame({"Value": [np.float64(2.0), np.float64(1.0)]}))
+    proxy = _TableSearchProxyModel()
+    proxy.setSourceModel(model)
+
+    result = proxy.lessThan(model.index(0, 0), model.index(1, 0))
+
+    assert isinstance(result, bool)
