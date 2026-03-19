@@ -13916,7 +13916,24 @@ class VideoSection(MiniDatabaseSection):
         fabrication_frame: Optional[pd.DataFrame],
     ) -> Dict[Tuple[str, int, int], Optional[float]]:
         lengths: Dict[Tuple[str, int, int], Optional[float]] = {}
-        if isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty:
+        try:
+            raw_index = MiniDatabaseStore("fabrication").load_payload("fabrication_index_raw")
+        except Exception:
+            raw_index = None
+        if isinstance(raw_index, FabricationIndex):
+            for (composition, draw, piece), piece_data in raw_index.piece_level.items():
+                composition_key = str(composition).strip()
+                if not composition_key:
+                    continue
+                try:
+                    draw_int = int(draw)
+                    piece_int = int(piece)
+                except (TypeError, ValueError):
+                    continue
+                lengths[(composition_key, draw_int, piece_int)] = self._coerce_float(
+                    piece_data.get("length_m") if isinstance(piece_data, dict) else None
+                )
+        elif isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty:
             for _, row in fabrication_frame.iterrows():
                 composition = str(row.get("Composition") or "").strip()
                 if not composition or composition == "Imported data:":
@@ -26367,6 +26384,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 sources = section.data.sources
             self._handle_section_sources_changed(key, sources)
         self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+        try:
+            self.video_section.sync_with_fabrication()
+        except Exception:
+            pass
 
     def _remember_project_directory(self, directory: Path) -> None:
         try:

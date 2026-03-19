@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from PyQt6 import QtCore, QtWidgets
 
+from microwire_data_builder import ui as builder_ui
 from microwire_data_builder.ui import (
     AssemblySection,
     DataFrameModel,
@@ -358,6 +359,58 @@ def test_video_end_length_propagates_to_all_rows_in_same_draw() -> None:
         assert float(updated.iloc[0][VIDEO_END_LENGTH_COLUMN]) == 25.0
         assert float(updated.iloc[1][VIDEO_END_LENGTH_COLUMN]) == 25.0
     finally:
+        section.close()
+
+
+def test_video_cumulative_length_uses_raw_fabrication_pieces_not_just_visible_rows() -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = VideoSection(logging.getLogger("test"), lambda *_args: None)
+    fabrication_store = builder_ui.MiniDatabaseStore("fabrication")
+    original_data = fabrication_store.load()
+    original_raw = fabrication_store.load_payload("fabrication_index_raw")
+    try:
+        raw_index = builder_ui.FabricationIndex()
+        for piece, length in ((1, 10.0), (2, 20.0), (3, 30.0), (4, 40.0), (5, 50.0), (10, 70.0)):
+            raw_index.set_piece("CompA", 1, piece, {"length_m": length})
+        fabrication_store.save_payload("fabrication_index_raw", raw_index)
+
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/5",
+                    "Draw": 1,
+                    "Piece": 5,
+                    "_group_key": "CompA|1|5",
+                    "_sources": [str(Path("C:/videos/one.mkv"))],
+                    "Length (m)": 50.0,
+                    VIDEO_END_LENGTH_COLUMN: 495.6,
+                },
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/10",
+                    "Draw": 1,
+                    "Piece": 10,
+                    "_group_key": "CompA|1|10",
+                    "_sources": [str(Path("C:/videos/one.mkv"))],
+                    "Length (m)": 70.0,
+                    VIDEO_END_LENGTH_COLUMN: 495.6,
+                },
+            ]
+        )
+
+        updated = section._apply_overrides_to_table(frame)
+
+        assert float(updated.iloc[0][VIDEO_MW_LENGTH_COLUMN]) == 345.6
+        assert float(updated.iloc[1][VIDEO_MW_LENGTH_COLUMN]) == 275.6
+    finally:
+        fabrication_store.save(original_data)
+        if original_raw is not None:
+            fabrication_store.save_payload("fabrication_index_raw", original_raw)
+        else:
+            fabrication_store.clear_payload("fabrication_index_raw")
         section.close()
 
 
