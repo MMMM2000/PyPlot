@@ -810,6 +810,13 @@ def _format_duration(seconds: float) -> str:
     return f"{sec:d}s"
 
 
+def _format_display_numeric(value: float) -> str:
+    text = f"{value:.3f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
 class QtLogHandler(logging.Handler):
     """Logging handler that forwards records to a Qt slot."""
 
@@ -2791,10 +2798,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if isinstance(value, float):
             if math.isnan(value):
                 return ""
-            text = f"{value:.3f}"
-            if "." in text:
-                text = text.rstrip("0").rstrip(".")
-            return text
+            return _format_display_numeric(value)
         if role == QtCore.Qt.ItemDataRole.DisplayRole and isinstance(value, str):
             stripped = value.strip()
             if stripped:
@@ -2803,10 +2807,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
                 except ValueError:
                     return stripped
                 if math.isfinite(numeric):
-                    text = f"{numeric:.3f}"
-                    if "." in text:
-                        text = text.rstrip("0").rstrip(".")
-                    return text
+                    return _format_display_numeric(numeric)
             return stripped
         return str(value) if value is not None else ""
 
@@ -13856,6 +13857,7 @@ class VideoSection(MiniDatabaseSection):
     def refresh(self) -> None:
         super().refresh()
         self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
+        QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
     def _row_sources(self, row: pd.Series) -> List[Path]:
         sources: List[Path] = []
@@ -14049,6 +14051,7 @@ class VideoSection(MiniDatabaseSection):
         self._normalize_temperature_columns()
         self._apply_overrides_to_model()
         self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
+        QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
@@ -14056,15 +14059,26 @@ class VideoSection(MiniDatabaseSection):
         self._normalize_temperature_columns()
         self._apply_overrides_to_model()
         self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
+        QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
     def sync_with_fabrication(self) -> None:
         self._video_source_status_cache.clear()
         self._apply_overrides_to_model()
         self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
+        QtCore.QTimer.singleShot(0, self._autosize_video_table)
+
+    def _autosize_video_table(self) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
         try:
-            self._auto_fit_columns()
+            header = self.table_view.horizontalHeader()
+            if header is not None:
+                header.setStretchLastSection(False)
+                header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            self.table_view.resizeColumnsToContents()
         except Exception:
-            pass
+            return
+        self._auto_fit_columns()
 
     @staticmethod
     def _is_missing(value: Any) -> bool:
@@ -14624,6 +14638,7 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         self.section = section
         self._current_source_row: Optional[int] = None
         self._updating_table = False
+        self._advance_scheduled = False
         self.setWindowTitle("Video review")
         self.setWindowFlags(
             QtCore.Qt.WindowType.Window
@@ -14682,7 +14697,6 @@ class _VideoReviewDialog(QtWidgets.QDialog):
             | QtWidgets.QAbstractItemView.EditTrigger.AnyKeyPressed
         )
         self.table.itemChanged.connect(self._handle_item_changed)
-        self.table.itemActivated.connect(lambda *_args: self._advance_from_current_selection())
         self.table.installEventFilter(self)
         header = self.table.horizontalHeader()
         if header is not None:
@@ -14702,7 +14716,7 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         if obj is self.table and event.type() == QtCore.QEvent.Type.KeyPress:
             key_event = cast(QtGui.QKeyEvent, event)
             if key_event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
-                QtCore.QTimer.singleShot(0, self._advance_from_current_selection)
+                self._schedule_advance_from_current_selection()
         return super().eventFilter(obj, event)
 
     def _series_for_current_row(self) -> Optional[pd.Series]:
@@ -14735,7 +14749,23 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         try:
             for column_index, (column, _label, editable) in enumerate(self._DISPLAY_COLUMNS):
                 value = series.get(column)
-                text = "" if value is None or (isinstance(value, float) and math.isnan(value)) else str(value)
+                if value is None or (isinstance(value, float) and math.isnan(value)):
+                    text = ""
+                elif isinstance(value, (int, float)):
+                    text = _format_display_numeric(float(value))
+                elif isinstance(value, str):
+                    stripped = value.strip()
+                    if stripped:
+                        try:
+                            numeric = float(stripped.replace(",", "."))
+                        except ValueError:
+                            text = stripped
+                        else:
+                            text = _format_display_numeric(numeric) if math.isfinite(numeric) else stripped
+                    else:
+                        text = ""
+                else:
+                    text = str(value)
                 item = self.table.item(0, column_index)
                 if item is None:
                     item = QtWidgets.QTableWidgetItem()
@@ -14795,7 +14825,6 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         updated_series = self.section._row_series(source_row)
         if updated_series is not None:
             self._populate_table(updated_series)
-            self._advance_after_commit(item.column(), updated_series)
 
     def _advance_after_commit(self, current_column: int, series: pd.Series) -> None:
         next_column: Optional[int] = None
@@ -14818,6 +14847,17 @@ class _VideoReviewDialog(QtWidgets.QDialog):
             self.table.editItem(self.table.item(0, next_column))
         except Exception:
             pass
+
+    def _schedule_advance_from_current_selection(self) -> None:
+        if self._advance_scheduled:
+            return
+        self._advance_scheduled = True
+
+        def _run() -> None:
+            self._advance_scheduled = False
+            self._advance_from_current_selection()
+
+        QtCore.QTimer.singleShot(0, _run)
 
     def _advance_from_current_selection(self) -> None:
         current_column = self.table.currentColumn()
