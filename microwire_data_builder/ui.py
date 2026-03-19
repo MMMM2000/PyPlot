@@ -6658,10 +6658,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 continue
             if metrics is None:
                 continue
-            target = max(90, metrics.horizontalAdvance(label) + 28)
+            header_target = max(90, metrics.horizontalAdvance(label) + 28)
             current = table.columnWidth(idx)
-            if current > target:
-                table.setColumnWidth(idx, target)
+            desired = max(header_target, min(current, 200))
+            table.setColumnWidth(idx, desired)
 
         header = table.horizontalHeader()
         v_header = table.verticalHeader()
