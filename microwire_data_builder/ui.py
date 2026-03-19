@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import difflib
 import faulthandler
 import html
 import io
@@ -100,7 +101,7 @@ from .core import (
     _load_annealing,
     _resistance_sanity_check,
     _group_microscope_measurements,
-    _collect_video_metrics,
+    _collect_video_sources,
     _microwire_label,
     _microwire_parts_from_label,
     _microwire_tuple_from_label,
@@ -807,6 +808,13 @@ def _format_duration(seconds: float) -> str:
     if minutes:
         return f"{minutes:d}m {sec:02d}s"
     return f"{sec:d}s"
+
+
+def _format_display_numeric(value: float) -> str:
+    text = f"{value:.3f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
 
 
 class QtLogHandler(logging.Handler):
@@ -2790,7 +2798,17 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if isinstance(value, float):
             if math.isnan(value):
                 return ""
-            return f"{value:.4g}"
+            return _format_display_numeric(value)
+        if role == QtCore.Qt.ItemDataRole.DisplayRole and isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                try:
+                    numeric = float(stripped.replace(",", "."))
+                except ValueError:
+                    return stripped
+                if math.isfinite(numeric):
+                    return _format_display_numeric(numeric)
+            return stripped
         return str(value) if value is not None else ""
 
     def flags(self, index: QtCore.QModelIndex) -> QtCore.Qt.ItemFlags:  # type: ignore[override]
@@ -2981,7 +2999,10 @@ class _TableSearchProxyModel(QtCore.QSortFilterProxyModel):
             right_value = model.frame().iat[right.row(), right.column()]
         except Exception:
             return super().lessThan(left, right)
-        return model._sort_value(left_value) < model._sort_value(right_value)
+        try:
+            return bool(model._sort_value(left_value) < model._sort_value(right_value))
+        except Exception:
+            return super().lessThan(left, right)
 
 
 def _dimension_display(field: str, *records: Dict[str, Any]) -> Optional[str]:
@@ -3011,9 +3032,8 @@ def _dimension_display(field: str, *records: Dict[str, Any]) -> Optional[str]:
         return None
     return "\n".join(values)
 
-
-def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
-    columns = [
+def _fabrication_frame_columns() -> List[str]:
+    return [
         "Composition",
         "Data source",
         "e/a",
@@ -3037,9 +3057,143 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         "Production datetime",
         "_source_paths",
     ]
+
+
+def _fabrication_row_from_records(
+    composition: str,
+    draw: int,
+    piece: int,
+    piece_record: Optional[Mapping[str, Any]],
+    draw_record: Optional[Mapping[str, Any]],
+    *,
+    columns: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    row_columns = list(columns) if columns is not None else _fabrication_frame_columns()
+    row: Dict[str, Any] = {column: None for column in row_columns}
+    piece_record_map = piece_record if isinstance(piece_record, Mapping) else {}
+    draw_record_map = draw_record if isinstance(draw_record, Mapping) else {}
+    row["Composition"] = composition
+    row["Data source"] = None
+    ea_value = _compute_ea_from_composition(composition)
+    row["e/a"] = ea_value
+    row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(ea_value)
+    row["Draw"] = draw
+    row["Piece"] = piece
+    row["Length (m)"] = _value_for_output(piece_record_map, "length_m")
+    row["Piece date"] = _value_for_output(piece_record_map, "piece_date")
+    row[MICROSCOPE_D_COLUMN] = _dimension_display("d_um", piece_record_map, draw_record_map)
+    row[MICROSCOPE_CAP_D_COLUMN] = _dimension_display("D_um", piece_record_map, draw_record_map)
+    row["d/D"] = _dimension_display("d_over_D", piece_record_map, draw_record_map)
+    piece_resistance = _value_for_output(piece_record_map, "fabrication_resistance_ohm")
+    draw_resistance = _value_for_output(draw_record_map, "fabrication_resistance_ohm")
+    row["Resistance (Ω)"] = piece_resistance if piece_resistance is not None else draw_resistance
+    row[CORE_TEMPERATURE_COLUMN] = _value_for_output(
+        draw_record_map,
+        "fabrication_temperature_c",
+    )
+    row[GLASS_TEMPERATURE_COLUMN] = _value_for_output(
+        draw_record_map,
+        "fabrication_glass_temperature_c",
+    )
+    row["Mass (g)"] = _value_for_output(draw_record_map, "mass_g")
+    row["Winding speed (m/min)"] = _value_for_output(draw_record_map, "winding_speed_m_per_min")
+    row["Glass feeding (mm/min)"] = _value_for_output(draw_record_map, "glass_feed_mm_per_min")
+    row["Underpressure"] = _value_for_output(draw_record_map, "underpressure")
+    pull_value = _value_for_output(piece_record_map, "glass_pull_off")
+    if pull_value is None:
+        pull_value = _value_for_output(draw_record_map, "glass_pull_off")
+    row[GLASS_PULL_COLUMN] = pull_value
+    row["Notes"] = _compose_notes(draw_record_map, piece_record_map)
+    row["Production datetime"] = _value_for_output(draw_record_map, "production_datetime")
+    sources: List[str] = []
+    for record in (piece_record_map, draw_record_map):
+        path_value = record.get("_source_path") if isinstance(record, Mapping) else None
+        if not path_value:
+            continue
+        try:
+            resolved = str(Path(path_value))
+        except Exception:
+            resolved = str(path_value)
+        if resolved and resolved not in sources:
+            sources.append(resolved)
+    row["_source_paths"] = sources
+    if any("Imported" in source for source in sources):
+        row["Data source"] = "Imported"
+    elif sources:
+        row["Data source"] = "Measured"
+    return row
+
+
+def _is_blank(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    try:
+        return bool(pd.isna(value))
+    except Exception:
+        return False
+
+
+def _normalise_match_token(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+def _possible_source_mismatches(
+    composition: str,
+    source_roots: Iterable[str],
+    *,
+    limit: int = 3,
+) -> List[str]:
+    target = _normalise_match_token(composition)
+    if not target:
+        return []
+    scored: List[Tuple[float, str]] = []
+    seen: Set[str] = set()
+    for source in source_roots:
+        root = Path(source).expanduser()
+        if not root.exists():
+            continue
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir():
+                continue
+            candidate_name = str(child.name)
+            if candidate_name in seen:
+                continue
+            candidate_norm = _normalise_match_token(candidate_name)
+            if not candidate_norm:
+                continue
+            score = difflib.SequenceMatcher(None, target, candidate_norm).ratio()
+            if target in candidate_norm or candidate_norm in target:
+                score = max(score, 0.95)
+            if score < 0.82:
+                continue
+            seen.add(candidate_name)
+            scored.append((score, candidate_name))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [name for _score, name in scored[:limit]]
+
+
+def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
+    columns = _fabrication_frame_columns()
     rows: List[Dict[str, Any]] = []
     for (composition, draw, piece), piece_record in sorted(index.piece_level.items()):
         draw_record = index.get_draw(composition, draw)
+        rows.append(
+            _fabrication_row_from_records(
+                composition,
+                draw,
+                piece,
+                piece_record,
+                draw_record,
+                columns=columns,
+            )
+        )
+        continue
         row: Dict[str, Any] = {column: None for column in columns}
         row["Composition"] = composition
         row["Data source"] = None
@@ -5487,6 +5641,30 @@ class _SectionWorker(QtCore.QObject):
                 pass
 
 
+class _CandidateCollectWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(object)
+
+    def __init__(self, section: "MiniDatabaseSection") -> None:
+        super().__init__()
+        self._section = section
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:  # pragma: no cover - runs in worker thread
+        try:
+            candidates = self._section._collect_candidates()
+        except Exception as exc:
+            try:
+                self.failed.emit(exc)
+            except Exception:
+                pass
+        else:
+            try:
+                self.finished.emit(candidates)
+            except Exception:
+                pass
+
+
 class _PendingScanWorker(QtCore.QObject):
     """Background worker that counts pending files for a section."""
 
@@ -5685,6 +5863,11 @@ def _video_index_to_frame(
             "Notes",
             "Production datetime",
         ]
+    for column in _fabrication_frame_columns():
+        if str(column).startswith("_"):
+            continue
+        if column not in base_columns:
+            base_columns.append(column)
     if "Microwire" not in base_columns:
         base_columns.insert(1, "Microwire")
     if "Draw" not in base_columns:
@@ -5708,17 +5891,23 @@ def _video_index_to_frame(
             except (TypeError, ValueError):
                 continue
             fabrication_lookup[(composition, draw, piece)] = row
+    piece_summaries: Dict[Tuple[str, int, int], VideoMetricsSummary] = {}
+    draw_summaries: Dict[Tuple[str, int], VideoMetricsSummary] = {}
+    for (composition, draw, piece), summary in sorted(index.items()):
+        if piece is None:
+            draw_summaries[(composition, draw)] = summary
+        else:
+            piece_summaries[(composition, draw, piece)] = summary
     rows: List[Dict[str, Any]] = []
     seen_keys: Set[Tuple[str, int, int]] = set()
     for (composition, draw, piece), summary in sorted(index.items()):
+        if piece is None:
+            continue
         row: Dict[str, Any] = {column: None for column in columns}
         row["Composition"] = composition
         row["Draw"] = draw
         row["Piece"] = piece
-        if piece is None:
-            row["Microwire"] = f"{draw}/?"
-        else:
-            row["Microwire"] = _microwire_label(draw, piece, None)
+        row["Microwire"] = _microwire_label(draw, piece, None)
         ea_value = _compute_ea_from_composition(composition)
         row["e/a"] = ea_value
         row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(ea_value)
@@ -5745,14 +5934,14 @@ def _video_index_to_frame(
         if row.get("Glass feeding (mm/min)") in (None, ""):
             row["Glass feeding (mm/min)"] = summary.glass_feed()
         row["_sources"] = sorted(str(path) for path in getattr(summary, "sources", set()))
-        if piece is None:
-            row["_group_key"] = ""
-        else:
-            row["_group_key"] = _microwire_key_to_str((composition, draw, piece, None))
+        row["_group_key"] = _microwire_key_to_str((composition, draw, piece, None))
         rows.append(row)
     for (composition, draw, piece), fabrication_row in sorted(fabrication_lookup.items()):
         if (composition, draw, piece) in seen_keys:
             continue
+        summary = piece_summaries.get((composition, draw, piece))
+        if summary is None:
+            summary = draw_summaries.get((composition, draw))
         row: Dict[str, Any] = {column: None for column in columns}
         row["Composition"] = composition
         row["Draw"] = draw
@@ -5771,7 +5960,18 @@ def _video_index_to_frame(
                 row[column] = candidate
         if row.get(ESTIMATED_TRANSITION_COLUMN) in (None, ""):
             row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(row.get("e/a"))
-        row["_sources"] = []
+        if summary is not None:
+            if row.get(CORE_TEMPERATURE_COLUMN) in (None, ""):
+                row[CORE_TEMPERATURE_COLUMN] = summary.temperature()
+            if row.get("Underpressure") in (None, ""):
+                row["Underpressure"] = summary.underpressure()
+            if row.get("Winding speed (m/min)") in (None, ""):
+                row["Winding speed (m/min)"] = summary.winding_speed()
+            if row.get("Glass feeding (mm/min)") in (None, ""):
+                row["Glass feeding (mm/min)"] = summary.glass_feed()
+            row["_sources"] = sorted(str(path) for path in getattr(summary, "sources", set()))
+        else:
+            row["_sources"] = []
         row["_group_key"] = _microwire_key_to_str((composition, draw, piece, None))
         rows.append(row)
     if not rows:
@@ -6221,6 +6421,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     log_emitted = QtCore.pyqtSignal(int, str)
     _processing_owner: ClassVar[Optional["MiniDatabaseSection"]] = None
     _refresh_queue: ClassVar[List["MiniDatabaseSection"]] = []
+    _project_load_batch_mode: ClassVar[bool] = False
     _SCROLL_SINGLE_STEP = 12
 
     def __init__(
@@ -6247,6 +6448,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         )
         self._worker_thread: QtCore.QThread | None = None
         self._worker: Optional["_SectionWorker"] = None
+        self._candidate_thread: QtCore.QThread | None = None
+        self._candidate_worker: Optional[_CandidateCollectWorker] = None
         self._active_candidates: List[Path] = []
         self._pending_count_cache: int | None = None
         self._pending_scan_in_progress = False
@@ -6444,6 +6647,35 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             target = graph_width if graph_width > current else current
             if target > 0:
                 table.setColumnWidth(idx, target)
+
+        numeric_width_hints = {
+            VIDEO_END_LENGTH_COLUMN,
+            VIDEO_MW_LENGTH_COLUMN,
+            "Length (m)",
+            "Piece date",
+            "Resistance (Ω)",
+            CORE_TEMPERATURE_COLUMN,
+            GLASS_TEMPERATURE_COLUMN,
+            "Mass (g)",
+            "Winding speed (m/min)",
+            "Glass feeding (mm/min)",
+            "Underpressure",
+            "Production datetime",
+        }
+        try:
+            metrics = table.fontMetrics()
+        except Exception:
+            metrics = None
+        for idx, column_name in enumerate(frame.columns):
+            label = str(column_name)
+            if label not in numeric_width_hints:
+                continue
+            if metrics is None:
+                continue
+            header_target = max(90, metrics.horizontalAdvance(label) + 28)
+            current = table.columnWidth(idx)
+            desired = max(header_target, min(current, 200))
+            table.setColumnWidth(idx, desired)
 
         header = table.horizontalHeader()
         v_header = table.verticalHeader()
@@ -6703,7 +6935,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         if self._progress_total <= 0:
             dialog = QtWidgets.QProgressDialog("Scanning files...", None, 0, 0, self)
             dialog.setWindowTitle(self.section_title)
-            dialog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+            dialog.setWindowModality(QtCore.Qt.WindowModality.NonModal)
             dialog.setCancelButton(None)
             dialog.setMinimumDuration(0)
             dialog.setAutoClose(False)
@@ -6721,7 +6953,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self,
         )
         dialog.setWindowTitle(self.section_title)
-        dialog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        dialog.setWindowModality(QtCore.Qt.WindowModality.NonModal)
         dialog.setCancelButton(None)
         dialog.setMinimumDuration(0)
         dialog.setAutoClose(False)
@@ -6783,6 +7015,16 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             return
         self._cancel_requested = True
         self.stop_button.setEnabled(False)
+        candidate_thread = self._candidate_thread
+        if candidate_thread is not None:
+            try:
+                candidate_thread.requestInterruption()
+            except Exception:
+                pass
+            try:
+                candidate_thread.quit()
+            except Exception:
+                pass
         if self._progress_dialog is not None:
             self._progress_dialog.setRange(0, 0)
             self._progress_dialog.setLabelText("Cancelling...")
@@ -7085,6 +7327,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             message = "Connect one or more folders to begin."
             self.refresh_button.setEnabled(False)
             self._pending_count_cache = 0
+        elif self._project_load_batch_mode:
+            self.refresh_button.setEnabled(True)
+            if not self.data.table.empty:
+                message = f"Up to date ({len(self.data.table)} record(s))."
+            else:
+                message = "No processed data available yet."
         else:
             self.refresh_button.setEnabled(True)
             if pending_count is None:
@@ -7217,8 +7465,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
         self.data = MiniDatabaseData(sources=sources, processed=processed, table=frame, extra=extra)
         self.model.set_frame(frame)
+        self._pending_count_cache = 0
         self.store.save(self.data)
         self._populate_sources_list()
+        if self._project_load_batch_mode:
+            self._reset_progress_ui()
+            return
         self._auto_fit_columns()
         self._update_status()
         self._update_open_sources_enabled()
@@ -7271,21 +7523,6 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         return bool(self.data.extra)
 
     def refresh(self) -> None:
-        candidates = self._collect_candidates()
-        if not candidates:
-            self.log(f"{self.section_title}: no files found in connected folders.")
-            self.data.processed = {}
-            self.data.table = pd.DataFrame()
-            self.store.save(self.data)
-            self.model.set_frame(self.data.table)
-            self._auto_fit_columns()
-            self._update_status()
-            self._reset_progress_ui()
-            try:
-                self.data_updated.emit()
-            except Exception:
-                pass
-            return
         self._cancel_requested = False
         self.stop_button.setEnabled(True)
         owner = MiniDatabaseSection._processing_owner
@@ -7305,7 +7542,75 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self._reset_progress_ui()
             self.stop_button.setEnabled(False)
             return
+        self._start_progress(0)
+        try:
+            QtWidgets.QApplication.processEvents(
+                QtCore.QEventLoop.ProcessEventsFlag.AllEvents
+            )
+        except Exception:
+            pass
         MiniDatabaseSection._processing_owner = self
+        status_message = "Scanning files..."
+        self.status_label.setText(status_message)
+        try:
+            self.status_changed.emit(status_message)
+        except Exception:
+            pass
+        self._start_candidate_worker()
+
+    def _start_candidate_worker(self) -> None:
+        if self._candidate_thread is not None and self._candidate_thread.isRunning():
+            try:
+                self._candidate_thread.quit()
+                self._candidate_thread.wait(100)
+            except Exception:
+                pass
+        self._cleanup_candidate_thread()
+        thread = QtCore.QThread(self)
+        worker = _CandidateCollectWorker(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._handle_candidate_scan_finished)
+        worker.failed.connect(self._handle_candidate_scan_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._candidate_thread = thread
+        self._candidate_worker = worker
+        thread.start()
+
+    def _cleanup_candidate_thread(self) -> None:
+        thread = self._candidate_thread
+        self._candidate_thread = None
+        self._candidate_worker = None
+        if thread is None:
+            return
+        try:
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(100)
+        except Exception:
+            pass
+
+    def _handle_candidate_scan_finished(self, payload: object) -> None:
+        self._cleanup_candidate_thread()
+        candidates = [Path(path) for path in payload] if isinstance(payload, list) else []
+        if not candidates:
+            self.log(f"{self.section_title}: no files found in connected folders.")
+            self.data.processed = {}
+            self.data.table = pd.DataFrame()
+            self.store.save(self.data)
+            self.model.set_frame(self.data.table)
+            self._auto_fit_columns()
+            self._update_status()
+            self._reset_progress_ui()
+            self._release_processing()
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
+            return
         status_message = f"Processing {len(candidates)} file(s)."
         self.status_label.setText(status_message)
         try:
@@ -7314,6 +7619,22 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             pass
         self._start_progress(len(candidates))
         self._start_section_worker(candidates)
+
+    def _handle_candidate_scan_failed(self, exc: object) -> None:
+        self._cleanup_candidate_thread()
+        self._active_candidates = []
+        self._fail_progress()
+        if isinstance(exc, Exception):
+            self.logger.exception("%s candidate scan failed", self.section_title, exc_info=exc)
+            detail = str(exc) if str(exc) else exc.__class__.__name__
+        else:
+            self.logger.error("%s candidate scan failed: %s", self.section_title, exc)
+            detail = str(exc)
+        QtWidgets.QMessageBox.critical(
+            self,
+            self.section_title,
+            f"Failed to scan connected files:\\n{detail}",
+        )
 
     def _start_section_worker(self, candidates: List[Path]) -> None:
         self._active_candidates = list(candidates)
@@ -7455,6 +7776,7 @@ class FabricationSection(MiniDatabaseSection):
     section_key = "fabrication"
     section_title = "Fabrication data"
     supported_suffixes = (".xlsx", ".xls", ".xlsm")
+    raw_index_payload_name = "fabrication_index_raw"
 
     def __init__(
         self,
@@ -7465,15 +7787,97 @@ class FabricationSection(MiniDatabaseSection):
         self._table_splitter: QtWidgets.QSplitter | None = None
         self._separate_imported = False
         self._microscope_snapshot: pd.DataFrame | None = None
+        self._source_status_cache: Dict[Tuple[str, ...], bool] = {}
         super().__init__(logger, log_callback, parent)
         self._normalize_temperature_columns()
         self._hide_columns(["_source_paths", "_source_path"])
         self.model.set_editable_columns(self._editable_columns())
         self.model.set_text_columns({GLASS_PULL_COLUMN, "Notes"})
+        self.model.set_background_provider(self._background_brush_for_cell)
+        self.model.set_foreground_provider(self._foreground_brush_for_cell)
         try:
             self.model.dataChanged.connect(self._handle_cell_edited)
         except Exception:
             pass
+        self.missing_data_button = QtWidgets.QPushButton("Missing data…", self)
+        self.missing_data_button.clicked.connect(self._show_missing_data_dialog)
+        try:
+            self.controls_layout.insertWidget(2, self.missing_data_button)
+        except Exception:
+            pass
+
+    def _load_raw_index(self) -> Optional[FabricationIndex]:
+        try:
+            raw_index = self.store.load_payload(self.raw_index_payload_name)
+        except Exception:
+            raw_index = None
+        if isinstance(raw_index, FabricationIndex):
+            return raw_index
+        try:
+            visible_index = self.store.load_payload("fabrication_index")
+        except Exception:
+            visible_index = None
+        if isinstance(visible_index, FabricationIndex):
+            return visible_index
+        return None
+
+    def _store_indexes(
+        self,
+        visible_index: FabricationIndex,
+        *,
+        raw_index: Optional[FabricationIndex] = None,
+    ) -> None:
+        raw_payload = raw_index if isinstance(raw_index, FabricationIndex) else visible_index
+        self.store.save_payload("fabrication_index", visible_index)
+        self.store.save_payload(self.raw_index_payload_name, raw_payload)
+        payload_map = dict(self.data.extra.get("payloads", {}))
+        payload_map["fabrication_index"] = "fabrication_index"
+        payload_map[self.raw_index_payload_name] = self.raw_index_payload_name
+        self.data.extra["payloads"] = payload_map
+
+    def _build_visible_table_from_index(
+        self,
+        raw_index: FabricationIndex,
+        *,
+        relevant_map: Optional[Dict[str, Dict[Optional[int], Set[Optional[int]]]]] = None,
+        relevant_compositions: Optional[Set[str]] = None,
+    ) -> Tuple[pd.DataFrame, FabricationIndex, int, int]:
+        if relevant_map is None or relevant_compositions is None:
+            relevant_map, relevant_compositions = self._load_relevant_map()
+        filtered_index = raw_index
+        removed_draws = 0
+        removed_pieces = 0
+        if relevant_compositions:
+            original_draws = len(raw_index.draw_level)
+            original_pieces = len(raw_index.piece_level)
+            filtered_index = self._filter_index(raw_index, relevant_map, relevant_compositions)
+            removed_draws = original_draws - len(filtered_index.draw_level)
+            removed_pieces = original_pieces - len(filtered_index.piece_level)
+        table = _fabrication_index_to_frame(filtered_index)
+        table = self._augment_table_with_relevant_microscope_rows(
+            table,
+            relevant_map,
+            source_index=raw_index,
+        )
+        table = self._apply_imported_separation(table)
+        return table, filtered_index, removed_draws, removed_pieces
+
+    def _rebuild_table_from_raw_index(self) -> bool:
+        raw_index = self._load_raw_index()
+        if not isinstance(raw_index, FabricationIndex):
+            return False
+        table, filtered_index, _removed_draws, _removed_pieces = self._build_visible_table_from_index(
+            raw_index
+        )
+        self.data.table = table
+        self._store_indexes(filtered_index, raw_index=raw_index)
+        self.store.save(self.data)
+        self.model.set_frame(table)
+        self._normalize_temperature_columns()
+        self._hide_columns(["_source_paths", "_source_path"])
+        self._auto_fit_columns()
+        self._update_status()
+        return True
 
     def _normalize_temperature_columns(self) -> None:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else None
@@ -7593,61 +7997,24 @@ class FabricationSection(MiniDatabaseSection):
 
     def _update_status(self) -> None:  # type: ignore[override]
         super()._update_status()
-        missing = self._missing_microwires()
-        if not missing:
+        missing_entries = self._missing_data_entries()
+        if not missing_entries:
             return
         base_message = self.status_label.text()
-        preview = ", ".join(missing[:3])
-        if len(missing) > 3:
+        preview = ", ".join(
+            f"{entry['Composition']} {entry['Microwire']}"
+            for entry in missing_entries[:3]
+        )
+        if len(missing_entries) > 3:
             preview += ", …"
-        message = f"{base_message} — Missing {len(missing)} annealing record(s): {preview}"
+        message = (
+            f"{base_message} — Missing fabrication data for {len(missing_entries)} measured wire(s): {preview}"
+        )
         self.status_label.setText(message)
         try:
             self.status_changed.emit(message)
         except Exception:
             pass
-
-    def _missing_microwires(self) -> List[str]:
-        expected_map, _ = self._load_relevant_map()
-        expected: Set[Tuple[str, int, int]] = set()
-        for composition, draws in expected_map.items():
-            for draw, pieces in draws.items():
-                for piece in pieces:
-                    if piece is None:
-                        continue
-                    try:
-                        expected.add((str(composition), int(draw), int(piece)))
-                    except (TypeError, ValueError):
-                        continue
-        if not expected:
-            return []
-        present: Set[Tuple[str, int, int]] = set()
-        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
-        if isinstance(frame, pd.DataFrame) and not frame.empty:
-            if "_group_key" in frame.columns:
-                for value in frame["_group_key"]:
-                    if value in (None, "", "None"):
-                        continue
-                    key_parts = _microwire_key_from_string(str(value))
-                    if key_parts is None:
-                        continue
-                    comp, draw_val, piece_val, _suffix = key_parts
-                    present.add((comp, draw_val, piece_val))
-            else:
-                for _, row in frame.iterrows():
-                    comp = str(row.get("Composition", "")).strip()
-                    microwire = str(row.get("Microwire", "")).strip()
-                    parsed = _microwire_parts_from_label_safe(microwire)
-                    if parsed is None:
-                        continue
-                    draw_val, piece_val, _suffix = parsed
-                    present.add((comp, int(draw_val), int(piece_val)))
-        missing = [
-            f"{composition} {draw}/{piece}"
-            for composition, draw, piece in sorted(expected)
-            if (composition, draw, piece) not in present
-        ]
-        return missing
 
     @staticmethod
     def _normalise_int(value: object) -> Optional[int]:
@@ -7663,31 +8030,28 @@ class FabricationSection(MiniDatabaseSection):
             return None
         return int(numeric)
 
-    def _load_relevant_map(
+    def _measured_keys_by_source(
         self,
-    ) -> Tuple[Dict[str, Dict[Optional[int], Set[Optional[int]]]], Set[str]]:
+    ) -> Tuple[Set[Tuple[str, int, int]], Set[Tuple[str, int, int]]]:
+        annealing_keys: Set[Tuple[str, int, int]] = set()
+        microscope_keys: Set[Tuple[str, int, int]] = set()
         try:
             store = MiniDatabaseStore("annealing")
             records = store.load_payload("annealing_records")
         except Exception:
             records = None
-        relevant: Dict[str, Dict[Optional[int], Set[Optional[int]]]] = {}
         if isinstance(records, list):
             for record in records:
                 metadata = getattr(record, "metadata", None)
                 if metadata is None:
                     continue
                 composition = getattr(metadata, "composition_token", None)
-                if not composition:
-                    continue
-                composition_key = str(composition).strip()
-                if not composition_key:
-                    continue
                 draw_value = self._normalise_int(getattr(metadata, "draw_x", None))
                 piece_value = self._normalise_int(getattr(metadata, "piece_y", None))
-                bucket = relevant.setdefault(composition_key, {})
-                piece_bucket = bucket.setdefault(draw_value, set())
-                piece_bucket.add(piece_value)
+                composition_key = str(composition or "").strip()
+                if not composition_key or draw_value is None or piece_value is None:
+                    continue
+                annealing_keys.add((composition_key, int(draw_value), int(piece_value)))
         microscope_table = (
             self._microscope_snapshot.copy()
             if isinstance(self._microscope_snapshot, pd.DataFrame)
@@ -7715,13 +8079,126 @@ class FabricationSection(MiniDatabaseSection):
                 draw_value, piece_value, suffix = parsed
                 if str(suffix or "").strip().lower() == "oe":
                     continue
-                bucket = relevant.setdefault(composition_key, {})
-                piece_bucket = bucket.setdefault(int(draw_value), set())
-                piece_bucket.add(int(piece_value))
+                microscope_keys.add((composition_key, int(draw_value), int(piece_value)))
+        return annealing_keys, microscope_keys
+
+    def _source_label_for_key(
+        self,
+        key: Tuple[str, int, int],
+        annealing_keys: Set[Tuple[str, int, int]],
+        microscope_keys: Set[Tuple[str, int, int]],
+    ) -> str:
+        in_annealing = key in annealing_keys
+        in_microscope = key in microscope_keys
+        if in_annealing and in_microscope:
+            return "Current annealing + microscope"
+        if in_annealing:
+            return "Current annealing only"
+        if in_microscope:
+            return "Microscope only"
+        return "Measured only"
+
+    def _load_relevant_map(
+        self,
+    ) -> Tuple[Dict[str, Dict[Optional[int], Set[Optional[int]]]], Set[str]]:
+        relevant: Dict[str, Dict[Optional[int], Set[Optional[int]]]] = {}
+        annealing_keys, microscope_keys = self._measured_keys_by_source()
+        for composition_key, draw_value, piece_value in sorted(annealing_keys | microscope_keys):
+            bucket = relevant.setdefault(composition_key, {})
+            piece_bucket = bucket.setdefault(int(draw_value), set())
+            piece_bucket.add(int(piece_value))
         return relevant, set(relevant.keys())
+
+    def _missing_data_entries(self, *, include_possible_mismatch: bool = False) -> List[Dict[str, str]]:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return []
+        watched_columns = [
+            "Length (m)",
+            "Piece date",
+            "Resistance (Ω)",
+            CORE_TEMPERATURE_COLUMN,
+            "Mass (g)",
+            "Winding speed (m/min)",
+            "Glass feeding (mm/min)",
+            "Underpressure",
+        ]
+        entries: List[Dict[str, str]] = []
+        for _, row in frame.iterrows():
+            composition = str(row.get("Composition") or "").strip()
+            if not composition or composition == "Imported data:":
+                continue
+            microwire = str(row.get("Microwire") or "").strip()
+            if not microwire:
+                try:
+                    microwire = f"{int(row.get('Draw'))}/{int(row.get('Piece'))}"
+                except Exception:
+                    microwire = ""
+            missing_fields = [
+                column for column in watched_columns if column in frame.columns and _is_blank(row.get(column))
+            ]
+            if not missing_fields:
+                continue
+            source_missing = self._row_missing_source_files(row)
+            possible_mismatch = ""
+            if include_possible_mismatch and source_missing:
+                possible_mismatch = ", ".join(_possible_source_mismatches(composition, self.data.sources))
+            entries.append(
+                {
+                    "Composition": composition,
+                    "Microwire": microwire,
+                    "Data source": str(row.get("Data source") or "").strip(),
+                    "Source files": "Missing" if source_missing else "Present",
+                    "Possible mismatch": possible_mismatch,
+                    "Missing fields": ", ".join(missing_fields),
+                }
+            )
+        return entries
+
+    def _show_missing_data_dialog(self) -> None:
+        entries = self._missing_data_entries(include_possible_mismatch=True)
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Fabrication Missing Data")
+        dialog.resize(980, 640)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        summary = QtWidgets.QLabel(
+            f"{len(entries)} measured wire(s) still have missing fabrication fields."
+            if entries
+            else "No measured wires are currently missing fabrication fields."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        table = QtWidgets.QTableWidget(dialog)
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels(
+            ["Composition", "Microwire", "Data source", "Source files", "Possible mismatch", "Missing fields"]
+        )
+        table.setRowCount(len(entries))
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        table.setSortingEnabled(False)
+        for row_index, entry in enumerate(entries):
+            for column_index, key in enumerate(
+                ("Composition", "Microwire", "Data source", "Source files", "Possible mismatch", "Missing fields")
+            ):
+                item = QtWidgets.QTableWidgetItem(entry.get(key, ""))
+                table.setItem(row_index, column_index, item)
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(True)
+        table.resizeColumnsToContents()
+        layout.addWidget(table, 1)
+        button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close, dialog)
+        button_box.rejected.connect(dialog.reject)
+        button_box.accepted.connect(dialog.accept)
+        layout.addWidget(button_box)
+        dialog.exec()
 
     def set_microscope_snapshot(self, frame: pd.DataFrame | None) -> None:
         self._microscope_snapshot = frame.copy() if isinstance(frame, pd.DataFrame) else None
+        if self._rebuild_table_from_raw_index():
+            return
         table = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         relevant_map, _ = self._load_relevant_map()
         if isinstance(table, pd.DataFrame):
@@ -7799,11 +8276,14 @@ class FabricationSection(MiniDatabaseSection):
         self,
         frame: pd.DataFrame,
         relevant_map: Dict[str, Dict[Optional[int], Set[Optional[int]]]],
+        *,
+        source_index: Optional[FabricationIndex] = None,
     ) -> pd.DataFrame:
         if not isinstance(frame, pd.DataFrame):
             frame = pd.DataFrame()
-        columns = list(frame.columns) if not frame.empty else list(_fabrication_index_to_frame(FabricationIndex()).columns)
+        columns = list(frame.columns) if not frame.empty else list(_fabrication_frame_columns())
         updated = frame.copy() if not frame.empty else pd.DataFrame(columns=columns)
+        annealing_keys, microscope_keys = self._measured_keys_by_source()
         existing: Set[Tuple[str, int, int]] = set()
         if not updated.empty:
             for _, row in updated.iterrows():
@@ -7815,25 +8295,6 @@ class FabricationSection(MiniDatabaseSection):
                     continue
                 if comp:
                     existing.add((comp, draw, piece))
-
-        microscope_data = MiniDatabaseStore("microscope").load()
-        microscope_table = (
-            microscope_data.table
-            if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
-            else pd.DataFrame()
-        )
-        microscope_lookup: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
-        if not microscope_table.empty:
-            for _, row in microscope_table.iterrows():
-                comp = str(row.get("Composition") or "").strip()
-                microwire = str(row.get("Microwire") or "").strip()
-                if not comp or not microwire or microwire.lower().endswith("oe"):
-                    continue
-                parsed = _microwire_parts_from_label_safe(microwire)
-                if parsed is None:
-                    continue
-                draw, piece, _suffix = parsed
-                microscope_lookup[(comp, int(draw), int(piece))] = dict(row)
 
         new_rows: List[Dict[str, Any]] = []
         for composition, draws in relevant_map.items():
@@ -7849,17 +8310,30 @@ class FabricationSection(MiniDatabaseSection):
                     key = (comp_key, int(draw), int(piece))
                     if key in existing:
                         continue
-                    row: Dict[str, Any] = {column: None for column in columns}
-                    row["Composition"] = comp_key
-                    row["Data source"] = "Microscope only"
-                    row["e/a"] = _compute_ea_from_composition(comp_key)
-                    row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(row["e/a"])
-                    row["Draw"] = int(draw)
-                    row["Piece"] = int(piece)
-                    microscope_row = microscope_lookup.get(key, {})
-                    for column in (MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN, "d/D"):
-                        if column in row and column in microscope_row:
-                            row[column] = microscope_row.get(column)
+                    piece_record = (
+                        source_index.get_piece(comp_key, int(draw), int(piece))
+                        if isinstance(source_index, FabricationIndex)
+                        else None
+                    )
+                    draw_record = (
+                        source_index.get_draw(comp_key, int(draw))
+                        if isinstance(source_index, FabricationIndex)
+                        else None
+                    )
+                    row = _fabrication_row_from_records(
+                        comp_key,
+                        int(draw),
+                        int(piece),
+                        piece_record,
+                        draw_record,
+                        columns=columns,
+                    )
+                    if row.get("Data source") in (None, ""):
+                        row["Data source"] = self._source_label_for_key(
+                            key,
+                            annealing_keys,
+                            microscope_keys,
+                        )
                     new_rows.append(row)
         if not new_rows:
             return updated
@@ -7971,27 +8445,23 @@ class FabricationSection(MiniDatabaseSection):
             except Exception:
                 pass
 
-        index = build_fabrication_index(
+        raw_index = build_fabrication_index(
             filtered_paths,
             self.logger,
             progress_callback=_progress,
             cancel_callback=self.is_cancelled,
         )
         self._check_cancelled()
-        if relevant_compositions:
-            original_draws = len(index.draw_level)
-            original_pieces = len(index.piece_level)
-            index = self._filter_index(index, relevant_map, relevant_compositions)
-            removed_draws = original_draws - len(index.draw_level)
-            removed_pieces = original_pieces - len(index.piece_level)
-            if removed_draws > 0 or removed_pieces > 0:
-                self.log(
-                    "Fabrication data: skipped %d draw(s) and %d piece(s) without matching current annealing records."
-                    % (removed_draws, removed_pieces)
-                )
-        table = _fabrication_index_to_frame(index)
-        table = self._augment_table_with_relevant_microscope_rows(table, relevant_map)
-        table = self._apply_imported_separation(table)
+        table, index, removed_draws, removed_pieces = self._build_visible_table_from_index(
+            raw_index,
+            relevant_map=relevant_map,
+            relevant_compositions=relevant_compositions,
+        )
+        if removed_draws > 0 or removed_pieces > 0:
+            self.log(
+                "Fabrication data: skipped %d draw(s) and %d piece(s) without matching current annealing records."
+                % (removed_draws, removed_pieces)
+            )
         processed: Dict[str, float] = {}
         for path in filtered_paths:
             try:
@@ -8001,11 +8471,17 @@ class FabricationSection(MiniDatabaseSection):
         return SectionProcessResult(
             table=table,
             processed=processed,
-            payloads={"fabrication_index": index},
+            payloads={
+                "fabrication_index": index,
+                self.raw_index_payload_name: raw_index,
+            },
         )
 
     def refresh(self) -> None:
         super().refresh()
+        self._source_status_cache.clear()
+        if self._rebuild_table_from_raw_index():
+            return
         table = self.data.table
         if isinstance(table, pd.DataFrame):
             relevant_map, _ = self._load_relevant_map()
@@ -8033,7 +8509,10 @@ class FabricationSection(MiniDatabaseSection):
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._source_status_cache.clear()
         self._normalize_temperature_columns()
+        if self._rebuild_table_from_raw_index():
+            return
         table = self.data.table
         if isinstance(table, pd.DataFrame):
             relevant_map, _ = self._load_relevant_map()
@@ -8058,8 +8537,44 @@ class FabricationSection(MiniDatabaseSection):
                 continue
         return sources
 
+    def _source_paths_exist(self, sources: Sequence[Path]) -> bool:
+        key = tuple(str(path) for path in sources)
+        if key in self._source_status_cache:
+            return self._source_status_cache[key]
+        exists = False
+        for path in sources:
+            try:
+                if path.exists():
+                    exists = True
+                    break
+            except OSError:
+                continue
+        self._source_status_cache[key] = exists
+        return exists
+
+    def _row_missing_source_files(self, row: pd.Series) -> bool:
+        data_source = str(row.get("Data source") or "").strip()
+        if "Imported" in data_source:
+            return False
+        sources = self._row_sources(row)
+        if not sources:
+            return True
+        return not self._source_paths_exist(sources)
+
+    def _background_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        if self._row_missing_source_files(row):
+            return QtGui.QBrush(QtGui.QColor("#3a0a0a"))
+        return None
+
+    def _foreground_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        if self._row_missing_source_files(row):
+            return QtGui.QBrush(QtGui.QColor("#ffd6d6"))
+        return None
+
     def set_import_separation(self, enabled: bool) -> None:
         self._separate_imported = bool(enabled)
+        if self._rebuild_table_from_raw_index():
+            return
         try:
             index = self.store.load_payload("fabrication_index")
         except Exception:
@@ -8127,6 +8642,9 @@ class FabricationSection(MiniDatabaseSection):
             index = None
         if not isinstance(index, FabricationIndex):
             index = FabricationIndex()
+        raw_index = self._load_raw_index()
+        if not isinstance(raw_index, FabricationIndex):
+            raw_index = index
         updated_any = False
         for row_idx in range(top_left.row(), bottom_right.row() + 1):
             if row_idx < 0 or row_idx >= len(frame.index):
@@ -8141,7 +8659,8 @@ class FabricationSection(MiniDatabaseSection):
             except (TypeError, ValueError):
                 continue
             key = (composition, draw, piece)
-            piece_data = dict(index.piece_level.get(key, {}))
+            existing_piece_data = raw_index.piece_level.get(key, index.piece_level.get(key, {}))
+            piece_data = dict(existing_piece_data)
             row_updated = False
             for column in columns:
                 if column not in relevant:
@@ -8157,19 +8676,23 @@ class FabricationSection(MiniDatabaseSection):
             if row_updated:
                 if piece_data:
                     piece_data.setdefault("_source_path", piece_data.get("_source_path") or "Manual")
-                index.piece_level[key] = piece_data
+                    index.piece_level[key] = dict(piece_data)
+                    raw_index.piece_level[key] = dict(piece_data)
+                else:
+                    index.piece_level.pop(key, None)
+                    raw_index.piece_level.pop(key, None)
         if updated_any:
             self.data.table = frame
-            self.store.save_payload("fabrication_index", index)
-            payload_map = dict(self.data.extra.get("payloads", {}))
-            payload_map["fabrication_index"] = "fabrication_index"
-            self.data.extra["payloads"] = payload_map
+            self._store_indexes(index, raw_index=raw_index)
             self.store.save(self.data)
 
     def apply_imported_samples(self, records: Iterable[Dict[str, Any]]) -> int:
         index = self.store.load_payload("fabrication_index")
         if not isinstance(index, FabricationIndex):
             index = FabricationIndex()
+        raw_index = self._load_raw_index()
+        if not isinstance(raw_index, FabricationIndex):
+            raw_index = index
         added = 0
         for record in records:
             composition = str(record.get("Composition") or "").strip()
@@ -8207,15 +8730,15 @@ class FabricationSection(MiniDatabaseSection):
             before = bool(index.get_piece(composition, draw_x, piece_y))
             index.set_piece(composition, int(draw_x), int(piece_y), piece_data)
             index.set_draw(composition, int(draw_x), draw_data)
+            raw_index.set_piece(composition, int(draw_x), int(piece_y), dict(piece_data))
+            raw_index.set_draw(composition, int(draw_x), dict(draw_data))
             if not before:
                 added += 1
-        table = _fabrication_index_to_frame(index)
-        table = self._apply_imported_separation(table)
+        table, index, _removed_draws, _removed_pieces = self._build_visible_table_from_index(
+            raw_index
+        )
         self.data.table = table
-        self.store.save_payload("fabrication_index", index)
-        payload_map = dict(self.data.extra.get("payloads", {}))
-        payload_map["fabrication_index"] = "fabrication_index"
-        self.data.extra["payloads"] = payload_map
+        self._store_indexes(index, raw_index=raw_index)
         self.store.save(self.data)
         self.model.set_frame(table)
         self._auto_fit_columns()
@@ -11465,9 +11988,10 @@ class CurrentDensitySection(QtWidgets.QWidget):
         )
         header = table.horizontalHeader()
         if header is not None:
-            header.setStretchLastSection(True)
+            header.setStretchLastSection(False)
             header.setSectionsMovable(True)
             header.setSectionsClickable(True)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         vertical_bar = table.verticalScrollBar()
         if vertical_bar is not None:
             vertical_bar.setSingleStep(MiniDatabaseSection._SCROLL_SINGLE_STEP)
@@ -13101,6 +13625,19 @@ class VideoSection(MiniDatabaseSection):
     section_key = "videos"
     section_title = "Fabrication videos"
     supported_suffixes = VIDEO_EXTENSIONS
+    _HIDDEN_VIDEO_COLUMNS: Tuple[str, ...] = (
+        "Data source",
+        "e/a",
+        ESTIMATED_TRANSITION_COLUMN,
+        MICROSCOPE_D_COLUMN,
+        MICROSCOPE_CAP_D_COLUMN,
+        "d/D",
+        "Mass (g)",
+        GLASS_PULL_COLUMN,
+        "_sources",
+        "_group_key",
+        "_cumulative_length_m",
+    )
 
     def __init__(
         self,
@@ -13109,21 +13646,36 @@ class VideoSection(MiniDatabaseSection):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._overrides: Dict[str, Dict[str, Any]] = {}
+        self._fabrication_lookup_cache: Dict[str, Mapping[str, Any]] = {}
+        self._video_source_status_cache: Dict[Tuple[str, ...], bool] = {}
+        self._review_dialog: Optional["_VideoReviewDialog"] = None
         super().__init__(logger, log_callback, parent)
         self.source_button.hide()
-        self.refresh_button.setText("Start video OCR")
+        self.refresh_button.setText("Refresh videos")
         self.open_sources_button.setText("Open video(s)")
         self.open_sources_button.setToolTip("Open the selected video files.")
-        self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
         self._load_overrides()
         self._normalize_temperature_columns()
         self._apply_overrides_to_model()
         self.model.set_editable_columns(self._editable_columns())
         self.model.set_text_columns({"Notes", "Piece date", "Production datetime"})
+        self.model.set_background_provider(self._background_brush_for_cell)
+        self.model.set_foreground_provider(self._foreground_brush_for_cell)
         try:
             self.model.dataChanged.connect(self._handle_cell_edited)
         except Exception:
             pass
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        dialog = self._review_dialog
+        self._review_dialog = None
+        if dialog is not None:
+            try:
+                dialog.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         table = QtWidgets.QTableView(parent)
@@ -13150,6 +13702,119 @@ class VideoSection(MiniDatabaseSection):
         layout.addWidget(table, 1)
         return container
 
+    @staticmethod
+    def _normalise_int(value: object) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return int(value)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(numeric):
+            return None
+        return int(numeric)
+
+    @staticmethod
+    def _normalise_token(text: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+    def _load_relevant_map(
+        self,
+    ) -> Tuple[Dict[str, Dict[Optional[int], Set[Optional[int]]]], Set[str]]:
+        relevant: Dict[str, Dict[Optional[int], Set[Optional[int]]]] = {}
+        try:
+            store = MiniDatabaseStore("annealing")
+            records = store.load_payload("annealing_records")
+        except Exception:
+            records = None
+        if isinstance(records, list):
+            for record in records:
+                metadata = getattr(record, "metadata", None)
+                if metadata is None:
+                    continue
+                composition = getattr(metadata, "composition_token", None)
+                draw_value = self._normalise_int(getattr(metadata, "draw_x", None))
+                piece_value = self._normalise_int(getattr(metadata, "piece_y", None))
+                composition_key = str(composition or "").strip()
+                if not composition_key or draw_value is None or piece_value is None:
+                    continue
+                bucket = relevant.setdefault(composition_key, {})
+                piece_bucket = bucket.setdefault(int(draw_value), set())
+                piece_bucket.add(int(piece_value))
+        try:
+            microscope_data = MiniDatabaseStore("microscope").load()
+        except Exception:
+            microscope_data = None
+        microscope_table = (
+            microscope_data.table
+            if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
+            else pd.DataFrame()
+        )
+        if isinstance(microscope_table, pd.DataFrame) and not microscope_table.empty:
+            for _, row in microscope_table.iterrows():
+                composition_key = str(row.get("Composition") or "").strip()
+                microwire_label = str(row.get("Microwire") or "").strip()
+                if not composition_key or not microwire_label:
+                    continue
+                parsed = _microwire_parts_from_label_safe(microwire_label)
+                if parsed is None:
+                    continue
+                draw_value, piece_value, suffix = parsed
+                if str(suffix or "").strip().lower() == "oe":
+                    continue
+                bucket = relevant.setdefault(composition_key, {})
+                piece_bucket = bucket.setdefault(int(draw_value), set())
+                piece_bucket.add(int(piece_value))
+        return relevant, set(relevant.keys())
+
+    def _filter_candidates_for_relevance(
+        self,
+        candidates: List[Path],
+        relevant_map: Dict[str, Dict[Optional[int], Set[Optional[int]]]],
+        relevant_compositions: Set[str],
+    ) -> List[Path]:
+        if not relevant_compositions:
+            return candidates
+        filtered: List[Path] = []
+        for path in candidates:
+            key = _microscope_key(path)
+            if key is not None:
+                composition, draw, piece, _suffix = key
+                draw_map = relevant_map.get(str(composition).strip())
+                if not draw_map:
+                    continue
+                allowed = draw_map.get(int(draw))
+                fallback = draw_map.get(None)
+                if allowed and int(piece) in {int(value) for value in allowed if value is not None}:
+                    filtered.append(path)
+                    continue
+                if fallback and int(piece) in {int(value) for value in fallback if value is not None}:
+                    filtered.append(path)
+                    continue
+                continue
+            draw_key = _draw_key(path)
+            if draw_key is None:
+                continue
+            composition, draw = draw_key
+            draw_map = relevant_map.get(str(composition).strip())
+            if not draw_map:
+                continue
+            if int(draw) in draw_map or None in draw_map:
+                filtered.append(path)
+        return filtered
+
+    def _collect_candidates(self) -> List[Path]:
+        candidates = super()._collect_candidates()
+        relevant_map, relevant_compositions = self._load_relevant_map()
+        filtered = self._filter_candidates_for_relevance(
+            candidates,
+            relevant_map,
+            relevant_compositions,
+        )
+        return filtered or candidates
+
     def process(
         self,
         paths: List[Path],
@@ -13169,7 +13834,7 @@ class VideoSection(MiniDatabaseSection):
             except Exception:
                 pass
 
-        index = _collect_video_metrics(
+        index = _collect_video_sources(
             unique_paths,
             self.logger,
             progress_callback=_progress if progress is not None else None,
@@ -13191,7 +13856,8 @@ class VideoSection(MiniDatabaseSection):
 
     def refresh(self) -> None:
         super().refresh()
-        self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
+        QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
     def _row_sources(self, row: pd.Series) -> List[Path]:
         sources: List[Path] = []
@@ -13206,6 +13872,138 @@ class VideoSection(MiniDatabaseSection):
                     continue
         return sources
 
+    def _first_selected_source_row(self) -> Optional[int]:
+        rows = self._selected_rows()
+        if rows:
+            return rows[0]
+        return None
+
+    def _select_source_row(self, source_row: int) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        target = self.model.index(source_row, 0)
+        if not target.isValid():
+            return
+        proxy_target = self._search_proxy.mapFromSource(target)
+        if not proxy_target.isValid():
+            proxy_target = self._search_proxy.index(source_row, 0)
+        if not proxy_target.isValid():
+            return
+        selection = self.table_view.selectionModel()
+        if selection is None:
+            return
+        try:
+            selection.setCurrentIndex(
+                proxy_target,
+                QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
+            )
+            self.table_view.scrollTo(
+                proxy_target,
+                QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible,
+            )
+        except Exception:
+            pass
+
+    def _open_video_sources_for_row(self, source_row: int) -> Tuple[bool, List[Path], str]:
+        series = self._row_series(source_row)
+        if series is None:
+            return False, [], f"Row {source_row + 1}"
+        sources = self._row_sources(series)
+        composition = str(series.get("Composition") or "").strip()
+        microwire = str(series.get("Microwire") or "").strip()
+        label = f"{composition} {microwire}".strip() or f"Row {source_row + 1}"
+        if not sources:
+            return False, [], label
+        opened_any = False
+        missing: List[Path] = []
+        for path in sources:
+            if self._open_file(path):
+                opened_any = True
+            else:
+                missing.append(path)
+        return opened_any, missing, label
+
+    def _next_source_row_with_video(self, current_row: int) -> Optional[int]:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return None
+        row_count = len(frame.index)
+        if row_count <= 0:
+            return None
+        for offset in range(1, row_count + 1):
+            row_idx = (current_row + offset) % row_count
+            try:
+                series = frame.iloc[row_idx]
+            except Exception:
+                continue
+            if not self._row_missing_video_files(series):
+                return row_idx
+        return None
+
+    def _row_has_review_gaps(self, row: pd.Series) -> bool:
+        if self._row_missing_video_files(row):
+            return False
+        required_columns = [VIDEO_END_LENGTH_COLUMN, *[column for column in self._editable_columns() if column != VIDEO_END_LENGTH_COLUMN]]
+        for column in required_columns:
+            if self._is_missing(row.get(column)):
+                return True
+        return False
+
+    def _remaining_review_rows_after(self, current_row: int) -> int:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return 0
+        remaining = 0
+        for row_idx in range(current_row + 1, len(frame.index)):
+            try:
+                row = frame.iloc[row_idx]
+            except Exception:
+                continue
+            if self._row_has_review_gaps(row):
+                remaining += 1
+        return remaining
+
+    def _set_source_row_value(self, source_row: int, column: str, value: Any) -> bool:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or source_row < 0 or source_row >= len(frame.index):
+            return False
+        try:
+            column_index = int(frame.columns.get_loc(column))
+        except Exception:
+            return False
+        model_index = self.model.index(source_row, column_index)
+        if not model_index.isValid():
+            return False
+        return bool(self.model.setData(model_index, value, QtCore.Qt.ItemDataRole.EditRole))
+
+    def _ensure_review_dialog(self) -> "_VideoReviewDialog":
+        dialog = self._review_dialog
+        if dialog is None:
+            dialog = _VideoReviewDialog(self)
+            self._review_dialog = dialog
+        return dialog
+
+    def _source_paths_exist(self, sources: Sequence[Path]) -> bool:
+        key = tuple(str(path) for path in sources)
+        if key in self._video_source_status_cache:
+            return self._video_source_status_cache[key]
+        exists = False
+        for path in sources:
+            try:
+                if path.exists():
+                    exists = True
+                    break
+            except OSError:
+                continue
+        self._video_source_status_cache[key] = exists
+        return exists
+
+    def _row_missing_video_files(self, row: pd.Series) -> bool:
+        sources = self._row_sources(row)
+        if not sources:
+            return True
+        return not self._source_paths_exist(sources)
+
     def _selected_rows(self) -> List[int]:
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return []
@@ -13215,7 +14013,13 @@ class VideoSection(MiniDatabaseSection):
         indexes = selection.selectedIndexes()
         if not indexes:
             return []
-        rows = {index.row() for index in indexes if index.isValid()}
+        rows: Set[int] = set()
+        for index in indexes:
+            if not index.isValid():
+                continue
+            source_row = self._search_proxy.map_row_to_source(index.row())
+            if source_row is not None:
+                rows.add(source_row)
         return sorted(rows)
 
     def _update_open_sources_enabled(self) -> None:
@@ -13225,71 +14029,56 @@ class VideoSection(MiniDatabaseSection):
         self.open_sources_button.setEnabled(bool(rows))
 
     def _open_selected_sources(self) -> None:
-        rows = self._selected_rows()
-        if not rows:
+        source_row = self._first_selected_source_row()
+        if source_row is None:
             QtWidgets.QMessageBox.information(
                 self,
                 self.section_title,
-                "Select one or more rows to open their video files.",
+                "Select a row to open its video and review fields.",
             )
             return
-        opened_any = False
-        missing_paths: List[Path] = []
-        missing_labels: List[str] = []
-        seen: set[Path] = set()
-        for row_index in rows:
-            series = self._row_series(row_index)
-            if series is None:
-                continue
-            sources = self._row_sources(series)
-            if not sources:
-                composition = str(series.get("Composition") or "").strip()
-                microwire = str(series.get("Microwire") or "").strip()
-                label = f"{composition} {microwire}".strip()
-                missing_labels.append(label or f"Row {row_index + 1}")
-                continue
-            for path in sources:
-                if path in seen:
-                    continue
-                seen.add(path)
-                if self._open_file(path):
-                    opened_any = True
-                else:
-                    missing_paths.append(path)
-        if opened_any:
-            return
-        details: List[str] = []
-        if missing_labels:
-            preview = ", ".join(missing_labels[:5])
-            if len(missing_labels) > 5:
-                preview += ", …"
-            details.append(f"No video found for: {preview}")
-        if missing_paths:
-            path_preview = "\n".join(str(p) for p in missing_paths[:5])
-            if len(missing_paths) > 5:
-                path_preview += "\n…"
-            details.append(f"Missing files:\n{path_preview}")
-        message = "No video files are available for the selected row(s)."
-        if details:
-            message = f"{message}\n\n" + "\n".join(details)
-        QtWidgets.QMessageBox.warning(self, self.section_title, message)
+        self._select_source_row(source_row)
+        dialog = self._ensure_review_dialog()
+        dialog.load_source_row(source_row, open_video=True)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._video_source_status_cache.clear()
         self._load_overrides()
         self._normalize_temperature_columns()
         self._apply_overrides_to_model()
-        self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
+        QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
+        self._video_source_status_cache.clear()
         self._normalize_temperature_columns()
         self._apply_overrides_to_model()
-        self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
+        QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
     def sync_with_fabrication(self) -> None:
+        self._video_source_status_cache.clear()
         self._apply_overrides_to_model()
-        self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
+        QtCore.QTimer.singleShot(0, self._autosize_video_table)
+
+    def _autosize_video_table(self) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        try:
+            header = self.table_view.horizontalHeader()
+            if header is not None:
+                header.setStretchLastSection(False)
+                header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            self.table_view.resizeColumnsToContents()
+        except Exception:
+            return
+        self._auto_fit_columns()
 
     @staticmethod
     def _is_missing(value: Any) -> bool:
@@ -13332,7 +14121,24 @@ class VideoSection(MiniDatabaseSection):
         fabrication_frame: Optional[pd.DataFrame],
     ) -> Dict[Tuple[str, int, int], Optional[float]]:
         lengths: Dict[Tuple[str, int, int], Optional[float]] = {}
-        if isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty:
+        try:
+            raw_index = MiniDatabaseStore("fabrication").load_payload("fabrication_index_raw")
+        except Exception:
+            raw_index = None
+        if isinstance(raw_index, FabricationIndex):
+            for (composition, draw, piece), piece_data in raw_index.piece_level.items():
+                composition_key = str(composition).strip()
+                if not composition_key:
+                    continue
+                try:
+                    draw_int = int(draw)
+                    piece_int = int(piece)
+                except (TypeError, ValueError):
+                    continue
+                lengths[(composition_key, draw_int, piece_int)] = self._coerce_float(
+                    piece_data.get("length_m") if isinstance(piece_data, dict) else None
+                )
+        elif isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty:
             for _, row in fabrication_frame.iterrows():
                 composition = str(row.get("Composition") or "").strip()
                 if not composition or composition == "Imported data:":
@@ -13371,6 +14177,37 @@ class VideoSection(MiniDatabaseSection):
                     cumulative_map[(composition, draw, piece)] = running
         return cumulative_map
 
+    def _compute_video_range(
+        self,
+        row: pd.Series,
+        cumulative_map: Dict[Tuple[str, int, int], Optional[float]],
+    ) -> Optional[str]:
+        end_length = self._coerce_float(row.get(VIDEO_END_LENGTH_COLUMN))
+        if end_length is None:
+            return None
+        try:
+            composition = str(row.get("Composition") or "").strip()
+            draw = int(row.get("Draw"))
+            piece = int(row.get("Piece"))
+        except (TypeError, ValueError):
+            return None
+        cumulative_current = cumulative_map.get((composition, draw, piece))
+        if cumulative_current is None:
+            return None
+        length_value = self._coerce_float(row.get("Length (m)"))
+        if length_value is None:
+            return None
+        cumulative_previous = cumulative_current - length_value
+        start_value = end_length - cumulative_previous
+        end_value = end_length - cumulative_current
+        if not (math.isfinite(start_value) and math.isfinite(end_value)):
+            return None
+        low_value = min(start_value, end_value)
+        high_value = max(start_value, end_value)
+        low_int = int(round(low_value))
+        high_int = int(round(high_value))
+        return f"{low_int}-{high_int}"
+
     def _load_overrides(self) -> None:
         stored = self.data.extra.get("overrides")
         if isinstance(stored, dict):
@@ -13391,6 +14228,63 @@ class VideoSection(MiniDatabaseSection):
         if isinstance(payload, dict):
             return payload
         return {}
+
+    def _refresh_fabrication_lookup_cache(self) -> None:
+        table = self._fabrication_table()
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            self._fabrication_lookup_cache = {}
+            return
+        lookup: Dict[str, Mapping[str, Any]] = {}
+        for _, row in table.iterrows():
+            composition = str(row.get("Composition") or "").strip()
+            if not composition or composition == "Imported data:":
+                continue
+            try:
+                draw = int(row.get("Draw"))
+                piece = int(row.get("Piece"))
+            except (TypeError, ValueError):
+                continue
+            key = _microwire_key_to_str((composition, draw, piece, None))
+            if key:
+                lookup[key] = row
+        self._fabrication_lookup_cache = lookup
+
+    def _completion_state(self, row: pd.Series, column: str) -> Optional[bool]:
+        if self._row_missing_video_files(row):
+            return None
+        key_raw = row.get("_group_key")
+        key = str(key_raw).strip() if key_raw not in (None, "") else ""
+        if column == VIDEO_END_LENGTH_COLUMN:
+            return not self._is_missing(row.get(column))
+        if column == VIDEO_MW_LENGTH_COLUMN:
+            end_length = row.get(VIDEO_END_LENGTH_COLUMN)
+            return None if self._is_missing(end_length) else not self._is_missing(row.get(column))
+        editable = self._editable_columns()
+        if column not in editable:
+            return None
+        fabrication_row = self._fabrication_lookup_cache.get(key) if key else None
+        if fabrication_row is None:
+            return not self._is_missing(row.get(column))
+        base_missing = self._is_missing(fabrication_row.get(column))
+        if not base_missing:
+            return None
+        return not self._is_missing(row.get(column))
+
+    def _background_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        if self._row_missing_video_files(row):
+            return QtGui.QBrush(QtGui.QColor("#3a0a0a"))
+        state = self._completion_state(row, column)
+        if state is None:
+            return None
+        return QtGui.QBrush(QtGui.QColor("#0f3b26" if state else "#3a0a0a"))
+
+    def _foreground_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        if self._row_missing_video_files(row):
+            return QtGui.QBrush(QtGui.QColor("#ffd6d6"))
+        state = self._completion_state(row, column)
+        if state is None:
+            return None
+        return QtGui.QBrush(QtGui.QColor("#22c55e" if state else "#ef4444"))
 
     def _store_overrides(self) -> None:
         self.data.extra["overrides"] = self._overrides
@@ -13429,12 +14323,16 @@ class VideoSection(MiniDatabaseSection):
             else:
                 cumulative = cumulative_map.get((composition, draw, piece))
             updated.at[idx, "_cumulative_length_m"] = cumulative
-            updated.at[idx, VIDEO_MW_LENGTH_COLUMN] = self._compute_video_length(updated.loc[idx])
+            updated.at[idx, VIDEO_MW_LENGTH_COLUMN] = self._compute_video_range(
+                updated.loc[idx],
+                cumulative_map,
+            )
         return updated
 
     def _apply_overrides_to_model(self) -> None:
         frame = self.model.frame()
         fabrication_frame = self._fabrication_table()
+        self._refresh_fabrication_lookup_cache()
         index = self._load_video_index()
         if (
             (isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty)
@@ -13469,6 +14367,37 @@ class VideoSection(MiniDatabaseSection):
                 else:
                     keys.append("")
             updated["_group_key"] = keys
+        preferred = [
+            "Composition",
+            "Microwire",
+            "Data source",
+            "e/a",
+            ESTIMATED_TRANSITION_COLUMN,
+            "Draw",
+            "Piece",
+            VIDEO_END_LENGTH_COLUMN,
+            VIDEO_MW_LENGTH_COLUMN,
+            "Length (m)",
+            "Piece date",
+            MICROSCOPE_D_COLUMN,
+            MICROSCOPE_CAP_D_COLUMN,
+            "d/D",
+            "Resistance (Ω)",
+            CORE_TEMPERATURE_COLUMN,
+            GLASS_TEMPERATURE_COLUMN,
+            "Mass (g)",
+            "Winding speed (m/min)",
+            "Glass feeding (mm/min)",
+            "Underpressure",
+            "Production datetime",
+            "Notes",
+            "_sources",
+            "_group_key",
+            "_cumulative_length_m",
+        ]
+        ordered_columns = [column for column in preferred if column in updated.columns]
+        ordered_columns.extend(column for column in updated.columns if column not in ordered_columns)
+        updated = updated.loc[:, ordered_columns]
         frame = updated
         updated = self._apply_overrides_to_table(frame)
         self.data.table = updated
@@ -13589,6 +14518,7 @@ class VideoSection(MiniDatabaseSection):
             return
         updated_any = False
         changed_draws: Set[Tuple[str, int]] = set()
+        shared_video_end_lengths: Dict[Tuple[str, int], Any] = {}
         for row_idx in range(top_left.row(), bottom_right.row() + 1):
             if row_idx < 0 or row_idx >= len(frame.index):
                 continue
@@ -13607,6 +14537,14 @@ class VideoSection(MiniDatabaseSection):
                 else:
                     bucket[column] = value
                 updated_any = True
+                if column == VIDEO_END_LENGTH_COLUMN:
+                    try:
+                        composition = str(series.get("Composition") or "").strip()
+                        draw = int(series.get("Draw"))
+                    except (TypeError, ValueError):
+                        continue
+                    if composition:
+                        shared_video_end_lengths[(composition, draw)] = value
                 if column in {"Length (m)", VIDEO_END_LENGTH_COLUMN}:
                     try:
                         composition = str(series.get("Composition") or "").strip()
@@ -13616,10 +14554,31 @@ class VideoSection(MiniDatabaseSection):
                     if composition:
                         changed_draws.add((composition, draw))
             if VIDEO_END_LENGTH_COLUMN in columns or "Length (m)" in columns:
-                computed = self._compute_video_length(series)
+                computed = None
                 frame.at[row_idx, VIDEO_MW_LENGTH_COLUMN] = computed
                 bucket[VIDEO_MW_LENGTH_COLUMN] = computed
         if updated_any:
+            if shared_video_end_lengths:
+                for idx, row in frame.iterrows():
+                    try:
+                        composition = str(row.get("Composition") or "").strip()
+                        draw = int(row.get("Draw"))
+                    except (TypeError, ValueError):
+                        continue
+                    shared_value = shared_video_end_lengths.get((composition, draw))
+                    if (composition, draw) not in shared_video_end_lengths:
+                        continue
+                    key_raw = row.get("_group_key")
+                    key = str(key_raw).strip() if key_raw not in (None, "") else ""
+                    if not key:
+                        continue
+                    bucket = self._overrides.setdefault(key, {})
+                    if self._is_missing(shared_value):
+                        frame.at[idx, VIDEO_END_LENGTH_COLUMN] = None
+                        bucket[VIDEO_END_LENGTH_COLUMN] = None
+                    else:
+                        frame.at[idx, VIDEO_END_LENGTH_COLUMN] = shared_value
+                        bucket[VIDEO_END_LENGTH_COLUMN] = shared_value
             if changed_draws:
                 fabrication_frame = self._fabrication_table()
                 cumulative_map = self._build_cumulative_lengths(frame, fabrication_frame)
@@ -13634,8 +14593,9 @@ class VideoSection(MiniDatabaseSection):
                         continue
                     cumulative = cumulative_map.get((composition, draw, piece))
                     frame.at[idx, "_cumulative_length_m"] = cumulative
-                    frame.at[idx, VIDEO_MW_LENGTH_COLUMN] = self._compute_video_length(
-                        frame.loc[idx]
+                    frame.at[idx, VIDEO_MW_LENGTH_COLUMN] = self._compute_video_range(
+                        frame.loc[idx],
+                        cumulative_map,
                     )
             self.data.table = frame
             self._store_overrides()
@@ -13655,6 +14615,284 @@ class VideoSection(MiniDatabaseSection):
                         )
                     except Exception:
                         pass
+
+
+class _VideoReviewDialog(QtWidgets.QDialog):
+    _DISPLAY_COLUMNS: Tuple[Tuple[str, str, bool], ...] = (
+        (VIDEO_END_LENGTH_COLUMN, "Video total length (m)", True),
+        (VIDEO_MW_LENGTH_COLUMN, "Video wire-piece length (m)", False),
+        ("Length (m)", "Length (m)", True),
+        ("Piece date", "Piece date", True),
+        ("Resistance (Ω)", "Resistance (Ω)", True),
+        (CORE_TEMPERATURE_COLUMN, "Core temperature (°C)", True),
+        (GLASS_TEMPERATURE_COLUMN, "Glass temperature (°C)", True),
+        ("Winding speed (m/min)", "Winding speed (m/min)", True),
+        ("Glass feeding (mm/min)", "Glass feeding (mm/min)", True),
+        ("Underpressure", "Underpressure", True),
+        ("Production datetime", "Production datetime", True),
+        ("Notes", "Notes", True),
+    )
+
+    def __init__(self, section: VideoSection) -> None:
+        super().__init__(None)
+        self.section = section
+        self._current_source_row: Optional[int] = None
+        self._updating_table = False
+        self._advance_scheduled = False
+        self.setWindowTitle("Video review")
+        self.setWindowFlags(
+            QtCore.Qt.WindowType.Window
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.resize(1500, 180)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
+
+        self.header_label = QtWidgets.QLabel("Select a video row to review.")
+        self.header_label.setWordWrap(False)
+        top_row.addWidget(self.header_label, 1)
+
+        self.remaining_label = QtWidgets.QLabel("")
+        self.remaining_label.setWordWrap(False)
+        top_row.addWidget(self.remaining_label)
+
+        self.reopen_button = QtWidgets.QPushButton("Reopen video")
+        self.reopen_button.clicked.connect(self._reopen_video)
+        self.reopen_button.setAutoDefault(False)
+        self.reopen_button.setDefault(False)
+        top_row.addWidget(self.reopen_button)
+
+        self.next_button = QtWidgets.QPushButton("Next video")
+        self.next_button.clicked.connect(self._open_next_video)
+        self.next_button.setAutoDefault(False)
+        self.next_button.setDefault(False)
+        top_row.addWidget(self.next_button)
+
+        self.close_button = QtWidgets.QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        self.close_button.setAutoDefault(False)
+        self.close_button.setDefault(False)
+        top_row.addWidget(self.close_button)
+
+        layout.addLayout(top_row)
+
+        self.table = QtWidgets.QTableWidget(self)
+        self.table.setRowCount(1)
+        self.table.setColumnCount(len(self._DISPLAY_COLUMNS))
+        self.table.setHorizontalHeaderLabels([label for _column, label, _editable in self._DISPLAY_COLUMNS])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+            | QtWidgets.QAbstractItemView.EditTrigger.AnyKeyPressed
+        )
+        self.table.itemChanged.connect(self._handle_item_changed)
+        self.table.installEventFilter(self)
+        header = self.table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(True)
+        self.table.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        layout.addWidget(self.table, 0)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if getattr(self.section, "_review_dialog", None) is self:
+            self.section._review_dialog = None
+        super().closeEvent(event)
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if obj is self.table and event.type() == QtCore.QEvent.Type.KeyPress:
+            key_event = cast(QtGui.QKeyEvent, event)
+            if key_event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                self._schedule_advance_from_current_selection()
+        return super().eventFilter(obj, event)
+
+    def _series_for_current_row(self) -> Optional[pd.Series]:
+        row = self._current_source_row
+        if row is None:
+            return None
+        return self.section._row_series(row)
+
+    def load_source_row(self, source_row: int, *, open_video: bool = False) -> None:
+        self._current_source_row = source_row
+        self.section._select_source_row(source_row)
+        series = self.section._row_series(source_row)
+        if series is None:
+            self.header_label.setText("Unable to load the selected row.")
+            return
+        composition = str(series.get("Composition") or "").strip()
+        microwire = str(series.get("Microwire") or "").strip()
+        self.header_label.setText(f"{composition} {microwire}".strip() or f"Row {source_row + 1}")
+        remaining = self.section._remaining_review_rows_after(source_row)
+        self.remaining_label.setText(f"{remaining} left")
+        sources = self.section._row_sources(series)
+        self._populate_table(series)
+        self.reopen_button.setEnabled(bool(sources))
+        self.next_button.setEnabled(self.section._next_source_row_with_video(source_row) is not None)
+        if open_video:
+            self._reopen_video()
+
+    def _populate_table(self, series: pd.Series) -> None:
+        self._updating_table = True
+        try:
+            for column_index, (column, _label, editable) in enumerate(self._DISPLAY_COLUMNS):
+                value = series.get(column)
+                if value is None or (isinstance(value, float) and math.isnan(value)):
+                    text = ""
+                elif isinstance(value, (int, float)):
+                    text = _format_display_numeric(float(value))
+                elif isinstance(value, str):
+                    stripped = value.strip()
+                    if stripped:
+                        try:
+                            numeric = float(stripped.replace(",", "."))
+                        except ValueError:
+                            text = stripped
+                        else:
+                            text = _format_display_numeric(numeric) if math.isfinite(numeric) else stripped
+                    else:
+                        text = ""
+                else:
+                    text = str(value)
+                item = self.table.item(0, column_index)
+                if item is None:
+                    item = QtWidgets.QTableWidgetItem()
+                    self.table.setItem(0, column_index, item)
+                item.setText(text)
+                flags = item.flags()
+                if editable:
+                    item.setFlags(flags | QtCore.Qt.ItemFlag.ItemIsEditable)
+                else:
+                    item.setFlags(flags & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                self._style_item(item, series, column)
+            self.table.resizeColumnsToContents()
+            self._update_table_height()
+        finally:
+            self._updating_table = False
+
+    def _update_table_height(self) -> None:
+        header = self.table.horizontalHeader()
+        header_height = header.height() if header is not None else 24
+        row_height = self.table.rowHeight(0) if self.table.rowCount() else 28
+        frame = self.table.frameWidth() * 2
+        target_height = header_height + row_height + frame + 4
+        self.table.setFixedHeight(target_height)
+        layout = self.layout()
+        if isinstance(layout, QtWidgets.QVBoxLayout):
+            margins = layout.contentsMargins()
+            spacing = layout.spacing()
+            top_row_height = max(
+                self.header_label.sizeHint().height(),
+                self.reopen_button.sizeHint().height(),
+                self.next_button.sizeHint().height(),
+                self.close_button.sizeHint().height(),
+            )
+            total = margins.top() + top_row_height + spacing + target_height + margins.bottom()
+            self.setMinimumHeight(total)
+            self.setMaximumHeight(total)
+
+    def _style_item(self, item: QtWidgets.QTableWidgetItem, series: pd.Series, column: str) -> None:
+        background = self.section._background_brush_for_cell(series, column)
+        foreground = self.section._foreground_brush_for_cell(series, column)
+        item.setBackground(background if background is not None else QtGui.QBrush())
+        item.setForeground(foreground if foreground is not None else QtGui.QBrush())
+
+    def _handle_item_changed(self, item: QtWidgets.QTableWidgetItem) -> None:
+        if self._updating_table:
+            return
+        source_row = self._current_source_row
+        if source_row is None:
+            return
+        try:
+            column, _label, editable = self._DISPLAY_COLUMNS[item.column()]
+        except Exception:
+            return
+        if not editable:
+            return
+        self.section._set_source_row_value(source_row, column, item.text())
+        updated_series = self.section._row_series(source_row)
+        if updated_series is not None:
+            self._populate_table(updated_series)
+
+    def _advance_after_commit(self, current_column: int, series: pd.Series) -> None:
+        next_column: Optional[int] = None
+        for column_index in range(current_column + 1, len(self._DISPLAY_COLUMNS)):
+            column, _label, editable = self._DISPLAY_COLUMNS[column_index]
+            if not editable:
+                continue
+            if self.section._is_missing(series.get(column)):
+                next_column = column_index
+                break
+        if next_column is None:
+            self.next_button.setFocus(QtCore.Qt.FocusReason.TabFocusReason)
+            return
+        try:
+            self.table.setCurrentCell(0, next_column)
+            self.table.scrollToItem(
+                self.table.item(0, next_column),
+                QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible,
+            )
+            self.table.editItem(self.table.item(0, next_column))
+        except Exception:
+            pass
+
+    def _schedule_advance_from_current_selection(self) -> None:
+        if self._advance_scheduled:
+            return
+        self._advance_scheduled = True
+
+        def _run() -> None:
+            self._advance_scheduled = False
+            self._advance_from_current_selection()
+
+        QtCore.QTimer.singleShot(0, _run)
+
+    def _advance_from_current_selection(self) -> None:
+        current_column = self.table.currentColumn()
+        if current_column < 0:
+            return
+        series = self._series_for_current_row()
+        if series is None:
+            return
+        self._advance_after_commit(current_column, series)
+
+    def _reopen_video(self) -> None:
+        source_row = self._current_source_row
+        if source_row is None:
+            return
+        opened, missing_paths, label = self.section._open_video_sources_for_row(source_row)
+        if opened:
+            return
+        details: List[str] = [f"No video found for: {label}"]
+        if missing_paths:
+            details.append("Missing files:\n" + "\n".join(str(path) for path in missing_paths[:5]))
+        QtWidgets.QMessageBox.warning(self, self.section.section_title, "\n\n".join(details))
+
+    def _open_next_video(self) -> None:
+        source_row = self._current_source_row
+        if source_row is None:
+            return
+        next_row = self.section._next_source_row_with_video(source_row)
+        if next_row is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section.section_title,
+                "No next available video was found.",
+            )
+            return
+        self.load_source_row(next_row, open_video=True)
 
 
 class VsmHysteresisSection(MiniDatabaseSection):
@@ -24431,6 +25669,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         video = getattr(self, "video_section", None)
         if isinstance(video, MiniDatabaseSection):
             video.set_sources(sources)
+        if isinstance(video, VideoSection):
+            try:
+                video.sync_with_fabrication()
+            except Exception:
+                pass
 
     def _sync_microscope_dependent_sections(self) -> None:
         microscope = getattr(self, "microscope_section", None)
@@ -25344,29 +26587,32 @@ class BuilderWindow(QtWidgets.QMainWindow):
             if not isinstance(sections_payload, Mapping):
                 sections_payload = {}
 
-            for index, (key, section) in enumerate(self.sections.items(), start=1):
-                label = getattr(section, "section_title", key)
-                _pump_events(index - 1, f"Loading {label}…")
-                importer = getattr(section, "import_project_payload", None)
-                if callable(importer):
-                    if isinstance(section, MiniDatabaseSection):
-                        section.reset_to_blank()
-                    section_payload = sections_payload.get(key)
-                    try:
-                        importer(section_payload or {})
-                    except Exception as exc:
-                        self.logger.error("Failed to load section %s from project: %s", key, exc)
-                _pump_events(index)
+            MiniDatabaseSection._project_load_batch_mode = True
+            with MiniDatabaseStore.suspend_disk_writes():
+                for index, (key, section) in enumerate(self.sections.items(), start=1):
+                    label = getattr(section, "section_title", key)
+                    _pump_events(index - 1, f"Loading {label}…")
+                    importer = getattr(section, "import_project_payload", None)
+                    if callable(importer):
+                        if isinstance(section, MiniDatabaseSection):
+                            section.reset_to_blank()
+                        section_payload = sections_payload.get(key)
+                        try:
+                            importer(section_payload or {})
+                        except Exception as exc:
+                            self.logger.error("Failed to load section %s from project: %s", key, exc)
+                    _pump_events(index)
 
-            assembly_payload = sections_payload.get("assemble")
-            assembly = getattr(self, "assembly_section", None)
-            if assembly is not None:
-                importer = getattr(assembly, "import_project_payload", None)
-                if callable(importer):
-                    try:
-                        importer(assembly_payload or {})
-                    except Exception as exc:
-                        self.logger.error("Failed to load section assemble: %s", exc)
+                assembly_payload = sections_payload.get("assemble")
+                assembly = getattr(self, "assembly_section", None)
+                if assembly is not None:
+                    importer = getattr(assembly, "import_project_payload", None)
+                    if callable(importer):
+                        try:
+                            importer(assembly_payload or {})
+                        except Exception as exc:
+                            self.logger.error("Failed to load section assemble: %s", exc)
+            MiniDatabaseSection._project_load_batch_mode = False
             self._update_imported_data_item()
             if isinstance(assembly, AssemblySection):
                 show_imported = getattr(assembly, "_show_imported", True)
@@ -25407,6 +26653,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 f"Failed to load project file:\n{exc}",
             )
         finally:
+            MiniDatabaseSection._project_load_batch_mode = False
             self._suppress_dirty = False
             if progress_dialog is not None:
                 try:
@@ -25419,6 +26666,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
     def _refresh_sections_after_project_load(self) -> None:
         for key, section in self.sections.items():
+            if isinstance(section, MiniDatabaseSection):
+                try:
+                    section._pending_count_cache = 0
+                    section._reset_progress_ui()
+                    section._update_status()
+                    section._update_open_sources_enabled()
+                except Exception:
+                    pass
             status_text = ""
             status_label = getattr(section, "status_label", None)
             if isinstance(status_label, QtWidgets.QLabel):
@@ -25429,6 +26684,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 sources = section.data.sources
             self._handle_section_sources_changed(key, sources)
         self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+        try:
+            self.video_section.sync_with_fabrication()
+        except Exception:
+            pass
 
     def _remember_project_directory(self, directory: Path) -> None:
         try:

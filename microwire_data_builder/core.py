@@ -195,7 +195,7 @@ GLASS_TEMPERATURE_COLUMN = "Glass temperature (°C)"
 ESTIMATED_TRANSITION_COLUMN = "Tt est (°C)"
 GLASS_PULL_COLUMN = "Glass pull-off"
 VIDEO_END_LENGTH_COLUMN = "Video end length (m)"
-VIDEO_MW_LENGTH_COLUMN = "Video microwire length (m)"
+VIDEO_MW_LENGTH_COLUMN = "Video wire range (m)"
 
 OUTPUT_COLUMNS = [
     "Composition",
@@ -408,6 +408,7 @@ MICROSCOPE_PAIR_PATTERNS: Tuple[re.Pattern[str], ...] = (
     re.compile(r"(\d+)[/-](\d+)")
 )
 MICROSCOPE_WHITESPACE_PAIR = re.compile(r"\b(\d{1,3})\s+(\d{1,3})\b")
+MICROWIRE_SHORTCUT_STOP_NAMES = {".shortcut-targets-by-id"}
 SETPOINT_PATTERN = re.compile(r"(\d{1,4})mA", re.IGNORECASE)
 ALT_VARIANT_PATTERN = re.compile(r"(?:s\d+|\d+_\d+)a(?!\w)", re.IGNORECASE)
 DOT_DATE_PATTERN = re.compile(r"\d{1,2}\.\d{1,2}\.\d{2,4}")
@@ -1828,6 +1829,28 @@ def _extract_composition_token(text: str) -> Optional[str]:
     return token or None
 
 
+def _identifier_candidates_from_path(path: Path) -> List[str]:
+    candidates: List[str] = []
+    for candidate in (path.stem, path.name):
+        text = str(candidate or "").strip()
+        if text:
+            candidates.append(text)
+    for parent in path.parents:
+        name = str(parent.name or "").strip()
+        if not name:
+            continue
+        if name.lower() in MICROWIRE_SHORTCUT_STOP_NAMES:
+            break
+        try:
+            parent_stop_name = str(parent.parent.name or "").strip().lower()
+        except Exception:
+            parent_stop_name = ""
+        if parent_stop_name in MICROWIRE_SHORTCUT_STOP_NAMES:
+            continue
+        candidates.append(name)
+    return candidates
+
+
 def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]:
     def _suffix_from_text(text: str, start_idx: int) -> Optional[str]:
         if start_idx >= len(text):
@@ -1896,12 +1919,8 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]
                 return pair
         return None
 
-    for candidate in (path.stem, path.name):
+    for candidate in _identifier_candidates_from_path(path):
         result = _match(candidate)
-        if result is not None:
-            return result
-    for parent in path.parents:
-        result = _match(parent.name)
         if result is not None:
             return result
     return None
@@ -3220,13 +3239,11 @@ def _group_microscope_measurements(
     return MicroscopeGroupingResult(grouped, updated_cache)
 
 def _draw_key(path: Path) -> Optional[Tuple[str, int]]:
-    candidates: List[str] = [parent.name for parent in path.parents]
-    candidates.extend([path.stem, path.name])
-    for candidate in candidates:
+    for candidate in _identifier_candidates_from_path(path):
         if not candidate:
             continue
         composition = _extract_composition_token(candidate)
-        if not composition:
+        if not composition or not any(ch.isdigit() for ch in composition):
             continue
         draw_match = re.search(r"(\d+)", candidate)
         if not draw_match:
@@ -3237,6 +3254,62 @@ def _draw_key(path: Path) -> Optional[Tuple[str, int]]:
             continue
         return composition, draw_x
     return None
+
+
+def _video_summary_key(path: Path) -> Optional[Tuple[str, int, Optional[int]]]:
+    key = _microscope_key(path)
+    if key is not None:
+        parts = _split_microwire_key(key)
+        if parts is not None:
+            composition, draw_x, piece_y, _suffix = parts
+            return composition, draw_x, piece_y
+    draw_key = _draw_key(path)
+    if draw_key is None:
+        return None
+    composition, draw_x = draw_key
+    return composition, draw_x, None
+
+
+def _collect_video_sources(
+    video_files: Sequence[Path],
+    logger: Optional[logging.Logger],
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary]:
+    log = _logger(logger)
+    aggregated: Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary] = {}
+    unique_files = list(dict.fromkeys(Path(p) for p in video_files))
+    total = len(unique_files)
+    processed = 0
+    for raw_path in unique_files:
+        path = raw_path.expanduser()
+        processed += 1
+
+        def _notify() -> None:
+            if progress_callback is not None:
+                try:
+                    progress_callback(processed, total)
+                except BuildCancelledError:
+                    raise
+                except Exception:
+                    pass
+
+        try:
+            if not path.exists():
+                log.debug("Video file %s does not exist; skipping", path)
+                _notify()
+                continue
+        except OSError:
+            _notify()
+            continue
+        summary_key = _video_summary_key(path)
+        if summary_key is None:
+            log.debug("Unable to derive microwire key from video %s", path)
+            _notify()
+            continue
+        summary = aggregated.setdefault(summary_key, VideoMetricsSummary())
+        summary.sources.add(path)
+        _notify()
+    return aggregated
 
 
 def _collect_video_metrics(
@@ -3270,21 +3343,12 @@ def _collect_video_metrics(
         except OSError:
             _notify()
             continue
-        key = _microscope_key(path)
-        if key is not None:
-            parts = _split_microwire_key(key)
-            if parts is None:
-                _notify()
-                continue
-            composition, draw_x, piece_y, _ = parts
-        else:
-            draw_key = _draw_key(path)
-            if draw_key is None:
-                log.debug("Unable to derive microwire key from video %s", path)
-                _notify()
-                continue
-            composition, draw_x = draw_key
-            piece_y = None
+        summary_key = _video_summary_key(path)
+        if summary_key is None:
+            log.debug("Unable to derive microwire key from video %s", path)
+            _notify()
+            continue
+        composition, draw_x, piece_y = summary_key
         try:
             result = extract_video_metrics(path, logger=log)
         except Exception:

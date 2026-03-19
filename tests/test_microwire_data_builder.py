@@ -65,6 +65,62 @@ def test_microscope_key_preserves_decimal_composition_token() -> None:
     assert parsed == ("Mn58.1Ni4.3Si18.5Sn18.8", 3, 2, None)
 
 
+def test_microscope_key_ignores_google_drive_shortcut_ancestors(tmp_path: Path) -> None:
+    video_path = (
+        tmp_path
+        / ".shortcut-targets-by-id"
+        / "1-8FX4i_bNyyVH8wvIQz5KdrZuCTYH2xT"
+        / "databaza mikrodrotov"
+        / "Ni50Fe27Ga23"
+        / "6.Ni50Fe27Ga23 20052024 1140"
+        / "2024-05-20 11-37-53.mkv"
+    )
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"video")
+
+    assert core._microscope_key(video_path) is None
+    assert core._draw_key(video_path) == ("Ni50Fe27Ga23", 6)
+
+
+def test_collect_video_metrics_uses_draw_folder_for_shortcut_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_path = (
+        tmp_path
+        / ".shortcut-targets-by-id"
+        / "1-8FX4i_bNyyVH8wvIQz5KdrZuCTYH2xT"
+        / "databaza mikrodrotov"
+        / "Ni50Fe27Ga23"
+        / "3.Ni50Fe27Ga23 17042024 0850"
+        / "2024-04-17 08-44-39.mkv"
+    )
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"video")
+
+    class FakeVideoResult:
+        def median_temperature(self) -> float | None:
+            return 401.2
+
+        def median_underpressure(self) -> float | None:
+            return 52.0
+
+        def median_winding_speed(self) -> float | None:
+            return 64.0
+
+        def median_glass_feed(self) -> float | None:
+            return 3.4
+
+    monkeypatch.setattr(core, "extract_video_metrics", lambda *args, **kwargs: FakeVideoResult())
+
+    aggregated = core._collect_video_metrics([video_path], logging.getLogger("test"))
+
+    assert set(aggregated.keys()) == {("Ni50Fe27Ga23", 3, None)}
+    summary = aggregated[("Ni50Fe27Ga23", 3, None)]
+    assert summary.temperature() == pytest.approx(401.2)
+    assert video_path in summary.sources
+
+
 def _ensure_qapp() -> QtWidgets.QApplication:
     global _APP_REF
     app = QtWidgets.QApplication.instance()
@@ -1253,17 +1309,91 @@ def test_fabrication_augments_rows_for_microscope_only_samples() -> None:
 
         base = pd.DataFrame(columns=builder_ui._fabrication_index_to_frame(FabricationIndex()).columns)
         relevant_map = {"TestCompI": {3: {2}}}
-        updated = section._augment_table_with_relevant_microscope_rows(base, relevant_map)
+        raw_index = builder_ui.FabricationIndex()
+        raw_index.set_draw(
+            "TestCompI",
+            3,
+            {
+                "fabrication_temperature_c": 405.0,
+                "mass_g": 2.3,
+                "winding_speed_m_per_min": 66.0,
+                "_source_path": "Measured",
+            },
+        )
+        raw_index.set_piece(
+            "TestCompI",
+            3,
+            2,
+            {
+                "length_m": 12.5,
+                "piece_date": "2026-03-17",
+                "_source_path": "Measured",
+            },
+        )
+        updated = section._augment_table_with_relevant_microscope_rows(
+            base,
+            relevant_map,
+            source_index=raw_index,
+        )
 
         assert len(updated.index) == 1
         row = updated.iloc[0]
         assert row["Composition"] == "TestCompI"
         assert row["Draw"] == 3
         assert row["Piece"] == 2
-        assert row["Data source"] == "Microscope only"
-        assert row[builder_ui.MICROSCOPE_D_COLUMN] == 7.0
+        assert row["Data source"] == "Measured"
+        assert pd.isna(row[builder_ui.MICROSCOPE_D_COLUMN])
+        assert pd.isna(row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
+        assert pd.isna(row["d/D"])
+        assert row["Length (m)"] == pytest.approx(12.5)
+        assert row[builder_ui.CORE_TEMPERATURE_COLUMN] == pytest.approx(405.0)
+        assert row["Mass (g)"] == pytest.approx(2.3)
     finally:
         microscope_store.save(microscope_original)
+        section.close()
+
+
+def test_fabrication_appends_placeholder_for_measured_wire_without_fabrication_data() -> None:
+    _ensure_qapp()
+    microscope_store = builder_ui.MiniDatabaseStore("microscope")
+    microscope_original = microscope_store.load()
+    annealing_store = builder_ui.MiniDatabaseStore("annealing")
+    annealing_original = annealing_store.load()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        microscope_frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompJ",
+                    "Microwire": "4/7",
+                    builder_ui.MICROSCOPE_D_COLUMN: 11.2,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 44.1,
+                    "d/D": 0.254,
+                    "_key": "TestCompJ|4|7",
+                }
+            ]
+        )
+        microscope_store.save(MiniDatabaseData(table=microscope_frame))
+        annealing_store.save(MiniDatabaseData(table=pd.DataFrame()))
+
+        base = pd.DataFrame(columns=builder_ui._fabrication_index_to_frame(builder_ui.FabricationIndex()).columns)
+        relevant_map = {"TestCompJ": {4: {7}}}
+        updated = section._augment_table_with_relevant_microscope_rows(
+            base,
+            relevant_map,
+            source_index=builder_ui.FabricationIndex(),
+        )
+
+        assert len(updated.index) == 1
+        row = updated.iloc[0]
+        assert row["Composition"] == "TestCompJ"
+        assert row["Data source"] == "Microscope only"
+        assert pd.isna(row[builder_ui.MICROSCOPE_D_COLUMN])
+        assert pd.isna(row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
+        assert pd.isna(row["d/D"])
+    finally:
+        microscope_store.save(microscope_original)
+        annealing_store.save(annealing_original)
         section.close()
 
 
@@ -1995,6 +2125,40 @@ def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.
     ):
         assert column in highlights
         assert 0 in highlights[column]
+
+
+def test_video_index_to_frame_propagates_draw_level_sources_to_piece_rows() -> None:
+    summary = core.VideoMetricsSummary(
+        sources={Path("G:/videos/Ni50Fe27Ga23_draw6.mkv")},
+        temperatures=[395.0],
+        winding_speeds=[71.0],
+    )
+    fabrication_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "6/2",
+                "Data source": "Measured",
+                "e/a": 7.85,
+                "Tt est (°C)": 396.9,
+                "Draw": 6,
+                "Piece": 2,
+                "Length (m)": 27.88,
+            }
+        ]
+    )
+
+    frame = builder_ui._video_index_to_frame(
+        {("Ni50Fe27Ga23", 6, None): summary},
+        fabrication_frame,
+    )
+
+    assert len(frame.index) == 1
+    row = frame.iloc[0]
+    assert row["Microwire"] == "6/2"
+    assert row["_sources"] == [str(Path("G:/videos/Ni50Fe27Ga23_draw6.mkv"))]
+    assert float(row[builder_ui.CORE_TEMPERATURE_COLUMN]) == pytest.approx(395.0)
+    assert float(row["Winding speed (m/min)"]) == pytest.approx(71.0)
 
 
 def test_highlight_and_crop_columns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

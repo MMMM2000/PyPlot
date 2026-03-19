@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
@@ -37,6 +38,10 @@ class MiniDatabaseData:
 class MiniDatabaseStore:
     """Load and save ``MiniDatabaseData`` records for individual sections."""
 
+    _memory_data: Dict[str, MiniDatabaseData] = {}
+    _memory_payloads: Dict[tuple[str, str], Any] = {}
+    _disk_writes_suspended: int = 0
+
     def __init__(self, section: str) -> None:
         self.section = section
         base = _storage_root() / "mini_databases"
@@ -61,7 +66,24 @@ class MiniDatabaseStore:
     def table_path(self) -> Path:
         return self._table_path
 
+    @classmethod
+    @contextmanager
+    def suspend_disk_writes(cls):
+        cls._disk_writes_suspended += 1
+        try:
+            yield
+        finally:
+            cls._disk_writes_suspended = max(0, cls._disk_writes_suspended - 1)
+
     def load(self) -> MiniDatabaseData:
+        cached = self._memory_data.get(self.section)
+        if isinstance(cached, MiniDatabaseData):
+            return MiniDatabaseData(
+                sources=list(cached.sources),
+                processed=dict(cached.processed),
+                table=cached.table.copy() if isinstance(cached.table, pd.DataFrame) else pd.DataFrame(),
+                extra=dict(cached.extra),
+            )
         data = MiniDatabaseData()
         if self._meta_path.exists():
             try:
@@ -88,9 +110,23 @@ class MiniDatabaseStore:
                 table = pd.DataFrame()
             if isinstance(table, pd.DataFrame):
                 data.table = table
+        self._memory_data[self.section] = MiniDatabaseData(
+            sources=list(data.sources),
+            processed=dict(data.processed),
+            table=data.table.copy() if isinstance(data.table, pd.DataFrame) else pd.DataFrame(),
+            extra=dict(data.extra),
+        )
         return data
 
     def save(self, data: MiniDatabaseData) -> None:
+        self._memory_data[self.section] = MiniDatabaseData(
+            sources=list(dict.fromkeys(data.sources)),
+            processed=dict(data.processed),
+            table=data.table.copy() if isinstance(data.table, pd.DataFrame) else pd.DataFrame(),
+            extra=dict(data.extra),
+        )
+        if self._disk_writes_suspended:
+            return
         meta = {
             "sources": list(dict.fromkeys(data.sources)),
             "processed": data.processed,
@@ -103,6 +139,9 @@ class MiniDatabaseStore:
         data.table.to_pickle(self._table_path)
 
     def clear_table(self) -> None:
+        cached = self._memory_data.get(self.section)
+        if isinstance(cached, MiniDatabaseData):
+            cached.table = pd.DataFrame()
         try:
             self._table_path.unlink()
         except FileNotFoundError:
@@ -114,19 +153,28 @@ class MiniDatabaseStore:
 
     def save_payload(self, name: str, payload: Any) -> Path:
         path = self.payload_path(name)
+        self._memory_payloads[(self.section, name)] = payload
+        if self._disk_writes_suspended:
+            return path
         pd.to_pickle(payload, path)
         return path
 
     def load_payload(self, name: str) -> Any:
+        cache_key = (self.section, name)
+        if cache_key in self._memory_payloads:
+            return self._memory_payloads[cache_key]
         path = self.payload_path(name)
         if path.exists():
             try:
-                return pd.read_pickle(path)
+                payload = pd.read_pickle(path)
+                self._memory_payloads[cache_key] = payload
+                return payload
             except Exception:
                 return None
         return None
 
     def clear_payload(self, name: str) -> None:
+        self._memory_payloads.pop((self.section, name), None)
         path = self.payload_path(name)
         try:
             path.unlink()
