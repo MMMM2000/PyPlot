@@ -13624,6 +13624,19 @@ class VideoSection(MiniDatabaseSection):
     section_key = "videos"
     section_title = "Fabrication videos"
     supported_suffixes = VIDEO_EXTENSIONS
+    _HIDDEN_VIDEO_COLUMNS: Tuple[str, ...] = (
+        "Data source",
+        "e/a",
+        ESTIMATED_TRANSITION_COLUMN,
+        MICROSCOPE_D_COLUMN,
+        MICROSCOPE_CAP_D_COLUMN,
+        "d/D",
+        "Mass (g)",
+        GLASS_PULL_COLUMN,
+        "_sources",
+        "_group_key",
+        "_cumulative_length_m",
+    )
 
     def __init__(
         self,
@@ -13640,7 +13653,7 @@ class VideoSection(MiniDatabaseSection):
         self.refresh_button.setText("Refresh videos")
         self.open_sources_button.setText("Open video(s)")
         self.open_sources_button.setToolTip("Open the selected video files.")
-        self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
         self._load_overrides()
         self._normalize_temperature_columns()
         self._apply_overrides_to_model()
@@ -13842,7 +13855,7 @@ class VideoSection(MiniDatabaseSection):
 
     def refresh(self) -> None:
         super().refresh()
-        self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
 
     def _row_sources(self, row: pd.Series) -> List[Path]:
         sources: List[Path] = []
@@ -14035,19 +14048,19 @@ class VideoSection(MiniDatabaseSection):
         self._load_overrides()
         self._normalize_temperature_columns()
         self._apply_overrides_to_model()
-        self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
         self._video_source_status_cache.clear()
         self._normalize_temperature_columns()
         self._apply_overrides_to_model()
-        self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
 
     def sync_with_fabrication(self) -> None:
         self._video_source_status_cache.clear()
         self._apply_overrides_to_model()
-        self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
         try:
             self._auto_fit_columns()
         except Exception:
@@ -14599,7 +14612,6 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         ("Resistance (Ω)", "Resistance (Ω)", True),
         (CORE_TEMPERATURE_COLUMN, "Core temperature (°C)", True),
         (GLASS_TEMPERATURE_COLUMN, "Glass temperature (°C)", True),
-        ("Mass (g)", "Mass (g)", True),
         ("Winding speed (m/min)", "Winding speed (m/min)", True),
         ("Glass feeding (mm/min)", "Glass feeding (mm/min)", True),
         ("Underpressure", "Underpressure", True),
