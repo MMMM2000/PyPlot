@@ -101,7 +101,7 @@ from .core import (
     _load_annealing,
     _resistance_sanity_check,
     _group_microscope_measurements,
-    _collect_video_sources,
+    _collect_video_metrics,
     _microwire_label,
     _microwire_parts_from_label,
     _microwire_tuple_from_label,
@@ -2628,7 +2628,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
 
     def __init__(self, frame: pd.DataFrame | None = None, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
-        self._frame = frame.copy() if frame is not None else pd.DataFrame()
+        self._frame = self._coerce_frame(frame)
         self._decoration_provider: Optional[
             Callable[[pd.Series, str], Optional[QtGui.QPixmap | QtGui.QImage]]
         ] = None
@@ -2641,9 +2641,21 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self._editable_columns: set[str] = set()
         self._text_columns: set[str] = set()
 
+    @staticmethod
+    def _coerce_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
+        if frame is None or not isinstance(frame, pd.DataFrame):
+            return pd.DataFrame()
+        try:
+            return frame.astype(object)
+        except Exception:
+            try:
+                return frame.copy()
+            except Exception:
+                return pd.DataFrame()
+
     def set_frame(self, frame: pd.DataFrame | None) -> None:
         self.beginResetModel()
-        self._frame = frame.copy() if frame is not None else pd.DataFrame()
+        self._frame = self._coerce_frame(frame)
         self.endResetModel()
         try:
             self.layoutChanged.emit()
@@ -8632,7 +8644,11 @@ class FabricationSection(MiniDatabaseSection):
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return
-        columns = list(frame.columns[top_left.column() : bottom_right.column() + 1])
+        columns = [
+            frame.columns[col_idx]
+            for col_idx in range(top_left.column(), bottom_right.column() + 1)
+            if 0 <= col_idx < len(frame.columns)
+        ]
         relevant = self._editable_columns()
         if not any(column in relevant for column in columns):
             return
@@ -13834,7 +13850,7 @@ class VideoSection(MiniDatabaseSection):
             except Exception:
                 pass
 
-        index = _collect_video_sources(
+        index = _collect_video_metrics(
             unique_paths,
             self.logger,
             progress_callback=_progress if progress is not None else None,
@@ -14120,6 +14136,15 @@ class VideoSection(MiniDatabaseSection):
         base_frame: pd.DataFrame,
         fabrication_frame: Optional[pd.DataFrame],
     ) -> Dict[Tuple[str, int, int], Optional[float]]:
+        def _rows(frame: Optional[pd.DataFrame]) -> Iterable[pd.Series]:
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return
+            for row_idx in range(len(frame.index)):
+                try:
+                    yield frame.iloc[row_idx]
+                except Exception:
+                    continue
+
         lengths: Dict[Tuple[str, int, int], Optional[float]] = {}
         try:
             raw_index = MiniDatabaseStore("fabrication").load_payload("fabrication_index_raw")
@@ -14139,7 +14164,7 @@ class VideoSection(MiniDatabaseSection):
                     piece_data.get("length_m") if isinstance(piece_data, dict) else None
                 )
         elif isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty:
-            for _, row in fabrication_frame.iterrows():
+            for row in _rows(fabrication_frame):
                 composition = str(row.get("Composition") or "").strip()
                 if not composition or composition == "Imported data:":
                     continue
@@ -14150,7 +14175,7 @@ class VideoSection(MiniDatabaseSection):
                     continue
                 length_val = self._coerce_float(row.get("Length (m)"))
                 lengths[(composition, draw, piece)] = length_val
-        for _, row in base_frame.iterrows():
+        for row in _rows(base_frame):
             composition = str(row.get("Composition") or "").strip()
             if not composition or composition == "Imported data:":
                 continue
@@ -14179,7 +14204,7 @@ class VideoSection(MiniDatabaseSection):
 
     def _compute_video_range(
         self,
-        row: pd.Series,
+        row: Mapping[str, Any],
         cumulative_map: Dict[Tuple[str, int, int], Optional[float]],
     ) -> Optional[str]:
         end_length = self._coerce_float(row.get(VIDEO_END_LENGTH_COLUMN))
@@ -14512,17 +14537,46 @@ class VideoSection(MiniDatabaseSection):
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return
-        columns = list(frame.columns[top_left.column() : bottom_right.column() + 1])
+        columns = [
+            frame.columns[col_idx]
+            for col_idx in range(top_left.column(), bottom_right.column() + 1)
+            if 0 <= col_idx < len(frame.columns)
+        ]
         relevant = self._editable_columns()
         if not any(column in relevant for column in columns):
             return
+
+        if VIDEO_MW_LENGTH_COLUMN not in frame.columns:
+            frame[VIDEO_MW_LENGTH_COLUMN] = pd.Series(
+                [None] * len(frame.index),
+                index=frame.index,
+                dtype=object,
+            )
+
+        def _row_at_position(row_pos: int) -> Dict[Any, Any]:
+            return {
+                frame.columns[col_idx]: frame.iat[row_pos, col_idx]
+                for col_idx in range(len(frame.columns))
+            }
+
+        try:
+            video_end_length_col_idx = frame.columns.get_loc(VIDEO_END_LENGTH_COLUMN)
+        except Exception:
+            video_end_length_col_idx = None
+        try:
+            video_range_col_idx = frame.columns.get_loc(VIDEO_MW_LENGTH_COLUMN)
+        except Exception:
+            video_range_col_idx = None
+
         updated_any = False
         changed_draws: Set[Tuple[str, int]] = set()
         shared_video_end_lengths: Dict[Tuple[str, int], Any] = {}
+        end_length_rows: Set[int] = set()
+        video_range_rows: Set[int] = set()
         for row_idx in range(top_left.row(), bottom_right.row() + 1):
             if row_idx < 0 or row_idx >= len(frame.index):
                 continue
-            series = frame.iloc[row_idx]
+            series = _row_at_position(row_idx)
             key_raw = series.get("_group_key")
             key = str(key_raw).strip() if key_raw not in (None, "") else ""
             if not key:
@@ -14555,11 +14609,13 @@ class VideoSection(MiniDatabaseSection):
                         changed_draws.add((composition, draw))
             if VIDEO_END_LENGTH_COLUMN in columns or "Length (m)" in columns:
                 computed = None
-                frame.at[row_idx, VIDEO_MW_LENGTH_COLUMN] = computed
+                if video_range_col_idx is not None:
+                    frame.iat[row_idx, video_range_col_idx] = computed
                 bucket[VIDEO_MW_LENGTH_COLUMN] = computed
         if updated_any:
             if shared_video_end_lengths:
-                for idx, row in frame.iterrows():
+                for row_pos in range(len(frame.index)):
+                    row = _row_at_position(row_pos)
                     try:
                         composition = str(row.get("Composition") or "").strip()
                         draw = int(row.get("Draw"))
@@ -14574,15 +14630,29 @@ class VideoSection(MiniDatabaseSection):
                         continue
                     bucket = self._overrides.setdefault(key, {})
                     if self._is_missing(shared_value):
-                        frame.at[idx, VIDEO_END_LENGTH_COLUMN] = None
+                        if video_end_length_col_idx is not None:
+                            frame.iat[row_pos, video_end_length_col_idx] = None
                         bucket[VIDEO_END_LENGTH_COLUMN] = None
                     else:
-                        frame.at[idx, VIDEO_END_LENGTH_COLUMN] = shared_value
+                        if video_end_length_col_idx is not None:
+                            frame.iat[row_pos, video_end_length_col_idx] = shared_value
                         bucket[VIDEO_END_LENGTH_COLUMN] = shared_value
+                    end_length_rows.add(row_pos)
             if changed_draws:
+                if "_cumulative_length_m" not in frame.columns:
+                    frame["_cumulative_length_m"] = pd.Series(
+                        [None] * len(frame.index),
+                        index=frame.index,
+                        dtype=object,
+                    )
+                try:
+                    cumulative_col_idx = frame.columns.get_loc("_cumulative_length_m")
+                except Exception:
+                    cumulative_col_idx = None
                 fabrication_frame = self._fabrication_table()
                 cumulative_map = self._build_cumulative_lengths(frame, fabrication_frame)
-                for idx, row in frame.iterrows():
+                for row_pos in range(len(frame.index)):
+                    row = _row_at_position(row_pos)
                     try:
                         composition = str(row.get("Composition") or "").strip()
                         draw = int(row.get("Draw"))
@@ -14592,29 +14662,43 @@ class VideoSection(MiniDatabaseSection):
                     if (composition, draw) not in changed_draws:
                         continue
                     cumulative = cumulative_map.get((composition, draw, piece))
-                    frame.at[idx, "_cumulative_length_m"] = cumulative
-                    frame.at[idx, VIDEO_MW_LENGTH_COLUMN] = self._compute_video_range(
-                        frame.loc[idx],
-                        cumulative_map,
-                    )
+                    if cumulative_col_idx is not None:
+                        frame.iat[row_pos, cumulative_col_idx] = cumulative
+                    if video_range_col_idx is not None:
+                        updated_row = _row_at_position(row_pos)
+                        frame.iat[row_pos, video_range_col_idx] = self._compute_video_range(
+                            updated_row,
+                            cumulative_map,
+                        )
+                    video_range_rows.add(row_pos)
             self.data.table = frame
             self._store_overrides()
-            if VIDEO_MW_LENGTH_COLUMN in frame.columns:
+
+            def _emit_model_change(rows: Set[int], column: str) -> None:
+                if not rows or column not in frame.columns:
+                    return
                 try:
-                    col_idx = frame.columns.get_loc(VIDEO_MW_LENGTH_COLUMN)
+                    col_idx = frame.columns.get_loc(column)
                 except Exception:
-                    col_idx = None
-                if col_idx is not None:
-                    top = self.model.index(top_left.row(), col_idx)
-                    bottom = self.model.index(bottom_right.row(), col_idx)
-                    try:
-                        self.model.dataChanged.emit(
-                            top,
-                            bottom,
-                            [QtCore.Qt.ItemDataRole.DisplayRole],
-                        )
-                    except Exception:
-                        pass
+                    return
+                top = self.model.index(min(rows), col_idx)
+                bottom = self.model.index(max(rows), col_idx)
+                try:
+                    self.model.dataChanged.emit(
+                        top,
+                        bottom,
+                        [
+                            QtCore.Qt.ItemDataRole.DisplayRole,
+                            QtCore.Qt.ItemDataRole.EditRole,
+                            QtCore.Qt.ItemDataRole.BackgroundRole,
+                            QtCore.Qt.ItemDataRole.ForegroundRole,
+                        ],
+                    )
+                except Exception:
+                    pass
+
+            _emit_model_change(end_length_rows, VIDEO_END_LENGTH_COLUMN)
+            _emit_model_change(video_range_rows, VIDEO_MW_LENGTH_COLUMN)
 
 
 class _VideoReviewDialog(QtWidgets.QDialog):
