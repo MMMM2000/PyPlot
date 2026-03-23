@@ -14739,7 +14739,6 @@ class VideoSection(MiniDatabaseSection):
                         bottom,
                         [
                             QtCore.Qt.ItemDataRole.DisplayRole,
-                            QtCore.Qt.ItemDataRole.EditRole,
                             QtCore.Qt.ItemDataRole.BackgroundRole,
                             QtCore.Qt.ItemDataRole.ForegroundRole,
                         ],
