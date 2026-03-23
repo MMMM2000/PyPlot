@@ -518,6 +518,10 @@ def test_video_end_length_propagation_notifies_all_changed_rows() -> None:
             and right_col == range_col
             for top_row, bottom_row, left_col, right_col, _roles in events
         )
+        assert all(
+            QtCore.Qt.ItemDataRole.EditRole not in roles
+            for _top_row, _bottom_row, _left_col, _right_col, roles in events
+        )
     finally:
         section.close()
 

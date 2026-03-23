@@ -189,7 +189,10 @@ ANNEALING_GRAPH_HEIGHT = 230
 ANNEALING_TITLE_FONT_SIZE = 8
 ANNEALING_AXIS_FONT_SIZE = 6
 ANNEALING_TICK_FONT_SIZE = 6
-ANNEALING_OTHER_GRAPH_COLUMN = "Graph — other mA"
+ANNEALING_HIGH_GRAPH_COLUMN = "Graph — 1000 mA"
+ANNEALING_OTHER_GRAPH_COLUMN = "Graph — other annealing"
+ANNEALING_LEGACY_LOW_GRAPH_COLUMN = "Graph — low mA"
+ANNEALING_LEGACY_OTHER_GRAPH_COLUMN = "Graph — other mA"
 GRAPH_PREVIEW_WIDTH = 720
 GRAPH_PREVIEW_HEIGHT = 420
 MAX_PLOT_POINTS = 2000
@@ -4196,8 +4199,7 @@ def _annealing_records_to_frame(
     columns = [
         "Composition",
         "Microwire",
-        "Graph — 1000 mA",
-        "Graph — low mA",
+        ANNEALING_HIGH_GRAPH_COLUMN,
         ANNEALING_OTHER_GRAPH_COLUMN,
         "_group_key",
         "_sources",
@@ -4234,7 +4236,7 @@ def _annealing_records_to_frame(
             (str(item[0][3]).lower() if item[0][3] is not None else ""),
         ),
     ):
-        high_record, low_record = _select_high_low_pair(group)
+        high_record, other_records = _select_anchor_and_other_records(group)
         try:
             microwire = _microwire_label(draw, piece, suffix)
         except Exception:
@@ -4251,7 +4253,7 @@ def _annealing_records_to_frame(
 
         group_key = _microwire_key_to_str((composition, draw, piece, suffix))
         source_paths: List[str] = []
-        for entry in (high_record, low_record):
+        for entry in [high_record, *other_records]:
             path = getattr(entry, "path", None)
             if path:
                 source_paths.append(str(Path(path)))
@@ -4261,8 +4263,7 @@ def _annealing_records_to_frame(
             {
                 "Composition": composition,
                 "Microwire": microwire,
-                "Graph — 1000 mA": None,
-                "Graph — low mA": None,
+                ANNEALING_HIGH_GRAPH_COLUMN: None,
                 ANNEALING_OTHER_GRAPH_COLUMN: None,
                 "_group_key": group_key,
                 "_sources": source_paths,
@@ -4298,41 +4299,29 @@ def _format_setpoint(value: Optional[float]) -> str:
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
-def _select_high_low_pair(
+def _select_anchor_and_other_records(
     records: List[MeasurementRecord],
-) -> Tuple[Optional[MeasurementRecord], Optional[MeasurementRecord]]:
+) -> Tuple[Optional[MeasurementRecord], List[MeasurementRecord]]:
     high_record = _select_high_measurement(records)
-    low_record = _select_low_measurement(records)
-    if (
-        high_record
-        and low_record
-        and _extract_setpoint(high_record) == _extract_setpoint(low_record)
-    ):
-        setpoints = {
-            _extract_setpoint(record)
-            for record in records
-            if _extract_setpoint(record) is not None
-        }
-        if len(setpoints) <= 1:
-            low_record = None
-    return high_record, low_record
+    other_records = _select_other_measurements(records, high_record)
+    return high_record, other_records
 
 
 def _select_other_measurements(
     records: Sequence[MeasurementRecord],
     high_record: Optional[MeasurementRecord],
-    low_record: Optional[MeasurementRecord],
+    low_record: Optional[MeasurementRecord] = None,
 ) -> List[MeasurementRecord]:
-    excluded_ids = {id(high_record), id(low_record)}
+    excluded_ids = {id(high_record)}
 
-    def _sort_key(record: MeasurementRecord) -> Tuple[int, str]:
+    def _sort_key(record: MeasurementRecord) -> Tuple[int, float, str]:
         setpoint = getattr(getattr(record, "metadata", object()), "setpoint_mA", None)
         try:
-            setpoint_value = int(setpoint) if setpoint is not None else -1
+            setpoint_value = float(setpoint) if setpoint is not None else math.inf
         except (TypeError, ValueError):
-            setpoint_value = -1
+            setpoint_value = math.inf
         file_name = getattr(getattr(record, "metadata", object()), "file_name", "")
-        return (setpoint_value, str(file_name).lower())
+        return (0 if math.isfinite(setpoint_value) else 1, setpoint_value, str(file_name).lower())
 
     remaining = [record for record in records if id(record) not in excluded_ids]
     return sorted(remaining, key=_sort_key)
@@ -4612,6 +4601,90 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         except Exception:
             pass
         return figure
+
+
+class _AnnealingPlotGallery(QtWidgets.QWidget):
+    valuePicked = QtCore.pyqtSignal(float)
+
+    def __init__(
+        self,
+        title: str,
+        logger: logging.Logger,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._logger = logger
+        self._cards: list[_AnnealingPlotDisplay] = []
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.title_label = QtWidgets.QLabel(title, self)
+        self.title_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        layout.addWidget(self.title_label)
+
+        self._placeholder = QtWidgets.QLabel(
+            "Select a row to preview the annealing measurements.",
+            self,
+        )
+        self._placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setWordWrap(True)
+        layout.addWidget(self._placeholder, 1)
+
+        self._scroll = QtWidgets.QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setVisible(False)
+        self._container = QtWidgets.QWidget(self._scroll)
+        self._scroll.setWidget(self._container)
+        self._items_layout = QtWidgets.QVBoxLayout(self._container)
+        self._items_layout.setContentsMargins(0, 0, 0, 0)
+        self._items_layout.setSpacing(10)
+        layout.addWidget(self._scroll, 1)
+
+    def set_records(
+        self,
+        records: Sequence[MeasurementRecord],
+        *,
+        description: str,
+    ) -> None:
+        self._clear_cards()
+        if not records:
+            self._placeholder.setText(description)
+            self._placeholder.setVisible(True)
+            self._scroll.setVisible(False)
+            self.title_label.setText(self._title)
+            return
+
+        for record in records:
+            card = _AnnealingPlotDisplay(self._title, self._logger, self._scroll)
+            card.valuePicked.connect(self.valuePicked.emit)
+            card.set_record(
+                record,
+                setpoint=_extract_setpoint(record),
+                description=description,
+            )
+            self._cards.append(card)
+            self._items_layout.addWidget(card)
+        self._items_layout.addStretch(1)
+        self.title_label.setText(self._title)
+        self._placeholder.setVisible(False)
+        self._scroll.setVisible(True)
+
+    def clear(self, message: str) -> None:
+        self.set_records([], description=message)
+
+    def _clear_cards(self) -> None:
+        self._cards.clear()
+        while self._items_layout.count():
+            item = self._items_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
 
 
 @dataclass
@@ -5428,7 +5501,7 @@ def _fmr_preview_items(
 
 
 class AnnealingPlotPanel(QtWidgets.QWidget):
-    """Display paired annealing plots for the selected microwire."""
+    """Display anchor and follow-up annealing plots for the selected microwire."""
 
     def __init__(
         self,
@@ -5448,10 +5521,10 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
         layout.addWidget(self.header_label)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
-        self._high_display = _AnnealingPlotDisplay("Graph — 1000 mA", logger, splitter)
-        self._low_display = _AnnealingPlotDisplay("Graph — low mA", logger, splitter)
+        self._high_display = _AnnealingPlotDisplay(ANNEALING_HIGH_GRAPH_COLUMN, logger, splitter)
+        self._other_display = _AnnealingPlotGallery(ANNEALING_OTHER_GRAPH_COLUMN, logger, splitter)
         splitter.addWidget(self._high_display)
-        splitter.addWidget(self._low_display)
+        splitter.addWidget(self._other_display)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([1, 1])
@@ -5461,12 +5534,12 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
         self,
         key: Optional[MicrowireKey],
         high: Optional[MeasurementRecord],
-        low: Optional[MeasurementRecord],
+        other_records: Sequence[MeasurementRecord],
     ) -> None:
         if key is None:
             self.header_label.setText("Select a row to preview annealing plots.")
             self._high_display.clear("Select a row to view the 1000 mA measurement.")
-            self._low_display.clear("Select a row to view the low-current measurement.")
+            self._other_display.clear("Select a row to view the other annealing measurements.")
             return
 
         composition, draw, piece, suffix = key
@@ -5481,10 +5554,9 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
             setpoint=_extract_setpoint(high),
             description="No 1000 mA measurement available for this microwire.",
         )
-        self._low_display.set_record(
-            low,
-            setpoint=_extract_setpoint(low),
-            description="No lower-current measurement available for this microwire.",
+        self._other_display.set_records(
+            other_records,
+            description="No other annealing measurements available for this microwire.",
         )
 
 
@@ -6573,7 +6645,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         table = QtWidgets.QTableView(parent)
         table.setModel(self.model)
-        table.horizontalHeader().setStretchLastSection(True)
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
@@ -8835,7 +8910,10 @@ class AnnealingSection(MiniDatabaseSection):
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         table = QtWidgets.QTableView(parent)
         table.setModel(self.model)
-        table.horizontalHeader().setStretchLastSection(True)
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
@@ -8849,16 +8927,36 @@ class AnnealingSection(MiniDatabaseSection):
             | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
         )
         table.setSortingEnabled(True)
+        table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         table.setIconSize(
             QtCore.QSize(self._preview_icon_width(), ANNEALING_GRAPH_HEIGHT)
         )
-        header = table.verticalHeader()
-        if header is not None:
+        vertical_header = table.verticalHeader()
+        if vertical_header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
-            header.setDefaultSectionSize(default_height)
-            header.setMinimumSectionSize(default_height)
+            vertical_header.setDefaultSectionSize(default_height)
+            vertical_header.setMinimumSectionSize(default_height)
         self.table_view = table
         return table
+
+    def _configure_table_view(self) -> None:  # type: ignore[override]
+        super()._configure_table_view()
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+
+    def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
+        super().apply_data(data)
+        self._sanitize_graph_columns()
+        self._hide_columns(["_group_key", "_sources"])
+        self._refresh_record_groups()
+        self._prune_phase_points()
+        self._update_export_enabled()
 
     def process(
         self,
@@ -9185,6 +9283,8 @@ class AnnealingSection(MiniDatabaseSection):
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
+        self._sanitize_graph_columns()
+        self._hide_columns(["_group_key", "_sources"])
         self._refresh_record_groups()
         self._update_export_enabled()
 
@@ -9221,8 +9321,7 @@ class AnnealingSection(MiniDatabaseSection):
         self._record_groups = grouped
         max_other = 1
         for records in grouped.values():
-            high_record, low_record = _select_high_low_pair(records)
-            other_records = _select_other_measurements(records, high_record, low_record)
+            _high_record, other_records = _select_anchor_and_other_records(records)
             if other_records:
                 max_other = max(max_other, len(other_records))
         self._preview_other_count = max_other
@@ -9234,7 +9333,18 @@ class AnnealingSection(MiniDatabaseSection):
         if frame.empty:
             return
         changed = False
-        for column in ("Graph — 1000 mA", "Graph — low mA", ANNEALING_OTHER_GRAPH_COLUMN):
+        legacy_map = {
+            ANNEALING_LEGACY_OTHER_GRAPH_COLUMN: ANNEALING_OTHER_GRAPH_COLUMN,
+            ANNEALING_LEGACY_LOW_GRAPH_COLUMN: ANNEALING_OTHER_GRAPH_COLUMN,
+        }
+        for legacy_column, new_column in legacy_map.items():
+            if legacy_column in frame.columns and new_column not in frame.columns:
+                frame = frame.rename(columns={legacy_column: new_column})
+                changed = True
+            elif legacy_column in frame.columns:
+                frame = frame.drop(columns=[legacy_column])
+                changed = True
+        for column in (ANNEALING_HIGH_GRAPH_COLUMN, ANNEALING_OTHER_GRAPH_COLUMN):
             if column not in frame.columns:
                 continue
             series = frame[column]
@@ -9261,8 +9371,7 @@ class AnnealingSection(MiniDatabaseSection):
         desired_order = [
             "Composition",
             "Microwire",
-            "Graph — 1000 mA",
-            "Graph — low mA",
+            ANNEALING_HIGH_GRAPH_COLUMN,
             ANNEALING_OTHER_GRAPH_COLUMN,
             "_group_key",
             "_sources",
@@ -9325,7 +9434,7 @@ class AnnealingSection(MiniDatabaseSection):
         row: pd.Series,
         column: str,
     ) -> Optional[QtGui.QPixmap]:
-        if column not in {"Graph — 1000 mA", "Graph — low mA", ANNEALING_OTHER_GRAPH_COLUMN}:
+        if column not in {ANNEALING_HIGH_GRAPH_COLUMN, ANNEALING_OTHER_GRAPH_COLUMN}:
             return None
         key = row.get("_group_key")
         if not isinstance(key, str) or not key:
@@ -9336,15 +9445,11 @@ class AnnealingSection(MiniDatabaseSection):
         records = self._record_groups.get(key)
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
-            high_record, low_record = _select_high_low_pair(records)
-            if column == "Graph — 1000 mA":
+            high_record, other_records = _select_anchor_and_other_records(records)
+            if column == ANNEALING_HIGH_GRAPH_COLUMN:
                 target = high_record
                 pixmap = _render_measurement_pixmap(target, self.logger)
-            elif column == "Graph — low mA":
-                target = low_record
-                pixmap = _render_measurement_pixmap(target, self.logger)
             else:
-                other_records = _select_other_measurements(records, high_record, low_record)
                 if other_records:
                     signature = tuple(
                         str(getattr(record, "path", "")) for record in other_records
@@ -9470,15 +9575,15 @@ class AnnealingSection(MiniDatabaseSection):
                         "Composition",
                         "Microwire",
                         "1000 mA file",
-                        "Low mA (mA)",
-                        "Low mA file",
+                        "Other annealing files",
                         "Graph — 1000 mA",
-                        "Graph — low mA",
+                        "Graph — other annealing",
                     ]
                     worksheet.write_row(0, 0, headers, header_format)
                     worksheet.set_column(0, 1, 18)
-                    worksheet.set_column(2, 4, 22)
-                    worksheet.set_column(5, 6, 42)
+                    worksheet.set_column(2, 2, 22)
+                    worksheet.set_column(3, 3, 40)
+                    worksheet.set_column(4, 5, 42)
 
                     plot_dir = Path(tmpdir)
                     row_idx = 1
@@ -9491,19 +9596,17 @@ class AnnealingSection(MiniDatabaseSection):
                             (str(item[0][3]).lower() if item[0][3] is not None else ""),
                         ),
                     ):
-                        high_record, low_record = _select_high_low_pair(recs)
+                        high_record, other_records = _select_anchor_and_other_records(recs)
 
                         microwire_label = _microwire_label(draw_x, piece_y, suffix)
-                        low_setpoint = (
-                            low_record.metadata.setpoint_mA if low_record else None
-                        )
                         high_file = (
                             high_record.metadata.file_name if high_record else ""
                         )
-                        low_file = (
-                            low_record.metadata.file_name if low_record else ""
+                        other_files = ", ".join(
+                            record.metadata.file_name
+                            for record in other_records
+                            if getattr(record.metadata, "file_name", None)
                         )
-                        formatted_low = _format_setpoint(low_setpoint)
 
                         worksheet.write_row(
                             row_idx,
@@ -9512,8 +9615,7 @@ class AnnealingSection(MiniDatabaseSection):
                                 composition,
                                 microwire_label,
                                 high_file,
-                                formatted_low,
-                                low_file,
+                                other_files,
                                 "",
                                 "",
                             ],
@@ -9539,20 +9641,43 @@ class AnnealingSection(MiniDatabaseSection):
                             return plot_path
 
                         high_plot = _plot(high_record) if high_record else None
-                        low_plot = _plot(low_record) if low_record else None
+                        other_pixmaps = [
+                            _render_measurement_pixmap(record, self.logger)
+                            for record in other_records
+                        ]
+                        other_pixmaps = [
+                            pixmap for pixmap in other_pixmaps if isinstance(pixmap, QtGui.QPixmap)
+                        ]
+                        other_plot = _combine_pixmaps_side_by_side(
+                            other_pixmaps,
+                            width_px=max(
+                                ANNEALING_GRAPH_WIDTH,
+                                ANNEALING_GRAPH_WIDTH * max(len(other_pixmaps), 1),
+                            ),
+                            height_px=ANNEALING_GRAPH_HEIGHT,
+                            spacing=self._preview_spacing,
+                            scale_to_fit=False,
+                        ) if other_pixmaps else None
+                        other_plot_path: Optional[Path] = None
+                        if other_plot is not None and not other_plot.isNull():
+                            other_plot_path = (
+                                plot_dir
+                                / f"{composition}_{draw_x}_{piece_y}_{suffix or 'base'}_other.png"
+                            )
+                            other_plot.save(str(other_plot_path), "PNG")
                         image_options = {"x_scale": 0.6, "y_scale": 0.6}
                         if high_plot is not None:
                             worksheet.insert_image(
                                 row_idx,
-                                5,
+                                4,
                                 str(high_plot),
                                 image_options,
                             )
-                        if low_plot is not None:
+                        if other_plot_path is not None:
                             worksheet.insert_image(
                                 row_idx,
-                                6,
-                                str(low_plot),
+                                5,
+                                str(other_plot_path),
                                 image_options,
                             )
                         row_idx += 1
@@ -11890,25 +12015,25 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
         )
         layout.addWidget(self.header_label)
 
-        self._high_display = _AnnealingPlotDisplay("Graph — 1000 mA", logger, self)
-        self._low_display = _AnnealingPlotDisplay("Graph — low mA", logger, self)
+        self._high_display = _AnnealingPlotDisplay(ANNEALING_HIGH_GRAPH_COLUMN, logger, self)
+        self._other_display = _AnnealingPlotGallery(ANNEALING_OTHER_GRAPH_COLUMN, logger, self)
         layout.addWidget(self._high_display, 1)
-        layout.addWidget(self._low_display, 1)
+        layout.addWidget(self._other_display, 1)
         layout.setStretch(1, 1)
         layout.setStretch(2, 1)
         self._high_display.valuePicked.connect(lambda value: self.valuePicked.emit("As", value))
-        self._low_display.valuePicked.connect(lambda value: self.valuePicked.emit("Ms", value))
+        self._other_display.valuePicked.connect(lambda value: self.valuePicked.emit("Ms", value))
 
     def update_selection(
         self,
         key: Optional[MicrowireKey],
         high: Optional[MeasurementRecord],
-        low: Optional[MeasurementRecord],
+        other_records: Sequence[MeasurementRecord],
     ) -> None:
         if key is None:
             self.header_label.setText("Select a row to preview annealing plots.")
             self._high_display.clear("Select a row to view the 1000 mA measurement.")
-            self._low_display.clear("Select a row to view the low-current measurement.")
+            self._other_display.clear("Select a row to view the other annealing measurements.")
             return
         composition, draw, piece, suffix = key
         try:
@@ -11922,10 +12047,9 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
             setpoint=_extract_setpoint(high),
             description="No 1000 mA measurement available for this microwire.",
         )
-        self._low_display.set_record(
-            low,
-            setpoint=_extract_setpoint(low),
-            description="No lower-current measurement available for this microwire.",
+        self._other_display.set_records(
+            other_records,
+            description="No other annealing measurements available for this microwire.",
         )
 
 
@@ -12210,10 +12334,10 @@ class CurrentDensitySection(QtWidgets.QWidget):
             return
         key = self._current_selection_key()
         if key is None:
-            panel.update_selection(None, None, None)
+            panel.update_selection(None, None, [])
             return
-        high, low = self._fetch_records_for_key(key)
-        panel.update_selection(key, high, low)
+        high, other_records = self._fetch_records_for_key(key)
+        panel.update_selection(key, high, other_records)
 
     def _handle_selection_changed(self, *_args: Any) -> None:
         self._update_preview()
@@ -12373,11 +12497,11 @@ class CurrentDensitySection(QtWidgets.QWidget):
     def _fetch_records_for_key(
         self,
         key: MicrowireKey,
-    ) -> Tuple[Optional[MeasurementRecord], Optional[MeasurementRecord]]:
+    ) -> Tuple[Optional[MeasurementRecord], List[MeasurementRecord]]:
         key_str = _microwire_key_to_str(key)
         groups = getattr(self._annealing_section, "_record_groups", {})
         if not isinstance(groups, dict):
-            return None, None
+            return None, []
         records = groups.get(key_str, [])
         if not records:
             parts = _split_microwire_key(key)
@@ -12386,8 +12510,8 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 base_key = _microwire_key_to_str((composition, draw, piece, None))
                 records = groups.get(base_key, [])
         if not records:
-            return None, None
-        return _select_high_low_pair(records)
+            return None, []
+        return _select_anchor_and_other_records(records)
 
     @staticmethod
     def _parse_group_key(value: object) -> Optional[MicrowireKey]:
@@ -14739,7 +14863,6 @@ class VideoSection(MiniDatabaseSection):
                         bottom,
                         [
                             QtCore.Qt.ItemDataRole.DisplayRole,
-                            QtCore.Qt.ItemDataRole.EditRole,
                             QtCore.Qt.ItemDataRole.BackgroundRole,
                             QtCore.Qt.ItemDataRole.ForegroundRole,
                         ],
@@ -19782,10 +19905,10 @@ class CompareSection(MiniDatabaseSection):
         self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
         self.open_high_plot_button.setEnabled(False)
         graph_row.addWidget(self.open_high_plot_button)
-        self.open_low_plot_button = QtWidgets.QPushButton("Open low mA graph")
-        self.open_low_plot_button.clicked.connect(lambda: self._open_preview_graph("low"))
-        self.open_low_plot_button.setEnabled(False)
-        graph_row.addWidget(self.open_low_plot_button)
+        self.open_other_plot_button = QtWidgets.QPushButton("Open other annealing graphs")
+        self.open_other_plot_button.clicked.connect(lambda: self._open_preview_graph("other"))
+        self.open_other_plot_button.setEnabled(False)
+        graph_row.addWidget(self.open_other_plot_button)
         self.open_vsm_hysteresis_button = QtWidgets.QPushButton("Open VSM hyst graphs")
         self.open_vsm_hysteresis_button.clicked.connect(
             lambda: self._open_preview_graph("vsm_hysteresis")
@@ -19854,13 +19977,13 @@ class CompareSection(MiniDatabaseSection):
         annealing_layout.setContentsMargins(0, 0, 0, 0)
         annealing_layout.setSpacing(6)
         self.high_preview_display = _AnnealingPlotDisplay(
-            "Graph — 1000 mA", self.logger, annealing_tab
+            ANNEALING_HIGH_GRAPH_COLUMN, self.logger, annealing_tab
         )
         annealing_layout.addWidget(self.high_preview_display, 1)
-        self.low_preview_display = _AnnealingPlotDisplay(
-            "Graph — low mA", self.logger, annealing_tab
+        self.other_preview_display = _AnnealingPlotGallery(
+            ANNEALING_OTHER_GRAPH_COLUMN, self.logger, annealing_tab
         )
-        annealing_layout.addWidget(self.low_preview_display, 1)
+        annealing_layout.addWidget(self.other_preview_display, 1)
         self.graph_preview_tabs.addTab(annealing_tab, "Annealing")
 
         self.vsm_hysteresis_gallery = _GraphGalleryWidget(
@@ -20282,8 +20405,7 @@ class CompareSection(MiniDatabaseSection):
                 records = self._ensure_annealing_groups().get(key, [])
                 if not records:
                     return 1
-                high_record, low_record = _select_high_low_pair(records)
-                other_records = _select_other_measurements(records, high_record, low_record)
+                _high_record, other_records = _select_anchor_and_other_records(records)
                 return max(len(other_records), 1)
             return 1
         if field == VSM_HYSTERESIS_COLUMN:
@@ -20419,11 +20541,9 @@ class CompareSection(MiniDatabaseSection):
                 records = self._ensure_annealing_groups().get(key, [])
                 if not records:
                     return None
-                high_record, low_record = _select_high_low_pair(records)
+                high_record, other_records = _select_anchor_and_other_records(records)
                 if field == FIGURE_COLUMNS[0]:
                     target = high_record
-                elif field == FIGURE_COLUMNS[1]:
-                    target = low_record
                 else:
                     target = None
                 if target is not None:
@@ -20446,7 +20566,6 @@ class CompareSection(MiniDatabaseSection):
                         return None
                     self._matrix_pixmap_cache[cache_key] = pixmap
                     return pixmap
-                other_records = _select_other_measurements(records, high_record, low_record)
                 if not other_records:
                     return None
                 signature = tuple(
@@ -20685,7 +20804,7 @@ class CompareSection(MiniDatabaseSection):
         key = self._active_compare_key()
         enabled = key is not None
         self.open_high_plot_button.setEnabled(enabled)
-        self.open_low_plot_button.setEnabled(enabled)
+        self.open_other_plot_button.setEnabled(enabled)
         self.open_vsm_hysteresis_button.setEnabled(
             bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
         )
@@ -20737,10 +20856,9 @@ class CompareSection(MiniDatabaseSection):
                     setpoint=None,
                     description="Select a row to preview the annealing measurement.",
                 )
-                self.low_preview_display.set_record(
-                    None,
-                    setpoint=None,
-                    description="Select a row to preview the annealing measurement.",
+                self.other_preview_display.set_records(
+                    [],
+                    description="Select a row to preview the other annealing measurements.",
                 )
                 self.vsm_hysteresis_gallery.clear(
                     "Select a row to preview VSM hysteresis graphs."
@@ -20762,8 +20880,8 @@ class CompareSection(MiniDatabaseSection):
                 self.high_preview_display.set_record(
                     None, setpoint=None, description=message
                 )
-                self.low_preview_display.set_record(
-                    None, setpoint=None, description=message
+                self.other_preview_display.set_records(
+                    [], description=message
                 )
                 self.vsm_hysteresis_gallery.clear(message)
                 self.vsm_temperature_gallery.clear(message)
@@ -20774,24 +20892,23 @@ class CompareSection(MiniDatabaseSection):
 
             records = self._ensure_annealing_groups().get(key, [])
             if records:
-                high_record, low_record = _select_high_low_pair(records)
+                high_record, other_records = _select_anchor_and_other_records(records)
                 self.high_preview_display.set_record(
                     high_record,
                     setpoint=_extract_setpoint(high_record),
                     description="No 1000 mA measurement available for this microwire.",
                 )
-                self.low_preview_display.set_record(
-                    low_record,
-                    setpoint=_extract_setpoint(low_record),
-                    description="No low mA measurement available for this microwire.",
+                self.other_preview_display.set_records(
+                    other_records,
+                    description="No other annealing measurements available for this microwire.",
                 )
             else:
                 message = "No annealing records found for this microwire."
                 self.high_preview_display.set_record(
                     None, setpoint=None, description=message
                 )
-                self.low_preview_display.set_record(
-                    None, setpoint=None, description=message
+                self.other_preview_display.set_records(
+                    [], description=message
                 )
 
             vsm_records = self._ensure_vsm_hysteresis_groups().get(key, [])
@@ -20865,7 +20982,7 @@ class CompareSection(MiniDatabaseSection):
                 "Select a microwire row with annealing data first.",
             )
             return
-        if kind in {"high", "low"}:
+        if kind in {"high", "other"}:
             records = self._ensure_annealing_groups().get(key, [])
             if not records:
                 QtWidgets.QMessageBox.information(
@@ -20874,17 +20991,25 @@ class CompareSection(MiniDatabaseSection):
                     "No annealing records found for the selected microwire.",
                 )
                 return
-            high_record, low_record = _select_high_low_pair(records)
-            record = high_record if kind == "high" else low_record
-            label = "1000 mA" if kind == "high" else "low mA"
-            if record is None:
+            high_record, other_records = _select_anchor_and_other_records(records)
+            if kind == "high":
+                if high_record is None:
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "Microwire Data Builder",
+                        "No 1000 mA measurement available for this microwire.",
+                    )
+                    return
+                self._show_annealing_records([high_record], "1000 mA")
+                return
+            if not other_records:
                 QtWidgets.QMessageBox.information(
                     self,
                     "Microwire Data Builder",
-                    f"No {label} measurement available for this microwire.",
+                    "No other annealing measurements available for this microwire.",
                 )
                 return
-            self._show_annealing_record(record, label)
+            self._show_annealing_records(other_records, "other annealing")
             return
 
         if kind == "vsm_hysteresis":
@@ -20952,15 +21077,18 @@ class CompareSection(MiniDatabaseSection):
         )
         dialog.exec()
 
-    def _show_annealing_record(self, record: MeasurementRecord, label: str) -> None:
+    def _show_annealing_records(
+        self,
+        records: Sequence[MeasurementRecord],
+        label: str,
+    ) -> None:
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(f"Annealing graph — {label}")
         dialog.resize(960, 640)
         layout = QtWidgets.QVBoxLayout(dialog)
-        display = _AnnealingPlotDisplay(f"Graph — {label}", self.logger, dialog)
-        display.set_record(
-            record,
-            setpoint=_extract_setpoint(record),
+        display = _AnnealingPlotGallery(f"Graph — {label}", self.logger, dialog)
+        display.set_records(
+            records,
             description="No annealing measurement available for this microwire.",
         )
         layout.addWidget(display, 1)
@@ -21240,10 +21368,10 @@ class AssemblySection(QtWidgets.QWidget):
         self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
         self.open_high_plot_button.setEnabled(False)
         graph_row.addWidget(self.open_high_plot_button)
-        self.open_low_plot_button = QtWidgets.QPushButton("Open low mA graph")
-        self.open_low_plot_button.clicked.connect(lambda: self._open_preview_graph("low"))
-        self.open_low_plot_button.setEnabled(False)
-        graph_row.addWidget(self.open_low_plot_button)
+        self.open_other_plot_button = QtWidgets.QPushButton("Open other annealing graphs")
+        self.open_other_plot_button.clicked.connect(lambda: self._open_preview_graph("other"))
+        self.open_other_plot_button.setEnabled(False)
+        graph_row.addWidget(self.open_other_plot_button)
         self.open_vsm_hysteresis_button = QtWidgets.QPushButton("Open VSM hyst graphs")
         self.open_vsm_hysteresis_button.clicked.connect(
             lambda: self._open_preview_graph("vsm_hysteresis")
@@ -21356,13 +21484,13 @@ class AssemblySection(QtWidgets.QWidget):
         annealing_layout.setContentsMargins(0, 0, 0, 0)
         annealing_layout.setSpacing(6)
         self.high_preview_display = _AnnealingPlotDisplay(
-            "Graph — 1000 mA", self.logger, annealing_tab
+            ANNEALING_HIGH_GRAPH_COLUMN, self.logger, annealing_tab
         )
         annealing_layout.addWidget(self.high_preview_display, 1)
-        self.low_preview_display = _AnnealingPlotDisplay(
-            "Graph — low mA", self.logger, annealing_tab
+        self.other_preview_display = _AnnealingPlotGallery(
+            ANNEALING_OTHER_GRAPH_COLUMN, self.logger, annealing_tab
         )
-        annealing_layout.addWidget(self.low_preview_display, 1)
+        annealing_layout.addWidget(self.other_preview_display, 1)
         self.graph_preview_tabs.addTab(annealing_tab, "Annealing")
 
         self.vsm_hysteresis_gallery = _GraphGalleryWidget(
@@ -22711,8 +22839,7 @@ class AssemblySection(QtWidgets.QWidget):
             for records in self._ensure_annealing_groups().values():
                 if not records:
                     continue
-                high_record, low_record = _select_high_low_pair(records)
-                other_records = _select_other_measurements(records, high_record, low_record)
+                _high_record, other_records = _select_anchor_and_other_records(records)
                 max_count = max(max_count, len(other_records))
         if VSM_HYSTERESIS_COLUMN in column_set:
             for records in self._ensure_vsm_hysteresis_groups().values():
@@ -22912,11 +23039,9 @@ class AssemblySection(QtWidgets.QWidget):
                 records = self._ensure_annealing_groups().get(key, [])
                 if not records:
                     return None
-                high_record, low_record = _select_high_low_pair(records)
+                high_record, other_records = _select_anchor_and_other_records(records)
                 if column_label == FIGURE_COLUMNS[0]:
                     target = high_record
-                elif column_label == FIGURE_COLUMNS[1]:
-                    target = low_record
                 else:
                     target = None
                 if target is not None:
@@ -22939,7 +23064,6 @@ class AssemblySection(QtWidgets.QWidget):
                         return None
                     self._graph_pixmap_cache[cache_key] = pixmap
                     return pixmap
-                other_records = _select_other_measurements(records, high_record, low_record)
                 if not other_records:
                     return None
                 signature = tuple(
@@ -23229,8 +23353,8 @@ class AssemblySection(QtWidgets.QWidget):
             enabled = row_index is not None and key is not None
             if hasattr(self, "open_high_plot_button"):
                 self.open_high_plot_button.setEnabled(enabled)
-            if hasattr(self, "open_low_plot_button"):
-                self.open_low_plot_button.setEnabled(enabled)
+            if hasattr(self, "open_other_plot_button"):
+                self.open_other_plot_button.setEnabled(enabled)
             if hasattr(self, "open_vsm_hysteresis_button"):
                 self.open_vsm_hysteresis_button.setEnabled(
                     bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
@@ -23294,10 +23418,9 @@ class AssemblySection(QtWidgets.QWidget):
                     setpoint=None,
                     description="Select a row to preview the annealing measurement.",
                 )
-                self.low_preview_display.set_record(
-                    None,
-                    setpoint=None,
-                    description="Select a row to preview the annealing measurement.",
+                self.other_preview_display.set_records(
+                    [],
+                    description="Select a row to preview the other annealing measurements.",
                 )
                 self.vsm_hysteresis_gallery.clear("Select a row to preview VSM hysteresis graphs.")
                 self.vsm_temperature_gallery.clear("Select a row to preview VSM temperature scans.")
@@ -23311,8 +23434,8 @@ class AssemblySection(QtWidgets.QWidget):
                 self.high_preview_display.set_record(
                     None, setpoint=None, description=message
                 )
-                self.low_preview_display.set_record(
-                    None, setpoint=None, description=message
+                self.other_preview_display.set_records(
+                    [], description=message
                 )
                 self.vsm_hysteresis_gallery.clear(message)
                 self.vsm_temperature_gallery.clear(message)
@@ -23322,24 +23445,23 @@ class AssemblySection(QtWidgets.QWidget):
                 return
             records = self._ensure_annealing_groups().get(key, [])
             if records:
-                high_record, low_record = _select_high_low_pair(records)
+                high_record, other_records = _select_anchor_and_other_records(records)
                 self.high_preview_display.set_record(
                     high_record,
                     setpoint=_extract_setpoint(high_record),
                     description="No 1000 mA measurement available for this microwire.",
                 )
-                self.low_preview_display.set_record(
-                    low_record,
-                    setpoint=_extract_setpoint(low_record),
-                    description="No low mA measurement available for this microwire.",
+                self.other_preview_display.set_records(
+                    other_records,
+                    description="No other annealing measurements available for this microwire.",
                 )
             else:
                 message = "No annealing records found for this microwire."
                 self.high_preview_display.set_record(
                     None, setpoint=None, description=message
                 )
-                self.low_preview_display.set_record(
-                    None, setpoint=None, description=message
+                self.other_preview_display.set_records(
+                    [], description=message
                 )
 
             vsm_records = self._ensure_vsm_hysteresis_groups().get(key, [])
@@ -23428,9 +23550,8 @@ class AssemblySection(QtWidgets.QWidget):
         add(
             "annealing",
             [
-                "Low mA value (mA)",
                 "File 1000 mA",
-                "File low mA",
+                "Other annealing files",
                 *FIGURE_COLUMNS,
                 *ORIGIN_FIGURE_COLUMNS,
             ],
@@ -23704,7 +23825,7 @@ class AssemblySection(QtWidgets.QWidget):
                 "Select a microwire row with annealing data first.",
             )
             return
-        if kind in {"high", "low"}:
+        if kind in {"high", "other"}:
             records = self._ensure_annealing_groups().get(key, [])
             if not records:
                 QtWidgets.QMessageBox.information(
@@ -23713,17 +23834,25 @@ class AssemblySection(QtWidgets.QWidget):
                     "No annealing records found for the selected microwire.",
                 )
                 return
-            high_record, low_record = _select_high_low_pair(records)
-            record = high_record if kind == "high" else low_record
-            label = "1000 mA" if kind == "high" else "low mA"
-            if record is None:
+            high_record, other_records = _select_anchor_and_other_records(records)
+            if kind == "high":
+                if high_record is None:
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "Microwire Data Builder",
+                        "No 1000 mA measurement available for this microwire.",
+                    )
+                    return
+                self._show_annealing_records([high_record], "1000 mA")
+                return
+            if not other_records:
                 QtWidgets.QMessageBox.information(
                     self,
                     "Microwire Data Builder",
-                    f"No {label} measurement available for this microwire.",
+                    "No other annealing measurements available for this microwire.",
                 )
                 return
-            self._show_annealing_record(record, label)
+            self._show_annealing_records(other_records, "other annealing")
             return
 
         if kind == "vsm_hysteresis":
@@ -23791,15 +23920,18 @@ class AssemblySection(QtWidgets.QWidget):
         )
         dialog.exec()
 
-    def _show_annealing_record(self, record: MeasurementRecord, label: str) -> None:
+    def _show_annealing_records(
+        self,
+        records: Sequence[MeasurementRecord],
+        label: str,
+    ) -> None:
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(f"Annealing graph — {label}")
         dialog.resize(960, 640)
         layout = QtWidgets.QVBoxLayout(dialog)
-        display = _AnnealingPlotDisplay(f"Graph — {label}", self.logger, dialog)
-        display.set_record(
-            record,
-            setpoint=_extract_setpoint(record),
+        display = _AnnealingPlotGallery(f"Graph — {label}", self.logger, dialog)
+        display.set_records(
+            records,
             description="No annealing measurement available for this microwire.",
         )
         layout.addWidget(display, 1)
@@ -24090,7 +24222,6 @@ class AssemblySection(QtWidgets.QWidget):
                 composition = str(row.get("Composition") or "").strip()
                 microwire = str(row.get("Microwire") or "").strip()
                 high_uri = ""
-                low_uri = ""
                 key = None
                 if composition and microwire:
                     parsed = _microwire_parts_from_label_safe(microwire)
@@ -24099,15 +24230,9 @@ class AssemblySection(QtWidgets.QWidget):
                         key = _microwire_key_to_str((composition, int(draw), int(piece), suffix))
                         records = groups.get(key, [])
                         if records:
-                            high_record, low_record = _select_high_low_pair(records)
+                            high_record, other_records = _select_anchor_and_other_records(records)
                             high_uri = self._graph_data_uri(
                                 high_record, plot_dir, graph_cache, image_cache
-                            )
-                            low_uri = self._graph_data_uri(
-                                low_record, plot_dir, graph_cache, image_cache
-                            )
-                            other_records = _select_other_measurements(
-                                records, high_record, low_record
                             )
                             other_uris = [
                                 self._graph_data_uri(
@@ -24121,7 +24246,7 @@ class AssemblySection(QtWidgets.QWidget):
                         other_uris = []
                 else:
                     other_uris = []
-                if high_uri or low_uri or any(other_uris):
+                if high_uri or any(other_uris):
                     has_graphs = True
                 vsm_hyst_uris: List[str] = []
                 vsm_temp_uris: List[str] = []
@@ -24238,7 +24363,6 @@ class AssemblySection(QtWidgets.QWidget):
                 fmr_blob = "|".join(fmr_uris)
                 attrs = [
                     f'data-high="{html.escape(high_uri)}"',
-                    f'data-low="{html.escape(low_uri)}"',
                     f'data-other="{html.escape(other_blob)}"',
                     f'data-core="{html.escape(core_uri)}"',
                     f'data-glass="{html.escape(glass_uri)}"',
@@ -24287,14 +24411,9 @@ class AssemblySection(QtWidgets.QWidget):
                   <div id="preview-high-empty" class="preview-empty">No 1000 mA graph</div>
                 </div>
                 <div class="preview-card">
-                  <div class="preview-label">Low mA</div>
-                  <img id="preview-low" class="preview-image" alt="Low mA graph" />
-                  <div id="preview-low-empty" class="preview-empty">No low mA graph</div>
-                </div>
-                <div class="preview-card">
-                  <div class="preview-label">Other mA</div>
+                  <div class="preview-label">Other annealing</div>
                   <div id="preview-other" class="preview-stack"></div>
-                  <div id="preview-other-empty" class="preview-empty">No other mA graphs</div>
+                  <div id="preview-other-empty" class="preview-empty">No other annealing graphs</div>
                 </div>
               </div>
             </div>
@@ -24604,8 +24723,6 @@ class AssemblySection(QtWidgets.QWidget):
     const preview = {{
       high: document.getElementById('preview-high'),
       highEmpty: document.getElementById('preview-high-empty'),
-      low: document.getElementById('preview-low'),
-      lowEmpty: document.getElementById('preview-low-empty'),
       other: document.getElementById('preview-other'),
       otherEmpty: document.getElementById('preview-other-empty'),
       core: document.getElementById('preview-core'),
@@ -24686,7 +24803,6 @@ class AssemblySection(QtWidgets.QWidget):
 
     function updatePreview(row) {{
       setImage(preview.high, preview.highEmpty, row ? row.dataset.high : '');
-      setImage(preview.low, preview.lowEmpty, row ? row.dataset.low : '');
       setImageList(preview.other, preview.otherEmpty, row ? row.dataset.other : '');
       setImage(preview.core, preview.coreEmpty, row ? row.dataset.core : '');
       setImage(preview.glass, preview.glassEmpty, row ? row.dataset.glass : '');
@@ -24715,10 +24831,7 @@ class AssemblySection(QtWidgets.QWidget):
       if (field === 'Figure — 1000 mA') {{
         return row.dataset.high || '';
       }}
-      if (field === 'Figure — low mA') {{
-        return row.dataset.low || '';
-      }}
-      if (field === 'Figure — other mA') {{
+      if (field === 'Figure — other annealing') {{
         return row.dataset.other || '';
       }}
       if (field === 'VSM hysteresis graphs') {{
@@ -24778,8 +24891,7 @@ class AssemblySection(QtWidgets.QWidget):
       );
       const graphColumns = new Set([
         'Figure — 1000 mA',
-        'Figure — low mA',
-        'Figure — other mA',
+        'Figure — other annealing',
         'VSM hysteresis graphs',
         'VSM temperature scan graphs',
         'DMA iso-stress graphs',

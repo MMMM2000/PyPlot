@@ -229,15 +229,12 @@ OUTPUT_COLUMNS = [
     VIDEO_MW_LENGTH_COLUMN,
     "Notes",
     "Data source",
-    "Low mA value (mA)",
     "File 1000 mA",
-    "File low mA",
+    "Other annealing files",
     "Figure — 1000 mA",
-    "Figure — low mA",
-    "Figure — other mA",
+    "Figure — other annealing",
     "Figure — 1000 mA (Origin)",
-    "Figure — low mA (Origin)",
-    "Figure — other mA (Origin)",
+    "Figure — other annealing (Origin)",
     "VSM hysteresis graphs",
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
@@ -259,8 +256,7 @@ MICROSCOPE_IMAGE_COLUMNS = (
 
 FIGURE_COLUMNS = (
     "Figure — 1000 mA",
-    "Figure — low mA",
-    "Figure — other mA",
+    "Figure — other annealing",
 )
 
 VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
@@ -3890,15 +3886,17 @@ def _microwire_label(
 def _select_high_measurement(records: List[MeasurementRecord]) -> Optional[MeasurementRecord]:
     if not records:
         return None
+    exact_candidates = [
+        record for record in records if getattr(record.metadata, "setpoint_mA", None) == 1000
+    ]
+    if not exact_candidates:
+        return None
 
-    def key(record: MeasurementRecord) -> Tuple[int, int, int, str]:
-        setpoint = record.metadata.setpoint_mA
-        priority_exact = 1 if setpoint == 1000 else 0
-        magnitude = setpoint if setpoint is not None else -1
-        variant_score = 1 if not record.metadata.alt_variant else 0
-        return (priority_exact, magnitude, variant_score, record.metadata.file_name.lower())
+    def key(record: MeasurementRecord) -> Tuple[int, str]:
+        variant_penalty = 0 if not record.metadata.alt_variant else 1
+        return (variant_penalty, record.metadata.file_name.lower())
 
-    return max(records, key=key)
+    return min(exact_candidates, key=key)
 
 
 def _select_low_measurement(records: List[MeasurementRecord]) -> Optional[MeasurementRecord]:
@@ -3919,21 +3917,32 @@ def _select_low_measurement(records: List[MeasurementRecord]) -> Optional[Measur
 def _select_other_measurements(
     records: Sequence[MeasurementRecord],
     high_record: Optional[MeasurementRecord],
-    low_record: Optional[MeasurementRecord],
+    low_record: Optional[MeasurementRecord] = None,
 ) -> List[MeasurementRecord]:
-    excluded_ids = {id(high_record), id(low_record)}
+    excluded_ids = {id(high_record)}
 
-    def key(record: MeasurementRecord) -> Tuple[int, str]:
+    def key(record: MeasurementRecord) -> Tuple[int, float, str]:
         setpoint = getattr(getattr(record, "metadata", object()), "setpoint_mA", None)
         try:
-            setpoint_value = int(setpoint) if setpoint is not None else -1
+            setpoint_value = float(setpoint) if setpoint is not None else math.inf
         except (TypeError, ValueError):
-            setpoint_value = -1
+            setpoint_value = math.inf
         file_name = getattr(getattr(record, "metadata", object()), "file_name", "")
-        return (setpoint_value, str(file_name).lower())
+        return (0 if math.isfinite(setpoint_value) else 1, setpoint_value, str(file_name).lower())
 
     remaining = [record for record in records if id(record) not in excluded_ids]
     return sorted(remaining, key=key)
+
+
+def _measurement_cache_key(record: MeasurementRecord) -> str:
+    path = getattr(record, "path", None)
+    if path:
+        return str(path)
+    metadata = getattr(record, "metadata", None)
+    measurement_id = getattr(metadata, "measurement_id", None)
+    if measurement_id:
+        return str(measurement_id)
+    return repr(record)
 
 
 def _plot_measurement_matplotlib(
@@ -4587,7 +4596,7 @@ def _embed_assets_with_xlsxwriter(
     figure_columns = [column for column in FIGURE_COLUMNS if column in dataframe.columns]
     origin_columns = [
         column
-    for column in ("Figure — 1000 mA (Origin)", "Figure — low mA (Origin)")
+    for column in ("Figure — 1000 mA (Origin)", "Figure — other annealing (Origin)")
         if column in dataframe.columns
     ]
     microscope_columns = [
@@ -5672,29 +5681,22 @@ def build_database(
         if not piece_info:
             stats.missing_piece += 1
         high_record = _select_high_measurement(records)
-        low_record = _select_low_measurement(records)
-        if low_record and high_record:
-            high_sp = high_record.metadata.setpoint_mA
-            low_sp = low_record.metadata.setpoint_mA
-            setpoints = {r.metadata.setpoint_mA for r in records if r.metadata.setpoint_mA is not None}
-            if high_sp is not None and low_sp == high_sp and len(setpoints) <= 1:
-                low_record = None
-        other_records = _select_other_measurements(records, high_record, low_record)
+        other_records = _select_other_measurements(records, high_record)
         if high_record:
             row["File 1000 mA"] = high_record.metadata.file_name
         else:
             stats.missing_high_measurement += 1
             log.warning("No 1000 mA measurement found for %s %s", composition, row["Microwire"] or "(unknown)")
-        if low_record:
-            row["File low mA"] = low_record.metadata.file_name
-            if low_record.metadata.setpoint_mA is not None:
-                row["Low mA value (mA)"] = low_record.metadata.setpoint_mA
-        else:
-            stats.missing_low_measurement += 1
-            log.warning("No low-current measurement found for %s %s", composition, row["Microwire"] or "(unknown)")
+        if other_records:
+            row["Other annealing files"] = [
+                record.metadata.file_name
+                for record in other_records
+                if getattr(record.metadata, "file_name", None)
+            ]
         if wants_matplotlib:
             if high_record:
-                cached = plot_cache.get(high_record.metadata.measurement_id)
+                high_cache_key = _measurement_cache_key(high_record)
+                cached = plot_cache.get(high_cache_key)
                 if cached is None:
                     try:
                         cached = _plot_measurement_matplotlib(
@@ -5703,7 +5705,7 @@ def build_database(
                             plot_dir,
                             figure_size,
                         )
-                        plot_cache[high_record.metadata.measurement_id] = cached
+                        plot_cache[high_cache_key] = cached
                     except Exception:
                         log.exception("Failed to generate plot for %s", high_record.path)
                         cached = None
@@ -5713,30 +5715,11 @@ def build_database(
                     plot_name_to_path.setdefault(figure_name, cached)
                     if figure_name not in plot_records:
                         plot_records.append(figure_name)
-            if low_record:
-                cached = plot_cache.get(low_record.metadata.measurement_id)
-                if cached is None:
-                    try:
-                        cached = _plot_measurement_matplotlib(
-                            low_record.dataframe,
-                            low_record.path,
-                            plot_dir,
-                            figure_size,
-                        )
-                        plot_cache[low_record.metadata.measurement_id] = cached
-                    except Exception:
-                        log.exception("Failed to generate plot for %s", low_record.path)
-                        cached = None
-                if cached is not None:
-                    figure_name = Path(cached).name
-                    row["Figure — low mA"] = figure_name
-                    plot_name_to_path.setdefault(figure_name, cached)
-                    if figure_name not in plot_records:
-                        plot_records.append(figure_name)
             if other_records:
                 other_figures: List[str] = []
                 for record in other_records:
-                    cached = plot_cache.get(record.metadata.measurement_id)
+                    record_cache_key = _measurement_cache_key(record)
+                    cached = plot_cache.get(record_cache_key)
                     if cached is None:
                         try:
                             cached = _plot_measurement_matplotlib(
@@ -5745,7 +5728,7 @@ def build_database(
                                 plot_dir,
                                 figure_size,
                             )
-                            plot_cache[record.metadata.measurement_id] = cached
+                            plot_cache[record_cache_key] = cached
                         except Exception:
                             log.exception("Failed to generate plot for %s", record.path)
                             cached = None
@@ -5756,10 +5739,11 @@ def build_database(
                         if figure_name not in plot_records:
                             plot_records.append(figure_name)
                 if other_figures:
-                    row["Figure — other mA"] = other_figures
+                    row["Figure — other annealing"] = other_figures
         if origin_enabled:
             if high_record:
-                cached_origin = origin_cache.get(high_record.metadata.measurement_id)
+                high_cache_key = _measurement_cache_key(high_record)
+                cached_origin = origin_cache.get(high_cache_key)
                 if cached_origin is None:
                     try:
                         cached_origin = _plot_measurement_origin(
@@ -5779,39 +5763,15 @@ def build_database(
                         cached_origin = None
                     else:
                         if cached_origin is not None:
-                            origin_cache[high_record.metadata.measurement_id] = cached_origin
+                            origin_cache[high_cache_key] = cached_origin
                             origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
                 if cached_origin is not None:
                     row["Figure — 1000 mA (Origin)"] = cached_origin.descriptor
-            if origin_enabled and low_record:
-                cached_origin = origin_cache.get(low_record.metadata.measurement_id)
-                if cached_origin is None:
-                    try:
-                        cached_origin = _plot_measurement_origin(
-                            low_record.dataframe,
-                            low_record.path,
-                            origin_dir,
-                            log,
-                        )
-                    except RuntimeError as exc:
-                        if origin_disabled_reason is None:
-                            origin_disabled_reason = str(exc) or exc.__class__.__name__
-                            log.warning("Origin plotting disabled: %s", origin_disabled_reason)
-                        origin_enabled = False
-                        cached_origin = None
-                    except Exception:
-                        log.exception("Failed to generate Origin plot for %s", low_record.path)
-                        cached_origin = None
-                    else:
-                        if cached_origin is not None:
-                            origin_cache[low_record.metadata.measurement_id] = cached_origin
-                            origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
-                if cached_origin is not None:
-                    row["Figure — low mA (Origin)"] = cached_origin.descriptor
             if origin_enabled and other_records:
                 other_descriptors: List[str] = []
                 for record in other_records:
-                    cached_origin = origin_cache.get(record.metadata.measurement_id)
+                    record_cache_key = _measurement_cache_key(record)
+                    cached_origin = origin_cache.get(record_cache_key)
                     if cached_origin is None:
                         try:
                             cached_origin = _plot_measurement_origin(
@@ -5831,12 +5791,12 @@ def build_database(
                             cached_origin = None
                         else:
                             if cached_origin is not None:
-                                origin_cache[record.metadata.measurement_id] = cached_origin
+                                origin_cache[record_cache_key] = cached_origin
                                 origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
                     if cached_origin is not None:
                         other_descriptors.append(cached_origin.descriptor)
                 if other_descriptors:
-                    row["Figure — other mA (Origin)"] = other_descriptors
+                    row["Figure — other annealing (Origin)"] = other_descriptors
         row_index = len(rows)
         rows.append(row)
         if row_highlights:
@@ -5987,14 +5947,13 @@ def build_database(
         else:
             log.warning("Unsupported export format '%s'; skipping", fmt)
     log.info(
-        "Measurements parsed: %s | Skipped: %s | Rows built: %s | Missing draw info: %s | Missing piece info: %s | Missing 1000 mA: %s | Missing low mA: %s | Râ‰ˆV/I failures: %s",
+        "Measurements parsed: %s | Skipped: %s | Rows built: %s | Missing draw info: %s | Missing piece info: %s | Missing 1000 mA: %s | Râ‰ˆV/I failures: %s",
         stats.parsed,
         stats.skipped,
         stats.rows_built,
         stats.missing_draw,
         stats.missing_piece,
         stats.missing_high_measurement,
-        stats.missing_low_measurement,
         stats.resistance_checks_failed,
     )
 
