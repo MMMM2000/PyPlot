@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import pandas as pd
 import numpy as np
+import pandas as pd
+import pytest
 from PyQt6 import QtCore, QtWidgets
 
+from microwire_data_builder import storage as builder_storage
 from microwire_data_builder import ui as builder_ui
 from microwire_data_builder.ui import (
     AssemblySection,
@@ -210,6 +212,7 @@ def test_video_section_selection_maps_proxy_rows_back_to_source_rows(tmp_path: P
         app = QtWidgets.QApplication([])
     section = VideoSection(logging.getLogger("test"), lambda *_args: None)
     try:
+        section._store_overrides = lambda: None  # type: ignore[method-assign]
         first = tmp_path / "first.mkv"
         second = tmp_path / "second.mkv"
         first.write_bytes(b"video")
@@ -261,6 +264,8 @@ def test_video_review_dialog_updates_total_length_and_advances(tmp_path: Path) -
         app = QtWidgets.QApplication([])
     section = VideoSection(logging.getLogger("test"), lambda *_args: None)
     try:
+        section._store_overrides = lambda: None  # type: ignore[method-assign]
+        section._fabrication_table = lambda: pd.DataFrame()  # type: ignore[method-assign]
         first = tmp_path / "first.mkv"
         second = tmp_path / "second.mkv"
         first.write_bytes(b"video")
@@ -320,12 +325,58 @@ def test_video_review_dialog_updates_total_length_and_advances(tmp_path: Path) -
         section.close()
 
 
+def test_video_section_process_preserves_overlay_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = VideoSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        video_path = tmp_path / "CompA 1_2 detail.mkv"
+        video_path.write_bytes(b"video")
+        section._fabrication_table = lambda: pd.DataFrame()  # type: ignore[method-assign]
+        summary = builder_ui.VideoMetricsSummary(
+            temperatures=[401.5],
+            underpressures=[-0.62],
+            winding_speeds=[13.4],
+            glass_feeds=[31.8],
+            sources={video_path},
+        )
+        calls: list[list[Path]] = []
+
+        def fake_collect(
+            paths: list[Path],
+            logger: logging.Logger,
+            progress_callback=None,
+        ) -> dict[tuple[str, int, int | None], builder_ui.VideoMetricsSummary]:
+            del logger, progress_callback
+            calls.append([Path(path) for path in paths])
+            return {("CompA", 1, 2): summary}
+
+        monkeypatch.setattr(builder_ui, "_collect_video_metrics", fake_collect)
+
+        result = section.process([video_path])
+
+        assert calls == [[video_path]]
+        assert len(result.table.index) == 1
+        row = result.table.iloc[0]
+        assert float(row[builder_ui.CORE_TEMPERATURE_COLUMN]) == pytest.approx(401.5)
+        assert float(row["Underpressure"]) == pytest.approx(-0.62)
+        assert float(row["Winding speed (m/min)"]) == pytest.approx(13.4)
+        assert float(row["Glass feeding (mm/min)"]) == pytest.approx(31.8)
+    finally:
+        section.close()
+
+
 def test_video_end_length_propagates_to_all_rows_in_same_draw() -> None:
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication([])
     section = VideoSection(logging.getLogger("test"), lambda *_args: None)
     try:
+        section._store_overrides = lambda: None  # type: ignore[method-assign]
+        section._fabrication_table = lambda: pd.DataFrame()  # type: ignore[method-assign]
         frame = pd.DataFrame(
             [
                 {
@@ -360,6 +411,167 @@ def test_video_end_length_propagates_to_all_rows_in_same_draw() -> None:
         assert float(updated.iloc[1][VIDEO_END_LENGTH_COLUMN]) == 25.0
     finally:
         section.close()
+
+
+def test_video_end_length_propagation_notifies_all_changed_rows() -> None:
+    class _DummyIndex:
+        def __init__(self, row: int, column: int) -> None:
+            self._row = row
+            self._column = column
+
+        def row(self) -> int:
+            return self._row
+
+        def column(self) -> int:
+            return self._column
+
+    class _DummyModel(QtCore.QObject):
+        dataChanged = QtCore.pyqtSignal(object, object, list)
+
+        def __init__(self, frame: pd.DataFrame) -> None:
+            super().__init__()
+            self._frame = frame
+
+        def frame(self) -> pd.DataFrame:
+            return self._frame
+
+        def index(self, row: int, column: int) -> _DummyIndex:
+            return _DummyIndex(row, column)
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = VideoSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section._store_overrides = lambda: None  # type: ignore[method-assign]
+        section._fabrication_table = lambda: pd.DataFrame()  # type: ignore[method-assign]
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "_group_key": "CompA|1|1",
+                    "_sources": [str(Path("C:/videos/one.mkv"))],
+                    "Length (m)": 6.0,
+                    VIDEO_END_LENGTH_COLUMN: None,
+                    VIDEO_MW_LENGTH_COLUMN: None,
+                },
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/2",
+                    "Draw": 1,
+                    "Piece": 2,
+                    "_group_key": "CompA|1|2",
+                    "_sources": [str(Path("C:/videos/one.mkv"))],
+                    "Length (m)": 8.0,
+                    VIDEO_END_LENGTH_COLUMN: None,
+                    VIDEO_MW_LENGTH_COLUMN: None,
+                },
+            ]
+        )
+        section.data.table = frame.copy()
+        events: list[tuple[int, int, int, int, tuple[QtCore.Qt.ItemDataRole, ...]]] = []
+
+        def _capture(
+            top_left: _DummyIndex,
+            bottom_right: _DummyIndex,
+            roles: list[QtCore.Qt.ItemDataRole],
+        ) -> None:
+            events.append(
+                (
+                    top_left.row(),
+                    bottom_right.row(),
+                    top_left.column(),
+                    bottom_right.column(),
+                    tuple(roles),
+                )
+            )
+
+        end_col = frame.columns.get_loc(VIDEO_END_LENGTH_COLUMN)
+        edited_frame = frame.copy()
+        edited_frame.iat[0, end_col] = 25.0
+        section.data.table = edited_frame
+        section.model = _DummyModel(edited_frame)  # type: ignore[assignment]
+        section.model.dataChanged.connect(_capture)
+
+        edited = _DummyIndex(0, end_col)
+        section._handle_cell_edited(
+            edited,
+            edited,
+            (QtCore.Qt.ItemDataRole.EditRole,),
+        )
+
+        range_col = frame.columns.get_loc(VIDEO_MW_LENGTH_COLUMN)
+        assert any(
+            top_row == 0
+            and bottom_row == 1
+            and left_col == end_col
+            and right_col == end_col
+            for top_row, bottom_row, left_col, right_col, _roles in events
+        )
+        assert any(
+            top_row == 0
+            and bottom_row == 1
+            and left_col == range_col
+            and right_col == range_col
+            for top_row, bottom_row, left_col, right_col, _roles in events
+        )
+    finally:
+        section.close()
+
+
+def test_suspend_disk_writes_flushes_latest_state_to_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: tmp_path)
+    builder_storage.MiniDatabaseStore._memory_data = {}
+    builder_storage.MiniDatabaseStore._memory_payloads = {}
+    builder_storage.MiniDatabaseStore._pending_sections = set()
+    builder_storage.MiniDatabaseStore._pending_payloads = set()
+    builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+    try:
+        store = builder_storage.MiniDatabaseStore("videos")
+        store.save(
+            builder_storage.MiniDatabaseData(
+                sources=["old-source"],
+                processed={"old-source": 1.0},
+                table=pd.DataFrame([{"Composition": "OldComp", "Microwire": "1/1"}]),
+                extra={"flag": "old"},
+            )
+        )
+
+        with builder_storage.MiniDatabaseStore.suspend_disk_writes():
+            store.save(
+                builder_storage.MiniDatabaseData(
+                    sources=["new-source"],
+                    processed={"new-source": 2.0},
+                    table=pd.DataFrame([{"Composition": "NewComp", "Microwire": "2/3"}]),
+                    extra={"flag": "new"},
+                )
+            )
+            store.save_payload("video_index", {"fresh": True})
+
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+
+        fresh_store = builder_storage.MiniDatabaseStore("videos")
+        loaded = fresh_store.load()
+
+        assert loaded.sources == ["new-source"]
+        assert loaded.processed == {"new-source": 2.0}
+        assert loaded.extra == {"flag": "new"}
+        assert loaded.table.to_dict(orient="records") == [
+            {"Composition": "NewComp", "Microwire": "2/3"}
+        ]
+        assert fresh_store.load_payload("video_index") == {"fresh": True}
+    finally:
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        builder_storage.MiniDatabaseStore._pending_sections = set()
+        builder_storage.MiniDatabaseStore._pending_payloads = set()
+        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
 
 
 def test_video_cumulative_length_uses_raw_fabrication_pieces_not_just_visible_rows() -> None:
