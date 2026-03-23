@@ -17,7 +17,7 @@ import sys
 import time
 import traceback
 import warnings
-from datetime import datetime
+from datetime import UTC, datetime
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -11419,7 +11419,7 @@ class MicroscopeSection(MiniDatabaseSection):
         if MICROSCOPE_CAP_D_COLUMN in columns_to_mark:
             entry["D_reviewed"] = True
 
-        entry["timestamp"] = datetime.utcnow().isoformat() + "Z"
+        entry["timestamp"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         self._validated[key] = entry
         self._store_validation()
         override_changed = False
