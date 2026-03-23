@@ -5,7 +5,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 ## Sections and Data Sources
 
 - Fabrication: metadata columns (length, datetime, mass, resistance, notes), computed e/a ratio, plus any available video-related fields (core/glass temperature, winding speed, glass feeding, underpressure). Imported samples are added here so fabrication lookups work even when no spreadsheet exists yet.
-- Current annealing: links high/low mA files plus any additional mA runs; extra runs surface in "Figure — other mA" and can be hidden via the visibility dialog.
+- Current annealing: uses one dedicated `1000 mA` anchor slot plus an aggregated `Other annealing` bucket for every non-anchor run; extra runs surface in "Figure — other annealing" and can be hidden via the visibility dialog.
 - Microscope: d/D values, images, and review state; reviewed values must not be deleted on refresh.
 - Current density: As/Af/Ms/Mf markers (two passes if measured twice).
 - Videos: shows the fabrication-style table for video-linked samples, supports manual edits for fabrication fields, and adds `Video end length (m)` + derived `Video microwire length (m)` (baseline minus cumulative Length (m) for the draw). Edits override assembled values. Videos can be opened from the selection.
