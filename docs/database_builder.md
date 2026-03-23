@@ -9,6 +9,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - Microscope: d/D values, images, and review state; reviewed values must not be deleted on refresh.
 - Current density: As/Af/Ms/Mf markers (two passes if measured twice).
 - Videos: shows the fabrication-style table for video-linked samples, supports manual edits for fabrication fields, and adds `Video end length (m)` + derived `Video microwire length (m)` (baseline minus cumulative Length (m) for the draw). Edits override assembled values. Videos can be opened from the selection.
+  Video review state: required empty fields stay red until filled, first-time fills stay green, and overwriting an existing value highlights the cell amber with hover access to the prior value plus a restore action from the review dialog. `Notes` stays neutral instead of being treated as a required review field.
 - VSM hysteresis: multiple graphs per sample row (angles grouped per temperature, sub-versions in the same row).
 - VSM temperature scan: multiple graphs per sample row (sub-versions in the same row).
 - Transition temps: pick As/Af/Ms/Mf from VSM temperature graphs without switching away from the active graph.

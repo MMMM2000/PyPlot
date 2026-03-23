@@ -113,6 +113,7 @@ def test_video_completion_colours_follow_missing_and_filled_cells() -> None:
         "Ni50Fe27Ga23|6|2": {
             "Length (m)": None,
             "Winding speed (m/min)": 71.0,
+            "Notes": None,
         }
     }
     source_key = (str(Path("C:/videos/source.mkv")),)
@@ -139,10 +140,14 @@ def test_video_completion_colours_follow_missing_and_filled_cells() -> None:
     missing_bg = section._background_brush_for_cell(missing_row, "Length (m)")
     filled_bg = section._background_brush_for_cell(filled_row, "Length (m)")
     end_bg = section._background_brush_for_cell(filled_row, "Video end length (m)")
+    notes_bg = section._background_brush_for_cell(missing_row, "Notes")
+    notes_fg = section._foreground_brush_for_cell(missing_row, "Notes")
 
     assert missing_bg is not None and missing_bg.color().name() == "#3a0a0a"
     assert filled_bg is not None and filled_bg.color().name() == "#0f3b26"
     assert end_bg is not None and end_bg.color().name() == "#0f3b26"
+    assert notes_bg is None
+    assert notes_fg is None
 
 
 def test_video_missing_sources_highlight_whole_row_red() -> None:
@@ -323,6 +328,98 @@ def test_video_review_dialog_updates_total_length_and_advances(tmp_path: Path) -
         assert dialog._current_source_row == 1
     finally:
         section.close()
+
+
+def test_video_review_dialog_highlights_overwrites_and_restores_previous_value(
+    tmp_path: Path,
+) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = VideoSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section._store_overrides = lambda: None  # type: ignore[method-assign]
+        source_path = tmp_path / "sample.mkv"
+        source_path.write_bytes(b"video")
+        fabrication_frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "Length (m)": 27.88,
+                    "Notes": "factory note",
+                }
+            ]
+        )
+        section._fabrication_table = lambda: fabrication_frame  # type: ignore[method-assign]
+        section._refresh_fabrication_lookup_cache()
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "_group_key": "CompA|1|1",
+                    "_sources": [str(source_path)],
+                    "Length (m)": 27.88,
+                    "Notes": "",
+                    VIDEO_END_LENGTH_COLUMN: None,
+                    VIDEO_MW_LENGTH_COLUMN: None,
+                }
+            ]
+        )
+        section.model.set_frame(frame)
+        section.data.table = frame.copy()
+        dialog = _VideoReviewDialog(section)
+        dialog.load_source_row(0)
+
+        length_col = next(
+            index
+            for index, (column, _label, _editable) in enumerate(dialog._DISPLAY_COLUMNS)
+            if column == "Length (m)"
+        )
+        length_item = dialog.table.item(0, length_col)
+        assert length_item is not None
+        length_item.setText("28.4")
+
+        updated_series = section.model.frame().iloc[0]
+        background = section._background_brush_for_cell(updated_series, "Length (m)")
+        foreground = section._foreground_brush_for_cell(updated_series, "Length (m)")
+        tooltip = section._tooltip_for_cell(updated_series, "Length (m)")
+
+        assert background is not None and background.color().name() == "#4a3806"
+        assert foreground is not None and foreground.color().name() == "#facc15"
+        assert tooltip is not None and "Previous value: 27.88" in tooltip
+
+        assert dialog._restore_previous_value(length_col) is True
+        restored_value = section.model.frame().iloc[0]["Length (m)"]
+        assert float(restored_value) == pytest.approx(27.88)
+    finally:
+        section.close()
+
+
+def test_video_overrides_snapshot_excludes_history_metadata() -> None:
+    section = VideoSection.__new__(VideoSection)
+    section._overrides = {
+        "CompA|1|1": {
+            "Length (m)": 28.4,
+            section._OVERRIDE_META_KEY: {
+                section._OVERRIDE_HISTORY_KEY: {
+                    "Length (m)": {
+                        "previous": 27.88,
+                        "original": 27.88,
+                    }
+                }
+            },
+        }
+    }
+
+    snapshot = section.overrides_snapshot()
+
+    assert snapshot == {"CompA|1|1": {"Length (m)": 28.4}}
 
 
 def test_video_section_process_preserves_overlay_metrics(
