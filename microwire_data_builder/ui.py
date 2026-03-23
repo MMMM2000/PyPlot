@@ -14547,7 +14547,11 @@ class VideoSection(MiniDatabaseSection):
     ) -> None:
         if roles and QtCore.Qt.ItemDataRole.EditRole not in roles:
             return
-        frame = self.model.frame()
+        base_frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else None
+        if isinstance(base_frame, pd.DataFrame) and not base_frame.empty:
+            frame = base_frame
+        else:
+            frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return
         columns = [
@@ -14566,10 +14570,24 @@ class VideoSection(MiniDatabaseSection):
                 dtype=object,
             )
 
-        row_records = [
-            dict(record)
-            for record in frame.to_dict(orient="records")
-        ]
+        recent_edits = dict(getattr(self.model, "_recent_edits", {}))
+        for (row_idx, col_idx), value in recent_edits.items():
+            if 0 <= row_idx < len(frame.index) and 0 <= col_idx < len(frame.columns):
+                try:
+                    frame.iat[row_idx, col_idx] = value
+                except Exception:
+                    pass
+
+        column_names = [frame.columns[col_idx] for col_idx in range(len(frame.columns))]
+        row_records: List[Dict[Any, Any]] = []
+        for row_idx in range(len(frame.index)):
+            record: Dict[Any, Any] = {}
+            for col_idx, column in enumerate(column_names):
+                try:
+                    record[column] = frame.iat[row_idx, col_idx]
+                except Exception:
+                    record[column] = None
+            row_records.append(record)
 
         def _row_at_position(row_pos: int) -> Dict[Any, Any]:
             try:
@@ -14591,7 +14609,6 @@ class VideoSection(MiniDatabaseSection):
         shared_video_end_lengths: Dict[Tuple[str, int], Any] = {}
         end_length_rows: Set[int] = set()
         video_range_rows: Set[int] = set()
-        recent_edits = getattr(self.model, "_recent_edits", {})
         for row_idx in range(top_left.row(), bottom_right.row() + 1):
             if row_idx < 0 or row_idx >= len(frame.index):
                 continue
@@ -14608,17 +14625,7 @@ class VideoSection(MiniDatabaseSection):
                     col_idx = frame.columns.get_loc(column)
                 except Exception:
                     col_idx = None
-                recent_key = (
-                    (row_idx, col_idx)
-                    if isinstance(col_idx, int)
-                    else None
-                )
-                if recent_key is not None and recent_key in recent_edits:
-                    value = recent_edits.pop(recent_key)
-                    frame.iat[row_idx, col_idx] = value
-                    series[column] = value
-                else:
-                    value = series.get(column)
+                value = series.get(column)
                 if self._is_missing(value):
                     bucket[column] = None
                 else:
@@ -14711,8 +14718,10 @@ class VideoSection(MiniDatabaseSection):
                         row_records[row_pos][VIDEO_MW_LENGTH_COLUMN] = range_value
                     video_range_rows.add(row_pos)
             self.data.table = frame
-            if hasattr(self.model, "_coerce_frame"):
-                self.model._frame = self.model._coerce_frame(frame)
+            if hasattr(self.model, "_frame"):
+                self.model._frame = frame
+            if hasattr(self.model, "_recent_edits"):
+                self.model._recent_edits = {}
             self._store_overrides()
 
             def _emit_model_change(rows: Set[int], column: str) -> None:
