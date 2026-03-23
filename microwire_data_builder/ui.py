@@ -6645,7 +6645,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         table = QtWidgets.QTableView(parent)
         table.setModel(self.model)
-        table.horizontalHeader().setStretchLastSection(True)
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
@@ -8907,7 +8910,10 @@ class AnnealingSection(MiniDatabaseSection):
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         table = QtWidgets.QTableView(parent)
         table.setModel(self.model)
-        table.horizontalHeader().setStretchLastSection(True)
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
@@ -8921,16 +8927,36 @@ class AnnealingSection(MiniDatabaseSection):
             | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
         )
         table.setSortingEnabled(True)
+        table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         table.setIconSize(
             QtCore.QSize(self._preview_icon_width(), ANNEALING_GRAPH_HEIGHT)
         )
-        header = table.verticalHeader()
-        if header is not None:
+        vertical_header = table.verticalHeader()
+        if vertical_header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
-            header.setDefaultSectionSize(default_height)
-            header.setMinimumSectionSize(default_height)
+            vertical_header.setDefaultSectionSize(default_height)
+            vertical_header.setMinimumSectionSize(default_height)
         self.table_view = table
         return table
+
+    def _configure_table_view(self) -> None:  # type: ignore[override]
+        super()._configure_table_view()
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+
+    def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
+        super().apply_data(data)
+        self._sanitize_graph_columns()
+        self._hide_columns(["_group_key", "_sources"])
+        self._refresh_record_groups()
+        self._prune_phase_points()
+        self._update_export_enabled()
 
     def process(
         self,
@@ -9257,6 +9283,8 @@ class AnnealingSection(MiniDatabaseSection):
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
+        self._sanitize_graph_columns()
+        self._hide_columns(["_group_key", "_sources"])
         self._refresh_record_groups()
         self._update_export_enabled()
 

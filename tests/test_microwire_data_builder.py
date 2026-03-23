@@ -2441,6 +2441,43 @@ def test_builder_column_groups_include_transition_and_current_density_columns() 
         QtWidgets.QApplication.processEvents()
 
 
+def test_annealing_section_maps_legacy_columns_and_keeps_horizontal_scrolling() -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni55Fe18Ga27",
+                    "Microwire": "4/1",
+                    "Graph — 1000 mA": "high.png",
+                    "Graph — low mA": "legacy-low.png",
+                    "Graph — other mA": "legacy-other.png",
+                    "_group_key": "Ni55Fe18Ga27|4|1",
+                    "_sources": [],
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+
+        applied = section.model.frame()
+        assert "Graph — 1000 mA" in applied.columns
+        assert builder_ui.ANNEALING_OTHER_GRAPH_COLUMN in applied.columns
+        assert "Graph — low mA" not in applied.columns
+        assert "Graph — other mA" not in applied.columns
+
+        header = section.table_view.horizontalHeader()
+        assert header is not None
+        assert header.stretchLastSection() is False
+        assert (
+            section.table_view.horizontalScrollMode()
+            == QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_builder_recent_projects_menu_updates(tmp_path: Path) -> None:
     _ensure_qapp()
     window = BuilderWindow()
