@@ -5,7 +5,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 ## Sections and Data Sources
 
 - Fabrication: metadata columns (length, datetime, mass, resistance, notes), computed e/a ratio, plus any available video-related fields (core/glass temperature, winding speed, glass feeding, underpressure). Imported samples are added here so fabrication lookups work even when no spreadsheet exists yet.
-- Current annealing: links high/low mA files plus any additional mA runs; extra runs surface in "Figure — other mA" and can be hidden via the visibility dialog.
+- Current annealing: uses one dedicated `1000 mA` graph slot plus an aggregated `other annealing` graph slot; extra runs are grouped there and can be hidden via the visibility dialog.
 - Microscope: d/D values, images, and review state; reviewed values must not be deleted on refresh.
 - Current density: As/Af/Ms/Mf markers (two passes if measured twice).
 - Videos: shows the fabrication-style table for video-linked samples, supports manual edits for fabrication fields, and adds `Video end length (m)` + derived `Video microwire length (m)` (baseline minus cumulative Length (m) for the draw). Edits override assembled values. Videos can be opened from the selection.
@@ -19,7 +19,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - FMR: Field vs X/Y voltage plots from CSV files; multiple graphs per sample row.
 - Strain: stress/strain entries tied to composition + microwire; d auto-filled from microscope when available.
 - Assemble: combined preview and export configuration.
-- Analysis: `Analysis -> Analyze assemble data...` opens the separate Microwire EDA tool using the current filtered Assemble rows. The report generator is read-only, only analyses data already present in Assemble, shows a progress dialog while it runs, and can also work from assembled spreadsheet exports.
+- Analysis: `Analysis -> Analyze assemble data...` opens the separate Microwire EDA tool using the current filtered Assemble rows. The report generator is read-only, only analyses data already present in Assemble, shows a progress dialog while it runs, and writes into a dedicated report subfolder.
 - Assemble imports: spreadsheet rows can be imported and merged with the assembled dataset; imported rows are tagged via the "Data source" column and enriched with fabrication metadata where possible.
 - Data menu: import external workbooks, toggle visibility of imported-only rows, or remove imported data entirely. Optionally separate imported Fabrication rows under an "Imported data:" divider. Imported workbooks appear under Project Explorer.
 - Compare: subset of rows for side-by-side comparison.
@@ -64,6 +64,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - Graph preview panel is optional. When enabled, selecting a row shows current annealing, VSM, DMA, shape-memory, and FMR previews for that row.
 - "Add to compare" uses the current row selection and populates the Compare tab.
 - Multi-graph previews in non-Compare sections are laid out horizontally; Compare stacks graphs vertically with rows tall enough to show full-size plots.
+- The bottom-right `Export worksheet...` shortcut was removed; use the top-left `Export...` flow for Assemble exports.
 
 ## Compare
 
@@ -77,12 +78,12 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - HTML export must not require the Videos section to be processed, and includes a compare view (Ctrl/Cmd-click rows to compare).
 - Matplotlib/Origin outputs should use the same rows and columns as the Assemble preview.
 - No PyPlot UI should be embedded inside the builder; graphs are rendered as static previews like the current annealing section.
-- Microwire EDA outputs are separate from Assemble exports: the EDA tool writes its own HTML report, summary workbook, canonical CSV, manifest JSON, and optional figure bundles to the chosen report directory.
+- Microwire EDA outputs are separate from Assemble exports: the EDA tool writes its own HTML report, summary workbook, canonical CSV, manifest JSON, and optional figure bundles to a dedicated subfolder under the chosen report directory.
 
 ## Microwire EDA
 
 - Microwire EDA is a separate read-only workflow that can load either a Builder `.pydpj` project or an assembled spreadsheet export.
-- The generated report focuses on the measured strain/stress endpoints from manual stress/strain data already surfaced in Assemble: coverage checks, endpoint distributions, controllable-parameter distributions, correlation heatmaps, strain-focused scatter views, interaction plots, sweet-spot binning, time drift, and gated regression models.
+- The generated report focuses on the measured strain/stress endpoints from manual stress/strain data already surfaced in Assemble: coverage checks, endpoint distributions, controllable-parameter distributions, correlation heatmaps, strain-focused scatter views, interaction plots, sweet-spot summaries, time drift, and gated regression models.
 - Standalone command entrypoint: `launcher.py --microwire-eda <project.pydpj|assembled.xlsx> [--rows all|filtered|selected] [--out <dir>] [--microwire-eda-title <title>]`.
 - Builder-launched analysis uses the current Assemble preview rows directly when available so the report matches the visible filtered subset rather than silently reverting to the full project.
 

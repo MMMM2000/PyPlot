@@ -333,6 +333,36 @@ def test_search_filters_mini_database_section_rows(tmp_path: Path) -> None:
         section.close()
 
 
+def test_annealing_section_migrates_low_graph_column_to_other_annealing() -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "5/4",
+                    "Graph — 1000 mA": "high.png",
+                    "Graph — low mA": "low.png",
+                    "_group_key": "Ni50Fe27Ga23|5|4",
+                    "_sources": [],
+                }
+            ]
+        )
+        section.data.table = frame
+        section.model.set_frame(frame)
+
+        section._sanitize_graph_columns()
+
+        migrated = section.model.frame()
+        assert "Graph — low mA" not in migrated.columns
+        assert builder_ui.ANNEALING_OTHER_GRAPH_COLUMN in migrated.columns
+        assert migrated.loc[0, builder_ui.ANNEALING_OTHER_GRAPH_COLUMN] == "low.png"
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_microscope_section_can_hide_other_ends() -> None:
     _ensure_qapp()
     section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
@@ -2472,3 +2502,42 @@ def test_load_project_handles_missing_sections(
         window.hide()
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_assemble_prepare_inputs_allows_export_without_annealing_section_selected(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    window = builder_ui.BuilderWindow()
+    qtbot.addWidget(window)
+    try:
+        record = core.MeasurementRecord(
+            path=tmp_path / "Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+            metadata=core.MeasurementMetadata(
+                composition_token="Ni50Fe27Ga23",
+                draw_x=5,
+                piece_y=4,
+                setpoint_mA=1000,
+                alt_variant=False,
+                measurement_id="anneal-1",
+                file_name="Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+                relpath="Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+                timestamp_mtime_utc="2026-03-24T00:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_A": [0.1], "V_V": [0.2], "R_ohm": [2.0]}),
+            sanity_ok=True,
+            sanity_error=None,
+        )
+        window.annealing_section.store.save_payload("annealing_records", [record])
+
+        payload = window.assembly_section._prepare_builder_inputs(
+            {"fabrication"},
+            require_payloads=False,
+        )
+
+        assert payload is not None
+        annealing_records = payload[1]
+        assert len(annealing_records) == 1
+    finally:
+        window.close()

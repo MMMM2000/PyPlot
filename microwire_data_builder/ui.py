@@ -189,7 +189,7 @@ ANNEALING_GRAPH_HEIGHT = 230
 ANNEALING_TITLE_FONT_SIZE = 8
 ANNEALING_AXIS_FONT_SIZE = 6
 ANNEALING_TICK_FONT_SIZE = 6
-ANNEALING_OTHER_GRAPH_COLUMN = "Graph — other mA"
+ANNEALING_OTHER_GRAPH_COLUMN = "Graph — other annealing"
 GRAPH_PREVIEW_WIDTH = 720
 GRAPH_PREVIEW_HEIGHT = 420
 MAX_PLOT_POINTS = 2000
@@ -4203,7 +4203,6 @@ def _annealing_records_to_frame(
         "Composition",
         "Microwire",
         "Graph — 1000 mA",
-        "Graph — low mA",
         ANNEALING_OTHER_GRAPH_COLUMN,
         "_group_key",
         "_sources",
@@ -4268,7 +4267,6 @@ def _annealing_records_to_frame(
                 "Composition": composition,
                 "Microwire": microwire,
                 "Graph — 1000 mA": None,
-                "Graph — low mA": None,
                 ANNEALING_OTHER_GRAPH_COLUMN: None,
                 "_group_key": group_key,
                 "_sources": source_paths,
@@ -9270,6 +9268,24 @@ class AnnealingSection(MiniDatabaseSection):
         if frame.empty:
             return
         changed = False
+        legacy_other_column = "Graph — other mA"
+        if legacy_other_column in frame.columns and ANNEALING_OTHER_GRAPH_COLUMN not in frame.columns:
+            frame = frame.rename(columns={legacy_other_column: ANNEALING_OTHER_GRAPH_COLUMN})
+            changed = True
+        if "Graph — low mA" in frame.columns:
+            low_series = frame["Graph — low mA"]
+            if ANNEALING_OTHER_GRAPH_COLUMN not in frame.columns:
+                frame[ANNEALING_OTHER_GRAPH_COLUMN] = low_series
+                changed = True
+            else:
+                target_series = frame[ANNEALING_OTHER_GRAPH_COLUMN]
+                frame[ANNEALING_OTHER_GRAPH_COLUMN] = target_series.where(
+                    ~(target_series.isna() | (target_series == "")),
+                    low_series,
+                )
+                changed = True
+            frame = frame.drop(columns=["Graph — low mA"])
+            changed = True
         for column in ("Graph — 1000 mA", "Graph — low mA", ANNEALING_OTHER_GRAPH_COLUMN):
             if column not in frame.columns:
                 continue
@@ -9298,7 +9314,6 @@ class AnnealingSection(MiniDatabaseSection):
             "Composition",
             "Microwire",
             "Graph — 1000 mA",
-            "Graph — low mA",
             ANNEALING_OTHER_GRAPH_COLUMN,
             "_group_key",
             "_sources",
@@ -21442,10 +21457,6 @@ class AssemblySection(QtWidgets.QWidget):
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)
-        self.export_preview_button = QtWidgets.QPushButton("Export worksheet...")
-        self.export_preview_button.clicked.connect(self._export_preview_worksheet)
-        self.export_preview_button.setEnabled(False)
-        button_row.addWidget(self.export_preview_button)
         self.analyze_button = QtWidgets.QPushButton("Analyze...")
         self.analyze_button.clicked.connect(self._open_eda_window)
         button_row.addWidget(self.analyze_button)
@@ -22159,14 +22170,6 @@ class AssemblySection(QtWidgets.QWidget):
             Dict[str, Dict[str, Any]],
         ]
     ]:
-        if "annealing" not in selected:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Microwire Data Builder",
-                "Current annealing data must be included to assemble a database.",
-            )
-            return None
-
         missing: list[str] = []
 
         def _mark_missing(label: str) -> None:
@@ -22769,8 +22772,6 @@ class AssemblySection(QtWidgets.QWidget):
                 self.status_label.setText("No preview rows match the current search.")
             else:
                 self.status_label.setText("Preview is empty.")
-        if hasattr(self, "export_preview_button"):
-            self.export_preview_button.setEnabled(row_count > 0)
         if hasattr(self, "clear_sort_button"):
             self.clear_sort_button.setEnabled(bool(self._sort_spec))
 
@@ -25553,10 +25554,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._crash_handlers_installed = False
 
         def _append_log(level: int, message: str) -> None:
-            self.log_view.appendPlainText(message)
-            scrollbar = self.log_view.verticalScrollBar()
-            if scrollbar is not None:
-                scrollbar.setValue(scrollbar.maximum())
+            try:
+                self.log_view.appendPlainText(message)
+                scrollbar = self.log_view.verticalScrollBar()
+                if scrollbar is not None:
+                    scrollbar.setValue(scrollbar.maximum())
+            except RuntimeError:
+                return
             self._append_log_to_file(level, message)
             if level >= logging.ERROR:
                 self._log_has_unread_errors = True

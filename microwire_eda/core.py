@@ -490,7 +490,7 @@ def _blank_figure(title: str, message: str) -> plt.Figure:
 
 def _normalise_output_dir(config: MicrowireEdaConfig) -> Path:
     if isinstance(config.output_dir, Path):
-        return config.output_dir
+        return config.output_dir / _slugify(config.report_title)
     if isinstance(config.input_path, Path):
         return config.input_path.with_suffix("").parent / f"{_slugify(config.report_title)}_report"
     return Path.cwd() / f"{_slugify(config.report_title)}_report"
