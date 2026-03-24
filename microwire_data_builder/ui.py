@@ -2653,9 +2653,13 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self._foreground_provider: Optional[
             Callable[[pd.Series, str], Optional[QtGui.QBrush]]
         ] = None
+        self._tooltip_provider: Optional[
+            Callable[[pd.Series, str], Optional[str]]
+        ] = None
         self._editable_columns: set[str] = set()
         self._text_columns: set[str] = set()
         self._recent_edits: Dict[Tuple[int, int], Any] = {}
+        self._recent_old_values: Dict[Tuple[int, int], Any] = {}
 
     @staticmethod
     def _coerce_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
@@ -2673,6 +2677,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self.beginResetModel()
         self._frame = self._coerce_frame(frame)
         self._recent_edits = {}
+        self._recent_old_values = {}
         self.endResetModel()
         try:
             self.layoutChanged.emit()
@@ -2700,6 +2705,12 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         provider: Optional[Callable[[pd.Series, str], Optional[QtGui.QBrush]]],
     ) -> None:
         self._foreground_provider = provider
+
+    def set_tooltip_provider(
+        self,
+        provider: Optional[Callable[[pd.Series, str], Optional[str]]],
+    ) -> None:
+        self._tooltip_provider = provider
 
     def set_editable_columns(self, columns: Iterable[str]) -> None:
         self._editable_columns = {str(column) for column in columns}
@@ -2839,6 +2850,19 @@ class DataFrameModel(QtCore.QAbstractTableModel):
                 bg = QtGui.QColor("#07351f" if ok else "#3a0a0a")
                 return QtGui.QBrush(bg)
             return None
+        if role == QtCore.Qt.ItemDataRole.ToolTipRole:
+            provider = getattr(self, "_tooltip_provider", None)
+            if provider is not None:
+                try:
+                    column_label = str(self._frame.columns[index.column()])
+                    row_series = self._frame.iloc[index.row()]
+                except Exception:
+                    return None
+                try:
+                    return provider(row_series, column_label)
+                except Exception:
+                    return None
+            return None
         if role not in (
             QtCore.Qt.ItemDataRole.DisplayRole,
             QtCore.Qt.ItemDataRole.EditRole,
@@ -2914,10 +2938,15 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         else:
             return False
         try:
+            previous_value = self._frame.iat[index.row(), index.column()]
+        except Exception:
+            previous_value = None
+        try:
             self._frame.iat[index.row(), index.column()] = coerced
         except Exception:
             return False
         self._recent_edits[(index.row(), index.column())] = coerced
+        self._recent_old_values[(index.row(), index.column())] = previous_value
         try:
             # Normalize back to a plain object-backed frame after in-place edits so
             # follow-up Qt handlers don't trip over pandas extension-dtype internals.
@@ -2931,6 +2960,9 @@ class DataFrameModel(QtCore.QAbstractTableModel):
                 [
                     QtCore.Qt.ItemDataRole.DisplayRole,
                     QtCore.Qt.ItemDataRole.EditRole,
+                    QtCore.Qt.ItemDataRole.BackgroundRole,
+                    QtCore.Qt.ItemDataRole.ForegroundRole,
+                    QtCore.Qt.ItemDataRole.ToolTipRole,
                 ],
             )
         except Exception:
@@ -9326,24 +9358,50 @@ class AnnealingSection(MiniDatabaseSection):
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         if frame.empty:
             return
+
+        def _graph_cell_items(value: Any) -> List[Any]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                stripped = value.strip()
+                return [stripped] if stripped else []
+            if isinstance(value, (list, tuple, set)):
+                items: List[Any] = []
+                for item in value:
+                    items.extend(_graph_cell_items(item))
+                return items
+            return [value]
+
+        def _merge_graph_cells(left: Any, right: Any) -> Any:
+            merged: List[Any] = []
+            for item in _graph_cell_items(left) + _graph_cell_items(right):
+                duplicate = False
+                for existing in merged:
+                    if existing == item:
+                        duplicate = True
+                        break
+                if not duplicate:
+                    merged.append(item)
+            if not merged:
+                return None
+            if len(merged) == 1:
+                return merged[0]
+            return merged
+
         changed = False
-        legacy_other_column = "Graph — other mA"
-        if legacy_other_column in frame.columns and ANNEALING_OTHER_GRAPH_COLUMN not in frame.columns:
-            frame = frame.rename(columns={legacy_other_column: ANNEALING_OTHER_GRAPH_COLUMN})
-            changed = True
-        if "Graph — low mA" in frame.columns:
-            low_series = frame["Graph — low mA"]
-            if ANNEALING_OTHER_GRAPH_COLUMN not in frame.columns:
-                frame[ANNEALING_OTHER_GRAPH_COLUMN] = low_series
-                changed = True
-            else:
-                target_series = frame[ANNEALING_OTHER_GRAPH_COLUMN]
-                frame[ANNEALING_OTHER_GRAPH_COLUMN] = target_series.where(
-                    ~(target_series.isna() | (target_series == "")),
-                    low_series,
+        if ANNEALING_OTHER_GRAPH_COLUMN not in frame.columns:
+            frame[ANNEALING_OTHER_GRAPH_COLUMN] = None
+        for legacy_column in ("Graph — other mA", "Graph — low mA"):
+            if legacy_column not in frame.columns:
+                continue
+            frame[ANNEALING_OTHER_GRAPH_COLUMN] = [
+                _merge_graph_cells(target, legacy)
+                for target, legacy in zip(
+                    frame[ANNEALING_OTHER_GRAPH_COLUMN].tolist(),
+                    frame[legacy_column].tolist(),
                 )
-                changed = True
-            frame = frame.drop(columns=["Graph — low mA"])
+            ]
+            frame = frame.drop(columns=[legacy_column])
             changed = True
         for column in ("Graph — 1000 mA", "Graph — low mA", ANNEALING_OTHER_GRAPH_COLUMN):
             if column not in frame.columns:
@@ -13815,6 +13873,8 @@ class VideoSection(MiniDatabaseSection):
     section_key = "videos"
     section_title = "Fabrication videos"
     supported_suffixes = VIDEO_EXTENSIONS
+    _OVERRIDE_META_KEY = "__meta__"
+    _OVERRIDE_HISTORY_KEY = "history"
     _HIDDEN_VIDEO_COLUMNS: Tuple[str, ...] = (
         "Data source",
         "e/a",
@@ -13852,6 +13912,7 @@ class VideoSection(MiniDatabaseSection):
         self.model.set_text_columns({"Notes", "Piece date", "Production datetime"})
         self.model.set_background_provider(self._background_brush_for_cell)
         self.model.set_foreground_provider(self._foreground_brush_for_cell)
+        self.model.set_tooltip_provider(self._tooltip_for_cell)
         try:
             self.model.dataChanged.connect(self._handle_cell_edited)
         except Exception:
@@ -14135,7 +14196,7 @@ class VideoSection(MiniDatabaseSection):
             return False
         required_columns = [VIDEO_END_LENGTH_COLUMN, *[column for column in self._editable_columns() if column != VIDEO_END_LENGTH_COLUMN]]
         for column in required_columns:
-            if self._is_missing(row.get(column)):
+            if self._completion_state(row, column) is False:
                 return True
         return False
 
@@ -14414,10 +14475,156 @@ class VideoSection(MiniDatabaseSection):
             for key, payload in stored.items():
                 if not isinstance(key, str) or not isinstance(payload, dict):
                     continue
-                cleaned[key] = dict(payload)
+                bucket = dict(payload)
+                meta = bucket.get(self._OVERRIDE_META_KEY)
+                if isinstance(meta, dict):
+                    meta_copy = dict(meta)
+                    history = meta_copy.get(self._OVERRIDE_HISTORY_KEY)
+                    if isinstance(history, dict):
+                        cleaned_history: Dict[str, Dict[str, Any]] = {}
+                        for column, entry in history.items():
+                            if isinstance(column, str) and isinstance(entry, dict):
+                                cleaned_history[column] = dict(entry)
+                        meta_copy[self._OVERRIDE_HISTORY_KEY] = cleaned_history
+                    else:
+                        meta_copy[self._OVERRIDE_HISTORY_KEY] = {}
+                    bucket[self._OVERRIDE_META_KEY] = meta_copy
+                else:
+                    bucket.pop(self._OVERRIDE_META_KEY, None)
+                cleaned[key] = bucket
             self._overrides = cleaned
         else:
             self._overrides = {}
+
+    def _is_text_edit_column(self, column: str) -> bool:
+        return column in {"Notes", "Piece date", "Production datetime"}
+
+    def _normalise_video_cell_value(self, column: str, value: Any) -> Any:
+        if self._is_missing(value):
+            return None
+        if self._is_text_edit_column(column):
+            return str(value).strip()
+        numeric = self._coerce_float(value)
+        if numeric is not None:
+            return numeric
+        return str(value).strip()
+
+    def _video_cell_values_equal(self, column: str, left: Any, right: Any) -> bool:
+        return self._normalise_video_cell_value(column, left) == self._normalise_video_cell_value(column, right)
+
+    def _format_video_cell_history_value(self, column: str, value: Any) -> str:
+        normalised = self._normalise_video_cell_value(column, value)
+        if normalised is None:
+            return "(empty)"
+        if isinstance(normalised, float):
+            return _format_display_numeric(normalised)
+        return str(normalised)
+
+    def _override_history_map(
+        self,
+        bucket: Mapping[str, Any] | None,
+        *,
+        create: bool = False,
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
+        if not isinstance(bucket, dict):
+            return None
+        meta = bucket.get(self._OVERRIDE_META_KEY)
+        if not isinstance(meta, dict):
+            if not create:
+                return None
+            meta = {}
+            bucket[self._OVERRIDE_META_KEY] = meta
+        history = meta.get(self._OVERRIDE_HISTORY_KEY)
+        if not isinstance(history, dict):
+            if not create:
+                return None
+            history = {}
+            meta[self._OVERRIDE_HISTORY_KEY] = history
+        return cast(Dict[str, Dict[str, Any]], history)
+
+    def _override_history_for_cell(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[Dict[str, Any]]:
+        key_raw = row.get("_group_key")
+        key = str(key_raw).strip() if key_raw not in (None, "") else ""
+        if not key:
+            return None
+        bucket = self._overrides.get(key)
+        history = self._override_history_map(bucket)
+        if not isinstance(history, dict):
+            return None
+        entry = history.get(column)
+        if isinstance(entry, dict):
+            return entry
+        return None
+
+    def _source_baseline_value(self, row: Mapping[str, Any], column: str, previous_value: Any) -> Any:
+        key_raw = row.get("_group_key")
+        key = str(key_raw).strip() if key_raw not in (None, "") else ""
+        if column == VIDEO_END_LENGTH_COLUMN:
+            return previous_value
+        fabrication_row = self._fabrication_lookup_cache.get(key) if key else None
+        if fabrication_row is not None and column in fabrication_row:
+            return fabrication_row.get(column)
+        return previous_value
+
+    def _record_override_history(
+        self,
+        bucket: Dict[str, Any],
+        row: Mapping[str, Any],
+        column: str,
+        previous_value: Any,
+        new_value: Any,
+    ) -> None:
+        if self._video_cell_values_equal(column, previous_value, new_value):
+            return
+        history = self._override_history_map(bucket, create=True)
+        if history is None:
+            return
+        entry = history.get(column)
+        if not isinstance(entry, dict):
+            entry = {}
+            history[column] = entry
+        baseline_value = self._source_baseline_value(row, column, previous_value)
+        if "original" not in entry:
+            entry["original"] = baseline_value
+        if not self._is_missing(previous_value):
+            entry["previous"] = previous_value
+
+    def _cell_is_overwritten(self, row: pd.Series, column: str) -> bool:
+        entry = self._override_history_for_cell(row, column)
+        if not isinstance(entry, dict):
+            return False
+        current_value = row.get(column)
+        original_value = entry.get("original")
+        if not self._is_missing(original_value):
+            return not self._video_cell_values_equal(column, current_value, original_value)
+        previous_value = entry.get("previous")
+        if self._is_missing(previous_value):
+            return False
+        return not self._video_cell_values_equal(column, current_value, previous_value)
+
+    def _tooltip_for_cell(self, row: pd.Series, column: str) -> Optional[str]:
+        entry = self._override_history_for_cell(row, column)
+        if not isinstance(entry, dict):
+            return None
+        lines: List[str] = []
+        previous_value = entry.get("previous")
+        if not self._is_missing(previous_value):
+            lines.append(
+                f"Previous value: {self._format_video_cell_history_value(column, previous_value)}"
+            )
+        original_value = entry.get("original")
+        if (
+            not self._is_missing(original_value)
+            and not self._video_cell_values_equal(column, original_value, previous_value)
+        ):
+            lines.append(
+                f"Original value: {self._format_video_cell_history_value(column, original_value)}"
+            )
+        return "\n".join(lines) if lines else None
 
     def _load_video_index(self) -> Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary]:
         try:
@@ -14451,6 +14658,8 @@ class VideoSection(MiniDatabaseSection):
     def _completion_state(self, row: pd.Series, column: str) -> Optional[bool]:
         if self._row_missing_video_files(row):
             return None
+        if column == "Notes":
+            return None
         key_raw = row.get("_group_key")
         key = str(key_raw).strip() if key_raw not in (None, "") else ""
         if column == VIDEO_END_LENGTH_COLUMN:
@@ -14472,6 +14681,8 @@ class VideoSection(MiniDatabaseSection):
     def _background_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
         if self._row_missing_video_files(row):
             return QtGui.QBrush(QtGui.QColor("#3a0a0a"))
+        if self._cell_is_overwritten(row, column):
+            return QtGui.QBrush(QtGui.QColor("#4a3806"))
         state = self._completion_state(row, column)
         if state is None:
             return None
@@ -14480,6 +14691,8 @@ class VideoSection(MiniDatabaseSection):
     def _foreground_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
         if self._row_missing_video_files(row):
             return QtGui.QBrush(QtGui.QColor("#ffd6d6"))
+        if self._cell_is_overwritten(row, column):
+            return QtGui.QBrush(QtGui.QColor("#facc15"))
         state = self._completion_state(row, column)
         if state is None:
             return None
@@ -14494,10 +14707,27 @@ class VideoSection(MiniDatabaseSection):
 
     def overrides_snapshot(self) -> Dict[str, Dict[str, Any]]:
         return {
-            str(key): dict(payload)
+            str(key): {
+                str(column): value
+                for column, value in payload.items()
+                if str(column) != self._OVERRIDE_META_KEY
+            }
             for key, payload in self._overrides.items()
             if isinstance(payload, dict)
         }
+
+    def restore_previous_value(self, source_row: int, column: str) -> bool:
+        series = self._row_series(source_row)
+        if series is None:
+            return False
+        entry = self._override_history_for_cell(series, column)
+        if not isinstance(entry, dict):
+            return False
+        previous_value = entry.get("previous")
+        if self._is_missing(previous_value):
+            return False
+        value = str(previous_value) if self._is_text_edit_column(column) else previous_value
+        return self._set_source_row_value(source_row, column, value)
 
     def _apply_overrides_to_table(self, table: pd.DataFrame) -> pd.DataFrame:
         if not isinstance(table, pd.DataFrame) or table.empty:
@@ -14732,6 +14962,7 @@ class VideoSection(MiniDatabaseSection):
             )
 
         recent_edits = dict(getattr(self.model, "_recent_edits", {}))
+        recent_old_values = dict(getattr(self.model, "_recent_old_values", {}))
         for (row_idx, col_idx), value in recent_edits.items():
             if 0 <= row_idx < len(frame.index) and 0 <= col_idx < len(frame.columns):
                 try:
@@ -14787,6 +15018,8 @@ class VideoSection(MiniDatabaseSection):
                 except Exception:
                     col_idx = None
                 value = series.get(column)
+                previous_value = recent_old_values.get((row_idx, col_idx), value)
+                self._record_override_history(bucket, series, column, previous_value, value)
                 if self._is_missing(value):
                     bucket[column] = None
                 else:
@@ -14831,6 +15064,14 @@ class VideoSection(MiniDatabaseSection):
                     if not key:
                         continue
                     bucket = self._overrides.setdefault(key, {})
+                    previous_value = row.get(VIDEO_END_LENGTH_COLUMN)
+                    self._record_override_history(
+                        bucket,
+                        row,
+                        VIDEO_END_LENGTH_COLUMN,
+                        previous_value,
+                        shared_value,
+                    )
                     if self._is_missing(shared_value):
                         if video_end_length_col_idx is not None:
                             frame.iat[row_pos, video_end_length_col_idx] = None
@@ -14883,6 +15124,8 @@ class VideoSection(MiniDatabaseSection):
                 self.model._frame = frame
             if hasattr(self.model, "_recent_edits"):
                 self.model._recent_edits = {}
+            if hasattr(self.model, "_recent_old_values"):
+                self.model._recent_old_values = {}
             self._store_overrides()
 
             def _emit_model_change(rows: Set[int], column: str) -> None:
@@ -14902,6 +15145,7 @@ class VideoSection(MiniDatabaseSection):
                             QtCore.Qt.ItemDataRole.DisplayRole,
                             QtCore.Qt.ItemDataRole.BackgroundRole,
                             QtCore.Qt.ItemDataRole.ForegroundRole,
+                            QtCore.Qt.ItemDataRole.ToolTipRole,
                         ],
                     )
                 except Exception:
@@ -14990,7 +15234,9 @@ class _VideoReviewDialog(QtWidgets.QDialog):
             | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
             | QtWidgets.QAbstractItemView.EditTrigger.AnyKeyPressed
         )
+        self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.itemChanged.connect(self._handle_item_changed)
+        self.table.customContextMenuRequested.connect(self._open_context_menu)
         self.table.installEventFilter(self)
         header = self.table.horizontalHeader()
         if header is not None:
@@ -15071,6 +15317,8 @@ class _VideoReviewDialog(QtWidgets.QDialog):
                 else:
                     item.setFlags(flags & ~QtCore.Qt.ItemFlag.ItemIsEditable)
                 self._style_item(item, series, column)
+                tooltip = self.section._tooltip_for_cell(series, column)
+                item.setToolTip(tooltip or "")
             self.table.resizeColumnsToContents()
             self._update_table_height()
         finally:
@@ -15120,13 +15368,50 @@ class _VideoReviewDialog(QtWidgets.QDialog):
         if updated_series is not None:
             self._populate_table(updated_series)
 
+    def _open_context_menu(self, pos: QtCore.QPoint) -> None:
+        item = self.table.itemAt(pos)
+        if item is None:
+            return
+        source_row = self._current_source_row
+        if source_row is None:
+            return
+        try:
+            column, _label, editable = self._DISPLAY_COLUMNS[item.column()]
+        except Exception:
+            return
+        if not editable:
+            return
+        series = self.section._row_series(source_row)
+        if series is None:
+            return
+        tooltip = self.section._tooltip_for_cell(series, column)
+        menu = QtWidgets.QMenu(self)
+        action = menu.addAction("Restore previous value")
+        action.setEnabled(bool(tooltip))
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is action:
+            if self._restore_previous_value(item.column()):
+                updated_series = self.section._row_series(source_row)
+                if updated_series is not None:
+                    self._populate_table(updated_series)
+
+    def _restore_previous_value(self, column_index: int) -> bool:
+        source_row = self._current_source_row
+        if source_row is None:
+            return False
+        try:
+            column, _label, _editable = self._DISPLAY_COLUMNS[column_index]
+        except Exception:
+            return False
+        return self.section.restore_previous_value(source_row, column)
+
     def _advance_after_commit(self, current_column: int, series: pd.Series) -> None:
         next_column: Optional[int] = None
         for column_index in range(current_column + 1, len(self._DISPLAY_COLUMNS)):
             column, _label, editable = self._DISPLAY_COLUMNS[column_index]
             if not editable:
                 continue
-            if self.section._is_missing(series.get(column)):
+            if self.section._completion_state(series, column) is False:
                 next_column = column_index
                 break
         if next_column is None:

@@ -108,6 +108,21 @@ def test_canonicalise_frame_maps_aliases_and_derives_outcomes() -> None:
     assert clean.loc[1, "is_broken"] == 1
 
 
+def test_canonicalise_frame_merges_duplicate_canonical_alias_columns() -> None:
+    frame = pd.DataFrame(
+        [
+            ["Ni50Fe27Ga23", "5/4", None, 12.0],
+            ["Ni50Fe27Ga23", "6/4", 13.0, None],
+        ],
+        columns=["Composition", "Microwire", "d (痠)", "d (µm)"],
+    )
+
+    clean = canonicalise_frame(frame)
+
+    assert "d (µm) (2)" not in clean.columns
+    assert clean["d (µm)"].tolist() == [12.0, 13.0]
+
+
 def test_generate_report_honors_filtered_scope_and_writes_outputs(tmp_path: Path) -> None:
     frame = _sample_dataframe()
     config = MicrowireEdaConfig(
@@ -133,6 +148,26 @@ def test_generate_report_honors_filtered_scope_and_writes_outputs(tmp_path: Path
     assert result.row_counts["all_rows"] == 8
     assert result.row_counts["known_outcome"] == 8
     assert result.figure_paths
+
+
+def test_generate_report_skips_png_bundle_when_disabled(tmp_path: Path) -> None:
+    frame = _sample_dataframe()
+    config = MicrowireEdaConfig(
+        source_dataframe=frame,
+        output_dir=tmp_path / "report",
+        report_title="Unit Test EDA No PNG",
+        export_png_bundle=False,
+        export_pdf_bundle=False,
+    )
+
+    result = generate_report(config)
+
+    assert result.report_path.exists()
+    assert result.workbook_path.exists()
+    assert result.csv_path.exists()
+    assert result.figure_paths == []
+    figures_dir = result.output_dir / "figures"
+    assert not figures_dir.exists() or not any(figures_dir.glob("*.png"))
 
 
 def test_builder_launch_passes_filtered_assemble_rows(

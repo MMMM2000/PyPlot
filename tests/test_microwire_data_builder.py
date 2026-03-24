@@ -363,6 +363,73 @@ def test_annealing_section_migrates_low_graph_column_to_other_annealing() -> Non
         section.close()
 
 
+def test_annealing_section_merges_both_legacy_graph_columns_into_other_annealing() -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "5/4",
+                    "Graph — other mA": "other.png",
+                    "Graph — low mA": "low.png",
+                    "_group_key": "Ni50Fe27Ga23|5|4",
+                    "_sources": [],
+                }
+            ]
+        )
+        section.data.table = frame
+        section.model.set_frame(frame)
+
+        section._sanitize_graph_columns()
+
+        migrated = section.model.frame()
+        merged = migrated.loc[0, builder_ui.ANNEALING_OTHER_GRAPH_COLUMN]
+        assert "Graph — other mA" not in migrated.columns
+        assert "Graph — low mA" not in migrated.columns
+        assert merged == ["other.png", "low.png"]
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_video_review_completion_ignores_blank_notes() -> None:
+    section = builder_ui.VideoSection.__new__(builder_ui.VideoSection)
+    section._overrides = {}
+    section._fabrication_lookup_cache = {}
+    source_key = (str(Path("C:/videos/source.mkv")),)
+    section._video_source_status_cache = {source_key: True}
+    section._editable_columns = lambda: {"Notes", builder_ui.VIDEO_END_LENGTH_COLUMN}  # type: ignore[method-assign]
+
+    row = pd.Series(
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Draw": 6,
+            "Piece": 2,
+            "_group_key": "Ni50Fe27Ga23|6|2",
+            "Notes": "",
+            builder_ui.VIDEO_END_LENGTH_COLUMN: 42.0,
+            "_sources": list(source_key),
+        }
+    )
+
+    assert section._completion_state(row, "Notes") is None
+    assert section._row_has_review_gaps(row) is False
+
+
+def test_single_asset_reference_unwraps_single_item_lists() -> None:
+    assert core._single_asset_reference("other.png") == "other.png"
+    assert core._single_asset_reference(["other.png"]) == "other.png"
+    assert core._single_asset_reference(["one.png", "two.png"]) is None
+
+
+def test_collapse_asset_references_returns_scalar_for_single_item() -> None:
+    assert core._collapse_asset_references(["other.png"]) == "other.png"
+    assert core._collapse_asset_references(["other.png", "other.png"]) == "other.png"
+    assert core._collapse_asset_references(["one.png", "two.png"]) == ["one.png", "two.png"]
+
+
 def test_microscope_section_can_hide_other_ends() -> None:
     _ensure_qapp()
     section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)

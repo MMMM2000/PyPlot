@@ -179,7 +179,7 @@ class FigureArtifact:
     key: str
     title: str
     section: str
-    png_path: Path
+    png_path: Path | None
     html: str
 
 
@@ -314,14 +314,11 @@ def load_input_frame(config: MicrowireEdaConfig) -> tuple[pd.DataFrame, str]:
 
 
 def _canonical_column_names(columns: Iterable[object]) -> list[str]:
-    seen: dict[str, int] = {}
     output: list[str] = []
     for column in columns:
         raw = str(column).strip().replace("\ufeff", "")
         key = HEADER_ALIASES.get(_header_key(raw), raw)
-        count = seen.get(key, 0)
-        seen[key] = count + 1
-        output.append(key if count == 0 else f"{key} ({count + 1})")
+        output.append(key)
     return output
 
 
@@ -469,10 +466,13 @@ def _save_figure(
     title: str,
     section: str,
     pdf: PdfPages | None,
+    write_png: bool = True,
 ) -> FigureArtifact:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    png_path = output_dir / f"{_slugify(key)}.png"
-    fig.savefig(png_path, dpi=180, bbox_inches="tight")
+    png_path: Path | None = None
+    if write_png:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        png_path = output_dir / f"{_slugify(key)}.png"
+        fig.savefig(png_path, dpi=180, bbox_inches="tight")
     if pdf is not None:
         pdf.savefig(fig, bbox_inches="tight")
     html_text = _figure_to_html(fig)
@@ -1140,7 +1140,15 @@ def _write_manifest(
         "pdf_path": str(pdf_path) if pdf_path else None,
         "row_counts": {str(key): int(value) for key, value in row_counts.items()},
         "tables": {str(name): {"rows": int(table.shape[0]), "columns": int(table.shape[1])} for name, table in tables.items()},
-        "figures": [{"key": figure.key, "title": figure.title, "section": figure.section, "png_path": str(figure.png_path)} for figure in figures],
+        "figures": [
+            {
+                "key": figure.key,
+                "title": figure.title,
+                "section": figure.section,
+                "png_path": str(figure.png_path) if figure.png_path is not None else None,
+            }
+            for figure in figures
+        ],
         "skipped_sections": dict(skipped_sections),
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1278,34 +1286,34 @@ def run_microwire_eda(config: MicrowireEdaConfig) -> MicrowireEdaResult:
 
     pdf = PdfPages(pdf_path) if pdf_path is not None else None
     try:
-        figures.append(_save_figure(_coverage_figure(scoped_frame), output_dir=figures_dir, key="coverage", title="Coverage heatmap", section="coverage", pdf=pdf))
-        figures.append(_save_figure(_outcome_overview_figure(scoped_frame), output_dir=figures_dir, key="outcomes", title="Outcome overview", section="outcomes", pdf=pdf))
-        figures.append(_save_figure(_distribution_grid_figure(scoped_frame, FABRICATION_COLUMNS + GEOMETRY_COLUMNS, "Fabrication and geometry distributions"), output_dir=figures_dir, key="fabrication_distributions", title="Fabrication and geometry distributions", section="fabrication", pdf=pdf))
-        figures.append(_save_figure(_annotated_heatmap(_correlation_matrix(scoped_frame, CONTROL_FEATURES), title="Spearman correlation matrix"), output_dir=figures_dir, key="fabrication_heatmap", title="Spearman correlation matrix", section="fabrication", pdf=pdf))
-        figures.append(_save_figure(_annotated_heatmap(_correlation_matrix(scoped_frame, GEOMETRY_COLUMNS + CONTROL_FEATURES[:4]), title="Controllable parameter interactions"), output_dir=figures_dir, key="fabrication_interactions", title="Controllable parameter interactions", section="fabrication", pdf=pdf))
-        figures.append(_save_figure(_scatter_grid(scoped_frame, target="strain_abs", title="Top variables vs |Strain|"), output_dir=figures_dir, key="strain_scatter", title="Top variables vs |Strain|", section="relationships", pdf=pdf))
-        figures.append(_save_figure(_geometry_to_function_figure(scoped_frame), output_dir=figures_dir, key="geometry_to_function", title="Geometry to function", section="relationships", pdf=pdf))
-        figures.append(_save_figure(_pairplot_figure(scoped_frame), output_dir=figures_dir, key="pairplot", title="Pairplot", section="interactions", pdf=pdf))
-        figures.append(_save_figure(_interaction_grid_figure(scoped_frame), output_dir=figures_dir, key="interaction_grid", title="Interaction grid", section="interactions", pdf=pdf))
-        figures.append(_save_figure(_parallel_coordinates_figure(scoped_frame), output_dir=figures_dir, key="parallel_coordinates", title="Parallel coordinates", section="interactions", pdf=pdf))
-        figures.append(_save_figure(_sweet_spot_figure(tables["sweet_spots"]), output_dir=figures_dir, key="sweet_spots", title="Sweet spots", section="sweet_spots", pdf=pdf))
-        figures.append(_save_figure(_time_drift_figure(scoped_frame), output_dir=figures_dir, key="time_drift", title="Time drift", section="time", pdf=pdf))
+        figures.append(_save_figure(_coverage_figure(scoped_frame), output_dir=figures_dir, key="coverage", title="Coverage heatmap", section="coverage", pdf=pdf, write_png=config.export_png_bundle))
+        figures.append(_save_figure(_outcome_overview_figure(scoped_frame), output_dir=figures_dir, key="outcomes", title="Outcome overview", section="outcomes", pdf=pdf, write_png=config.export_png_bundle))
+        figures.append(_save_figure(_distribution_grid_figure(scoped_frame, FABRICATION_COLUMNS + GEOMETRY_COLUMNS, "Fabrication and geometry distributions"), output_dir=figures_dir, key="fabrication_distributions", title="Fabrication and geometry distributions", section="fabrication", pdf=pdf, write_png=config.export_png_bundle))
+        figures.append(_save_figure(_annotated_heatmap(_correlation_matrix(scoped_frame, CONTROL_FEATURES), title="Spearman correlation matrix"), output_dir=figures_dir, key="fabrication_heatmap", title="Spearman correlation matrix", section="fabrication", pdf=pdf, write_png=config.export_png_bundle))
+        figures.append(_save_figure(_annotated_heatmap(_correlation_matrix(scoped_frame, GEOMETRY_COLUMNS + CONTROL_FEATURES[:4]), title="Controllable parameter interactions"), output_dir=figures_dir, key="fabrication_interactions", title="Controllable parameter interactions", section="fabrication", pdf=pdf, write_png=config.export_png_bundle))
+        figures.append(_save_figure(_scatter_grid(scoped_frame, target="strain_abs", title="Top variables vs |Strain|"), output_dir=figures_dir, key="strain_scatter", title="Top variables vs |Strain|", section="relationships", pdf=pdf, write_png=config.export_png_bundle))
+        figures.append(_save_figure(_geometry_to_function_figure(scoped_frame), output_dir=figures_dir, key="geometry_to_function", title="Geometry to function", section="relationships", pdf=pdf, write_png=config.export_png_bundle))
+        figures.append(_save_figure(_pairplot_figure(scoped_frame), output_dir=figures_dir, key="pairplot", title="Pairplot", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
+        figures.append(_save_figure(_interaction_grid_figure(scoped_frame), output_dir=figures_dir, key="interaction_grid", title="Interaction grid", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
+        figures.append(_save_figure(_parallel_coordinates_figure(scoped_frame), output_dir=figures_dir, key="parallel_coordinates", title="Parallel coordinates", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
+        figures.append(_save_figure(_sweet_spot_figure(tables["sweet_spots"]), output_dir=figures_dir, key="sweet_spots", title="Sweet spots", section="sweet_spots", pdf=pdf, write_png=config.export_png_bundle))
+        figures.append(_save_figure(_time_drift_figure(scoped_frame), output_dir=figures_dir, key="time_drift", title="Time drift", section="time", pdf=pdf, write_png=config.export_png_bundle))
 
         tables["model_a_metrics"], model_a_fig, model_a_skip = _fit_classification_model(scoped_frame)
         if model_a_fig is not None:
-            figures.append(_save_figure(model_a_fig, output_dir=figures_dir, key="model_a", title="Model A: broke classifier", section="models", pdf=pdf))
+            figures.append(_save_figure(model_a_fig, output_dir=figures_dir, key="model_a", title="Model A: broke classifier", section="models", pdf=pdf, write_png=config.export_png_bundle))
         if model_a_skip:
             skipped_sections["models"] = model_a_skip
 
         tables["model_b_metrics"], model_b_fig, model_b_skip = _fit_regression_model(scoped_frame, target="strain_abs", title="Model B", ok_only=True)
         if model_b_fig is not None:
-            figures.append(_save_figure(model_b_fig, output_dir=figures_dir, key="model_b", title="Model B: strain regression", section="models", pdf=pdf))
+            figures.append(_save_figure(model_b_fig, output_dir=figures_dir, key="model_b", title="Model B: strain regression", section="models", pdf=pdf, write_png=config.export_png_bundle))
         if model_b_skip:
             skipped_sections["models_b"] = model_b_skip
 
         tables["model_c_metrics"], model_c_fig, model_c_skip = _fit_regression_model(scoped_frame, target="fracture_strain_abs", title="Model C", ok_only=False)
         if model_c_fig is not None:
-            figures.append(_save_figure(model_c_fig, output_dir=figures_dir, key="model_c", title="Model C: fracture strain regression", section="models", pdf=pdf))
+            figures.append(_save_figure(model_c_fig, output_dir=figures_dir, key="model_c", title="Model C: fracture strain regression", section="models", pdf=pdf, write_png=config.export_png_bundle))
         if model_c_skip:
             skipped_sections["models_c"] = model_c_skip
     finally:
@@ -1361,7 +1369,7 @@ def run_microwire_eda(config: MicrowireEdaConfig) -> MicrowireEdaResult:
         csv_path=csv_path,
         manifest_path=manifest_path,
         pdf_path=pdf_path if pdf_path and pdf_path.exists() else None,
-        figure_paths=[figure.png_path for figure in figures],
+        figure_paths=[figure.png_path for figure in figures if figure.png_path is not None],
         skipped_sections=skipped_sections,
         row_counts=row_counts,
         tables=tables,
@@ -1517,11 +1525,11 @@ def generate_report(
         figures_dir = output_dir / "figures"
         figure_artifacts: list[FigureArtifact] = []
         progress("Building coverage and distribution views")
-        figure_artifacts.append(_save_figure(_coverage_figure(scoped_frame), output_dir=figures_dir, key="coverage_heatmap", title="Coverage heatmap", section="coverage", pdf=pdf))
-        figure_artifacts.append(_save_figure(_outcome_overview_figure(scoped_frame), output_dir=figures_dir, key="outcome_overview", title="Outcome overview", section="outcomes", pdf=pdf))
-        figure_artifacts.append(_save_figure(_distribution_grid_figure(scoped_frame, GEOMETRY_COLUMNS + FABRICATION_COLUMNS, "Geometry and fabrication distributions"), output_dir=figures_dir, key="distributions", title="Geometry and fabrication distributions", section="fabrication", pdf=pdf))
+        figure_artifacts.append(_save_figure(_coverage_figure(scoped_frame), output_dir=figures_dir, key="coverage_heatmap", title="Coverage heatmap", section="coverage", pdf=pdf, write_png=config.export_png_bundle))
+        figure_artifacts.append(_save_figure(_outcome_overview_figure(scoped_frame), output_dir=figures_dir, key="outcome_overview", title="Outcome overview", section="outcomes", pdf=pdf, write_png=config.export_png_bundle))
+        figure_artifacts.append(_save_figure(_distribution_grid_figure(scoped_frame, GEOMETRY_COLUMNS + FABRICATION_COLUMNS, "Geometry and fabrication distributions"), output_dir=figures_dir, key="distributions", title="Geometry and fabrication distributions", section="fabrication", pdf=pdf, write_png=config.export_png_bundle))
         corr_matrix = _correlation_matrix(scoped_frame, CONTROL_FEATURES)
-        figure_artifacts.append(_save_figure(_annotated_heatmap(corr_matrix, title="Spearman correlations"), output_dir=figures_dir, key="spearman_heatmap", title="Spearman correlations", section="fabrication", pdf=pdf))
+        figure_artifacts.append(_save_figure(_annotated_heatmap(corr_matrix, title="Spearman correlations"), output_dir=figures_dir, key="spearman_heatmap", title="Spearman correlations", section="fabrication", pdf=pdf, write_png=config.export_png_bundle))
         progress("Building target correlation views")
         for key, table_name, title_text in [
             ("strain_correlation_bar", "strain_correlations", "Top correlations with |Strain|"),
@@ -1540,15 +1548,15 @@ def generate_report(
             ax.set_xlabel("Spearman ρ")
             ax.set_title(title_text)
             fig.tight_layout()
-            figure_artifacts.append(_save_figure(fig, output_dir=figures_dir, key=key, title=title_text, section="function", pdf=pdf))
-        figure_artifacts.append(_save_figure(_scatter_grid(scoped_frame, target="strain_abs", title="Top |Strain| scatter plots"), output_dir=figures_dir, key="strain_scatter_grid", title="Top |Strain| scatter plots", section="function", pdf=pdf))
-        figure_artifacts.append(_save_figure(_geometry_to_function_figure(scoped_frame), output_dir=figures_dir, key="geometry_to_function", title="Geometry to strain", section="geometry", pdf=pdf))
+            figure_artifacts.append(_save_figure(fig, output_dir=figures_dir, key=key, title=title_text, section="function", pdf=pdf, write_png=config.export_png_bundle))
+        figure_artifacts.append(_save_figure(_scatter_grid(scoped_frame, target="strain_abs", title="Top |Strain| scatter plots"), output_dir=figures_dir, key="strain_scatter_grid", title="Top |Strain| scatter plots", section="function", pdf=pdf, write_png=config.export_png_bundle))
+        figure_artifacts.append(_save_figure(_geometry_to_function_figure(scoped_frame), output_dir=figures_dir, key="geometry_to_function", title="Geometry to strain", section="geometry", pdf=pdf, write_png=config.export_png_bundle))
         progress("Building interaction, sweet spot, and time drift views")
-        figure_artifacts.append(_save_figure(_pairplot_figure(scoped_frame), output_dir=figures_dir, key="pairplot", title="Pairplot", section="interactions", pdf=pdf))
-        figure_artifacts.append(_save_figure(_interaction_grid_figure(scoped_frame), output_dir=figures_dir, key="interaction_grid", title="Interaction grid", section="interactions", pdf=pdf))
-        figure_artifacts.append(_save_figure(_parallel_coordinates_figure(scoped_frame), output_dir=figures_dir, key="parallel_coordinates", title="Parallel coordinates", section="interactions", pdf=pdf))
-        figure_artifacts.append(_save_figure(_sweet_spot_figure(tables["sweet_spots"]), output_dir=figures_dir, key="sweet_spots", title="Sweet spots", section="sweet_spots", pdf=pdf))
-        figure_artifacts.append(_save_figure(_time_drift_figure(scoped_frame), output_dir=figures_dir, key="time_drift", title="Time drift", section="time_drift", pdf=pdf))
+        figure_artifacts.append(_save_figure(_pairplot_figure(scoped_frame), output_dir=figures_dir, key="pairplot", title="Pairplot", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
+        figure_artifacts.append(_save_figure(_interaction_grid_figure(scoped_frame), output_dir=figures_dir, key="interaction_grid", title="Interaction grid", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
+        figure_artifacts.append(_save_figure(_parallel_coordinates_figure(scoped_frame), output_dir=figures_dir, key="parallel_coordinates", title="Parallel coordinates", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
+        figure_artifacts.append(_save_figure(_sweet_spot_figure(tables["sweet_spots"]), output_dir=figures_dir, key="sweet_spots", title="Sweet spots", section="sweet_spots", pdf=pdf, write_png=config.export_png_bundle))
+        figure_artifacts.append(_save_figure(_time_drift_figure(scoped_frame), output_dir=figures_dir, key="time_drift", title="Time drift", section="time_drift", pdf=pdf, write_png=config.export_png_bundle))
         progress("Running regression models")
         model_b_metrics, model_b_fig, model_b_skip = _regression_model(scoped_frame, "strain_abs", "|Strain|", "Model B")
         model_c_metrics, model_c_fig, model_c_skip = _regression_model(scoped_frame, "fracture_strain_abs", "|Fracture strain|", "Model C")
@@ -1570,7 +1578,7 @@ def generate_report(
             ("model_d", "Model D - Fracture stress regression", model_d_fig),
         ]:
             if fig is not None:
-                figure_artifacts.append(_save_figure(fig, output_dir=figures_dir, key=key, title=title_text, section="models", pdf=pdf))
+                figure_artifacts.append(_save_figure(fig, output_dir=figures_dir, key=key, title=title_text, section="models", pdf=pdf, write_png=config.export_png_bundle))
     finally:
         if pdf is not None:
             pdf.close()
@@ -1615,7 +1623,7 @@ def generate_report(
         "row_scope_requested": config.row_scope,
         "row_scope_applied": applied_scope,
         "row_counts": counts,
-        "figure_paths": [str(artifact.png_path) for artifact in figure_artifacts],
+        "figure_paths": [str(artifact.png_path) for artifact in figure_artifacts if artifact.png_path is not None],
         "skipped_sections": skipped_sections,
         "note": note,
     }
@@ -1630,7 +1638,7 @@ def generate_report(
         csv_path=csv_path,
         manifest_path=manifest_path,
         pdf_path=pdf_path if pdf_path is not None and pdf_path.exists() else None,
-        figure_paths=[artifact.png_path for artifact in figure_artifacts],
+        figure_paths=[artifact.png_path for artifact in figure_artifacts if artifact.png_path is not None],
         skipped_sections=skipped_sections,
         row_counts=counts,
         tables=tables,
