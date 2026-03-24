@@ -307,6 +307,15 @@ def _builder_settings() -> QtCore.QSettings:
     return QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
 
 
+def _builder_dialogs_suppressed() -> bool:
+    return os.environ.get("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _open_microwire_eda_window(config: object, parent: QtWidgets.QWidget | None = None) -> None:
     from microwire_eda import launch_eda_window
 
@@ -2733,6 +2742,28 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             return ", ".join(str(item) for item in value)
         return value
 
+    @staticmethod
+    def _format_header_label(value: object) -> str:
+        text = str(value or "")
+        lowered = text.lower()
+        for needle in [
+            " stress/strain current density ",
+            " fracture stress/strain current density ",
+            " fracture stress/strain current ",
+            " stress/strain current ",
+            " current density ",
+            " fracture strain ",
+            " fracture stress ",
+        ]:
+            idx = lowered.find(needle)
+            if idx > 6:
+                text = text[:idx] + "\n" + text[idx + 1 :]
+                lowered = text.lower()
+                break
+        if " (" in text and len(text) > 18:
+            text = text.replace(" (", "\n(", 1)
+        return text
+
     def data(
         self,
         index: QtCore.QModelIndex,
@@ -2916,7 +2947,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             return None
         if orientation == QtCore.Qt.Orientation.Horizontal:
             try:
-                return str(self._frame.columns[section])
+                return self._format_header_label(self._frame.columns[section])
             except Exception:
                 return ""
         try:
@@ -6071,6 +6102,7 @@ def _apply_microscope_overrides(
             core=list(measurements.core),
             glass=list(measurements.glass),
             other=list(measurements.other),
+            brittle=bool(getattr(measurements, "brittle", False)),
         )
         token = _microwire_key_to_text(key) or ""
         override = overrides.get(token, {})
@@ -9429,6 +9461,39 @@ class AnnealingSection(MiniDatabaseSection):
                         pixmap = loaded
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
+
+    def _preview_background(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[QtGui.QBrush]:
+        _ = column
+        frame = self.preview_model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return None
+        try:
+            row_idx = int(row.name)
+        except Exception:
+            return None
+        if row_idx < 0 or row_idx >= len(frame.index):
+            return None
+        group_index = 0
+        previous_group: Optional[str] = None
+        for idx in range(row_idx + 1):
+            current_row = frame.iloc[idx]
+            current_group = "|".join(
+                [
+                    str(current_row.get("Composition") or "").strip(),
+                    str(current_row.get("Microwire") or "").strip(),
+                ]
+            )
+            if previous_group is None:
+                previous_group = current_group
+            elif current_group != previous_group:
+                group_index += 1
+                previous_group = current_group
+        color = QtGui.QColor("#1a1a1a" if group_index % 2 == 0 else "#202733")
+        return QtGui.QBrush(color)
 
     def _row_sources(self, row: pd.Series) -> List[Path]:
         sources: List[Path] = []
@@ -21367,6 +21432,7 @@ class AssemblySection(QtWidgets.QWidget):
 
         self.preview_model = DataFrameModel()
         self.preview_model.set_decoration_provider(self._preview_decoration)
+        self.preview_model.set_background_provider(self._preview_background)
         self.preview_table = QtWidgets.QTableView()
         self.preview_table.setModel(self.preview_model)
         self.preview_table.setAlternatingRowColors(True)
@@ -21381,6 +21447,13 @@ class AssemblySection(QtWidgets.QWidget):
             header.setStretchLastSection(True)
             header.setSectionsMovable(True)
             header.setSectionsClickable(True)
+            try:
+                header.setDefaultAlignment(
+                    QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+                )
+                header.setFixedHeight(self.preview_table.fontMetrics().height() * 2 + 14)
+            except Exception:
+                pass
         self.preview_table.setVerticalScrollMode(
             QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
         )
@@ -21642,10 +21715,7 @@ class AssemblySection(QtWidgets.QWidget):
             for col in selected_columns:
                 if not col:
                     continue
-                text = str(col)
-                if text == "Temperature (°C)":
-                    text = CORE_TEMPERATURE_COLUMN
-                mapped.append(text)
+                mapped.append(self._normalise_saved_column_name(col))
             self._selected_columns = set(mapped)
         else:
             self._selected_columns = None
@@ -21655,10 +21725,7 @@ class AssemblySection(QtWidgets.QWidget):
             for col in column_order:
                 if not col:
                     continue
-                text = str(col)
-                if text == "Temperature (°C)":
-                    text = CORE_TEMPERATURE_COLUMN
-                mapped.append(text)
+                mapped.append(self._normalise_saved_column_name(col))
             self._column_order = mapped
         else:
             self._column_order = []
@@ -21677,8 +21744,7 @@ class AssemblySection(QtWidgets.QWidget):
                 else:
                     continue
                 if isinstance(column, str):
-                    if column == "Temperature (°C)":
-                        column = CORE_TEMPERATURE_COLUMN
+                    column = self._normalise_saved_column_name(column)
                     restored_sort.append((column, bool(ascending)))
         self._sort_spec = restored_sort
         search_query = payload.get("search_query")
@@ -21697,10 +21763,7 @@ class AssemblySection(QtWidgets.QWidget):
         if isinstance(columns_payload, (list, tuple)):
             column_names = []
             for column in columns_payload:
-                text = str(column)
-                if text == "Temperature (°C)":
-                    text = CORE_TEMPERATURE_COLUMN
-                column_names.append(text)
+                column_names.append(self._normalise_saved_column_name(column))
         else:
             column_names = []
         rows_payload = payload.get("rows")
@@ -21710,6 +21773,7 @@ class AssemblySection(QtWidgets.QWidget):
             frame = pd.DataFrame(columns=column_names)
         if isinstance(frame, pd.DataFrame):
             frame = self._dedupe_frame_columns(frame)
+            self._known_columns = {str(column) for column in frame.columns}
         index_payload = payload.get("index")
         if isinstance(index_payload, list) and len(index_payload) == len(frame.index):
             try:
@@ -22007,6 +22071,10 @@ class AssemblySection(QtWidgets.QWidget):
                         merged_frame[column] = None
                     existing = row.get(column)
                     if self._should_fill_import_value(existing, value):
+                        try:
+                            merged_frame[column] = merged_frame[column].astype(object)
+                        except Exception:
+                            pass
                         merged_frame.at[row_idx, column] = value
                         updated = True
                 if updated:
@@ -22512,6 +22580,9 @@ class AssemblySection(QtWidgets.QWidget):
                 D_path = self._image_path_from_row(row, "glass")
                 if D_path is not None:
                     measurements.add_placeholder("glass", D_path)
+            brittle_value = str(row.get(BRITTLE_COLUMN) or "").strip().lower()
+            if brittle_value == "brittle":
+                measurements.brittle = True
         return index
 
     def _update_preview(self, frame: pd.DataFrame) -> None:
@@ -22575,14 +22646,6 @@ class AssemblySection(QtWidgets.QWidget):
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return frame
         groups = self._ensure_shape_memory_stress_strain_groups()
-        if not groups:
-            updated = frame.copy()
-            updated[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = [
-                _row_to_microwire_key(row) or f"row-{idx}"
-                for idx, (_, row) in enumerate(updated.iterrows())
-            ]
-            updated[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = 0
-            return updated
 
         expanded_rows: List[Dict[str, Any]] = []
         for idx, row in frame.iterrows():
@@ -22595,6 +22658,171 @@ class AssemblySection(QtWidgets.QWidget):
                 continue
             records = list(groups.get(row_key, []))
             if not records:
+                source_paths: List[Path] = []
+                raw_sources = row_dict.get("_sources")
+                if isinstance(raw_sources, (list, tuple, set)):
+                    for entry in raw_sources:
+                        try:
+                            source_paths.append(Path(entry))
+                        except Exception:
+                            continue
+                section_row: Optional[pd.Series] = None
+                if not source_paths:
+                    section = self.sections.get("shape_memory_stress_strain")
+                    section_frame = (
+                        section.model.frame()
+                        if isinstance(section, ShapeMemoryStressStrainSection)
+                        else pd.DataFrame()
+                    )
+                    if isinstance(section_frame, pd.DataFrame) and not section_frame.empty:
+                        for _, candidate_row in section_frame.iterrows():
+                            if _row_to_microwire_key(candidate_row) == row_key:
+                                section_row = candidate_row
+                                break
+                    if section_row is not None:
+                        candidate_sources = section_row.get("_sources")
+                        if isinstance(candidate_sources, (list, tuple, set)):
+                            for entry in candidate_sources:
+                                try:
+                                    source_paths.append(Path(entry))
+                                except Exception:
+                                    continue
+                fallback_rows: List[Dict[str, Any]] = []
+                sample_entry = self._cached_shape_memory_entries.get(row_key, {})
+                standard_source = str(
+                    (section_row.get(_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN) if section_row is not None else row_dict.get(_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN))
+                    or ""
+                ).strip()
+                fracture_source = str(
+                    (section_row.get(_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN) if section_row is not None else row_dict.get(_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN))
+                    or ""
+                ).strip()
+                standard_source_count = sum(
+                    1 for path in source_paths if "fracture" not in path.stem.casefold()
+                )
+                fracture_source_count = sum(
+                    1 for path in source_paths if "fracture" in path.stem.casefold()
+                )
+                d_value = row_dict.get(MICROSCOPE_D_COLUMN)
+                try:
+                    diameter_um = float(d_value) if d_value is not None else None
+                except Exception:
+                    diameter_um = None
+                for source_path in source_paths:
+                    path_key = str(source_path)
+                    entry = self._cached_shape_memory_record_entries.get(path_key, {})
+                    current = _shape_memory_current_mA_from_record(
+                        ShapeMemoryStressStrainRecord(path=source_path, sample="", data=pd.DataFrame())
+                    )
+                    is_fracture = "fracture" in source_path.stem.casefold()
+                    new_row = dict(row_dict)
+                    current_value = current
+                    labels = [source_path.stem]
+                    if labels:
+                        new_row[SHAPE_MEMORY_STRESS_STRAIN_COLUMN] = labels
+                    new_row[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+                    if is_fracture:
+                        new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = current_value
+                        new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = _current_density_from_diameter_um(
+                            current_value,
+                            diameter_um,
+                        )
+                    else:
+                        new_row[SHAPE_MEMORY_CURRENT_COLUMN] = current_value
+                        new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = _current_density_from_diameter_um(
+                            current_value,
+                            diameter_um,
+                        )
+
+                    standard_entry: Dict[str, Any] = {}
+                    fracture_entry: Dict[str, Any] = {}
+                    if is_fracture:
+                        for column in (
+                            SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                            SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                            SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                        ):
+                            if column in entry:
+                                fracture_entry[column] = entry[column]
+                        if not fracture_entry and fracture_source and path_key == fracture_source:
+                            for column in (
+                                SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                            ):
+                                if column in sample_entry:
+                                    fracture_entry[column] = sample_entry[column]
+                        elif not fracture_entry and not fracture_source and fracture_source_count == 1:
+                            for column in (
+                                SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                            ):
+                                if column in sample_entry:
+                                    fracture_entry[column] = sample_entry[column]
+                    else:
+                        for column in (
+                            SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                            SHAPE_MEMORY_LOAD_COLUMN,
+                            SHAPE_MEMORY_STRAIN_COLUMN,
+                            SHAPE_MEMORY_STRESS_COLUMN,
+                        ):
+                            if column in entry:
+                                standard_entry[column] = entry[column]
+                        if not standard_entry and standard_source and path_key == standard_source:
+                            for column in (
+                                SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                                SHAPE_MEMORY_LOAD_COLUMN,
+                                SHAPE_MEMORY_STRAIN_COLUMN,
+                                SHAPE_MEMORY_STRESS_COLUMN,
+                            ):
+                                if column in sample_entry:
+                                    standard_entry[column] = sample_entry[column]
+                        elif not standard_entry and not standard_source and standard_source_count == 1:
+                            for column in (
+                                SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                                SHAPE_MEMORY_LOAD_COLUMN,
+                                SHAPE_MEMORY_STRAIN_COLUMN,
+                                SHAPE_MEMORY_STRESS_COLUMN,
+                            ):
+                                if column in sample_entry:
+                                    standard_entry[column] = sample_entry[column]
+
+                    for column in (
+                        SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                        SHAPE_MEMORY_LOAD_COLUMN,
+                        SHAPE_MEMORY_STRAIN_COLUMN,
+                        SHAPE_MEMORY_STRESS_COLUMN,
+                    ):
+                        new_row[column] = standard_entry.get(column)
+                    for column in (
+                        SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                    ):
+                        new_row[column] = fracture_entry.get(column)
+                    fallback_rows.append(new_row)
+
+                if fallback_rows:
+                    def _fallback_sort_key(payload: Dict[str, Any]) -> Tuple[int, float]:
+                        value = payload.get(SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN)
+                        if value in (None, ""):
+                            value = payload.get(SHAPE_MEMORY_CURRENT_COLUMN)
+                        try:
+                            numeric = float(value)
+                        except Exception:
+                            numeric = math.inf
+                        return (0 if math.isfinite(numeric) else 1, numeric)
+
+                    for order, payload in enumerate(sorted(fallback_rows, key=_fallback_sort_key)):
+                        payload[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = row_key
+                        payload[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
+                        expanded_rows.append(payload)
+                    continue
+
                 row_dict[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = row_key
                 row_dict[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = 0
                 expanded_rows.append(row_dict)
@@ -22721,7 +22949,13 @@ class AssemblySection(QtWidgets.QWidget):
             self._preview_row_index_map = row_map
         self.preview_model.set_frame(display_frame)
         if self._column_order:
-            QtCore.QTimer.singleShot(0, lambda: self._apply_preview_column_order(self._column_order))
+            try:
+                self._apply_preview_column_order(self._column_order)
+            except Exception:
+                QtCore.QTimer.singleShot(
+                    0,
+                    lambda: self._apply_preview_column_order(self._column_order),
+                )
         self.preview_table.setVisible(True)
         display_columns = (
             [str(column) for column in display_frame.columns]
@@ -22781,6 +23015,19 @@ class AssemblySection(QtWidgets.QWidget):
         if value is None:
             return ""
         return str(value).strip()
+
+    @staticmethod
+    def _normalise_saved_column_name(value: object) -> str:
+        text = str(value or "").strip()
+        legacy_map = {
+            "Temperature (°C)": CORE_TEMPERATURE_COLUMN,
+            "Current (mA)": SHAPE_MEMORY_CURRENT_COLUMN,
+            "Current density (A/mm^2)": SHAPE_MEMORY_CURRENT_DENSITY_COLUMN,
+            "Fracture current (mA)": SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
+            "Fracture current density (A/mm^2)": SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
+            "Graph — other mA": ANNEALING_OTHER_GRAPH_COLUMN,
+        }
+        return legacy_map.get(text, text)
 
     def _handle_preview_search_changed(self, text: str) -> None:
         query = self._normalise_search_text(text)
@@ -22853,15 +23100,6 @@ class AssemblySection(QtWidgets.QWidget):
                 for column in column_names
                 if column not in self._graph_columns and not column.startswith("_")
             }
-        else:
-            new_columns = [
-                col
-                for col in column_names
-                if col not in self._known_columns and not col.startswith("_")
-            ]
-            self._selected_columns.update(
-                column for column in new_columns if column not in self._graph_columns
-            )
         self._known_columns.update(column_names)
         self._selected_columns.update(self._mandatory_columns)
         self._sync_section_states_from_columns(self._selected_columns, column_names)
@@ -23154,7 +23392,40 @@ class AssemblySection(QtWidgets.QWidget):
                 return self._combined_graph_pixmap(cache_key, items, stack_vertical=False)
         except Exception:
             self.logger.exception("Failed to render assemble graph preview")
-        return None
+            return None
+
+    def _preview_background(
+        self,
+        row: pd.Series,
+        column_label: str,
+    ) -> Optional[QtGui.QBrush]:
+        _ = column_label
+        frame = self.preview_model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return None
+        try:
+            row_idx = int(row.name)
+        except Exception:
+            return None
+        if row_idx < 0 or row_idx >= len(frame.index):
+            return None
+        group_index = 0
+        previous_group: Optional[str] = None
+        for idx in range(row_idx + 1):
+            current_row = frame.iloc[idx]
+            current_group = "|".join(
+                [
+                    str(current_row.get("Composition") or "").strip(),
+                    str(current_row.get("Microwire") or "").strip(),
+                ]
+            )
+            if previous_group is None:
+                previous_group = current_group
+            elif current_group != previous_group:
+                group_index += 1
+                previous_group = current_group
+        color = QtGui.QColor("#1a1a1a" if group_index % 2 == 0 else "#202733")
+        return QtGui.QBrush(color)
 
     def _group_annealing_records(
         self,
@@ -26994,11 +27265,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._dirty = False
             self.logger.info("Project loaded from %s", target)
             _pump_events(total_steps, "Finishing…")
-            QtWidgets.QMessageBox.information(
-                self,
-                "Open Project",
-                f"Loaded project from {target}",
-            )
+            if not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Open Project",
+                    f"Loaded project from {target}",
+                )
         except Exception as exc:
             self.logger.exception("Failed to load project %s", target, exc_info=exc)
             QtWidgets.QMessageBox.critical(

@@ -5330,6 +5330,11 @@ def build_database(
                 progress_callback(idx, total)
     rows: List[Dict[str, object]] = []
 
+    if microscope_index:
+        for candidate_key in microscope_index.keys():
+            if candidate_key not in grouped:
+                grouped[candidate_key] = []
+
     def _group_sort_key(
         item: Tuple[Tuple[str, int, int, Optional[str]], List[MeasurementRecord]]
     ) -> Tuple[str, int, int, str]:
@@ -5379,7 +5384,7 @@ def build_database(
             pull_value = _value_for_output(draw_info, "glass_pull_off")
         row[GLASS_PULL_COLUMN] = pull_value
         row["Notes"] = _compose_notes(draw_info, piece_info)
-        row["Data source"] = "Measured"
+        row["Data source"] = "Measured" if records else "Microscope only"
         phase_entry = phase_points_map.get(key_str, {})
         if phase_entry:
             as_value = phase_entry.get("As1")
@@ -5462,6 +5467,20 @@ def build_database(
                 microscope_data = microscope_index.get((composition, draw_x, piece_y, None))
             if microscope_data is None:
                 microscope_data = microscope_index.get((composition, draw_x, piece_y))
+            if microscope_data is None:
+                for candidate_key, candidate_value in microscope_index.items():
+                    try:
+                        if (
+                            isinstance(candidate_key, tuple)
+                            and len(candidate_key) >= 3
+                            and str(candidate_key[0]) == str(composition)
+                            and int(candidate_key[1]) == int(draw_x)
+                            and int(candidate_key[2]) == int(piece_y)
+                        ):
+                            microscope_data = candidate_value
+                            break
+                    except (TypeError, ValueError):
+                        continue
         if microscope_data:
             if getattr(microscope_data, "brittle", False):
                 row[BRITTLE_COLUMN] = "brittle"
@@ -5682,14 +5701,14 @@ def build_database(
         other_records = _select_other_measurements(records, high_record, low_record)
         if high_record:
             row["File 1000 mA"] = high_record.metadata.file_name
-        else:
+        elif records:
             stats.missing_high_measurement += 1
             log.warning("No 1000 mA measurement found for %s %s", composition, row["Microwire"] or "(unknown)")
         if low_record:
             row["File low mA"] = low_record.metadata.file_name
             if low_record.metadata.setpoint_mA is not None:
                 row["Low mA value (mA)"] = low_record.metadata.setpoint_mA
-        else:
+        elif records:
             stats.missing_low_measurement += 1
             log.warning("No low-current measurement found for %s %s", composition, row["Microwire"] or "(unknown)")
         if wants_matplotlib:

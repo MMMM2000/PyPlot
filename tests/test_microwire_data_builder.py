@@ -1496,6 +1496,39 @@ def test_build_database_populates_brittle_column_from_microscope_index(tmp_path:
     assert result.dataframe.iloc[0][BRITTLE_COLUMN] == "brittle"
 
 
+def test_build_database_adds_microscope_only_brittle_rows(tmp_path: Path) -> None:
+    microscope_index = {
+        ("Ni50Fe27Ga23", 2, 1, None): core.MicroscopeMeasurements(
+            glass=[
+                core.MicroscopeDetection(
+                    value=28.2,
+                    image_path=tmp_path / "Ni50Fe27Ga23 2-1 glass brittle.jpg",
+                    source="manual",
+                    category="glass",
+                )
+            ],
+            brittle=True,
+        )
+    }
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path / "out",
+        ),
+        measurement_records=[],
+        microscope_index=microscope_index,
+        skip_exports=True,
+    )
+
+    assert len(result.dataframe.index) == 1
+    row = result.dataframe.iloc[0]
+    assert row["Composition"] == "Ni50Fe27Ga23"
+    assert row["Microwire"] == "2/1"
+    assert row["Data source"] == "Microscope only"
+    assert row[BRITTLE_COLUMN] == "brittle"
+
+
 def test_shape_memory_section_normalises_current_columns_from_sources(tmp_path: Path) -> None:
     _ensure_qapp()
     section = builder_ui.ShapeMemoryStressStrainSection(
@@ -2539,5 +2572,35 @@ def test_assemble_prepare_inputs_allows_export_without_annealing_section_selecte
         assert payload is not None
         annealing_records = payload[1]
         assert len(annealing_records) == 1
+    finally:
+        window.close()
+
+
+def test_assemble_import_project_payload_preserves_hidden_columns_and_order(qtbot) -> None:
+    _ensure_qapp()
+    window = builder_ui.BuilderWindow()
+    qtbot.addWidget(window)
+    try:
+        payload = {
+            "columns": ["Composition", "Microwire", "Brittle", builder_ui.GLASS_PULL_COLUMN],
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "5/4",
+                    "Brittle": "brittle",
+                    builder_ui.GLASS_PULL_COLUMN: None,
+                }
+            ],
+            "selected_columns": ["Composition", "Microwire"],
+            "column_order": ["Microwire", "Composition"],
+        }
+
+        window.assembly_section.import_project_payload(payload)
+        QtWidgets.QApplication.processEvents()
+
+        assert window.assembly_section._current_preview_column_order()[:2] == [
+            "Microwire",
+            "Composition",
+        ]
     finally:
         window.close()
