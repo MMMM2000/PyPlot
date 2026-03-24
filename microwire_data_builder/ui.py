@@ -274,10 +274,10 @@ _SHAPE_MEMORY_COLUMN_ALIASES = {
     "Shape memory fracture stress (MPa)": SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
 }
 
-SHAPE_MEMORY_CURRENT_COLUMN = "Current (mA)"
-SHAPE_MEMORY_CURRENT_DENSITY_COLUMN = "Current density (A/mm^2)"
-SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN = "Fracture current (mA)"
-SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN = "Fracture current density (A/mm^2)"
+SHAPE_MEMORY_CURRENT_COLUMN = "Stress/strain current (mA)"
+SHAPE_MEMORY_CURRENT_DENSITY_COLUMN = "Stress/strain current density (A/mm^2)"
+SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN = "Fracture stress/strain current (mA)"
+SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN = "Fracture stress/strain current density (A/mm^2)"
 _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN = "_shape_memory_standard_source"
 _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN = "_shape_memory_fracture_source"
 _SHAPE_MEMORY_GROUP_KEY_COLUMN = "_shape_memory_group_key"
@@ -4256,7 +4256,7 @@ def _annealing_records_to_frame(
 
         group_key = _microwire_key_to_str((composition, draw, piece, suffix))
         source_paths: List[str] = []
-        for entry in (high_record, low_record):
+        for entry in group:
             path = getattr(entry, "path", None)
             if path:
                 source_paths.append(str(Path(path)))
@@ -4327,7 +4327,8 @@ def _select_other_measurements(
     high_record: Optional[MeasurementRecord],
     low_record: Optional[MeasurementRecord],
 ) -> List[MeasurementRecord]:
-    excluded_ids = {id(high_record), id(low_record)}
+    _ = low_record
+    excluded_ids = {id(high_record)}
 
     def _sort_key(record: MeasurementRecord) -> Tuple[int, str]:
         setpoint = getattr(getattr(record, "metadata", object()), "setpoint_mA", None)
