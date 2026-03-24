@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+import logging
+import sys
+from pathlib import Path
+from typing import Any
+
+from PyQt6 import QtCore, QtGui, QtWidgets
+
+from .core import (
+    INPUT_KIND_AUTO,
+    ROW_SCOPE_ALL,
+    ROW_SCOPE_FILTERED,
+    ROW_SCOPE_SELECTED,
+    MicrowireEdaConfig,
+    MicrowireEdaResult,
+    run_microwire_eda,
+)
+
+LOGGER = logging.getLogger(__name__)
+_WINDOW_REFS: list["MicrowireEdaWindow"] = []
+
+
+def run_cli(config: MicrowireEdaConfig) -> MicrowireEdaResult:
+    return run_microwire_eda(config)
+
+
+class MicrowireEdaWindow(QtWidgets.QMainWindow):
+    def __init__(self, config: MicrowireEdaConfig | None = None, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._initial_config = config or MicrowireEdaConfig()
+        self._last_result: MicrowireEdaResult | None = None
+        self.setWindowTitle("Microwire EDA")
+        self.resize(860, 620)
+        self._build_ui()
+        self._apply_initial_config()
+
+    def _build_ui(self) -> None:
+        central = QtWidgets.QWidget(self)
+        layout = QtWidgets.QVBoxLayout(central)
+
+        form = QtWidgets.QFormLayout()
+        self.input_edit = QtWidgets.QLineEdit(self)
+        browse_row = QtWidgets.QHBoxLayout()
+        browse_row.addWidget(self.input_edit, 1)
+        self.input_browse_button = QtWidgets.QPushButton("Browse…", self)
+        self.input_browse_button.clicked.connect(self._choose_input)
+        browse_row.addWidget(self.input_browse_button)
+        form.addRow("Input project/export", self._wrap_layout(browse_row))
+
+        self.output_edit = QtWidgets.QLineEdit(self)
+        output_row = QtWidgets.QHBoxLayout()
+        output_row.addWidget(self.output_edit, 1)
+        self.output_browse_button = QtWidgets.QPushButton("Browse…", self)
+        self.output_browse_button.clicked.connect(self._choose_output_dir)
+        output_row.addWidget(self.output_browse_button)
+        form.addRow("Output directory", self._wrap_layout(output_row))
+
+        self.title_edit = QtWidgets.QLineEdit(self)
+        form.addRow("Report title", self.title_edit)
+
+        self.scope_combo = QtWidgets.QComboBox(self)
+        form.addRow("Row scope", self.scope_combo)
+
+        self.pdf_checkbox = QtWidgets.QCheckBox("Write PDF figure bundle", self)
+        self.pdf_checkbox.setChecked(True)
+        form.addRow("", self.pdf_checkbox)
+
+        layout.addLayout(form)
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        self.run_button = QtWidgets.QPushButton("Run analysis", self)
+        self.run_button.clicked.connect(self._run_analysis)
+        button_row.addWidget(self.run_button)
+        self.open_report_button = QtWidgets.QPushButton("Open report", self)
+        self.open_report_button.setEnabled(False)
+        self.open_report_button.clicked.connect(self._open_report)
+        button_row.addWidget(self.open_report_button)
+        layout.addLayout(button_row)
+
+        self.summary_label = QtWidgets.QLabel("", self)
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        self.log_view = QtWidgets.QPlainTextEdit(self)
+        self.log_view.setReadOnly(True)
+        layout.addWidget(self.log_view, 1)
+
+        self.setCentralWidget(central)
+
+    @staticmethod
+    def _wrap_layout(layout: QtWidgets.QLayout) -> QtWidgets.QWidget:
+        wrapper = QtWidgets.QWidget()
+        wrapper.setLayout(layout)
+        return wrapper
+
+    def _apply_initial_config(self) -> None:
+        config = self._initial_config
+        if config.input_path is not None:
+            self.input_edit.setText(str(config.input_path))
+        default_output = config.output_dir or (Path.cwd() / "microwire_eda_output")
+        self.output_edit.setText(str(default_output))
+        self.title_edit.setText(config.report_title)
+        self.pdf_checkbox.setChecked(bool(config.export_pdf_bundle))
+
+        self.scope_combo.clear()
+        scopes: list[tuple[str, str]] = [(ROW_SCOPE_ALL, "All rows")]
+        if config.filtered_row_indices:
+            scopes.insert(0, (ROW_SCOPE_FILTERED, "Filtered rows"))
+        if config.selected_row_indices:
+            scopes.insert(0, (ROW_SCOPE_SELECTED, "Selected rows"))
+        for value, label in scopes:
+            self.scope_combo.addItem(label, value)
+        current_index = max(0, self.scope_combo.findData(config.row_scope))
+        self.scope_combo.setCurrentIndex(current_index)
+
+    def _choose_input(self) -> None:
+        start = self.input_edit.text().strip() or str(Path.cwd())
+        path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Choose Microwire EDA input",
+            start,
+            "Microwire Builder Project (*.pydpj);;Spreadsheet (*.xlsx *.xls *.xlsm *.csv);;All files (*)",
+        )
+        if path_str:
+            self.input_edit.setText(path_str)
+
+    def _choose_output_dir(self) -> None:
+        start = self.output_edit.text().strip() or str(Path.cwd())
+        path_str = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose output directory", start)
+        if path_str:
+            self.output_edit.setText(path_str)
+
+    def _current_config(self) -> MicrowireEdaConfig:
+        return MicrowireEdaConfig(
+            input_path=Path(self.input_edit.text().strip()).expanduser() if self.input_edit.text().strip() else self._initial_config.input_path,
+            input_kind=INPUT_KIND_AUTO,
+            row_scope=str(self.scope_combo.currentData() or ROW_SCOPE_ALL),
+            output_dir=Path(self.output_edit.text().strip()).expanduser(),
+            report_title=self.title_edit.text().strip() or "Microwire EDA Report",
+            source_dataframe=self._initial_config.source_dataframe,
+            filtered_row_indices=self._initial_config.filtered_row_indices,
+            selected_row_indices=self._initial_config.selected_row_indices,
+            export_png_bundle=True,
+            export_pdf_bundle=self.pdf_checkbox.isChecked(),
+            metadata=dict(self._initial_config.metadata),
+        )
+
+    def _run_analysis(self) -> None:
+        self.run_button.setEnabled(False)
+        self.open_report_button.setEnabled(False)
+        self.summary_label.setText("Running analysis…")
+        self.log_view.appendPlainText("Running Microwire EDA…")
+        QtWidgets.QApplication.processEvents()
+        try:
+            result = run_microwire_eda(self._current_config())
+        except Exception as exc:
+            LOGGER.exception("Microwire EDA failed")
+            self.log_view.appendPlainText(f"Analysis failed: {exc}")
+            self.summary_label.setText(f"Analysis failed: {exc}")
+            QtWidgets.QMessageBox.critical(self, "Microwire EDA", f"Analysis failed:\n{exc}")
+            return
+        finally:
+            self.run_button.setEnabled(True)
+        self._last_result = result
+        self.open_report_button.setEnabled(True)
+        self.summary_label.setText(
+            f"Report ready: {result.report_path}\nRows analysed: {result.row_counts.get('analysed_rows', 0)}"
+        )
+        self.log_view.appendPlainText(f"HTML report: {result.report_path}")
+        self.log_view.appendPlainText(f"Workbook: {result.workbook_path}")
+        self.log_view.appendPlainText(f"Manifest: {result.manifest_path}")
+        if result.skipped_sections:
+            for key, message in result.skipped_sections.items():
+                self.log_view.appendPlainText(f"Skipped {key}: {message}")
+
+    def _open_report(self) -> None:
+        if self._last_result is None:
+            return
+        url = QtCore.QUrl.fromLocalFile(str(self._last_result.report_path))
+        QtGui.QDesktopServices.openUrl(url)
+
+
+def launch_eda_window(config: MicrowireEdaConfig | None = None, parent: QtWidgets.QWidget | None = None) -> MicrowireEdaWindow:
+    window = MicrowireEdaWindow(config=config, parent=parent)
+    window.show()
+    _WINDOW_REFS.append(window)
+    return window
+
+
+def main(argv: list[str] | None = None) -> Any:
+    args = sys.argv if argv is None else argv
+    app = QtWidgets.QApplication.instance()
+    owns_app = app is None
+    if app is None:
+        app = QtWidgets.QApplication([args[0] if args else "microwire_eda"])
+    window = launch_eda_window()
+    if owns_app:
+        return app.exec()
+    return window

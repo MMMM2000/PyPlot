@@ -19,6 +19,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - FMR: Field vs X/Y voltage plots from CSV files; multiple graphs per sample row.
 - Strain: stress/strain entries tied to composition + microwire; d auto-filled from microscope when available.
 - Assemble: combined preview and export configuration.
+- Analysis: `Analysis -> Analyze assemble data...` opens the separate Microwire EDA tool using the current filtered Assemble rows. The report generator is read-only, prefers `.pydpj` project context when available, and can also work from assembled spreadsheet exports.
 - Assemble imports: spreadsheet rows can be imported and merged with the assembled dataset; imported rows are tagged via the "Data source" column and enriched with fabrication metadata where possible.
 - Data menu: import external workbooks, toggle visibility of imported-only rows, or remove imported data entirely. Optionally separate imported Fabrication rows under an "Imported data:" divider. Imported workbooks appear under Project Explorer.
 - Compare: subset of rows for side-by-side comparison.
@@ -55,6 +56,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 
 - Export is driven by one button: open settings, adjust, then export.
 - "Preview database" shows the combined view using current column selection and sorting; "Combine database" is the full merge for export outputs.
+- `Analyze...` opens the standalone Microwire EDA workflow. When a preview is available it uses the current filtered Assemble rows as its default scope, keeps the current selected subset available as an alternate scope, and writes a read-only HTML/Excel/CSV/manifest report bundle without modifying the `.pydpj` project.
 - Column selector must include every column from every section, including graph columns; graph columns are off by default.
 - Column order, visibility, and multi-column sort are persisted in the `.pydpj` project.
 - Assemble preview includes a quick search box that filters rows across currently visible columns; saved projects keep the active search text.
@@ -75,6 +77,14 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - HTML export must not require the Videos section to be processed, and includes a compare view (Ctrl/Cmd-click rows to compare).
 - Matplotlib/Origin outputs should use the same rows and columns as the Assemble preview.
 - No PyPlot UI should be embedded inside the builder; graphs are rendered as static previews like the current annealing section.
+- Microwire EDA outputs are separate from Assemble exports: the EDA tool writes its own HTML report, summary workbook, canonical CSV, manifest JSON, and optional figure bundles to the chosen report directory.
+
+## Microwire EDA
+
+- Microwire EDA is a separate read-only workflow that can load either a Builder `.pydpj` project or an assembled spreadsheet export.
+- The generated report includes coverage checks, outcome distributions, controllable-parameter distributions, correlation heatmaps, strain-focused scatter views, interaction plots, sweet-spot binning, time drift, and gated simple models.
+- Standalone command entrypoint: `launcher.py --microwire-eda <project.pydpj|assembled.xlsx> [--microwire-eda-rows all|filtered|selected] [--microwire-eda-out <dir>] [--microwire-eda-title <title>]`.
+- Builder-launched analysis uses the current Assemble preview rows directly when available so the report matches the visible filtered subset rather than silently reverting to the full project.
 
 ## Logging and Diagnostics
 

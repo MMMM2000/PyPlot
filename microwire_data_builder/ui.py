@@ -307,6 +307,12 @@ def _builder_settings() -> QtCore.QSettings:
     return QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
 
 
+def _open_microwire_eda_window(config: object, parent: QtWidgets.QWidget | None = None) -> None:
+    from microwire_eda import launch_eda_window
+
+    launch_eda_window(config=config if isinstance(config, object) else None, parent=parent)
+
+
 def _looks_like_test_path(value: object) -> bool:
     if not isinstance(value, (str, Path)):
         return False
@@ -5018,6 +5024,7 @@ class _GraphGalleryDialog(QtWidgets.QDialog):
 
 _VSM_TEMP_PROCESSOR: VSMTemperatureScanProcessor | None = None
 _OPEN_PYPLOT_WINDOWS: List[QtWidgets.QWidget] = []
+_OPEN_EDA_WINDOWS: List[QtWidgets.QWidget] = []
 
 
 def _open_pyplot_for_paths(
@@ -5108,6 +5115,35 @@ def _open_pyplot_for_paths(
         QtCore.QTimer.singleShot(0, _load_and_plot)
 
     QtCore.QTimer.singleShot(0, _run)
+
+
+def _open_microwire_eda_window(
+    config: object,
+    logger: logging.Logger,
+) -> None:
+    try:
+        from microwire_eda.ui import launch_eda_window
+    except Exception:
+        logger.exception("Failed to import Microwire EDA window.")
+        QtWidgets.QMessageBox.warning(
+            None,
+            "Microwire EDA",
+            "Microwire EDA is unavailable in this environment.",
+        )
+        return
+    app = QtWidgets.QApplication.instance()
+    if app is not None:
+        try:
+            ensure_app_theme(app)
+        except Exception:
+            pass
+    window = launch_eda_window(config)
+    _OPEN_EDA_WINDOWS.append(window)
+    window.destroyed.connect(
+        lambda *_args, ref=window: _OPEN_EDA_WINDOWS.remove(ref)
+        if ref in _OPEN_EDA_WINDOWS
+        else None
+    )
 
 
 def _get_vsm_temp_processor(logger: logging.Logger) -> Optional[VSMTemperatureScanProcessor]:
@@ -21186,6 +21222,7 @@ class AssemblySection(QtWidgets.QWidget):
         self._imported_sources: List[str] = []
         self._show_imported = True
         self._preview_search_text: str = ""
+        self._project_path_getter: Callable[[], Optional[Path]] | None = None
 
         self._output_dir = str(Path.cwd())
         self._output_name = DEFAULT_OUTPUT_NAME
@@ -21409,6 +21446,9 @@ class AssemblySection(QtWidgets.QWidget):
         self.export_preview_button.clicked.connect(self._export_preview_worksheet)
         self.export_preview_button.setEnabled(False)
         button_row.addWidget(self.export_preview_button)
+        self.analyze_button = QtWidgets.QPushButton("Analyze...")
+        self.analyze_button.clicked.connect(self._open_eda_window)
+        button_row.addWidget(self.analyze_button)
         self.preview_button = QtWidgets.QPushButton("Preview database")
         self.preview_button.clicked.connect(self._preview)
         button_row.addWidget(self.preview_button)
@@ -21423,6 +21463,82 @@ class AssemblySection(QtWidgets.QWidget):
     def attach_compare_section(self, compare_section: "CompareSection") -> None:
         self._compare_section = compare_section
         self._update_preview_graph_buttons()
+
+    def attach_project_context(self, path_getter: Callable[[], Optional[Path]]) -> None:
+        self._project_path_getter = path_getter
+
+    def _analysis_filtered_rows(self) -> tuple[int, ...]:
+        raw_frame = self._raw_preview_frame
+        if not isinstance(raw_frame, pd.DataFrame) or raw_frame.empty:
+            return ()
+        if self._preview_row_index_map:
+            return tuple(
+                idx for idx in self._preview_row_index_map if 0 <= int(idx) < len(raw_frame.index)
+            )
+        return tuple(range(len(raw_frame.index)))
+
+    def _analysis_selected_rows(self) -> tuple[int, ...]:
+        raw_frame = self._raw_preview_frame
+        if not isinstance(raw_frame, pd.DataFrame) or raw_frame.empty:
+            return ()
+        mapped_rows: list[int] = []
+        for row in self._selected_preview_rows():
+            if row < 0:
+                continue
+            if self._preview_row_index_map and row < len(self._preview_row_index_map):
+                mapped_rows.append(int(self._preview_row_index_map[row]))
+            else:
+                mapped_rows.append(int(row))
+        return tuple(sorted({idx for idx in mapped_rows if 0 <= idx < len(raw_frame.index)}))
+
+    def _open_eda_window(self) -> None:
+        from microwire_eda.core import MicrowireEdaConfig, ROW_SCOPE_ALL, ROW_SCOPE_FILTERED
+
+        raw_frame = self._raw_preview_frame if isinstance(self._raw_preview_frame, pd.DataFrame) else None
+        project_path = self._project_path_getter() if callable(self._project_path_getter) else None
+        if raw_frame is None or raw_frame.empty:
+            if project_path is None:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Microwire EDA",
+                    "Preview the database or save/open a project before launching analysis.",
+                )
+                return
+            config = MicrowireEdaConfig(
+                input_path=project_path,
+                row_scope=ROW_SCOPE_ALL,
+                output_dir=Path(self._output_dir or Path.cwd()) / "eda_report",
+                report_title="Microwire EDA Report",
+            )
+            _open_microwire_eda_window(config, self.logger)
+            return
+
+        filtered_rows = self._analysis_filtered_rows()
+        selected_rows = self._analysis_selected_rows()
+        default_scope = ROW_SCOPE_FILTERED if filtered_rows else ROW_SCOPE_ALL
+        source_frame = raw_frame.copy()
+        filtered_scope_rows: tuple[int, ...] = ()
+        selected_scope_rows: tuple[int, ...] = ()
+        if filtered_rows:
+            source_frame = raw_frame.iloc[list(filtered_rows)].reset_index(drop=True)
+            filtered_scope_rows = tuple(range(len(source_frame.index)))
+            filtered_index_map = {int(original): idx for idx, original in enumerate(filtered_rows)}
+            selected_scope_rows = tuple(
+                filtered_index_map[idx]
+                for idx in selected_rows
+                if int(idx) in filtered_index_map
+            )
+        config = MicrowireEdaConfig(
+            input_path=project_path,
+            row_scope=default_scope,
+            output_dir=Path(self._output_dir or Path.cwd()) / "eda_report",
+            report_title="Microwire EDA Report",
+            source_dataframe=source_frame,
+            filtered_row_indices=filtered_scope_rows,
+            selected_row_indices=selected_scope_rows,
+            metadata={"source": "builder_assemble"},
+        )
+        _open_microwire_eda_window(config, self.logger)
 
     def has_project_data(self) -> bool:
         frame = self._raw_preview_frame
@@ -23935,6 +24051,21 @@ class AssemblySection(QtWidgets.QWidget):
                 export_frame[column] = series.map(self._serialise_preview_value)
         return export_frame
 
+    def analysis_source_frame(self) -> pd.DataFrame:
+        raw_frame = self._raw_preview_frame
+        if not isinstance(raw_frame, pd.DataFrame) or raw_frame.empty:
+            return pd.DataFrame()
+        if not self._preview_row_index_map:
+            return raw_frame.copy().reset_index(drop=True)
+        valid = [
+            int(index)
+            for index in self._preview_row_index_map
+            if 0 <= int(index) < len(raw_frame.index)
+        ]
+        if not valid:
+            return pd.DataFrame(columns=list(raw_frame.columns))
+        return raw_frame.iloc[valid].reset_index(drop=True).copy()
+
     def _html_cell_value(self, value: Any) -> str:
         if value is None:
             return ""
@@ -25564,6 +25695,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
             assembly.data_updated.connect(self._handle_section_data_updated)
         except Exception:
             pass
+        try:
+            assembly.attach_project_context(lambda: self._project_path)
+        except Exception:
+            pass
         _pump_events()
 
         self.compare_section = CompareSection(
@@ -25680,6 +25815,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._setup_project_actions(menu_bar)
         self._setup_settings_menu(menu_bar)
         self._setup_data_menu(menu_bar)
+        self._setup_analysis_menu(menu_bar)
         self._update_project_actions()
         self._suppress_dirty = True
         for section in self.sections.values():
@@ -26316,6 +26452,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._separate_imported_action = separate_action
         self._remove_imported_action = remove_action
 
+    def _setup_analysis_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        analysis_menu = menu_bar.addMenu("Analysis")
+        analyze_action = QtGui.QAction("Analyze assemble data…", self)
+        analyze_action.triggered.connect(self._analyze_assemble_data)
+        analysis_menu.addAction(analyze_action)
+
     def _handle_import_data(self) -> None:
         assembly = getattr(self, "assembly_section", None)
         if isinstance(assembly, AssemblySection):
@@ -26346,6 +26488,61 @@ class BuilderWindow(QtWidgets.QMainWindow):
             assembly.clear_imported_data()
             self._update_imported_data_item()
             self._update_project_actions()
+
+    def _analyze_assemble_data(self) -> None:
+        assembly = getattr(self, "assembly_section", None)
+        if not isinstance(assembly, AssemblySection):
+            return
+        frame = assembly.analysis_source_frame()
+        if frame.empty:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire EDA",
+                "Preview the assemble data first so there are filtered rows to analyse.",
+            )
+            return
+        try:
+            from microwire_eda.core import MicrowireEdaConfig, ROW_SCOPE_FILTERED
+        except Exception:
+            self.logger.exception("Failed to import Microwire EDA configuration.")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire EDA",
+                "Microwire EDA is unavailable in this environment.",
+            )
+            return
+        output_dir = (
+            self._project_path.with_suffix("").parent / "microwire_eda_report"
+            if isinstance(self._project_path, Path)
+            else Path(self._last_output_dir or Path.cwd()) / "microwire_eda_report"
+        )
+        report_title = (
+            f"Microwire EDA - {self._project_path.stem}"
+            if isinstance(self._project_path, Path)
+            else "Microwire EDA Report"
+        )
+        config = MicrowireEdaConfig(
+            input_path=self._project_path,
+            row_scope=ROW_SCOPE_FILTERED,
+            output_dir=output_dir,
+            report_title=report_title,
+            source_dataframe=frame,
+            filtered_row_indices=tuple(range(len(frame.index))),
+            export_png_bundle=True,
+            export_pdf_bundle=True,
+            metadata={
+                "source": "builder",
+                "project_path": str(self._project_path) if isinstance(self._project_path, Path) else "",
+                "search_query": getattr(assembly, "_preview_search_text", ""),
+            },
+        )
+        if self._project_path is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire EDA",
+                "This project has not been saved yet. The report will use the current filtered Assemble rows directly.",
+            )
+        _open_microwire_eda_window(config, self.logger)
 
     def _update_imported_data_item(self) -> None:
         item = self._imported_item
@@ -26572,6 +26769,25 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._load_project_from_path(candidate)
         except Exception:
             self.logger.exception("Failed to auto-open last project %s", candidate)
+
+    def _analyze_assemble_data(self) -> None:
+        assembly = getattr(self, "assembly_section", None)
+        if assembly is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire EDA",
+                "Assemble is not available yet.",
+            )
+            return
+        launcher = getattr(assembly, "_open_eda_window", None)
+        if callable(launcher):
+            launcher()
+            return
+        QtWidgets.QMessageBox.information(
+            self,
+            "Microwire EDA",
+            "Assemble analysis launcher is unavailable.",
+        )
 
     def _new_project(self) -> None:
         if getattr(self, "_dirty", False):

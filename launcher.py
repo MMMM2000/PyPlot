@@ -634,6 +634,27 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         action="store_true",
         help="Keep UI visible while visual-check runs.",
     )
+    parser.add_argument(
+        "--microwire-eda",
+        default=None,
+        help="Generate a Microwire EDA report from a .pydpj project or assembled spreadsheet and exit.",
+    )
+    parser.add_argument(
+        "--rows",
+        choices=(("all", "filtered", "selected")),
+        default="all",
+        help="Row scope for Microwire EDA CLI runs. Builder-provided filtered/selected scopes are only available when launched from the Builder UI.",
+    )
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="Output directory for Microwire EDA CLI runs.",
+    )
+    parser.add_argument(
+        "--microwire-eda-title",
+        default="Microwire EDA Report",
+        help="Report title for Microwire EDA output.",
+    )
     parser.set_defaults(visual_origin=True)
     args, qt_args = parser.parse_known_args(argv)
     return args, qt_args
@@ -651,6 +672,30 @@ def _is_pyplot_automation_requested(args: argparse.Namespace) -> bool:
         or getattr(args, "pyplot_plot_image", None)
         or getattr(args, "pyplot_summary_json", None)
     )
+
+
+def _is_microwire_eda_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "microwire_eda", None))
+
+
+def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
+    from microwire_eda import MicrowireEdaConfig
+    from microwire_eda.core import generate_report
+
+    input_path = Path(str(getattr(args, "microwire_eda", "")).strip()).expanduser()
+    output_dir_value = getattr(args, "out", None)
+    output_dir = Path(str(output_dir_value)).expanduser() if output_dir_value else None
+    config = MicrowireEdaConfig(
+        input_path=input_path,
+        row_scope=str(getattr(args, "rows", "all") or "all"),
+        output_dir=output_dir,
+        report_title=str(getattr(args, "microwire_eda_title", "Microwire EDA Report")),
+    )
+    result = generate_report(config)
+    print(f"[microwire-eda] report={result.report_path}")
+    print(f"[microwire-eda] workbook={result.workbook_path}")
+    print(f"[microwire-eda] manifest={result.manifest_path}")
+    return 0
 
 
 def _run_visual_check(args: argparse.Namespace) -> int:
@@ -1362,6 +1407,7 @@ EMULATORS: Dict[str, LauncherFactory] = {
 
 BUILDERS: Dict[str, LauncherFactory] = {
     "Microwire Data Builder": _lazy("microwire_data_builder", "main"),
+    "Microwire EDA": _lazy("microwire_eda", "main"),
 }
 
 
@@ -2002,6 +2048,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_run_visual_check(args))
     if getattr(args, "automation_recipe", None):
         raise SystemExit(_run_automation_recipe(args, qt_args))
+    if _is_microwire_eda_requested(args):
+        raise SystemExit(_run_microwire_eda_cli(args))
     if _is_pyplot_automation_requested(args):
         raise SystemExit(_run_pyplot_automation(args, qt_args))
     _install_crash_log_hook()
