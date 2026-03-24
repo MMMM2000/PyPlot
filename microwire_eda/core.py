@@ -158,6 +158,38 @@ HEADER_ALIASES = {
     "production datetime": "Production datetime",
 }
 
+_DIAMETER_SUFFIX_ALIASES = {
+    "(µm)",
+    "(μm)",
+    "(âµm)",
+    "(î¼m)",
+    "(痠)",
+    "(um)",
+    "[µm]",
+    "[μm]",
+    "[um]",
+    "_um",
+}
+
+
+def _build_casefold_aliases() -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for alias, target in HEADER_ALIASES.items():
+        folded = alias.casefold()
+        if folded in ambiguous:
+            continue
+        existing = aliases.get(folded)
+        if existing is None or existing == target:
+            aliases[folded] = target
+            continue
+        aliases.pop(folded, None)
+        ambiguous.add(folded)
+    return aliases
+
+
+HEADER_ALIASES_CASEFOLD = _build_casefold_aliases()
+
 
 @dataclass(slots=True)
 class MicrowireEdaConfig:
@@ -207,6 +239,19 @@ def _slugify(value: object) -> str:
 
 def _header_key(value: object) -> str:
     return str(value).strip().replace("\ufeff", "").casefold()
+
+
+def _canonical_diameter_alias(raw: str) -> str | None:
+    text = str(raw).strip().replace("\ufeff", "")
+    if not text:
+        return None
+    prefix = text[0]
+    if prefix not in {"d", "D"}:
+        return None
+    suffix = re.sub(r"\s+", "", text[1:]).casefold()
+    if suffix not in _DIAMETER_SUFFIX_ALIASES:
+        return None
+    return f"{prefix} (µm)"
 
 
 def _parse_numeric(value: object) -> float:
@@ -317,7 +362,11 @@ def _canonical_column_names(columns: Iterable[object]) -> list[str]:
     output: list[str] = []
     for column in columns:
         raw = str(column).strip().replace("\ufeff", "")
-        key = HEADER_ALIASES.get(_header_key(raw), raw)
+        key = HEADER_ALIASES.get(raw)
+        if key is None:
+            key = _canonical_diameter_alias(raw)
+        if key is None:
+            key = HEADER_ALIASES_CASEFOLD.get(_header_key(raw), raw)
         output.append(key)
     return output
 

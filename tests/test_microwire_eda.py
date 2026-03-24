@@ -123,6 +123,21 @@ def test_canonicalise_frame_merges_duplicate_canonical_alias_columns() -> None:
     assert clean["d (µm)"].tolist() == [12.0, 13.0]
 
 
+def test_canonicalise_frame_preserves_outer_diameter_aliases() -> None:
+    frame = pd.DataFrame(
+        [
+            ["Ni50Fe27Ga23", "5/4", 12.0, 40.0],
+            ["Ni50Fe27Ga23", "6/4", 13.0, 42.0],
+        ],
+        columns=["Composition", "Microwire", "d (痠)", "D (μm)"],
+    )
+
+    clean = canonicalise_frame(frame)
+
+    assert clean["d (µm)"].tolist() == [12.0, 13.0]
+    assert clean["D (µm)"].tolist() == [40.0, 42.0]
+
+
 def test_generate_report_honors_filtered_scope_and_writes_outputs(tmp_path: Path) -> None:
     frame = _sample_dataframe()
     config = MicrowireEdaConfig(
