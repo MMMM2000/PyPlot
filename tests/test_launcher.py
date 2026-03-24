@@ -156,6 +156,22 @@ def test_launcher_detects_pyplot_automation_flags() -> None:
     assert launcher_module._is_pyplot_automation_requested(args) is True  # noqa: SLF001
 
 
+def test_launcher_detects_microwire_eda_cli_flags() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(
+        [
+            "--microwire-eda",
+            "sample.pydpj",
+            "--rows",
+            "filtered",
+            "--out",
+            "artifacts/eda",
+        ]
+    )
+    assert launcher_module._is_microwire_eda_requested(args) is True  # noqa: SLF001
+    assert args.rows == "filtered"
+    assert args.out == "artifacts/eda"
+
+
 def test_launcher_pyplot_automation_generates_summary_and_artifacts(tmp_path: Path) -> None:
     _ensure_app()
     source = _write_hysteresis_source(tmp_path / "250C sample.dat")

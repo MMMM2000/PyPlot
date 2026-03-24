@@ -510,6 +510,64 @@ def test_video_end_length_propagates_to_all_rows_in_same_draw() -> None:
         section.close()
 
 
+def test_video_end_length_propagation_tracks_sibling_override_history() -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = VideoSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section._store_overrides = lambda: None  # type: ignore[method-assign]
+        section._fabrication_table = lambda: pd.DataFrame()  # type: ignore[method-assign]
+        source_key = (str(Path("C:/videos/one.mkv")),)
+        section._video_source_status_cache = {source_key: True}
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "_group_key": "CompA|1|1",
+                    "_sources": list(source_key),
+                    "Length (m)": 6.0,
+                    VIDEO_END_LENGTH_COLUMN: 10.0,
+                },
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/2",
+                    "Draw": 1,
+                    "Piece": 2,
+                    "_group_key": "CompA|1|2",
+                    "_sources": list(source_key),
+                    "Length (m)": 8.0,
+                    VIDEO_END_LENGTH_COLUMN: 10.0,
+                },
+            ]
+        )
+        section.model.set_frame(frame)
+        section.data.table = frame.copy()
+        top_left = section.model.index(0, frame.columns.get_loc(VIDEO_END_LENGTH_COLUMN))
+        assert section.model.setData(top_left, "25.0") is True
+
+        updated = section.model.frame()
+        sibling = updated.iloc[1]
+        tooltip = section._tooltip_for_cell(sibling, VIDEO_END_LENGTH_COLUMN)
+        background = section._background_brush_for_cell(sibling, VIDEO_END_LENGTH_COLUMN)
+        foreground = section._foreground_brush_for_cell(sibling, VIDEO_END_LENGTH_COLUMN)
+
+        assert tooltip is not None
+        assert "10" in tooltip
+        assert background is not None and background.color().name() == "#4a3806"
+        assert foreground is not None and foreground.color().name() == "#facc15"
+
+        assert section.restore_previous_value(1, VIDEO_END_LENGTH_COLUMN) is True
+        restored = section.model.frame()
+        assert float(restored.iloc[0][VIDEO_END_LENGTH_COLUMN]) == 10.0
+        assert float(restored.iloc[1][VIDEO_END_LENGTH_COLUMN]) == 10.0
+    finally:
+        section.close()
+
+
 def test_video_end_length_propagation_notifies_all_changed_rows() -> None:
     class _DummyIndex:
         def __init__(self, row: int, column: int) -> None:
@@ -619,6 +677,62 @@ def test_video_end_length_propagation_notifies_all_changed_rows() -> None:
             QtCore.Qt.ItemDataRole.EditRole not in roles
             for _top_row, _bottom_row, _left_col, _right_col, roles in events
         )
+    finally:
+        section.close()
+
+
+def test_video_review_dialog_advance_skips_blank_notes(tmp_path: Path) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = VideoSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section._store_overrides = lambda: None  # type: ignore[method-assign]
+        section._fabrication_table = lambda: pd.DataFrame()  # type: ignore[method-assign]
+        source_path = tmp_path / "sample.mkv"
+        source_path.write_bytes(b"video")
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "_group_key": "CompA|1|1",
+                    "_sources": [str(source_path)],
+                    "Length (m)": 6.0,
+                    "Piece date": "2026-03-24",
+                    "Resistance (Ω)": 1.2,
+                    "Core temperature (°C)": 400.0,
+                    "Glass temperature (°C)": 200.0,
+                    "Winding speed (m/min)": 12.0,
+                    "Glass feeding (mm/min)": 3.0,
+                    "Underpressure": -0.5,
+                    "Production datetime": "2026-03-24 10:00",
+                    "Notes": "",
+                    VIDEO_END_LENGTH_COLUMN: 25.0,
+                    VIDEO_MW_LENGTH_COLUMN: "25-19",
+                }
+            ]
+        )
+        section.model.set_frame(frame)
+        section.data.table = frame.copy()
+        dialog = _VideoReviewDialog(section)
+        dialog.load_source_row(0)
+
+        current_column = next(
+            index
+            for index, (column, _label, _editable) in enumerate(dialog._DISPLAY_COLUMNS)
+            if column == "Production datetime"
+        )
+        notes_column = next(
+            index
+            for index, (column, _label, _editable) in enumerate(dialog._DISPLAY_COLUMNS)
+            if column == "Notes"
+        )
+        dialog._advance_after_commit(current_column, section.model.frame().iloc[0])
+
+        assert dialog.table.currentColumn() != notes_column
     finally:
         section.close()
 

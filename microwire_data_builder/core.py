@@ -4365,6 +4365,36 @@ def _export_origin_object(
     return None
 
 
+def _collapse_asset_references(values: Sequence[str]) -> str | list[str] | None:
+    cleaned: List[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        stripped = value.strip()
+        if stripped and stripped not in cleaned:
+            cleaned.append(stripped)
+    if not cleaned:
+        return None
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return cleaned
+
+
+def _single_asset_reference(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, (list, tuple, set)):
+        resolved: List[str] = []
+        for item in value:
+            candidate = _single_asset_reference(item)
+            if candidate and candidate not in resolved:
+                resolved.append(candidate)
+        if len(resolved) == 1:
+            return resolved[0]
+    return None
+
+
 def _embed_plots_in_excel_openpyxl(
     excel_path: Path,
     dataframe: pd.DataFrame,
@@ -4421,11 +4451,8 @@ def _embed_plots_in_excel_openpyxl(
         column_width_chars = _excel_column_width(target_width_in)
         for row_idx, row in reset_df.iterrows():
             for column in figure_columns:
-                value = row.get(column)
-                if not isinstance(value, str):
-                    continue
-                name = value.strip()
-                if not name:
+                name = _single_asset_reference(row.get(column))
+                if name is None:
                     continue
                 image_path = available.get(name)
                 if image_path is None or not image_path.exists():
@@ -4595,9 +4622,7 @@ def _embed_assets_with_xlsxwriter(
 
     figure_columns = [column for column in FIGURE_COLUMNS if column in dataframe.columns]
     origin_columns = [
-        column
-    for column in ("Figure — 1000 mA (Origin)", "Figure — other annealing (Origin)")
-        if column in dataframe.columns
+        column for column in ORIGIN_FIGURE_COLUMNS if column in dataframe.columns
     ]
     microscope_columns = [
         column for column in microscope_columns if column in dataframe.columns
@@ -4685,11 +4710,8 @@ def _embed_assets_with_xlsxwriter(
     for row_idx, row in reset_df.iterrows():
         row_number = row_idx + 1
         for column in figure_columns:
-            value = row.get(column)
-            if not isinstance(value, str):
-                continue
-            name = value.strip()
-            if not name:
+            name = _single_asset_reference(row.get(column))
+            if name is None:
                 continue
             image_path = available.get(name)
             if image_path is None and plot_dir:
@@ -4780,11 +4802,8 @@ def _embed_assets_with_xlsxwriter(
             )
 
         for column in origin_columns:
-            value = row.get(column)
-            if not isinstance(value, str):
-                continue
-            descriptor = value.strip()
-            if not descriptor:
+            descriptor = _single_asset_reference(row.get(column))
+            if descriptor is None:
                 continue
             artifact = origin_artifacts.get(descriptor)
             if artifact is None or artifact.object_path is None:
@@ -5339,6 +5358,11 @@ def build_database(
                 progress_callback(idx, total)
     rows: List[Dict[str, object]] = []
 
+    if microscope_index:
+        for candidate_key in microscope_index.keys():
+            if candidate_key not in grouped:
+                grouped[candidate_key] = []
+
     def _group_sort_key(
         item: Tuple[Tuple[str, int, int, Optional[str]], List[MeasurementRecord]]
     ) -> Tuple[str, int, int, str]:
@@ -5388,7 +5412,7 @@ def build_database(
             pull_value = _value_for_output(draw_info, "glass_pull_off")
         row[GLASS_PULL_COLUMN] = pull_value
         row["Notes"] = _compose_notes(draw_info, piece_info)
-        row["Data source"] = "Measured"
+        row["Data source"] = "Measured" if records else "Microscope only"
         phase_entry = phase_points_map.get(key_str, {})
         if phase_entry:
             as_value = phase_entry.get("As1")
@@ -5471,6 +5495,20 @@ def build_database(
                 microscope_data = microscope_index.get((composition, draw_x, piece_y, None))
             if microscope_data is None:
                 microscope_data = microscope_index.get((composition, draw_x, piece_y))
+            if microscope_data is None:
+                for candidate_key, candidate_value in microscope_index.items():
+                    try:
+                        if (
+                            isinstance(candidate_key, tuple)
+                            and len(candidate_key) >= 3
+                            and str(candidate_key[0]) == str(composition)
+                            and int(candidate_key[1]) == int(draw_x)
+                            and int(candidate_key[2]) == int(piece_y)
+                        ):
+                            microscope_data = candidate_value
+                            break
+                    except (TypeError, ValueError):
+                        continue
         if microscope_data:
             if getattr(microscope_data, "brittle", False):
                 row[BRITTLE_COLUMN] = "brittle"
@@ -5684,7 +5722,7 @@ def build_database(
         other_records = _select_other_measurements(records, high_record)
         if high_record:
             row["File 1000 mA"] = high_record.metadata.file_name
-        else:
+        elif records:
             stats.missing_high_measurement += 1
             log.warning("No 1000 mA measurement found for %s %s", composition, row["Microwire"] or "(unknown)")
         if other_records:
@@ -5739,7 +5777,7 @@ def build_database(
                         if figure_name not in plot_records:
                             plot_records.append(figure_name)
                 if other_figures:
-                    row["Figure — other annealing"] = other_figures
+                    row["Figure — other annealing"] = _collapse_asset_references(other_figures)
         if origin_enabled:
             if high_record:
                 high_cache_key = _measurement_cache_key(high_record)
@@ -5796,7 +5834,7 @@ def build_database(
                     if cached_origin is not None:
                         other_descriptors.append(cached_origin.descriptor)
                 if other_descriptors:
-                    row["Figure — other annealing (Origin)"] = other_descriptors
+                    row["Figure — other annealing (Origin)"] = _collapse_asset_references(other_descriptors)
         row_index = len(rows)
         rows.append(row)
         if row_highlights:
@@ -6004,4 +6042,3 @@ __all__ = [
     "LOGGER_NAME",
     "DEFAULT_OUTPUT_NAME",
 ]
-

@@ -35,6 +35,7 @@
 - After dependency changes, sanity-check imports for key modules: PyQt6, matplotlib, numpy, pandas, plotly, opencv-python (if used).
 - Run the most relevant tests for the touched area; if you can't, state what wasn't run.
 - Run `launcher.py` as a smoke check when practical, or note if skipped.
+- Never run verification directly against the user's real `.pypj` or `.pydpj` project files. Always make a disposable copy first and test against the copy.
 - For graph-generation changes, always create real output graphs and visually verify results before finishing.
 - Apply that visual verification rule to both Matplotlib graphs and Origin-exported graphs, and continue iterating until output is correct.
 - When a task changes visible PyPlot/UI behavior and the result is meant for user review, capture final review screenshots after verification.

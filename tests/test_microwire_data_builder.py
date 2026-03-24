@@ -333,6 +333,103 @@ def test_search_filters_mini_database_section_rows(tmp_path: Path) -> None:
         section.close()
 
 
+def test_annealing_section_migrates_low_graph_column_to_other_annealing() -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "5/4",
+                    "Graph — 1000 mA": "high.png",
+                    "Graph — low mA": "low.png",
+                    "_group_key": "Ni50Fe27Ga23|5|4",
+                    "_sources": [],
+                }
+            ]
+        )
+        section.data.table = frame
+        section.model.set_frame(frame)
+
+        section._sanitize_graph_columns()
+
+        migrated = section.model.frame()
+        assert "Graph — low mA" not in migrated.columns
+        assert builder_ui.ANNEALING_OTHER_GRAPH_COLUMN in migrated.columns
+        assert migrated.loc[0, builder_ui.ANNEALING_OTHER_GRAPH_COLUMN] == "low.png"
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_annealing_section_merges_both_legacy_graph_columns_into_other_annealing() -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "5/4",
+                    "Graph — other mA": "other.png",
+                    "Graph — low mA": "low.png",
+                    "_group_key": "Ni50Fe27Ga23|5|4",
+                    "_sources": [],
+                }
+            ]
+        )
+        section.data.table = frame
+        section.model.set_frame(frame)
+
+        section._sanitize_graph_columns()
+
+        migrated = section.model.frame()
+        merged = migrated.loc[0, builder_ui.ANNEALING_OTHER_GRAPH_COLUMN]
+        assert "Graph — other mA" not in migrated.columns
+        assert "Graph — low mA" not in migrated.columns
+        assert merged == ["other.png", "low.png"]
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_video_review_completion_ignores_blank_notes() -> None:
+    section = builder_ui.VideoSection.__new__(builder_ui.VideoSection)
+    section._overrides = {}
+    section._fabrication_lookup_cache = {}
+    source_key = (str(Path("C:/videos/source.mkv")),)
+    section._video_source_status_cache = {source_key: True}
+    section._editable_columns = lambda: {"Notes", builder_ui.VIDEO_END_LENGTH_COLUMN}  # type: ignore[method-assign]
+
+    row = pd.Series(
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Draw": 6,
+            "Piece": 2,
+            "_group_key": "Ni50Fe27Ga23|6|2",
+            "Notes": "",
+            builder_ui.VIDEO_END_LENGTH_COLUMN: 42.0,
+            "_sources": list(source_key),
+        }
+    )
+
+    assert section._completion_state(row, "Notes") is None
+    assert section._row_has_review_gaps(row) is False
+
+
+def test_single_asset_reference_unwraps_single_item_lists() -> None:
+    assert core._single_asset_reference("other.png") == "other.png"
+    assert core._single_asset_reference(["other.png"]) == "other.png"
+    assert core._single_asset_reference(["one.png", "two.png"]) is None
+
+
+def test_collapse_asset_references_returns_scalar_for_single_item() -> None:
+    assert core._collapse_asset_references(["other.png"]) == "other.png"
+    assert core._collapse_asset_references(["other.png", "other.png"]) == "other.png"
+    assert core._collapse_asset_references(["one.png", "two.png"]) == ["one.png", "two.png"]
+
+
 def test_microscope_section_can_hide_other_ends() -> None:
     _ensure_qapp()
     section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
@@ -1466,6 +1563,39 @@ def test_build_database_populates_brittle_column_from_microscope_index(tmp_path:
     assert result.dataframe.iloc[0][BRITTLE_COLUMN] == "brittle"
 
 
+def test_build_database_adds_microscope_only_brittle_rows(tmp_path: Path) -> None:
+    microscope_index = {
+        ("Ni50Fe27Ga23", 2, 1, None): core.MicroscopeMeasurements(
+            glass=[
+                core.MicroscopeDetection(
+                    value=28.2,
+                    image_path=tmp_path / "Ni50Fe27Ga23 2-1 glass brittle.jpg",
+                    source="manual",
+                    category="glass",
+                )
+            ],
+            brittle=True,
+        )
+    }
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path / "out",
+        ),
+        measurement_records=[],
+        microscope_index=microscope_index,
+        skip_exports=True,
+    )
+
+    assert len(result.dataframe.index) == 1
+    row = result.dataframe.iloc[0]
+    assert row["Composition"] == "Ni50Fe27Ga23"
+    assert row["Microwire"] == "2/1"
+    assert row["Data source"] == "Microscope only"
+    assert row[BRITTLE_COLUMN] == "brittle"
+
+
 def test_shape_memory_section_normalises_current_columns_from_sources(tmp_path: Path) -> None:
     _ensure_qapp()
     section = builder_ui.ShapeMemoryStressStrainSection(
@@ -1751,7 +1881,7 @@ def test_build_database_populates_plot_columns(tmp_path: Path, monkeypatch: pyte
     assert "Figure — other annealing (Origin)" in result.dataframe.columns
     assert set(result.plot_paths) == {produced[high.name].name, produced[low.name].name}
     assert row["Figure — 1000 mA"] == produced[high.name].name
-    assert row["Figure — other annealing"] == [produced[low.name].name]
+    assert row["Figure — other annealing"] == produced[low.name].name
     assert pd.isna(row["Figure — 1000 mA (Origin)"])
     assert pd.isna(row["Figure — other annealing (Origin)"])
     assert row["Other annealing files"] == [low.name]
@@ -1793,7 +1923,7 @@ def test_build_database_origin_backend(tmp_path: Path, monkeypatch: pytest.Monke
     assert "Figure — 1000 mA" in result.dataframe.columns
     assert "Figure — other annealing" in result.dataframe.columns
     assert row["Figure — 1000 mA (Origin)"] == origin_records[high.name].descriptor
-    assert row["Figure — other annealing (Origin)"] == [origin_records[low.name].descriptor]
+    assert row["Figure — other annealing (Origin)"] == origin_records[low.name].descriptor
     assert pd.isna(row["Figure — 1000 mA"])
     assert pd.isna(row["Figure — other annealing"])
     assert pd.isna(row[core.STRAIN_COLUMN])
@@ -2626,3 +2756,97 @@ def test_load_project_handles_missing_sections(
         window.hide()
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_assemble_prepare_inputs_allows_export_without_annealing_section_selected(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    window = builder_ui.BuilderWindow()
+    qtbot.addWidget(window)
+    try:
+        record = core.MeasurementRecord(
+            path=tmp_path / "Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+            metadata=core.MeasurementMetadata(
+                composition_token="Ni50Fe27Ga23",
+                draw_x=5,
+                piece_y=4,
+                setpoint_mA=1000,
+                alt_variant=False,
+                measurement_id="anneal-1",
+                file_name="Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+                relpath="Ni50Fe27Ga23 5_4 s1 1000mA.txt",
+                timestamp_mtime_utc="2026-03-24T00:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_A": [0.1], "V_V": [0.2], "R_ohm": [2.0]}),
+            sanity_ok=True,
+            sanity_error=None,
+        )
+        window.annealing_section.store.save_payload("annealing_records", [record])
+
+        payload = window.assembly_section._prepare_builder_inputs(
+            {"fabrication"},
+            require_payloads=False,
+        )
+
+        assert payload is not None
+        annealing_records = payload[1]
+        assert len(annealing_records) == 1
+    finally:
+        window.close()
+
+
+def test_assemble_prepare_inputs_respects_hide_other_ends_setting(qtbot, tmp_path: Path) -> None:
+    _ensure_qapp()
+    window = builder_ui.BuilderWindow()
+    qtbot.addWidget(window)
+    try:
+        window.microscope_section._show_other_ends = False
+        microscope_index = {
+            ("Ni50Fe27Ga23", 5, 4, None): core.MicroscopeMeasurements(),
+            ("Ni50Fe27Ga23", 5, 4, "oe"): core.MicroscopeMeasurements(),
+        }
+        window.microscope_section.store.save_payload("microscope_index", microscope_index)
+
+        payload = window.assembly_section._prepare_builder_inputs(
+            {"microscope"},
+            require_payloads=False,
+        )
+
+        assert payload is not None
+        prepared_index = payload[8]
+        assert ("Ni50Fe27Ga23", 5, 4, None) in prepared_index
+        assert ("Ni50Fe27Ga23", 5, 4, "oe") not in prepared_index
+    finally:
+        window.close()
+
+
+def test_assemble_import_project_payload_preserves_hidden_columns_and_order(qtbot) -> None:
+    _ensure_qapp()
+    window = builder_ui.BuilderWindow()
+    qtbot.addWidget(window)
+    try:
+        payload = {
+            "columns": ["Composition", "Microwire", "Brittle", builder_ui.GLASS_PULL_COLUMN],
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "5/4",
+                    "Brittle": "brittle",
+                    builder_ui.GLASS_PULL_COLUMN: None,
+                }
+            ],
+            "selected_columns": ["Composition", "Microwire"],
+            "column_order": ["Microwire", "Composition"],
+        }
+
+        window.assembly_section.import_project_payload(payload)
+        QtWidgets.QApplication.processEvents()
+
+        assert window.assembly_section._current_preview_column_order()[:2] == [
+            "Microwire",
+            "Composition",
+        ]
+    finally:
+        window.close()
