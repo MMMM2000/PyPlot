@@ -251,6 +251,12 @@ class MicrowireEdaWindow(QtWidgets.QMainWindow):
         self._log(f"HTML report: {result.report_path}")
         self._log(f"Workbook: {result.workbook_path}")
         self._log(f"Manifest: {result.manifest_path}")
+        if result.findings_json_path is not None:
+            self._log(f"Findings JSON: {result.findings_json_path}")
+        if result.findings_md_path is not None:
+            self._log(f"Findings Markdown: {result.findings_md_path}")
+        if result.copied_project_path is not None:
+            self._log(f"Disposable project copy: {result.copied_project_path}")
         if result.skipped_sections:
             for key, message in result.skipped_sections.items():
                 self._log(f"Skipped {key}: {message}")

@@ -6,10 +6,13 @@ import io
 import json
 import math
 import re
+import shutil
+import tempfile
 import unicodedata
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import matplotlib
 
@@ -23,11 +26,6 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import ListedColormap
 from pandas.plotting import parallel_coordinates, scatter_matrix
 from scipy import stats
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.metrics import accuracy_score, confusion_matrix, mean_squared_error, r2_score, roc_auc_score
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 
 ROW_SCOPE_ALL = "all"
 ROW_SCOPE_FILTERED = "filtered"
@@ -66,18 +64,33 @@ ANNEALING_COLUMNS = [
     "Af1 (mA)",
     "Ms1 (mA)",
     "Mf1 (mA)",
+    "As2 (mA)",
+    "Af2 (mA)",
+    "Ms2 (mA)",
+    "Mf2 (mA)",
     "As current density (A/mm^2)",
     "Ms current density (A/mm^2)",
     "Low mA value (mA)",
 ]
 FUNCTIONAL_COLUMNS = [
-    "Stress (MPa)",
-    "Fracture stress (MPa)",
     "Strain (%)",
     "Fracture strain (%)",
+    "Stress (MPa)",
+    "Fracture stress (MPa)",
+    "Strain",
     "Legacy strain",
+    "Legacy stress (MPa)",
 ]
-OUTCOME_COLUMNS = ["is_broken", "strain_abs", "fracture_strain_abs"]
+LEGACY_OUTCOME_COLUMNS = ["Brittle", "Broke", "is_broken"]
+DERIVED_OUTCOME_COLUMNS = ["strain_abs", "fracture_strain_abs"]
+ENDPOINT_COLUMNS = [
+    "strain_abs",
+    "fracture_strain_abs",
+    "Stress (MPa)",
+    "Fracture stress (MPa)",
+]
+PROCESS_FEATURES = FABRICATION_COLUMNS + ANNEALING_COLUMNS
+NUMERIC_ANALYSIS_FEATURES = GEOMETRY_COLUMNS + PROCESS_FEATURES
 
 CANONICAL_COLUMNS = (
     ["Composition", "Microwire", "Production datetime"]
@@ -85,47 +98,50 @@ CANONICAL_COLUMNS = (
     + FABRICATION_COLUMNS
     + ANNEALING_COLUMNS
     + FUNCTIONAL_COLUMNS
-    + OUTCOME_COLUMNS
+    + LEGACY_OUTCOME_COLUMNS
+    + DERIVED_OUTCOME_COLUMNS
 )
-
-CONTROL_FEATURES = [
-    "d (µm)",
-    "D (µm)",
-    "d/D",
-    "Core temperature (°C)",
-    "Glass temperature (°C)",
-    "Winding speed (m/min)",
-    "Glass feeding (mm/min)",
-    "Underpressure",
-    "Length (m)",
-    "Mass (g)",
-    "e/a",
-    "As current density (A/mm^2)",
-    "Ms current density (A/mm^2)",
-    "Low mA value (mA)",
-    "As1 (mA)",
-    "Af1 (mA)",
-    "Ms1 (mA)",
-    "Mf1 (mA)",
-]
 
 SUMMARY_TABLE_ORDER = [
     "coverage",
     "row_scope",
-    "spearman_all",
-    "strain_correlations",
-    "fracture_strain_correlations",
-    "fracture_stress_correlations",
-    "sweet_spots",
-    "model_b_metrics",
-    "model_c_metrics",
-    "model_d_metrics",
+    "endpoint_coverage",
+    "duplicate_wires",
+    "composition_summary",
+    "process_strain_correlations",
+    "process_fracture_strain_correlations",
+    "process_stress_correlations",
+    "process_fracture_stress_correlations",
+    "geometry_strain_correlations",
+    "geometry_fracture_strain_correlations",
+    "geometry_stress_correlations",
+    "geometry_fracture_stress_correlations",
+    "legacy_breakage_summary",
+    "time_summary",
 ]
 
+DEFAULT_FINDINGS_FILENAME = "microwire_eda_findings.json"
+DEFAULT_FINDINGS_MD_FILENAME = "microwire_eda_findings.md"
+
 HEADER_ALIASES = {
+    "composition": "Composition",
+    "zloženie": "Composition",
+    "microwire": "Microwire",
+    "date and time": "Production datetime",
+    "production datetime": "Production datetime",
+    "dátum a čas výroby": "Production datetime",
     "temperature (°c)": "Core temperature (°C)",
+    "temperature [°c]": "Core temperature (°C)",
+    "t 0c": "Core temperature (°C)",
     "core temperature (°c)": "Core temperature (°C)",
     "glass temperature (°c)": "Glass temperature (°C)",
+    "hmotnost": "Mass (g)",
+    "mass": "Mass (g)",
+    "winding speed (m/min)": "Winding speed (m/min)",
+    "glass feeding (mm/min)": "Glass feeding (mm/min)",
+    "underpressure": "Underpressure",
+    "poznamka": "Notes",
+    "notes": "Notes",
     "d (µm)": "d (µm)",
     "d (âµm)": "d (µm)",
     "d (μm)": "d (µm)",
@@ -151,11 +167,12 @@ HEADER_ALIASES = {
     "strain (%)": "Strain (%)",
     "fracture strain (%)": "Fracture strain (%)",
     "stress (mpa)": "Stress (MPa)",
+    "legacy stress (mpa)": "Legacy stress (MPa)",
     "fracture stress (mpa)": "Fracture stress (MPa)",
     "brittle": "Brittle",
+    "broke": "Broke",
     "broken": "is_broken",
     "is broken": "is_broken",
-    "production datetime": "Production datetime",
 }
 
 _DIAMETER_SUFFIX_ALIASES = {
@@ -170,6 +187,12 @@ _DIAMETER_SUFFIX_ALIASES = {
     "[um]",
     "_um",
 }
+
+ProgressCallback = Callable[[str], None]
+
+
+def _noop_progress(_message: str) -> None:
+    return
 
 
 def _build_casefold_aliases() -> dict[str, str]:
@@ -204,6 +227,12 @@ class MicrowireEdaConfig:
     export_png_bundle: bool = True
     export_pdf_bundle: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
+    working_copy_dir: Path | None = None
+    copied_project_path: Path | None = None
+    copy_project: bool = True
+    include_legacy_breakage_analysis: bool = True
+    include_composition_splits: bool = True
+    write_findings: bool = True
 
 
 @dataclass(slots=True)
@@ -213,6 +242,24 @@ class FigureArtifact:
     section: str
     png_path: Path | None
     html: str
+
+
+@dataclass(slots=True)
+class MicrowireEdaAnalysis:
+    config: MicrowireEdaConfig
+    input_kind: str
+    source_path: Path | None
+    working_input_path: Path | None
+    copied_project_path: Path | None
+    canonical_frame: pd.DataFrame
+    scoped_frame: pd.DataFrame
+    applied_scope: str
+    row_counts: dict[str, int]
+    tables: dict[str, pd.DataFrame]
+    skipped_sections: dict[str, str]
+    findings: list[dict[str, Any]]
+    sufficiency_summary: dict[str, Any]
+    endpoint_tables: dict[str, pd.DataFrame]
 
 
 @dataclass(slots=True)
@@ -229,6 +276,12 @@ class MicrowireEdaResult:
     skipped_sections: dict[str, str]
     row_counts: dict[str, int]
     tables: dict[str, pd.DataFrame]
+    findings_json_path: Path | None = None
+    findings_md_path: Path | None = None
+    copied_project_path: Path | None = None
+    sufficiency_summary: dict[str, Any] = field(default_factory=dict)
+    endpoint_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
+    findings: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _slugify(value: object) -> str:
@@ -304,7 +357,16 @@ def _parse_boolish(value: object) -> int | None:
 def _coerce_datetime(series: pd.Series) -> pd.Series:
     if series.empty:
         return series
-    return pd.to_datetime(series, errors="coerce")
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Parsing dates in %Y-%m-%d %H:%M:%S format when dayfirst=True was specified.*",
+            category=UserWarning,
+        )
+        parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
+    if parsed.isna().all():
+        return pd.to_datetime(series, errors="coerce")
+    return parsed
 
 
 def _copy_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
@@ -329,14 +391,37 @@ def detect_input_kind(path: Path | None, explicit: str = INPUT_KIND_AUTO) -> str
     raise ValueError(f"Unsupported Microwire EDA input: {path}")
 
 
+def _project_section_to_frame(section: Mapping[str, Any]) -> pd.DataFrame:
+    rows = section.get("rows")
+    columns = section.get("columns")
+    if isinstance(rows, list) and rows:
+        if isinstance(rows[0], Mapping):
+            return pd.DataFrame(rows)
+        if isinstance(columns, list):
+            return pd.DataFrame(rows, columns=[str(column) for column in columns])
+    if isinstance(rows, list):
+        return pd.DataFrame(rows)
+    imported_rows = section.get("imported_rows")
+    if isinstance(imported_rows, list) and imported_rows:
+        if isinstance(imported_rows[0], Mapping):
+            return pd.DataFrame(imported_rows)
+        if isinstance(columns, list):
+            return pd.DataFrame(imported_rows, columns=[str(column) for column in columns])
+    return pd.DataFrame()
+
+
 def _load_project_frame(path: Path) -> pd.DataFrame:
     payload = json.loads(path.read_text(encoding="utf-8"))
     sections = payload.get("sections", {})
-    assemble = sections.get("assemble", {}) if isinstance(sections, Mapping) else {}
-    rows = assemble.get("rows", []) if isinstance(assemble, Mapping) else []
-    if not isinstance(rows, list):
+    if not isinstance(sections, Mapping):
+        raise ValueError("Project file does not contain sections.")
+    assemble = sections.get("assemble", {})
+    if not isinstance(assemble, Mapping):
+        raise ValueError("Project file does not contain an assemble section.")
+    frame = _project_section_to_frame(assemble)
+    if frame.empty:
         raise ValueError("Project file is missing assemble rows.")
-    return pd.DataFrame(rows)
+    return frame
 
 
 def _load_excel_frame(path: Path) -> pd.DataFrame:
@@ -345,17 +430,65 @@ def _load_excel_frame(path: Path) -> pd.DataFrame:
     return pd.read_excel(path)
 
 
-def load_input_frame(config: MicrowireEdaConfig) -> tuple[pd.DataFrame, str]:
+def _normalise_output_dir(config: MicrowireEdaConfig) -> Path:
+    if isinstance(config.output_dir, Path):
+        return config.output_dir / _slugify(config.report_title)
+    if isinstance(config.input_path, Path):
+        return config.input_path.with_suffix("").parent / f"{_slugify(config.report_title)}_report"
+    return Path.cwd() / f"{_slugify(config.report_title)}_report"
+
+
+def _copy_project_for_analysis(
+    source_path: Path,
+    config: MicrowireEdaConfig,
+) -> tuple[Path, Path | None]:
+    if source_path.suffix.lower() != ".pydpj":
+        return source_path, None
+    if not config.copy_project and config.copied_project_path is None and config.working_copy_dir is None:
+        return source_path, None
+
+    if config.copied_project_path is not None:
+        copied_path = config.copied_project_path.expanduser()
+        copied_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        if config.working_copy_dir is not None:
+            working_dir = config.working_copy_dir.expanduser()
+            working_dir.mkdir(parents=True, exist_ok=True)
+        elif config.output_dir is not None:
+            working_dir = (_normalise_output_dir(config) / "_working_copy").resolve()
+            working_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            working_dir = Path(tempfile.mkdtemp(prefix="microwire_eda_"))
+        copied_path = working_dir / f"{source_path.stem}-eda-copy{source_path.suffix}"
+    shutil.copy2(source_path, copied_path)
+    return copied_path, copied_path
+
+
+def load_analysis_frame(
+    config: MicrowireEdaConfig,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[pd.DataFrame, str, Path | None, Path | None]:
+    progress = progress_callback or _noop_progress
     if isinstance(config.source_dataframe, pd.DataFrame):
-        return _copy_frame(config.source_dataframe), INPUT_KIND_DATAFRAME
+        return _copy_frame(config.source_dataframe), INPUT_KIND_DATAFRAME, config.input_path, None
     if config.input_path is None:
         raise ValueError("Microwire EDA requires an input path or source dataframe.")
-    kind = detect_input_kind(config.input_path, config.input_kind)
+    source_path = config.input_path.expanduser()
+    kind = detect_input_kind(source_path, config.input_kind)
+    working_path = source_path
+    copied_project_path: Path | None = None
     if kind == INPUT_KIND_PROJECT:
-        return _load_project_frame(config.input_path), kind
+        progress("Preparing disposable project copy")
+        working_path, copied_project_path = _copy_project_for_analysis(source_path, config)
+        return _load_project_frame(working_path), kind, working_path, copied_project_path
     if kind == INPUT_KIND_EXCEL:
-        return _load_excel_frame(config.input_path), kind
+        return _load_excel_frame(working_path), kind, working_path, None
     raise ValueError(f"Unsupported input kind: {kind}")
+
+
+def load_input_frame(config: MicrowireEdaConfig) -> tuple[pd.DataFrame, str]:
+    frame, kind, _working_path, _copied_project_path = load_analysis_frame(config)
+    return frame, kind
 
 
 def _canonical_column_names(columns: Iterable[object]) -> list[str]:
@@ -407,10 +540,22 @@ def canonicalise_frame(frame: pd.DataFrame) -> pd.DataFrame:
     clean.columns = _canonical_column_names(clean.columns)
     clean = _dedupe_columns(clean)
 
+    if "Strain (%)" not in clean.columns:
+        source = _first_present(clean, ["Strain (%)", "Strain", "Legacy strain"])
+        if source is not None:
+            clean["Strain (%)"] = source
+    if "Stress (MPa)" not in clean.columns:
+        source = _first_present(clean, ["Stress (MPa)", "Legacy stress (MPa)"])
+        if source is not None:
+            clean["Stress (MPa)"] = source
     if "Legacy strain" not in clean.columns:
         source = _first_present(clean, ["Legacy strain", "Strain"])
         if source is not None:
             clean["Legacy strain"] = source
+    if "Legacy stress (MPa)" not in clean.columns:
+        source = _first_present(clean, ["Legacy stress (MPa)", "Stress (MPa)"])
+        if source is not None:
+            clean["Legacy stress (MPa)"] = source
 
     if "Production datetime" in clean.columns:
         clean["Production datetime"] = _coerce_datetime(clean["Production datetime"])
@@ -420,13 +565,12 @@ def canonicalise_frame(frame: pd.DataFrame) -> pd.DataFrame:
         if column in clean.columns:
             clean[column] = clean[column].map(_parse_numeric)
 
-    for column in ["Brittle", "is_broken"]:
+    for column in LEGACY_OUTCOME_COLUMNS:
         if column in clean.columns:
             clean[column] = clean[column].map(_parse_boolish)
 
-    explicit_broken = _first_present(clean, ["is_broken", "Brittle"])
-    strain_series = _first_present(clean, ["Strain (%)"])
-    legacy_strain_series = _first_present(clean, ["Legacy strain", "Strain"])
+    explicit_broken = _first_present(clean, ["is_broken", "Broke", "Brittle"])
+    strain_series = _first_present(clean, ["Strain (%)", "Strain", "Legacy strain"])
     fracture_strain_series = _first_present(clean, ["Fracture strain (%)"])
 
     derived_broken: list[int | float] = []
@@ -435,9 +579,9 @@ def canonicalise_frame(frame: pd.DataFrame) -> pd.DataFrame:
         if explicit_broken is not None:
             broken_value = _parse_boolish(explicit_broken.iloc[idx])
         strain_value = _parse_numeric(strain_series.iloc[idx]) if strain_series is not None else math.nan
-        if math.isnan(strain_value) and legacy_strain_series is not None:
-            strain_value = _parse_numeric(legacy_strain_series.iloc[idx])
-        fracture_value = _parse_numeric(fracture_strain_series.iloc[idx]) if fracture_strain_series is not None else math.nan
+        fracture_value = (
+            _parse_numeric(fracture_strain_series.iloc[idx]) if fracture_strain_series is not None else math.nan
+        )
         if broken_value is not None:
             derived_broken.append(broken_value)
         elif not math.isnan(strain_value):
@@ -450,16 +594,12 @@ def canonicalise_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
     if strain_series is not None:
         clean["strain_abs"] = strain_series.map(lambda value: abs(_parse_numeric(value)))
-    elif legacy_strain_series is not None:
-        clean["strain_abs"] = legacy_strain_series.map(lambda value: abs(_parse_numeric(value)))
     else:
         clean["strain_abs"] = math.nan
-
     if fracture_strain_series is not None:
         clean["fracture_strain_abs"] = fracture_strain_series.map(lambda value: abs(_parse_numeric(value)))
     else:
         clean["fracture_strain_abs"] = math.nan
-
     return clean
 
 
@@ -496,13 +636,21 @@ def _ordered_columns(frame: pd.DataFrame) -> list[str]:
     return ordered
 
 
+def _ordered_export_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    ordered = [column for column in CANONICAL_COLUMNS if column in frame.columns]
+    remaining = [column for column in frame.columns if column not in ordered]
+    return frame.loc[:, ordered + remaining].copy()
+
+
 def _table_html(frame: pd.DataFrame, *, index: bool = False) -> str:
+    if frame.empty:
+        return "<p class='empty-note'>No rows were available for this table.</p>"
     return frame.copy().to_html(index=index, border=0, classes="eda-table")
 
 
 def _figure_to_html(fig: plt.Figure) -> str:
     buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
+    fig.savefig(buffer, format="png", dpi=96)
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f'<img alt="EDA figure" src="data:image/png;base64,{encoded}" />'
 
@@ -537,53 +685,20 @@ def _blank_figure(title: str, message: str) -> plt.Figure:
     return fig
 
 
-def _normalise_output_dir(config: MicrowireEdaConfig) -> Path:
-    if isinstance(config.output_dir, Path):
-        return config.output_dir / _slugify(config.report_title)
-    if isinstance(config.input_path, Path):
-        return config.input_path.with_suffix("").parent / f"{_slugify(config.report_title)}_report"
-    return Path.cwd() / f"{_slugify(config.report_title)}_report"
+def _count_notna(frame: pd.DataFrame, column: str) -> int:
+    return int(frame.get(column, pd.Series(dtype=float)).notna().sum())
 
 
-def _ordered_export_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    ordered = [column for column in CANONICAL_COLUMNS if column in frame.columns]
-    remaining = [column for column in frame.columns if column not in ordered]
-    return frame.loc[:, ordered + remaining].copy()
-
-
-def _complete_case_count(frame: pd.DataFrame, columns: Sequence[str]) -> int:
-    usable = [column for column in columns if column in frame.columns]
-    if not usable:
-        return 0
-    return int(frame[usable].notna().all(axis=1).sum())
-
-
-def _usable_row_counts(frame: pd.DataFrame) -> dict[str, int]:
+def _row_counts(frame: pd.DataFrame) -> dict[str, int]:
     return {
         "all_rows": int(len(frame.index)),
         "known_outcome": int(frame.get("is_broken", pd.Series(dtype=float)).notna().sum()),
-        "numeric_strain": int(frame.get("strain_abs", pd.Series(dtype=float)).notna().sum()),
-        "numeric_fracture_strain": int(
-            frame.get("fracture_strain_abs", pd.Series(dtype=float)).notna().sum()
-        ),
-        "geometry_plus_strain": _complete_case_count(frame, ["d (µm)", "D (µm)", "d/D", "strain_abs"]),
-        "geometry_plus_fracture_strain": _complete_case_count(
-            frame,
-            ["d (µm)", "D (µm)", "d/D", "fracture_strain_abs"],
-        ),
-        "core_controls_plus_strain": _complete_case_count(
-            frame,
-            [
-                "d (µm)",
-                "D (µm)",
-                "d/D",
-                "Core temperature (°C)",
-                "Winding speed (m/min)",
-                "Glass feeding (mm/min)",
-                "Underpressure",
-                "strain_abs",
-            ],
-        ),
+        "numeric_strain": _count_notna(frame, "strain_abs"),
+        "numeric_fracture_strain": _count_notna(frame, "fracture_strain_abs"),
+        "numeric_stress": _count_notna(frame, "Stress (MPa)"),
+        "numeric_fracture_stress": _count_notna(frame, "Fracture stress (MPa)"),
+        "dated_rows": _count_notna(frame, "Production datetime"),
+        "composition_rows": _count_notna(frame, "Composition"),
     }
 
 
@@ -610,14 +725,97 @@ def _row_scope_table(requested: str, applied: str, counts: Mapping[str, int]) ->
             {"metric": "requested_scope", "value": requested},
             {"metric": "applied_scope", "value": applied},
             {"metric": "rows", "value": counts.get("all_rows", 0)},
-            {"metric": "known_outcome", "value": counts.get("known_outcome", 0)},
             {"metric": "numeric_strain", "value": counts.get("numeric_strain", 0)},
-            {
-                "metric": "numeric_fracture_strain",
-                "value": counts.get("numeric_fracture_strain", 0),
-            },
+            {"metric": "numeric_fracture_strain", "value": counts.get("numeric_fracture_strain", 0)},
+            {"metric": "numeric_stress", "value": counts.get("numeric_stress", 0)},
+            {"metric": "numeric_fracture_stress", "value": counts.get("numeric_fracture_stress", 0)},
         ]
     )
+
+
+def _endpoint_coverage_table(frame: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    total = max(len(frame.index), 1)
+    for column, label in [
+        ("strain_abs", "|Strain|"),
+        ("fracture_strain_abs", "|Fracture strain|"),
+        ("Stress (MPa)", "Stress (MPa)"),
+        ("Fracture stress (MPa)", "Fracture stress (MPa)"),
+        ("is_broken", "Legacy breakage label"),
+    ]:
+        non_null = int(frame.get(column, pd.Series(dtype=float)).notna().sum())
+        rows.append(
+            {
+                "endpoint": label,
+                "column": column,
+                "rows_available": non_null,
+                "coverage_ratio": round(non_null / total, 3),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _duplicate_wire_table(frame: pd.DataFrame) -> pd.DataFrame:
+    if "Composition" not in frame.columns or "Microwire" not in frame.columns:
+        return pd.DataFrame(columns=["Composition", "Microwire", "count"])
+    grouped = (
+        frame.loc[:, ["Composition", "Microwire"]]
+        .dropna()
+        .groupby(["Composition", "Microwire"], dropna=True)
+        .size()
+        .reset_index(name="count")
+    )
+    duplicates = grouped.loc[grouped["count"] > 1].sort_values(["count", "Composition", "Microwire"], ascending=[False, True, True])
+    return duplicates.reset_index(drop=True)
+
+
+def _composition_summary_table(frame: pd.DataFrame) -> pd.DataFrame:
+    if "Composition" not in frame.columns:
+        return pd.DataFrame()
+    grouped = frame.groupby("Composition", dropna=True)
+    summary = grouped.size().reset_index(name="rows")
+    if "Microwire" in frame.columns:
+        summary = summary.merge(
+            grouped["Microwire"].nunique().reset_index(name="unique_wires"),
+            on="Composition",
+            how="left",
+        )
+    for source, count_name, mean_name in [
+        ("strain_abs", "numeric_strain", "mean_strain"),
+        ("fracture_strain_abs", "numeric_fracture_strain", "mean_fracture_strain"),
+        ("Stress (MPa)", "numeric_stress", "mean_stress"),
+        ("Fracture stress (MPa)", "numeric_fracture_stress", "mean_fracture_stress"),
+    ]:
+        if source not in frame.columns:
+            continue
+        count_table = grouped[source].apply(lambda series: int(pd.Series(series).notna().sum())).reset_index(name=count_name)
+        mean_table = grouped[source].mean().reset_index(name=mean_name)
+        summary = summary.merge(count_table, on="Composition", how="left")
+        summary = summary.merge(mean_table, on="Composition", how="left")
+    summary = summary.sort_values(["rows", "Composition"], ascending=[False, True])
+    return summary
+
+
+def _time_summary_table(frame: pd.DataFrame) -> pd.DataFrame:
+    if "Production datetime" not in frame.columns:
+        return pd.DataFrame()
+    working = frame.loc[frame["Production datetime"].notna()].copy()
+    if working.empty:
+        return pd.DataFrame()
+    working["month"] = working["Production datetime"].dt.to_period("M").astype(str)
+    grouped = working.groupby("month")
+    summary = grouped.size().reset_index(name="rows")
+    for source, name in [
+        ("strain_abs", "numeric_strain"),
+        ("fracture_strain_abs", "numeric_fracture_strain"),
+        ("Stress (MPa)", "numeric_stress"),
+        ("Fracture stress (MPa)", "numeric_fracture_stress"),
+    ]:
+        if source not in working.columns:
+            continue
+        count_table = grouped[source].apply(lambda series: int(pd.Series(series).notna().sum())).reset_index(name=name)
+        summary = summary.merge(count_table, on="month", how="left")
+    return summary
 
 
 def _safe_spearman(frame: pd.DataFrame, left: str, right: str) -> tuple[float, float, int]:
@@ -630,32 +828,11 @@ def _safe_spearman(frame: pd.DataFrame, left: str, right: str) -> tuple[float, f
     return float(rho), float(p_value), int(len(subset.index))
 
 
-def _spearman_table(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
-    usable = [column for column in columns if column in frame.columns]
-    rows: list[dict[str, Any]] = []
-    for idx, left in enumerate(usable):
-        for right in usable[idx + 1 :]:
-            rho, p_value, n = _safe_spearman(frame, left, right)
-            rows.append(
-                {
-                    "column_a": left,
-                    "column_b": right,
-                    "rho": rho,
-                    "p_value": p_value,
-                    "n": n,
-                }
-            )
-    result = pd.DataFrame(rows)
-    if not result.empty:
-        result = result.sort_values(["column_a", "column_b"]).reset_index(drop=True)
-    return result
-
-
-def _target_correlation_table(frame: pd.DataFrame, target: str) -> pd.DataFrame:
+def _target_correlation_table(frame: pd.DataFrame, *, target: str, features: Sequence[str]) -> pd.DataFrame:
     if target not in frame.columns:
-        return pd.DataFrame(columns=["feature", "rho", "p_value", "n"])
+        return pd.DataFrame(columns=["feature", "rho", "abs_rho", "p_value", "n"])
     rows: list[dict[str, Any]] = []
-    for feature in CONTROL_FEATURES + ["Stress (MPa)", "Fracture stress (MPa)"]:
+    for feature in features:
         if feature not in frame.columns or feature == target:
             continue
         rho, p_value, n = _safe_spearman(frame, feature, target)
@@ -672,16 +849,16 @@ def _target_correlation_table(frame: pd.DataFrame, target: str) -> pd.DataFrame:
         )
     result = pd.DataFrame(rows)
     if not result.empty:
-        result = result.sort_values("abs_rho", ascending=False).reset_index(drop=True)
+        result = result.sort_values(["abs_rho", "feature"], ascending=[False, True]).reset_index(drop=True)
     return result
 
 
-def _broke_ok_summary(frame: pd.DataFrame) -> pd.DataFrame:
+def _legacy_breakage_summary(frame: pd.DataFrame) -> pd.DataFrame:
     working = frame.loc[frame["is_broken"].isin([0, 1])].copy()
     rows: list[dict[str, Any]] = []
     if working.empty:
         return pd.DataFrame(rows)
-    for feature in CONTROL_FEATURES + ["Stress (MPa)"]:
+    for feature in NUMERIC_ANALYSIS_FEATURES + ["Stress (MPa)", "Fracture stress (MPa)"]:
         if feature not in working.columns:
             continue
         ok_values = working.loc[working["is_broken"] == 0, feature].dropna()
@@ -709,40 +886,6 @@ def _broke_ok_summary(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _sweet_spot_table(frame: pd.DataFrame) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    targets = [target for target in ["strain_abs", "fracture_strain_abs", "Fracture stress (MPa)"] if target in frame.columns]
-    if not targets:
-        return pd.DataFrame(rows)
-    for feature in CONTROL_FEATURES:
-        if feature not in frame.columns:
-            continue
-        subset = frame[[feature] + targets].dropna(how="all")
-        if len(subset.index) < 6:
-            continue
-        try:
-            subset = subset.assign(bucket=pd.qcut(subset[feature], q=3, duplicates="drop"))
-        except Exception:
-            continue
-        for bucket, bucket_frame in subset.groupby("bucket", observed=False):
-            if len(bucket_frame.index) < 2:
-                continue
-            rows.append(
-                {
-                    "feature": feature,
-                    "bucket": str(bucket),
-                    "mean_strain_abs": float(bucket_frame["strain_abs"].dropna().mean()) if "strain_abs" in bucket_frame else math.nan,
-                    "mean_fracture_strain_abs": float(bucket_frame["fracture_strain_abs"].dropna().mean()) if "fracture_strain_abs" in bucket_frame else math.nan,
-                    "mean_fracture_stress_mpa": float(bucket_frame["Fracture stress (MPa)"].dropna().mean()) if "Fracture stress (MPa)" in bucket_frame else math.nan,
-                    "n": int(len(bucket_frame.index)),
-                }
-            )
-    result = pd.DataFrame(rows)
-    if not result.empty:
-        result = result.sort_values(["feature", "bucket"]).reset_index(drop=True)
-    return result
-
-
 def _status_series(frame: pd.DataFrame) -> pd.Series:
     status = pd.Series(STATUS_NO_DATA, index=frame.index, dtype=object)
     if "is_broken" not in frame.columns:
@@ -752,14 +895,38 @@ def _status_series(frame: pd.DataFrame) -> pd.Series:
     return status
 
 
+def _available_numeric_columns(
+    frame: pd.DataFrame,
+    *,
+    min_non_null: int = 4,
+    exclude: Sequence[str] = (),
+) -> list[str]:
+    excluded = set(exclude)
+    output: list[str] = []
+    for column in frame.columns:
+        if column in excluded:
+            continue
+        series = pd.to_numeric(frame[column], errors="coerce")
+        if int(series.notna().sum()) >= min_non_null:
+            output.append(str(column))
+    return output
+
+
 def _coverage_figure(frame: pd.DataFrame) -> plt.Figure:
     columns = [column for column in CANONICAL_COLUMNS if column in frame.columns]
     if not columns:
         return _blank_figure("Coverage report", "No canonical columns are available.")
-    coverage_frame = frame.loc[:, columns].copy().head(120)
+    coverage_frame = frame.loc[:, columns].copy().head(150)
     matrix = coverage_frame.notna().astype(int).T.values
-    fig, ax = plt.subplots(figsize=(max(10, len(coverage_frame.index) * 0.16), max(6, len(columns) * 0.28)))
-    image = ax.imshow(matrix, aspect="auto", cmap=ListedColormap(["#d32f2f", "#43a047"]), interpolation="nearest", vmin=0, vmax=1)
+    fig, ax = plt.subplots(figsize=(max(10, len(coverage_frame.index) * 0.14), max(6, len(columns) * 0.28)))
+    image = ax.imshow(
+        matrix,
+        aspect="auto",
+        cmap=ListedColormap(["#d32f2f", "#43a047"]),
+        interpolation="nearest",
+        vmin=0,
+        vmax=1,
+    )
     ax.set_yticks(range(len(columns)))
     ax.set_yticklabels(columns)
     ax.set_xticks(range(len(coverage_frame.index)))
@@ -772,92 +939,100 @@ def _coverage_figure(frame: pd.DataFrame) -> plt.Figure:
     return fig
 
 
-def _outcome_overview_figure(frame: pd.DataFrame) -> plt.Figure:
+def _endpoint_overview_figure(frame: pd.DataFrame) -> plt.Figure:
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     axes = axes.ravel()
-    for axis, column, title, color in [
-        (axes[0], "strain_abs", "|Strain| distribution", "#4f8bc9"),
-        (axes[1], "fracture_strain_abs", "|Fracture strain| distribution", "#e39d34"),
-        (axes[2], "Stress (MPa)", "Stress distribution", "#8f63c8"),
-        (axes[3], "Fracture stress (MPa)", "Fracture stress distribution", "#26a69a"),
-    ]:
+    endpoint_specs = [
+        ("strain_abs", "|Strain| distribution", "#4f8bc9"),
+        ("fracture_strain_abs", "|Fracture strain| distribution", "#e39d34"),
+        ("Stress (MPa)", "Stress distribution", "#8f63c8"),
+        ("Fracture stress (MPa)", "Fracture stress distribution", "#26a69a"),
+    ]
+    for axis, (column, title, color) in zip(axes, endpoint_specs, strict=False):
         series = frame.get(column, pd.Series(dtype=float)).dropna()
         if series.empty:
             axis.text(0.5, 0.5, "No data", ha="center", va="center")
             axis.set_axis_off()
             continue
         axis.hist(series, bins=min(10, max(4, len(series))), color=color, edgecolor="white")
+        axis.axvline(series.median(), color="#263238", linestyle="--", linewidth=1.2)
         axis.set_title(title)
     fig.tight_layout()
     return fig
 
 
-def _distribution_grid_figure(frame: pd.DataFrame, columns: Sequence[str], title: str) -> plt.Figure:
-    available = [column for column in columns if column in frame.columns and frame[column].notna().any()]
-    if not available:
-        return _blank_figure(title, "No numeric variables are available for this section.")
-    rows = math.ceil(len(available) / 2)
-    fig, axes = plt.subplots(rows, 2, figsize=(12, max(4, rows * 3.4)))
-    axes_array = np.atleast_1d(axes).ravel()
-    for ax, column in zip(axes_array, available):
-        values = frame[column].dropna()
-        ax.hist(values, bins=min(10, max(4, values.nunique())), color="#5b9bd5", edgecolor="white")
-        ax.axvline(values.median(), color="#d9534f", linestyle="--", linewidth=1.2)
-        ax.set_title(column)
-    for ax in axes_array[len(available):]:
-        ax.axis("off")
-    fig.suptitle(title)
+def _composition_coverage_figure(frame: pd.DataFrame) -> plt.Figure:
+    summary = _composition_summary_table(frame).head(12)
+    if summary.empty:
+        return _blank_figure("Composition coverage", "No composition labels were available.")
+    labels = summary["Composition"].tolist()
+    fig, axes = plt.subplots(1, 2, figsize=(14, max(4.5, len(labels) * 0.45)))
+    axes[0].barh(labels[::-1], summary["rows"].tolist()[::-1], color="#4f8bc9")
+    axes[0].set_title("Rows per composition")
+    axes[0].set_xlabel("Rows")
+    endpoint_labels = [
+        column
+        for column in ["numeric_strain", "numeric_fracture_strain", "numeric_stress", "numeric_fracture_stress"]
+        if column in summary.columns
+    ]
+    if not endpoint_labels:
+        return _blank_figure("Composition coverage", "No endpoint coverage columns were available.")
+    matrix = summary.loc[:, endpoint_labels].to_numpy()[::-1]
+    image = axes[1].imshow(matrix, aspect="auto", cmap="YlGnBu")
+    axes[1].set_yticks(range(len(labels)))
+    axes[1].set_yticklabels(labels[::-1])
+    axes[1].set_xticks(range(len(endpoint_labels)))
+    readable_labels = {
+        "numeric_strain": "Strain",
+        "numeric_fracture_strain": "Fracture strain",
+        "numeric_stress": "Stress",
+        "numeric_fracture_stress": "Fracture stress",
+    }
+    axes[1].set_xticklabels([readable_labels.get(label, label) for label in endpoint_labels], rotation=20, ha="right")
+    axes[1].set_title("Endpoint availability by composition")
+    fig.colorbar(image, ax=axes[1], shrink=0.85)
     fig.tight_layout()
     return fig
 
 
-def _annotated_heatmap(corr: pd.DataFrame, *, title: str, cmap: str = "coolwarm") -> plt.Figure:
-    if corr.empty:
-        return _blank_figure(title, "Not enough numeric data for a correlation heatmap.")
-    fig, ax = plt.subplots(figsize=(max(7, len(corr.columns) * 1.2), max(5, len(corr.index) * 0.8)))
-    image = ax.imshow(corr.values, cmap=cmap, vmin=-1, vmax=1, aspect="auto")
-    ax.set_xticks(range(len(corr.columns)))
-    ax.set_xticklabels(corr.columns, rotation=45, ha="right")
-    ax.set_yticks(range(len(corr.index)))
-    ax.set_yticklabels(corr.index)
-    for row in range(corr.shape[0]):
-        for col in range(corr.shape[1]):
-            value = corr.iat[row, col]
-            if math.isnan(float(value)):
-                continue
-            ax.text(col, row, f"{value:.2f}", ha="center", va="center", fontsize=8)
-    fig.colorbar(image, ax=ax)
+def _correlation_bar_figure(table: pd.DataFrame, *, title: str) -> plt.Figure:
+    if table.empty:
+        return _blank_figure(title, "Not enough rows for this correlation view.")
+    display = table.head(8).iloc[::-1]
+    colors = ["#2e8b57" if value >= 0 else "#d94f4f" for value in display["rho"]]
+    fig, ax = plt.subplots(figsize=(9, max(4, len(display) * 0.65)))
+    ax.barh(display["feature"], display["rho"], color=colors)
+    ax.axvline(0, color="black", linewidth=1)
+    ax.set_xlabel("Spearman rho")
     ax.set_title(title)
     fig.tight_layout()
     return fig
 
 
-def _correlation_matrix(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
-    available = [column for column in columns if column in frame.columns and frame[column].notna().sum() >= 2]
-    if len(available) < 2:
-        return pd.DataFrame()
-    numeric = frame.loc[:, available].apply(pd.to_numeric, errors="coerce")
-    return numeric.corr(method="spearman")
-
-
-def _scatter_grid(frame: pd.DataFrame, *, target: str, title: str) -> plt.Figure:
-    table = _target_correlation_table(frame, target)
-    features = table["feature"].head(6).tolist() if not table.empty else [column for column in CONTROL_FEATURES if column in frame.columns][:6]
-    if target not in frame.columns or not features:
+def _scatter_grid(frame: pd.DataFrame, *, target: str, features: Sequence[str], title: str) -> plt.Figure:
+    usable_features = [feature for feature in features if feature in frame.columns]
+    if target not in frame.columns or not usable_features:
         return _blank_figure(title, "Not enough data for scatter plots.")
-    rows = math.ceil(len(features) / 2)
+    rows = math.ceil(len(usable_features) / 2)
     fig, axes = plt.subplots(rows, 2, figsize=(12, max(4, rows * 3.4)))
     axes_array = np.atleast_1d(axes).ravel()
     status = _status_series(frame)
     color_values = status.map(STATUS_COLORS).fillna("#9c9c9c")
     target_series = pd.to_numeric(frame[target], errors="coerce")
-    for ax, feature in zip(axes_array, features):
+    for ax, feature in zip(axes_array, usable_features, strict=False):
         feature_series = pd.to_numeric(frame.get(feature), errors="coerce")
         mask = feature_series.notna() & target_series.notna()
         if int(mask.sum()) < 2:
             ax.axis("off")
             continue
-        ax.scatter(feature_series[mask], target_series[mask], c=color_values[mask], alpha=0.85, edgecolors="white", linewidths=0.5)
+        ax.scatter(
+            feature_series[mask],
+            target_series[mask],
+            c=color_values[mask],
+            alpha=0.85,
+            edgecolors="white",
+            linewidths=0.5,
+        )
         try:
             slope, intercept = np.polyfit(feature_series[mask], target_series[mask], 1)
             xs = np.linspace(float(feature_series[mask].min()), float(feature_series[mask].max()), 100)
@@ -867,104 +1042,56 @@ def _scatter_grid(frame: pd.DataFrame, *, target: str, title: str) -> plt.Figure
         ax.set_title(feature)
         ax.set_xlabel(feature)
         ax.set_ylabel(target)
-    for ax in axes_array[len(features):]:
+    for ax in axes_array[len(usable_features):]:
         ax.axis("off")
     fig.suptitle(title)
     fig.tight_layout()
     return fig
 
 
-def _geometry_to_function_figure(frame: pd.DataFrame) -> plt.Figure:
-    targets = [("strain_abs", "|Strain|"), ("fracture_strain_abs", "|Fracture strain|")]
-    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
-    status = _status_series(frame)
-    colors = status.map(STATUS_COLORS).fillna("#9c9c9c")
-    for row_idx, (target, label) in enumerate(targets):
-        target_series = pd.to_numeric(frame.get(target), errors="coerce")
-        for col_idx, feature in enumerate(GEOMETRY_COLUMNS):
-            ax = axes[row_idx, col_idx]
-            if feature not in frame.columns:
-                ax.axis("off")
-                continue
-            feature_series = pd.to_numeric(frame[feature], errors="coerce")
-            mask = feature_series.notna() & target_series.notna()
-            if int(mask.sum()) < 2:
-                ax.text(0.5, 0.5, "Not enough data", ha="center", va="center")
-                ax.set_axis_off()
-                continue
-            ax.scatter(feature_series[mask], target_series[mask], c=colors[mask], alpha=0.85, edgecolors="white", linewidths=0.5)
-            ax.set_title(f"{feature} vs {label}")
-            ax.set_xlabel(feature)
-            ax.set_ylabel(label)
-    fig.tight_layout()
-    return fig
-
-
 def _pairplot_figure(frame: pd.DataFrame) -> plt.Figure:
-    columns = [column for column in ["e/a", "d (µm)", "D (µm)", "d/D", "Length (m)"] if column in frame.columns and int(frame[column].notna().sum()) >= 6]
+    candidates = _available_numeric_columns(
+        frame,
+        min_non_null=8,
+        exclude=["is_broken"],
+    )
+    columns = candidates[:4]
     if len(columns) < 3:
         return _blank_figure("Pairplot", "Not enough overlapping numeric rows for a pairplot.")
-    working = frame[columns + ["is_broken"]].dropna(subset=columns, how="all").copy()
+    working = frame[columns].dropna(subset=columns, how="all").copy()
     if len(working.index) < 6:
         return _blank_figure("Pairplot", "Not enough overlapping numeric rows for a pairplot.")
     axis_array = scatter_matrix(
         working[columns],
-        figsize=(3 * len(columns), 3 * len(columns)),
+        figsize=(2.6 * len(columns), 2.6 * len(columns)),
         diagonal="hist",
         alpha=0.65,
         color="#5b9bd5",
     )
     fig = axis_array[0, 0].figure
-    fig.suptitle("Pairplot of top numeric columns", fontsize=14)
-    fig.tight_layout()
-    return fig
-
-
-def _interaction_grid_figure(frame: pd.DataFrame) -> plt.Figure:
-    x_columns = [column for column in ["Core temperature (°C)", "Winding speed (m/min)", "Glass feeding (mm/min)", "Underpressure"] if column in frame.columns and int(frame[column].notna().sum()) >= 3]
-    y_columns = [column for column in GEOMETRY_COLUMNS if column in frame.columns and int(frame[column].notna().sum()) >= 3]
-    if not x_columns or not y_columns:
-        return _blank_figure("Interaction grid", "Not enough controllable and geometry rows for the interaction grid.")
-    fig, axes = plt.subplots(len(y_columns), len(x_columns), figsize=(4 * len(x_columns), 3.5 * len(y_columns)))
-    axes_grid = np.atleast_2d(axes)
-    strain_values = frame["strain_abs"].dropna()
-    vmin = float(strain_values.min()) if not strain_values.empty else 0.0
-    vmax = float(strain_values.max()) if not strain_values.empty else 1.0
-    for row_idx, y_col in enumerate(y_columns):
-        for col_idx, x_col in enumerate(x_columns):
-            ax = axes_grid[row_idx, col_idx]
-            subset = frame[[x_col, y_col, "strain_abs"]].dropna(subset=[x_col, y_col])
-            if subset.empty:
-                ax.axis("off")
-                continue
-            ax.scatter(
-                subset[x_col],
-                subset[y_col],
-                c=subset["strain_abs"].fillna(0.0),
-                cmap="RdYlGn",
-                vmin=vmin,
-                vmax=vmax,
-                alpha=0.85,
-            )
-            ax.set_xlabel(x_col)
-            ax.set_ylabel(y_col)
+    fig.suptitle("Pairplot of available numeric columns", fontsize=14)
     fig.tight_layout()
     return fig
 
 
 def _parallel_coordinates_figure(frame: pd.DataFrame) -> plt.Figure:
-    columns = [column for column in GEOMETRY_COLUMNS + ["Core temperature (°C)", "Winding speed (m/min)", "Glass feeding (mm/min)", "Underpressure"] if column in frame.columns]
+    columns = [column for column in NUMERIC_ANALYSIS_FEATURES if column in frame.columns]
     if len(columns) < 4:
-        return _blank_figure("Parallel coordinates", "Not enough assembled numeric columns for parallel coordinates.")
-    working = frame.loc[:, columns + ["fracture_strain_abs"]].dropna(subset=columns, how="any")
+        return _blank_figure("Parallel coordinates", "Not enough numeric columns for parallel coordinates.")
+    band_target = "fracture_strain_abs"
+    if band_target not in frame.columns or int(frame[band_target].notna().sum()) < 6:
+        band_target = "strain_abs"
+    if band_target not in frame.columns or int(frame[band_target].notna().sum()) < 6:
+        return _blank_figure("Parallel coordinates", "Not enough endpoint rows for parallel coordinates.")
+    working = frame.loc[:, columns + [band_target]].dropna(subset=columns, how="any")
     if len(working.index) < 6:
-        return _blank_figure("Parallel coordinates", "Not enough complete assembled rows for parallel coordinates.")
+        return _blank_figure("Parallel coordinates", "Not enough complete rows for parallel coordinates.")
     normalized = working.copy()
     for column in columns:
         minimum = float(normalized[column].min())
         maximum = float(normalized[column].max())
         normalized[column] = 0.5 if math.isclose(minimum, maximum) else (normalized[column] - minimum) / (maximum - minimum)
-    band_source = normalized["fracture_strain_abs"].fillna(normalized["fracture_strain_abs"].median())
+    band_source = normalized[band_target]
     if band_source.isna().all() or band_source.nunique(dropna=True) < 2:
         normalized["Band"] = "All rows"
     else:
@@ -974,31 +1101,9 @@ def _parallel_coordinates_figure(frame: pd.DataFrame) -> plt.Figure:
             duplicates="drop",
         ).astype(str)
     fig, ax = plt.subplots(figsize=(11, 5))
-    parallel_coordinates(normalized.drop(columns=["fracture_strain_abs"]), "Band", alpha=0.35, ax=ax)
+    parallel_coordinates(normalized.drop(columns=[band_target]), "Band", alpha=0.35, ax=ax)
     ax.set_ylabel("Normalised value (0-1)")
     ax.set_title("Parallel coordinates")
-    fig.tight_layout()
-    return fig
-
-
-def _sweet_spot_figure(table: pd.DataFrame) -> plt.Figure:
-    if table.empty:
-        return _blank_figure("Sweet spots", "Not enough assembled numeric rows for sweet-spot binning.")
-    variables = list(dict.fromkeys(table["feature"].tolist()))[:6]
-    rows = math.ceil(len(variables) / 2)
-    fig, axes = plt.subplots(rows, 2, figsize=(12, max(4.5, rows * 3.5)))
-    axes_array = np.atleast_1d(axes).ravel()
-    for ax, feature in zip(axes_array, variables):
-        subset = table.loc[table["feature"] == feature]
-        metric = "mean_fracture_strain_abs" if subset["mean_fracture_strain_abs"].notna().any() else "mean_strain_abs"
-        values = subset[metric].fillna(0.0).tolist()
-        ax.bar(range(len(subset.index)), values, color="#64b5f6")
-        ax.set_xticks(range(len(subset.index)))
-        ax.set_xticklabels(subset["bucket"], rotation=20, ha="right", fontsize=8)
-        ax.set_title(feature)
-        ax.set_ylabel(metric)
-    for ax in axes_array[len(variables):]:
-        ax.axis("off")
     fig.tight_layout()
     return fig
 
@@ -1009,257 +1114,402 @@ def _time_drift_figure(frame: pd.DataFrame) -> plt.Figure:
     working = frame.loc[frame["Production datetime"].notna()].sort_values("Production datetime").copy()
     if working.empty:
         return _blank_figure("Time drift", "No usable production timeline rows were available.")
-    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
-    with_strain = working.loc[working["strain_abs"].notna()]
-    if not with_strain.empty:
-        axes[0].scatter(with_strain["Production datetime"], with_strain["strain_abs"], color="#1e88e5", alpha=0.8)
-        axes[0].set_ylabel("|Strain|")
-        axes[0].set_title("|Strain| over time")
-    if "Fracture stress (MPa)" in working.columns:
-        with_fracture = working.loc[working["Fracture stress (MPa)"].notna()]
-        if not with_fracture.empty:
-            axes[1].scatter(with_fracture["Production datetime"], with_fracture["Fracture stress (MPa)"], color="#26a69a", alpha=0.8)
-            axes[1].set_ylabel("Fracture stress (MPa)")
-            axes[1].set_title("Fracture stress over time")
-    for axis in axes:
-        axis.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    fig, axes = plt.subplots(2, 2, figsize=(13, 8), sharex=True)
+    specs = [
+        ("strain_abs", "|Strain| over time", "#1e88e5"),
+        ("fracture_strain_abs", "|Fracture strain| over time", "#fb8c00"),
+        ("Stress (MPa)", "Stress over time", "#8e24aa"),
+        ("Fracture stress (MPa)", "Fracture stress over time", "#00897b"),
+    ]
+    for ax, (column, title, color) in zip(axes.ravel(), specs, strict=False):
+        subset = working.loc[working[column].notna()] if column in working.columns else pd.DataFrame()
+        if subset.empty:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center")
+            ax.set_axis_off()
+            continue
+        ax.scatter(subset["Production datetime"], subset[column], color=color, alpha=0.8)
+        ax.set_title(title)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
     fig.autofmt_xdate()
-    fig.tight_layout()
+    fig.subplots_adjust(bottom=0.16, hspace=0.38, wspace=0.28)
     return fig
 
 
-def _prepare_features(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    available = [column for column in CONTROL_FEATURES if column in frame.columns]
-    if not available:
-        return pd.DataFrame(index=frame.index), []
-    numeric = frame.loc[:, available].apply(pd.to_numeric, errors="coerce")
-    numeric = numeric.loc[:, [column for column in numeric.columns if numeric[column].notna().sum() >= 2]]
-    return numeric, list(numeric.columns)
+def _format_count(value: int, total: int) -> str:
+    if total <= 0:
+        return f"{value}"
+    return f"{value}/{total} ({value / total:.0%})"
 
 
-def _fit_classification_model(frame: pd.DataFrame) -> tuple[pd.DataFrame, plt.Figure | None, str | None]:
-    working = frame.loc[frame["is_broken"].isin([0, 1])].copy()
-    class_counts = working["is_broken"].value_counts()
-    if class_counts.get(0, 0) < 4 or class_counts.get(1, 0) < 4:
-        return pd.DataFrame(), None, "Skipped classification: both OK and Broke need at least 4 rows."
-    features, feature_names = _prepare_features(working)
-    if not feature_names:
-        return pd.DataFrame(), None, "Skipped classification: no usable numeric features are available."
-    target = working["is_broken"].astype(int)
-    pipeline = Pipeline(
-        [
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler()),
-            ("model", LogisticRegression(max_iter=2000)),
-        ]
-    )
-    pipeline.fit(features, target)
-    predicted = pipeline.predict(features)
-    accuracy = float(accuracy_score(target, predicted))
-    matrix = confusion_matrix(target, predicted, labels=[0, 1])
-    probabilities = pipeline.predict_proba(features)[:, 1]
-    auc = float(roc_auc_score(target, probabilities)) if len(set(target.tolist())) == 2 else math.nan
-
-    metrics = pd.DataFrame(
-        [
-            {
-                "model": "logistic_regression",
-                "n": int(len(target)),
-                "accuracy": round(accuracy, 4),
-                "roc_auc": round(auc, 4) if not math.isnan(auc) else math.nan,
-                "class_ok": int(class_counts.get(0, 0)),
-                "class_broke": int(class_counts.get(1, 0)),
-                "features": ", ".join(feature_names),
-            }
-        ]
-    )
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    image = axes[0].imshow(matrix, cmap="Blues", vmin=0)
-    axes[0].set_xticks([0, 1])
-    axes[0].set_xticklabels([STATUS_OK, STATUS_BROKE])
-    axes[0].set_yticks([0, 1])
-    axes[0].set_yticklabels([STATUS_OK, STATUS_BROKE])
-    axes[0].set_xlabel("Predicted")
-    axes[0].set_ylabel("Actual")
-    axes[0].set_title(f"Model A confusion matrix (acc={accuracy:.3f})")
-    for row in range(2):
-        for col in range(2):
-            axes[0].text(col, row, str(matrix[row, col]), ha="center", va="center")
-    fig.colorbar(image, ax=axes[0], shrink=0.9)
-
-    axes[1].hist(probabilities[target == 0], bins=min(10, max(4, int((target == 0).sum()))), alpha=0.7, label=STATUS_OK, color=STATUS_COLORS[STATUS_OK])
-    axes[1].hist(probabilities[target == 1], bins=min(10, max(4, int((target == 1).sum()))), alpha=0.7, label=STATUS_BROKE, color=STATUS_COLORS[STATUS_BROKE])
-    axes[1].set_title("Predicted broke probability")
-    axes[1].set_xlabel("P(Broke)")
-    axes[1].legend(loc="best")
-    fig.tight_layout()
-    return metrics, fig, None
+def _summarise_table(table: pd.DataFrame, *, limit: int = 3) -> list[dict[str, Any]]:
+    if table.empty:
+        return []
+    records = table.head(limit).replace({np.nan: None}).to_dict(orient="records")
+    return [dict(record) for record in records]
 
 
-def _fit_regression_model(frame: pd.DataFrame, *, target: str, title: str, ok_only: bool) -> tuple[pd.DataFrame, plt.Figure | None, str | None]:
-    working = frame.loc[frame[target].notna()].copy()
-    if ok_only:
-        working = working.loc[working["is_broken"].eq(0)]
-    if len(working.index) < 8:
-        return pd.DataFrame(), None, f"Skipped {title}: need at least 8 complete target rows."
-    if int(working[target].nunique()) < 4:
-        return pd.DataFrame(), None, f"Skipped {title}: need at least 4 distinct target values."
-    features, feature_names = _prepare_features(working)
-    if not feature_names:
-        return pd.DataFrame(), None, f"Skipped {title}: no usable numeric features are available."
-
-    target_series = pd.to_numeric(working[target], errors="coerce")
-    model = Pipeline(
-        [
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler()),
-            ("model", LinearRegression()),
-        ]
-    )
-    model.fit(features, target_series)
-    predicted = model.predict(features)
-    rmse = float(mean_squared_error(target_series, predicted, squared=False))
-    r2 = float(r2_score(target_series, predicted))
-    metrics = pd.DataFrame(
-        [
-            {
-                "model": "linear_regression",
-                "target": target,
-                "n": int(len(target_series)),
-                "rmse": round(rmse, 4),
-                "r2": round(r2, 4),
-                "features": ", ".join(feature_names),
-            }
-        ]
-    )
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    axes[0].scatter(target_series, predicted, color="#5b9bd5", edgecolors="white", linewidths=0.6)
-    minimum = float(min(target_series.min(), predicted.min()))
-    maximum = float(max(target_series.max(), predicted.max()))
-    axes[0].plot([minimum, maximum], [minimum, maximum], linestyle="--", color="#6c757d")
-    axes[0].set_xlabel("Actual")
-    axes[0].set_ylabel("Predicted")
-    axes[0].set_title(f"{title}: actual vs predicted")
-
-    residuals = target_series - predicted
-    axes[1].hist(residuals, bins=min(10, max(4, len(residuals))), color="#8f63c8", edgecolor="white")
-    axes[1].axvline(0, color="black", linestyle="--", linewidth=1)
-    axes[1].set_xlabel("Residual")
-    axes[1].set_title(f"{title}: residuals (RMSE={rmse:.3f}, R²={r2:.3f})")
-    fig.tight_layout()
-    return metrics, fig, None
-
-
-def _write_summary_workbook(*, output_path: Path, canonical_frame: pd.DataFrame, tables: Mapping[str, pd.DataFrame]) -> None:
-    with pd.ExcelWriter(output_path) as writer:
-        canonical_frame.to_excel(writer, sheet_name="canonical_data", index=False)
-        for sheet_name in SUMMARY_TABLE_ORDER:
-            table = tables.get(sheet_name)
-            if isinstance(table, pd.DataFrame):
-                table.to_excel(writer, sheet_name=_slugify(sheet_name)[:31], index=False)
-
-
-def _write_manifest(
+def _generate_findings(
+    frame: pd.DataFrame,
     *,
-    path: Path,
-    config: MicrowireEdaConfig,
-    input_kind: str,
+    counts: Mapping[str, int],
     tables: Mapping[str, pd.DataFrame],
-    figures: Sequence[FigureArtifact],
-    skipped_sections: Mapping[str, str],
-    row_counts: Mapping[str, int],
-    report_path: Path,
-    workbook_path: Path,
-    csv_path: Path,
-    pdf_path: Path | None,
-) -> None:
-    payload = {
-        "kind": "MicrowireEDA",
-        "version": 1,
-        "input_path": str(config.input_path) if config.input_path else None,
-        "input_kind": input_kind,
-        "row_scope": config.row_scope,
-        "report_title": config.report_title,
-        "output_dir": str(path.parent),
-        "report_path": str(report_path),
-        "workbook_path": str(workbook_path),
-        "csv_path": str(csv_path),
-        "pdf_path": str(pdf_path) if pdf_path else None,
-        "row_counts": {str(key): int(value) for key, value in row_counts.items()},
-        "tables": {str(name): {"rows": int(table.shape[0]), "columns": int(table.shape[1])} for name, table in tables.items()},
-        "figures": [
+    include_legacy_breakage_analysis: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    total_rows = int(counts.get("all_rows", 0))
+    findings.append(
+        {
+            "category": "data_quality",
+            "headline": "Endpoint coverage is sparse and uneven.",
+            "detail": (
+                f"Rows analysed: {total_rows}. Available rows are "
+                f"{_format_count(int(counts.get('numeric_strain', 0)), total_rows)} for strain, "
+                f"{_format_count(int(counts.get('numeric_fracture_strain', 0)), total_rows)} for fracture strain, "
+                f"{_format_count(int(counts.get('numeric_stress', 0)), total_rows)} for stress, and "
+                f"{_format_count(int(counts.get('numeric_fracture_stress', 0)), total_rows)} for fracture stress."
+            ),
+            "evidence": {
+                "row_counts": dict(counts),
+            },
+            "confidence": "high",
+        }
+    )
+
+    duplicates = tables.get("duplicate_wires", pd.DataFrame())
+    if isinstance(duplicates, pd.DataFrame) and not duplicates.empty:
+        findings.append(
             {
-                "key": figure.key,
-                "title": figure.title,
-                "section": figure.section,
-                "png_path": str(figure.png_path) if figure.png_path is not None else None,
+                "category": "data_quality",
+                "headline": "Duplicate composition/microwire labels are present.",
+                "detail": "Some composition and microwire keys appear more than once in the analysed dataset. These rows should be checked before treating per-wire trends as independent evidence.",
+                "evidence": {"examples": _summarise_table(duplicates)},
+                "confidence": "medium",
             }
-            for figure in figures
-        ],
-        "skipped_sections": dict(skipped_sections),
+        )
+
+    for label, table_key in [
+        ("strain", "process_strain_correlations"),
+        ("fracture strain", "process_fracture_strain_correlations"),
+        ("stress", "process_stress_correlations"),
+        ("fracture stress", "process_fracture_stress_correlations"),
+    ]:
+        table = tables.get(table_key, pd.DataFrame())
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            findings.append(
+                {
+                    "category": "endpoint_signal",
+                    "headline": f"{label.title()} trends remain underpowered.",
+                    "detail": f"There are not enough overlapping rows to support a stable process-to-{label} ranking yet.",
+                    "evidence": {"table": table_key},
+                    "confidence": "high",
+                }
+            )
+            continue
+        top_row = table.iloc[0]
+        direction = "higher" if float(top_row["rho"]) >= 0 else "lower"
+        findings.append(
+            {
+                "category": "endpoint_signal",
+                "headline": f"Top process signal for {label}: {top_row['feature']}.",
+                "detail": (
+                    f"The strongest available process-side monotonic association with {label} is {top_row['feature']} "
+                    f"(Spearman rho={float(top_row['rho']):.3f}, n={int(top_row['n'])}). In this dataset, "
+                    f"{direction} values of that variable track higher {label} values."
+                ),
+                "evidence": {"top_rows": _summarise_table(table)},
+                "confidence": "medium",
+            }
+        )
+
+    composition_summary = tables.get("composition_summary", pd.DataFrame())
+    if isinstance(composition_summary, pd.DataFrame) and not composition_summary.empty:
+        richest = composition_summary.iloc[0]
+        findings.append(
+            {
+                "category": "cohorts",
+                "headline": f"Composition coverage is concentrated in {richest['Composition']}.",
+                "detail": (
+                    f"The densest composition in the current dataset is {richest['Composition']} with "
+                    f"{int(richest['rows'])} rows. Most composition-specific conclusions should be treated as cohort-specific "
+                    f"until more families have comparable endpoint coverage."
+                ),
+                "evidence": {"top_rows": _summarise_table(composition_summary)},
+                "confidence": "high",
+            }
+        )
+
+    if include_legacy_breakage_analysis and int(counts.get("known_outcome", 0)) > 0:
+        findings.append(
+            {
+                "category": "legacy_context",
+                "headline": "Legacy breakage labels are available, but they are no longer the main analysis target.",
+                "detail": (
+                    f"Breakage labels are present for {_format_count(int(counts.get('known_outcome', 0)), total_rows)} rows. "
+                    "They remain useful as auxiliary context, but modern measured strain and fracture endpoints are preferred whenever available."
+                ),
+                "evidence": {"legacy_rows": int(counts.get("known_outcome", 0))},
+                "confidence": "high",
+            }
+        )
+
+    sufficiency_summary = {
+        "all_rows": total_rows,
+        "sufficient_for_correlation": {
+            "strain_abs": int(counts.get("numeric_strain", 0)) >= 6,
+            "fracture_strain_abs": int(counts.get("numeric_fracture_strain", 0)) >= 6,
+            "Stress (MPa)": int(counts.get("numeric_stress", 0)) >= 6,
+            "Fracture stress (MPa)": int(counts.get("numeric_fracture_stress", 0)) >= 6,
+        },
+        "composition_split_viable": bool(
+            isinstance(composition_summary, pd.DataFrame) and not composition_summary.empty and int(composition_summary["rows"].max()) >= 4
+        ),
     }
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return findings, sufficiency_summary
+
+
+def _build_tables(
+    frame: pd.DataFrame,
+    *,
+    config: MicrowireEdaConfig,
+    counts: Mapping[str, int],
+    applied_scope: str,
+) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, str]]:
+    tables: dict[str, pd.DataFrame] = {
+        "coverage": _coverage_table(frame),
+        "row_scope": _row_scope_table(config.row_scope, applied_scope, counts),
+        "endpoint_coverage": _endpoint_coverage_table(frame),
+        "duplicate_wires": _duplicate_wire_table(frame),
+        "composition_summary": _composition_summary_table(frame),
+        "process_strain_correlations": _target_correlation_table(frame, target="strain_abs", features=PROCESS_FEATURES),
+        "process_fracture_strain_correlations": _target_correlation_table(frame, target="fracture_strain_abs", features=PROCESS_FEATURES),
+        "process_stress_correlations": _target_correlation_table(frame, target="Stress (MPa)", features=PROCESS_FEATURES),
+        "process_fracture_stress_correlations": _target_correlation_table(frame, target="Fracture stress (MPa)", features=PROCESS_FEATURES),
+        "geometry_strain_correlations": _target_correlation_table(frame, target="strain_abs", features=GEOMETRY_COLUMNS),
+        "geometry_fracture_strain_correlations": _target_correlation_table(frame, target="fracture_strain_abs", features=GEOMETRY_COLUMNS),
+        "geometry_stress_correlations": _target_correlation_table(frame, target="Stress (MPa)", features=GEOMETRY_COLUMNS),
+        "geometry_fracture_stress_correlations": _target_correlation_table(frame, target="Fracture stress (MPa)", features=GEOMETRY_COLUMNS),
+        "time_summary": _time_summary_table(frame),
+    }
+    endpoint_tables = {
+        "strain_abs": tables["process_strain_correlations"],
+        "fracture_strain_abs": tables["process_fracture_strain_correlations"],
+        "Stress (MPa)": tables["process_stress_correlations"],
+        "Fracture stress (MPa)": tables["process_fracture_stress_correlations"],
+    }
+    skipped_sections: dict[str, str] = {}
+    if config.include_legacy_breakage_analysis:
+        legacy_table = _legacy_breakage_summary(frame)
+        tables["legacy_breakage_summary"] = legacy_table
+        if legacy_table.empty:
+            skipped_sections["legacy"] = "Legacy broke/OK comparisons were kept as auxiliary context, but there were not enough labeled rows for a stable split."
+    else:
+        tables["legacy_breakage_summary"] = pd.DataFrame()
+        skipped_sections["legacy"] = "Legacy broke/OK analysis was disabled for this run."
+    return tables, endpoint_tables, skipped_sections
+
+
+def run_analysis(
+    config: MicrowireEdaConfig,
+    progress_callback: ProgressCallback | None = None,
+) -> MicrowireEdaAnalysis:
+    progress = progress_callback or _noop_progress
+    progress("Loading assemble data")
+    raw_frame, input_kind, working_input_path, copied_project_path = load_analysis_frame(config, progress)
+    progress("Canonicalising columns")
+    canonical_frame = canonicalise_frame(raw_frame)
+    scoped_frame, applied_scope = apply_row_scope(canonical_frame, config)
+    scoped_frame = _ordered_export_frame(scoped_frame)
+    counts = _row_counts(scoped_frame)
+    progress("Preparing analysis tables")
+    tables, endpoint_tables, skipped_sections = _build_tables(
+        scoped_frame,
+        config=config,
+        counts=counts,
+        applied_scope=applied_scope,
+    )
+    findings, sufficiency_summary = _generate_findings(
+        scoped_frame,
+        counts=counts,
+        tables=tables,
+        include_legacy_breakage_analysis=config.include_legacy_breakage_analysis,
+    )
+    return MicrowireEdaAnalysis(
+        config=config,
+        input_kind=input_kind,
+        source_path=config.input_path,
+        working_input_path=working_input_path,
+        copied_project_path=copied_project_path,
+        canonical_frame=canonical_frame,
+        scoped_frame=scoped_frame,
+        applied_scope=applied_scope,
+        row_counts=counts,
+        tables=tables,
+        skipped_sections=skipped_sections,
+        findings=findings,
+        sufficiency_summary=sufficiency_summary,
+        endpoint_tables=endpoint_tables,
+    )
+
+
+def _findings_markdown(
+    *,
+    title: str,
+    analysis: MicrowireEdaAnalysis,
+) -> str:
+    lines = [
+        f"# {title}",
+        "",
+        "## Summary",
+        "",
+        f"- Rows analysed: {analysis.row_counts.get('all_rows', 0)}",
+        f"- Strain rows: {analysis.row_counts.get('numeric_strain', 0)}",
+        f"- Fracture strain rows: {analysis.row_counts.get('numeric_fracture_strain', 0)}",
+        f"- Stress rows: {analysis.row_counts.get('numeric_stress', 0)}",
+        f"- Fracture stress rows: {analysis.row_counts.get('numeric_fracture_stress', 0)}",
+    ]
+    if analysis.copied_project_path is not None:
+        lines.extend(
+            [
+                "",
+                "## Working Copy",
+                "",
+                f"- Disposable project copy used: `{analysis.copied_project_path}`",
+            ]
+        )
+    lines.extend(["", "## Findings", ""])
+    if not analysis.findings:
+        lines.append("- No findings were generated.")
+    for finding in analysis.findings:
+        lines.append(f"- **{finding.get('headline', 'Finding')}** {finding.get('detail', '').strip()}")
+    lines.extend(
+        [
+            "",
+            "## Cautions",
+            "",
+            "- These findings are observational and intended to guide follow-up experiments, not to prove causality.",
+            "- Sparse endpoint coverage can change apparent rankings quickly as more measurements are added.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _html_document(
     *,
     title: str,
-    row_scope_table: pd.DataFrame,
+    analysis: MicrowireEdaAnalysis,
     figures: Sequence[FigureArtifact],
-    tables: Mapping[str, pd.DataFrame],
-    skipped_sections: Mapping[str, str],
 ) -> str:
     grouped_figures: dict[str, list[FigureArtifact]] = {}
     for figure in figures:
         grouped_figures.setdefault(figure.section, []).append(figure)
 
+    findings_html = "".join(
+        [
+            "<article class='finding-card'>"
+            f"<h3>{html.escape(str(finding.get('headline', 'Finding')))}</h3>"
+            f"<p>{html.escape(str(finding.get('detail', '')))}</p>"
+            "</article>"
+            for finding in analysis.findings
+        ]
+    ) or "<p class='empty-note'>No findings were generated.</p>"
+
     sections = [
-        ("coverage", "Coverage"),
-        ("outcomes", "Outcome overview"),
-        ("fabrication", "Fabrication and geometry"),
-        ("relationships", "Relationships to function"),
-        ("interactions", "Interactions"),
-        ("sweet_spots", "Sweet spots"),
-        ("time", "Time drift"),
-        ("models", "Models"),
+        (
+            "quality",
+            "Data quality",
+            "Coverage, endpoint availability, duplicate-wire checks, and cohort sizes.",
+            [
+                _table_html(analysis.tables["coverage"]),
+                _table_html(analysis.tables["row_scope"]),
+                _table_html(analysis.tables["endpoint_coverage"]),
+                _table_html(analysis.tables["duplicate_wires"]),
+            ],
+        ),
+        (
+            "overview",
+            "Endpoint overview",
+            "Distributions for strain, fracture strain, stress, and fracture stress measured in the assembled dataset.",
+            [],
+        ),
+        (
+            "process",
+            "Process to outcome",
+            "Process-side correlations to the measured mechanical endpoints.",
+            [
+                _table_html(analysis.tables["process_strain_correlations"]),
+                _table_html(analysis.tables["process_fracture_strain_correlations"]),
+                _table_html(analysis.tables["process_stress_correlations"]),
+                _table_html(analysis.tables["process_fracture_stress_correlations"]),
+            ],
+        ),
+        (
+            "geometry",
+            "Geometry to outcome",
+            "Geometry-side correlations and scatter views for d, D, and d/D.",
+            [
+                _table_html(analysis.tables["geometry_strain_correlations"]),
+                _table_html(analysis.tables["geometry_fracture_strain_correlations"]),
+                _table_html(analysis.tables["geometry_stress_correlations"]),
+                _table_html(analysis.tables["geometry_fracture_stress_correlations"]),
+            ],
+        ),
+        (
+            "cohorts",
+            "Cohort splits",
+            "Cross-composition and per-composition coverage summaries to show where the dataset is concentrated.",
+            [
+                _table_html(analysis.tables["composition_summary"]),
+            ],
+        ),
+        (
+            "interactions",
+            "Interaction views",
+            "Multivariate views to spot clusters, regimes, and missing-data constraints.",
+            [],
+        ),
+        (
+            "time",
+            "Time drift",
+            "Month-by-month coverage and production-date trends.",
+            [
+                _table_html(analysis.tables["time_summary"]),
+            ],
+        ),
+        (
+            "findings",
+            "Findings",
+            "Auto-generated observations that summarize the strongest current signals and the main limitations.",
+            [findings_html],
+        ),
     ]
+
+    if analysis.config.include_legacy_breakage_analysis:
+        sections.insert(
+            6,
+            (
+                "legacy",
+                "Legacy breakage context",
+                "Auxiliary broke/OK comparisons kept for backward compatibility with older EDA framing.",
+                [f"<p class='skip-note'>{html.escape(analysis.skipped_sections.get('legacy', ''))}</p>", _table_html(analysis.tables["legacy_breakage_summary"])],
+            ),
+        )
+
     parts: list[str] = []
-    for section_key, heading in sections:
-        parts.append(f"<section><h2>{html.escape(heading)}</h2>")
-        if section_key in skipped_sections:
-            parts.append(f"<p class='skip-note'>{html.escape(skipped_sections[section_key])}</p>")
+    for section_key, heading, intro, content_html in sections:
+        parts.append(f"<section><h2>{html.escape(heading)}</h2><p>{html.escape(intro)}</p>")
+        if section_key in analysis.skipped_sections and section_key != "legacy":
+            parts.append(f"<p class='skip-note'>{html.escape(analysis.skipped_sections[section_key])}</p>")
         for figure in grouped_figures.get(section_key, []):
             parts.append(f"<article class='figure-card'><h3>{html.escape(figure.title)}</h3>{figure.html}</article>")
-        if section_key == "coverage":
-            parts.append("<h3>Coverage table</h3>")
-            parts.append(_table_html(tables["coverage"]))
-            parts.append("<h3>Row scope</h3>")
-            parts.append(_table_html(row_scope_table))
-        elif section_key == "relationships":
-            for key, label in [
-                ("strain_correlations", "Top correlations to |Strain|"),
-                ("fracture_strain_correlations", "Top correlations to fracture |strain|"),
-                ("broke_ok_summary", "Broke vs OK summary"),
-            ]:
-                table = tables.get(key)
-                if isinstance(table, pd.DataFrame) and not table.empty:
-                    parts.append(f"<h3>{html.escape(label)}</h3>")
-                    parts.append(_table_html(table))
-        elif section_key == "sweet_spots":
-            table = tables.get("sweet_spots")
-            if isinstance(table, pd.DataFrame) and not table.empty:
-                parts.append("<h3>Sweet spot bins</h3>")
-                parts.append(_table_html(table))
-        elif section_key == "models":
-            for key in ("model_a_metrics", "model_b_metrics", "model_c_metrics"):
-                table = tables.get(key)
-                if isinstance(table, pd.DataFrame) and not table.empty:
-                    parts.append(f"<h3>{html.escape(key.replace('_', ' ').title())}</h3>")
-                    parts.append(_table_html(table))
+        parts.extend(content_html)
         parts.append("</section>")
 
+    copy_note = ""
+    if analysis.copied_project_path is not None:
+        copy_note = (
+            "<p class='lead'><strong>Copy-safe run:</strong> this analysis used a disposable project copy at "
+            f"{html.escape(str(analysis.copied_project_path))}.</p>"
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1269,13 +1519,13 @@ def _html_document(
     body {{
       font-family: "Segoe UI", Arial, sans-serif;
       margin: 24px auto;
-      max-width: 1320px;
+      max-width: 1380px;
       color: #1f2933;
       background: linear-gradient(180deg, #f5f7fb 0%, #ffffff 18%);
       padding: 0 20px 40px;
     }}
     h1, h2, h3 {{ color: #17324d; }}
-    .lead {{ color: #52606d; margin-bottom: 22px; }}
+    .lead {{ color: #52606d; margin-bottom: 18px; }}
     section {{
       background: #ffffff;
       border: 1px solid #d9e2ec;
@@ -1284,7 +1534,7 @@ def _html_document(
       margin: 18px 0;
       box-shadow: 0 10px 22px rgba(15, 23, 42, 0.04);
     }}
-    .figure-card {{
+    .figure-card, .finding-card {{
       margin: 16px 0 22px;
       padding: 14px;
       border-radius: 12px;
@@ -1296,399 +1546,243 @@ def _html_document(
     .eda-table th, .eda-table td {{ border: 1px solid #d9e2ec; padding: 6px 8px; text-align: left; vertical-align: top; }}
     .eda-table th {{ background: #f0f4f8; }}
     .skip-note {{ padding: 10px 12px; border-left: 4px solid #f0ad4e; background: #fff8e7; border-radius: 8px; }}
+    .empty-note {{ color: #52606d; font-style: italic; }}
   </style>
 </head>
 <body>
   <h1>{html.escape(title)}</h1>
-  <p class="lead">Read-only exploratory analysis built from Microwire Data Builder assemble data.</p>
+  <p class="lead">Analysis-first exploratory report for microwire assemble data. Modern strain and fracture endpoints are primary; legacy broke/OK labels remain auxiliary context only.</p>
+  {copy_note}
   {''.join(parts)}
 </body>
 </html>"""
 
 
-def run_microwire_eda(config: MicrowireEdaConfig) -> MicrowireEdaResult:
-    raw_frame, input_kind = load_input_frame(config)
-    canonical_frame = canonicalise_frame(raw_frame)
-    scoped_frame, applied_scope = apply_row_scope(canonical_frame, config)
-    scoped_frame = _ordered_export_frame(scoped_frame)
+def _write_summary_workbook(
+    *,
+    output_path: Path,
+    analysis: MicrowireEdaAnalysis,
+) -> None:
+    with pd.ExcelWriter(output_path) as writer:
+        analysis.scoped_frame.to_excel(writer, sheet_name="dataset", index=False)
+        for sheet_name in SUMMARY_TABLE_ORDER:
+            table = analysis.tables.get(sheet_name)
+            if isinstance(table, pd.DataFrame):
+                table.to_excel(writer, sheet_name=_slugify(sheet_name)[:31], index=False)
 
-    output_dir = _normalise_output_dir(config).resolve()
+
+def _write_findings_json(
+    *,
+    path: Path,
+    analysis: MicrowireEdaAnalysis,
+) -> None:
+    payload = {
+        "kind": "MicrowireEDAFindings",
+        "version": 1,
+        "source_path": str(analysis.source_path) if analysis.source_path is not None else None,
+        "working_input_path": str(analysis.working_input_path) if analysis.working_input_path is not None else None,
+        "copied_project_path": str(analysis.copied_project_path) if analysis.copied_project_path is not None else None,
+        "row_counts": dict(analysis.row_counts),
+        "sufficiency_summary": dict(analysis.sufficiency_summary),
+        "findings": analysis.findings,
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _write_manifest(
+    *,
+    path: Path,
+    analysis: MicrowireEdaAnalysis,
+    report_path: Path,
+    workbook_path: Path,
+    csv_path: Path,
+    pdf_path: Path | None,
+    figure_artifacts: Sequence[FigureArtifact],
+    findings_json_path: Path | None,
+    findings_md_path: Path | None,
+) -> None:
+    payload = {
+        "kind": "MicrowireEDA",
+        "version": 2,
+        "input_path": str(analysis.source_path) if analysis.source_path is not None else None,
+        "working_input_path": str(analysis.working_input_path) if analysis.working_input_path is not None else None,
+        "copied_project_path": str(analysis.copied_project_path) if analysis.copied_project_path is not None else None,
+        "input_kind": analysis.input_kind,
+        "row_scope_requested": analysis.config.row_scope,
+        "row_scope_applied": analysis.applied_scope,
+        "report_title": analysis.config.report_title,
+        "output_dir": str(path.parent),
+        "report_path": str(report_path),
+        "workbook_path": str(workbook_path),
+        "csv_path": str(csv_path),
+        "pdf_path": str(pdf_path) if pdf_path else None,
+        "findings_json_path": str(findings_json_path) if findings_json_path else None,
+        "findings_md_path": str(findings_md_path) if findings_md_path else None,
+        "row_counts": dict(analysis.row_counts),
+        "sufficiency_summary": dict(analysis.sufficiency_summary),
+        "tables": {
+            str(name): {"rows": int(table.shape[0]), "columns": int(table.shape[1])}
+            for name, table in analysis.tables.items()
+        },
+        "figures": [
+            {
+                "key": figure.key,
+                "title": figure.title,
+                "section": figure.section,
+                "png_path": str(figure.png_path) if figure.png_path is not None else None,
+            }
+            for figure in figure_artifacts
+        ],
+        "skipped_sections": dict(analysis.skipped_sections),
+        "finding_count": len(analysis.findings),
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def write_analysis_artifacts(
+    analysis: MicrowireEdaAnalysis,
+    progress_callback: ProgressCallback | None = None,
+) -> MicrowireEdaResult:
+    progress = progress_callback or _noop_progress
+    output_dir = _normalise_output_dir(analysis.config).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     figures_dir = output_dir / "figures"
     report_path = output_dir / "microwire_eda_report.html"
     workbook_path = output_dir / "microwire_eda_summary.xlsx"
-    csv_path = output_dir / "microwire_eda_canonical.csv"
+    csv_path = output_dir / "microwire_eda_dataset.csv"
     manifest_path = output_dir / "microwire_eda_manifest.json"
-    pdf_path = output_dir / "microwire_eda_report.pdf" if config.export_pdf_bundle else None
+    findings_json_path = output_dir / DEFAULT_FINDINGS_FILENAME if analysis.config.write_findings else None
+    findings_md_path = output_dir / DEFAULT_FINDINGS_MD_FILENAME if analysis.config.write_findings else None
+    pdf_path = output_dir / "microwire_eda_figures.pdf" if analysis.config.export_pdf_bundle else None
 
-    tables: dict[str, pd.DataFrame] = {
-        "coverage": _coverage_table(scoped_frame),
-        "row_scope": _row_scope_table(config.row_scope, applied_scope, _usable_row_counts(scoped_frame)),
-        "spearman_all": _spearman_table(scoped_frame, CONTROL_FEATURES),
-        "strain_correlations": _target_correlation_table(scoped_frame, "strain_abs"),
-        "fracture_strain_correlations": _target_correlation_table(scoped_frame, "fracture_strain_abs"),
-        "broke_ok_summary": _broke_ok_summary(scoped_frame),
-        "sweet_spots": _sweet_spot_table(scoped_frame),
-    }
-    skipped_sections: dict[str, str] = {}
-    figures: list[FigureArtifact] = []
+    progress("Building figures")
+    figure_specs: list[tuple[str, str, str, plt.Figure]] = [
+        ("quality", "coverage_heatmap", "Coverage heatmap", _coverage_figure(analysis.scoped_frame)),
+        ("overview", "endpoint_overview", "Endpoint overview", _endpoint_overview_figure(analysis.scoped_frame)),
+        ("cohorts", "composition_coverage", "Composition coverage", _composition_coverage_figure(analysis.scoped_frame)),
+        (
+            "process",
+            "process_strain_correlation",
+            "Top process correlations with |Strain|",
+            _correlation_bar_figure(analysis.tables["process_strain_correlations"], title="Top process correlations with |Strain|"),
+        ),
+        (
+            "process",
+            "process_fracture_stress_correlation",
+            "Top process correlations with fracture stress",
+            _correlation_bar_figure(analysis.tables["process_fracture_stress_correlations"], title="Top process correlations with fracture stress"),
+        ),
+        (
+            "geometry",
+            "geometry_strain_scatter",
+            "Geometry vs |Strain|",
+            _scatter_grid(
+                analysis.scoped_frame,
+                target="strain_abs",
+                features=[feature for feature in GEOMETRY_COLUMNS if feature in analysis.scoped_frame.columns],
+                title="Geometry vs |Strain|",
+            ),
+        ),
+        (
+            "geometry",
+            "geometry_fracture_strain_scatter",
+            "Geometry vs |Fracture strain|",
+            _scatter_grid(
+                analysis.scoped_frame,
+                target="fracture_strain_abs",
+                features=[feature for feature in GEOMETRY_COLUMNS if feature in analysis.scoped_frame.columns],
+                title="Geometry vs |Fracture strain|",
+            ),
+        ),
+        ("interactions", "pairplot", "Pairplot", _pairplot_figure(analysis.scoped_frame)),
+        ("interactions", "parallel_coordinates", "Parallel coordinates", _parallel_coordinates_figure(analysis.scoped_frame)),
+        ("time", "time_drift", "Time drift", _time_drift_figure(analysis.scoped_frame)),
+    ]
+    if analysis.config.include_legacy_breakage_analysis:
+        figure_specs.append(
+            (
+                "legacy",
+                "legacy_breakage_correlation",
+                "Legacy broke/OK summary",
+                _correlation_bar_figure(
+                    analysis.tables["legacy_breakage_summary"].rename(columns={"delta_broke_minus_ok": "rho", "feature": "feature"}),
+                    title="Legacy broke/OK delta summary",
+                )
+                if not analysis.tables["legacy_breakage_summary"].empty
+                else _blank_figure("Legacy broke/OK summary", "Not enough labeled rows for a stable broke/OK comparison."),
+            )
+        )
 
     pdf = PdfPages(pdf_path) if pdf_path is not None else None
+    figure_artifacts: list[FigureArtifact] = []
     try:
-        figures.append(_save_figure(_coverage_figure(scoped_frame), output_dir=figures_dir, key="coverage", title="Coverage heatmap", section="coverage", pdf=pdf, write_png=config.export_png_bundle))
-        figures.append(_save_figure(_outcome_overview_figure(scoped_frame), output_dir=figures_dir, key="outcomes", title="Outcome overview", section="outcomes", pdf=pdf, write_png=config.export_png_bundle))
-        figures.append(_save_figure(_distribution_grid_figure(scoped_frame, FABRICATION_COLUMNS + GEOMETRY_COLUMNS, "Fabrication and geometry distributions"), output_dir=figures_dir, key="fabrication_distributions", title="Fabrication and geometry distributions", section="fabrication", pdf=pdf, write_png=config.export_png_bundle))
-        figures.append(_save_figure(_annotated_heatmap(_correlation_matrix(scoped_frame, CONTROL_FEATURES), title="Spearman correlation matrix"), output_dir=figures_dir, key="fabrication_heatmap", title="Spearman correlation matrix", section="fabrication", pdf=pdf, write_png=config.export_png_bundle))
-        figures.append(_save_figure(_annotated_heatmap(_correlation_matrix(scoped_frame, GEOMETRY_COLUMNS + CONTROL_FEATURES[:4]), title="Controllable parameter interactions"), output_dir=figures_dir, key="fabrication_interactions", title="Controllable parameter interactions", section="fabrication", pdf=pdf, write_png=config.export_png_bundle))
-        figures.append(_save_figure(_scatter_grid(scoped_frame, target="strain_abs", title="Top variables vs |Strain|"), output_dir=figures_dir, key="strain_scatter", title="Top variables vs |Strain|", section="relationships", pdf=pdf, write_png=config.export_png_bundle))
-        figures.append(_save_figure(_geometry_to_function_figure(scoped_frame), output_dir=figures_dir, key="geometry_to_function", title="Geometry to function", section="relationships", pdf=pdf, write_png=config.export_png_bundle))
-        figures.append(_save_figure(_pairplot_figure(scoped_frame), output_dir=figures_dir, key="pairplot", title="Pairplot", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
-        figures.append(_save_figure(_interaction_grid_figure(scoped_frame), output_dir=figures_dir, key="interaction_grid", title="Interaction grid", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
-        figures.append(_save_figure(_parallel_coordinates_figure(scoped_frame), output_dir=figures_dir, key="parallel_coordinates", title="Parallel coordinates", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
-        figures.append(_save_figure(_sweet_spot_figure(tables["sweet_spots"]), output_dir=figures_dir, key="sweet_spots", title="Sweet spots", section="sweet_spots", pdf=pdf, write_png=config.export_png_bundle))
-        figures.append(_save_figure(_time_drift_figure(scoped_frame), output_dir=figures_dir, key="time_drift", title="Time drift", section="time", pdf=pdf, write_png=config.export_png_bundle))
-
-        tables["model_a_metrics"], model_a_fig, model_a_skip = _fit_classification_model(scoped_frame)
-        if model_a_fig is not None:
-            figures.append(_save_figure(model_a_fig, output_dir=figures_dir, key="model_a", title="Model A: broke classifier", section="models", pdf=pdf, write_png=config.export_png_bundle))
-        if model_a_skip:
-            skipped_sections["models"] = model_a_skip
-
-        tables["model_b_metrics"], model_b_fig, model_b_skip = _fit_regression_model(scoped_frame, target="strain_abs", title="Model B", ok_only=True)
-        if model_b_fig is not None:
-            figures.append(_save_figure(model_b_fig, output_dir=figures_dir, key="model_b", title="Model B: strain regression", section="models", pdf=pdf, write_png=config.export_png_bundle))
-        if model_b_skip:
-            skipped_sections["models_b"] = model_b_skip
-
-        tables["model_c_metrics"], model_c_fig, model_c_skip = _fit_regression_model(scoped_frame, target="fracture_strain_abs", title="Model C", ok_only=False)
-        if model_c_fig is not None:
-            figures.append(_save_figure(model_c_fig, output_dir=figures_dir, key="model_c", title="Model C: fracture strain regression", section="models", pdf=pdf, write_png=config.export_png_bundle))
-        if model_c_skip:
-            skipped_sections["models_c"] = model_c_skip
+        for section, key, title, figure in figure_specs:
+            figure_artifacts.append(
+                _save_figure(
+                    figure,
+                    output_dir=figures_dir,
+                    key=key,
+                    title=title,
+                    section=section,
+                    pdf=pdf,
+                    write_png=analysis.config.export_png_bundle,
+                )
+            )
     finally:
         if pdf is not None:
             pdf.close()
 
-    if "models" not in skipped_sections:
-        model_messages = [message for key, message in skipped_sections.items() if key.startswith("models_")]
-        if model_messages:
-            skipped_sections["models"] = " ".join(model_messages)
+    progress("Writing report bundle")
+    analysis.scoped_frame.to_csv(csv_path, index=False)
+    _write_summary_workbook(output_path=workbook_path, analysis=analysis)
+    report_path.write_text(_html_document(title=analysis.config.report_title, analysis=analysis, figures=figure_artifacts), encoding="utf-8")
 
-    scoped_frame.to_csv(csv_path, index=False)
-    _write_summary_workbook(output_path=workbook_path, canonical_frame=scoped_frame, tables=tables)
-    report_path.write_text(
-        _html_document(
-            title=config.report_title,
-            row_scope_table=tables["row_scope"],
-            figures=figures,
-            tables=tables,
-            skipped_sections=skipped_sections,
-        ),
-        encoding="utf-8",
-    )
+    if findings_json_path is not None:
+        _write_findings_json(path=findings_json_path, analysis=analysis)
+    if findings_md_path is not None:
+        findings_md_path.write_text(_findings_markdown(title=analysis.config.report_title, analysis=analysis), encoding="utf-8")
 
-    row_counts = {
-        "input_rows": int(len(canonical_frame.index)),
-        "analysed_rows": int(len(scoped_frame.index)),
-        "labeled_rows": int(scoped_frame.get("is_broken", pd.Series(dtype=float)).isin([0, 1]).sum()),
-        "numeric_strain_rows": int(scoped_frame.get("strain_abs", pd.Series(dtype=float)).notna().sum()),
-        "fracture_strain_rows": int(scoped_frame.get("fracture_strain_abs", pd.Series(dtype=float)).notna().sum()),
-    }
-    row_counts["all_rows"] = row_counts["analysed_rows"]
-    row_counts["known_outcome"] = row_counts["labeled_rows"]
     _write_manifest(
         path=manifest_path,
-        config=config,
-        input_kind=input_kind,
-        tables=tables,
-        figures=figures,
-        skipped_sections=skipped_sections,
-        row_counts=row_counts,
+        analysis=analysis,
         report_path=report_path,
         workbook_path=workbook_path,
         csv_path=csv_path,
         pdf_path=pdf_path if pdf_path and pdf_path.exists() else None,
+        figure_artifacts=figure_artifacts,
+        findings_json_path=findings_json_path if findings_json_path and findings_json_path.exists() else None,
+        findings_md_path=findings_md_path if findings_md_path and findings_md_path.exists() else None,
     )
+
     return MicrowireEdaResult(
-        config=config,
-        input_kind=input_kind,
+        config=analysis.config,
+        input_kind=analysis.input_kind,
         output_dir=output_dir,
         report_path=report_path,
         workbook_path=workbook_path,
         csv_path=csv_path,
         manifest_path=manifest_path,
         pdf_path=pdf_path if pdf_path and pdf_path.exists() else None,
-        figure_paths=[figure.png_path for figure in figures if figure.png_path is not None],
-        skipped_sections=skipped_sections,
-        row_counts=row_counts,
-        tables=tables,
+        figure_paths=[artifact.png_path for artifact in figure_artifacts if artifact.png_path is not None],
+        skipped_sections=analysis.skipped_sections,
+        row_counts=dict(analysis.row_counts),
+        tables=analysis.tables,
+        findings_json_path=findings_json_path if findings_json_path and findings_json_path.exists() else None,
+        findings_md_path=findings_md_path if findings_md_path and findings_md_path.exists() else None,
+        copied_project_path=analysis.copied_project_path,
+        sufficiency_summary=dict(analysis.sufficiency_summary),
+        endpoint_tables=analysis.endpoint_tables,
+        findings=list(analysis.findings),
     )
-
-
-generate_report = run_microwire_eda
-
-
-def _classification_model(frame: pd.DataFrame) -> tuple[pd.DataFrame, plt.Figure | None, str | None]:
-    working = frame.loc[frame["is_broken"].isin([0, 1])].copy()
-    if working.empty:
-        return pd.DataFrame(), None, "Classification skipped: no rows with a known broke/OK outcome."
-    counts = working["is_broken"].value_counts()
-    if int(counts.get(0, 0)) < 4 or int(counts.get(1, 0)) < 4:
-        return pd.DataFrame(), None, "Classification skipped: at least 4 OK rows and 4 Broke rows are required."
-    features = [feature for feature in CONTROL_FEATURES if feature in working.columns and int(working[feature].notna().sum()) >= 8]
-    if not features:
-        return pd.DataFrame(), None, "Classification skipped: no control features had enough usable rows."
-    complete = working.dropna(subset=features + ["is_broken"]).copy()
-    if len(complete.index) < 8:
-        return pd.DataFrame(), None, "Classification skipped: at least 8 complete rows are required after feature filtering."
-    x = complete[features]
-    y = complete["is_broken"].astype(int)
-    pipeline = Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler()), ("model", LogisticRegression(max_iter=2000, class_weight="balanced"))])
-    pipeline.fit(x, y)
-    predicted = pipeline.predict(x)
-    probabilities = pipeline.predict_proba(x)[:, 1]
-    matrix = confusion_matrix(y, predicted, labels=[0, 1])
-    metrics = pd.DataFrame([{"model": "Model A", "rows_used": len(complete.index), "feature_count": len(features), "accuracy": accuracy_score(y, predicted), "roc_auc": roc_auc_score(y, probabilities), "tn": int(matrix[0, 0]), "fp": int(matrix[0, 1]), "fn": int(matrix[1, 0]), "tp": int(matrix[1, 1])}])
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-    axes[0].scatter(probabilities, y + np.random.normal(0.0, 0.03, size=len(y)), c=[STATUS_COLORS[STATUS_BROKE] if value == 1 else STATUS_COLORS[STATUS_OK] for value in y], alpha=0.8)
-    axes[0].set_title("Model A: predicted broke probability")
-    axes[0].set_xlabel("Predicted probability")
-    axes[0].set_ylabel("Actual outcome")
-    axes[0].set_yticks([0, 1], labels=[STATUS_OK, STATUS_BROKE])
-    coefficients = pd.Series(pipeline.named_steps["model"].coef_[0], index=features).sort_values()
-    axes[1].barh(coefficients.index, coefficients.values, color=[STATUS_COLORS[STATUS_BROKE] if value > 0 else STATUS_COLORS[STATUS_OK] for value in coefficients.values])
-    axes[1].axvline(0.0, color="#37474f", linewidth=1.0)
-    axes[1].set_title("Model A: logistic coefficients")
-    fig.tight_layout()
-    return metrics, fig, None
-
-
-def _regression_model(frame: pd.DataFrame, target: str, label: str, model_name: str) -> tuple[pd.DataFrame, plt.Figure | None, str | None]:
-    if target not in frame.columns:
-        return pd.DataFrame(), None, f"{model_name} skipped: target column is unavailable."
-    working = frame.loc[frame[target].notna()].copy()
-    if working.empty:
-        return pd.DataFrame(), None, f"{model_name} skipped: no rows with numeric target values are available."
-    features = [feature for feature in CONTROL_FEATURES if feature in working.columns and int(working[feature].notna().sum()) >= 8]
-    if not features:
-        return pd.DataFrame(), None, f"{model_name} skipped: no control features had enough usable rows."
-    complete = working.dropna(subset=features + [target]).copy()
-    if len(complete.index) < 8:
-        return pd.DataFrame(), None, f"{model_name} skipped: at least 8 complete rows are required."
-    if complete[target].nunique(dropna=True) < 4:
-        return pd.DataFrame(), None, f"{model_name} skipped: at least 4 distinct target values are required."
-    x = complete[features]
-    y = complete[target]
-    pipeline = Pipeline([("imputer", SimpleImputer(strategy="median")), ("scaler", StandardScaler()), ("model", LinearRegression())])
-    pipeline.fit(x, y)
-    predicted = pd.Series(pipeline.predict(x), index=complete.index)
-    residuals = y - predicted
-    metrics = pd.DataFrame([{"model": model_name, "target": label, "rows_used": len(complete.index), "feature_count": len(features), "rmse": math.sqrt(mean_squared_error(y, predicted)), "r2": r2_score(y, predicted)}])
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-    axes[0].scatter(y, predicted, c=[STATUS_COLORS[STATUS_BROKE] if value == 1 else STATUS_COLORS[STATUS_OK] if value == 0 else STATUS_COLORS[STATUS_NO_DATA] for value in complete.get("is_broken", pd.Series([math.nan] * len(complete.index)))], alpha=0.8)
-    lower = min(float(y.min()), float(predicted.min()))
-    upper = max(float(y.max()), float(predicted.max()))
-    axes[0].plot([lower, upper], [lower, upper], linestyle="--", color="#37474f")
-    axes[0].set_title(f"{model_name}: prediction vs reality")
-    axes[0].set_xlabel(f"Actual {label}")
-    axes[0].set_ylabel(f"Predicted {label}")
-    axes[1].hist(residuals, bins=min(10, max(4, len(residuals))), color="#4f83cc", alpha=0.85)
-    axes[1].axvline(0.0, linestyle="--", color="#37474f")
-    axes[1].set_title(f"{model_name}: residuals")
-    axes[1].set_xlabel("Residual")
-    fig.tight_layout()
-    return metrics, fig, None
-
-
-def _write_html_report(
-    *,
-    report_path: Path,
-    title: str,
-    cards: Sequence[tuple[str, Any]],
-    sections: Sequence[tuple[str, str, list[str], list[str]]],
-) -> None:
-    html_parts = [
-        "<!DOCTYPE html>",
-        "<html lang='en'><head><meta charset='utf-8'>",
-        f"<title>{html.escape(title)}</title>",
-        "<style>",
-        "body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f7fafc;color:#1f2933;}",
-        "header{padding:28px 32px;background:linear-gradient(135deg,#0f4c81,#147a73);color:#fff;}",
-        "main{padding:24px 32px 40px;max-width:1400px;margin:0 auto;}",
-        "section{background:#fff;border-radius:14px;padding:20px 22px;margin-bottom:22px;box-shadow:0 1px 4px rgba(15,23,42,.08);}",
-        "figure{margin:18px 0;}figure img{max-width:100%;border:1px solid #d9e2ec;border-radius:8px;}",
-        ".note{background:#fff4e5;border-left:4px solid #fb8c00;padding:10px 12px;margin:12px 0;}",
-        ".eda-table{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px;}",
-        ".eda-table th,.eda-table td{border:1px solid #d9e2ec;padding:7px 8px;text-align:left;vertical-align:top;}",
-        ".eda-table th{background:#f0f4f8;}",
-        ".cards{display:flex;flex-wrap:wrap;gap:12px;margin:0 0 22px;}",
-        ".card{background:#fff;border-radius:12px;padding:14px 16px;min-width:160px;box-shadow:0 1px 4px rgba(15,23,42,.08);}",
-        ".label{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#52606d;}",
-        ".value{font-size:26px;font-weight:600;margin-top:5px;}",
-        "</style></head><body>",
-        f"<header><h1>{html.escape(title)}</h1><p>Read-only exploratory analysis of assemble data with coverage checks, outcome summaries, controllable-parameter views, interaction plots, sweet-spot summaries, time drift, and gated baseline models.</p></header>",
-        "<main><div class='cards'>",
-    ]
-    for label, value in cards:
-        html_parts.append(f"<div class='card'><div class='label'>{html.escape(str(label))}</div><div class='value'>{html.escape(str(value))}</div></div>")
-    html_parts.append("</div>")
-    for section_title, intro, figures, tables in sections:
-        html_parts.append(f"<section><h2>{html.escape(section_title)}</h2><p>{html.escape(intro)}</p>")
-        html_parts.extend(figures)
-        html_parts.extend(tables)
-        html_parts.append("</section>")
-    html_parts.append("</main></body></html>")
-    report_path.write_text("\n".join(html_parts), encoding="utf-8")
 
 
 def generate_report(
     config: MicrowireEdaConfig,
-    progress_callback: callable | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> MicrowireEdaResult:
-    progress = progress_callback or (lambda _message: None)
-    progress("Loading assemble data")
-    raw_frame, input_kind = load_input_frame(config)
-    progress("Canonicalising columns")
-    canonical = canonicalise_frame(raw_frame)
-    scoped_frame, applied_scope = apply_row_scope(canonical, config)
-    output_dir = _normalise_output_dir(config).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = output_dir / "figures_bundle.pdf" if config.export_pdf_bundle else None
-    pdf = PdfPages(pdf_path) if pdf_path is not None else None
-    try:
-        progress("Preparing summary tables")
-        counts = _usable_row_counts(scoped_frame)
-        counts["fracture_stress_rows"] = int(
-            scoped_frame.get("Fracture stress (MPa)", pd.Series(dtype=float)).notna().sum()
-        )
-        tables: dict[str, pd.DataFrame] = {
-            "coverage": _coverage_table(scoped_frame),
-            "row_scope": _row_scope_table(config.row_scope, applied_scope, counts),
-            "spearman_all": _spearman_table(scoped_frame, CONTROL_FEATURES),
-            "strain_correlations": _target_correlation_table(scoped_frame, "strain_abs"),
-            "fracture_strain_correlations": _target_correlation_table(scoped_frame, "fracture_strain_abs"),
-            "fracture_stress_correlations": _target_correlation_table(scoped_frame, "Fracture stress (MPa)"),
-            "sweet_spots": _sweet_spot_table(scoped_frame),
-        }
-        skipped_sections: dict[str, str] = {}
-        figures_dir = output_dir / "figures"
-        figure_artifacts: list[FigureArtifact] = []
-        progress("Building coverage and distribution views")
-        figure_artifacts.append(_save_figure(_coverage_figure(scoped_frame), output_dir=figures_dir, key="coverage_heatmap", title="Coverage heatmap", section="coverage", pdf=pdf, write_png=config.export_png_bundle))
-        figure_artifacts.append(_save_figure(_outcome_overview_figure(scoped_frame), output_dir=figures_dir, key="outcome_overview", title="Outcome overview", section="outcomes", pdf=pdf, write_png=config.export_png_bundle))
-        figure_artifacts.append(_save_figure(_distribution_grid_figure(scoped_frame, GEOMETRY_COLUMNS + FABRICATION_COLUMNS, "Geometry and fabrication distributions"), output_dir=figures_dir, key="distributions", title="Geometry and fabrication distributions", section="fabrication", pdf=pdf, write_png=config.export_png_bundle))
-        corr_matrix = _correlation_matrix(scoped_frame, CONTROL_FEATURES)
-        figure_artifacts.append(_save_figure(_annotated_heatmap(corr_matrix, title="Spearman correlations"), output_dir=figures_dir, key="spearman_heatmap", title="Spearman correlations", section="fabrication", pdf=pdf, write_png=config.export_png_bundle))
-        progress("Building target correlation views")
-        for key, table_name, title_text in [
-            ("strain_correlation_bar", "strain_correlations", "Top correlations with |Strain|"),
-            ("fracture_correlation_bar", "fracture_strain_correlations", "Top correlations with |Fracture strain|"),
-            ("fracture_stress_correlation_bar", "fracture_stress_correlations", "Top correlations with fracture stress"),
-        ]:
-            table = tables[table_name]
-            if table.empty:
-                skipped_sections[key] = f"Not enough rows for {title_text.lower()}."
-                continue
-            display = table.head(8).iloc[::-1]
-            fig, ax = plt.subplots(figsize=(9, max(4, len(display) * 0.65)))
-            colors = [STATUS_COLORS[STATUS_OK] if value >= 0 else STATUS_COLORS[STATUS_BROKE] for value in display["rho"]]
-            ax.barh(display["feature"], display["rho"], color=colors)
-            ax.axvline(0, color="black", linewidth=1)
-            ax.set_xlabel("Spearman ρ")
-            ax.set_title(title_text)
-            fig.tight_layout()
-            figure_artifacts.append(_save_figure(fig, output_dir=figures_dir, key=key, title=title_text, section="function", pdf=pdf, write_png=config.export_png_bundle))
-        figure_artifacts.append(_save_figure(_scatter_grid(scoped_frame, target="strain_abs", title="Top |Strain| scatter plots"), output_dir=figures_dir, key="strain_scatter_grid", title="Top |Strain| scatter plots", section="function", pdf=pdf, write_png=config.export_png_bundle))
-        figure_artifacts.append(_save_figure(_geometry_to_function_figure(scoped_frame), output_dir=figures_dir, key="geometry_to_function", title="Geometry to strain", section="geometry", pdf=pdf, write_png=config.export_png_bundle))
-        progress("Building interaction, sweet spot, and time drift views")
-        figure_artifacts.append(_save_figure(_pairplot_figure(scoped_frame), output_dir=figures_dir, key="pairplot", title="Pairplot", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
-        figure_artifacts.append(_save_figure(_interaction_grid_figure(scoped_frame), output_dir=figures_dir, key="interaction_grid", title="Interaction grid", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
-        figure_artifacts.append(_save_figure(_parallel_coordinates_figure(scoped_frame), output_dir=figures_dir, key="parallel_coordinates", title="Parallel coordinates", section="interactions", pdf=pdf, write_png=config.export_png_bundle))
-        figure_artifacts.append(_save_figure(_sweet_spot_figure(tables["sweet_spots"]), output_dir=figures_dir, key="sweet_spots", title="Sweet spots", section="sweet_spots", pdf=pdf, write_png=config.export_png_bundle))
-        figure_artifacts.append(_save_figure(_time_drift_figure(scoped_frame), output_dir=figures_dir, key="time_drift", title="Time drift", section="time_drift", pdf=pdf, write_png=config.export_png_bundle))
-        progress("Running regression models")
-        model_b_metrics, model_b_fig, model_b_skip = _regression_model(scoped_frame, "strain_abs", "|Strain|", "Model B")
-        model_c_metrics, model_c_fig, model_c_skip = _regression_model(scoped_frame, "fracture_strain_abs", "|Fracture strain|", "Model C")
-        model_d_metrics, model_d_fig, model_d_skip = _regression_model(
-            scoped_frame,
-            "Fracture stress (MPa)",
-            "Fracture stress (MPa)",
-            "Model D",
-        )
-        tables["model_b_metrics"] = model_b_metrics
-        tables["model_c_metrics"] = model_c_metrics
-        tables["model_d_metrics"] = model_d_metrics
-        for skip_key, reason in [("model_b", model_b_skip), ("model_c", model_c_skip), ("model_d", model_d_skip)]:
-            if reason:
-                skipped_sections[skip_key] = reason
-        for key, title_text, fig in [
-            ("model_b", "Model B - |Strain| regression", model_b_fig),
-            ("model_c", "Model C - |Fracture strain| regression", model_c_fig),
-            ("model_d", "Model D - Fracture stress regression", model_d_fig),
-        ]:
-            if fig is not None:
-                figure_artifacts.append(_save_figure(fig, output_dir=figures_dir, key=key, title=title_text, section="models", pdf=pdf, write_png=config.export_png_bundle))
-    finally:
-        if pdf is not None:
-            pdf.close()
-
+    progress = progress_callback or _noop_progress
+    analysis = run_analysis(config, progress_callback=progress)
     progress("Writing output files")
-    ordered_frame = _ordered_export_frame(scoped_frame)
-    csv_path = output_dir / "canonical_dataset.csv"
-    ordered_frame.to_csv(csv_path, index=False)
-    workbook_path = output_dir / "summary_tables.xlsx"
-    with pd.ExcelWriter(workbook_path) as writer:
-        ordered_frame.to_excel(writer, sheet_name="dataset", index=False)
-        for name in SUMMARY_TABLE_ORDER:
-            table = tables.get(name)
-            if isinstance(table, pd.DataFrame):
-                table.to_excel(writer, sheet_name=_slugify(name)[:31], index=False)
-
-    sections = [
-        ("Coverage report", "Completeness, availability, and usable-row counts for the assembled dataset.", [artifact.html for artifact in figure_artifacts if artifact.section == "coverage"], [_table_html(tables["coverage"]), _table_html(tables["row_scope"])]),
-        ("Endpoint overview", "Distributions for strain, fracture strain, stress, and fracture stress measured in the assembled data.", [artifact.html for artifact in figure_artifacts if artifact.section == "outcomes"], []),
-        ("Fabrication to geometry", "Distribution and correlation views for geometry and fabrication variables.", [artifact.html for artifact in figure_artifacts if artifact.section == "fabrication"], [_table_html(tables["spearman_all"])]),
-        ("Geometry and fabrication to function", "Target correlations against the available strain and fracture endpoints.", [artifact.html for artifact in figure_artifacts if artifact.section == "function"], [_table_html(tables["strain_correlations"]), _table_html(tables["fracture_strain_correlations"]), _table_html(tables["fracture_stress_correlations"])]),
-        ("Geometry to strain", "Dedicated d, D, and d/D views against strain endpoints.", [artifact.html for artifact in figure_artifacts if artifact.section == "geometry"], []),
-        ("Interaction views", "Pairwise, interaction-grid, and parallel-coordinate views for overlapping assembled rows.", [artifact.html for artifact in figure_artifacts if artifact.section == "interactions"], []),
-        ("Sweet spots", "Quantile-binned summaries for strain and fracture endpoints by parameter band.", [artifact.html for artifact in figure_artifacts if artifact.section == "sweet_spots"], [_table_html(tables["sweet_spots"])]),
-        ("Time drift", "Strain and fracture stress drift along the production timeline.", [artifact.html for artifact in figure_artifacts if artifact.section == "time_drift"], []),
-        ("Regression models", "Gated baseline regressions for strain, fracture strain, and fracture stress.", [artifact.html for artifact in figure_artifacts if artifact.section == "models"], [_table_html(tables["model_b_metrics"]), _table_html(tables["model_c_metrics"]), _table_html(tables["model_d_metrics"])]),
-    ]
-    report_path = output_dir / "report.html"
-    cards = [("Rows", counts["all_rows"]), ("Numeric |Strain|", counts["numeric_strain"]), ("Numeric |Fracture strain|", counts["numeric_fracture_strain"]), ("Numeric fracture stress", counts["fracture_stress_rows"])]
-    _write_html_report(report_path=report_path, title=config.report_title, cards=cards, sections=sections)
-    manifest_path = output_dir / "manifest.json"
-    note = None
-    if config.row_scope != applied_scope:
-        note = f"Requested row scope '{config.row_scope}' was not available from the current input, so '{applied_scope}' was used instead."
-    manifest = {
-        "kind": "microwire_eda",
-        "version": 1,
-        "report_title": config.report_title,
-        "input_kind": input_kind,
-        "input_path": str(config.input_path.resolve()) if isinstance(config.input_path, Path) else None,
-        "output_dir": str(output_dir),
-        "row_scope_requested": config.row_scope,
-        "row_scope_applied": applied_scope,
-        "row_counts": counts,
-        "figure_paths": [str(artifact.png_path) for artifact in figure_artifacts if artifact.png_path is not None],
-        "skipped_sections": skipped_sections,
-        "note": note,
-    }
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    result = write_analysis_artifacts(analysis, progress_callback=progress)
     progress("Finished")
-    return MicrowireEdaResult(
-        config=config,
-        input_kind=input_kind,
-        output_dir=output_dir,
-        report_path=report_path,
-        workbook_path=workbook_path,
-        csv_path=csv_path,
-        manifest_path=manifest_path,
-        pdf_path=pdf_path if pdf_path is not None and pdf_path.exists() else None,
-        figure_paths=[artifact.png_path for artifact in figure_artifacts if artifact.png_path is not None],
-        skipped_sections=skipped_sections,
-        row_counts=counts,
-        tables=tables,
-    )
+    return result

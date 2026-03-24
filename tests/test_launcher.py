@@ -170,6 +170,58 @@ def test_launcher_detects_microwire_eda_cli_flags() -> None:
     assert launcher_module._is_microwire_eda_requested(args) is True  # noqa: SLF001
     assert args.rows == "filtered"
     assert args.out == "artifacts/eda"
+    assert args.microwire_eda_copy_project is True
+
+
+def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_generate_report(config: object) -> object:
+        captured["config"] = config
+        return argparse.Namespace(
+            report_path=tmp_path / "report.html",
+            workbook_path=tmp_path / "summary.xlsx",
+            csv_path=tmp_path / "dataset.csv",
+            manifest_path=tmp_path / "manifest.json",
+            findings_json_path=tmp_path / "findings.json",
+            findings_md_path=tmp_path / "findings.md",
+            copied_project_path=tmp_path / "working" / "copy.pydpj",
+            findings=[{"headline": "Top signal"}],
+        )
+
+    import microwire_eda.core as eda_core
+
+    monkeypatch.setattr(eda_core, "generate_report", _fake_generate_report)
+
+    args = argparse.Namespace(
+        microwire_eda=str(tmp_path / "source.pydpj"),
+        rows="all",
+        out=str(tmp_path / "artifacts"),
+        microwire_eda_title="CLI EDA",
+        microwire_eda_working_copy_dir=str(tmp_path / "working"),
+        microwire_eda_copy_project=True,
+        microwire_eda_legacy_breakage=False,
+        microwire_eda_composition_splits=False,
+        microwire_eda_findings=True,
+    )
+
+    exit_code = launcher_module._run_microwire_eda_cli(args)  # noqa: SLF001 - internal automation hook
+
+    assert exit_code == 0
+    config = captured["config"]
+    assert getattr(config, "copy_project") is True
+    assert getattr(config, "working_copy_dir") == tmp_path / "working"
+    assert getattr(config, "include_legacy_breakage_analysis") is False
+    assert getattr(config, "include_composition_splits") is False
+    assert getattr(config, "write_findings") is True
+    output = capsys.readouterr().out
+    assert "findings_json=" in output
+    assert "copied_project=" in output
+    assert "finding=Top signal" in output
 
 
 def test_launcher_pyplot_automation_generates_summary_and_artifacts(tmp_path: Path) -> None:

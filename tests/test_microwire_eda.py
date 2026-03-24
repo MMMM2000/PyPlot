@@ -61,6 +61,17 @@ def _sample_dataframe() -> pd.DataFrame:
     )
 
 
+def _project_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "kind": "MicrowireDataBuilder",
+        "sections": {
+            "assemble": {
+                "rows": rows,
+            }
+        },
+    }
+
+
 def test_detect_input_kind_and_project_loading(tmp_path: Path) -> None:
     project_path = tmp_path / "example.pydpj"
     project_path.write_text(
@@ -183,6 +194,61 @@ def test_generate_report_skips_png_bundle_when_disabled(tmp_path: Path) -> None:
     assert result.figure_paths == []
     figures_dir = result.output_dir / "figures"
     assert not figures_dir.exists() or not any(figures_dir.glob("*.png"))
+
+
+def test_generate_report_modern_endpoints_work_without_breakage_labels(tmp_path: Path) -> None:
+    frame = _sample_dataframe().drop(columns=["Fracture stress (MPa)"], errors="ignore")
+    config = MicrowireEdaConfig(
+        source_dataframe=frame.drop(columns=["is_broken"], errors="ignore"),
+        output_dir=tmp_path / "report",
+        report_title="Endpoint First",
+        export_png_bundle=False,
+        export_pdf_bundle=False,
+        include_legacy_breakage_analysis=True,
+    )
+
+    result = generate_report(config)
+
+    assert result.report_path.exists()
+    assert result.row_counts["numeric_strain"] == 5
+    assert result.row_counts["known_outcome"] == 10
+    assert result.tables["process_strain_correlations"].empty is False
+    assert result.findings
+    assert result.tables["endpoint_coverage"].empty is False
+
+
+def test_generate_report_writes_findings_and_uses_project_copy(tmp_path: Path) -> None:
+    project_path = tmp_path / "source_project.pydpj"
+    source_rows = _sample_dataframe().head(6).copy()
+    source_rows["Production datetime"] = source_rows["Production datetime"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    payload = _project_payload(source_rows.to_dict(orient="records"))
+    original_text = json.dumps(payload, ensure_ascii=False)
+    project_path.write_text(original_text, encoding="utf-8")
+
+    config = MicrowireEdaConfig(
+        input_path=project_path,
+        output_dir=tmp_path / "report",
+        report_title="Copy Safe",
+        working_copy_dir=tmp_path / "working",
+        copy_project=True,
+        export_png_bundle=False,
+        export_pdf_bundle=False,
+    )
+
+    result = generate_report(config)
+
+    assert result.copied_project_path is not None
+    assert result.copied_project_path.exists()
+    assert result.copied_project_path != project_path
+    assert project_path.read_text(encoding="utf-8") == original_text
+    assert result.findings_json_path is not None and result.findings_json_path.exists()
+    assert result.findings_md_path is not None and result.findings_md_path.exists()
+
+    findings_payload = json.loads(result.findings_json_path.read_text(encoding="utf-8"))
+    assert findings_payload["kind"] == "MicrowireEDAFindings"
+    assert findings_payload["copied_project_path"] == str(result.copied_project_path)
+    assert findings_payload["findings"]
+    assert "## Findings" in result.findings_md_path.read_text(encoding="utf-8")
 
 
 def test_builder_launch_passes_filtered_assemble_rows(
