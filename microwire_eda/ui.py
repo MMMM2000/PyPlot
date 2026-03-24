@@ -1,7 +1,9 @@
+"""Qt window for Microwire EDA report generation."""
+
 from __future__ import annotations
 
-import logging
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -14,22 +16,44 @@ from .core import (
     ROW_SCOPE_SELECTED,
     MicrowireEdaConfig,
     MicrowireEdaResult,
-    run_microwire_eda,
+    generate_report,
 )
 
-LOGGER = logging.getLogger(__name__)
 _WINDOW_REFS: list["MicrowireEdaWindow"] = []
 
 
-def run_cli(config: MicrowireEdaConfig) -> MicrowireEdaResult:
-    return run_microwire_eda(config)
+class _EdaWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(str)
+    progress = QtCore.pyqtSignal(str)
+
+    def __init__(self, config: MicrowireEdaConfig) -> None:
+        super().__init__()
+        self._config = config
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            result = generate_report(self._config, progress_callback=self.progress.emit)
+        except Exception as exc:
+            message = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            self.failed.emit(message)
+            return
+        self.finished.emit(result)
 
 
 class MicrowireEdaWindow(QtWidgets.QMainWindow):
-    def __init__(self, config: MicrowireEdaConfig | None = None, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        config: MicrowireEdaConfig | None = None,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._initial_config = config or MicrowireEdaConfig()
         self._last_result: MicrowireEdaResult | None = None
+        self._thread: QtCore.QThread | None = None
+        self._worker: _EdaWorker | None = None
+        self._progress_dialog: QtWidgets.QProgressDialog | None = None
         self.setWindowTitle("Microwire EDA")
         self.resize(860, 620)
         self._build_ui()
@@ -67,6 +91,10 @@ class MicrowireEdaWindow(QtWidgets.QMainWindow):
         form.addRow("", self.pdf_checkbox)
 
         layout.addLayout(form)
+
+        self.context_label = QtWidgets.QLabel("", self)
+        self.context_label.setWordWrap(True)
+        layout.addWidget(self.context_label)
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)
@@ -115,6 +143,15 @@ class MicrowireEdaWindow(QtWidgets.QMainWindow):
         current_index = max(0, self.scope_combo.findData(config.row_scope))
         self.scope_combo.setCurrentIndex(current_index)
 
+        if isinstance(config.source_dataframe, object) and config.source_dataframe is not None:
+            self.context_label.setText(
+                f"Using {len(config.source_dataframe.index)} row(s) supplied directly from Microwire Data Builder Assemble."
+            )
+        else:
+            self.context_label.setText(
+                "The report will use only the data already present in the selected Assemble project/export."
+            )
+
     def _choose_input(self) -> None:
         start = self.input_edit.text().strip() or str(Path.cwd())
         path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -134,7 +171,9 @@ class MicrowireEdaWindow(QtWidgets.QMainWindow):
 
     def _current_config(self) -> MicrowireEdaConfig:
         return MicrowireEdaConfig(
-            input_path=Path(self.input_edit.text().strip()).expanduser() if self.input_edit.text().strip() else self._initial_config.input_path,
+            input_path=Path(self.input_edit.text().strip()).expanduser()
+            if self.input_edit.text().strip()
+            else self._initial_config.input_path,
             input_kind=INPUT_KIND_AUTO,
             row_scope=str(self.scope_combo.currentData() or ROW_SCOPE_ALL),
             output_dir=Path(self.output_edit.text().strip()).expanduser(),
@@ -147,33 +186,92 @@ class MicrowireEdaWindow(QtWidgets.QMainWindow):
             metadata=dict(self._initial_config.metadata),
         )
 
+    def _log(self, message: str) -> None:
+        self.log_view.appendPlainText(message)
+        bar = self.log_view.verticalScrollBar()
+        if bar is not None:
+            bar.setValue(bar.maximum())
+
     def _run_analysis(self) -> None:
+        config = self._current_config()
+        if config.source_dataframe is None and config.input_path is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire EDA",
+                "Choose a Builder project or assembled spreadsheet first.",
+            )
+            return
         self.run_button.setEnabled(False)
         self.open_report_button.setEnabled(False)
-        self.summary_label.setText("Running analysis…")
-        self.log_view.appendPlainText("Running Microwire EDA…")
-        QtWidgets.QApplication.processEvents()
-        try:
-            result = run_microwire_eda(self._current_config())
-        except Exception as exc:
-            LOGGER.exception("Microwire EDA failed")
-            self.log_view.appendPlainText(f"Analysis failed: {exc}")
-            self.summary_label.setText(f"Analysis failed: {exc}")
-            QtWidgets.QMessageBox.critical(self, "Microwire EDA", f"Analysis failed:\n{exc}")
+        self.summary_label.setText("Running analysis...")
+        self._log("Starting Microwire EDA...")
+        self._progress_dialog = QtWidgets.QProgressDialog(
+            "Preparing analysis...",
+            "",
+            0,
+            0,
+            self,
+        )
+        self._progress_dialog.setWindowTitle("Microwire EDA")
+        self._progress_dialog.setCancelButton(None)
+        self._progress_dialog.setMinimumDuration(0)
+        self._progress_dialog.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        self._progress_dialog.show()
+
+        self._thread = QtCore.QThread(self)
+        self._worker = _EdaWorker(config)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._handle_progress)
+        self._worker.finished.connect(self._handle_finished)
+        self._worker.failed.connect(self._handle_failed)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.failed.connect(self._thread.quit)
+        self._thread.finished.connect(self._cleanup_thread)
+        self._thread.start()
+
+    def _handle_progress(self, message: str) -> None:
+        self._log(message)
+        if self._progress_dialog is not None:
+            self._progress_dialog.setLabelText(message)
+
+    def _handle_finished(self, result: object) -> None:
+        self.run_button.setEnabled(True)
+        if self._progress_dialog is not None:
+            self._progress_dialog.close()
+            self._progress_dialog = None
+        if not isinstance(result, MicrowireEdaResult):
+            self._log(f"Unexpected result type: {type(result)}")
             return
-        finally:
-            self.run_button.setEnabled(True)
         self._last_result = result
         self.open_report_button.setEnabled(True)
         self.summary_label.setText(
-            f"Report ready: {result.report_path}\nRows analysed: {result.row_counts.get('analysed_rows', 0)}"
+            f"Report ready: {result.report_path}\nRows analysed: {result.row_counts.get('all_rows', 0)}"
         )
-        self.log_view.appendPlainText(f"HTML report: {result.report_path}")
-        self.log_view.appendPlainText(f"Workbook: {result.workbook_path}")
-        self.log_view.appendPlainText(f"Manifest: {result.manifest_path}")
+        self._log(f"HTML report: {result.report_path}")
+        self._log(f"Workbook: {result.workbook_path}")
+        self._log(f"Manifest: {result.manifest_path}")
         if result.skipped_sections:
             for key, message in result.skipped_sections.items():
-                self.log_view.appendPlainText(f"Skipped {key}: {message}")
+                self._log(f"Skipped {key}: {message}")
+
+    def _handle_failed(self, message: str) -> None:
+        self.run_button.setEnabled(True)
+        if self._progress_dialog is not None:
+            self._progress_dialog.close()
+            self._progress_dialog = None
+        self._log("Microwire EDA failed:")
+        self._log(message)
+        self.summary_label.setText("Analysis failed. See the log for details.")
+        QtWidgets.QMessageBox.critical(self, "Microwire EDA", "Analysis failed. See the log for details.")
+
+    def _cleanup_thread(self) -> None:
+        if self._worker is not None:
+            self._worker.deleteLater()
+        if self._thread is not None:
+            self._thread.deleteLater()
+        self._worker = None
+        self._thread = None
 
     def _open_report(self) -> None:
         if self._last_result is None:
@@ -182,7 +280,10 @@ class MicrowireEdaWindow(QtWidgets.QMainWindow):
         QtGui.QDesktopServices.openUrl(url)
 
 
-def launch_eda_window(config: MicrowireEdaConfig | None = None, parent: QtWidgets.QWidget | None = None) -> MicrowireEdaWindow:
+def launch_eda_window(
+    config: MicrowireEdaConfig | None = None,
+    parent: QtWidgets.QWidget | None = None,
+) -> MicrowireEdaWindow:
     window = MicrowireEdaWindow(config=config, parent=parent)
     window.show()
     _WINDOW_REFS.append(window)

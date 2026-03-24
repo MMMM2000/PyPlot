@@ -115,11 +115,11 @@ SUMMARY_TABLE_ORDER = [
     "spearman_all",
     "strain_correlations",
     "fracture_strain_correlations",
-    "broke_ok_summary",
+    "fracture_stress_correlations",
     "sweet_spots",
-    "model_a_metrics",
     "model_b_metrics",
     "model_c_metrics",
+    "model_d_metrics",
 ]
 
 HEADER_ALIASES = {
@@ -661,14 +661,14 @@ def _broke_ok_summary(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _sweet_spot_table(frame: pd.DataFrame) -> pd.DataFrame:
-    working = frame.loc[frame["is_broken"].isin([0, 1])].copy()
     rows: list[dict[str, Any]] = []
-    if working.empty:
+    targets = [target for target in ["strain_abs", "fracture_strain_abs", "Fracture stress (MPa)"] if target in frame.columns]
+    if not targets:
         return pd.DataFrame(rows)
     for feature in CONTROL_FEATURES:
-        if feature not in working.columns:
+        if feature not in frame.columns:
             continue
-        subset = working[[feature, "is_broken"]].dropna()
+        subset = frame[[feature] + targets].dropna(how="all")
         if len(subset.index) < 6:
             continue
         try:
@@ -682,7 +682,9 @@ def _sweet_spot_table(frame: pd.DataFrame) -> pd.DataFrame:
                 {
                     "feature": feature,
                     "bucket": str(bucket),
-                    "broke_rate_pct": float(bucket_frame["is_broken"].mean()) * 100.0,
+                    "mean_strain_abs": float(bucket_frame["strain_abs"].dropna().mean()) if "strain_abs" in bucket_frame else math.nan,
+                    "mean_fracture_strain_abs": float(bucket_frame["fracture_strain_abs"].dropna().mean()) if "fracture_strain_abs" in bucket_frame else math.nan,
+                    "mean_fracture_stress_mpa": float(bucket_frame["Fracture stress (MPa)"].dropna().mean()) if "Fracture stress (MPa)" in bucket_frame else math.nan,
                     "n": int(len(bucket_frame.index)),
                 }
             )
@@ -722,18 +724,13 @@ def _coverage_figure(frame: pd.DataFrame) -> plt.Figure:
 
 
 def _outcome_overview_figure(frame: pd.DataFrame) -> plt.Figure:
-    status = _status_series(frame)
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     axes = axes.ravel()
-    counts = status.value_counts().reindex([STATUS_OK, STATUS_BROKE, STATUS_NO_DATA], fill_value=0)
-    axes[0].bar(counts.index, counts.values, color=[STATUS_COLORS[key] for key in counts.index])
-    axes[0].set_title("Outcome counts")
-    axes[0].set_ylabel("Rows")
-
     for axis, column, title, color in [
-        (axes[1], "strain_abs", "|Strain| distribution", "#4f8bc9"),
-        (axes[2], "fracture_strain_abs", "Fracture |strain| distribution", "#e39d34"),
-        (axes[3], "Stress (MPa)", "Stress distribution", "#8f63c8"),
+        (axes[0], "strain_abs", "|Strain| distribution", "#4f8bc9"),
+        (axes[1], "fracture_strain_abs", "|Fracture strain| distribution", "#e39d34"),
+        (axes[2], "Stress (MPa)", "Stress distribution", "#8f63c8"),
+        (axes[3], "Fracture stress (MPa)", "Fracture stress distribution", "#26a69a"),
     ]:
         series = frame.get(column, pd.Series(dtype=float)).dropna()
         if series.empty:
@@ -887,15 +884,19 @@ def _interaction_grid_figure(frame: pd.DataFrame) -> plt.Figure:
     for row_idx, y_col in enumerate(y_columns):
         for col_idx, x_col in enumerate(x_columns):
             ax = axes_grid[row_idx, col_idx]
-            subset = frame[[x_col, y_col, "strain_abs", "is_broken"]].dropna(subset=[x_col, y_col])
+            subset = frame[[x_col, y_col, "strain_abs"]].dropna(subset=[x_col, y_col])
             if subset.empty:
                 ax.axis("off")
                 continue
-            for broken_value, marker in [(0, "o"), (1, "x")]:
-                portion = subset.loc[subset["is_broken"] == broken_value]
-                if portion.empty:
-                    continue
-                ax.scatter(portion[x_col], portion[y_col], c=portion["strain_abs"].fillna(0.0), cmap="RdYlGn", vmin=vmin, vmax=vmax, marker=marker, alpha=0.85)
+            ax.scatter(
+                subset[x_col],
+                subset[y_col],
+                c=subset["strain_abs"].fillna(0.0),
+                cmap="RdYlGn",
+                vmin=vmin,
+                vmax=vmax,
+                alpha=0.85,
+            )
             ax.set_xlabel(x_col)
             ax.set_ylabel(y_col)
     fig.tight_layout()
@@ -905,18 +906,26 @@ def _interaction_grid_figure(frame: pd.DataFrame) -> plt.Figure:
 def _parallel_coordinates_figure(frame: pd.DataFrame) -> plt.Figure:
     columns = [column for column in GEOMETRY_COLUMNS + ["Core temperature (°C)", "Winding speed (m/min)", "Glass feeding (mm/min)", "Underpressure"] if column in frame.columns]
     if len(columns) < 4:
-        return _blank_figure("Parallel coordinates", "Not enough rows with known OK/Broke outcomes for parallel coordinates.")
-    working = frame.loc[frame["is_broken"].isin([0, 1]), columns + ["is_broken"]].dropna()
+        return _blank_figure("Parallel coordinates", "Not enough assembled numeric columns for parallel coordinates.")
+    working = frame.loc[:, columns + ["fracture_strain_abs"]].dropna(subset=columns, how="any")
     if len(working.index) < 6:
-        return _blank_figure("Parallel coordinates", "Not enough rows with known OK/Broke outcomes for parallel coordinates.")
+        return _blank_figure("Parallel coordinates", "Not enough complete assembled rows for parallel coordinates.")
     normalized = working.copy()
     for column in columns:
         minimum = float(normalized[column].min())
         maximum = float(normalized[column].max())
         normalized[column] = 0.5 if math.isclose(minimum, maximum) else (normalized[column] - minimum) / (maximum - minimum)
-    normalized["Status"] = normalized["is_broken"].map(lambda value: STATUS_BROKE if value == 1 else STATUS_OK)
+    band_source = normalized["fracture_strain_abs"].fillna(normalized["fracture_strain_abs"].median())
+    if band_source.isna().all() or band_source.nunique(dropna=True) < 2:
+        normalized["Band"] = "All rows"
+    else:
+        normalized["Band"] = pd.qcut(
+            band_source,
+            q=min(3, int(band_source.nunique(dropna=True))),
+            duplicates="drop",
+        ).astype(str)
     fig, ax = plt.subplots(figsize=(11, 5))
-    parallel_coordinates(normalized.drop(columns=["is_broken"]), "Status", color=[STATUS_COLORS[STATUS_OK], STATUS_COLORS[STATUS_BROKE]], alpha=0.35, ax=ax)
+    parallel_coordinates(normalized.drop(columns=["fracture_strain_abs"]), "Band", alpha=0.35, ax=ax)
     ax.set_ylabel("Normalised value (0-1)")
     ax.set_title("Parallel coordinates")
     fig.tight_layout()
@@ -925,19 +934,20 @@ def _parallel_coordinates_figure(frame: pd.DataFrame) -> plt.Figure:
 
 def _sweet_spot_figure(table: pd.DataFrame) -> plt.Figure:
     if table.empty:
-        return _blank_figure("Sweet spots", "Not enough outcome-labelled rows for sweet-spot binning.")
+        return _blank_figure("Sweet spots", "Not enough assembled numeric rows for sweet-spot binning.")
     variables = list(dict.fromkeys(table["feature"].tolist()))[:6]
     rows = math.ceil(len(variables) / 2)
     fig, axes = plt.subplots(rows, 2, figsize=(12, max(4.5, rows * 3.5)))
     axes_array = np.atleast_1d(axes).ravel()
     for ax, feature in zip(axes_array, variables):
         subset = table.loc[table["feature"] == feature]
-        colors = [STATUS_COLORS[STATUS_OK] if value < 50 else "#fb8c00" if value <= 75 else STATUS_COLORS[STATUS_BROKE] for value in subset["broke_rate_pct"].tolist()]
-        ax.bar(range(len(subset.index)), subset["broke_rate_pct"], color=colors)
-        ax.axhline(50.0, linestyle="--", color="#37474f", linewidth=1.0)
+        metric = "mean_fracture_strain_abs" if subset["mean_fracture_strain_abs"].notna().any() else "mean_strain_abs"
+        values = subset[metric].fillna(0.0).tolist()
+        ax.bar(range(len(subset.index)), values, color="#64b5f6")
         ax.set_xticks(range(len(subset.index)))
         ax.set_xticklabels(subset["bucket"], rotation=20, ha="right", fontsize=8)
         ax.set_title(feature)
+        ax.set_ylabel(metric)
     for ax in axes_array[len(variables):]:
         ax.axis("off")
     fig.tight_layout()
@@ -951,18 +961,17 @@ def _time_drift_figure(frame: pd.DataFrame) -> plt.Figure:
     if working.empty:
         return _blank_figure("Time drift", "No usable production timeline rows were available.")
     fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
-    with_outcome = working.loc[working["is_broken"].isin([0, 1])]
-    if not with_outcome.empty:
-        rolling = with_outcome["is_broken"].rolling(window=5, min_periods=1).mean()
-        axes[0].scatter(with_outcome["Production datetime"], with_outcome["is_broken"], c=with_outcome["is_broken"].map({0: STATUS_COLORS[STATUS_OK], 1: STATUS_COLORS[STATUS_BROKE]}), alpha=0.8)
-        axes[0].plot(with_outcome["Production datetime"], rolling, color="#1e88e5", linewidth=1.8)
-        axes[0].set_ylabel("Broke (1) / OK (0)")
-        axes[0].set_title("Broken rate over time")
     with_strain = working.loc[working["strain_abs"].notna()]
     if not with_strain.empty:
-        axes[1].scatter(with_strain["Production datetime"], with_strain["strain_abs"], color="#1e88e5", alpha=0.8)
-        axes[1].set_ylabel("|Strain|")
-        axes[1].set_title("|Strain| over time")
+        axes[0].scatter(with_strain["Production datetime"], with_strain["strain_abs"], color="#1e88e5", alpha=0.8)
+        axes[0].set_ylabel("|Strain|")
+        axes[0].set_title("|Strain| over time")
+    if "Fracture stress (MPa)" in working.columns:
+        with_fracture = working.loc[working["Fracture stress (MPa)"].notna()]
+        if not with_fracture.empty:
+            axes[1].scatter(with_fracture["Production datetime"], with_fracture["Fracture stress (MPa)"], color="#26a69a", alpha=0.8)
+            axes[1].set_ylabel("Fracture stress (MPa)")
+            axes[1].set_title("Fracture stress over time")
     for axis in axes:
         axis.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
     fig.autofmt_xdate()
@@ -1475,8 +1484,14 @@ def _write_html_report(
     report_path.write_text("\n".join(html_parts), encoding="utf-8")
 
 
-def generate_report(config: MicrowireEdaConfig) -> MicrowireEdaResult:
+def generate_report(
+    config: MicrowireEdaConfig,
+    progress_callback: callable | None = None,
+) -> MicrowireEdaResult:
+    progress = progress_callback or (lambda _message: None)
+    progress("Loading assemble data")
     raw_frame, input_kind = load_input_frame(config)
+    progress("Canonicalising columns")
     canonical = canonicalise_frame(raw_frame)
     scoped_frame, applied_scope = apply_row_scope(canonical, config)
     output_dir = _normalise_output_dir(config).resolve()
@@ -1484,39 +1499,34 @@ def generate_report(config: MicrowireEdaConfig) -> MicrowireEdaResult:
     pdf_path = output_dir / "figures_bundle.pdf" if config.export_pdf_bundle else None
     pdf = PdfPages(pdf_path) if pdf_path is not None else None
     try:
+        progress("Preparing summary tables")
         counts = _usable_row_counts(scoped_frame)
+        counts["fracture_stress_rows"] = int(
+            scoped_frame.get("Fracture stress (MPa)", pd.Series(dtype=float)).notna().sum()
+        )
         tables: dict[str, pd.DataFrame] = {
             "coverage": _coverage_table(scoped_frame),
             "row_scope": _row_scope_table(config.row_scope, applied_scope, counts),
             "spearman_all": _spearman_table(scoped_frame, CONTROL_FEATURES),
             "strain_correlations": _target_correlation_table(scoped_frame, "strain_abs"),
             "fracture_strain_correlations": _target_correlation_table(scoped_frame, "fracture_strain_abs"),
-            "broke_ok_summary": _broke_ok_summary(scoped_frame),
+            "fracture_stress_correlations": _target_correlation_table(scoped_frame, "Fracture stress (MPa)"),
             "sweet_spots": _sweet_spot_table(scoped_frame),
         }
         skipped_sections: dict[str, str] = {}
         figures_dir = output_dir / "figures"
         figure_artifacts: list[FigureArtifact] = []
+        progress("Building coverage and distribution views")
         figure_artifacts.append(_save_figure(_coverage_figure(scoped_frame), output_dir=figures_dir, key="coverage_heatmap", title="Coverage heatmap", section="coverage", pdf=pdf))
         figure_artifacts.append(_save_figure(_outcome_overview_figure(scoped_frame), output_dir=figures_dir, key="outcome_overview", title="Outcome overview", section="outcomes", pdf=pdf))
         figure_artifacts.append(_save_figure(_distribution_grid_figure(scoped_frame, GEOMETRY_COLUMNS + FABRICATION_COLUMNS, "Geometry and fabrication distributions"), output_dir=figures_dir, key="distributions", title="Geometry and fabrication distributions", section="fabrication", pdf=pdf))
         corr_matrix = _correlation_matrix(scoped_frame, CONTROL_FEATURES)
         figure_artifacts.append(_save_figure(_annotated_heatmap(corr_matrix, title="Spearman correlations"), output_dir=figures_dir, key="spearman_heatmap", title="Spearman correlations", section="fabrication", pdf=pdf))
-        if not tables["broke_ok_summary"].empty:
-            display = tables["broke_ok_summary"].head(10).iloc[::-1]
-            fig, ax = plt.subplots(figsize=(10, max(4, len(display) * 0.6)))
-            colors = [STATUS_COLORS[STATUS_OK] if value < 0 else STATUS_COLORS[STATUS_BROKE] for value in display["delta_broke_minus_ok"]]
-            ax.barh(display["feature"], display["delta_broke_minus_ok"], color=colors)
-            ax.axvline(0, color="black", linewidth=1)
-            ax.set_xlabel("Broke mean - OK mean")
-            ax.set_title("Broke vs OK mean differences")
-            fig.tight_layout()
-            figure_artifacts.append(_save_figure(fig, output_dir=figures_dir, key="broke_ok_deltas", title="Broke vs OK mean differences", section="function", pdf=pdf))
-        else:
-            skipped_sections["broke_ok"] = "Not enough labeled rows for OK vs Broke comparison plots."
+        progress("Building target correlation views")
         for key, table_name, title_text in [
             ("strain_correlation_bar", "strain_correlations", "Top correlations with |Strain|"),
             ("fracture_correlation_bar", "fracture_strain_correlations", "Top correlations with |Fracture strain|"),
+            ("fracture_stress_correlation_bar", "fracture_stress_correlations", "Top correlations with fracture stress"),
         ]:
             table = tables[table_name]
             if table.empty:
@@ -1533,27 +1543,39 @@ def generate_report(config: MicrowireEdaConfig) -> MicrowireEdaResult:
             figure_artifacts.append(_save_figure(fig, output_dir=figures_dir, key=key, title=title_text, section="function", pdf=pdf))
         figure_artifacts.append(_save_figure(_scatter_grid(scoped_frame, target="strain_abs", title="Top |Strain| scatter plots"), output_dir=figures_dir, key="strain_scatter_grid", title="Top |Strain| scatter plots", section="function", pdf=pdf))
         figure_artifacts.append(_save_figure(_geometry_to_function_figure(scoped_frame), output_dir=figures_dir, key="geometry_to_function", title="Geometry to strain", section="geometry", pdf=pdf))
+        progress("Building interaction, sweet spot, and time drift views")
         figure_artifacts.append(_save_figure(_pairplot_figure(scoped_frame), output_dir=figures_dir, key="pairplot", title="Pairplot", section="interactions", pdf=pdf))
         figure_artifacts.append(_save_figure(_interaction_grid_figure(scoped_frame), output_dir=figures_dir, key="interaction_grid", title="Interaction grid", section="interactions", pdf=pdf))
         figure_artifacts.append(_save_figure(_parallel_coordinates_figure(scoped_frame), output_dir=figures_dir, key="parallel_coordinates", title="Parallel coordinates", section="interactions", pdf=pdf))
         figure_artifacts.append(_save_figure(_sweet_spot_figure(tables["sweet_spots"]), output_dir=figures_dir, key="sweet_spots", title="Sweet spots", section="sweet_spots", pdf=pdf))
         figure_artifacts.append(_save_figure(_time_drift_figure(scoped_frame), output_dir=figures_dir, key="time_drift", title="Time drift", section="time_drift", pdf=pdf))
-        model_a_metrics, model_a_fig, model_a_skip = _classification_model(scoped_frame)
+        progress("Running regression models")
         model_b_metrics, model_b_fig, model_b_skip = _regression_model(scoped_frame, "strain_abs", "|Strain|", "Model B")
         model_c_metrics, model_c_fig, model_c_skip = _regression_model(scoped_frame, "fracture_strain_abs", "|Fracture strain|", "Model C")
-        tables["model_a_metrics"] = model_a_metrics
+        model_d_metrics, model_d_fig, model_d_skip = _regression_model(
+            scoped_frame,
+            "Fracture stress (MPa)",
+            "Fracture stress (MPa)",
+            "Model D",
+        )
         tables["model_b_metrics"] = model_b_metrics
         tables["model_c_metrics"] = model_c_metrics
-        for skip_key, reason in [("model_a", model_a_skip), ("model_b", model_b_skip), ("model_c", model_c_skip)]:
+        tables["model_d_metrics"] = model_d_metrics
+        for skip_key, reason in [("model_b", model_b_skip), ("model_c", model_c_skip), ("model_d", model_d_skip)]:
             if reason:
                 skipped_sections[skip_key] = reason
-        for key, title_text, fig in [("model_a", "Model A - Broke classification", model_a_fig), ("model_b", "Model B - |Strain| regression", model_b_fig), ("model_c", "Model C - |Fracture strain| regression", model_c_fig)]:
+        for key, title_text, fig in [
+            ("model_b", "Model B - |Strain| regression", model_b_fig),
+            ("model_c", "Model C - |Fracture strain| regression", model_c_fig),
+            ("model_d", "Model D - Fracture stress regression", model_d_fig),
+        ]:
             if fig is not None:
                 figure_artifacts.append(_save_figure(fig, output_dir=figures_dir, key=key, title=title_text, section="models", pdf=pdf))
     finally:
         if pdf is not None:
             pdf.close()
 
+    progress("Writing output files")
     ordered_frame = _ordered_export_frame(scoped_frame)
     csv_path = output_dir / "canonical_dataset.csv"
     ordered_frame.to_csv(csv_path, index=False)
@@ -1567,17 +1589,17 @@ def generate_report(config: MicrowireEdaConfig) -> MicrowireEdaResult:
 
     sections = [
         ("Coverage report", "Completeness, availability, and usable-row counts for the assembled dataset.", [artifact.html for artifact in figure_artifacts if artifact.section == "coverage"], [_table_html(tables["coverage"]), _table_html(tables["row_scope"])]),
-        ("Outcome overview", "Broke vs OK counts together with the available strain endpoint distributions.", [artifact.html for artifact in figure_artifacts if artifact.section == "outcomes"], []),
+        ("Endpoint overview", "Distributions for strain, fracture strain, stress, and fracture stress measured in the assembled data.", [artifact.html for artifact in figure_artifacts if artifact.section == "outcomes"], []),
         ("Fabrication to geometry", "Distribution and correlation views for geometry and fabrication variables.", [artifact.html for artifact in figure_artifacts if artifact.section == "fabrication"], [_table_html(tables["spearman_all"])]),
-        ("Geometry and fabrication to function", "Broke vs OK comparisons and target correlations against the available strain endpoints.", [artifact.html for artifact in figure_artifacts if artifact.section == "function"], [_table_html(tables["broke_ok_summary"]), _table_html(tables["strain_correlations"]), _table_html(tables["fracture_strain_correlations"])]),
+        ("Geometry and fabrication to function", "Target correlations against the available strain and fracture endpoints.", [artifact.html for artifact in figure_artifacts if artifact.section == "function"], [_table_html(tables["strain_correlations"]), _table_html(tables["fracture_strain_correlations"]), _table_html(tables["fracture_stress_correlations"])]),
         ("Geometry to strain", "Dedicated d, D, and d/D views against strain endpoints.", [artifact.html for artifact in figure_artifacts if artifact.section == "geometry"], []),
-        ("Interaction views", "Pairwise, interaction-grid, and parallel-coordinate views for overlapping numeric rows.", [artifact.html for artifact in figure_artifacts if artifact.section == "interactions"], []),
-        ("Sweet spots", "Quantile-binned broke-rate summaries for control and geometry parameters.", [artifact.html for artifact in figure_artifacts if artifact.section == "sweet_spots"], [_table_html(tables["sweet_spots"])]),
-        ("Time drift", "Broken-rate and strain drift along the production timeline.", [artifact.html for artifact in figure_artifacts if artifact.section == "time_drift"], []),
-        ("Simple models", "Gated baseline models for broke classification and strain regression.", [artifact.html for artifact in figure_artifacts if artifact.section == "models"], [_table_html(tables["model_a_metrics"]), _table_html(tables["model_b_metrics"]), _table_html(tables["model_c_metrics"])]),
+        ("Interaction views", "Pairwise, interaction-grid, and parallel-coordinate views for overlapping assembled rows.", [artifact.html for artifact in figure_artifacts if artifact.section == "interactions"], []),
+        ("Sweet spots", "Quantile-binned summaries for strain and fracture endpoints by parameter band.", [artifact.html for artifact in figure_artifacts if artifact.section == "sweet_spots"], [_table_html(tables["sweet_spots"])]),
+        ("Time drift", "Strain and fracture stress drift along the production timeline.", [artifact.html for artifact in figure_artifacts if artifact.section == "time_drift"], []),
+        ("Regression models", "Gated baseline regressions for strain, fracture strain, and fracture stress.", [artifact.html for artifact in figure_artifacts if artifact.section == "models"], [_table_html(tables["model_b_metrics"]), _table_html(tables["model_c_metrics"]), _table_html(tables["model_d_metrics"])]),
     ]
     report_path = output_dir / "report.html"
-    cards = [("Rows", counts["all_rows"]), ("Known outcomes", counts["known_outcome"]), ("Numeric |Strain|", counts["numeric_strain"]), ("Numeric |Fracture strain|", counts["numeric_fracture_strain"])]
+    cards = [("Rows", counts["all_rows"]), ("Numeric |Strain|", counts["numeric_strain"]), ("Numeric |Fracture strain|", counts["numeric_fracture_strain"]), ("Numeric fracture stress", counts["fracture_stress_rows"])]
     _write_html_report(report_path=report_path, title=config.report_title, cards=cards, sections=sections)
     manifest_path = output_dir / "manifest.json"
     note = None
@@ -1598,6 +1620,7 @@ def generate_report(config: MicrowireEdaConfig) -> MicrowireEdaResult:
         "note": note,
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    progress("Finished")
     return MicrowireEdaResult(
         config=config,
         input_kind=input_kind,

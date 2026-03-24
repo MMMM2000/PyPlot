@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 from PyQt6 import QtWidgets
 
+from microwire_eda import ui as eda_ui
 from microwire_eda.core import (
     ROW_SCOPE_FILTERED,
     MicrowireEdaConfig,
@@ -17,6 +18,7 @@ from microwire_eda.core import (
     detect_input_kind,
     generate_report,
     load_input_frame,
+    MicrowireEdaResult,
 )
 from microwire_data_builder.ui import BuilderWindow
 
@@ -162,3 +164,43 @@ def test_builder_launch_passes_filtered_assemble_rows(
         assert list(config.source_dataframe["Microwire"]) == ["1/1", "5/1"]
     finally:
         window.close()
+
+
+def test_eda_window_shows_progress_dialog(qtbot, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    report_path = tmp_path / "report.html"
+    workbook_path = tmp_path / "summary.xlsx"
+    csv_path = tmp_path / "dataset.csv"
+    manifest_path = tmp_path / "manifest.json"
+    for path in (report_path, workbook_path, csv_path, manifest_path):
+        path.write_text("", encoding="utf-8")
+
+    fake_result = MicrowireEdaResult(
+        config=MicrowireEdaConfig(),
+        input_kind="dataframe",
+        output_dir=tmp_path,
+        report_path=report_path,
+        workbook_path=workbook_path,
+        csv_path=csv_path,
+        manifest_path=manifest_path,
+        pdf_path=None,
+        figure_paths=[],
+        skipped_sections={},
+        row_counts={"all_rows": 3},
+        tables={},
+    )
+
+    def _fake_run(self) -> None:
+        self.progress.emit("Working...")
+        self.finished.emit(fake_result)
+
+    monkeypatch.setattr(eda_ui._EdaWorker, "run", _fake_run)
+
+    window = eda_ui.MicrowireEdaWindow(
+        MicrowireEdaConfig(source_dataframe=_sample_dataframe().head(3), filtered_row_indices=(0, 1, 2))
+    )
+    qtbot.addWidget(window)
+    window._run_analysis()
+    qtbot.waitUntil(lambda: window._last_result is not None, timeout=5000)
+
+    assert window._progress_dialog is None
+    assert "Working..." in window.log_view.toPlainText()

@@ -19,7 +19,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - FMR: Field vs X/Y voltage plots from CSV files; multiple graphs per sample row.
 - Strain: stress/strain entries tied to composition + microwire; d auto-filled from microscope when available.
 - Assemble: combined preview and export configuration.
-- Analysis: `Analysis -> Analyze assemble data...` opens the separate Microwire EDA tool using the current filtered Assemble rows. The report generator is read-only, prefers `.pydpj` project context when available, and can also work from assembled spreadsheet exports.
+- Analysis: `Analysis -> Analyze assemble data...` opens the separate Microwire EDA tool using the current filtered Assemble rows. The report generator is read-only, only analyses data already present in Assemble, shows a progress dialog while it runs, and can also work from assembled spreadsheet exports.
 - Assemble imports: spreadsheet rows can be imported and merged with the assembled dataset; imported rows are tagged via the "Data source" column and enriched with fabrication metadata where possible.
 - Data menu: import external workbooks, toggle visibility of imported-only rows, or remove imported data entirely. Optionally separate imported Fabrication rows under an "Imported data:" divider. Imported workbooks appear under Project Explorer.
 - Compare: subset of rows for side-by-side comparison.
@@ -82,8 +82,8 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 ## Microwire EDA
 
 - Microwire EDA is a separate read-only workflow that can load either a Builder `.pydpj` project or an assembled spreadsheet export.
-- The generated report includes coverage checks, outcome distributions, controllable-parameter distributions, correlation heatmaps, strain-focused scatter views, interaction plots, sweet-spot binning, time drift, and gated simple models.
-- Standalone command entrypoint: `launcher.py --microwire-eda <project.pydpj|assembled.xlsx> [--microwire-eda-rows all|filtered|selected] [--microwire-eda-out <dir>] [--microwire-eda-title <title>]`.
+- The generated report focuses on the measured strain/stress endpoints from manual stress/strain data already surfaced in Assemble: coverage checks, endpoint distributions, controllable-parameter distributions, correlation heatmaps, strain-focused scatter views, interaction plots, sweet-spot binning, time drift, and gated regression models.
+- Standalone command entrypoint: `launcher.py --microwire-eda <project.pydpj|assembled.xlsx> [--rows all|filtered|selected] [--out <dir>] [--microwire-eda-title <title>]`.
 - Builder-launched analysis uses the current Assemble preview rows directly when available so the report matches the visible filtered subset rather than silently reverting to the full project.
 
 ## Logging and Diagnostics
