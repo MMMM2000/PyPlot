@@ -6134,6 +6134,24 @@ def _apply_microscope_overrides(
     return result
 
 
+def _filter_other_end_microscope_index(
+    index: Dict[MicrowireKey, MicroscopeMeasurements],
+    *,
+    show_other_ends: bool,
+) -> Dict[MicrowireKey, MicroscopeMeasurements]:
+    if show_other_ends:
+        return dict(index)
+    filtered: Dict[MicrowireKey, MicroscopeMeasurements] = {}
+    for key, measurements in index.items():
+        suffix = None
+        if isinstance(key, tuple) and len(key) >= 4:
+            suffix = key[3]
+        if str(suffix or "").strip().lower() == "oe":
+            continue
+        filtered[key] = measurements
+    return filtered
+
+
 def _sample_from_path(path: Path, sources: Sequence[str]) -> str:
     for source in sources:
         root = Path(source).expanduser()
@@ -9005,6 +9023,14 @@ class AnnealingSection(MiniDatabaseSection):
         self._prune_phase_points()
         self._update_export_enabled()
 
+    def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
+        super().import_project_payload(payload)
+        self._sanitize_graph_columns()
+        self._hide_columns(["_group_key", "_sources"])
+        self._refresh_record_groups()
+        self._prune_phase_points()
+        self._update_export_enabled()
+
     def _update_export_enabled(self) -> None:
         has_rows = isinstance(self.data.table, pd.DataFrame) and not self.data.table.empty
         if hasattr(self, "export_button"):
@@ -9418,6 +9444,24 @@ class AnnealingSection(MiniDatabaseSection):
         if cache_key in self._pixmap_cache:
             return self._pixmap_cache[cache_key]
         records = self._record_groups.get(key)
+        if not records:
+            loaded_records: List[MeasurementRecord] = []
+            for source in self._row_sources(row):
+                try:
+                    metadata = _metadata_from_path(source)
+                    frame = _load_annealing(source, expected_setpoint_mA=metadata.setpoint_mA)
+                except Exception:
+                    continue
+                loaded_records.append(
+                    MeasurementRecord(
+                        path=source,
+                        metadata=metadata,
+                        dataframe=frame,
+                        sanity_ok=True,
+                        sanity_error=None,
+                    )
+                )
+            records = loaded_records
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
             high_record, low_record = _select_high_low_pair(records)
@@ -17142,6 +17186,31 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
                 fracture_currents,
             )
+            standard_has_values = any(
+                updated.at[row_index, column] not in (None, "")
+                and not (isinstance(updated.at[row_index, column], float) and math.isnan(updated.at[row_index, column]))
+                for column in (
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                    SHAPE_MEMORY_LOAD_COLUMN,
+                    SHAPE_MEMORY_STRAIN_COLUMN,
+                    SHAPE_MEMORY_STRESS_COLUMN,
+                )
+            )
+            if not standard_has_values:
+                updated.at[row_index, SHAPE_MEMORY_CURRENT_COLUMN] = None
+                updated.at[row_index, SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+            fracture_has_values = any(
+                updated.at[row_index, column] not in (None, "")
+                and not (isinstance(updated.at[row_index, column], float) and math.isnan(updated.at[row_index, column]))
+                for column in (
+                    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                )
+            )
+            if not fracture_has_values:
+                updated.at[row_index, SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                updated.at[row_index, SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
         if changed or not frame.columns.equals(updated.columns) or not updated.equals(frame):
             self.data.table = updated
             self.model.set_frame(updated)
@@ -22268,12 +22337,14 @@ class AssemblySection(QtWidgets.QWidget):
 
         microscope_index: Dict[MicrowireKey, MicroscopeMeasurements] = {}
         overrides: Dict[str, Dict[str, float]] = {}
+        show_other_ends = True
         if "microscope" in selected:
             payload = self._load_payload("microscope", "microscope_index")
             microscope_section = self.sections.get("microscope")
             if isinstance(microscope_section, MicroscopeSection):
                 overrides = microscope_section.overrides
                 table = microscope_section.data.table
+                show_other_ends = bool(getattr(microscope_section, "_show_other_ends", True))
             else:
                 table = None
             if isinstance(payload, dict) and payload:
@@ -22282,6 +22353,10 @@ class AssemblySection(QtWidgets.QWidget):
                 microscope_index = self._build_microscope_index_from_table(table)
             else:
                 _mark_missing("microscope")
+            microscope_index = _filter_other_end_microscope_index(
+                microscope_index,
+                show_other_ends=show_other_ends,
+            )
 
         video_index: Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary] = {}
         if "videos" in selected:
@@ -22646,6 +22721,38 @@ class AssemblySection(QtWidgets.QWidget):
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return frame
         groups = self._ensure_shape_memory_stress_strain_groups()
+        def _clear_orphan_currents(payload: Dict[str, Any]) -> None:
+            standard_has_values = any(
+                payload.get(column) not in (None, "")
+                and not (
+                    isinstance(payload.get(column), float)
+                    and math.isnan(payload.get(column))
+                )
+                for column in (
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                    SHAPE_MEMORY_LOAD_COLUMN,
+                    SHAPE_MEMORY_STRAIN_COLUMN,
+                    SHAPE_MEMORY_STRESS_COLUMN,
+                )
+            )
+            if not standard_has_values:
+                payload[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                payload[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+            fracture_has_values = any(
+                payload.get(column) not in (None, "")
+                and not (
+                    isinstance(payload.get(column), float)
+                    and math.isnan(payload.get(column))
+                )
+                for column in (
+                    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                )
+            )
+            if not fracture_has_values:
+                payload[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                payload[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
 
         expanded_rows: List[Dict[str, Any]] = []
         for idx, row in frame.iterrows():
@@ -22804,6 +22911,7 @@ class AssemblySection(QtWidgets.QWidget):
                         SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
                     ):
                         new_row[column] = fracture_entry.get(column)
+                    _clear_orphan_currents(new_row)
                     fallback_rows.append(new_row)
 
                 if fallback_rows:
@@ -22818,6 +22926,7 @@ class AssemblySection(QtWidgets.QWidget):
                         return (0 if math.isfinite(numeric) else 1, numeric)
 
                     for order, payload in enumerate(sorted(fallback_rows, key=_fallback_sort_key)):
+                        _clear_orphan_currents(payload)
                         payload[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = row_key
                         payload[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
                         expanded_rows.append(payload)

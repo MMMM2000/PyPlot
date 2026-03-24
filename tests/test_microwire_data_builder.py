@@ -2576,6 +2576,31 @@ def test_assemble_prepare_inputs_allows_export_without_annealing_section_selecte
         window.close()
 
 
+def test_assemble_prepare_inputs_respects_hide_other_ends_setting(qtbot, tmp_path: Path) -> None:
+    _ensure_qapp()
+    window = builder_ui.BuilderWindow()
+    qtbot.addWidget(window)
+    try:
+        window.microscope_section._show_other_ends = False
+        microscope_index = {
+            ("Ni50Fe27Ga23", 5, 4, None): core.MicroscopeMeasurements(),
+            ("Ni50Fe27Ga23", 5, 4, "oe"): core.MicroscopeMeasurements(),
+        }
+        window.microscope_section.store.save_payload("microscope_index", microscope_index)
+
+        payload = window.assembly_section._prepare_builder_inputs(
+            {"microscope"},
+            require_payloads=False,
+        )
+
+        assert payload is not None
+        prepared_index = payload[8]
+        assert ("Ni50Fe27Ga23", 5, 4, None) in prepared_index
+        assert ("Ni50Fe27Ga23", 5, 4, "oe") not in prepared_index
+    finally:
+        window.close()
+
+
 def test_assemble_import_project_payload_preserves_hidden_columns_and_order(qtbot) -> None:
     _ensure_qapp()
     window = builder_ui.BuilderWindow()
