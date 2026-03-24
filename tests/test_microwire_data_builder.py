@@ -1838,9 +1838,8 @@ def test_build_database_integration(tmp_path: Path) -> None:
     assert row["Composition"] == "Ni55Fe18Ga27"
     assert row["Microwire"] == "4/1"
     assert row["File 1000 mA"] == anneal_files[0].name
-    assert row["File low mA"] == anneal_files[1].name
+    assert row["Other annealing files"] == [anneal_files[1].name]
     assert pd.isna(row[core.STRAIN_COLUMN])
-    assert row["Low mA value (mA)"] == 100
     assert pd.notna(row["d (µm)"])
     assert pd.notna(row["D (µm)"])
     assert row["Production datetime"] == "2024-11-26 08:50:00"
@@ -1877,15 +1876,15 @@ def test_build_database_populates_plot_columns(tmp_path: Path, monkeypatch: pyte
     assert not result.origin_artifacts
     row = result.dataframe.iloc[0]
     assert "Figure — 1000 mA" in result.dataframe.columns
-    assert "Figure — low mA" in result.dataframe.columns
+    assert "Figure — other annealing" in result.dataframe.columns
     assert "Figure — 1000 mA (Origin)" in result.dataframe.columns
-    assert "Figure — low mA (Origin)" in result.dataframe.columns
+    assert "Figure — other annealing (Origin)" in result.dataframe.columns
     assert set(result.plot_paths) == {produced[high.name].name, produced[low.name].name}
     assert row["Figure — 1000 mA"] == produced[high.name].name
-    assert row["Figure — low mA"] == produced[low.name].name
+    assert row["Figure — other annealing"] == produced[low.name].name
     assert pd.isna(row["Figure — 1000 mA (Origin)"])
-    assert pd.isna(row["Figure — low mA (Origin)"])
-    assert row["Low mA value (mA)"] == 120
+    assert pd.isna(row["Figure — other annealing (Origin)"])
+    assert row["Other annealing files"] == [low.name]
     assert pd.isna(row[core.STRAIN_COLUMN])
 
 
@@ -1920,14 +1919,132 @@ def test_build_database_origin_backend(tmp_path: Path, monkeypatch: pytest.Monke
     assert set(result.origin_artifacts.keys()) == {artifact.descriptor for artifact in origin_records.values()}
     row = result.dataframe.iloc[0]
     assert "Figure — 1000 mA (Origin)" in result.dataframe.columns
-    assert "Figure — low mA (Origin)" in result.dataframe.columns
+    assert "Figure — other annealing (Origin)" in result.dataframe.columns
     assert "Figure — 1000 mA" in result.dataframe.columns
-    assert "Figure — low mA" in result.dataframe.columns
+    assert "Figure — other annealing" in result.dataframe.columns
     assert row["Figure — 1000 mA (Origin)"] == origin_records[high.name].descriptor
-    assert row["Figure — low mA (Origin)"] == origin_records[low.name].descriptor
+    assert row["Figure — other annealing (Origin)"] == origin_records[low.name].descriptor
     assert pd.isna(row["Figure — 1000 mA"])
-    assert pd.isna(row["Figure — low mA"])
+    assert pd.isna(row["Figure — other annealing"])
     assert pd.isna(row[core.STRAIN_COLUMN])
+
+
+def test_build_database_groups_all_non_anchor_measurements_into_other_bucket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    mid = tmp_path / "Ni55Fe18Ga27 1_1 140mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 1_1 90mA.txt"
+    for path in (high, mid, low):
+        path.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+
+    produced: dict[str, Path] = {}
+
+    def fake_plot(df, source: Path, plot_dir: Path, figsize: tuple[float, float]) -> Path:
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        out_path = plot_dir / f"{source.stem}.png"
+        out_path.write_text("stub")
+        produced[source.name] = out_path
+        return out_path
+
+    monkeypatch.setattr(core, "_plot_measurement_matplotlib", fake_plot)
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[high, mid, low],
+            output_dir=tmp_path / "out",
+            make_plots=True,
+        )
+    )
+
+    row = result.dataframe.iloc[0]
+    assert row["File 1000 mA"] == high.name
+    assert row["Other annealing files"] == [low.name, mid.name]
+    assert row["Figure — other annealing"] == [
+        produced[low.name].name,
+        produced[mid.name].name,
+    ]
+
+
+def test_build_database_without_exact_1000_keeps_all_measurements_in_other_bucket(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "Ni55Fe18Ga27 1_1 120mA.txt"
+    second = tmp_path / "Ni55Fe18Ga27 1_1 140mA.txt"
+    for path in (first, second):
+        path.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[first, second],
+            output_dir=tmp_path / "out",
+            make_plots=False,
+            export_formats=(),
+        )
+    )
+
+    row = result.dataframe.iloc[0]
+    assert pd.isna(row["File 1000 mA"])
+    assert row["Other annealing files"] == [first.name, second.name]
+    assert result.stats.missing_high_measurement == 1
+
+
+def test_build_database_prefers_non_variant_exact_1000_as_anchor(tmp_path: Path) -> None:
+    base_path = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    variant_path = tmp_path / "Ni55Fe18Ga27 1_1 s2a 1000mA.txt"
+    follow_up_path = tmp_path / "Ni55Fe18Ga27 1_1 140mA.txt"
+    for path in (base_path, variant_path, follow_up_path):
+        path.write_text("placeholder", encoding="utf-8")
+
+    def measurement(
+        path: Path,
+        *,
+        setpoint: int,
+        alt_variant: bool,
+    ) -> MeasurementRecord:
+        return MeasurementRecord(
+            path=path,
+            metadata=MeasurementMetadata(
+                composition_token="Ni55Fe18Ga27",
+                draw_x=1,
+                piece_y=1,
+                setpoint_mA=setpoint,
+                alt_variant=alt_variant,
+                measurement_id=path.stem,
+                file_name=path.name,
+                relpath=path.name,
+                timestamp_mtime_utc="2026-03-23T00:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame(
+                {"I_A": [0.1], "V_V": [0.2], "R_ohm": [2.0], "I_mA": [100.0]}
+            ),
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path / "out",
+            make_plots=False,
+            export_formats=(),
+        ),
+        measurement_records=[
+            measurement(base_path, setpoint=1000, alt_variant=False),
+            measurement(variant_path, setpoint=1000, alt_variant=True),
+            measurement(follow_up_path, setpoint=140, alt_variant=False),
+        ],
+        fabrication_index=FabricationIndex(),
+        skip_exports=True,
+    )
+
+    row = result.dataframe.iloc[0]
+    assert row["File 1000 mA"] == base_path.name
+    assert row["Other annealing files"] == [follow_up_path.name, variant_path.name]
 
 
 def test_build_database_merges_current_density_and_transition_entries(tmp_path: Path) -> None:
@@ -2398,7 +2515,7 @@ def test_update_existing_exports_with_strain(tmp_path: Path) -> None:
         "d/D",
         "Length (m)",
         "Figure — 1000 mA",
-        "Figure — low mA",
+        "Figure — other annealing",
     ]
     legacy_row = {
         "Composition": "Ni55Fe18Ga27",
@@ -2408,7 +2525,7 @@ def test_update_existing_exports_with_strain(tmp_path: Path) -> None:
         "d/D": 0.2,
         "Length (m)": 5.0,
         "Figure — 1000 mA": "high.png",
-        "Figure — low mA": "low.png",
+        "Figure — other annealing": "low.png",
     }
 
     csv_path = tmp_path / "legacy.csv"
@@ -2452,6 +2569,43 @@ def test_builder_column_groups_include_transition_and_current_density_columns() 
         window.hide()
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_section_maps_legacy_columns_and_keeps_horizontal_scrolling() -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni55Fe18Ga27",
+                    "Microwire": "4/1",
+                    "Graph — 1000 mA": "high.png",
+                    "Graph — low mA": "legacy-low.png",
+                    "Graph — other mA": "legacy-other.png",
+                    "_group_key": "Ni55Fe18Ga27|4|1",
+                    "_sources": [],
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+
+        applied = section.model.frame()
+        assert "Graph — 1000 mA" in applied.columns
+        assert builder_ui.ANNEALING_OTHER_GRAPH_COLUMN in applied.columns
+        assert "Graph — low mA" not in applied.columns
+        assert "Graph — other mA" not in applied.columns
+
+        header = section.table_view.horizontalHeader()
+        assert header is not None
+        assert header.stretchLastSection() is False
+        assert (
+            section.table_view.horizontalScrollMode()
+            == QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+    finally:
+        section._shutdown_background_threads()
+        section.close()
 
 
 def test_builder_recent_projects_menu_updates(tmp_path: Path) -> None:
