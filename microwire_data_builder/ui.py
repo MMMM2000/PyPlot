@@ -17032,6 +17032,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._table_splitter: QtWidgets.QSplitter | None = None
         self._preview_panel: _ShapeMemoryPreviewPanel | None = None
         self._preview_toggle: QtWidgets.QCheckBox | None = None
+        self._graph_column_toggle: QtWidgets.QCheckBox | None = None
         super().__init__(logger, log_callback, parent)
         self._normalise_value_columns()
         self._load_hidden_paths()
@@ -17063,6 +17064,10 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._preview_toggle.setChecked(self._preview_panel_visible())
         self._preview_toggle.toggled.connect(self._toggle_preview_panel)
         self.controls_layout.addWidget(self._preview_toggle)
+        self._graph_column_toggle = QtWidgets.QCheckBox("Show graph column")
+        self._graph_column_toggle.setChecked(self._graph_column_visible())
+        self._graph_column_toggle.toggled.connect(self._toggle_graph_column)
+        self.controls_layout.addWidget(self._graph_column_toggle)
         header = self.table_view.verticalHeader() if self.table_view is not None else None
         if header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
@@ -17074,6 +17079,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._refresh_record_groups()
         self._expand_rows_per_graph()
         self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
@@ -17263,6 +17269,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._refresh_record_groups()
         self._expand_rows_per_graph()
         self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
@@ -17323,6 +17330,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._refresh_record_groups()
         self._expand_rows_per_graph()
         self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
@@ -17332,6 +17340,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._refresh_record_groups()
         self._expand_rows_per_graph()
         self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
@@ -17990,6 +17999,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._refresh_record_groups()
         self._expand_rows_per_graph()
         self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
@@ -17998,8 +18008,33 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         visible = extra.get("preview_panel_visible", False)
         return bool(visible)
 
+    def _graph_column_visible(self) -> bool:
+        extra = self.data.extra if isinstance(self.data.extra, dict) else {}
+        visible = extra.get("graph_column_visible", True)
+        return bool(visible)
+
     def _hide_shape_memory_columns(self) -> None:
         self._hide_columns(self.HIDDEN_SECTION_COLUMNS)
+
+    def _apply_graph_column_visibility(self) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or SHAPE_MEMORY_STRESS_STRAIN_COLUMN not in frame.columns:
+            return
+        column_index = int(frame.columns.get_loc(SHAPE_MEMORY_STRESS_STRAIN_COLUMN))
+        self.table_view.setColumnHidden(column_index, not self._graph_column_visible())
+
+    def _toggle_graph_column(self, checked: bool) -> None:
+        extra = self.data.extra if isinstance(self.data.extra, dict) else {}
+        extra = dict(extra)
+        extra["graph_column_visible"] = bool(checked)
+        self.data.extra = extra
+        self._apply_graph_column_visibility()
+        try:
+            self.store.save(self.data)
+        except Exception:
+            pass
 
     def _toggle_preview_panel(self, checked: bool) -> None:
         extra = self.data.extra if isinstance(self.data.extra, dict) else {}
@@ -18093,6 +18128,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self.data.table = updated
         self.model.set_frame(updated)
         self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         try:
             if self.table_view is not None:
                 self.table_view.selectRow(row_index)
@@ -23508,6 +23544,43 @@ class AssemblySection(QtWidgets.QWidget):
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return frame
         groups = self._ensure_shape_memory_stress_strain_groups()
+        section_standard_entry_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        section_fracture_entry_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        section = self.sections.get("shape_memory_stress_strain")
+        if isinstance(section, ShapeMemoryStressStrainSection):
+            section_frame = section.model.frame()
+            if isinstance(section_frame, pd.DataFrame) and not section_frame.empty:
+                for _, candidate_row in section_frame.iterrows():
+                    section_key = _row_to_microwire_key(candidate_row)
+                    if not section_key:
+                        continue
+                    standard_source = str(
+                        candidate_row.get(_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN) or ""
+                    ).strip()
+                    if standard_source:
+                        entry = {
+                            column: candidate_row.get(column)
+                            for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS
+                            if _shape_memory_has_value(candidate_row.get(column))
+                        }
+                        if entry:
+                            section_standard_entry_map.setdefault(section_key, {})[
+                                standard_source
+                            ] = entry
+                    fracture_source = str(
+                        candidate_row.get(_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN) or ""
+                    ).strip()
+                    if fracture_source:
+                        entry = {
+                            column: candidate_row.get(column)
+                            for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS
+                            if _shape_memory_has_value(candidate_row.get(column))
+                        }
+                        if entry:
+                            section_fracture_entry_map.setdefault(section_key, {})[
+                                fracture_source
+                            ] = entry
+
         def _clear_orphan_currents(payload: Dict[str, Any]) -> None:
             standard_has_values = _shape_memory_payload_has_values(
                 payload,
@@ -23528,6 +23601,8 @@ class AssemblySection(QtWidgets.QWidget):
         for idx, row in frame.iterrows():
             row_dict = dict(row)
             row_key = _row_to_microwire_key(pd.Series(row_dict))
+            section_standard_entries = section_standard_entry_map.get(row_key or "", {})
+            section_fracture_entries = section_fracture_entry_map.get(row_key or "", {})
             if not row_key:
                 row_dict[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = f"row-{idx}"
                 row_dict[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = 0
@@ -23624,6 +23699,8 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry:
                                 fracture_entry[column] = entry[column]
+                        if not fracture_entry:
+                            fracture_entry = dict(section_fracture_entries.get(path_key, {}))
                         if not fracture_entry and fracture_source and path_key == fracture_source:
                             for column in (
                                 SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
@@ -23649,6 +23726,8 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry:
                                 standard_entry[column] = entry[column]
+                        if not standard_entry:
+                            standard_entry = dict(section_standard_entries.get(path_key, {}))
                         if not standard_entry and standard_source and path_key == standard_source:
                             for column in (
                                 SHAPE_MEMORY_DISPLACEMENT_COLUMN,
@@ -23697,6 +23776,11 @@ class AssemblySection(QtWidgets.QWidget):
 
                     for order, payload in enumerate(sorted(fallback_rows, key=_fallback_sort_key)):
                         _clear_orphan_currents(payload)
+                        if not (
+                            _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS)
+                            or _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS)
+                        ):
+                            continue
                         payload[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = row_key
                         payload[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
                         expanded_rows.append(payload)
@@ -23720,6 +23804,12 @@ class AssemblySection(QtWidgets.QWidget):
                 diameter_um = float(d_value) if d_value is not None else None
             except Exception:
                 diameter_um = None
+            standard_count = sum(
+                1 for record in records if not _shape_memory_is_fracture_record(record)
+            )
+            fracture_count = sum(
+                1 for record in records if _shape_memory_is_fracture_record(record)
+            )
 
             for order, ((_, current_sort), current_records) in enumerate(sorted_groups):
                 current_value = None if math.isinf(current_sort) else current_sort
@@ -23758,6 +23848,23 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry and column not in fracture_entry:
                                 fracture_entry[column] = entry[column]
+                        if not fracture_entry and path_key:
+                            source_entry = section_fracture_entries.get(path_key, {})
+                            for column in (
+                                SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                            ):
+                                if column in source_entry and column not in fracture_entry:
+                                    fracture_entry[column] = source_entry[column]
+                        if not fracture_entry and not section_fracture_entries and fracture_count == 1:
+                            for column in (
+                                SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                            ):
+                                if column in sample_entry and column not in fracture_entry:
+                                    fracture_entry[column] = sample_entry[column]
                     else:
                         for column in (
                             SHAPE_MEMORY_DISPLACEMENT_COLUMN,
@@ -23767,6 +23874,25 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry and column not in standard_entry:
                                 standard_entry[column] = entry[column]
+                        if not standard_entry and path_key:
+                            source_entry = section_standard_entries.get(path_key, {})
+                            for column in (
+                                SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                                SHAPE_MEMORY_LOAD_COLUMN,
+                                SHAPE_MEMORY_STRAIN_COLUMN,
+                                SHAPE_MEMORY_STRESS_COLUMN,
+                            ):
+                                if column in source_entry and column not in standard_entry:
+                                    standard_entry[column] = source_entry[column]
+                        if not standard_entry and not section_standard_entries and standard_count == 1:
+                            for column in (
+                                SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                                SHAPE_MEMORY_LOAD_COLUMN,
+                                SHAPE_MEMORY_STRAIN_COLUMN,
+                                SHAPE_MEMORY_STRESS_COLUMN,
+                            ):
+                                if column in sample_entry and column not in standard_entry:
+                                    standard_entry[column] = sample_entry[column]
 
                 if len(sorted_groups) == 1 and sample_entry:
                     for column in (
@@ -23805,6 +23931,12 @@ class AssemblySection(QtWidgets.QWidget):
                         diameter_um,
                     )
 
+                _clear_orphan_currents(new_row)
+                if not (
+                    _shape_memory_payload_has_values(new_row, _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS)
+                    or _shape_memory_payload_has_values(new_row, _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS)
+                ):
+                    continue
                 new_row[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = row_key
                 new_row[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
                 expanded_rows.append(new_row)
