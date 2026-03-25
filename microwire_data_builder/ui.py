@@ -285,6 +285,39 @@ _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN = "_shape_memory_standard_source"
 _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN = "_shape_memory_fracture_source"
 _SHAPE_MEMORY_GROUP_KEY_COLUMN = "_shape_memory_group_key"
 _SHAPE_MEMORY_GROUP_ORDER_COLUMN = "_shape_memory_group_order"
+_SHAPE_MEMORY_CURRENT_COLUMN_ALIASES = {
+    "Current (mA)": SHAPE_MEMORY_CURRENT_COLUMN,
+    "Current density (A/mm^2)": SHAPE_MEMORY_CURRENT_DENSITY_COLUMN,
+    "Fracture current (mA)": SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
+    "Fracture current density (A/mm^2)": SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
+}
+_SHAPE_MEMORY_STANDARD_VALUE_COLUMNS = (
+    SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+    SHAPE_MEMORY_LOAD_COLUMN,
+    SHAPE_MEMORY_STRAIN_COLUMN,
+    SHAPE_MEMORY_STRESS_COLUMN,
+)
+_SHAPE_MEMORY_STANDARD_META_COLUMNS = (
+    SHAPE_MEMORY_CURRENT_COLUMN,
+    SHAPE_MEMORY_CURRENT_DENSITY_COLUMN,
+    _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN,
+)
+_SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS = (
+    _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS + _SHAPE_MEMORY_STANDARD_META_COLUMNS
+)
+_SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS = (
+    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+)
+_SHAPE_MEMORY_FRACTURE_META_COLUMNS = (
+    SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
+    SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
+    _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
+)
+_SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS = (
+    _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS + _SHAPE_MEMORY_FRACTURE_META_COLUMNS
+)
 
 
 _STAGE_LABELS = {
@@ -308,6 +341,35 @@ def _builder_settings() -> QtCore.QSettings:
         )
         return QtCore.QSettings(str(settings_file), QtCore.QSettings.Format.IniFormat)
     return QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
+
+
+def _shape_memory_has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    try:
+        if bool(pd.isna(value)):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _shape_memory_payload_has_values(
+    payload: Mapping[str, Any], columns: Sequence[str]
+) -> bool:
+    return any(_shape_memory_has_value(payload.get(column)) for column in columns)
+
+
+def _shape_memory_graph_item_count(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return 1 if value.strip() else 0
+    if isinstance(value, (list, tuple, set)):
+        return sum(_shape_memory_graph_item_count(item) for item in value)
+    return 1
 
 
 def _builder_dialogs_suppressed() -> bool:
@@ -4875,6 +4937,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         self._tab_canvases: List[FigureCanvasQTAgg] = []
         self._saved_standard_selection: Optional[_ShapeMemoryPointSelection] = None
         self._saved_fracture_selection: Optional[_ShapeMemoryPointSelection] = None
+        self._record_signature: Tuple[str, ...] = ()
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -4945,11 +5008,19 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         title: str,
         records: Sequence[ShapeMemoryStressStrainRecord],
     ) -> None:
+        signature = tuple(
+            _record_path_key(record) or _record_label_for_display(record) or f"record-{idx}"
+            for idx, record in enumerate(records)
+        )
         current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
         self.header_label.setText(title or "Shape memory stress/strain")
+        if records and signature == self._record_signature and self._tab_widget.count() == len(signature):
+            self._stack.setCurrentWidget(self._tab_widget)
+            return
         blocker = QtCore.QSignalBlocker(self._tab_widget)
         try:
             self._clear_tabs()
+            self._record_signature = ()
             self._saved_standard_selection = None
             self._saved_fracture_selection = None
             self._update_picked_labels(None)
@@ -4993,6 +5064,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
                 self._placeholder.setText("No shape-memory graphs available for this microwire.")
                 self._stack.setCurrentWidget(self._placeholder)
             else:
+                self._record_signature = signature
                 if current_index >= 0:
                     self._tab_widget.setCurrentIndex(min(current_index, self._tab_widget.count() - 1))
                 self._stack.setCurrentWidget(self._tab_widget)
@@ -5018,6 +5090,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
     def clear(self, message: str) -> None:
         self.header_label.setText("Shape memory stress/strain")
         self._clear_tabs()
+        self._record_signature = ()
         self._update_hover_label(None)
         self._update_picked_labels(None)
         self._placeholder.setText(message)
@@ -9068,6 +9141,28 @@ class AnnealingSection(MiniDatabaseSection):
             header.setStretchLastSection(False)
             header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
 
+    def _auto_fit_columns(self) -> None:  # type: ignore[override]
+        super()._auto_fit_columns()
+        QtCore.QTimer.singleShot(0, self._ensure_preview_columns_wide)
+
+    def _ensure_preview_columns_wide(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+        required_widths = {
+            ANNEALING_HIGH_GRAPH_COLUMN: ANNEALING_GRAPH_WIDTH + 80,
+            ANNEALING_OTHER_GRAPH_COLUMN: self._preview_icon_width() + 80,
+        }
+        for column_name, minimum in required_widths.items():
+            if column_name not in frame.columns:
+                continue
+            idx = frame.columns.get_loc(column_name)
+            if table.columnWidth(idx) < minimum:
+                table.setColumnWidth(idx, minimum)
+
     def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
         super().apply_data(data)
         self._sanitize_graph_columns()
@@ -9450,6 +9545,15 @@ class AnnealingSection(MiniDatabaseSection):
             _high_record, other_records = _select_anchor_and_other_records(records)
             if other_records:
                 max_other = max(max_other, len(other_records))
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            other_file_column = "Other annealing files"
+            for _, row in frame.iterrows():
+                max_other = max(
+                    max_other,
+                    _shape_memory_graph_item_count(row.get(ANNEALING_OTHER_GRAPH_COLUMN)),
+                    _shape_memory_graph_item_count(row.get(other_file_column)),
+                )
         self._preview_other_count = max_other
         self._invalidate_previews()
         self._update_preview_icon_size()
@@ -9631,10 +9735,16 @@ class AnnealingSection(MiniDatabaseSection):
                 pixmap = _render_measurement_pixmap(target, self.logger)
             else:
                 if other_records:
+                    preview_count = max(
+                        len(other_records),
+                        _shape_memory_graph_item_count(row.get(ANNEALING_OTHER_GRAPH_COLUMN)),
+                        _shape_memory_graph_item_count(row.get("Other annealing files")),
+                        1,
+                    )
                     signature = tuple(
                         str(getattr(record, "path", "")) for record in other_records
                     )
-                    cache_key = (key, column, signature)
+                    cache_key = (key, column, signature, preview_count)
                     cached = self._pixmap_cache.get(cache_key)
                     if cached is not None:
                         return cached
@@ -9645,7 +9755,8 @@ class AnnealingSection(MiniDatabaseSection):
                             pixmaps.append(preview)
                     pixmap = _combine_pixmaps_side_by_side(
                         pixmaps,
-                        width_px=self._preview_icon_width(),
+                        width_px=ANNEALING_GRAPH_WIDTH * preview_count
+                        + self._preview_spacing * (preview_count - 1),
                         height_px=ANNEALING_GRAPH_HEIGHT,
                         spacing=self._preview_spacing,
                         scale_to_fit=False,
@@ -15879,8 +15990,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_WIDTH
 
     def _preview_icon_height(self) -> int:
         return ANNEALING_GRAPH_HEIGHT
@@ -16273,8 +16383,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_WIDTH
 
     def _preview_icon_height(self) -> int:
         return ANNEALING_GRAPH_HEIGHT
@@ -16327,12 +16436,12 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             )
             pixmaps = [item.pixmap for item in items if item.pixmap is not None]
             if pixmaps:
-                pixmap = _combine_pixmaps_side_by_side(
+                pixmap = _combine_pixmaps_vertical(
                     pixmaps,
                     width_px=self._preview_icon_width(),
                     height_px=self._preview_icon_height(),
                     spacing=self._preview_spacing,
-                    scale_to_fit=False,
+                    scale_to_fit=True,
                 )
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
@@ -16688,8 +16797,7 @@ class DmaIsoStressSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_WIDTH
 
     def _preview_icon_height(self) -> int:
         return ANNEALING_GRAPH_HEIGHT
@@ -16742,12 +16850,12 @@ class DmaIsoStressSection(MiniDatabaseSection):
             )
             pixmaps = [item.pixmap for item in items if item.pixmap is not None]
             if pixmaps:
-                pixmap = _combine_pixmaps_side_by_side(
+                pixmap = _combine_pixmaps_vertical(
                     pixmaps,
                     width_px=self._preview_icon_width(),
                     height_px=self._preview_icon_height(),
                     spacing=self._preview_spacing,
-                    scale_to_fit=False,
+                    scale_to_fit=True,
                 )
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
@@ -16880,6 +16988,16 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
     section_key = "shape_memory_stress_strain"
     section_title = "Shape memory stress/strain"
     supported_suffixes = (".txt",)
+    HIDDEN_SECTION_COLUMNS = (
+        "Sample",
+        "_sample",
+        "_group_key",
+        "_sources",
+        _SHAPE_MEMORY_GROUP_KEY_COLUMN,
+        _SHAPE_MEMORY_GROUP_ORDER_COLUMN,
+        _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN,
+        _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
+    )
     VALUE_COLUMNS = [
         SHAPE_MEMORY_DISPLACEMENT_COLUMN,
         SHAPE_MEMORY_LOAD_COLUMN,
@@ -16907,6 +17025,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._record_groups_by_key: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
         self._hidden_paths: Set[str] = set()
         self._all_records: List[ShapeMemoryStressStrainRecord] = []
+        self._records_by_path: Dict[str, ShapeMemoryStressStrainRecord] = {}
         self._microscope_snapshot: pd.DataFrame | None = None
         self._preview_group_count = 1
         self._preview_spacing = 6
@@ -16918,6 +17037,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
+            self.model.set_background_provider(self._background_brush_for_cell)
         self.open_graphs_button = QtWidgets.QPushButton("Open graphs")
         self.open_graphs_button.clicked.connect(self._open_selected_graphs)
         self.controls_layout.addWidget(self.open_graphs_button)
@@ -16952,7 +17072,8 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         if selection_model is not None:
             selection_model.selectionChanged.connect(self._handle_selection_changed)
         self._refresh_record_groups()
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._expand_rows_per_graph()
+        self._hide_shape_memory_columns()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
@@ -16986,7 +17107,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         splitter.addWidget(table)
         preview_panel = _ShapeMemoryPreviewPanel(self.logger, splitter)
         preview_panel.pointPicked.connect(self._apply_picked_selection)
-        preview_panel.currentRecordChanged.connect(self._update_preview)
+        preview_panel.currentRecordChanged.connect(self._sync_preview_saved_values)
         splitter.addWidget(preview_panel)
         self._preview_panel = preview_panel
         self._table_splitter = splitter
@@ -17072,7 +17193,15 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
             sample_column="_sample",
         )
+        for column in (
+            list(_SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS)
+            + list(_SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS)
+        ):
+            if column not in table.columns:
+                table[column] = None
         existing_entries = self.entries_snapshot()
+        existing_record_entries = self.record_entries_snapshot()
+        records_by_key = _group_graph_records_by_key(records)
         if existing_entries:
             for row_index, row in table.iterrows():
                 row_key = _row_to_microwire_key(row)
@@ -17086,9 +17215,42 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                         table[column] = None
                     if column in payload:
                         table.at[row_index, column] = payload.get(column)
-        for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
-            if column not in table.columns:
-                table[column] = None
+        if existing_record_entries:
+            for row_index, row in table.iterrows():
+                row_key = _row_to_microwire_key(row)
+                if not row_key:
+                    continue
+                standard_entry: Dict[str, Any] = {}
+                fracture_entry: Dict[str, Any] = {}
+                for record in records_by_key.get(row_key, []):
+                    path_key = _record_path_key(record)
+                    if not path_key:
+                        continue
+                    entry = existing_record_entries.get(path_key, {})
+                    if not isinstance(entry, dict) or not entry:
+                        continue
+                    if _shape_memory_is_fracture_record(record):
+                        for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
+                            if column in entry and column not in fracture_entry:
+                                fracture_entry[column] = entry[column]
+                    else:
+                        for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
+                            if column in entry and column not in standard_entry:
+                                standard_entry[column] = entry[column]
+                for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
+                    if (
+                        column in standard_entry
+                        and column in table.columns
+                        and not _shape_memory_has_value(table.at[row_index, column])
+                    ):
+                        table.at[row_index, column] = standard_entry[column]
+                for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
+                    if (
+                        column in fracture_entry
+                        and column in table.columns
+                        and not _shape_memory_has_value(table.at[row_index, column])
+                    ):
+                        table.at[row_index, column] = fracture_entry[column]
         return SectionProcessResult(
             table=table,
             processed=processed,
@@ -17099,7 +17261,8 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         super().refresh()
         self._normalise_value_columns()
         self._refresh_record_groups()
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._expand_rows_per_graph()
+        self._hide_shape_memory_columns()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
@@ -17158,7 +17321,8 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
         self._refresh_record_groups()
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._expand_rows_per_graph()
+        self._hide_shape_memory_columns()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
@@ -17166,7 +17330,8 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         super()._handle_worker_finished(result)
         self._normalise_value_columns()
         self._refresh_record_groups()
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._expand_rows_per_graph()
+        self._hide_shape_memory_columns()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
@@ -17179,6 +17344,11 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         all_records = list(payload) if isinstance(payload, list) else []
         self._all_records = list(all_records)
         visible_records = self._visible_records(all_records)
+        self._records_by_path = {}
+        for record in visible_records:
+            path_key = _record_path_key(record)
+            if path_key:
+                self._records_by_path[path_key] = record
         if visible_records:
             for record in visible_records:
                 sample = getattr(record, "sample", None)
@@ -17225,9 +17395,213 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             except Exception:
                 pass
 
+    def _expand_rows_per_graph(self) -> None:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+
+        base_frame = frame.copy()
+        if (
+            self._all_records
+            and
+            _SHAPE_MEMORY_GROUP_KEY_COLUMN in base_frame.columns
+            and _SHAPE_MEMORY_GROUP_ORDER_COLUMN in base_frame.columns
+        ):
+            keyed = base_frame.copy()
+            keyed["_shape_memory_expand_key"] = [
+                str(row.get(_SHAPE_MEMORY_GROUP_KEY_COLUMN) or f"row-{idx}")
+                for idx, (_, row) in enumerate(keyed.iterrows())
+            ]
+            keyed["_shape_memory_expand_order"] = pd.to_numeric(
+                keyed[_SHAPE_MEMORY_GROUP_ORDER_COLUMN],
+                errors="coerce",
+            ).fillna(0)
+            base_frame = (
+                keyed.sort_values(
+                    by=["_shape_memory_expand_order"],
+                    kind="stable",
+                )
+                .drop_duplicates(subset=["_shape_memory_expand_key"], keep="first")
+                .drop(columns=["_shape_memory_expand_key", "_shape_memory_expand_order"])
+                .reset_index(drop=True)
+            )
+
+        sample_entries = self.entries_snapshot()
+        record_entries = self.record_entries_snapshot()
+        expanded_rows: List[Dict[str, Any]] = []
+
+        for idx, row in base_frame.iterrows():
+            row_dict = dict(row)
+            row_key = _row_to_microwire_key(row)
+            sample_group_key = str(
+                row_dict.get(_SHAPE_MEMORY_GROUP_KEY_COLUMN) or row_key or f"row-{idx}"
+            )
+            sample_entry = sample_entries.get(row_key or "", {}) if row_key else {}
+            standard_source = str(row_dict.get(_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN) or "").strip()
+            fracture_source = str(row_dict.get(_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN) or "").strip()
+            records = self._records_for_row(row)
+            if not records:
+                row_dict[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = sample_group_key
+                row_dict[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = 0
+                expanded_rows.append(row_dict)
+                continue
+
+            try:
+                diameter_um = float(row_dict.get(MICROSCOPE_D_COLUMN))
+            except Exception:
+                diameter_um = None
+
+            standard_count = sum(
+                1 for record in records if not _shape_memory_is_fracture_record(record)
+            )
+            fracture_count = sum(
+                1 for record in records if _shape_memory_is_fracture_record(record)
+            )
+
+            def _record_sort_key(record: ShapeMemoryStressStrainRecord) -> Tuple[int, float, int, str]:
+                current = _shape_memory_current_mA_from_record(record)
+                try:
+                    numeric = float(current) if current is not None else math.inf
+                except Exception:
+                    numeric = math.inf
+                is_fracture = 1 if _shape_memory_is_fracture_record(record) else 0
+                label = _record_label_for_display(record)
+                return (0 if math.isfinite(numeric) else 1, numeric, is_fracture, label.casefold())
+
+            for order, record in enumerate(sorted(records, key=_record_sort_key)):
+                path_key = _record_path_key(record) or ""
+                entry = record_entries.get(path_key, {})
+                is_fracture = _shape_memory_is_fracture_record(record)
+                current_value = _shape_memory_current_mA_from_record(record)
+                density = _current_density_from_diameter_um(current_value, diameter_um)
+                new_row = dict(row_dict)
+                new_row["_sources"] = [path_key] if path_key else []
+                new_row[SHAPE_MEMORY_STRESS_STRAIN_COLUMN] = _record_label_for_display(record)
+                for column in _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS:
+                    new_row[column] = None
+                for column in _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS:
+                    new_row[column] = None
+                new_row[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+                new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+                new_row[_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] = None
+                new_row[_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN] = None
+
+                if is_fracture:
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = current_value
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = density
+                    new_row[_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN] = path_key or None
+                else:
+                    new_row[SHAPE_MEMORY_CURRENT_COLUMN] = current_value
+                    new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = density
+                    new_row[_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] = path_key or None
+
+                standard_entry: Dict[str, Any] = {}
+                fracture_entry: Dict[str, Any] = {}
+                if is_fracture:
+                    for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
+                        if column in entry:
+                            fracture_entry[column] = entry[column]
+                    if not fracture_entry and fracture_source and path_key == fracture_source:
+                        for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
+                            if column in sample_entry:
+                                fracture_entry[column] = sample_entry[column]
+                    elif not fracture_entry and not fracture_source and fracture_count == 1:
+                        for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
+                            if column in sample_entry:
+                                fracture_entry[column] = sample_entry[column]
+                else:
+                    for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
+                        if column in entry:
+                            standard_entry[column] = entry[column]
+                    if not standard_entry and standard_source and path_key == standard_source:
+                        for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
+                            if column in sample_entry:
+                                standard_entry[column] = sample_entry[column]
+                    elif not standard_entry and not standard_source and standard_count == 1:
+                        for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
+                            if column in sample_entry:
+                                standard_entry[column] = sample_entry[column]
+
+                for column in _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS:
+                    if column in standard_entry:
+                        new_row[column] = standard_entry[column]
+                for column in _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS:
+                    if column in fracture_entry:
+                        new_row[column] = fracture_entry[column]
+                new_row[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = sample_group_key
+                new_row[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
+                expanded_rows.append(new_row)
+
+        if not expanded_rows:
+            return
+        expanded_frame = pd.DataFrame(expanded_rows)
+        if frame.columns.equals(expanded_frame.columns) and expanded_frame.equals(frame):
+            return
+        self.data.table = expanded_frame
+        self.model.set_frame(expanded_frame)
+
+    def _records_for_row(self, row: pd.Series) -> List[ShapeMemoryStressStrainRecord]:
+        sources = row.get("_sources")
+        if isinstance(sources, (list, tuple, set)):
+            matched: List[ShapeMemoryStressStrainRecord] = []
+            for source in sources:
+                path_key = str(source or "").strip()
+                if not path_key:
+                    continue
+                record = self._records_by_path.get(path_key)
+                if record is not None:
+                    matched.append(record)
+            if matched:
+                return matched
+        sample = _row_sample_value(row)
+        if sample:
+            matched = self._record_groups.get(sample, [])
+            if matched:
+                return list(matched)
+        row_key = _row_to_microwire_key(row)
+        if row_key:
+            matched = self._record_groups_by_key.get(row_key, [])
+            if matched:
+                return list(matched)
+        return []
+
+    def _background_brush_for_cell(
+        self,
+        row: pd.Series,
+        column_label: str,
+    ) -> Optional[QtGui.QBrush]:
+        _ = column_label
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return None
+        try:
+            row_idx = int(row.name)
+        except Exception:
+            return None
+        if row_idx < 0 or row_idx >= len(frame.index):
+            return None
+
+        group_index = 0
+        previous_group: Optional[str] = None
+        for idx in range(row_idx + 1):
+            current_row = frame.iloc[idx]
+            current_group = str(
+                current_row.get(_SHAPE_MEMORY_GROUP_KEY_COLUMN)
+                or _row_to_microwire_key(current_row)
+                or f"row-{idx}"
+            )
+            if previous_group is None:
+                previous_group = current_group
+            elif current_group != previous_group:
+                group_index += 1
+                previous_group = current_group
+        color = QtGui.QColor("#1a1a1a" if group_index % 2 == 0 else "#202733")
+        return QtGui.QBrush(color)
+
     def _preview_icon_width(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_WIDTH
 
     def _preview_icon_height(self) -> int:
         return ANNEALING_GRAPH_HEIGHT
@@ -17262,14 +17636,15 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         sample = _row_sample_value(row)
         if not sample:
             return None
-        cache_key = f"{sample}|{column}"
+        sources = row.get("_sources")
+        if isinstance(sources, (list, tuple, set)):
+            source_key = "|".join(str(source) for source in sources if source)
+        else:
+            source_key = ""
+        cache_key = f"{sample}|{column}|{source_key}"
         if cache_key in self._pixmap_cache:
             return self._pixmap_cache[cache_key]
-        records = self._record_groups.get(sample, [])
-        if not records:
-            row_key = _row_to_microwire_key(row)
-            if row_key:
-                records = self._record_groups_by_key.get(row_key, [])
+        records = self._records_for_row(row)
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
             items = _shape_memory_stress_strain_preview_items(
@@ -17280,12 +17655,12 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             )
             pixmaps = [item.pixmap for item in items if item.pixmap is not None]
             if pixmaps:
-                pixmap = _combine_pixmaps_side_by_side(
+                pixmap = _combine_pixmaps_vertical(
                     pixmaps,
                     width_px=self._preview_icon_width(),
                     height_px=self._preview_icon_height(),
                     spacing=self._preview_spacing,
-                    scale_to_fit=False,
+                    scale_to_fit=True,
                 )
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
@@ -17299,15 +17674,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             series = self._row_series(row_index)
             if series is None:
                 continue
-            sample = _row_sample_value(series)
-            if not sample:
-                continue
-            matched = self._record_groups.get(sample, [])
-            if not matched:
-                row_key = _row_to_microwire_key(series)
-                if row_key:
-                    matched = self._record_groups_by_key.get(row_key, [])
-            records.extend(matched)
+            records.extend(self._records_for_row(series))
         return records
 
     def _selected_preview_records(self) -> List[ShapeMemoryStressStrainRecord]:
@@ -17317,13 +17684,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         series = self._row_series(rows[0])
         if series is None:
             return []
-        sample = _row_sample_value(series)
-        matched = self._record_groups.get(sample, []) if sample else []
-        if not matched:
-            row_key = _row_to_microwire_key(series)
-            if row_key:
-                matched = self._record_groups_by_key.get(row_key, [])
-        return list(matched)
+        return list(self._records_for_row(series))
 
     def _update_preview(self) -> None:
         panel = self._preview_panel
@@ -17336,6 +17697,12 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         first = records[0]
         title = getattr(first, "sample", None) or self.section_title
         panel.update_selection(str(title), records)
+        self._sync_preview_saved_values()
+
+    def _sync_preview_saved_values(self) -> None:
+        panel = self._preview_panel
+        if panel is None:
+            return
         rows = self._selected_rows()
         selection_row = None
         if rows:
@@ -17367,14 +17734,13 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             key = _row_to_microwire_key(row)
             if not key:
                 continue
-            entry: Dict[str, Any] = {}
+            entry = snapshot.setdefault(key, {})
             for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
                 value = row.get(column)
-                if value in (None, ""):
+                if not _shape_memory_has_value(value):
                     continue
-                entry[column] = value
-            if entry:
-                snapshot[key] = entry
+                if column not in entry:
+                    entry[column] = value
         return snapshot
 
     def record_entries_snapshot(self) -> Dict[str, Dict[str, Any]]:
@@ -17386,11 +17752,14 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             if not isinstance(key, str) or not isinstance(value, dict):
                 continue
             cleaned: Dict[str, Any] = {}
-            for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
+            for column in (
+                list(_SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS)
+                + list(_SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS)
+            ):
                 if column not in value:
                     continue
                 payload = value.get(column)
-                if payload in (None, ""):
+                if not _shape_memory_has_value(payload):
                     continue
                 cleaned[column] = payload
             if cleaned:
@@ -17487,7 +17856,9 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             return
         updated = frame.copy()
         changed = False
-        for old_name, new_name in _SHAPE_MEMORY_COLUMN_ALIASES.items():
+        legacy_aliases = dict(_SHAPE_MEMORY_COLUMN_ALIASES)
+        legacy_aliases.update(_SHAPE_MEMORY_CURRENT_COLUMN_ALIASES)
+        for old_name, new_name in legacy_aliases.items():
             if old_name not in updated.columns:
                 continue
             if new_name not in updated.columns:
@@ -17589,31 +17960,22 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
                 fracture_currents,
             )
-            standard_has_values = any(
-                updated.at[row_index, column] not in (None, "")
-                and not (isinstance(updated.at[row_index, column], float) and math.isnan(updated.at[row_index, column]))
-                for column in (
-                    SHAPE_MEMORY_DISPLACEMENT_COLUMN,
-                    SHAPE_MEMORY_LOAD_COLUMN,
-                    SHAPE_MEMORY_STRAIN_COLUMN,
-                    SHAPE_MEMORY_STRESS_COLUMN,
-                )
+            standard_has_values = _shape_memory_payload_has_values(
+                updated.loc[row_index],
+                _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS,
             )
             if not standard_has_values:
                 updated.at[row_index, SHAPE_MEMORY_CURRENT_COLUMN] = None
                 updated.at[row_index, SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
-            fracture_has_values = any(
-                updated.at[row_index, column] not in (None, "")
-                and not (isinstance(updated.at[row_index, column], float) and math.isnan(updated.at[row_index, column]))
-                for column in (
-                    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
-                    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
-                    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
-                )
+                updated.at[row_index, _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] = None
+            fracture_has_values = _shape_memory_payload_has_values(
+                updated.loc[row_index],
+                _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS,
             )
             if not fracture_has_values:
                 updated.at[row_index, SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
                 updated.at[row_index, SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+                updated.at[row_index, _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN] = None
         if changed or not frame.columns.equals(updated.columns) or not updated.equals(frame):
             self.data.table = updated
             self.model.set_frame(updated)
@@ -17626,14 +17988,18 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         super().apply_data(data)
         self._normalise_value_columns()
         self._refresh_record_groups()
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._expand_rows_per_graph()
+        self._hide_shape_memory_columns()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
     def _preview_panel_visible(self) -> bool:
         extra = self.data.extra if isinstance(self.data.extra, dict) else {}
-        visible = extra.get("preview_panel_visible", True)
+        visible = extra.get("preview_panel_visible", False)
         return bool(visible)
+
+    def _hide_shape_memory_columns(self) -> None:
+        self._hide_columns(self.HIDDEN_SECTION_COLUMNS)
 
     def _toggle_preview_panel(self, checked: bool) -> None:
         extra = self.data.extra if isinstance(self.data.extra, dict) else {}
@@ -17726,7 +18092,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             updated.at[row_index, column] = value
         self.data.table = updated
         self.model.set_frame(updated)
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._hide_shape_memory_columns()
         try:
             if self.table_view is not None:
                 self.table_view.selectRow(row_index)
@@ -17741,10 +18107,23 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             if path_key:
                 record_entries = self.record_entries_snapshot()
                 entry = dict(record_entries.get(path_key, {}))
-                entry.update({key: value for key, value in updates.items() if value not in (None, "")})
+                bundle_columns = (
+                    _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS
+                    if target == "fracture"
+                    else _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS
+                )
+                for column in bundle_columns:
+                    value = updates.get(column)
+                    if _shape_memory_has_value(value):
+                        entry[column] = value
+                    else:
+                        entry.pop(column, None)
                 raw = self.data.extra.get("record_entries")
                 raw_entries = dict(raw) if isinstance(raw, dict) else {}
-                raw_entries[path_key] = entry
+                if entry:
+                    raw_entries[path_key] = entry
+                else:
+                    raw_entries.pop(path_key, None)
                 self.data.extra["record_entries"] = raw_entries
                 try:
                     self.store.save(self.data)
@@ -23130,33 +23509,16 @@ class AssemblySection(QtWidgets.QWidget):
             return frame
         groups = self._ensure_shape_memory_stress_strain_groups()
         def _clear_orphan_currents(payload: Dict[str, Any]) -> None:
-            standard_has_values = any(
-                payload.get(column) not in (None, "")
-                and not (
-                    isinstance(payload.get(column), float)
-                    and math.isnan(payload.get(column))
-                )
-                for column in (
-                    SHAPE_MEMORY_DISPLACEMENT_COLUMN,
-                    SHAPE_MEMORY_LOAD_COLUMN,
-                    SHAPE_MEMORY_STRAIN_COLUMN,
-                    SHAPE_MEMORY_STRESS_COLUMN,
-                )
+            standard_has_values = _shape_memory_payload_has_values(
+                payload,
+                _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS,
             )
             if not standard_has_values:
                 payload[SHAPE_MEMORY_CURRENT_COLUMN] = None
                 payload[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
-            fracture_has_values = any(
-                payload.get(column) not in (None, "")
-                and not (
-                    isinstance(payload.get(column), float)
-                    and math.isnan(payload.get(column))
-                )
-                for column in (
-                    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
-                    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
-                    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
-                )
+            fracture_has_values = _shape_memory_payload_has_values(
+                payload,
+                _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS,
             )
             if not fracture_has_values:
                 payload[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None

@@ -19,12 +19,6 @@
 - When the worktree is clean and the update is a fast-forward, bring the branch up to date with `git pull --ff-only`.
 - If there are local changes, no upstream branch, or the pull would require a merge or rebase, stop and summarize the situation instead of forcing a sync.
 
-## Delegation
-- Proactively spawn subagents when it will materially help with the task, especially for parallelizable investigation, verification, or well-bounded implementation work.
-- Do not wait for the user to explicitly request subagents when delegation is the clearest or fastest path.
-- Keep the main agent responsible for the critical path, integration, and the final answer; use subagents to accelerate supporting work, not to avoid ownership.
-- Avoid delegation when the task is too small, when the next step is immediately blocked on the answer, or when parallel work would create unnecessary overhead.
-
 ## Changelog
 - Keep `CHANGELOG.md` as the canonical release history on `main`.
 - In feature branches/worktrees, add a changelog fragment under `changelog.d/` instead of editing `CHANGELOG.md` directly.
@@ -38,8 +32,8 @@
 - Never run verification directly against the user's real `.pypj` or `.pydpj` project files. Always make a disposable copy first and test against the copy.
 - For graph-generation changes, always create real output graphs and visually verify results before finishing.
 - Apply that visual verification rule to both Matplotlib graphs and Origin-exported graphs, and continue iterating until output is correct.
-- When a task changes visible PyPlot/UI behavior and the result is meant for user review, capture final review screenshots after verification.
-- For PyPlot GUI review screenshots, use a fullscreen or clearly maximized window layout so docks, toolbars, and graph content are readable; do not save cramped window captures as the final review artifact.
+- When a task changes visible PyPlot or Microwire Data Builder UI behavior and the result is meant for user review, capture final review screenshots after verification.
+- For PyPlot or Microwire Data Builder GUI review screenshots, use a fullscreen or clearly maximized window layout so docks, toolbars, tables, preview panels, and graph content are readable; do not save cramped window captures as the final review artifact.
 - By default, show final review screenshots inline in the chat using absolute local image paths so the user can review them immediately.
 - Save final review screenshots to `~/Downloads` only when the user explicitly asks for saved files there, asks for a path, or when inline screenshots alone would be insufficient.
 - Store temporary visual-check outputs under a workspace `artifacts/` folder (create it when needed).
