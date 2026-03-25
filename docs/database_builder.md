@@ -85,6 +85,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 
 - Microwire EDA is a separate read-only workflow that can load either a Builder `.pydpj` project or an assembled spreadsheet export.
 - The current analysis is endpoint-first rather than broke/OK-first. Modern measured endpoints (`Strain (%)`, `Fracture strain (%)`, `Stress (MPa)`, `Fracture stress (MPa)`) are the primary outputs; legacy broke/brittle labels are retained only as optional auxiliary context.
+- For `.pydpj` inputs, Microwire EDA now prefers a copy-safe autonomous flow and can rebuild Assemble rows transiently from the Builder project sections when the saved Assemble payload is missing or when a force-rebuild run is requested.
 - The generated bundle now includes the HTML report, summary workbook, canonical CSV dataset, findings JSON, findings Markdown brief, and manifest JSON. Findings focus on what the data currently supports and which follow-up experiments are worth running next.
 - Standalone command entrypoint: `launcher.py --microwire-eda <project.pydpj|assembled.xlsx> [--rows all|filtered|selected] [--out <dir>] [--microwire-eda-title <title>] [--microwire-eda-working-copy-dir <dir>]`.
 - Builder-launched analysis uses the current Assemble preview rows directly when available so the report matches the visible filtered subset rather than silently reverting to the full project.

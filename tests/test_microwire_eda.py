@@ -17,6 +17,7 @@ from microwire_eda.core import (
     canonicalise_frame,
     detect_input_kind,
     generate_report,
+    load_analysis_frame,
     load_input_frame,
     MicrowireEdaResult,
 )
@@ -249,6 +250,65 @@ def test_generate_report_writes_findings_and_uses_project_copy(tmp_path: Path) -
     assert findings_payload["copied_project_path"] == str(result.copied_project_path)
     assert findings_payload["findings"]
     assert "## Findings" in result.findings_md_path.read_text(encoding="utf-8")
+
+
+def test_load_analysis_frame_rebuilds_project_when_assemble_rows_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = tmp_path / "missing_assemble.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "MicrowireDataBuilder",
+                "sections": {
+                    "assemble": {
+                        "rows": [],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    rebuilt = _sample_dataframe().head(4).copy()
+
+    monkeypatch.setattr(
+        "microwire_eda.core._rebuild_project_frame_via_builder",
+        lambda path, progress_callback=None: rebuilt,
+    )
+
+    frame, kind, working_path, copied_project_path, used_rebuild = load_analysis_frame(
+        MicrowireEdaConfig(
+            input_path=project_path,
+            output_dir=tmp_path / "report",
+            working_copy_dir=tmp_path / "working",
+            copy_project=True,
+        )
+    )
+
+    assert kind == "project"
+    assert used_rebuild is True
+    assert copied_project_path is not None
+    assert working_path == copied_project_path
+    assert frame.equals(rebuilt)
+
+
+def test_generate_report_disables_composition_outputs_when_requested(tmp_path: Path) -> None:
+    frame = _sample_dataframe()
+    config = MicrowireEdaConfig(
+        source_dataframe=frame,
+        output_dir=tmp_path / "report",
+        report_title="No Cohorts",
+        export_png_bundle=False,
+        export_pdf_bundle=False,
+        include_composition_splits=False,
+    )
+
+    result = generate_report(config)
+
+    assert result.tables["composition_summary"].empty
+    assert result.tables["per_composition_process_strain_signals"].empty
+    assert "cohorts" in result.skipped_sections
 
 
 def test_builder_launch_passes_filtered_assemble_rows(

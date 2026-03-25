@@ -171,6 +171,7 @@ def test_launcher_detects_microwire_eda_cli_flags() -> None:
     assert args.rows == "filtered"
     assert args.out == "artifacts/eda"
     assert args.microwire_eda_copy_project is True
+    assert args.microwire_eda_force_project_rebuild is False
 
 
 def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(
@@ -204,6 +205,7 @@ def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(
         microwire_eda_title="CLI EDA",
         microwire_eda_working_copy_dir=str(tmp_path / "working"),
         microwire_eda_copy_project=True,
+        microwire_eda_force_project_rebuild=True,
         microwire_eda_legacy_breakage=False,
         microwire_eda_composition_splits=False,
         microwire_eda_findings=True,
@@ -214,6 +216,7 @@ def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(
     assert exit_code == 0
     config = captured["config"]
     assert getattr(config, "copy_project") is True
+    assert getattr(config, "force_project_rebuild") is True
     assert getattr(config, "working_copy_dir") == tmp_path / "working"
     assert getattr(config, "include_legacy_breakage_analysis") is False
     assert getattr(config, "include_composition_splits") is False

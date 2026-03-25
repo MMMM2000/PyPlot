@@ -7,6 +7,7 @@ The workflow is analysis-first:
 - prefer measured strain and fracture endpoints over legacy broke/OK labels
 - surface data sufficiency and missingness early
 - separate process-side signals from geometry-side signals
+- compare cross-composition trends against composition-specific signals when enough rows exist
 - produce machine-readable findings so an agent can inspect, summarize, and iterate autonomously
 
 ## Inputs
@@ -28,6 +29,7 @@ Reference PDF used for the original analysis framing:
 Never run verification or ad hoc analysis directly against the user's real Praha project file.
 
 - For CLI and agent-driven `.pydpj` analysis, Microwire EDA now makes a disposable copied project by default.
+- If saved Assemble rows are missing, or if `--microwire-eda-force-project-rebuild` is used, Microwire EDA rebuilds the assembled dataframe transiently from the Builder project sections.
 - Builder-launched analysis that passes the current Assemble dataframe directly stays read-only and does not mutate the project.
 - Tests should always create their own temporary `.pydpj` copies.
 
@@ -63,7 +65,7 @@ The current report is structured around exploratory questions:
 - Geometry to outcome
   Correlations and scatter views for `d`, `D`, and `d/D`.
 - Cohort splits
-  Cross-composition and per-composition coverage summaries.
+  Cross-composition coverage plus per-composition top process signals for each endpoint when enough rows exist.
 - Interaction views
   Pairplot and parallel-coordinate views for the overlapping numeric subsets.
 - Time drift
@@ -131,6 +133,7 @@ Useful flags:
 
 - `--rows all|filtered|selected`
 - `--no-microwire-eda-copy-project`
+- `--microwire-eda-force-project-rebuild`
 - `--microwire-eda-no-legacy-breakage`
 - `--microwire-eda-no-composition-splits`
 - `--microwire-eda-no-findings`

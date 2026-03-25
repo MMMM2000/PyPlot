@@ -690,12 +690,19 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         action="store_false",
         help="Disable findings JSON/Markdown outputs for Microwire EDA runs.",
     )
+    parser.add_argument(
+        "--microwire-eda-force-project-rebuild",
+        dest="microwire_eda_force_project_rebuild",
+        action="store_true",
+        help="Rebuild Assemble rows transiently from the Builder project sections even when saved Assemble rows already exist.",
+    )
     parser.set_defaults(
         visual_origin=True,
         microwire_eda_copy_project=True,
         microwire_eda_legacy_breakage=True,
         microwire_eda_composition_splits=True,
         microwire_eda_findings=True,
+        microwire_eda_force_project_rebuild=False,
     )
     args, qt_args = parser.parse_known_args(argv)
     return args, qt_args
@@ -739,6 +746,7 @@ def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
         report_title=str(getattr(args, "microwire_eda_title", "Microwire EDA Report")),
         working_copy_dir=working_copy_dir,
         copy_project=bool(getattr(args, "microwire_eda_copy_project", True)),
+        force_project_rebuild=bool(getattr(args, "microwire_eda_force_project_rebuild", False)),
         include_legacy_breakage_analysis=bool(getattr(args, "microwire_eda_legacy_breakage", True)),
         include_composition_splits=bool(getattr(args, "microwire_eda_composition_splits", True)),
         write_findings=bool(getattr(args, "microwire_eda_findings", True)),
@@ -754,6 +762,8 @@ def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
         print(f"[microwire-eda] findings_md={result.findings_md_path}")
     if result.copied_project_path is not None:
         print(f"[microwire-eda] copied_project={result.copied_project_path}")
+    if getattr(result, "used_project_rebuild", False):
+        print("[microwire-eda] rebuilt_assemble=true")
     if result.findings:
         for finding in result.findings[:3]:
             print(f"[microwire-eda] finding={finding.get('headline', 'Finding')}")

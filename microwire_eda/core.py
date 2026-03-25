@@ -5,6 +5,7 @@ import html
 import io
 import json
 import math
+import os
 import re
 import shutil
 import tempfile
@@ -89,6 +90,11 @@ ENDPOINT_COLUMNS = [
     "Stress (MPa)",
     "Fracture stress (MPa)",
 ]
+REPORT_EXTRA_COLUMNS = [
+    "Tt est (°C)",
+    "Notes",
+    "Data source",
+]
 PROCESS_FEATURES = FABRICATION_COLUMNS + ANNEALING_COLUMNS
 NUMERIC_ANALYSIS_FEATURES = GEOMETRY_COLUMNS + PROCESS_FEATURES
 
@@ -108,6 +114,10 @@ SUMMARY_TABLE_ORDER = [
     "endpoint_coverage",
     "duplicate_wires",
     "composition_summary",
+    "per_composition_process_strain_signals",
+    "per_composition_process_fracture_strain_signals",
+    "per_composition_process_stress_signals",
+    "per_composition_process_fracture_stress_signals",
     "process_strain_correlations",
     "process_fracture_strain_correlations",
     "process_stress_correlations",
@@ -230,6 +240,8 @@ class MicrowireEdaConfig:
     working_copy_dir: Path | None = None
     copied_project_path: Path | None = None
     copy_project: bool = True
+    rebuild_project_if_assemble_missing: bool = True
+    force_project_rebuild: bool = False
     include_legacy_breakage_analysis: bool = True
     include_composition_splits: bool = True
     write_findings: bool = True
@@ -251,6 +263,7 @@ class MicrowireEdaAnalysis:
     source_path: Path | None
     working_input_path: Path | None
     copied_project_path: Path | None
+    used_project_rebuild: bool
     canonical_frame: pd.DataFrame
     scoped_frame: pd.DataFrame
     applied_scope: str
@@ -279,6 +292,7 @@ class MicrowireEdaResult:
     findings_json_path: Path | None = None
     findings_md_path: Path | None = None
     copied_project_path: Path | None = None
+    used_project_rebuild: bool = False
     sufficiency_summary: dict[str, Any] = field(default_factory=dict)
     endpoint_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -424,6 +438,128 @@ def _load_project_frame(path: Path) -> pd.DataFrame:
     return frame
 
 
+def _load_project_frame_if_available(path: Path) -> pd.DataFrame:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    sections = payload.get("sections", {})
+    if not isinstance(sections, Mapping):
+        return pd.DataFrame()
+    assemble = sections.get("assemble", {})
+    if not isinstance(assemble, Mapping):
+        return pd.DataFrame()
+    return _project_section_to_frame(assemble)
+
+
+def _rebuild_project_frame_via_builder(
+    path: Path,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
+    progress = progress_callback or _noop_progress
+    progress("Rebuilding Assemble rows from project sections")
+
+    previous_dialog_setting = os.environ.get("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS")
+    os.environ["MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"] = "1"
+    try:
+        from PyQt6 import QtWidgets
+        from microwire_data_builder.core import BuilderConfig, DEFAULT_OUTPUT_NAME, _normalise_output_name, build_database
+        from microwire_data_builder.ui import BuilderWindow, _apply_microscope_overrides
+
+        app = QtWidgets.QApplication.instance()
+        owns_app = app is None
+        if app is None:
+            app = QtWidgets.QApplication(["microwire_eda_rebuild"])
+
+        window = BuilderWindow()
+        try:
+            window._load_project_from_path(path)
+            assembly = getattr(window, "assembly_section", None)
+            if assembly is None:
+                raise ValueError("Builder project did not load an Assemble section.")
+
+            selected_state = getattr(assembly, "_section_states", {})
+            selected = set(selected_state.keys()) if isinstance(selected_state, dict) and selected_state else set(window.sections.keys())
+            inputs = assembly._prepare_builder_inputs(selected, require_payloads=False)
+            if inputs is None:
+                raise ValueError("Builder project did not provide enough processed section data to rebuild Assemble rows.")
+
+            (
+                fabrication_index,
+                annealing_records,
+                vsm_hysteresis_records,
+                vsm_temperature_records,
+                dma_isostress_records,
+                shape_memory_stress_strain_records,
+                shape_memory_entries,
+                fmr_records,
+                microscope_index,
+                video_index,
+                strain_records,
+                strain_entries,
+                current_density_entries,
+                overrides,
+                phase_points,
+                transition_points,
+                video_overrides,
+            ) = inputs
+
+            if "microscope" in selected and overrides:
+                microscope_index = _apply_microscope_overrides(microscope_index, overrides)
+            elif "microscope" not in selected:
+                microscope_index = {}
+
+            output_dir = Path(tempfile.mkdtemp(prefix="microwire_eda_builder_"))
+            config = BuilderConfig(
+                annealing_files=[],
+                fabrication_files=[],
+                output_dir=output_dir,
+                microscope_files=[],
+                video_files=[],
+                strain_files=[],
+                make_plots=False,
+                export_formats=(),
+                plot_backends=(),
+                output_name=_normalise_output_name(DEFAULT_OUTPUT_NAME),
+            )
+            build_kwargs = {
+                "fabrication_index": fabrication_index,
+                "measurement_records": annealing_records,
+                "vsm_hysteresis_records": vsm_hysteresis_records if "vsm_hysteresis" in selected else [],
+                "vsm_temperature_scan_records": vsm_temperature_records if "vsm_temperature_scan" in selected else [],
+                "dma_iso_stress_records": dma_isostress_records if "dma_iso_stress" in selected else [],
+                "shape_memory_stress_strain_records": (
+                    shape_memory_stress_strain_records if "shape_memory_stress_strain" in selected else []
+                ),
+                "shape_memory_entries": shape_memory_entries if "shape_memory_stress_strain" in selected else {},
+                "fmr_records": fmr_records if "fmr" in selected else [],
+                "microscope_index": microscope_index if "microscope" in selected else {},
+                "video_index": video_index if "videos" in selected else {},
+                "video_overrides": video_overrides,
+                "strain_records": strain_records if "strain" in selected else {},
+                "strain_entries": strain_entries if "strain" in selected else {},
+                "current_density_entries": current_density_entries if "current_density" in selected else {},
+                "phase_points": phase_points,
+                "transition_temps": transition_points,
+                "skip_exports": True,
+            }
+            result = build_database(config, logger=window.logger, **build_kwargs)
+            return _copy_frame(getattr(result, "dataframe", None))
+        finally:
+            try:
+                window.close()
+            except Exception:
+                pass
+            if owns_app and app is not None:
+                try:
+                    app.quit()
+                except Exception:
+                    pass
+    finally:
+        if previous_dialog_setting is None:
+            os.environ.pop("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", None)
+        else:
+            os.environ["MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"] = previous_dialog_setting
+
+
 def _load_excel_frame(path: Path) -> pd.DataFrame:
     if path.suffix.lower() == ".csv":
         return pd.read_csv(path)
@@ -467,27 +603,37 @@ def _copy_project_for_analysis(
 def load_analysis_frame(
     config: MicrowireEdaConfig,
     progress_callback: ProgressCallback | None = None,
-) -> tuple[pd.DataFrame, str, Path | None, Path | None]:
+) -> tuple[pd.DataFrame, str, Path | None, Path | None, bool]:
     progress = progress_callback or _noop_progress
     if isinstance(config.source_dataframe, pd.DataFrame):
-        return _copy_frame(config.source_dataframe), INPUT_KIND_DATAFRAME, config.input_path, None
+        return _copy_frame(config.source_dataframe), INPUT_KIND_DATAFRAME, config.input_path, None, False
     if config.input_path is None:
         raise ValueError("Microwire EDA requires an input path or source dataframe.")
     source_path = config.input_path.expanduser()
     kind = detect_input_kind(source_path, config.input_kind)
     working_path = source_path
     copied_project_path: Path | None = None
+    used_project_rebuild = False
     if kind == INPUT_KIND_PROJECT:
         progress("Preparing disposable project copy")
         working_path, copied_project_path = _copy_project_for_analysis(source_path, config)
-        return _load_project_frame(working_path), kind, working_path, copied_project_path
+        frame = _load_project_frame_if_available(working_path)
+        should_rebuild = config.force_project_rebuild or (
+            config.rebuild_project_if_assemble_missing and frame.empty
+        )
+        if should_rebuild:
+            frame = _rebuild_project_frame_via_builder(working_path, progress_callback=progress)
+            used_project_rebuild = True
+        if frame.empty:
+            raise ValueError("Project file is missing assemble rows and could not be rebuilt.")
+        return frame, kind, working_path, copied_project_path, used_project_rebuild
     if kind == INPUT_KIND_EXCEL:
-        return _load_excel_frame(working_path), kind, working_path, None
+        return _load_excel_frame(working_path), kind, working_path, None, False
     raise ValueError(f"Unsupported input kind: {kind}")
 
 
 def load_input_frame(config: MicrowireEdaConfig) -> tuple[pd.DataFrame, str]:
-    frame, kind, _working_path, _copied_project_path = load_analysis_frame(config)
+    frame, kind, _working_path, _copied_project_path, _used_project_rebuild = load_analysis_frame(config)
     return frame, kind
 
 
@@ -702,10 +848,18 @@ def _row_counts(frame: pd.DataFrame) -> dict[str, int]:
     }
 
 
-def _coverage_table(frame: pd.DataFrame) -> pd.DataFrame:
+def _report_relevant_columns(frame: pd.DataFrame) -> list[str]:
+    preferred = list(dict.fromkeys(list(CANONICAL_COLUMNS) + REPORT_EXTRA_COLUMNS))
+    output = [column for column in preferred if column in frame.columns]
+    if output:
+        return output
+    return _ordered_columns(frame)
+
+
+def _coverage_table(frame: pd.DataFrame, *, columns: Sequence[str] | None = None) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     total = max(len(frame.index), 1)
-    for column in _ordered_columns(frame):
+    for column in columns or _ordered_columns(frame):
         series = frame[column]
         non_null = int(pd.Series(series).notna().sum())
         rows.append(
@@ -850,6 +1004,28 @@ def _target_correlation_table(frame: pd.DataFrame, *, target: str, features: Seq
     result = pd.DataFrame(rows)
     if not result.empty:
         result = result.sort_values(["abs_rho", "feature"], ascending=[False, True]).reset_index(drop=True)
+    return result
+
+
+def _per_composition_signal_table(
+    frame: pd.DataFrame,
+    *,
+    target: str,
+    features: Sequence[str],
+    top_n: int = 3,
+) -> pd.DataFrame:
+    if "Composition" not in frame.columns or target not in frame.columns:
+        return pd.DataFrame(columns=["Composition", "feature", "rho", "abs_rho", "p_value", "n"])
+    rows: list[dict[str, Any]] = []
+    for composition, subset in frame.groupby("Composition", dropna=True):
+        table = _target_correlation_table(subset, target=target, features=features)
+        if table.empty:
+            continue
+        for record in table.head(top_n).to_dict(orient="records"):
+            rows.append({"Composition": composition, **record})
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result = result.sort_values(["Composition", "abs_rho", "feature"], ascending=[True, False, True]).reset_index(drop=True)
     return result
 
 
@@ -1154,6 +1330,8 @@ def _generate_findings(
     counts: Mapping[str, int],
     tables: Mapping[str, pd.DataFrame],
     include_legacy_breakage_analysis: bool,
+    include_composition_splits: bool,
+    used_project_rebuild: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     total_rows = int(counts.get("all_rows", 0))
@@ -1174,6 +1352,17 @@ def _generate_findings(
             "confidence": "high",
         }
     )
+
+    if used_project_rebuild:
+        findings.append(
+            {
+                "category": "data_quality",
+                "headline": "Assemble rows were rebuilt transiently from the project sections.",
+                "detail": "This run did not rely only on already-saved Assemble rows. Microwire EDA rebuilt the assembled dataframe in-process from the Builder project sections, without mutating the source project file.",
+                "evidence": {},
+                "confidence": "high",
+            }
+        )
 
     duplicates = tables.get("duplicate_wires", pd.DataFrame())
     if isinstance(duplicates, pd.DataFrame) and not duplicates.empty:
@@ -1207,22 +1396,29 @@ def _generate_findings(
             continue
         top_row = table.iloc[0]
         direction = "higher" if float(top_row["rho"]) >= 0 else "lower"
+        headline = f"Top process signal for {label}: {top_row['feature']}."
+        detail_prefix = "The strongest available process-side monotonic association"
+        confidence = "medium"
+        if int(top_row["n"]) < 6:
+            headline = f"Preliminary process signal for {label}: {top_row['feature']}."
+            detail_prefix = "The strongest currently available preliminary process-side monotonic association"
+            confidence = "low"
         findings.append(
             {
                 "category": "endpoint_signal",
-                "headline": f"Top process signal for {label}: {top_row['feature']}.",
+                "headline": headline,
                 "detail": (
-                    f"The strongest available process-side monotonic association with {label} is {top_row['feature']} "
+                    f"{detail_prefix} with {label} is {top_row['feature']} "
                     f"(Spearman rho={float(top_row['rho']):.3f}, n={int(top_row['n'])}). In this dataset, "
                     f"{direction} values of that variable track higher {label} values."
                 ),
                 "evidence": {"top_rows": _summarise_table(table)},
-                "confidence": "medium",
+                "confidence": confidence,
             }
         )
 
     composition_summary = tables.get("composition_summary", pd.DataFrame())
-    if isinstance(composition_summary, pd.DataFrame) and not composition_summary.empty:
+    if include_composition_splits and isinstance(composition_summary, pd.DataFrame) and not composition_summary.empty:
         richest = composition_summary.iloc[0]
         findings.append(
             {
@@ -1237,6 +1433,29 @@ def _generate_findings(
                 "confidence": "high",
             }
         )
+        per_comp = tables.get("per_composition_process_strain_signals", pd.DataFrame())
+        if isinstance(per_comp, pd.DataFrame) and not per_comp.empty:
+            strongest = per_comp.sort_values(["abs_rho", "Composition"], ascending=[False, True]).iloc[0]
+            direction = "higher" if float(strongest["rho"]) >= 0 else "lower"
+            confidence = "medium" if int(strongest["n"]) >= 6 else "low"
+            headline = f"Strongest composition-specific strain signal: {strongest['Composition']} / {strongest['feature']}."
+            detail_prefix = "Within"
+            if int(strongest["n"]) < 6:
+                headline = f"Preliminary composition-specific strain signal: {strongest['Composition']} / {strongest['feature']}."
+                detail_prefix = "Within"
+            findings.append(
+                {
+                    "category": "cohorts",
+                    "headline": headline,
+                    "detail": (
+                        f"{detail_prefix} {strongest['Composition']}, the strongest available process-to-strain relationship is "
+                        f"{strongest['feature']} (Spearman rho={float(strongest['rho']):.3f}, n={int(strongest['n'])}). "
+                        f"In that family, {direction} values of the feature track higher strain."
+                    ),
+                    "evidence": {"top_rows": _summarise_table(per_comp)},
+                    "confidence": confidence,
+                }
+            )
 
     if include_legacy_breakage_analysis and int(counts.get("known_outcome", 0)) > 0:
         findings.append(
@@ -1275,11 +1494,10 @@ def _build_tables(
     applied_scope: str,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, str]]:
     tables: dict[str, pd.DataFrame] = {
-        "coverage": _coverage_table(frame),
+        "coverage": _coverage_table(frame, columns=_report_relevant_columns(frame)),
         "row_scope": _row_scope_table(config.row_scope, applied_scope, counts),
         "endpoint_coverage": _endpoint_coverage_table(frame),
         "duplicate_wires": _duplicate_wire_table(frame),
-        "composition_summary": _composition_summary_table(frame),
         "process_strain_correlations": _target_correlation_table(frame, target="strain_abs", features=PROCESS_FEATURES),
         "process_fracture_strain_correlations": _target_correlation_table(frame, target="fracture_strain_abs", features=PROCESS_FEATURES),
         "process_stress_correlations": _target_correlation_table(frame, target="Stress (MPa)", features=PROCESS_FEATURES),
@@ -1290,13 +1508,44 @@ def _build_tables(
         "geometry_fracture_stress_correlations": _target_correlation_table(frame, target="Fracture stress (MPa)", features=GEOMETRY_COLUMNS),
         "time_summary": _time_summary_table(frame),
     }
+    skipped_sections: dict[str, str] = {}
+    if config.include_composition_splits:
+        tables["composition_summary"] = _composition_summary_table(frame)
+        tables["per_composition_process_strain_signals"] = _per_composition_signal_table(
+            frame,
+            target="strain_abs",
+            features=PROCESS_FEATURES,
+        )
+        tables["per_composition_process_fracture_strain_signals"] = _per_composition_signal_table(
+            frame,
+            target="fracture_strain_abs",
+            features=PROCESS_FEATURES,
+        )
+        tables["per_composition_process_stress_signals"] = _per_composition_signal_table(
+            frame,
+            target="Stress (MPa)",
+            features=PROCESS_FEATURES,
+        )
+        tables["per_composition_process_fracture_stress_signals"] = _per_composition_signal_table(
+            frame,
+            target="Fracture stress (MPa)",
+            features=PROCESS_FEATURES,
+        )
+        if tables["composition_summary"].empty:
+            skipped_sections["cohorts"] = "Composition-split analysis is enabled, but no usable composition labels were available."
+    else:
+        tables["composition_summary"] = pd.DataFrame()
+        tables["per_composition_process_strain_signals"] = pd.DataFrame()
+        tables["per_composition_process_fracture_strain_signals"] = pd.DataFrame()
+        tables["per_composition_process_stress_signals"] = pd.DataFrame()
+        tables["per_composition_process_fracture_stress_signals"] = pd.DataFrame()
+        skipped_sections["cohorts"] = "Composition-split analysis was disabled for this run."
     endpoint_tables = {
         "strain_abs": tables["process_strain_correlations"],
         "fracture_strain_abs": tables["process_fracture_strain_correlations"],
         "Stress (MPa)": tables["process_stress_correlations"],
         "Fracture stress (MPa)": tables["process_fracture_stress_correlations"],
     }
-    skipped_sections: dict[str, str] = {}
     if config.include_legacy_breakage_analysis:
         legacy_table = _legacy_breakage_summary(frame)
         tables["legacy_breakage_summary"] = legacy_table
@@ -1314,7 +1563,7 @@ def run_analysis(
 ) -> MicrowireEdaAnalysis:
     progress = progress_callback or _noop_progress
     progress("Loading assemble data")
-    raw_frame, input_kind, working_input_path, copied_project_path = load_analysis_frame(config, progress)
+    raw_frame, input_kind, working_input_path, copied_project_path, used_project_rebuild = load_analysis_frame(config, progress)
     progress("Canonicalising columns")
     canonical_frame = canonicalise_frame(raw_frame)
     scoped_frame, applied_scope = apply_row_scope(canonical_frame, config)
@@ -1332,6 +1581,8 @@ def run_analysis(
         counts=counts,
         tables=tables,
         include_legacy_breakage_analysis=config.include_legacy_breakage_analysis,
+        include_composition_splits=config.include_composition_splits,
+        used_project_rebuild=used_project_rebuild,
     )
     return MicrowireEdaAnalysis(
         config=config,
@@ -1339,6 +1590,7 @@ def run_analysis(
         source_path=config.input_path,
         working_input_path=working_input_path,
         copied_project_path=copied_project_path,
+        used_project_rebuild=used_project_rebuild,
         canonical_frame=canonical_frame,
         scoped_frame=scoped_frame,
         applied_scope=applied_scope,
@@ -1376,6 +1628,8 @@ def _findings_markdown(
                 f"- Disposable project copy used: `{analysis.copied_project_path}`",
             ]
         )
+    if analysis.used_project_rebuild:
+        lines.append("- Assemble rows were rebuilt transiently from the Builder project sections for this run.")
     lines.extend(["", "## Findings", ""])
     if not analysis.findings:
         lines.append("- No findings were generated.")
@@ -1459,6 +1713,10 @@ def _html_document(
             "Cross-composition and per-composition coverage summaries to show where the dataset is concentrated.",
             [
                 _table_html(analysis.tables["composition_summary"]),
+                _table_html(analysis.tables["per_composition_process_strain_signals"]),
+                _table_html(analysis.tables["per_composition_process_fracture_strain_signals"]),
+                _table_html(analysis.tables["per_composition_process_stress_signals"]),
+                _table_html(analysis.tables["per_composition_process_fracture_stress_signals"]),
             ],
         ),
         (
@@ -1510,6 +1768,8 @@ def _html_document(
             "<p class='lead'><strong>Copy-safe run:</strong> this analysis used a disposable project copy at "
             f"{html.escape(str(analysis.copied_project_path))}.</p>"
         )
+    if analysis.used_project_rebuild:
+        copy_note += "<p class='lead'><strong>Transient rebuild:</strong> Assemble rows were rebuilt in-process from the Builder project sections for this run.</p>"
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1582,6 +1842,7 @@ def _write_findings_json(
         "source_path": str(analysis.source_path) if analysis.source_path is not None else None,
         "working_input_path": str(analysis.working_input_path) if analysis.working_input_path is not None else None,
         "copied_project_path": str(analysis.copied_project_path) if analysis.copied_project_path is not None else None,
+        "used_project_rebuild": bool(analysis.used_project_rebuild),
         "row_counts": dict(analysis.row_counts),
         "sufficiency_summary": dict(analysis.sufficiency_summary),
         "findings": analysis.findings,
@@ -1607,6 +1868,7 @@ def _write_manifest(
         "input_path": str(analysis.source_path) if analysis.source_path is not None else None,
         "working_input_path": str(analysis.working_input_path) if analysis.working_input_path is not None else None,
         "copied_project_path": str(analysis.copied_project_path) if analysis.copied_project_path is not None else None,
+        "used_project_rebuild": bool(analysis.used_project_rebuild),
         "input_kind": analysis.input_kind,
         "row_scope_requested": analysis.config.row_scope,
         "row_scope_applied": analysis.applied_scope,
@@ -1659,7 +1921,6 @@ def write_analysis_artifacts(
     figure_specs: list[tuple[str, str, str, plt.Figure]] = [
         ("quality", "coverage_heatmap", "Coverage heatmap", _coverage_figure(analysis.scoped_frame)),
         ("overview", "endpoint_overview", "Endpoint overview", _endpoint_overview_figure(analysis.scoped_frame)),
-        ("cohorts", "composition_coverage", "Composition coverage", _composition_coverage_figure(analysis.scoped_frame)),
         (
             "process",
             "process_strain_correlation",
@@ -1698,6 +1959,8 @@ def write_analysis_artifacts(
         ("interactions", "parallel_coordinates", "Parallel coordinates", _parallel_coordinates_figure(analysis.scoped_frame)),
         ("time", "time_drift", "Time drift", _time_drift_figure(analysis.scoped_frame)),
     ]
+    if analysis.config.include_composition_splits:
+        figure_specs.insert(2, ("cohorts", "composition_coverage", "Composition coverage", _composition_coverage_figure(analysis.scoped_frame)))
     if analysis.config.include_legacy_breakage_analysis:
         figure_specs.append(
             (
@@ -1770,6 +2033,7 @@ def write_analysis_artifacts(
         findings_json_path=findings_json_path if findings_json_path and findings_json_path.exists() else None,
         findings_md_path=findings_md_path if findings_md_path and findings_md_path.exists() else None,
         copied_project_path=analysis.copied_project_path,
+        used_project_rebuild=analysis.used_project_rebuild,
         sufficiency_summary=dict(analysis.sufficiency_summary),
         endpoint_tables=analysis.endpoint_tables,
         findings=list(analysis.findings),
