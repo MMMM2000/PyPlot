@@ -744,6 +744,36 @@ def test_assembly_exposes_compare_hook() -> None:
     assert callable(hook)
 
 
+def test_compare_section_defers_matrix_build_until_visible() -> None:
+    _ensure_qapp()
+    section = builder_ui.CompareSection({}, logging.getLogger("test"), lambda *_args: None)
+    host = QtWidgets.QMainWindow()
+    build_calls = 0
+
+    def fake_build_matrix_frame() -> pd.DataFrame:
+        nonlocal build_calls
+        build_calls += 1
+        return pd.DataFrame({"Composition": ["Ni50Fe27Ga23"], "Microwire": ["10/1"]})
+
+    section._build_matrix_frame = fake_build_matrix_frame  # type: ignore[method-assign]
+    payload = {
+        "columns": ["Composition", "Microwire"],
+        "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "10/1"}],
+        "extra": {"compare_view_mode": "matrix"},
+    }
+    try:
+        section.import_project_payload(payload)
+        assert build_calls == 0
+        host.setCentralWidget(section)
+        host.show()
+        QtWidgets.QApplication.processEvents()
+        assert build_calls >= 1
+    finally:
+        host.close()
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_get_paddle_ocr_disabled_on_py313_without_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

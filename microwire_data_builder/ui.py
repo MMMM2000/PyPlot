@@ -21121,6 +21121,7 @@ class CompareSection(MiniDatabaseSection):
         self._compare_view_mode = "matrix"
         self._compare_fields: Set[str] = set()
         self._compare_field_order: List[str] = []
+        self._matrix_view_dirty = True
         self._matrix_column_keys: Dict[str, str] = {}
         self._matrix_graph_rows: Set[str] = set()
         self._matrix_pixmap_cache: Dict[Tuple[object, ...], QtGui.QPixmap] = {}
@@ -21213,6 +21214,10 @@ class CompareSection(MiniDatabaseSection):
         self._set_compare_view_mode(self._compare_view_mode)
         self._update_preview_graph_buttons()
         self._update_status()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        self._update_matrix_view()
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         table = QtWidgets.QTableView(parent)
@@ -21397,6 +21402,7 @@ class CompareSection(MiniDatabaseSection):
         self._update_compare_view_controls()
         self._update_preview_graph_buttons()
         self._update_graph_preview_panel()
+        self._update_matrix_view()
 
     def _update_compare_view_controls(self) -> None:
         is_matrix = self._compare_view_mode == "matrix"
@@ -21710,11 +21716,17 @@ class CompareSection(MiniDatabaseSection):
     def _update_matrix_view(self) -> None:
         if not hasattr(self, "matrix_model"):
             return
+        self._matrix_view_dirty = True
+        if self._compare_view_mode != "matrix":
+            return
+        if not self.isVisible():
+            return
         self._matrix_pixmap_cache.clear()
         matrix_frame = self._build_matrix_frame()
         self.matrix_model.set_frame(matrix_frame)
         self._update_matrix_row_heights()
         self._update_matrix_column_widths()
+        self._matrix_view_dirty = False
 
     def _record_signature(self, records: Sequence[object]) -> Tuple[str, ...]:
         signature: List[str] = []
