@@ -1630,9 +1630,12 @@ def test_shape_memory_section_normalises_current_columns_from_sources(tmp_path: 
             ]
         )
         section.apply_data(MiniDatabaseData(table=frame, extra={}))
-        row = section.model.frame().iloc[0]
-        assert row[builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == 30.0
-        assert row[builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] == 30.0
+        updated = section.model.frame()
+        assert len(updated.index) == 2
+        assert updated.at[0, builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == 30.0
+        assert pd.isna(updated.at[0, builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN])
+        assert pd.isna(updated.at[1, builder_ui.SHAPE_MEMORY_CURRENT_COLUMN])
+        assert updated.at[1, builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] == 30.0
     finally:
         section._shutdown_background_threads()
         section.close()
@@ -3357,6 +3360,324 @@ def test_shape_memory_section_does_not_keep_current_for_sample_fallback_values(t
         section.close()
 
 
+def test_shape_memory_section_expanded_rows_fill_current_density_from_microscope_snapshot(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        standard_path = tmp_path / "Ni50Fe27Ga23 10_1 30mA.txt"
+        standard_path.write_text(
+            "\n".join(
+                [
+                    "Displacement\tLoad\tStrain\tStress",
+                    "mm\tg\t%\tMPa",
+                    "0\t0\t0\t0",
+                    "0.01\t0.10\t0.05\t0.9",
+                    "0.02\t0.20\t0.10\t1.8",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        section.store.load_payload = lambda key, *_args, **_kwargs: [  # type: ignore[method-assign]
+            ShapeMemoryStressStrainRecord(
+                path=standard_path,
+                sample="Ni50Fe27Ga23 10/1",
+                data=pd.DataFrame(),
+                key=("Ni50Fe27Ga23", 10, 1),
+                label="30mA",
+            )
+        ] if key == "shape_memory_stress_strain_records" else None
+        section.set_microscope_snapshot(
+            pd.DataFrame(
+                [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "10/1",
+                        builder_ui.MICROSCOPE_D_COLUMN: 12.4,
+                        "_key": "Ni50Fe27Ga23|10|1",
+                    }
+                ]
+            )
+        )
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    builder_ui._SHAPE_MEMORY_STANDARD_SOURCE_COLUMN: str(standard_path),
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.8,
+                    SHAPE_MEMORY_LOAD_COLUMN: 7.0,
+                    SHAPE_MEMORY_STRAIN_COLUMN: 18.591,
+                    SHAPE_MEMORY_STRESS_COLUMN: 568.441,
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        updated = section.model.frame()
+        assert updated.at[0, builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == pytest.approx(30.0)
+        assert updated.at[0, builder_ui.SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] == pytest.approx(
+            248.42082688641315,
+            rel=1e-6,
+        )
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_shape_memory_section_fills_current_density_without_microscope_key_column(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        standard_path = tmp_path / "Ni50Fe27Ga23 10_1 30mA.txt"
+        standard_path.write_text("stub", encoding="utf-8")
+        section.store.load_payload = lambda key, *_args, **_kwargs: [  # type: ignore[method-assign]
+            ShapeMemoryStressStrainRecord(
+                path=standard_path,
+                sample="Ni50Fe27Ga23 10/1",
+                data=pd.DataFrame(),
+                key=("Ni50Fe27Ga23", 10, 1),
+                label="30mA",
+            )
+        ] if key == "shape_memory_stress_strain_records" else None
+        section.set_microscope_snapshot(
+            pd.DataFrame(
+                [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "10/1",
+                        builder_ui.MICROSCOPE_D_COLUMN: 12.4,
+                    }
+                ]
+            )
+        )
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    builder_ui._SHAPE_MEMORY_STANDARD_SOURCE_COLUMN: str(standard_path),
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.8,
+                    SHAPE_MEMORY_LOAD_COLUMN: 7.0,
+                    SHAPE_MEMORY_STRAIN_COLUMN: 18.591,
+                    SHAPE_MEMORY_STRESS_COLUMN: 568.441,
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        updated = section.model.frame()
+        assert updated.at[0, builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == pytest.approx(30.0)
+        assert updated.at[0, builder_ui.SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] == pytest.approx(
+            248.42082688641315,
+            rel=1e-6,
+        )
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_shape_memory_section_expands_saved_rows_without_live_payloads(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        standard_path = tmp_path / "Ni50Fe27Ga23 10_1 30mA.txt"
+        fracture_path = tmp_path / "Ni50Fe27Ga23 10_1 fracture 30mA.txt"
+        standard_path.write_text("stub", encoding="utf-8")
+        fracture_path.write_text("stub", encoding="utf-8")
+        section.store.load_payload = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN: [
+                        "30mA",
+                        "fracture 30mA",
+                    ],
+                    "_sources": [str(standard_path), str(fracture_path)],
+                    builder_ui._SHAPE_MEMORY_STANDARD_SOURCE_COLUMN: str(standard_path),
+                    builder_ui._SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN: str(fracture_path),
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.8,
+                    SHAPE_MEMORY_LOAD_COLUMN: 7.0,
+                    SHAPE_MEMORY_STRAIN_COLUMN: 18.591,
+                    SHAPE_MEMORY_STRESS_COLUMN: 568.441,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_LOAD_COLUMN: 11.518,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN: 21.058,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_STRESS_COLUMN: 935.329,
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section.set_microscope_snapshot(
+            pd.DataFrame(
+                [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "10/1",
+                        builder_ui.MICROSCOPE_D_COLUMN: 12.4,
+                    }
+                ]
+            )
+        )
+        updated = section.model.frame()
+        assert len(updated.index) == 2
+        assert list(updated[builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN]) == [
+            "30mA",
+            "fracture 30mA",
+        ]
+        assert updated.at[0, builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == pytest.approx(30.0)
+        assert updated.at[0, builder_ui.SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] == pytest.approx(
+            248.42082688641315,
+            rel=1e-6,
+        )
+        assert updated.at[1, builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] == pytest.approx(
+            30.0
+        )
+        assert updated.at[
+            1, builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN
+        ] == pytest.approx(248.42082688641315, rel=1e-6)
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_shape_memory_section_drops_duplicate_placeholder_rows_without_live_payloads(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        standard_path = tmp_path / "Ni50Fe27Ga23 10_1 30mA.txt"
+        fracture_path = tmp_path / "Ni50Fe27Ga23 10_1 fracture 30mA.txt"
+        standard_path.write_text("stub", encoding="utf-8")
+        fracture_path.write_text("stub", encoding="utf-8")
+        section.store.load_payload = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN: "30mA",
+                    "_sources": [str(standard_path)],
+                    builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN: "Ni50Fe27Ga23|10|1",
+                    builder_ui._SHAPE_MEMORY_GROUP_ORDER_COLUMN: 0,
+                    builder_ui._SHAPE_MEMORY_STANDARD_SOURCE_COLUMN: str(standard_path),
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.8,
+                    SHAPE_MEMORY_LOAD_COLUMN: 7.0,
+                    SHAPE_MEMORY_STRAIN_COLUMN: 18.591,
+                    SHAPE_MEMORY_STRESS_COLUMN: 568.441,
+                },
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN: "fracture 30mA",
+                    "_sources": [str(fracture_path)],
+                    builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN: "Ni50Fe27Ga23|10|1",
+                    builder_ui._SHAPE_MEMORY_GROUP_ORDER_COLUMN: 1,
+                    builder_ui._SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN: str(fracture_path),
+                    builder_ui.SHAPE_MEMORY_FRACTURE_LOAD_COLUMN: 11.518,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN: 21.058,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_STRESS_COLUMN: 935.329,
+                },
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN: "Ni50Fe27Ga23|10|1",
+                    builder_ui._SHAPE_MEMORY_GROUP_ORDER_COLUMN: 2,
+                },
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        updated = section.model.frame()
+        assert len(updated.index) == 2
+        assert list(updated[builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN]) == [
+            "30mA",
+            "fracture 30mA",
+        ]
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_shape_memory_section_ignores_stale_cached_payloads_when_payload_map_missing(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        stale_path = tmp_path / "Ni50Fe27Ga23 10_1 70mA.txt"
+        standard_path = tmp_path / "Ni50Fe27Ga23 10_1 30mA.txt"
+        fracture_path = tmp_path / "Ni50Fe27Ga23 10_1 fracture 30mA.txt"
+        stale_path.write_text("stub", encoding="utf-8")
+        standard_path.write_text("stub", encoding="utf-8")
+        fracture_path.write_text("stub", encoding="utf-8")
+        section.store.save_payload(
+            "shape_memory_stress_strain_records",
+            [
+                ShapeMemoryStressStrainRecord(
+                    path=stale_path,
+                    sample="Ni50Fe27Ga23 10/1",
+                    data=pd.DataFrame(),
+                    key=("Ni50Fe27Ga23", 10, 1),
+                    label="70mA",
+                )
+            ],
+        )
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN: [
+                        "30mA",
+                        "fracture 30mA",
+                    ],
+                    "_sources": [str(standard_path), str(fracture_path)],
+                    builder_ui._SHAPE_MEMORY_STANDARD_SOURCE_COLUMN: str(standard_path),
+                    builder_ui._SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN: str(fracture_path),
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.8,
+                    SHAPE_MEMORY_LOAD_COLUMN: 7.0,
+                    SHAPE_MEMORY_STRAIN_COLUMN: 18.591,
+                    SHAPE_MEMORY_STRESS_COLUMN: 568.441,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_LOAD_COLUMN: 11.518,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN: 21.058,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_STRESS_COLUMN: 935.329,
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        updated = section.model.frame()
+        assert len(updated.index) == 2
+        assert list(updated[builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN]) == [
+            "30mA",
+            "fracture 30mA",
+        ]
+        assert "70mA" not in "".join(str(value) for value in updated[builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN])
+    finally:
+        section.store.clear_payload("shape_memory_stress_strain_records")
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_shape_memory_preview_panel_reuses_existing_tabs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3425,6 +3746,70 @@ def test_annealing_section_widens_other_graph_column_for_multiple_measurements()
         assert section.table_view.iconSize().width() >= expected_width
         column_index = section.model.frame().columns.get_loc(builder_ui.ANNEALING_OTHER_GRAPH_COLUMN)
         assert section.table_view.columnWidth(column_index) >= expected_width
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_shape_memory_section_can_clear_selected_values(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        standard_path = tmp_path / "Ni50Fe27Ga23 10_1 30mA.txt"
+        standard_path.write_text("stub", encoding="utf-8")
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "10/1",
+                    builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN: "30mA",
+                    "_sources": [str(standard_path)],
+                    builder_ui._SHAPE_MEMORY_STANDARD_SOURCE_COLUMN: str(standard_path),
+                    SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.8,
+                    SHAPE_MEMORY_LOAD_COLUMN: 7.0,
+                    SHAPE_MEMORY_STRAIN_COLUMN: 18.591,
+                    SHAPE_MEMORY_STRESS_COLUMN: 568.441,
+                    builder_ui.SHAPE_MEMORY_CURRENT_COLUMN: 30.0,
+                    builder_ui.SHAPE_MEMORY_CURRENT_DENSITY_COLUMN: 248.421,
+                }
+            ]
+        )
+        section.apply_data(
+            MiniDatabaseData(
+                table=frame,
+                extra={
+                    "record_entries": {
+                        str(standard_path): {
+                            SHAPE_MEMORY_DISPLACEMENT_COLUMN: 3.8,
+                            SHAPE_MEMORY_LOAD_COLUMN: 7.0,
+                            SHAPE_MEMORY_STRAIN_COLUMN: 18.591,
+                            SHAPE_MEMORY_STRESS_COLUMN: 568.441,
+                            builder_ui.SHAPE_MEMORY_CURRENT_COLUMN: 30.0,
+                            builder_ui.SHAPE_MEMORY_CURRENT_DENSITY_COLUMN: 248.421,
+                        }
+                    }
+                },
+            )
+        )
+        assert section.table_view is not None
+        section.table_view.selectRow(0)
+        QtWidgets.QApplication.processEvents()
+        section._clear_selected_values()
+        updated = section.model.frame()
+        assert pd.isna(updated.at[0, SHAPE_MEMORY_DISPLACEMENT_COLUMN])
+        assert pd.isna(updated.at[0, SHAPE_MEMORY_LOAD_COLUMN])
+        assert pd.isna(updated.at[0, SHAPE_MEMORY_STRAIN_COLUMN])
+        assert pd.isna(updated.at[0, SHAPE_MEMORY_STRESS_COLUMN])
+        assert pd.isna(updated.at[0, builder_ui.SHAPE_MEMORY_CURRENT_COLUMN])
+        assert pd.isna(updated.at[0, builder_ui.SHAPE_MEMORY_CURRENT_DENSITY_COLUMN])
+        record_entries = section.record_entries_snapshot()
+        assert str(standard_path) not in record_entries
+        assert updated.at[0, builder_ui._SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] == str(
+            standard_path
+        )
     finally:
         section._shutdown_background_threads()
         section.close()
