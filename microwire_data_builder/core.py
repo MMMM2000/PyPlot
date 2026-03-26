@@ -5583,30 +5583,22 @@ def build_database(
         if video_data is None:
             video_data = video_index.get((composition, draw_x, None))
         if video_data:
-            temp_numeric = _parse_numeric(row[CORE_TEMPERATURE_COLUMN])
-            if temp_numeric is None:
-                temp = video_data.temperature()
-                if temp is not None:
-                    row[CORE_TEMPERATURE_COLUMN] = temp
-                    row_highlights.add(CORE_TEMPERATURE_COLUMN)
-            under_numeric = _parse_numeric(row["Underpressure"])
-            if under_numeric is None:
-                under_value = video_data.underpressure()
-                if under_value is not None:
-                    row["Underpressure"] = under_value
-                    row_highlights.add("Underpressure")
-            wind_numeric = _parse_numeric(row["Winding speed (m/min)"])
-            if wind_numeric is None:
-                wind = video_data.winding_speed()
-                if wind is not None:
-                    row["Winding speed (m/min)"] = wind
-                    row_highlights.add("Winding speed (m/min)")
-            glass_numeric = _parse_numeric(row["Glass feeding (mm/min)"])
-            if glass_numeric is None:
-                glass = video_data.glass_feed()
-                if glass is not None:
-                    row["Glass feeding (mm/min)"] = glass
-                    row_highlights.add("Glass feeding (mm/min)")
+            temp = video_data.temperature()
+            if temp is not None:
+                row[CORE_TEMPERATURE_COLUMN] = temp
+                row_highlights.add(CORE_TEMPERATURE_COLUMN)
+            under_value = video_data.underpressure()
+            if under_value is not None:
+                row["Underpressure"] = under_value
+                row_highlights.add("Underpressure")
+            wind = video_data.winding_speed()
+            if wind is not None:
+                row["Winding speed (m/min)"] = wind
+                row_highlights.add("Winding speed (m/min)")
+            glass = video_data.glass_feed()
+            if glass is not None:
+                row["Glass feeding (mm/min)"] = glass
+                row_highlights.add("Glass feeding (mm/min)")
         overrides = video_overrides_map.get(key_str, {})
         if overrides:
             for column, value in overrides.items():

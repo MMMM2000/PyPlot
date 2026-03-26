@@ -1752,7 +1752,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
             "Add cropped microscope images in new columns next to the d and D values"
         )
         with QtCore.QSignalBlocker(self.include_crops_check):
-            self.include_crops_check.setChecked(True)
+            self.include_crops_check.setChecked(False)
         microscope_layout.addWidget(self.include_crops_check)
         self.highlight_ocr_check = QtWidgets.QCheckBox("Highlight OCR-sourced values")
         self.highlight_ocr_check.stateChanged.connect(self._save_settings)
@@ -1917,7 +1917,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         with QtCore.QSignalBlocker(self.export_excel_check):
             self.export_excel_check.setChecked(_read_bool("export_excel", False))
         with QtCore.QSignalBlocker(self.include_crops_check):
-            self.include_crops_check.setChecked(_read_bool("include_microscope_crops", True))
+            self.include_crops_check.setChecked(_read_bool("include_microscope_crops", False))
         with QtCore.QSignalBlocker(self.highlight_ocr_check):
             self.highlight_ocr_check.setChecked(_read_bool("highlight_ocr_values", True))
         with QtCore.QSignalBlocker(self.video_metrics_check):
@@ -2725,6 +2725,8 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self._text_columns: set[str] = set()
         self._recent_edits: Dict[Tuple[int, int], Any] = {}
         self._recent_old_values: Dict[Tuple[int, int], Any] = {}
+        self._row_series_cache: Dict[int, pd.Series] = {}
+        self._column_label_cache: Tuple[str, ...] = tuple(str(column) for column in self._frame.columns)
 
     @staticmethod
     def _coerce_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
@@ -2743,11 +2745,37 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self._frame = self._coerce_frame(frame)
         self._recent_edits = {}
         self._recent_old_values = {}
+        self._row_series_cache = {}
+        self._column_label_cache = tuple(str(column) for column in self._frame.columns)
         self.endResetModel()
         try:
             self.layoutChanged.emit()
         except Exception:
             pass
+
+    def _row_series(self, row: int) -> Optional[pd.Series]:
+        if row < 0 or row >= len(self._frame.index):
+            return None
+        cached = self._row_series_cache.get(int(row))
+        if cached is not None:
+            return cached
+        try:
+            series = self._frame.iloc[row]
+        except Exception:
+            return None
+        self._row_series_cache[int(row)] = series
+        return series
+
+    def _column_label(self, column: int) -> str:
+        if column < 0:
+            return ""
+        try:
+            return self._column_label_cache[column]
+        except Exception:
+            try:
+                return str(self._frame.columns[column])
+            except Exception:
+                return ""
 
     def set_decoration_provider(
         self,
@@ -2814,6 +2842,15 @@ class DataFrameModel(QtCore.QAbstractTableModel):
                     suffix = match.group(3) or ""
                     suffix_text = suffix.strip().lower()
                     return f"{draw:05d}/{piece:05d}{suffix_text}"
+            numeric_text = value.strip().replace(",", ".")
+            if numeric_text:
+                try:
+                    numeric_value = float(numeric_text)
+                except ValueError:
+                    pass
+                else:
+                    if math.isfinite(numeric_value):
+                        return numeric_value
         if isinstance(value, (list, tuple, set)):
             return ", ".join(str(item) for item in value)
         return value
@@ -2854,12 +2891,9 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ItemDataRole.DecorationRole:
             provider = getattr(self, "_decoration_provider", None)
             if provider is not None:
-                try:
-                    column_label = str(self._frame.columns[index.column()])
-                    row_series = self._frame.iloc[index.row()]
-                except Exception:
-                    pass
-                else:
+                column_label = self._column_label(index.column())
+                row_series = self._row_series(index.row())
+                if row_series is not None:
                     try:
                         decoration = provider(row_series, column_label)
                     except Exception:
@@ -2876,19 +2910,13 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ItemDataRole.ForegroundRole:
             provider = getattr(self, "_foreground_provider", None)
             if provider is not None:
-                try:
-                    column_label = str(self._frame.columns[index.column()])
-                    row_series = self._frame.iloc[index.row()]
-                except Exception:
-                    pass
-                else:
+                column_label = self._column_label(index.column())
+                row_series = self._row_series(index.row())
+                if row_series is not None:
                     brush = provider(row_series, column_label)
                     if brush is not None:
                         return brush
-            try:
-                column_label = str(self._frame.columns[index.column()])
-            except Exception:
-                column_label = ""
+            column_label = self._column_label(index.column())
             if column_label.lower() == "reviewed":
                 ok = bool(value)
                 fg = QtGui.QColor("#10b981" if ok else "#ef4444")
@@ -2897,19 +2925,13 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ItemDataRole.BackgroundRole:
             provider = getattr(self, "_background_provider", None)
             if provider is not None:
-                try:
-                    column_label = str(self._frame.columns[index.column()])
-                    row_series = self._frame.iloc[index.row()]
-                except Exception:
-                    pass
-                else:
+                column_label = self._column_label(index.column())
+                row_series = self._row_series(index.row())
+                if row_series is not None:
                     brush = provider(row_series, column_label)
                     if brush is not None:
                         return brush
-            try:
-                column_label = str(self._frame.columns[index.column()])
-            except Exception:
-                column_label = ""
+            column_label = self._column_label(index.column())
             if column_label.lower() == "reviewed":
                 ok = bool(value)
                 bg = QtGui.QColor("#07351f" if ok else "#3a0a0a")
@@ -2918,10 +2940,9 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ItemDataRole.ToolTipRole:
             provider = getattr(self, "_tooltip_provider", None)
             if provider is not None:
-                try:
-                    column_label = str(self._frame.columns[index.column()])
-                    row_series = self._frame.iloc[index.row()]
-                except Exception:
+                column_label = self._column_label(index.column())
+                row_series = self._row_series(index.row())
+                if row_series is None:
                     return None
                 try:
                     return provider(row_series, column_label)
@@ -3010,12 +3031,15 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             self._frame.iat[index.row(), index.column()] = coerced
         except Exception:
             return False
+        self._row_series_cache.pop(int(index.row()), None)
         self._recent_edits[(index.row(), index.column())] = coerced
         self._recent_old_values[(index.row(), index.column())] = previous_value
         try:
             # Normalize back to a plain object-backed frame after in-place edits so
             # follow-up Qt handlers don't trip over pandas extension-dtype internals.
             self._frame = self._coerce_frame(self._frame)
+            self._row_series_cache = {}
+            self._column_label_cache = tuple(str(column) for column in self._frame.columns)
         except Exception:
             return False
         try:
@@ -6190,14 +6214,18 @@ def _video_index_to_frame(
             seen_keys.add((composition, draw, piece))
         if row.get(ESTIMATED_TRANSITION_COLUMN) in (None, ""):
             row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(row.get("e/a"))
-        if row.get(CORE_TEMPERATURE_COLUMN) in (None, ""):
-            row[CORE_TEMPERATURE_COLUMN] = summary.temperature()
-        if row.get("Underpressure") in (None, ""):
-            row["Underpressure"] = summary.underpressure()
-        if row.get("Winding speed (m/min)") in (None, ""):
-            row["Winding speed (m/min)"] = summary.winding_speed()
-        if row.get("Glass feeding (mm/min)") in (None, ""):
-            row["Glass feeding (mm/min)"] = summary.glass_feed()
+        temperature = summary.temperature()
+        if not _is_missing(temperature):
+            row[CORE_TEMPERATURE_COLUMN] = temperature
+        underpressure = summary.underpressure()
+        if not _is_missing(underpressure):
+            row["Underpressure"] = underpressure
+        winding_speed = summary.winding_speed()
+        if not _is_missing(winding_speed):
+            row["Winding speed (m/min)"] = winding_speed
+        glass_feed = summary.glass_feed()
+        if not _is_missing(glass_feed):
+            row["Glass feeding (mm/min)"] = glass_feed
         row["_sources"] = sorted(str(path) for path in getattr(summary, "sources", set()))
         row["_group_key"] = _microwire_key_to_str((composition, draw, piece, None))
         rows.append(row)
@@ -6226,14 +6254,18 @@ def _video_index_to_frame(
         if row.get(ESTIMATED_TRANSITION_COLUMN) in (None, ""):
             row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(row.get("e/a"))
         if summary is not None:
-            if row.get(CORE_TEMPERATURE_COLUMN) in (None, ""):
-                row[CORE_TEMPERATURE_COLUMN] = summary.temperature()
-            if row.get("Underpressure") in (None, ""):
-                row["Underpressure"] = summary.underpressure()
-            if row.get("Winding speed (m/min)") in (None, ""):
-                row["Winding speed (m/min)"] = summary.winding_speed()
-            if row.get("Glass feeding (mm/min)") in (None, ""):
-                row["Glass feeding (mm/min)"] = summary.glass_feed()
+            temperature = summary.temperature()
+            if not _is_missing(temperature):
+                row[CORE_TEMPERATURE_COLUMN] = temperature
+            underpressure = summary.underpressure()
+            if not _is_missing(underpressure):
+                row["Underpressure"] = underpressure
+            winding_speed = summary.winding_speed()
+            if not _is_missing(winding_speed):
+                row["Winding speed (m/min)"] = winding_speed
+            glass_feed = summary.glass_feed()
+            if not _is_missing(glass_feed):
+                row["Glass feeding (mm/min)"] = glass_feed
             row["_sources"] = sorted(str(path) for path in getattr(summary, "sources", set()))
         else:
             row["_sources"] = []
@@ -6449,6 +6481,19 @@ def _shape_memory_current_mA_from_record(record: ShapeMemoryStressStrainRecord) 
         text = path.stem
     elif isinstance(path, str):
         text = Path(path).stem
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*mA", text, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except Exception:
+        return None
+
+
+def _shape_memory_current_mA_from_text(value: object) -> Optional[float]:
+    text = str(value or "").strip()
+    if not text:
+        return None
     match = re.search(r"(\d+(?:[.,]\d+)?)\s*mA", text, re.IGNORECASE)
     if not match:
         return None
@@ -8874,7 +8919,11 @@ class FabricationSection(MiniDatabaseSection):
         super().import_project_payload(payload)
         self._source_status_cache.clear()
         self._normalize_temperature_columns()
-        if self._rebuild_table_from_raw_index():
+        saved_rows = payload.get("rows") if isinstance(payload, Mapping) else None
+        if (
+            not isinstance(saved_rows, (list, tuple))
+            or len(saved_rows) == 0
+        ) and self._rebuild_table_from_raw_index():
             return
         table = self.data.table
         if isinstance(table, pd.DataFrame):
@@ -8936,27 +8985,37 @@ class FabricationSection(MiniDatabaseSection):
 
     def set_import_separation(self, enabled: bool) -> None:
         self._separate_imported = bool(enabled)
-        if self._rebuild_table_from_raw_index():
-            return
-        try:
-            index = self.store.load_payload("fabrication_index")
-        except Exception:
-            index = None
-        if not isinstance(index, FabricationIndex):
-            return
-        table = _fabrication_index_to_frame(index)
+        table = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            if self._rebuild_table_from_raw_index():
+                return
+            try:
+                index = self.store.load_payload("fabrication_index")
+            except Exception:
+                index = None
+            if not isinstance(index, FabricationIndex):
+                return
+            table = _fabrication_index_to_frame(index)
         table = self._apply_imported_separation(table)
         self.data.table = table
+        try:
+            self.store.save(self.data)
+        except Exception:
+            pass
         self.model.set_frame(table)
+        self._hide_columns(["_source_paths", "_source_path"])
         self._auto_fit_columns()
         self._update_status()
 
     def _apply_imported_separation(self, table: pd.DataFrame) -> pd.DataFrame:
-        if not self._separate_imported:
-            return table
         if not isinstance(table, pd.DataFrame) or table.empty:
             return table
-        if "Data source" not in table.columns:
+        if "Data source" not in table.columns or "Composition" not in table.columns:
+            return table
+        table = table.loc[
+            table["Composition"].astype(str).str.strip() != "Imported data:"
+        ].copy()
+        if not self._separate_imported:
             return table
         imported_mask = table["Data source"].astype(str).str.contains("Imported", na=False)
         if not imported_mask.any():
@@ -14605,7 +14664,7 @@ class VideoSection(MiniDatabaseSection):
         self._video_source_status_cache.clear()
         self._load_overrides()
         self._normalize_temperature_columns()
-        self._apply_overrides_to_model()
+        self._apply_overrides_to_model(preserve_existing=True)
         self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
         QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
@@ -14619,7 +14678,7 @@ class VideoSection(MiniDatabaseSection):
 
     def sync_with_fabrication(self) -> None:
         self._video_source_status_cache.clear()
-        self._apply_overrides_to_model()
+        self._apply_overrides_to_model(preserve_existing=True)
         self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
         QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
@@ -15063,17 +15122,23 @@ class VideoSection(MiniDatabaseSection):
             )
         return updated
 
-    def _apply_overrides_to_model(self) -> None:
+    def _apply_overrides_to_model(self, *, preserve_existing: bool = False) -> None:
         frame = self.model.frame()
         fabrication_frame = self._fabrication_table()
         self._refresh_fabrication_lookup_cache()
         index = self._load_video_index()
+        has_existing_frame = isinstance(frame, pd.DataFrame) and not frame.empty
+        should_rebuild = not has_existing_frame
         if (
-            (isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty)
-            or index
-            or not isinstance(frame, pd.DataFrame)
-            or frame.empty
+            not should_rebuild
+            and not preserve_existing
+            and (
+                (isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty)
+                or bool(index)
+            )
         ):
+            should_rebuild = True
+        if should_rebuild:
             frame = _video_index_to_frame(index, fabrication_frame)
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return
@@ -22591,8 +22656,10 @@ class AssemblySection(QtWidgets.QWidget):
         self._imported_rows: Dict[str, Dict[str, Any]] = {}
         self._imported_sources: List[str] = []
         self._show_imported = True
+        self._show_oe_samples = False
         self._preview_search_text: str = ""
         self._project_path_getter: Callable[[], Optional[Path]] | None = None
+        self._preview_background_cache: Dict[Any, QtGui.QBrush] = {}
 
         self._output_dir = str(Path.cwd())
         self._output_name = DEFAULT_OUTPUT_NAME
@@ -22642,6 +22709,10 @@ class AssemblySection(QtWidgets.QWidget):
         self.graph_panel_checkbox.setChecked(False)
         self.graph_panel_checkbox.toggled.connect(self._toggle_graph_preview_panel)
         graph_row.addWidget(self.graph_panel_checkbox)
+        self.oe_samples_checkbox = QtWidgets.QCheckBox("Show oe samples")
+        self.oe_samples_checkbox.setChecked(self._show_oe_samples)
+        self.oe_samples_checkbox.toggled.connect(self.set_show_oe_samples)
+        graph_row.addWidget(self.oe_samples_checkbox)
         self.open_high_plot_button = QtWidgets.QPushButton("Open 1000 mA graph")
         self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
         self.open_high_plot_button.setEnabled(False)
@@ -22986,6 +23057,7 @@ class AssemblySection(QtWidgets.QWidget):
             ],
             "imported_sources": list(self._imported_sources),
             "show_imported": bool(self._show_imported),
+            "show_oe_samples": bool(self._show_oe_samples),
         }
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:
@@ -23089,6 +23161,15 @@ class AssemblySection(QtWidgets.QWidget):
         show_imported = payload.get("show_imported")
         if isinstance(show_imported, bool):
             self._show_imported = show_imported
+        show_oe_samples = payload.get("show_oe_samples")
+        if isinstance(show_oe_samples, bool):
+            self._show_oe_samples = show_oe_samples
+        if hasattr(self, "oe_samples_checkbox"):
+            try:
+                self.oe_samples_checkbox.blockSignals(True)
+                self.oe_samples_checkbox.setChecked(bool(self._show_oe_samples))
+            finally:
+                self.oe_samples_checkbox.blockSignals(False)
         self._measured_preview_frame = None
         self._raw_preview_frame = frame
         self._refresh_preview_frame()
@@ -23423,6 +23504,16 @@ class AssemblySection(QtWidgets.QWidget):
         else:
             self._update_preview(pd.DataFrame())
 
+    def set_show_oe_samples(self, enabled: bool) -> None:
+        self._show_oe_samples = bool(enabled)
+        if hasattr(self, "oe_samples_checkbox"):
+            try:
+                self.oe_samples_checkbox.blockSignals(True)
+                self.oe_samples_checkbox.setChecked(self._show_oe_samples)
+            finally:
+                self.oe_samples_checkbox.blockSignals(False)
+        self._refresh_preview_frame()
+
     def clear_imported_data(self) -> None:
         if not self._imported_rows and not self._imported_sources:
             return
@@ -23433,6 +23524,22 @@ class AssemblySection(QtWidgets.QWidget):
             self._update_preview(base_frame)
         else:
             self._update_preview(pd.DataFrame())
+
+    @staticmethod
+    def _row_is_oe_sample(row: pd.Series) -> bool:
+        key = _row_to_microwire_key(row)
+        if key:
+            parsed = _microwire_key_from_string(key)
+            if parsed is not None:
+                suffix = str(parsed[3] or "").strip().lower()
+                if suffix == "oe":
+                    return True
+        microwire = str(row.get("Microwire") or "").strip()
+        parsed = _microwire_parts_from_label_safe(microwire)
+        if parsed is None:
+            return False
+        suffix = str(parsed[2] or "").strip().lower()
+        return suffix == "oe"
         self._mark_dirty()
 
     def imported_sources(self) -> List[str]:
@@ -23539,12 +23646,21 @@ class AssemblySection(QtWidgets.QWidget):
                 self.log(f"Skipping {label} because no data were found.", level=logging.WARNING)
 
         fabrication_index = FabricationIndex()
-        if "fabrication" in selected:
-            payload = self._load_payload("fabrication", "fabrication_index")
-            if isinstance(payload, FabricationIndex):
-                fabrication_index = payload
+        fabrication_payload = self._load_payload("fabrication", "fabrication_index")
+        if isinstance(fabrication_payload, FabricationIndex):
+            fabrication_index = fabrication_payload
+        fabrication_section = self.sections.get("fabrication")
+        fabrication_table = None
+        if isinstance(fabrication_section, FabricationSection):
+            if isinstance(fabrication_section.data.table, pd.DataFrame) and not fabrication_section.data.table.empty:
+                fabrication_table = fabrication_section.data.table
             else:
-                _mark_missing("fabrication")
+                fabrication_table = fabrication_section.model.frame()
+        table_index = self._fabrication_index_from_frame(fabrication_table)
+        if table_index.draw_level or table_index.piece_level:
+            fabrication_index = table_index
+        if "fabrication" in selected and not (fabrication_index.draw_level or fabrication_index.piece_level):
+            _mark_missing("fabrication")
 
         annealing_records_payload = self._load_payload("annealing", "annealing_records")
         annealing_records: List[MeasurementRecord] = []
@@ -23581,19 +23697,20 @@ class AssemblySection(QtWidgets.QWidget):
             )
 
         video_index: Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary] = {}
-        if "videos" in selected:
-            payload = self._load_payload("videos", "video_index")
-            if isinstance(payload, dict):
-                video_index = payload
-            else:
-                if require_payloads:
-                    self.log("Skipping videos because no data were found.", level=logging.WARNING)
-                else:
-                    _mark_missing("videos")
+        video_payload = self._load_payload("videos", "video_index")
+        if isinstance(video_payload, dict):
+            video_index = video_payload
         video_overrides: Dict[str, Dict[str, Any]] = {}
         video_section = self.sections.get("videos")
         if isinstance(video_section, VideoSection):
             video_overrides = video_section.overrides_snapshot()
+            if not video_index:
+                video_index = video_section._load_video_index()
+        if "videos" in selected and not video_index and not video_overrides:
+            if require_payloads:
+                self.log("Skipping videos because no data were found.", level=logging.WARNING)
+            else:
+                _mark_missing("videos")
 
         strain_records: Dict[MicrowireKey, StrainRecord] = {}
         if "strain" in selected:
@@ -23943,6 +24060,7 @@ class AssemblySection(QtWidgets.QWidget):
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return frame
         groups = self._ensure_shape_memory_stress_strain_groups()
+        section_row_map: Dict[str, List[pd.Series]] = {}
         section_standard_entry_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
         section_fracture_entry_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
         section = self.sections.get("shape_memory_stress_strain")
@@ -23953,6 +24071,7 @@ class AssemblySection(QtWidgets.QWidget):
                     section_key = _row_to_microwire_key(candidate_row)
                     if not section_key:
                         continue
+                    section_row_map.setdefault(section_key, []).append(candidate_row.copy())
                     standard_source = str(
                         candidate_row.get(_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN) or ""
                     ).strip()
@@ -23979,6 +24098,96 @@ class AssemblySection(QtWidgets.QWidget):
                             section_fracture_entry_map.setdefault(section_key, {})[
                                 fracture_source
                             ] = entry
+
+        def _diameter_from_row_payload(payload: Mapping[str, Any]) -> Optional[float]:
+            for column in (MICROSCOPE_D_COLUMN, "d (µm)", "d (um)"):
+                try:
+                    value = payload.get(column)
+                except Exception:
+                    value = None
+                try:
+                    if value is not None:
+                        numeric = float(value)
+                        if math.isfinite(numeric) and numeric > 0:
+                            return numeric
+                except Exception:
+                    continue
+            return None
+
+        def _current_from_source_or_label(source_text: str, label_value: object) -> Optional[float]:
+            if source_text:
+                current = _shape_memory_current_mA_from_record(
+                    ShapeMemoryStressStrainRecord(path=Path(source_text), sample="", data=pd.DataFrame())
+                )
+                if current is not None:
+                    return current
+            if isinstance(label_value, (list, tuple, set)):
+                for item in label_value:
+                    current = _shape_memory_current_mA_from_text(item)
+                    if current is not None:
+                        return current
+                return None
+            return _shape_memory_current_mA_from_text(label_value)
+
+        def _expanded_row_from_section_row(
+            base_row: Mapping[str, Any],
+            section_row: pd.Series,
+            row_key: str,
+            order: int,
+        ) -> Optional[Dict[str, Any]]:
+            payload = dict(base_row)
+            section_payload = section_row.to_dict()
+            for column in (
+                SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+                "_sources",
+                _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN,
+                _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
+            ):
+                if column in section_payload:
+                    payload[column] = section_payload.get(column)
+            for column in _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS + _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS:
+                payload[column] = section_payload.get(column)
+            diameter_um = (
+                _diameter_from_row_payload(section_payload)
+                or _diameter_from_row_payload(payload)
+            )
+            standard_source = str(section_payload.get(_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN) or "").strip()
+            fracture_source = str(section_payload.get(_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN) or "").strip()
+            payload[SHAPE_MEMORY_CURRENT_COLUMN] = None
+            payload[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+            payload[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+            payload[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+            if _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS):
+                standard_current = _current_from_source_or_label(
+                    standard_source,
+                    section_payload.get(SHAPE_MEMORY_STRESS_STRAIN_COLUMN),
+                )
+                if standard_current is not None:
+                    payload[SHAPE_MEMORY_CURRENT_COLUMN] = standard_current
+                    payload[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = _current_density_from_diameter_um(
+                        standard_current,
+                        diameter_um,
+                    )
+            if _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS):
+                fracture_current = _current_from_source_or_label(
+                    fracture_source,
+                    section_payload.get(SHAPE_MEMORY_STRESS_STRAIN_COLUMN),
+                )
+                if fracture_current is not None:
+                    payload[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = fracture_current
+                    payload[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = _current_density_from_diameter_um(
+                        fracture_current,
+                        diameter_um,
+                    )
+            _clear_orphan_currents(payload)
+            if not (
+                _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS)
+                or _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS)
+            ):
+                return None
+            payload[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = row_key
+            payload[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
+            return payload
 
         def _clear_orphan_currents(payload: Dict[str, Any]) -> None:
             standard_has_values = _shape_memory_payload_has_values(
@@ -24007,6 +24216,17 @@ class AssemblySection(QtWidgets.QWidget):
                 row_dict[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = 0
                 expanded_rows.append(row_dict)
                 continue
+            section_rows = section_row_map.get(row_key or "", [])
+            if section_rows:
+                appended = False
+                for order, section_row in enumerate(section_rows):
+                    payload = _expanded_row_from_section_row(row_dict, section_row, row_key, order)
+                    if payload is None:
+                        continue
+                    expanded_rows.append(payload)
+                    appended = True
+                if appended:
+                    continue
             records = list(groups.get(row_key, []))
             if not records:
                 source_paths: List[Path] = []
@@ -24382,12 +24602,24 @@ class AssemblySection(QtWidgets.QWidget):
             display_frame = pd.DataFrame()
             self._preview_row_index_map = []
         else:
-            sorted_frame, row_map = self._apply_sort_spec(raw_frame)
+            working_frame = raw_frame
+            row_map = list(range(len(raw_frame.index)))
+            if not self._show_oe_samples:
+                keep_positions = [
+                    idx
+                    for idx, (_, row) in enumerate(raw_frame.iterrows())
+                    if not self._row_is_oe_sample(row)
+                ]
+                working_frame = raw_frame.iloc[keep_positions].reset_index(drop=True)
+                row_map = keep_positions
+            sorted_frame, sorted_row_map = self._apply_sort_spec(working_frame)
+            row_map = [row_map[idx] for idx in sorted_row_map if 0 <= int(idx) < len(row_map)]
             selected_columns = self._resolve_selected_columns(sorted_frame.columns)
             display_frame = sorted_frame.loc[:, selected_columns] if selected_columns else sorted_frame.loc[:, []]
             total_rows = len(display_frame.index)
             display_frame, row_map = self._apply_search_filter(display_frame, row_map)
             self._preview_row_index_map = row_map
+        self._rebuild_preview_background_cache(display_frame)
         self.preview_model.set_frame(display_frame)
         if self._column_order:
             try:
@@ -24554,43 +24786,51 @@ class AssemblySection(QtWidgets.QWidget):
         ):
             indexed = frame.copy()
             indexed["_source_row_index"] = list(range(len(indexed.index)))
-            first_rows = (
-                indexed.sort_values(
+
+            sort_columns: List[str] = []
+            ascending: List[bool] = []
+            for column, is_ascending in self._sort_spec:
+                if column in indexed.columns and column not in sort_columns:
+                    sort_columns.append(column)
+                    ascending.append(bool(is_ascending))
+            for fallback_column in ("Microwire", "Composition"):
+                if fallback_column in indexed.columns and fallback_column not in sort_columns:
+                    sort_columns.append(fallback_column)
+                    ascending.append(True)
+
+            if sort_columns:
+                row_sorted = indexed.sort_values(
+                    by=sort_columns + [_SHAPE_MEMORY_GROUP_ORDER_COLUMN],
+                    ascending=ascending + [True],
+                    kind="mergesort",
+                    key=lambda col: col.map(DataFrameModel._sort_value) if hasattr(col, "map") else col,
+                )
+            else:
+                row_sorted = indexed.sort_values(
                     by=[_SHAPE_MEMORY_GROUP_ORDER_COLUMN],
                     ascending=[True],
                     kind="mergesort",
                 )
-                .drop_duplicates(subset=[_SHAPE_MEMORY_GROUP_KEY_COLUMN], keep="first")
-            )
-            if self._sort_spec:
-                sort_columns: List[str] = []
-                ascending: List[bool] = []
-                for column, is_ascending in self._sort_spec:
-                    if (
-                        column in first_rows.columns
-                        and column not in sort_columns
-                        and not str(column).startswith("_")
-                    ):
-                        sort_columns.append(column)
-                        ascending.append(bool(is_ascending))
-                if sort_columns:
-                    first_rows = first_rows.sort_values(
-                        by=sort_columns,
-                        ascending=ascending,
-                        kind="mergesort",
-                        key=lambda col: col.map(DataFrameModel._sort_value) if hasattr(col, "map") else col,
-                    )
-            block_order = {
-                str(row[_SHAPE_MEMORY_GROUP_KEY_COLUMN]): idx
-                for idx, (_, row) in enumerate(first_rows.iterrows())
-            }
+
+            block_order: Dict[str, int] = {}
+            for _, row in row_sorted.iterrows():
+                key = str(row[_SHAPE_MEMORY_GROUP_KEY_COLUMN])
+                if key not in block_order:
+                    block_order[key] = len(block_order)
+
             indexed["_block_sort_index"] = indexed[_SHAPE_MEMORY_GROUP_KEY_COLUMN].map(
                 lambda value: block_order.get(str(value), len(block_order))
             )
+            within_group_columns = list(sort_columns)
+            within_group_ascending = list(ascending)
+            if _SHAPE_MEMORY_GROUP_ORDER_COLUMN not in within_group_columns:
+                within_group_columns.append(_SHAPE_MEMORY_GROUP_ORDER_COLUMN)
+                within_group_ascending.append(True)
             sorted_frame = indexed.sort_values(
-                by=["_block_sort_index", _SHAPE_MEMORY_GROUP_ORDER_COLUMN],
-                ascending=[True, True],
+                by=["_block_sort_index", *within_group_columns],
+                ascending=[True, *within_group_ascending],
                 kind="mergesort",
+                key=lambda col: col.map(DataFrameModel._sort_value) if hasattr(col, "map") else col,
             ).reset_index(drop=True)
             row_map = [int(value) for value in sorted_frame["_source_row_index"].tolist()]
             sorted_frame = sorted_frame.drop(columns=["_source_row_index", "_block_sort_index"])
@@ -24617,6 +24857,10 @@ class AssemblySection(QtWidgets.QWidget):
             if column in frame.columns and column not in sort_columns:
                 sort_columns.append(column)
                 ascending.append(bool(is_ascending))
+        for fallback_column in ("Microwire", "Composition"):
+            if fallback_column in frame.columns and fallback_column not in sort_columns:
+                sort_columns.append(fallback_column)
+                ascending.append(True)
         if not sort_columns:
             return frame.copy(), [
                 _index_position(frame.index, idx, fallback)
@@ -24837,23 +25081,24 @@ class AssemblySection(QtWidgets.QWidget):
         column_label: str,
     ) -> Optional[QtGui.QBrush]:
         _ = column_label
-        frame = self.preview_model.frame()
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return None
         try:
-            row_idx = int(row.name)
+            brush = self._preview_background_cache.get(row.name)
         except Exception:
-            return None
-        if row_idx < 0 or row_idx >= len(frame.index):
-            return None
+            brush = None
+        return brush
+
+    def _rebuild_preview_background_cache(self, frame: pd.DataFrame) -> None:
+        cache: Dict[Any, QtGui.QBrush] = {}
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            self._preview_background_cache = cache
+            return
         group_index = 0
         previous_group: Optional[str] = None
-        for idx in range(row_idx + 1):
-            current_row = frame.iloc[idx]
+        for row_label, row in frame.iterrows():
             current_group = "|".join(
                 [
-                    str(current_row.get("Composition") or "").strip(),
-                    str(current_row.get("Microwire") or "").strip(),
+                    str(row.get("Composition") or "").strip(),
+                    str(row.get("Microwire") or "").strip(),
                 ]
             )
             if previous_group is None:
@@ -24861,8 +25106,103 @@ class AssemblySection(QtWidgets.QWidget):
             elif current_group != previous_group:
                 group_index += 1
                 previous_group = current_group
-        color = QtGui.QColor("#1a1a1a" if group_index % 2 == 0 else "#202733")
-        return QtGui.QBrush(color)
+            cache[row_label] = QtGui.QBrush(
+                QtGui.QColor("#1a1a1a" if group_index % 2 == 0 else "#202733")
+            )
+        self._preview_background_cache = cache
+
+    @staticmethod
+    def _fabrication_index_from_frame(frame: Optional[pd.DataFrame]) -> FabricationIndex:
+        index = FabricationIndex()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return index
+
+        def _is_missing(value: Any) -> bool:
+            if value is None:
+                return True
+            if isinstance(value, str) and not value.strip():
+                return True
+            try:
+                return bool(pd.isna(value))
+            except Exception:
+                return False
+
+        def _assign_if_present(target: Dict[str, object], field: str, value: Any) -> None:
+            if not _is_missing(value):
+                target[field] = value
+
+        for _, row in frame.iterrows():
+            composition = str(row.get("Composition") or "").strip()
+            if not composition or composition == "Imported data:":
+                continue
+            try:
+                draw = int(row.get("Draw"))
+                piece = int(row.get("Piece"))
+            except (TypeError, ValueError):
+                microwire = str(row.get("Microwire") or "").strip()
+                parsed = _microwire_parts_from_label_safe(microwire)
+                if parsed is None:
+                    continue
+                try:
+                    draw = int(parsed[0])
+                    piece = int(parsed[1])
+                except (TypeError, ValueError):
+                    continue
+
+            piece_key = (composition, draw, piece)
+            draw_key = (composition, draw)
+            piece_data = dict(index.piece_level.get(piece_key, {}))
+            draw_data = dict(index.draw_level.get(draw_key, {}))
+
+            source_value: object = row.get("Data source") or "Manual"
+            source_paths = row.get("_source_paths")
+            if isinstance(source_paths, (list, tuple, set)):
+                for candidate in source_paths:
+                    if candidate:
+                        source_value = candidate
+                        break
+            _assign_if_present(piece_data, "length_m", row.get("Length (m)"))
+            _assign_if_present(piece_data, "piece_date", row.get("Piece date"))
+            _assign_if_present(piece_data, "fabrication_resistance_ohm", row.get("Resistance (Ω)"))
+            _assign_if_present(piece_data, "glass_pull_off", row.get(GLASS_PULL_COLUMN))
+            _assign_if_present(piece_data, "notes", row.get("Notes"))
+            _assign_if_present(piece_data, "_source_path", source_value)
+
+            temperature_value = row.get(CORE_TEMPERATURE_COLUMN)
+            if _is_missing(temperature_value):
+                temperature_value = row.get("Temperature (°C)")
+            _assign_if_present(draw_data, "fabrication_temperature_c", temperature_value)
+            _assign_if_present(
+                draw_data,
+                "fabrication_glass_temperature_c",
+                row.get(GLASS_TEMPERATURE_COLUMN),
+            )
+            _assign_if_present(draw_data, "mass_g", row.get("Mass (g)"))
+            _assign_if_present(
+                draw_data,
+                "winding_speed_m_per_min",
+                row.get("Winding speed (m/min)"),
+            )
+            _assign_if_present(
+                draw_data,
+                "glass_feed_mm_per_min",
+                row.get("Glass feeding (mm/min)"),
+            )
+            _assign_if_present(draw_data, "underpressure", row.get("Underpressure"))
+            _assign_if_present(
+                draw_data,
+                "production_datetime",
+                row.get("Production datetime"),
+            )
+            _assign_if_present(draw_data, "fabrication_resistance_ohm", row.get("Resistance (Ω)"))
+            _assign_if_present(draw_data, "notes", row.get("Notes"))
+            _assign_if_present(draw_data, "_source_path", source_value)
+
+            if piece_data:
+                index.set_piece(composition, draw, piece, piece_data)
+            if draw_data:
+                index.set_draw(composition, draw, draw_data)
+        return index
 
     def _group_annealing_records(
         self,
@@ -26839,6 +27179,7 @@ class AssemblySection(QtWidgets.QWidget):
             column_filter=column_filter,
             column_order=column_order,
             sort_spec=sort_spec,
+            include_microscope_crops=False,
         )
         build_kwargs = {
             "fabrication_index": fabrication_index,
@@ -26864,7 +27205,7 @@ class AssemblySection(QtWidgets.QWidget):
             ),
             "fmr_records": fmr_records if "fmr" in selected else [],
             "microscope_index": microscope_index if "microscope" in selected else {},
-            "video_index": video_index if "videos" in selected else {},
+            "video_index": video_index,
             "video_overrides": video_overrides,
             "strain_records": strain_records if "strain" in selected else {},
             "strain_entries": strain_entries if "strain" in selected else {},
@@ -26954,6 +27295,7 @@ class AssemblySection(QtWidgets.QWidget):
             export_formats=(),
             plot_backends=(),
             output_name=output_name,
+            include_microscope_crops=False,
         )
 
         build_kwargs = {
@@ -26980,7 +27322,7 @@ class AssemblySection(QtWidgets.QWidget):
             ),
             "fmr_records": fmr_records if "fmr" in selected else [],
             "microscope_index": microscope_index if "microscope" in selected else {},
-            "video_index": video_index if "videos" in selected else {},
+            "video_index": video_index,
             "video_overrides": video_overrides,
             "strain_records": strain_records if "strain" in selected else {},
             "strain_entries": strain_entries if "strain" in selected else {},
@@ -27527,7 +27869,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._update_project_title()
         self._set_initial_geometry()
         self._retabify_primary_docks()
-        QtCore.QTimer.singleShot(0, self._maybe_auto_open_last_project)
+        QtCore.QTimer.singleShot(150, self._maybe_auto_open_last_project)
 
     def _dock_switcher_supported(self) -> bool:
         override = os.environ.get("MW_DISABLE_DOCK_SWITCHER", "")

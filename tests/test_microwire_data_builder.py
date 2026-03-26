@@ -2251,6 +2251,81 @@ def test_assembly_restores_shape_memory_values_from_live_section_sources() -> No
         assembly.close()
 
 
+def test_assembly_preserves_multiple_shape_memory_rows_with_same_current_from_live_section() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    section = builder_ui.ShapeMemoryStressStrainSection(
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        section.store.load_payload = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        standard_path = Path("Ni50Fe27Ga23 11_1 50mA.txt")
+        fracture_a_path = Path("Ni50Fe27Ga23 11_1 fracture 50mA a.txt")
+        fracture_b_path = Path("Ni50Fe27Ga23 11_1 fracture 50mA b.txt")
+        section_frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "11/1",
+                    builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN: "fracture 50mA",
+                    builder_ui._SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN: str(fracture_a_path),
+                    builder_ui.SHAPE_MEMORY_FRACTURE_LOAD_COLUMN: 4.9,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN: 14.17,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_STRESS_COLUMN: 312.155,
+                },
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "11/1",
+                    builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN: "50mA",
+                    builder_ui._SHAPE_MEMORY_STANDARD_SOURCE_COLUMN: str(standard_path),
+                    builder_ui._SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN: str(fracture_b_path),
+                    builder_ui.SHAPE_MEMORY_DISPLACEMENT_COLUMN: 5.7,
+                    builder_ui.SHAPE_MEMORY_LOAD_COLUMN: 13.312,
+                    builder_ui.SHAPE_MEMORY_STRAIN_COLUMN: 17.636,
+                    builder_ui.SHAPE_MEMORY_STRESS_COLUMN: 848.043,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_LOAD_COLUMN: 16.912,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN: 18.564,
+                    builder_ui.SHAPE_MEMORY_FRACTURE_STRESS_COLUMN: 1077.382,
+                },
+            ]
+        )
+        section.apply_data(
+            MiniDatabaseData(
+                table=section_frame,
+                extra={"preview_panel_visible": False, "graph_column_visible": False},
+            )
+        )
+        assembly.sections["shape_memory_stress_strain"] = section
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "11/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: 14.0,
+                    builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN: ["50mA", "fracture 50mA"],
+                }
+            ]
+        )
+
+        expanded = assembly._expand_shape_memory_preview_rows(frame)
+
+        assert len(expanded.index) == 2
+        first = expanded.iloc[0]
+        second = expanded.iloc[1]
+        assert pd.isna(first[builder_ui.SHAPE_MEMORY_CURRENT_COLUMN])
+        assert first[builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] == pytest.approx(50.0)
+        assert first[builder_ui.SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN] == pytest.approx(14.17)
+        assert second[builder_ui.SHAPE_MEMORY_CURRENT_COLUMN] == pytest.approx(50.0)
+        assert second[builder_ui.SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] == pytest.approx(50.0)
+        assert second[builder_ui.SHAPE_MEMORY_STRAIN_COLUMN] == pytest.approx(17.636)
+        assert second[builder_ui.SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN] == pytest.approx(18.564)
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+        assembly.close()
+
+
 def test_assembly_keeps_values_but_not_current_when_only_sample_fallback_exists() -> None:
     _ensure_qapp()
     assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
@@ -2311,7 +2386,69 @@ def test_assembly_keeps_values_but_not_current_when_only_sample_fallback_exists(
         assembly.close()
 
 
-def test_assembly_shape_memory_sort_keeps_sample_rows_grouped() -> None:
+def test_assembly_hides_oe_samples_by_default_and_can_show_them() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {"Composition": "Ni50Fe27Ga23", "Microwire": "1/2", "Strain (%)": 7.75},
+                {"Composition": "Ni50Fe27Ga23", "Microwire": "1/2oe", "Strain (%)": 7.85},
+            ]
+        )
+
+        assembly._update_preview(frame)
+        hidden_frame = assembly.preview_model.frame()
+        assert list(hidden_frame["Microwire"]) == ["1/2"]
+
+        assembly.set_show_oe_samples(True)
+        shown_frame = assembly.preview_model.frame()
+        assert list(shown_frame["Microwire"]) == ["1/2", "1/2oe"]
+    finally:
+        assembly.close()
+
+
+def test_assembly_sort_uses_microwire_as_tie_breaker_for_equal_strain() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {"Composition": "Ni50Fe27Ga23", "Microwire": "9/3", "Strain (%)": 7.85},
+                {"Composition": "Ni53Fe16Ga27Co4", "Microwire": "1/2", "Strain (%)": 7.85},
+                {"Composition": "Ni50Fe27Ga23", "Microwire": "10/4oe", "Strain (%)": 7.85},
+            ]
+        )
+        assembly._sort_spec = [("Strain (%)", True)]
+
+        sorted_frame, _ = assembly._apply_sort_spec(frame)
+
+        assert list(sorted_frame["Microwire"]) == ["1/2", "9/3", "10/4oe"]
+    finally:
+        assembly.close()
+
+
+def test_assembly_sort_treats_numeric_text_as_numeric_for_strain() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {"Composition": "A", "Microwire": "1/2", "Strain (%)": "6.61"},
+                {"Composition": "B", "Microwire": "1/2", "Strain (%)": "7.68"},
+                {"Composition": "C", "Microwire": "1/2", "Strain (%)": "7.80"},
+            ]
+        )
+        assembly._sort_spec = [("Strain (%)", False), ("Microwire", True)]
+
+        sorted_frame, _ = assembly._apply_sort_spec(frame)
+
+        assert list(sorted_frame["Strain (%)"]) == ["7.80", "7.68", "6.61"]
+    finally:
+        assembly.close()
+
+
+def test_assembly_shape_memory_sort_keeps_sample_rows_grouped_and_positions_by_best_row() -> None:
     _ensure_qapp()
     assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
     try:
@@ -2344,13 +2481,241 @@ def test_assembly_shape_memory_sort_keeps_sample_rows_grouped() -> None:
 
         sorted_frame, _ = assembly._apply_sort_spec(frame)
 
-        group_keys = sorted_frame[builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN].tolist()
-        assert group_keys in (
-            ["B|1|1", "A|1|1", "A|1|1"],
-            ["A|1|1", "A|1|1", "B|1|1"],
-        )
+        assert sorted_frame[builder_ui._SHAPE_MEMORY_GROUP_KEY_COLUMN].tolist() == [
+            "A|1|1",
+            "A|1|1",
+            "B|1|1",
+        ]
+        assert sorted_frame[builder_ui.SHAPE_MEMORY_CURRENT_COLUMN].tolist() == [40.0, 25.0, 30.0]
     finally:
         assembly.close()
+
+
+def test_fabrication_import_project_payload_prefers_saved_rows_over_stale_raw_index() -> None:
+    _ensure_qapp()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        stale_index = builder_ui.FabricationIndex()
+        stale_index.set_piece(
+            "Ni50Fe27Ga23",
+            1,
+            1,
+            {
+                "length_m": None,
+                "_source_path": "Measured",
+            },
+        )
+        section.store.load_payload = lambda key, *_args, **_kwargs: stale_index if key in {
+            "fabrication_index",
+            section.raw_index_payload_name,
+        } else None  # type: ignore[method-assign]
+        section._load_relevant_map = lambda: ({}, set())  # type: ignore[method-assign]
+
+        payload = {
+            "columns": [
+                "Composition",
+                "Microwire",
+                "Draw",
+                "Piece",
+                "Length (m)",
+                "Mass (g)",
+                "Production datetime",
+                "Data source",
+                "_source_paths",
+            ],
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "Length (m)": 12.34,
+                    "Mass (g)": 5.67,
+                    "Production datetime": "2025-03-26 08:15",
+                    "Data source": "Measured",
+                    "_source_paths": ["C:/fabrication/source.xlsx"],
+                }
+            ],
+        }
+
+        section.import_project_payload(payload)
+        section.set_import_separation(True)
+
+        frame = section.model.frame()
+        assert frame.loc[0, "Length (m)"] == pytest.approx(12.34)
+        assert frame.loc[0, "Mass (g)"] == pytest.approx(5.67)
+        assert frame.loc[0, "Production datetime"] == "2025-03-26 08:15"
+    finally:
+        section.close()
+
+
+def test_video_import_project_payload_preserves_saved_rows_with_fabrication_present(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.VideoSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        video_path = tmp_path / "sample_video.mkv"
+        video_path.write_bytes(b"video")
+        section.store.load_payload = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        section._fabrication_table = lambda: pd.DataFrame(  # type: ignore[method-assign]
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "Length (m)": 4.2,
+                    "Mass (g)": 2.5,
+                    "Production datetime": "2025-03-10 09:00",
+                }
+            ]
+        )
+
+        payload = {
+            "columns": [
+                "Composition",
+                "Microwire",
+                "Draw",
+                "Piece",
+                "Length (m)",
+                "Mass (g)",
+                "Production datetime",
+                builder_ui.VIDEO_END_LENGTH_COLUMN,
+                "_sources",
+                "_group_key",
+            ],
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "Length (m)": 4.2,
+                    "Mass (g)": 2.5,
+                    "Production datetime": "2025-03-10 09:00",
+                    builder_ui.VIDEO_END_LENGTH_COLUMN: 123.4,
+                    "_sources": [str(video_path)],
+                    "_group_key": "Ni50Fe27Ga23|1|1",
+                }
+            ],
+        }
+
+        section.import_project_payload(payload)
+        section.sync_with_fabrication()
+
+        frame = section.model.frame()
+        row = frame.iloc[0]
+        assert row["Mass (g)"] == pytest.approx(2.5)
+        assert row["Production datetime"] == "2025-03-10 09:00"
+        assert row[builder_ui.VIDEO_END_LENGTH_COLUMN] == pytest.approx(123.4)
+        assert row["_sources"] == [str(video_path)]
+        assert section._row_missing_video_files(row) is False
+    finally:
+        section.close()
+
+
+def test_builder_load_project_preserves_saved_fabrication_and_video_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "information",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Ok,
+        )
+        source_xlsx = tmp_path / "fabrication.xlsx"
+        source_xlsx.write_text("dummy", encoding="utf-8")
+        video_path = tmp_path / "video.mkv"
+        video_path.write_bytes(b"video")
+        window.settings.setValue(window._project_settings_key("separate_imported"), True)
+
+        project_path = tmp_path / "integrity_project.pydpj"
+        payload = {
+            "kind": window.PROJECT_KIND,
+            "version": window.PROJECT_VERSION,
+            "sections": {
+                "fabrication": {
+                    "columns": [
+                        "Composition",
+                        "Microwire",
+                        "Draw",
+                        "Piece",
+                        "Length (m)",
+                        "Mass (g)",
+                        "Production datetime",
+                        "Data source",
+                        "_source_paths",
+                    ],
+                    "rows": [
+                        {
+                            "Composition": "Ni50Fe27Ga23",
+                            "Microwire": "10/1",
+                            "Draw": 10,
+                            "Piece": 1,
+                            "Length (m)": 7.0,
+                            "Mass (g)": 1.85,
+                            "Production datetime": "2025-03-26 08:15",
+                            "Data source": "Measured",
+                            "_source_paths": [str(source_xlsx)],
+                        }
+                    ],
+                },
+                "videos": {
+                    "columns": [
+                        "Composition",
+                        "Microwire",
+                        "Draw",
+                        "Piece",
+                        "Length (m)",
+                        "Mass (g)",
+                        "Production datetime",
+                        builder_ui.VIDEO_END_LENGTH_COLUMN,
+                        "_sources",
+                        "_group_key",
+                    ],
+                    "rows": [
+                        {
+                            "Composition": "Ni50Fe27Ga23",
+                            "Microwire": "10/1",
+                            "Draw": 10,
+                            "Piece": 1,
+                            "Length (m)": 7.0,
+                            "Mass (g)": 1.85,
+                            "Production datetime": "2025-03-26 08:15",
+                            builder_ui.VIDEO_END_LENGTH_COLUMN: 208.15,
+                            "_sources": [str(video_path)],
+                            "_group_key": "Ni50Fe27Ga23|10|1",
+                        }
+                    ],
+                },
+            },
+        }
+        project_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        window._load_project_from_path(project_path)
+        QtWidgets.QApplication.processEvents()
+
+        fabrication_frame = window.fabrication_section.model.frame()
+        assert fabrication_frame.loc[0, "Length (m)"] == pytest.approx(7.0)
+        assert fabrication_frame.loc[0, "Mass (g)"] == pytest.approx(1.85)
+        assert fabrication_frame.loc[0, "Production datetime"] == "2025-03-26 08:15"
+
+        video_frame = window.video_section.model.frame()
+        video_row = video_frame.iloc[0]
+        assert video_row["Mass (g)"] == pytest.approx(1.85)
+        assert video_row["Production datetime"] == "2025-03-26 08:15"
+        assert video_row[builder_ui.VIDEO_END_LENGTH_COLUMN] == pytest.approx(208.15)
+        assert window.video_section._row_missing_video_files(video_row) is False
+    finally:
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 
 def test_safe_plot_stem_removes_path_separators() -> None:
@@ -2957,6 +3322,97 @@ def test_video_index_to_frame_propagates_draw_level_sources_to_piece_rows() -> N
     assert row["_sources"] == [str(Path("G:/videos/Ni50Fe27Ga23_draw6.mkv"))]
     assert float(row[builder_ui.CORE_TEMPERATURE_COLUMN]) == pytest.approx(395.0)
     assert float(row["Winding speed (m/min)"]) == pytest.approx(71.0)
+
+
+def test_video_index_to_frame_prefers_video_metrics_over_fabrication_values() -> None:
+    summary = core.VideoMetricsSummary(
+        sources={Path("G:/videos/Ni50Fe27Ga23_draw6.mkv")},
+        temperatures=[395.0],
+        underpressures=[-0.72],
+        winding_speeds=[71.0],
+        glass_feeds=[4.5],
+    )
+    fabrication_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "6/2",
+                "Data source": "Measured",
+                "e/a": 7.85,
+                "Draw": 6,
+                "Piece": 2,
+                builder_ui.CORE_TEMPERATURE_COLUMN: 320.0,
+                "Underpressure": -0.1,
+                "Winding speed (m/min)": 20.0,
+                "Glass feeding (mm/min)": 1.2,
+            }
+        ]
+    )
+
+    frame = builder_ui._video_index_to_frame(
+        {("Ni50Fe27Ga23", 6, None): summary},
+        fabrication_frame,
+    )
+
+    row = frame.iloc[0]
+    assert float(row[builder_ui.CORE_TEMPERATURE_COLUMN]) == pytest.approx(395.0)
+    assert float(row["Underpressure"]) == pytest.approx(-0.72)
+    assert float(row["Winding speed (m/min)"]) == pytest.approx(71.0)
+    assert float(row["Glass feeding (mm/min)"]) == pytest.approx(4.5)
+
+
+def test_build_database_skips_microscope_crop_output_when_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 4_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 4_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+    core_img = tmp_path / "Ni55Fe18Ga27 4_1 core.png"
+    glass_img = tmp_path / "Ni55Fe18Ga27 4_1 glass.png"
+
+    from PIL import Image
+
+    Image.new("RGB", (40, 40), color="white").save(core_img)
+    Image.new("RGB", (40, 40), color="white").save(glass_img)
+
+    def fake_extract(path: Path, logger: logging.Logger) -> core.MicroscopeOCRResult:
+        result = core.MicroscopeOCRResult()
+        name = path.name.lower()
+        if "core" in name:
+            detection = core.MicroscopeDetection(
+                value=10.0,
+                image_path=core_img,
+                bbox=(5, 5, 25, 25),
+            )
+            result.append_value(10.0)
+            result.detections.append(detection)
+        elif "glass" in name:
+            detection = core.MicroscopeDetection(
+                value=50.0,
+                image_path=glass_img,
+                bbox=(4, 4, 30, 30),
+            )
+            result.append_value(50.0)
+            result.detections.append(detection)
+        return result
+
+    monkeypatch.setattr(core, "_extract_microscope_diameters", fake_extract)
+
+    config = BuilderConfig(
+        fabrication_files=[],
+        annealing_files=[high, low],
+        output_dir=tmp_path / "out",
+        microscope_files=[core_img, glass_img],
+        include_microscope_crops=False,
+        highlight_ocr_values=True,
+    )
+
+    result = build_database(config)
+
+    assert result.microscope_crops == {}
+    assert not (config.output_dir / "microscope_crops").exists()
 
 
 def test_highlight_and_crop_columns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4057,6 +4513,78 @@ def test_assemble_prepare_inputs_respects_hide_other_ends_setting(qtbot, tmp_pat
         assert ("Ni50Fe27Ga23", 5, 4, "oe") not in prepared_index
     finally:
         window.close()
+
+
+def test_assemble_prepare_inputs_keeps_fabrication_and_video_baselines_when_not_selected(
+    qtbot,
+) -> None:
+    _ensure_qapp()
+    log = logging.getLogger("test")
+    fabrication = builder_ui.FabricationSection(log, lambda *_: None)
+    videos = builder_ui.VideoSection(log, lambda *_: None)
+    sections = {
+        "fabrication": fabrication,
+        "videos": videos,
+    }
+    assembly = builder_ui.AssemblySection(sections, log, lambda *_: None)
+    qtbot.addWidget(fabrication)
+    qtbot.addWidget(videos)
+    qtbot.addWidget(assembly)
+    try:
+        fabrication_frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "6/2",
+                    "Draw": 6,
+                    "Piece": 2,
+                    "Length (m)": 27.88,
+                    "Production datetime": "2025-03-26 08:15",
+                    "Mass (g)": 5.67,
+                    "Resistance (Ω)": 71.0,
+                    builder_ui.CORE_TEMPERATURE_COLUMN: 320.0,
+                    "Glass temperature (°C)": 210.0,
+                    "Winding speed (m/min)": 20.0,
+                    "Glass feeding (mm/min)": 1.2,
+                    "Underpressure": -0.1,
+                    "Data source": "Measured",
+                }
+            ]
+        )
+        fabrication.apply_data(builder_ui.MiniDatabaseData(table=fabrication_frame))
+
+        video_summary = core.VideoMetricsSummary(
+            sources={Path("G:/videos/Ni50Fe27Ga23_draw6.mkv")},
+            temperatures=[395.0],
+            underpressures=[-0.72],
+            winding_speeds=[71.0],
+            glass_feeds=[4.5],
+        )
+        videos.store.save_payload(
+            "video_index",
+            {("Ni50Fe27Ga23", 6, None): video_summary},
+        )
+
+        payload = assembly._prepare_builder_inputs(
+            {"shape_memory_stress_strain"},
+            require_payloads=False,
+        )
+
+        assert payload is not None
+        fabrication_index = payload[0]
+        video_index = payload[9]
+
+        piece_info = fabrication_index.get_piece("Ni50Fe27Ga23", 6, 2)
+        draw_info = fabrication_index.get_draw("Ni50Fe27Ga23", 6)
+        assert piece_info.get("length_m") == pytest.approx(27.88)
+        assert draw_info.get("mass_g") == pytest.approx(5.67)
+        assert draw_info.get("production_datetime") == "2025-03-26 08:15"
+        assert draw_info.get("winding_speed_m_per_min") == pytest.approx(20.0)
+        assert ("Ni50Fe27Ga23", 6, None) in video_index
+    finally:
+        assembly.close()
+        videos.close()
+        fabrication.close()
 
 
 def test_assemble_import_project_payload_preserves_hidden_columns_and_order(qtbot) -> None:
