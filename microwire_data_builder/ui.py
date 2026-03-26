@@ -16009,8 +16009,12 @@ class VsmHysteresisSection(MiniDatabaseSection):
             pass
         header = table.verticalHeader()
         if header is not None:
+            row_height = max(height + 24, ANNEALING_GRAPH_HEIGHT + 24)
             try:
-                header.setDefaultSectionSize(max(height + 24, ANNEALING_GRAPH_HEIGHT + 24))
+                header.setDefaultSectionSize(row_height)
+                header.setMinimumSectionSize(row_height)
+                for row_index in range(table.model().rowCount() if table.model() is not None else 0):
+                    header.resizeSection(row_index, row_height)
             except Exception:
                 pass
         self._auto_fit_columns()
@@ -16402,8 +16406,12 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             pass
         header = table.verticalHeader()
         if header is not None:
+            row_height = max(height + 24, ANNEALING_GRAPH_HEIGHT + 24)
             try:
-                header.setDefaultSectionSize(max(height + 24, ANNEALING_GRAPH_HEIGHT + 24))
+                header.setMinimumSectionSize(row_height)
+                header.setDefaultSectionSize(row_height)
+                for row_index in range(table.model().rowCount() if table.model() is not None else 0):
+                    header.resizeSection(row_index, row_height)
             except Exception:
                 pass
         self._auto_fit_columns()
@@ -17508,14 +17516,20 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
 
                 standard_entry: Dict[str, Any] = {}
                 fracture_entry: Dict[str, Any] = {}
+                standard_current_confirmed = False
+                fracture_current_confirmed = False
                 if is_fracture:
                     for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
                         if column in entry:
                             fracture_entry[column] = entry[column]
+                    if fracture_entry:
+                        fracture_current_confirmed = True
                     if not fracture_entry and fracture_source and path_key == fracture_source:
                         for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
                             if column in sample_entry:
                                 fracture_entry[column] = sample_entry[column]
+                        if fracture_entry:
+                            fracture_current_confirmed = True
                     elif not fracture_entry and not fracture_source and fracture_count == 1:
                         for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
                             if column in sample_entry:
@@ -17524,10 +17538,14 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                     for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
                         if column in entry:
                             standard_entry[column] = entry[column]
+                    if standard_entry:
+                        standard_current_confirmed = True
                     if not standard_entry and standard_source and path_key == standard_source:
                         for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
                             if column in sample_entry:
                                 standard_entry[column] = sample_entry[column]
+                        if standard_entry:
+                            standard_current_confirmed = True
                     elif not standard_entry and not standard_source and standard_count == 1:
                         for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
                             if column in sample_entry:
@@ -17539,6 +17557,28 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 for column in _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS:
                     if column in fracture_entry:
                         new_row[column] = fracture_entry[column]
+                if not standard_current_confirmed:
+                    new_row[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+                    new_row[_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] = None
+                if not fracture_current_confirmed:
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+                    new_row[_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN] = None
+                if not _shape_memory_payload_has_values(
+                    new_row,
+                    _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS,
+                ):
+                    new_row[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+                    new_row[_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] = None
+                if not _shape_memory_payload_has_values(
+                    new_row,
+                    _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS,
+                ):
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+                    new_row[_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN] = None
                 new_row[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = sample_group_key
                 new_row[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
                 expanded_rows.append(new_row)
@@ -17619,6 +17659,31 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
             return
+        if not self._graph_column_visible():
+            try:
+                icon_extent = table.style().pixelMetric(
+                    QtWidgets.QStyle.PixelMetric.PM_SmallIconSize
+                )
+            except Exception:
+                icon_extent = 16
+            if icon_extent <= 0:
+                icon_extent = 16
+            try:
+                table.setIconSize(QtCore.QSize(icon_extent, icon_extent))
+            except Exception:
+                pass
+            header = table.verticalHeader()
+            if header is not None:
+                row_height = table.fontMetrics().height() + 8
+                try:
+                    header.setMinimumSectionSize(max(1, row_height))
+                    header.setDefaultSectionSize(row_height)
+                    for row_index in range(table.model().rowCount() if table.model() is not None else 0):
+                        header.resizeSection(row_index, row_height)
+                except Exception:
+                    pass
+            self._auto_fit_columns()
+            return
         width = self._preview_icon_width()
         height = self._preview_icon_height()
         try:
@@ -17629,8 +17694,12 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             pass
         header = table.verticalHeader()
         if header is not None:
+            row_height = max(height + 24, ANNEALING_GRAPH_HEIGHT + 24)
             try:
-                header.setDefaultSectionSize(max(height + 24, ANNEALING_GRAPH_HEIGHT + 24))
+                header.setMinimumSectionSize(row_height)
+                header.setDefaultSectionSize(row_height)
+                for row_index in range(table.model().rowCount() if table.model() is not None else 0):
+                    header.resizeSection(row_index, row_height)
             except Exception:
                 pass
         self._auto_fit_columns()
@@ -17939,10 +18008,6 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                     chosen_current = _shape_memory_current_mA_from_record(
                         ShapeMemoryStressStrainRecord(path=Path(source_text), sample="", data=pd.DataFrame())
                     )
-                elif values:
-                    unique = list(dict.fromkeys(float(v) for v in values))
-                    if len(unique) == 1:
-                        chosen_current = unique[0]
                 if updated.at[row_index, column] in (None, ""):
                     updated.at[row_index, column] = chosen_current
                     if chosen_current is not None:
@@ -17995,6 +18060,14 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
 
     def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
         super().apply_data(data)
+        if self._preview_toggle is not None:
+            blocker = QtCore.QSignalBlocker(self._preview_toggle)
+            self._preview_toggle.setChecked(self._preview_panel_visible())
+            del blocker
+        if self._graph_column_toggle is not None:
+            blocker = QtCore.QSignalBlocker(self._graph_column_toggle)
+            self._graph_column_toggle.setChecked(self._graph_column_visible())
+            del blocker
         self._normalise_value_columns()
         self._refresh_record_groups()
         self._expand_rows_per_graph()
@@ -18024,6 +18097,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             return
         column_index = int(frame.columns.get_loc(SHAPE_MEMORY_STRESS_STRAIN_COLUMN))
         self.table_view.setColumnHidden(column_index, not self._graph_column_visible())
+        self._update_preview_icon_size()
 
     def _toggle_graph_column(self, checked: bool) -> None:
         extra = self.data.extra if isinstance(self.data.extra, dict) else {}
@@ -23691,6 +23765,8 @@ class AssemblySection(QtWidgets.QWidget):
 
                     standard_entry: Dict[str, Any] = {}
                     fracture_entry: Dict[str, Any] = {}
+                    standard_current_confirmed = False
+                    fracture_current_confirmed = False
                     if is_fracture:
                         for column in (
                             SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
@@ -23699,8 +23775,11 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry:
                                 fracture_entry[column] = entry[column]
+                        if fracture_entry:
+                            fracture_current_confirmed = True
                         if not fracture_entry:
                             fracture_entry = dict(section_fracture_entries.get(path_key, {}))
+                            fracture_current_confirmed = bool(fracture_entry)
                         if not fracture_entry and fracture_source and path_key == fracture_source:
                             for column in (
                                 SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
@@ -23709,6 +23788,8 @@ class AssemblySection(QtWidgets.QWidget):
                             ):
                                 if column in sample_entry:
                                     fracture_entry[column] = sample_entry[column]
+                            if fracture_entry:
+                                fracture_current_confirmed = True
                         elif not fracture_entry and not fracture_source and fracture_source_count == 1:
                             for column in (
                                 SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
@@ -23726,8 +23807,11 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry:
                                 standard_entry[column] = entry[column]
+                        if standard_entry:
+                            standard_current_confirmed = True
                         if not standard_entry:
                             standard_entry = dict(section_standard_entries.get(path_key, {}))
+                            standard_current_confirmed = bool(standard_entry)
                         if not standard_entry and standard_source and path_key == standard_source:
                             for column in (
                                 SHAPE_MEMORY_DISPLACEMENT_COLUMN,
@@ -23737,6 +23821,8 @@ class AssemblySection(QtWidgets.QWidget):
                             ):
                                 if column in sample_entry:
                                     standard_entry[column] = sample_entry[column]
+                            if standard_entry:
+                                standard_current_confirmed = True
                         elif not standard_entry and not standard_source and standard_source_count == 1:
                             for column in (
                                 SHAPE_MEMORY_DISPLACEMENT_COLUMN,
@@ -23760,6 +23846,12 @@ class AssemblySection(QtWidgets.QWidget):
                         SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
                     ):
                         new_row[column] = fracture_entry.get(column)
+                    if not standard_current_confirmed:
+                        new_row[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                        new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+                    if not fracture_current_confirmed:
+                        new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                        new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
                     _clear_orphan_currents(new_row)
                     fallback_rows.append(new_row)
 
@@ -23831,6 +23923,8 @@ class AssemblySection(QtWidgets.QWidget):
 
                 standard_entry: Dict[str, Any] = {}
                 fracture_entry: Dict[str, Any] = {}
+                standard_current_confirmed = False
+                fracture_current_confirmed = False
                 has_fracture_record = False
                 for record in current_records:
                     path_key = _record_path_key(record)
@@ -23848,6 +23942,8 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry and column not in fracture_entry:
                                 fracture_entry[column] = entry[column]
+                        if fracture_entry:
+                            fracture_current_confirmed = True
                         if not fracture_entry and path_key:
                             source_entry = section_fracture_entries.get(path_key, {})
                             for column in (
@@ -23857,6 +23953,8 @@ class AssemblySection(QtWidgets.QWidget):
                             ):
                                 if column in source_entry and column not in fracture_entry:
                                     fracture_entry[column] = source_entry[column]
+                            if fracture_entry:
+                                fracture_current_confirmed = True
                         if not fracture_entry and not section_fracture_entries and fracture_count == 1:
                             for column in (
                                 SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
@@ -23874,6 +23972,8 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry and column not in standard_entry:
                                 standard_entry[column] = entry[column]
+                        if standard_entry:
+                            standard_current_confirmed = True
                         if not standard_entry and path_key:
                             source_entry = section_standard_entries.get(path_key, {})
                             for column in (
@@ -23884,6 +23984,8 @@ class AssemblySection(QtWidgets.QWidget):
                             ):
                                 if column in source_entry and column not in standard_entry:
                                     standard_entry[column] = source_entry[column]
+                            if standard_entry:
+                                standard_current_confirmed = True
                         if not standard_entry and not section_standard_entries and standard_count == 1:
                             for column in (
                                 SHAPE_MEMORY_DISPLACEMENT_COLUMN,
@@ -23924,12 +24026,15 @@ class AssemblySection(QtWidgets.QWidget):
                     SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
                 ):
                     new_row[column] = fracture_entry.get(column)
-                if has_fracture_record:
+                if has_fracture_record and fracture_current_confirmed:
                     new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = current_value
                     new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = _current_density_from_diameter_um(
                         current_value,
                         diameter_um,
                     )
+                if not standard_current_confirmed:
+                    new_row[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
 
                 _clear_orphan_currents(new_row)
                 if not (
