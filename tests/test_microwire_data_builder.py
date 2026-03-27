@@ -2549,6 +2549,139 @@ def test_fabrication_import_project_payload_prefers_saved_rows_over_stale_raw_in
         section.close()
 
 
+def test_fabrication_filter_index_keeps_all_available_pieces_on_relevant_draw() -> None:
+    _ensure_qapp()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        index = builder_ui.FabricationIndex()
+        index.set_draw("Ni50Fe27Ga23", 5, {"mass_g": 1.2})
+        for piece in range(0, 8):
+            index.set_piece(
+                "Ni50Fe27Ga23",
+                5,
+                piece,
+                {"length_m": float(piece)},
+            )
+
+        filtered = section._filter_index(
+            index,
+            {"Ni50Fe27Ga23": {5: {4}}},
+            {"Ni50Fe27Ga23"},
+        )
+
+        assert sorted(
+            piece
+            for (composition, draw, piece) in filtered.piece_level.keys()
+            if composition == "Ni50Fe27Ga23" and draw == 5
+        ) == [1, 2, 3, 4, 5, 6, 7]
+    finally:
+        section.close()
+
+
+def test_fabrication_augment_table_adds_all_available_sibling_pieces_from_same_draw() -> None:
+    _ensure_qapp()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        index = builder_ui.FabricationIndex()
+        index.set_draw("Ni50Fe27Ga23", 5, {"mass_g": 1.2})
+        for piece in range(0, 8):
+            index.set_piece(
+                "Ni50Fe27Ga23",
+                5,
+                piece,
+                {"length_m": float(piece)},
+            )
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "5/4",
+                    "Draw": 5,
+                    "Piece": 4,
+                    "Data source": "Measured",
+                }
+            ]
+        )
+
+        augmented = section._augment_table_with_relevant_microscope_rows(
+            frame,
+            {"Ni50Fe27Ga23": {5: {4}}},
+            source_index=index,
+        )
+
+        assert augmented["Draw"].tolist() == [5, 5, 5, 5, 5, 5, 5]
+        assert augmented["Piece"].tolist() == [4, 1, 2, 3, 5, 6, 7]
+    finally:
+        section.close()
+
+
+def test_fabrication_filter_index_limits_draw_to_last_meaningful_piece() -> None:
+    _ensure_qapp()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        index = builder_ui.FabricationIndex()
+        index.set_draw("Ni50Fe27Ga23", 5, {"mass_g": 1.2})
+        for piece in range(0, 21):
+            payload = {"length_m": 0.0}
+            if piece == 2:
+                payload = {"piece_date": "2024-04-26", "notes": "hruby podla mna cez 2m"}
+            elif piece == 4:
+                payload = {"piece_date": "2024-04-26", "notes": "hruby"}
+            elif piece >= 9:
+                payload = {"length_m": None}
+            index.set_piece("Ni50Fe27Ga23", 5, piece, payload)
+
+        filtered = section._filter_index(
+            index,
+            {"Ni50Fe27Ga23": {5: {4}}},
+            {"Ni50Fe27Ga23"},
+        )
+
+        assert sorted(
+            piece
+            for (composition, draw, piece) in filtered.piece_level.keys()
+            if composition == "Ni50Fe27Ga23" and draw == 5
+        ) == [1, 2, 3, 4]
+    finally:
+        section.close()
+
+
+def test_fabrication_filter_index_keeps_rows_up_to_last_meaningful_piece_on_draw() -> None:
+    _ensure_qapp()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        index = builder_ui.FabricationIndex()
+        index.set_draw("Ni50Fe27Ga23", 6, {"mass_g": 1.2})
+        for piece in range(0, 21):
+            if piece == 0:
+                payload = {"length_m": 0.0, "piece_date": "2024-05-20", "notes": "150m"}
+            elif 1 <= piece <= 6:
+                payload = {
+                    "length_m": float(piece),
+                    "piece_date": "2024-05-20",
+                    "fabrication_resistance_ohm": float(100 + piece),
+                }
+            elif piece in {7, 8}:
+                payload = {"length_m": 0.0}
+            else:
+                payload = {"length_m": None}
+            index.set_piece("Ni50Fe27Ga23", 6, piece, payload)
+
+        filtered = section._filter_index(
+            index,
+            {"Ni50Fe27Ga23": {6: {2}}},
+            {"Ni50Fe27Ga23"},
+        )
+
+        assert sorted(
+            piece
+            for (composition, draw, piece) in filtered.piece_level.keys()
+            if composition == "Ni50Fe27Ga23" and draw == 6
+        ) == [1, 2, 3, 4, 5, 6]
+    finally:
+        section.close()
+
+
 def test_video_import_project_payload_preserves_saved_rows_with_fabrication_present(
     tmp_path: Path,
 ) -> None:
@@ -2611,6 +2744,31 @@ def test_video_import_project_payload_preserves_saved_rows_with_fabrication_pres
         assert row[builder_ui.VIDEO_END_LENGTH_COLUMN] == pytest.approx(123.4)
         assert row["_sources"] == [str(video_path)]
         assert section._row_missing_video_files(row) is False
+    finally:
+        section.close()
+
+
+def test_video_filter_candidates_for_relevance_keeps_piece_paths_present_in_relevant_map(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.VideoSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        candidates = [
+            tmp_path / "Ni50Fe27Ga23 5_0 sample.mkv",
+            tmp_path / "Ni50Fe27Ga23 5_1 sample.mkv",
+            tmp_path / "Ni50Fe27Ga23 5_2 sample.mkv",
+            tmp_path / "Ni50Fe27Ga23 5_5 sample.mkv",
+            tmp_path / "Ni50Fe27Ga23 6_1 sample.mkv",
+        ]
+
+        filtered = section._filter_candidates_for_relevance(
+            candidates,
+            {"Ni50Fe27Ga23": {5: {1, 2, 3, 4}}},
+            {"Ni50Fe27Ga23"},
+        )
+
+        assert filtered == [candidates[1], candidates[2]]
     finally:
         section.close()
 
@@ -4515,6 +4673,149 @@ def test_assemble_prepare_inputs_respects_hide_other_ends_setting(qtbot, tmp_pat
         window.close()
 
 
+def test_build_database_include_fabrication_draw_siblings_limits_to_last_meaningful_piece(
+    tmp_path: Path,
+) -> None:
+    fabrication_index = FabricationIndex()
+    fabrication_index.set_draw(
+        "Ni50Fe27Ga23",
+        5,
+        {
+            "production_datetime": "2025-03-26 08:15",
+            "mass_g": 1.85,
+        },
+    )
+    for piece in range(0, 21):
+        payload = {"length_m": 0.0}
+        if piece == 2:
+            payload = {"piece_date": "2024-04-26", "notes": "hruby podla mna cez 2m"}
+        elif piece == 4:
+            payload = {"piece_date": "2024-04-26", "notes": "hruby"}
+        elif piece >= 9:
+            payload = {"length_m": None}
+        fabrication_index.set_piece(
+            "Ni50Fe27Ga23",
+            5,
+            piece,
+            payload,
+        )
+
+    record = MeasurementRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 1000mA.txt",
+        metadata=MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=5,
+            piece_y=4,
+            alt_variant=False,
+            setpoint_mA=1000,
+            file_name="Ni50Fe27Ga23 5_4 1000mA.txt",
+            measurement_id="m1",
+            relpath="Ni50Fe27Ga23 5_4 1000mA.txt",
+            timestamp_mtime_utc="2026-03-26T00:00:00+00:00",
+        ),
+            dataframe=pd.DataFrame(
+                {
+                    "I_A": [0.1, 0.2],
+                    "V_V": [0.2, 0.4],
+                    "R_ohm": [2.0, 2.0],
+                    "I_mA": [100.0, 200.0],
+                }
+            ),
+        sanity_ok=True,
+        sanity_error=None,
+    )
+    config = BuilderConfig(
+        annealing_files=[],
+        fabrication_files=[],
+        output_dir=tmp_path / "out",
+        make_plots=False,
+        export_formats=(),
+        plot_backends=(),
+    )
+
+    result = build_database(
+        config,
+        logger=logging.getLogger("test"),
+        fabrication_index=fabrication_index,
+        measurement_records=[record],
+        include_fabrication_draw_siblings=True,
+        skip_exports=True,
+    )
+
+    frame = result.dataframe
+    sample_rows = frame.loc[frame["Composition"] == "Ni50Fe27Ga23", ["Microwire", "Data source"]]
+    assert sample_rows["Microwire"].tolist() == ["5/1", "5/2", "5/3", "5/4"]
+    assert sample_rows["Data source"].tolist() == [
+        "Fabrication only",
+        "Fabrication only",
+        "Fabrication only",
+        "Measured",
+    ]
+
+
+def test_build_database_excel_export_skips_microscope_crops_when_disabled(
+    tmp_path: Path,
+) -> None:
+    fabrication_index = FabricationIndex()
+    fabrication_index.set_piece("Ni50Fe27Ga23", 5, 4, {"length_m": 4.0})
+    microscope_index = {
+        ("Ni50Fe27Ga23", 5, 4, None): core.MicroscopeMeasurements(
+            core=[
+                core.MicroscopeDetection(
+                    value=12.4,
+                    image_path=tmp_path / "core.png",
+                    source="manual",
+                    category="core",
+                )
+            ]
+        )
+    }
+    record = MeasurementRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 1000mA.txt",
+        metadata=MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=5,
+            piece_y=4,
+            alt_variant=False,
+            setpoint_mA=1000,
+            file_name="Ni50Fe27Ga23 5_4 1000mA.txt",
+            measurement_id="m1",
+            relpath="Ni50Fe27Ga23 5_4 1000mA.txt",
+            timestamp_mtime_utc="2026-03-26T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame(
+            {
+                "I_A": [0.1, 0.2],
+                "V_V": [0.2, 0.4],
+                "R_ohm": [2.0, 2.0],
+                "I_mA": [100.0, 200.0],
+            }
+        ),
+        sanity_ok=True,
+        sanity_error=None,
+    )
+
+    output_dir = tmp_path / "export"
+    result = build_database(
+        BuilderConfig(
+            annealing_files=[],
+            fabrication_files=[],
+            output_dir=output_dir,
+            make_plots=False,
+            export_formats=("excel",),
+            plot_backends=(),
+            include_microscope_crops=False,
+        ),
+        fabrication_index=fabrication_index,
+        measurement_records=[record],
+        microscope_index=microscope_index,
+    )
+
+    assert (output_dir / "microwire_database.xlsx").exists()
+    assert not (output_dir / "microscope_crops").exists()
+    assert result.microscope_crops == {}
+
+
 def test_assemble_prepare_inputs_keeps_fabrication_and_video_baselines_when_not_selected(
     qtbot,
 ) -> None:
@@ -4531,6 +4832,28 @@ def test_assemble_prepare_inputs_keeps_fabrication_and_video_baselines_when_not_
     qtbot.addWidget(videos)
     qtbot.addWidget(assembly)
     try:
+        payload_index = builder_ui.FabricationIndex()
+        payload_index.set_draw(
+            "Ni50Fe27Ga23",
+            6,
+            {
+                "mass_g": 5.67,
+                "production_datetime": "2025-03-26 08:15",
+                "winding_speed_m_per_min": 20.0,
+                "glass_feed_mm_per_min": 1.2,
+                "underpressure": -0.1,
+            },
+        )
+        payload_index.set_piece(
+            "Ni50Fe27Ga23",
+            6,
+            2,
+            {
+                "length_m": 27.88,
+                "fabrication_resistance_ohm": 71.0,
+            },
+        )
+        assembly._load_payload = lambda section_key, payload_key: payload_index if (section_key, payload_key) == ("fabrication", "fabrication_index") else None  # type: ignore[method-assign]
         fabrication_frame = pd.DataFrame(
             [
                 {
@@ -4581,6 +4904,92 @@ def test_assemble_prepare_inputs_keeps_fabrication_and_video_baselines_when_not_
         assert draw_info.get("production_datetime") == "2025-03-26 08:15"
         assert draw_info.get("winding_speed_m_per_min") == pytest.approx(20.0)
         assert ("Ni50Fe27Ga23", 6, None) in video_index
+    finally:
+        assembly.close()
+        videos.close()
+        fabrication.close()
+
+
+def test_assemble_prepare_inputs_merges_fabrication_payload_with_visible_table(
+    qtbot,
+) -> None:
+    _ensure_qapp()
+    log = logging.getLogger("test")
+    fabrication = builder_ui.FabricationSection(log, lambda *_: None)
+    videos = builder_ui.VideoSection(log, lambda *_: None)
+    sections = {
+        "fabrication": fabrication,
+        "videos": videos,
+    }
+    assembly = builder_ui.AssemblySection(sections, log, lambda *_: None)
+    qtbot.addWidget(fabrication)
+    qtbot.addWidget(videos)
+    qtbot.addWidget(assembly)
+    try:
+        payload_index = builder_ui.FabricationIndex()
+        payload_index.set_draw(
+            "Ni50Fe27Ga23",
+            6,
+            {
+                "mass_g": 5.67,
+                "production_datetime": "2025-03-26 08:15",
+                "winding_speed_m_per_min": 20.0,
+                "glass_feed_mm_per_min": 1.2,
+                "underpressure": -0.1,
+            },
+        )
+        payload_index.set_piece(
+            "Ni50Fe27Ga23",
+            6,
+            2,
+            {
+                "length_m": 27.88,
+                "fabrication_resistance_ohm": 71.0,
+            },
+        )
+
+        original_load_payload = assembly._load_payload
+
+        def fake_load_payload(section_key: str, payload_key: str):
+            if (section_key, payload_key) == ("fabrication", "fabrication_index"):
+                return payload_index
+            return original_load_payload(section_key, payload_key)
+
+        assembly._load_payload = fake_load_payload  # type: ignore[method-assign]
+
+        fabrication.apply_data(
+            builder_ui.MiniDatabaseData(
+                table=pd.DataFrame(
+                    [
+                        {
+                            "Composition": "Ni50Fe27Ga23",
+                            "Microwire": "6/2",
+                            "Draw": 6,
+                            "Piece": 2,
+                            "Length (m)": 27.88,
+                            "Data source": "Measured",
+                        }
+                    ]
+                )
+            )
+        )
+
+        payload = assembly._prepare_builder_inputs(
+            {"shape_memory_stress_strain"},
+            require_payloads=False,
+        )
+
+        assert payload is not None
+        fabrication_index = payload[0]
+        piece_info = fabrication_index.get_piece("Ni50Fe27Ga23", 6, 2)
+        draw_info = fabrication_index.get_draw("Ni50Fe27Ga23", 6)
+        assert piece_info.get("length_m") == pytest.approx(27.88)
+        assert piece_info.get("fabrication_resistance_ohm") == pytest.approx(71.0)
+        assert draw_info.get("mass_g") == pytest.approx(5.67)
+        assert draw_info.get("production_datetime") == "2025-03-26 08:15"
+        assert draw_info.get("winding_speed_m_per_min") == pytest.approx(20.0)
+        assert draw_info.get("glass_feed_mm_per_min") == pytest.approx(1.2)
+        assert draw_info.get("underpressure") == pytest.approx(-0.1)
     finally:
         assembly.close()
         videos.close()

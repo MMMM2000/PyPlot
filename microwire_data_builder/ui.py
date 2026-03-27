@@ -119,6 +119,7 @@ from .core import (
     _clean_str,
     _compute_ea_from_composition,
     _estimate_transition_temp_c,
+    _relevant_sibling_piece_candidates,
     CORE_TEMPERATURE_COLUMN,
     GLASS_TEMPERATURE_COLUMN,
     ESTIMATED_TRANSITION_COLUMN,
@@ -8638,13 +8639,15 @@ class FabricationSection(MiniDatabaseSection):
         draw: int,
         piece: int,
     ) -> bool:
+        if int(piece) <= 0:
+            return False
         draw_map = relevant_map.get(composition)
         if not draw_map:
             return True
-        allowed: Set[Optional[int]] = set()
         direct = draw_map.get(draw)
-        if direct:
-            allowed.update(direct)
+        if direct is not None:
+            return int(piece) in _relevant_sibling_piece_candidates([int(piece)], direct)
+        allowed: Set[Optional[int]] = set()
         fallback = draw_map.get(None)
         if fallback:
             allowed.update(fallback)
@@ -8652,7 +8655,7 @@ class FabricationSection(MiniDatabaseSection):
             return False
         if None in allowed:
             return True
-        return piece in allowed
+        return int(piece) in _relevant_sibling_piece_candidates([int(piece)], allowed)
 
     def _filter_index(
         self,
@@ -8661,6 +8664,10 @@ class FabricationSection(MiniDatabaseSection):
         relevant_compositions: Set[str],
     ) -> FabricationIndex:
         filtered = FabricationIndex()
+        available_by_draw: Dict[Tuple[str, int], Dict[int, Mapping[str, object]]] = {}
+        for (composition, draw, piece), piece_data in index.piece_level.items():
+            comp_key = str(composition).strip()
+            available_by_draw.setdefault((comp_key, int(draw)), {})[int(piece)] = dict(piece_data)
         for (composition, draw), draw_data in index.draw_level.items():
             comp_key = str(composition).strip()
             if comp_key not in relevant_compositions:
@@ -8675,7 +8682,33 @@ class FabricationSection(MiniDatabaseSection):
             piece_int = int(piece)
             if not self._allow_draw(relevant_map, comp_key, draw_int):
                 continue
-            if not self._allow_piece(relevant_map, comp_key, draw_int, piece_int):
+            draw_map = relevant_map.get(comp_key)
+            if not draw_map:
+                allowed_pieces = {
+                    candidate
+                    for candidate in available_by_draw.get((comp_key, draw_int), {})
+                    if candidate > 0
+                }
+            else:
+                relevant_pieces = draw_map.get(draw_int)
+                if relevant_pieces is None:
+                    relevant_pieces = draw_map.get(None)
+                if relevant_pieces and None in relevant_pieces:
+                    allowed_pieces = {
+                        candidate
+                        for candidate in available_by_draw.get((comp_key, draw_int), {})
+                        if candidate > 0
+                    }
+                else:
+                    piece_records = available_by_draw.get((comp_key, draw_int), {})
+                    allowed_pieces = set(
+                        _relevant_sibling_piece_candidates(
+                            piece_records.keys(),
+                            relevant_pieces,
+                            piece_records,
+                        )
+                    )
+            if piece_int not in allowed_pieces:
                 continue
             filtered.set_piece(comp_key, draw_int, piece_int, dict(piece_data))
         return filtered
@@ -8712,14 +8745,32 @@ class FabricationSection(MiniDatabaseSection):
             for draw, pieces in draws.items():
                 if draw is None:
                     continue
-                for piece in pieces:
-                    if piece is None:
-                        continue
+                candidate_pieces: List[int] = []
+                if isinstance(source_index, FabricationIndex):
+                    piece_records = {
+                        int(piece_value): dict(piece_data)
+                        for (piece_comp, piece_draw, piece_value), piece_data in source_index.piece_level.items()
+                        if str(piece_comp).strip() == comp_key and int(piece_draw) == int(draw)
+                    }
+                    available_pieces = {
+                        int(piece_value) for piece_value in piece_records.keys()
+                    }
+                    candidate_pieces = _relevant_sibling_piece_candidates(
+                        available_pieces,
+                        pieces,
+                        piece_records,
+                    )
+                if not candidate_pieces:
+                    candidate_pieces = _relevant_sibling_piece_candidates(
+                        [],
+                        pieces,
+                    )
+                for piece in candidate_pieces:
                     key = (comp_key, int(draw), int(piece))
                     if key in existing:
                         continue
                     piece_record = (
-                        source_index.get_piece(comp_key, int(draw), int(piece))
+                        source_index.get_piece(comp_key, int(draw), piece)
                         if isinstance(source_index, FabricationIndex)
                         else None
                     )
@@ -8731,7 +8782,7 @@ class FabricationSection(MiniDatabaseSection):
                     row = _fabrication_row_from_records(
                         comp_key,
                         int(draw),
-                        int(piece),
+                        piece,
                         piece_record,
                         draw_record,
                         columns=columns,
@@ -14400,14 +14451,25 @@ class VideoSection(MiniDatabaseSection):
                 draw_map = relevant_map.get(str(composition).strip())
                 if not draw_map:
                     continue
-                allowed = draw_map.get(int(draw))
-                fallback = draw_map.get(None)
-                if allowed and int(piece) in {int(value) for value in allowed if value is not None}:
-                    filtered.append(path)
+                relevant_pieces = draw_map.get(int(draw))
+                if relevant_pieces is not None:
+                    allowed_pieces = {
+                        int(value)
+                        for value in relevant_pieces
+                        if value is not None and int(value) > 0
+                    }
+                    if int(piece) in allowed_pieces:
+                        filtered.append(path)
                     continue
-                if fallback and int(piece) in {int(value) for value in fallback if value is not None}:
-                    filtered.append(path)
-                    continue
+                fallback_pieces = draw_map.get(None)
+                if fallback_pieces is not None:
+                    allowed_pieces = {
+                        int(value)
+                        for value in fallback_pieces
+                        if value is not None and int(value) > 0
+                    }
+                    if int(piece) in allowed_pieces:
+                        filtered.append(path)
                 continue
             draw_key = _draw_key(path)
             if draw_key is None:
@@ -23611,6 +23673,22 @@ class AssemblySection(QtWidgets.QWidget):
     def _selected_sections(self) -> set[str]:
         return {key for key, enabled in self._section_states.items() if enabled}
 
+    @staticmethod
+    def _merge_fabrication_indexes(
+        base_index: FabricationIndex,
+        overlay_index: FabricationIndex,
+    ) -> FabricationIndex:
+        merged = FabricationIndex()
+        for (composition, draw), payload in getattr(base_index, "draw_level", {}).items():
+            merged.set_draw(str(composition), int(draw), dict(payload))
+        for (composition, draw, piece), payload in getattr(base_index, "piece_level", {}).items():
+            merged.set_piece(str(composition), int(draw), int(piece), dict(payload))
+        for (composition, draw), payload in getattr(overlay_index, "draw_level", {}).items():
+            merged.set_draw(str(composition), int(draw), dict(payload))
+        for (composition, draw, piece), payload in getattr(overlay_index, "piece_level", {}).items():
+            merged.set_piece(str(composition), int(draw), int(piece), dict(payload))
+        return merged
+
     def _prepare_builder_inputs(
         self,
         selected: set[str],
@@ -23658,7 +23736,10 @@ class AssemblySection(QtWidgets.QWidget):
                 fabrication_table = fabrication_section.model.frame()
         table_index = self._fabrication_index_from_frame(fabrication_table)
         if table_index.draw_level or table_index.piece_level:
-            fabrication_index = table_index
+            fabrication_index = self._merge_fabrication_indexes(
+                fabrication_index,
+                table_index,
+            )
         if "fabrication" in selected and not (fabrication_index.draw_level or fabrication_index.piece_level):
             _mark_missing("fabrication")
 
@@ -27214,6 +27295,7 @@ class AssemblySection(QtWidgets.QWidget):
             ),
             "phase_points": phase_points,
             "transition_temps": transition_points,
+            "include_fabrication_draw_siblings": True,
         }
 
         self._combine_output_dir = output_dir
@@ -27332,6 +27414,7 @@ class AssemblySection(QtWidgets.QWidget):
             "phase_points": phase_points,
             "transition_temps": transition_points,
             "skip_exports": True,
+            "include_fabrication_draw_siblings": True,
         }
         self._preview_thread = QtCore.QThread(self)
         self._preview_worker = PreviewWorker(config, build_kwargs, self.logger)

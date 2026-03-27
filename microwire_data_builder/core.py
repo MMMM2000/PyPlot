@@ -3397,6 +3397,82 @@ def _parse_draw_rows(
         index.set_draw(composition, draw_x, record)
 
 
+def _fabrication_piece_has_meaningful_values(record: Optional[Mapping[str, object]]) -> bool:
+    if not isinstance(record, Mapping):
+        return False
+    for field, value in record.items():
+        if (
+            not field
+            or field.startswith("_")
+            or field.endswith("_raw")
+            or field.endswith("__display")
+        ):
+            continue
+        if isinstance(value, str):
+            if value.strip():
+                return True
+            continue
+        if isinstance(value, (list, tuple, set, dict)):
+            if value:
+                return True
+            continue
+        if value is None or _is_nan(value):
+            continue
+        if isinstance(value, (int, float)):
+            if float(value) != 0.0:
+                return True
+            continue
+        return True
+    return False
+
+
+def _relevant_sibling_piece_candidates(
+    available_pieces: Iterable[int],
+    relevant_pieces: Optional[Iterable[Optional[int]]] = None,
+    piece_records: Optional[Mapping[int, Mapping[str, object]]] = None,
+) -> List[int]:
+    """Return same-draw sibling pieces up to the last meaningful positive row.
+
+    Piece workbooks often contain placeholder rows after the real pieces. The
+    builder should therefore promote sibling pieces only up to the highest
+    positive piece row that contains meaningful fabrication data.
+    """
+
+    available = sorted(
+        {
+            int(piece)
+            for piece in available_pieces
+            if piece is not None and int(piece) > 0
+        }
+    )
+    relevant: List[int] = []
+    if relevant_pieces is not None:
+        for piece in relevant_pieces:
+            if piece is None:
+                continue
+            try:
+                piece_int = int(piece)
+            except (TypeError, ValueError):
+                continue
+            if piece_int > 0:
+                relevant.append(piece_int)
+    if available:
+        meaningful = []
+        if piece_records:
+            meaningful = [
+                piece
+                for piece in available
+                if _fabrication_piece_has_meaningful_values(piece_records.get(piece))
+            ]
+        if meaningful:
+            limit = max(meaningful)
+            return [piece for piece in available if piece <= limit]
+        return available
+    if relevant:
+        return sorted(set(relevant))
+    return available
+
+
 def _parse_piece_rows(
     df: pd.DataFrame,
     headers: List[Optional[str]],
@@ -4927,6 +5003,7 @@ def build_database(
     transition_temps: Optional[Dict[str, Dict[str, float]]] = None,
     current_density_entries: Optional[Dict[str, Dict[str, object]]] = None,
     video_overrides: Optional[Dict[str, Dict[str, object]]] = None,
+    include_fabrication_draw_siblings: bool = False,
 ) -> BuildResult:
     log = _logger(logger)
     output_dir = config.output_dir
@@ -5363,6 +5440,78 @@ def build_database(
             if candidate_key not in grouped:
                 grouped[candidate_key] = []
 
+    if include_fabrication_draw_siblings and fabrication_index.piece_level:
+        relevant_piece_limits: Dict[Tuple[str, int], Optional[int]] = {}
+
+        def _register_draw(raw_key: object) -> None:
+            parts = _split_microwire_key(raw_key)
+            if parts is None:
+                return
+            composition, draw_x, piece_y, _suffix = parts
+            key = (composition, int(draw_x))
+            if piece_y is None:
+                relevant_piece_limits[key] = None
+                return
+            piece_int = int(piece_y)
+            if piece_int <= 0:
+                return
+            current_limit = relevant_piece_limits.get(key)
+            if current_limit is None and key in relevant_piece_limits:
+                return
+            relevant_piece_limits[key] = max(int(current_limit or 0), piece_int)
+
+        for raw_key in grouped.keys():
+            _register_draw(raw_key)
+        for collection in (
+            vsm_hysteresis_groups,
+            vsm_temperature_groups,
+            dma_isostress_groups,
+            shape_memory_stress_strain_groups,
+            fmr_groups,
+            strain_records,
+        ):
+            for raw_key in collection.keys():
+                _register_draw(raw_key)
+        for collection in (
+            phase_points_map,
+            transition_temps_map,
+            current_density_map,
+            shape_memory_entry_map,
+            strain_entry_map,
+            video_overrides_map,
+        ):
+            for raw_key in collection.keys():
+                parsed = _microwire_key_from_string(str(raw_key))
+                if parsed is None:
+                    continue
+                composition, draw_x, _piece_y, _suffix = parsed
+                key = (composition, int(draw_x))
+                if piece_y is None:
+                    relevant_piece_limits[key] = None
+                    continue
+                piece_int = int(piece_y)
+                if piece_int <= 0:
+                    continue
+                current_limit = relevant_piece_limits.get(key)
+                if current_limit is None and key in relevant_piece_limits:
+                    continue
+                relevant_piece_limits[key] = max(int(current_limit or 0), piece_int)
+
+        sibling_pieces_by_draw: Dict[Tuple[str, int], Set[int]] = {}
+        sibling_records_by_draw: Dict[Tuple[str, int], Dict[int, Mapping[str, object]]] = {}
+        for (composition, draw_x, piece_y), _piece_record in fabrication_index.piece_level.items():
+            sibling_pieces_by_draw.setdefault((composition, int(draw_x)), set()).add(int(piece_y))
+            sibling_records_by_draw.setdefault((composition, int(draw_x)), {})[int(piece_y)] = dict(_piece_record)
+
+        for (composition, draw_x), piece_limit in sorted(relevant_piece_limits.items()):
+            candidate_pieces = _relevant_sibling_piece_candidates(
+                sibling_pieces_by_draw.get((composition, int(draw_x)), ()),
+                None if piece_limit is None else [piece_limit],
+                sibling_records_by_draw.get((composition, int(draw_x))),
+            )
+            for piece_y in candidate_pieces:
+                grouped.setdefault((composition, int(draw_x), int(piece_y), None), [])
+
     def _group_sort_key(
         item: Tuple[Tuple[str, int, int, Optional[str]], List[MeasurementRecord]]
     ) -> Tuple[str, int, int, str]:
@@ -5412,7 +5561,13 @@ def build_database(
             pull_value = _value_for_output(draw_info, "glass_pull_off")
         row[GLASS_PULL_COLUMN] = pull_value
         row["Notes"] = _compose_notes(draw_info, piece_info)
-        row["Data source"] = "Measured" if records else "Microscope only"
+        row["Data source"] = (
+            "Measured"
+            if records
+            else "Fabrication only"
+            if piece_info is not None or draw_info is not None
+            else "Microscope only"
+        )
         phase_entry = phase_points_map.get(key_str, {})
         if phase_entry:
             as_value = phase_entry.get("As1")
