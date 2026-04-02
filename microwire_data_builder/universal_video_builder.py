@@ -18,6 +18,7 @@ from .core import (
     FabricationIndex,
     VideoMetricsSummary,
     _collect_video_sources,
+    _relevant_sibling_piece_candidates,
     build_fabrication_index,
 )
 from .ui import (
@@ -130,27 +131,53 @@ class MultiSelectMenuButton(QtWidgets.QWidget):
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self._actions: List[QtGui.QAction] = []
+        self._options: List[Tuple[str, Any]] = []
         self._placeholder = "Select draws"
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.button = QtWidgets.QToolButton(self)
-        self.button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
         self.button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.button.setText(self._placeholder)
         self.button.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self.menu = QtWidgets.QMenu(self.button)
-        self.menu.setSeparatorsCollapsible(False)
-        self.menu.aboutToHide.connect(self._update_button_text)
-        self.button.setMenu(self.menu)
+        self.button.clicked.connect(self._toggle_popup)
         layout.addWidget(self.button)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
+        self.popup = QtWidgets.QFrame(None, QtCore.Qt.WindowType.Popup)
+        self.popup.setObjectName("universalVideoDrawPopup")
+        self.popup.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        popup_layout = QtWidgets.QVBoxLayout(self.popup)
+        popup_layout.setContentsMargins(6, 6, 6, 6)
+        popup_layout.setSpacing(6)
+        self.list_widget = QtWidgets.QListWidget(self.popup)
+        self.list_widget.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.MultiSelection
+        )
+        self.list_widget.setVerticalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self.list_widget.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.list_widget.setUniformItemSizes(True)
+        self.list_widget.itemSelectionChanged.connect(self._emit_selection_changed)
+        popup_layout.addWidget(self.list_widget, 1)
+        footer = QtWidgets.QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.addStretch(1)
+        clear_button = QtWidgets.QPushButton("Clear", self.popup)
+        clear_button.clicked.connect(self._clear_selection)
+        footer.addWidget(clear_button)
+        done_button = QtWidgets.QPushButton("Done", self.popup)
+        done_button.clicked.connect(self.popup.hide)
+        footer.addWidget(done_button)
+        popup_layout.addLayout(footer)
+        self.popup.hide()
 
     def set_placeholder_text(self, text: str) -> None:
         self._placeholder = str(text)
@@ -160,32 +187,40 @@ class MultiSelectMenuButton(QtWidgets.QWidget):
         self.set_options(())
 
     def set_options(self, options: Sequence[Tuple[str, Any]]) -> None:
-        self.menu.clear()
-        self._actions = []
-        for label, value in options:
-            action = self.menu.addAction(str(label))
-            action.setCheckable(True)
-            action.setData(value)
-            action.toggled.connect(self.selection_changed.emit)
-            self._actions.append(action)
-        self.setEnabled(bool(self._actions))
+        previous = {str(value) for value in self.selected_values()}
+        self._options = [(str(label), value) for label, value in options]
+        self.list_widget.clear()
+        for label, value in self._options:
+            item = QtWidgets.QListWidgetItem(label, self.list_widget)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, value)
+            if str(value) in previous:
+                item.setSelected(True)
+        self.setEnabled(bool(self._options))
+        self._resize_popup()
         self._update_button_text()
 
     def selected_values(self) -> List[Any]:
         values: List[Any] = []
-        for action in self._actions:
-            if action.isChecked():
-                values.append(action.data())
+        for item in self.list_widget.selectedItems():
+            values.append(item.data(QtCore.Qt.ItemDataRole.UserRole))
         return values
 
     def set_selected_values(self, values: Sequence[Any]) -> None:
         expected = {str(value) for value in values}
-        for action in self._actions:
-            action.setChecked(str(action.data()) in expected)
+        self.list_widget.blockSignals(True)
+        for row in range(self.list_widget.count()):
+            item = self.list_widget.item(row)
+            if item is None:
+                continue
+            item.setSelected(
+                str(item.data(QtCore.Qt.ItemDataRole.UserRole)) in expected
+            )
+        self.list_widget.blockSignals(False)
         self._update_button_text()
+        self.selection_changed.emit()
 
     def _update_button_text(self) -> None:
-        checked = [action.text() for action in self._actions if action.isChecked()]
+        checked = [item.text() for item in self.list_widget.selectedItems()]
         if not checked:
             self.button.setText(self._placeholder)
             return
@@ -193,6 +228,57 @@ class MultiSelectMenuButton(QtWidgets.QWidget):
             self.button.setText(", ".join(checked))
             return
         self.button.setText(f"{len(checked)} draws selected")
+
+    def _emit_selection_changed(self) -> None:
+        self._update_button_text()
+        self.selection_changed.emit()
+
+    def _clear_selection(self) -> None:
+        self.list_widget.clearSelection()
+        self._emit_selection_changed()
+
+    def _toggle_popup(self) -> None:
+        if self.popup.isVisible():
+            self.popup.hide()
+            return
+        self._resize_popup()
+        popup_size = self.popup.sizeHint()
+        anchor = self.button.mapToGlobal(QtCore.QPoint(0, self.button.height() + 4))
+        screen = self.button.screen() or QtGui.QGuiApplication.screenAt(anchor)
+        if screen is not None:
+            available = screen.availableGeometry()
+            x = max(
+                available.left(),
+                min(anchor.x(), available.right() - popup_size.width()),
+            )
+            y = max(
+                available.top(),
+                min(anchor.y(), available.bottom() - popup_size.height()),
+            )
+            self.popup.move(x, y)
+        else:
+            self.popup.move(anchor)
+        self.popup.resize(popup_size)
+        self.popup.show()
+        self.popup.raise_()
+        self.popup.activateWindow()
+        self.list_widget.setFocus(
+            QtCore.Qt.FocusReason.PopupFocusReason
+        )
+
+    def _resize_popup(self) -> None:
+        metrics = self.list_widget.fontMetrics()
+        longest = max(
+            [metrics.horizontalAdvance(label) for label, _ in self._options] or [140]
+        )
+        width = max(self.button.width(), min(320, longest + 48))
+        row_height = max(self.list_widget.sizeHintForRow(0), 24) if self.list_widget.count() else 24
+        visible_rows = min(max(self.list_widget.count(), 1), 14)
+        list_height = row_height * visible_rows + 8
+        total_height = list_height + 48
+        self.list_widget.setMinimumWidth(width - 12)
+        self.list_widget.setMinimumHeight(list_height)
+        self.popup.resize(width, total_height)
 
 
 class UniversalVideoSection(VideoSection):
@@ -209,6 +295,20 @@ class UniversalVideoSection(VideoSection):
         self._available_fabrication_frame = pd.DataFrame(columns=_fabrication_frame_columns())
         self._available_table = pd.DataFrame()
         super().__init__(logger, log_callback, parent)
+        self._hidden_universal_columns = tuple(
+            column
+            for column in self._HIDDEN_VIDEO_COLUMNS
+            if column not in {MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN, "d/D"}
+        ) + ("_source_paths",)
+        self.open_sources_button.setText("Open video(s)")
+        self.open_sources_button.setToolTip("Open the linked fabrication video files.")
+        self.open_fabrication_sources_button = QtWidgets.QPushButton("Open spreadsheet(s)", self)
+        self.open_fabrication_sources_button.setEnabled(False)
+        self.open_fabrication_sources_button.clicked.connect(
+            self._open_selected_fabrication_sources
+        )
+        if isinstance(self.controls_layout, QtWidgets.QHBoxLayout):
+            self.controls_layout.insertWidget(2, self.open_fabrication_sources_button)
         self.connected_source_label = QtWidgets.QLabel(self)
         self.connected_source_label.setObjectName("universalVideoConnectedSource")
         self.connected_source_label.setSizePolicy(
@@ -216,7 +316,7 @@ class UniversalVideoSection(VideoSection):
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         if isinstance(self.controls_layout, QtWidgets.QHBoxLayout):
-            self.controls_layout.insertWidget(2, self.connected_source_label, 1)
+            self.controls_layout.insertWidget(3, self.connected_source_label, 1)
         self.source_button.show()
         self.source_button.setText("Connect fabrication folder…")
         self.source_button.setToolTip("Select a fabrication root folder containing spreadsheets and videos.")
@@ -298,10 +398,22 @@ class UniversalVideoSection(VideoSection):
         )
         grid.addWidget(self.add_rows_button, 0, 3, 2, 1, QtCore.Qt.AlignmentFlag.AlignBottom)
 
+        self.remove_rows_button = QtWidgets.QPushButton("Remove selected row(s)", self)
+        self.remove_rows_button.clicked.connect(self._remove_selected_rows)
+        self.remove_rows_button.setMinimumWidth(180)
+        self.remove_rows_button.setMinimumHeight(34)
+        self.remove_rows_button.setEnabled(False)
+        self.remove_rows_button.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        grid.addWidget(self.remove_rows_button, 0, 4, 2, 1, QtCore.Qt.AlignmentFlag.AlignBottom)
+
         grid.setColumnStretch(0, 3)
         grid.setColumnStretch(1, 2)
         grid.setColumnStretch(2, 1)
         grid.setColumnStretch(3, 0)
+        grid.setColumnStretch(4, 0)
         self.main_layout.insertWidget(1, container)
 
     def _build_visual_shell(self) -> None:
@@ -325,7 +437,13 @@ class UniversalVideoSection(VideoSection):
         self.main_layout.setSpacing(12)
         if isinstance(self.controls_layout, QtWidgets.QHBoxLayout):
             self.controls_layout.setSpacing(8)
-        for button in (self.source_button, self.open_sources_button, self.refresh_button, self.stop_button):
+        for button in (
+            self.source_button,
+            self.open_sources_button,
+            self.open_fabrication_sources_button,
+            self.refresh_button,
+            self.stop_button,
+        ):
             if isinstance(button, QtWidgets.QPushButton):
                 button.setMinimumHeight(34)
         if isinstance(self.status_label, QtWidgets.QLabel):
@@ -486,6 +604,46 @@ class UniversalVideoSection(VideoSection):
         # not inherit annealing/microscope relevance filtering from other
         # builder sections.
         return scan_universal_video_inputs([Path(source) for source in self.data.sources])
+
+    def _filter_meaningful_piece_rows(
+        self,
+        raw_index: FabricationIndex,
+        fabrication_frame: pd.DataFrame,
+    ) -> pd.DataFrame:
+        if not isinstance(fabrication_frame, pd.DataFrame) or fabrication_frame.empty:
+            return fabrication_frame
+        allowed_positive: Dict[Tuple[str, int], Set[int]] = {}
+        piece_records_by_draw: Dict[Tuple[str, int], Dict[int, Mapping[str, Any]]] = {}
+        piece_values_by_draw: Dict[Tuple[str, int], Set[int]] = {}
+        for (composition, draw, piece), piece_record in raw_index.piece_level.items():
+            key = (str(composition).strip(), int(draw))
+            piece_int = int(piece)
+            piece_values_by_draw.setdefault(key, set()).add(piece_int)
+            piece_records_by_draw.setdefault(key, {})[piece_int] = piece_record
+        for key, pieces in piece_values_by_draw.items():
+            allowed_positive[key] = set(
+                _relevant_sibling_piece_candidates(
+                    pieces,
+                    piece_records=piece_records_by_draw.get(key),
+                )
+            )
+        keep_rows: List[bool] = []
+        for _, row in fabrication_frame.iterrows():
+            composition = str(row.get("Composition") or "").strip()
+            try:
+                draw = int(row.get("Draw"))
+                piece = int(row.get("Piece"))
+            except (TypeError, ValueError):
+                keep_rows.append(True)
+                continue
+            if piece <= 0:
+                keep_rows.append(True)
+                continue
+            allowed = allowed_positive.get((composition, draw))
+            keep_rows.append(True if allowed is None else piece in allowed)
+        if all(keep_rows):
+            return fabrication_frame
+        return fabrication_frame.loc[keep_rows].reset_index(drop=True)
 
     def _current_column_order(self) -> List[str]:
         if not isinstance(self.table_view, QtWidgets.QTableView):
@@ -681,7 +839,10 @@ class UniversalVideoSection(VideoSection):
             progress_callback=_fabrication_progress if fabrication_files else None,
             cancel_callback=self.is_cancelled,
         )
-        fabrication_frame = _fabrication_index_to_frame(raw_index)
+        fabrication_frame = self._filter_meaningful_piece_rows(
+            raw_index,
+            _fabrication_index_to_frame(raw_index),
+        )
         if not fabrication_files:
             _report("No fabrication spreadsheets found.")
 
@@ -744,7 +905,7 @@ class UniversalVideoSection(VideoSection):
         self.store.save(self.data)
         self._close_active_editor()
         self.model.set_frame(visible_table)
-        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
+        self._hide_columns(self._hidden_universal_columns)
         if not visible_table.empty:
             self._auto_fit_columns()
         self._update_status()
@@ -926,6 +1087,96 @@ class UniversalVideoSection(VideoSection):
                 QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible,
             )
 
+    def _row_fabrication_sources(self, row: pd.Series) -> List[Path]:
+        frame = self._fabrication_table()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return []
+        composition = str(row.get("Composition") or "").strip()
+        try:
+            draw = int(row.get("Draw"))
+            piece = int(row.get("Piece"))
+        except (TypeError, ValueError):
+            return []
+        matches = frame[
+            (frame["Composition"].astype(str) == composition)
+            & (pd.to_numeric(frame["Draw"], errors="coerce") == draw)
+            & (pd.to_numeric(frame["Piece"], errors="coerce") == piece)
+        ]
+        if matches.empty:
+            return []
+        raw_sources = matches.iloc[0].get("_source_paths")
+        paths: List[Path] = []
+        values: Iterable[Any]
+        if isinstance(raw_sources, str):
+            values = [raw_sources]
+        elif isinstance(raw_sources, (list, tuple, set)):
+            values = raw_sources
+        else:
+            values = ()
+        for entry in values:
+            text = str(entry or "").strip()
+            if not text:
+                continue
+            try:
+                paths.append(Path(text))
+            except Exception:
+                continue
+        return paths
+
+    def _update_open_sources_enabled(self) -> None:  # type: ignore[override]
+        super()._update_open_sources_enabled()
+        button = getattr(self, "open_fabrication_sources_button", None)
+        remove_button = getattr(self, "remove_rows_button", None)
+        rows = self._selected_rows()
+        if isinstance(remove_button, QtWidgets.QPushButton):
+            remove_button.setEnabled(bool(rows))
+        if not isinstance(button, QtWidgets.QPushButton):
+            return
+        enabled = False
+        if rows:
+            for row_index in rows:
+                series = self._row_series(row_index)
+                if series is None:
+                    continue
+                if self._row_fabrication_sources(series):
+                    enabled = True
+                    break
+        button.setEnabled(enabled)
+
+    def _open_selected_fabrication_sources(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to open their fabrication spreadsheets.",
+            )
+            return
+        opened_any = False
+        missing: List[Path] = []
+        seen: Set[Path] = set()
+        for row_index in rows:
+            series = self._row_series(row_index)
+            if series is None:
+                continue
+            for path in self._row_fabrication_sources(series):
+                if path in seen:
+                    continue
+                seen.add(path)
+                if self._open_file(path):
+                    opened_any = True
+                else:
+                    missing.append(path)
+        if not opened_any and missing:
+            details = "\n".join(str(path) for path in missing[:5])
+            if len(missing) > 5:
+                details += "\n…"
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.section_title,
+                f"None of the selected rows have available fabrication spreadsheets.\n\n{details}",
+            )
+
     def _add_selected_microwires(self) -> None:
         composition = self.composition_combo.currentText().strip()
         if not composition:
@@ -991,7 +1242,7 @@ class UniversalVideoSection(VideoSection):
             self.model.set_frame(updated)
             if column_order:
                 self._apply_column_order(column_order)
-            self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
+            self._hide_columns(self._hidden_universal_columns)
             self._auto_fit_columns()
             self._update_status()
             self.data_updated.emit()
@@ -1004,6 +1255,36 @@ class UniversalVideoSection(VideoSection):
             )
         self._select_group_keys(selected_keys)
         self._refresh_dashboard()
+
+    def _remove_selected_rows(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to remove them from the current table.",
+            )
+            return
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+        rows_to_remove = set(rows)
+        keep_mask = [idx not in rows_to_remove for idx in range(len(frame.index))]
+        updated = frame.loc[keep_mask].reset_index(drop=True)
+        self.data.table = updated
+        self.store.save(self.data)
+        self.model.set_frame(updated)
+        self._hide_columns(self._hidden_universal_columns)
+        if not updated.empty:
+            self._auto_fit_columns()
+        self._update_status()
+        self.data_updated.emit()
+        self.log(f"{self.section_title}: removed {len(rows)} row(s).")
+        if isinstance(self.table_view, QtWidgets.QTableView):
+            selection = self.table_view.selectionModel()
+            if selection is not None:
+                selection.clearSelection()
+        self._update_open_sources_enabled()
 
 
 class UniversalVideoBuilderWindow(QtWidgets.QMainWindow):

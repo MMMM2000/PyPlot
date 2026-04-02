@@ -6,12 +6,13 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from PyQt6 import QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 import launcher as launcher_module
 from microwire_data_builder import storage as builder_storage
 from microwire_data_builder import ui as builder_ui
 from microwire_data_builder import universal_video_builder as uvb
+from microwire_data_builder.core import FabricationIndex
 from microwire_data_builder.ui import VIDEO_END_LENGTH_COLUMN
 
 
@@ -128,6 +129,28 @@ def test_universal_video_builder_add_workflow_filters_draws_and_expands_all_piec
     assert set(frame["Draw"].astype(int)) == {2, 4}
 
 
+def test_universal_video_builder_can_remove_selected_rows(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    section, _root = _build_section(qtbot, monkeypatch, tmp_path)
+
+    _clear_visible_rows(section)
+    frame = _add_sample_rows(section, "Ni50Fe27Ga23", [2, 4])
+    assert len(frame.index) > 1
+
+    remove_keys = frame.loc[frame["Draw"].astype(int) == 2, "_group_key"].astype(str).tolist()
+    section._select_group_keys(remove_keys)
+    assert section.remove_rows_button.isEnabled() is True
+
+    section._remove_selected_rows()
+
+    updated = section.model.frame()
+    assert not updated.empty
+    assert set(updated["Draw"].astype(int)) == {4}
+
+
 def test_universal_video_builder_review_behaviour_uses_manual_values_and_video_opening(
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -198,6 +221,42 @@ def test_universal_video_builder_missing_video_rows_stay_red(
     assert foreground.color().name().lower() == "#ffd6d6"
 
 
+def test_universal_video_builder_draw_popup_is_scrollable_and_keeps_multi_select_open(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    section, _root = _build_section(qtbot, monkeypatch, tmp_path)
+    draws = [(str(value), value) for value in range(1, 120)]
+    section.draw_menu.set_options(draws)
+    section.draw_menu._toggle_popup()
+
+    assert section.draw_menu.popup.isVisible()
+    assert section.draw_menu.list_widget.verticalScrollBar().maximum() > 0
+
+    first = section.draw_menu.list_widget.item(0)
+    second = section.draw_menu.list_widget.item(1)
+    assert first is not None and second is not None
+
+    first_rect = section.draw_menu.list_widget.visualItemRect(first)
+    qtbot.mouseClick(
+        section.draw_menu.list_widget.viewport(),
+        QtCore.Qt.MouseButton.LeftButton,
+        pos=first_rect.center(),
+    )
+    assert section.draw_menu.popup.isVisible()
+
+    second_rect = section.draw_menu.list_widget.visualItemRect(second)
+    qtbot.mouseClick(
+        section.draw_menu.list_widget.viewport(),
+        QtCore.Qt.MouseButton.LeftButton,
+        pos=second_rect.center(),
+    )
+    assert section.draw_menu.popup.isVisible()
+    assert set(section.draw_menu.selected_values()) == {1, 2}
+    section.draw_menu.popup.hide()
+
+
 def test_universal_video_builder_project_round_trip_restores_manual_values(
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -247,6 +306,29 @@ def test_universal_video_builder_project_round_trip_restores_manual_values(
     restored.close()
 
 
+def test_universal_video_builder_opens_fabrication_spreadsheets_for_selected_rows(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    section, _root = _build_section(qtbot, monkeypatch, tmp_path)
+
+    _clear_visible_rows(section)
+    _add_sample_rows(section, "Ni54Fe23Ga15", [1])
+
+    opened_paths: list[Path] = []
+    monkeypatch.setattr(
+        section,
+        "_open_file",
+        lambda path: opened_paths.append(Path(path)) or True,
+    )
+
+    section._open_selected_fabrication_sources()
+
+    assert opened_paths
+    assert any(path.suffix.lower() in {".xlsx", ".xls", ".xlsm"} for path in opened_paths)
+
+
 def test_universal_video_builder_scan_does_not_call_ocr_video_analysis(
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -263,6 +345,22 @@ def test_universal_video_builder_scan_does_not_call_ocr_video_analysis(
 
     result = section.process(uvb.scan_universal_video_inputs([root]))
     assert not result.table.empty
+
+
+def test_universal_video_builder_keeps_diameter_columns_visible(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    section, _root = _build_section(qtbot, monkeypatch, tmp_path)
+    _clear_visible_rows(section)
+    _add_sample_rows(section, "Ni54Fe23Ga15", [1])
+
+    frame = section.model.frame()
+    for column in (builder_ui.MICROSCOPE_D_COLUMN, builder_ui.MICROSCOPE_CAP_D_COLUMN, "d/D"):
+        assert column in frame.columns
+        assert isinstance(section.table_view, QtWidgets.QTableView)
+        assert section.table_view.isColumnHidden(frame.columns.get_loc(column)) is False
 
 
 def test_universal_video_builder_window_starts_blank_even_if_store_has_data(
@@ -290,6 +388,34 @@ def test_universal_video_builder_window_starts_blank_even_if_store_has_data(
     assert window.section.data.sources == []
     window._dirty = False
     window.close()
+
+
+def test_universal_video_builder_filters_placeholder_piece_rows(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "storage"
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: storage_root)
+    section = uvb.UniversalVideoSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(section)
+
+    index = FabricationIndex()
+    for piece in range(0, 9):
+        payload = {"_source_path": f"/tmp/piece-{piece}.xlsx"}
+        if piece == 0:
+            payload["piece_date"] = "2026-01-01"
+        elif piece <= 5:
+            payload["length_m"] = float(piece)
+        else:
+            payload["length_m"] = 0.0
+        index.set_piece("Fe76Si9B10P5", 199, piece, payload)
+
+    frame = builder_ui._fabrication_index_to_frame(index)
+    filtered = section._filter_meaningful_piece_rows(index, frame)
+
+    pieces = sorted(filtered["Piece"].astype(int).tolist())
+    assert pieces == [0, 1, 2, 3, 4, 5]
 
 
 def test_universal_video_builder_window_scan_keeps_table_empty_until_add(
