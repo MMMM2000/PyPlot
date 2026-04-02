@@ -51,8 +51,6 @@ ALL_SUPPORTED_EXTENSIONS = EXCEL_EXTENSIONS + VIDEO_EXTENSIONS
 
 MISSING_VIDEO_BACKGROUND = "#3a0a0a"
 MISSING_VIDEO_FOREGROUND = "#ffd6d6"
-REVIEW_PENDING_BACKGROUND = "#3b2a12"
-REVIEW_PENDING_FOREGROUND = "#f6c453"
 REVIEW_COMPLETE_BACKGROUND = "#0f3b26"
 REVIEW_COMPLETE_FOREGROUND = "#4ade80"
 REVIEW_OVERWRITE_BACKGROUND = "#4a3806"
@@ -297,7 +295,7 @@ class UniversalVideoSection(VideoSection):
 
     def _build_visual_shell(self) -> None:
         guidance = QtWidgets.QLabel(
-            "State colors: red = no video, amber = review pending, green = first fill, dark amber = overwritten value.",
+            "State colors: red = missing required data or no video, green = first fill, dark amber = overwritten value.",
             self,
         )
         guidance.setWordWrap(True)
@@ -635,10 +633,72 @@ class UniversalVideoSection(VideoSection):
         )
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
-        super()._handle_worker_finished(result)
+        self._finish_progress()
+        existing_payloads = set(self.data.extra.get("payloads", {}).keys())
+        new_payloads = set(result.payloads.keys())
+        for name in existing_payloads - new_payloads:
+            self.store.clear_payload(name)
+
+        payload_map: Dict[str, str] = {}
+        for name, payload in result.payloads.items():
+            self.store.save_payload(name, payload)
+            payload_map[name] = name
+        if payload_map:
+            self.data.extra["payloads"] = payload_map
+        if result.extra:
+            self.data.extra.update(result.extra)
+        self.data.processed = result.processed
+
+        previous_frame = self.model.frame()
+        previous_keys: List[str] = []
+        if isinstance(previous_frame, pd.DataFrame) and not previous_frame.empty:
+            for _, row in previous_frame.iterrows():
+                key = str(row.get("_group_key") or "").strip()
+                if key:
+                    previous_keys.append(key)
+
+        available_table = _deserialize_frame(
+            result.extra.get("available_table") if isinstance(result.extra, Mapping) else None
+        )
+        visible_table = self._table_for_group_keys(previous_keys, available_table)
+        visible_table = self._apply_overrides_to_table(self._ensure_core_columns(visible_table))
+        self.data.table = visible_table
+        self.store.save(self.data)
+        self._close_active_editor()
+        self.model.set_frame(visible_table)
+        self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
+        if not visible_table.empty:
+            self._auto_fit_columns()
+        self._update_status()
+        processed_count = len(self._active_candidates)
+        self.log(f"{self.section_title}: processed {processed_count} file(s).")
+        self._active_candidates = []
+        self._update_open_sources_enabled()
+        try:
+            self.sources_changed.emit(list(self.data.sources))
+        except Exception:
+            pass
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
         self._refresh_available_frames_from_state()
         self._refresh_selector_catalog()
         self._refresh_dashboard()
+
+    def _table_for_group_keys(
+        self,
+        group_keys: Sequence[str],
+        available: Optional[pd.DataFrame] = None,
+    ) -> pd.DataFrame:
+        frame = available.copy() if isinstance(available, pd.DataFrame) else self._available_rows_frame()
+        if frame.empty:
+            return pd.DataFrame(columns=list(frame.columns))
+        wanted = {str(key).strip() for key in group_keys if str(key).strip()}
+        if not wanted:
+            return frame.iloc[0:0].copy()
+        rows = frame[frame["_group_key"].astype(str).isin(wanted)].copy()
+        return rows.reset_index(drop=True)
 
     def _update_status(self) -> None:  # type: ignore[override]
         super()._update_status()
@@ -653,7 +713,7 @@ class UniversalVideoSection(VideoSection):
         if state is None:
             return None
         return QtGui.QBrush(
-            QtGui.QColor(REVIEW_COMPLETE_BACKGROUND if state else REVIEW_PENDING_BACKGROUND)
+            QtGui.QColor(REVIEW_COMPLETE_BACKGROUND if state else MISSING_VIDEO_BACKGROUND)
         )
 
     def _foreground_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:  # type: ignore[override]
@@ -665,7 +725,7 @@ class UniversalVideoSection(VideoSection):
         if state is None:
             return None
         return QtGui.QBrush(
-            QtGui.QColor(REVIEW_COMPLETE_FOREGROUND if state else REVIEW_PENDING_FOREGROUND)
+            QtGui.QColor(REVIEW_COMPLETE_FOREGROUND if state else MISSING_VIDEO_FOREGROUND)
         )
 
     def _ensure_review_dialog(self):  # type: ignore[override]
@@ -924,6 +984,13 @@ class UniversalVideoBuilderWindow(QtWidgets.QMainWindow):
         splitter.setHandleWidth(8)
         layout.addWidget(splitter, 1)
         self.setCentralWidget(central)
+
+        self._suppress_dirty = True
+        try:
+            self.section._shutdown_background_threads()
+            self.section.reset_to_blank()
+        finally:
+            self._suppress_dirty = False
 
         menu_bar = install_standard_menu(self, help_topic="builder_database", console=self.log_view)
         self._setup_project_actions(menu_bar)

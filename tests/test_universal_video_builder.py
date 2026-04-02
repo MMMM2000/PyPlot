@@ -42,7 +42,26 @@ def _build_section(
     paths = uvb.scan_universal_video_inputs([root])
     result = section.process(paths)
     section._handle_worker_finished(result)
+    section._shutdown_background_threads()
+    section._cancel_requested = False
     return section, root
+
+
+def _add_sample_rows(section: uvb.UniversalVideoSection, composition: str, draws: list[int]) -> pd.DataFrame:
+    section.composition_combo.setEditText(composition)
+    section._refresh_draw_options()
+    section.draw_menu.set_selected_values(draws)
+    section._refresh_piece_options()
+    section._add_selected_microwires()
+    return section.model.frame()
+
+
+def _clear_visible_rows(section: uvb.UniversalVideoSection) -> None:
+    available = section._available_rows_frame()
+    empty = pd.DataFrame(columns=available.columns)
+    section.data.table = empty
+    section.store.save(section.data)
+    section.model.set_frame(empty)
 
 
 def test_launcher_registers_universal_video_builder() -> None:
@@ -57,20 +76,23 @@ def test_universal_video_builder_process_links_fabrication_and_videos(
     section, _root = _build_section(qtbot, monkeypatch, tmp_path)
 
     frame = section.model.frame()
-    assert not frame.empty
+    assert frame.empty
 
-    ni54 = frame[
-        (frame["Composition"] == "Ni54Fe23Ga15")
-        & (frame["Microwire"] == "1/1")
+    available = section._available_rows_frame()
+    assert not available.empty
+
+    ni54 = available[
+        (available["Composition"] == "Ni54Fe23Ga15")
+        & (available["Microwire"] == "1/1")
     ]
     assert not ni54.empty
     ni54_sources = ni54.iloc[0]["_sources"]
     assert ni54_sources
     assert any(str(path).endswith(".mkv") for path in ni54_sources)
 
-    ni50 = frame[
-        (frame["Composition"] == "Ni50Fe27Ga23")
-        & (frame["Microwire"] == "2/1")
+    ni50 = available[
+        (available["Composition"] == "Ni50Fe27Ga23")
+        & (available["Microwire"] == "2/1")
     ]
     assert not ni50.empty
     assert ni50.iloc[0]["Length (m)"] is not None
@@ -92,11 +114,7 @@ def test_universal_video_builder_add_workflow_filters_draws_and_expands_all_piec
     ].copy()
     assert not expected.empty
 
-    empty = pd.DataFrame(columns=available.columns)
-    section.data.table = empty
-    section.store.save(section.data)
-    section.model.set_frame(empty)
-
+    _clear_visible_rows(section)
     section.composition_combo.setEditText("Ni50Fe27Ga23")
     section._refresh_draw_options()
     section.draw_menu.set_selected_values([2, 4])
@@ -117,7 +135,8 @@ def test_universal_video_builder_review_behaviour_uses_manual_values_and_video_o
 ) -> None:
     section, _root = _build_section(qtbot, monkeypatch, tmp_path)
 
-    frame = section.model.frame()
+    _clear_visible_rows(section)
+    frame = _add_sample_rows(section, "Ni54Fe23Ga15", [1])
     source_row = int(
         frame.index[
             (frame["Composition"] == "Ni54Fe23Ga15")
@@ -129,7 +148,7 @@ def test_universal_video_builder_review_behaviour_uses_manual_values_and_video_o
     assert row is not None
     initial_brush = section._background_brush_for_cell(row, VIDEO_END_LENGTH_COLUMN)
     assert isinstance(initial_brush, QtGui.QBrush)
-    assert initial_brush.color().name().lower() == "#3b2a12"
+    assert initial_brush.color().name().lower() == "#3a0a0a"
 
     opened_paths: list[Path] = []
     monkeypatch.setattr(
@@ -164,7 +183,8 @@ def test_universal_video_builder_missing_video_rows_stay_red(
 ) -> None:
     section, _root = _build_section(qtbot, monkeypatch, tmp_path)
 
-    frame = section.model.frame()
+    _clear_visible_rows(section)
+    frame = _add_sample_rows(section, "Ni50Fe27Ga23", [2])
     missing_video_row = frame[
         (frame["Composition"] == "Ni50Fe27Ga23")
         & (frame["Microwire"] == "2/1")
@@ -192,8 +212,9 @@ def test_universal_video_builder_project_round_trip_restores_manual_values(
     window.section.set_sources([str(root)])
     result = window.section.process(uvb.scan_universal_video_inputs([root]))
     window.section._handle_worker_finished(result)
+    assert window.section.model.frame().empty
+    frame = _add_sample_rows(window.section, "Ni54Fe23Ga15", [1])
 
-    frame = window.section.model.frame()
     source_row = int(
         frame.index[
             (frame["Composition"] == "Ni54Fe23Ga15")
@@ -220,6 +241,10 @@ def test_universal_video_builder_project_round_trip_restores_manual_values(
     assert isinstance(restored.section.search_edit, QtWidgets.QLineEdit)
     assert restored.section.search_edit.text() == "Ni54Fe23Ga15"
     assert restored._project_path == project_path
+    window._dirty = False
+    restored._dirty = False
+    window.close()
+    restored.close()
 
 
 def test_universal_video_builder_scan_does_not_call_ocr_video_analysis(
@@ -238,6 +263,54 @@ def test_universal_video_builder_scan_does_not_call_ocr_video_analysis(
 
     result = section.process(uvb.scan_universal_video_inputs([root]))
     assert not result.table.empty
+
+
+def test_universal_video_builder_window_starts_blank_even_if_store_has_data(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "storage"
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: storage_root)
+    root = _sample_builder_root(tmp_path)
+
+    section = uvb.UniversalVideoSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(section)
+    section.set_sources([str(root)])
+    result = section.process(uvb.scan_universal_video_inputs([root]))
+    section._handle_worker_finished(result)
+    section._shutdown_background_threads()
+    section._cancel_requested = False
+    _add_sample_rows(section, "Ni54Fe23Ga15", [1])
+
+    window = uvb.UniversalVideoBuilderWindow()
+    qtbot.addWidget(window)
+
+    assert window.section.model.frame().empty
+    assert window.section.data.sources == []
+    window._dirty = False
+    window.close()
+
+
+def test_universal_video_builder_window_scan_keeps_table_empty_until_add(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "storage"
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: storage_root)
+    root = _sample_builder_root(tmp_path)
+
+    window = uvb.UniversalVideoBuilderWindow()
+    qtbot.addWidget(window)
+    window.section.set_sources([str(root)])
+    result = window.section.process(uvb.scan_universal_video_inputs([root]))
+    window.section._handle_worker_finished(result)
+
+    assert window.section.model.frame().empty
+    assert not window.section._available_rows_frame().empty
+    window._dirty = False
+    window.close()
 
 
 def test_universal_video_builder_close_event_honors_unsaved_prompt(
