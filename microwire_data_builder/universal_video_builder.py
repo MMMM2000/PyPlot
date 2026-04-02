@@ -209,6 +209,7 @@ class UniversalVideoSection(VideoSection):
         self._available_fabrication_frame = pd.DataFrame(columns=_fabrication_frame_columns())
         self._available_table = pd.DataFrame()
         super().__init__(logger, log_callback, parent)
+        self.source_button.show()
         self.source_button.setText("Connect fabrication folder…")
         self.source_button.setToolTip("Select a fabrication root folder containing spreadsheets and videos.")
         self.refresh_button.setText("Refresh fabrication data")
@@ -1076,6 +1077,8 @@ class UniversalVideoBuilderWindow(QtWidgets.QMainWindow):
             action.triggered.connect(lambda _checked=False, value=entry: self._open_recent_project(value))
 
     def _open_recent_project(self, entry: str) -> None:
+        if not self._confirm_discard_changes("opening another project"):
+            return
         path = Path(entry)
         if not path.exists():
             QtWidgets.QMessageBox.warning(
@@ -1149,6 +1152,8 @@ class UniversalVideoBuilderWindow(QtWidgets.QMainWindow):
         self.logger.info("Project saved to %s", target)
 
     def _open_project(self) -> None:
+        if not self._confirm_discard_changes("opening another project"):
+            return
         start_dir = self._project_dialog_start_directory()
         filters = f"Microwire Project (*{self.PROJECT_EXTENSION});;All files (*)"
         path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -1193,22 +1198,8 @@ class UniversalVideoBuilderWindow(QtWidgets.QMainWindow):
         self.logger.info("Project loaded from %s", target)
 
     def _new_project(self) -> None:
-        if self._dirty:
-            box = QtWidgets.QMessageBox(self)
-            box.setWindowTitle("Unsaved project")
-            box.setText("Save changes to this Universal Video Builder project before starting a new one?")
-            save_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Save)
-            discard_btn = box.addButton("Discard", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
-            cancel_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
-            box.setDefaultButton(save_btn)
-            box.exec()
-            clicked = box.clickedButton()
-            if clicked is cancel_btn:
-                return
-            if clicked is save_btn:
-                self._save_project()
-                if self._dirty:
-                    return
+        if not self._confirm_discard_changes("starting a new project"):
+            return
         self._suppress_dirty = True
         try:
             self.section.reset_to_blank()
@@ -1218,6 +1209,33 @@ class UniversalVideoBuilderWindow(QtWidgets.QMainWindow):
         self._dirty = False
         self._update_project_title()
         self._update_project_actions()
+
+    def _confirm_discard_changes(self, action_label: str) -> bool:
+        if not self._dirty:
+            return True
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Unsaved project")
+        box.setText(
+            f"Save changes to this Universal Video Builder project before {action_label}?"
+        )
+        save_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Save)
+        box.addButton("Discard", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(save_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel_btn:
+            return False
+        if clicked is save_btn:
+            self._save_project()
+            return not self._dirty
+        return True
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if not self._confirm_discard_changes("closing the window"):
+            event.ignore()
+            return
+        super().closeEvent(event)
 
 
 def run_app() -> None:

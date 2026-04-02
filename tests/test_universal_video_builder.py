@@ -74,6 +74,8 @@ def test_universal_video_builder_process_links_fabrication_and_videos(
     ]
     assert not ni50.empty
     assert ni50.iloc[0]["Length (m)"] is not None
+    assert section.source_button.isHidden() is False
+    assert section.source_button.text()
 
 
 def test_universal_video_builder_add_workflow_filters_draws_and_expands_all_pieces(
@@ -236,6 +238,30 @@ def test_universal_video_builder_scan_does_not_call_ocr_video_analysis(
 
     result = section.process(uvb.scan_universal_video_inputs([root]))
     assert not result.table.empty
+
+
+def test_universal_video_builder_close_event_honors_unsaved_prompt(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    window = uvb.UniversalVideoBuilderWindow()
+    qtbot.addWidget(window)
+    window._dirty = True
+
+    called: list[str] = []
+
+    def _fake_confirm(action_label: str) -> bool:
+        called.append(action_label)
+        return False
+
+    monkeypatch.setattr(window, "_confirm_discard_changes", _fake_confirm)
+
+    event = QtGui.QCloseEvent()
+    window.closeEvent(event)
+
+    assert called == ["closing the window"]
+    assert event.isAccepted() is False
 
 
 def test_universal_video_builder_open_file_falls_back_to_platform_launcher(
