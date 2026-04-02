@@ -1479,6 +1479,7 @@ EMULATORS: Dict[str, LauncherFactory] = {
 
 BUILDERS: Dict[str, LauncherFactory] = {
     "Microwire Data Builder": _lazy("microwire_data_builder", "main"),
+    "Universal Video Builder": _lazy("microwire_data_builder.universal_video_builder", "main"),
     "Microwire EDA": _lazy("microwire_eda", "main"),
 }
 

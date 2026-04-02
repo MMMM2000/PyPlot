@@ -2,6 +2,8 @@
 
 Microwire Data Builder aggregates per-section measurements (fabrication, annealing, microscope, etc.) into a single combined dataset that can be previewed, filtered, and exported. This document captures expected behaviors so we can test against a consistent spec.
 
+For the dedicated manual fabrication-video workflow, see [Universal Video Builder](./video_builder.md). That tool is separate from the full Microwire Data Builder and keeps fabrication/video review in a single focused window.
+
 ## Sections and Data Sources
 
 - Fabrication: metadata columns (length, datetime, mass, resistance, notes), computed e/a ratio, plus any available video-related fields (core/glass temperature, winding speed, glass feeding, underpressure). Imported samples are added here so fabrication lookups work even when no spreadsheet exists yet.

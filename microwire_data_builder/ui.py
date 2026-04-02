@@ -13,6 +13,7 @@ import math
 import os
 import pickle
 import re
+import subprocess
 import sys
 import time
 import traceback
@@ -7280,11 +7281,36 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         url = QtCore.QUrl.fromLocalFile(str(resolved))
         opened = QtGui.QDesktopServices.openUrl(url)
         if not opened:
+            opened = self._fallback_open_file(resolved)
+        if not opened:
             self.log(
                 f"{self.section_title}: could not open {resolved}",
                 level=logging.WARNING,
             )
         return opened
+
+    def _fallback_open_file(self, path: Path) -> bool:
+        try:
+            if sys.platform == "darwin":
+                completed = subprocess.run(
+                    ["open", str(path)],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return completed.returncode == 0
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))  # type: ignore[attr-defined]
+                return True
+            completed = subprocess.run(
+                ["xdg-open", str(path)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return completed.returncode == 0
+        except (FileNotFoundError, OSError):
+            return False
 
     def _open_selected_sources(self) -> None:
         rows = self._selected_rows()
@@ -15758,8 +15784,8 @@ class _VideoReviewDialog(QtWidgets.QDialog):
 
     def _update_table_height(self) -> None:
         header = self.table.horizontalHeader()
-        header_height = header.height() if header is not None else 24
-        row_height = self.table.rowHeight(0) if self.table.rowCount() else 28
+        header_height = max(header.height(), 30) if header is not None else 30
+        row_height = max(self.table.rowHeight(0), 38) if self.table.rowCount() else 38
         frame = self.table.frameWidth() * 2
         target_height = header_height + row_height + frame + 4
         self.table.setFixedHeight(target_height)

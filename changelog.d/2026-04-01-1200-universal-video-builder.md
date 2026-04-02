@@ -1,0 +1,7 @@
+2026-04-01 12:00 UTC
+- Added a dedicated `Universal Video Builder` launcher entry for manual fabrication-video review outside the full Microwire Data Builder.
+- Added a single-window fabrication/video workflow that scans connected fabrication roots, keeps fabrication data and linked videos in one table, and supports searchable composition selection plus multi-draw row adding.
+- Refined the Universal Video Builder layout so the controls and guidance text stay compact and readable, while keeping missing-video rows red and using a softer review state for manual gaps.
+- Made source-video launching more robust by falling back to the native OS file opener when Qt refuses to open a valid local video file.
+- Added dedicated `.pydpj` save/load support for the new workflow under the `MicrowireVideoBuilder` project kind.
+- Added project docs for the new manual-only workflow and documented that it does not use OCR.
