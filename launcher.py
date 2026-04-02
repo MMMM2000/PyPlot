@@ -655,7 +655,55 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         default="Microwire EDA Report",
         help="Report title for Microwire EDA output.",
     )
-    parser.set_defaults(visual_origin=True)
+    parser.add_argument(
+        "--microwire-eda-working-copy-dir",
+        default=None,
+        help="Directory for the disposable Microwire EDA project copy used during CLI runs.",
+    )
+    parser.add_argument(
+        "--microwire-eda-copy-project",
+        dest="microwire_eda_copy_project",
+        action="store_true",
+        help="Copy .pydpj inputs to a disposable working path before analysis (default).",
+    )
+    parser.add_argument(
+        "--no-microwire-eda-copy-project",
+        dest="microwire_eda_copy_project",
+        action="store_false",
+        help="Analyze the source .pydpj directly instead of making a disposable copy.",
+    )
+    parser.add_argument(
+        "--microwire-eda-no-legacy-breakage",
+        dest="microwire_eda_legacy_breakage",
+        action="store_false",
+        help="Disable the auxiliary broke/OK legacy analysis section.",
+    )
+    parser.add_argument(
+        "--microwire-eda-no-composition-splits",
+        dest="microwire_eda_composition_splits",
+        action="store_false",
+        help="Disable composition-split summaries in Microwire EDA output.",
+    )
+    parser.add_argument(
+        "--microwire-eda-no-findings",
+        dest="microwire_eda_findings",
+        action="store_false",
+        help="Disable findings JSON/Markdown outputs for Microwire EDA runs.",
+    )
+    parser.add_argument(
+        "--microwire-eda-force-project-rebuild",
+        dest="microwire_eda_force_project_rebuild",
+        action="store_true",
+        help="Rebuild Assemble rows transiently from the Builder project sections even when saved Assemble rows already exist.",
+    )
+    parser.set_defaults(
+        visual_origin=True,
+        microwire_eda_copy_project=True,
+        microwire_eda_legacy_breakage=True,
+        microwire_eda_composition_splits=True,
+        microwire_eda_findings=True,
+        microwire_eda_force_project_rebuild=False,
+    )
     args, qt_args = parser.parse_known_args(argv)
     return args, qt_args
 
@@ -685,16 +733,40 @@ def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
     input_path = Path(str(getattr(args, "microwire_eda", "")).strip()).expanduser()
     output_dir_value = getattr(args, "out", None)
     output_dir = Path(str(output_dir_value)).expanduser() if output_dir_value else None
+    working_copy_dir_value = getattr(args, "microwire_eda_working_copy_dir", None)
+    working_copy_dir = (
+        Path(str(working_copy_dir_value)).expanduser()
+        if working_copy_dir_value
+        else None
+    )
     config = MicrowireEdaConfig(
         input_path=input_path,
         row_scope=str(getattr(args, "rows", "all") or "all"),
         output_dir=output_dir,
         report_title=str(getattr(args, "microwire_eda_title", "Microwire EDA Report")),
+        working_copy_dir=working_copy_dir,
+        copy_project=bool(getattr(args, "microwire_eda_copy_project", True)),
+        force_project_rebuild=bool(getattr(args, "microwire_eda_force_project_rebuild", False)),
+        include_legacy_breakage_analysis=bool(getattr(args, "microwire_eda_legacy_breakage", True)),
+        include_composition_splits=bool(getattr(args, "microwire_eda_composition_splits", True)),
+        write_findings=bool(getattr(args, "microwire_eda_findings", True)),
     )
     result = generate_report(config)
     print(f"[microwire-eda] report={result.report_path}")
     print(f"[microwire-eda] workbook={result.workbook_path}")
+    print(f"[microwire-eda] dataset={result.csv_path}")
     print(f"[microwire-eda] manifest={result.manifest_path}")
+    if result.findings_json_path is not None:
+        print(f"[microwire-eda] findings_json={result.findings_json_path}")
+    if result.findings_md_path is not None:
+        print(f"[microwire-eda] findings_md={result.findings_md_path}")
+    if result.copied_project_path is not None:
+        print(f"[microwire-eda] copied_project={result.copied_project_path}")
+    if getattr(result, "used_project_rebuild", False):
+        print("[microwire-eda] rebuilt_assemble=true")
+    if result.findings:
+        for finding in result.findings[:3]:
+            print(f"[microwire-eda] finding={finding.get('headline', 'Finding')}")
     return 0
 
 
@@ -1407,6 +1479,7 @@ EMULATORS: Dict[str, LauncherFactory] = {
 
 BUILDERS: Dict[str, LauncherFactory] = {
     "Microwire Data Builder": _lazy("microwire_data_builder", "main"),
+    "Universal Video Builder": _lazy("microwire_data_builder.universal_video_builder", "main"),
     "Microwire EDA": _lazy("microwire_eda", "main"),
 }
 

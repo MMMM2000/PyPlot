@@ -245,12 +245,24 @@ class MicrowireEdaWindow(QtWidgets.QMainWindow):
             return
         self._last_result = result
         self.open_report_button.setEnabled(True)
-        self.summary_label.setText(
-            f"Report ready: {result.report_path}\nRows analysed: {result.row_counts.get('all_rows', 0)}"
-        )
+        summary_lines = [
+            f"Report ready: {result.report_path}",
+            f"Rows analysed: {result.row_counts.get('all_rows', 0)}",
+        ]
+        if result.used_project_rebuild:
+            summary_lines.append("Assemble rows were rebuilt transiently from the project sections.")
+        self.summary_label.setText("\n".join(summary_lines))
         self._log(f"HTML report: {result.report_path}")
         self._log(f"Workbook: {result.workbook_path}")
         self._log(f"Manifest: {result.manifest_path}")
+        if result.findings_json_path is not None:
+            self._log(f"Findings JSON: {result.findings_json_path}")
+        if result.findings_md_path is not None:
+            self._log(f"Findings Markdown: {result.findings_md_path}")
+        if result.copied_project_path is not None:
+            self._log(f"Disposable project copy: {result.copied_project_path}")
+        if result.used_project_rebuild:
+            self._log("Assemble rows were rebuilt transiently from the Builder project sections.")
         if result.skipped_sections:
             for key, message in result.skipped_sections.items():
                 self._log(f"Skipped {key}: {message}")

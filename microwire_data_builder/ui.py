@@ -13,6 +13,7 @@ import math
 import os
 import pickle
 import re
+import subprocess
 import sys
 import time
 import traceback
@@ -119,6 +120,7 @@ from .core import (
     _clean_str,
     _compute_ea_from_composition,
     _estimate_transition_temp_c,
+    _relevant_sibling_piece_candidates,
     CORE_TEMPERATURE_COLUMN,
     GLASS_TEMPERATURE_COLUMN,
     ESTIMATED_TRANSITION_COLUMN,
@@ -285,6 +287,39 @@ _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN = "_shape_memory_standard_source"
 _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN = "_shape_memory_fracture_source"
 _SHAPE_MEMORY_GROUP_KEY_COLUMN = "_shape_memory_group_key"
 _SHAPE_MEMORY_GROUP_ORDER_COLUMN = "_shape_memory_group_order"
+_SHAPE_MEMORY_CURRENT_COLUMN_ALIASES = {
+    "Current (mA)": SHAPE_MEMORY_CURRENT_COLUMN,
+    "Current density (A/mm^2)": SHAPE_MEMORY_CURRENT_DENSITY_COLUMN,
+    "Fracture current (mA)": SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
+    "Fracture current density (A/mm^2)": SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
+}
+_SHAPE_MEMORY_STANDARD_VALUE_COLUMNS = (
+    SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+    SHAPE_MEMORY_LOAD_COLUMN,
+    SHAPE_MEMORY_STRAIN_COLUMN,
+    SHAPE_MEMORY_STRESS_COLUMN,
+)
+_SHAPE_MEMORY_STANDARD_META_COLUMNS = (
+    SHAPE_MEMORY_CURRENT_COLUMN,
+    SHAPE_MEMORY_CURRENT_DENSITY_COLUMN,
+    _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN,
+)
+_SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS = (
+    _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS + _SHAPE_MEMORY_STANDARD_META_COLUMNS
+)
+_SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS = (
+    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+)
+_SHAPE_MEMORY_FRACTURE_META_COLUMNS = (
+    SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
+    SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
+    _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
+)
+_SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS = (
+    _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS + _SHAPE_MEMORY_FRACTURE_META_COLUMNS
+)
 
 
 _STAGE_LABELS = {
@@ -308,6 +343,35 @@ def _builder_settings() -> QtCore.QSettings:
         )
         return QtCore.QSettings(str(settings_file), QtCore.QSettings.Format.IniFormat)
     return QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
+
+
+def _shape_memory_has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    try:
+        if bool(pd.isna(value)):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _shape_memory_payload_has_values(
+    payload: Mapping[str, Any], columns: Sequence[str]
+) -> bool:
+    return any(_shape_memory_has_value(payload.get(column)) for column in columns)
+
+
+def _shape_memory_graph_item_count(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return 1 if value.strip() else 0
+    if isinstance(value, (list, tuple, set)):
+        return sum(_shape_memory_graph_item_count(item) for item in value)
+    return 1
 
 
 def _builder_dialogs_suppressed() -> bool:
@@ -1690,7 +1754,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
             "Add cropped microscope images in new columns next to the d and D values"
         )
         with QtCore.QSignalBlocker(self.include_crops_check):
-            self.include_crops_check.setChecked(True)
+            self.include_crops_check.setChecked(False)
         microscope_layout.addWidget(self.include_crops_check)
         self.highlight_ocr_check = QtWidgets.QCheckBox("Highlight OCR-sourced values")
         self.highlight_ocr_check.stateChanged.connect(self._save_settings)
@@ -1855,7 +1919,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         with QtCore.QSignalBlocker(self.export_excel_check):
             self.export_excel_check.setChecked(_read_bool("export_excel", False))
         with QtCore.QSignalBlocker(self.include_crops_check):
-            self.include_crops_check.setChecked(_read_bool("include_microscope_crops", True))
+            self.include_crops_check.setChecked(_read_bool("include_microscope_crops", False))
         with QtCore.QSignalBlocker(self.highlight_ocr_check):
             self.highlight_ocr_check.setChecked(_read_bool("highlight_ocr_values", True))
         with QtCore.QSignalBlocker(self.video_metrics_check):
@@ -2663,6 +2727,8 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self._text_columns: set[str] = set()
         self._recent_edits: Dict[Tuple[int, int], Any] = {}
         self._recent_old_values: Dict[Tuple[int, int], Any] = {}
+        self._row_series_cache: Dict[int, pd.Series] = {}
+        self._column_label_cache: Tuple[str, ...] = tuple(str(column) for column in self._frame.columns)
 
     @staticmethod
     def _coerce_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
@@ -2681,11 +2747,37 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self._frame = self._coerce_frame(frame)
         self._recent_edits = {}
         self._recent_old_values = {}
+        self._row_series_cache = {}
+        self._column_label_cache = tuple(str(column) for column in self._frame.columns)
         self.endResetModel()
         try:
             self.layoutChanged.emit()
         except Exception:
             pass
+
+    def _row_series(self, row: int) -> Optional[pd.Series]:
+        if row < 0 or row >= len(self._frame.index):
+            return None
+        cached = self._row_series_cache.get(int(row))
+        if cached is not None:
+            return cached
+        try:
+            series = self._frame.iloc[row]
+        except Exception:
+            return None
+        self._row_series_cache[int(row)] = series
+        return series
+
+    def _column_label(self, column: int) -> str:
+        if column < 0:
+            return ""
+        try:
+            return self._column_label_cache[column]
+        except Exception:
+            try:
+                return str(self._frame.columns[column])
+            except Exception:
+                return ""
 
     def set_decoration_provider(
         self,
@@ -2752,6 +2844,15 @@ class DataFrameModel(QtCore.QAbstractTableModel):
                     suffix = match.group(3) or ""
                     suffix_text = suffix.strip().lower()
                     return f"{draw:05d}/{piece:05d}{suffix_text}"
+            numeric_text = value.strip().replace(",", ".")
+            if numeric_text:
+                try:
+                    numeric_value = float(numeric_text)
+                except ValueError:
+                    pass
+                else:
+                    if math.isfinite(numeric_value):
+                        return numeric_value
         if isinstance(value, (list, tuple, set)):
             return ", ".join(str(item) for item in value)
         return value
@@ -2792,12 +2893,9 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ItemDataRole.DecorationRole:
             provider = getattr(self, "_decoration_provider", None)
             if provider is not None:
-                try:
-                    column_label = str(self._frame.columns[index.column()])
-                    row_series = self._frame.iloc[index.row()]
-                except Exception:
-                    pass
-                else:
+                column_label = self._column_label(index.column())
+                row_series = self._row_series(index.row())
+                if row_series is not None:
                     try:
                         decoration = provider(row_series, column_label)
                     except Exception:
@@ -2814,19 +2912,13 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ItemDataRole.ForegroundRole:
             provider = getattr(self, "_foreground_provider", None)
             if provider is not None:
-                try:
-                    column_label = str(self._frame.columns[index.column()])
-                    row_series = self._frame.iloc[index.row()]
-                except Exception:
-                    pass
-                else:
+                column_label = self._column_label(index.column())
+                row_series = self._row_series(index.row())
+                if row_series is not None:
                     brush = provider(row_series, column_label)
                     if brush is not None:
                         return brush
-            try:
-                column_label = str(self._frame.columns[index.column()])
-            except Exception:
-                column_label = ""
+            column_label = self._column_label(index.column())
             if column_label.lower() == "reviewed":
                 ok = bool(value)
                 fg = QtGui.QColor("#10b981" if ok else "#ef4444")
@@ -2835,19 +2927,13 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ItemDataRole.BackgroundRole:
             provider = getattr(self, "_background_provider", None)
             if provider is not None:
-                try:
-                    column_label = str(self._frame.columns[index.column()])
-                    row_series = self._frame.iloc[index.row()]
-                except Exception:
-                    pass
-                else:
+                column_label = self._column_label(index.column())
+                row_series = self._row_series(index.row())
+                if row_series is not None:
                     brush = provider(row_series, column_label)
                     if brush is not None:
                         return brush
-            try:
-                column_label = str(self._frame.columns[index.column()])
-            except Exception:
-                column_label = ""
+            column_label = self._column_label(index.column())
             if column_label.lower() == "reviewed":
                 ok = bool(value)
                 bg = QtGui.QColor("#07351f" if ok else "#3a0a0a")
@@ -2856,10 +2942,9 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ItemDataRole.ToolTipRole:
             provider = getattr(self, "_tooltip_provider", None)
             if provider is not None:
-                try:
-                    column_label = str(self._frame.columns[index.column()])
-                    row_series = self._frame.iloc[index.row()]
-                except Exception:
+                column_label = self._column_label(index.column())
+                row_series = self._row_series(index.row())
+                if row_series is None:
                     return None
                 try:
                     return provider(row_series, column_label)
@@ -2948,12 +3033,15 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             self._frame.iat[index.row(), index.column()] = coerced
         except Exception:
             return False
+        self._row_series_cache.pop(int(index.row()), None)
         self._recent_edits[(index.row(), index.column())] = coerced
         self._recent_old_values[(index.row(), index.column())] = previous_value
         try:
             # Normalize back to a plain object-backed frame after in-place edits so
             # follow-up Qt handlers don't trip over pandas extension-dtype internals.
             self._frame = self._coerce_frame(self._frame)
+            self._row_series_cache = {}
+            self._column_label_cache = tuple(str(column) for column in self._frame.columns)
         except Exception:
             return False
         try:
@@ -4875,6 +4963,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         self._tab_canvases: List[FigureCanvasQTAgg] = []
         self._saved_standard_selection: Optional[_ShapeMemoryPointSelection] = None
         self._saved_fracture_selection: Optional[_ShapeMemoryPointSelection] = None
+        self._record_signature: Tuple[str, ...] = ()
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -4945,11 +5034,19 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         title: str,
         records: Sequence[ShapeMemoryStressStrainRecord],
     ) -> None:
+        signature = tuple(
+            _record_path_key(record) or _record_label_for_display(record) or f"record-{idx}"
+            for idx, record in enumerate(records)
+        )
         current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
         self.header_label.setText(title or "Shape memory stress/strain")
+        if records and signature == self._record_signature and self._tab_widget.count() == len(signature):
+            self._stack.setCurrentWidget(self._tab_widget)
+            return
         blocker = QtCore.QSignalBlocker(self._tab_widget)
         try:
             self._clear_tabs()
+            self._record_signature = ()
             self._saved_standard_selection = None
             self._saved_fracture_selection = None
             self._update_picked_labels(None)
@@ -4993,6 +5090,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
                 self._placeholder.setText("No shape-memory graphs available for this microwire.")
                 self._stack.setCurrentWidget(self._placeholder)
             else:
+                self._record_signature = signature
                 if current_index >= 0:
                     self._tab_widget.setCurrentIndex(min(current_index, self._tab_widget.count() - 1))
                 self._stack.setCurrentWidget(self._tab_widget)
@@ -5018,6 +5116,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
     def clear(self, message: str) -> None:
         self.header_label.setText("Shape memory stress/strain")
         self._clear_tabs()
+        self._record_signature = ()
         self._update_hover_label(None)
         self._update_picked_labels(None)
         self._placeholder.setText(message)
@@ -6117,14 +6216,18 @@ def _video_index_to_frame(
             seen_keys.add((composition, draw, piece))
         if row.get(ESTIMATED_TRANSITION_COLUMN) in (None, ""):
             row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(row.get("e/a"))
-        if row.get(CORE_TEMPERATURE_COLUMN) in (None, ""):
-            row[CORE_TEMPERATURE_COLUMN] = summary.temperature()
-        if row.get("Underpressure") in (None, ""):
-            row["Underpressure"] = summary.underpressure()
-        if row.get("Winding speed (m/min)") in (None, ""):
-            row["Winding speed (m/min)"] = summary.winding_speed()
-        if row.get("Glass feeding (mm/min)") in (None, ""):
-            row["Glass feeding (mm/min)"] = summary.glass_feed()
+        temperature = summary.temperature()
+        if not _is_missing(temperature):
+            row[CORE_TEMPERATURE_COLUMN] = temperature
+        underpressure = summary.underpressure()
+        if not _is_missing(underpressure):
+            row["Underpressure"] = underpressure
+        winding_speed = summary.winding_speed()
+        if not _is_missing(winding_speed):
+            row["Winding speed (m/min)"] = winding_speed
+        glass_feed = summary.glass_feed()
+        if not _is_missing(glass_feed):
+            row["Glass feeding (mm/min)"] = glass_feed
         row["_sources"] = sorted(str(path) for path in getattr(summary, "sources", set()))
         row["_group_key"] = _microwire_key_to_str((composition, draw, piece, None))
         rows.append(row)
@@ -6153,14 +6256,18 @@ def _video_index_to_frame(
         if row.get(ESTIMATED_TRANSITION_COLUMN) in (None, ""):
             row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(row.get("e/a"))
         if summary is not None:
-            if row.get(CORE_TEMPERATURE_COLUMN) in (None, ""):
-                row[CORE_TEMPERATURE_COLUMN] = summary.temperature()
-            if row.get("Underpressure") in (None, ""):
-                row["Underpressure"] = summary.underpressure()
-            if row.get("Winding speed (m/min)") in (None, ""):
-                row["Winding speed (m/min)"] = summary.winding_speed()
-            if row.get("Glass feeding (mm/min)") in (None, ""):
-                row["Glass feeding (mm/min)"] = summary.glass_feed()
+            temperature = summary.temperature()
+            if not _is_missing(temperature):
+                row[CORE_TEMPERATURE_COLUMN] = temperature
+            underpressure = summary.underpressure()
+            if not _is_missing(underpressure):
+                row["Underpressure"] = underpressure
+            winding_speed = summary.winding_speed()
+            if not _is_missing(winding_speed):
+                row["Winding speed (m/min)"] = winding_speed
+            glass_feed = summary.glass_feed()
+            if not _is_missing(glass_feed):
+                row["Glass feeding (mm/min)"] = glass_feed
             row["_sources"] = sorted(str(path) for path in getattr(summary, "sources", set()))
         else:
             row["_sources"] = []
@@ -6370,12 +6477,25 @@ def _record_path_key(record: object) -> Optional[str]:
 
 
 def _shape_memory_current_mA_from_record(record: ShapeMemoryStressStrainRecord) -> Optional[float]:
-    path = getattr(record, "path", None)
     text = ""
+    path = getattr(record, "path", None)
     if isinstance(path, Path):
         text = path.stem
     elif isinstance(path, str):
         text = Path(path).stem
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*mA", text, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except Exception:
+        return None
+
+
+def _shape_memory_current_mA_from_text(value: object) -> Optional[float]:
+    text = str(value or "").strip()
+    if not text:
+        return None
     match = re.search(r"(\d+(?:[.,]\d+)?)\s*mA", text, re.IGNORECASE)
     if not match:
         return None
@@ -6396,6 +6516,58 @@ def _shape_memory_is_fracture_record(record: ShapeMemoryStressStrainRecord) -> b
     return "fracture" in text.casefold() or (
         isinstance(label, str) and "fracture" in label.casefold()
     )
+
+
+def _shape_memory_row_has_record_metadata(row: Mapping[str, Any]) -> bool:
+    raw_sources = row.get("_sources")
+    if isinstance(raw_sources, str) and raw_sources.strip():
+        return True
+    if isinstance(raw_sources, (list, tuple, set)):
+        for value in raw_sources:
+            if str(value or "").strip():
+                return True
+    for column in (
+        SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+        _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN,
+        _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
+    ):
+        value = row.get(column)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                if str(item or "").strip():
+                    return True
+    return False
+
+
+def _shape_memory_row_has_saved_payload(row: Mapping[str, Any]) -> bool:
+    return _shape_memory_payload_has_values(row, _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS) or _shape_memory_payload_has_values(
+        row, _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS
+    )
+
+
+def _microscope_diameter_lookup(frame: pd.DataFrame | None) -> Dict[str, Optional[float]]:
+    lookup: Dict[str, Optional[float]] = {}
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return lookup
+    for _, microscope_row in frame.iterrows():
+        lookup_key = _row_to_microwire_key(microscope_row)
+        if not lookup_key:
+            raw_key = str(microscope_row.get("_key") or "").strip()
+            if raw_key:
+                parsed_key = _microwire_key_from_string(raw_key)
+                split_key = _split_microwire_key(parsed_key)
+                if split_key is not None:
+                    lookup_key = _microwire_key_to_str(split_key)
+        if not lookup_key:
+            continue
+        try:
+            d_value = float(microscope_row.get(MICROSCOPE_D_COLUMN))
+        except Exception:
+            d_value = math.nan
+        lookup[lookup_key] = d_value if math.isfinite(d_value) and d_value > 0 else None
+    return lookup
 
 
 def _current_density_from_diameter_um(
@@ -6470,6 +6642,17 @@ def _hidden_paths_from_section(section: object) -> Set[str]:
         if isinstance(hidden, (list, tuple, set)):
             return {str(path) for path in hidden if path}
     return set()
+
+
+def _section_payload_enabled(section: object, name: str) -> bool:
+    extra = getattr(getattr(section, "data", None), "extra", None)
+    if not isinstance(extra, Mapping):
+        return False
+    payloads = extra.get("payloads")
+    if not isinstance(payloads, Mapping):
+        return False
+    stored_name = payloads.get(name)
+    return isinstance(stored_name, str) and stored_name == name
 
 
 def _record_key_for_group(record: object) -> Optional[MicrowireKey]:
@@ -7098,11 +7281,36 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         url = QtCore.QUrl.fromLocalFile(str(resolved))
         opened = QtGui.QDesktopServices.openUrl(url)
         if not opened:
+            opened = self._fallback_open_file(resolved)
+        if not opened:
             self.log(
                 f"{self.section_title}: could not open {resolved}",
                 level=logging.WARNING,
             )
         return opened
+
+    def _fallback_open_file(self, path: Path) -> bool:
+        try:
+            if sys.platform == "darwin":
+                completed = subprocess.run(
+                    ["open", str(path)],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return completed.returncode == 0
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))  # type: ignore[attr-defined]
+                return True
+            completed = subprocess.run(
+                ["xdg-open", str(path)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return completed.returncode == 0
+        except (FileNotFoundError, OSError):
+            return False
 
     def _open_selected_sources(self) -> None:
         rows = self._selected_rows()
@@ -7581,6 +7789,19 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     def reset_to_blank(self) -> None:
         """Clear all processed data and disconnect sources for a fresh start."""
 
+        payload_names: Set[str] = set()
+        extra = getattr(self.data, "extra", None)
+        if isinstance(extra, Mapping):
+            payloads = extra.get("payloads")
+            if isinstance(payloads, Mapping):
+                for value in payloads.values():
+                    if isinstance(value, str) and value.strip():
+                        payload_names.add(value.strip())
+        for payload_name in payload_names:
+            try:
+                self.store.clear_payload(payload_name)
+            except Exception:
+                continue
         self.data = MiniDatabaseData()
         self.model.set_frame(pd.DataFrame())
         self.sources_list.clear()
@@ -8444,13 +8665,15 @@ class FabricationSection(MiniDatabaseSection):
         draw: int,
         piece: int,
     ) -> bool:
+        if int(piece) <= 0:
+            return False
         draw_map = relevant_map.get(composition)
         if not draw_map:
             return True
-        allowed: Set[Optional[int]] = set()
         direct = draw_map.get(draw)
-        if direct:
-            allowed.update(direct)
+        if direct is not None:
+            return int(piece) in _relevant_sibling_piece_candidates([int(piece)], direct)
+        allowed: Set[Optional[int]] = set()
         fallback = draw_map.get(None)
         if fallback:
             allowed.update(fallback)
@@ -8458,7 +8681,7 @@ class FabricationSection(MiniDatabaseSection):
             return False
         if None in allowed:
             return True
-        return piece in allowed
+        return int(piece) in _relevant_sibling_piece_candidates([int(piece)], allowed)
 
     def _filter_index(
         self,
@@ -8467,6 +8690,10 @@ class FabricationSection(MiniDatabaseSection):
         relevant_compositions: Set[str],
     ) -> FabricationIndex:
         filtered = FabricationIndex()
+        available_by_draw: Dict[Tuple[str, int], Dict[int, Mapping[str, object]]] = {}
+        for (composition, draw, piece), piece_data in index.piece_level.items():
+            comp_key = str(composition).strip()
+            available_by_draw.setdefault((comp_key, int(draw)), {})[int(piece)] = dict(piece_data)
         for (composition, draw), draw_data in index.draw_level.items():
             comp_key = str(composition).strip()
             if comp_key not in relevant_compositions:
@@ -8481,7 +8708,33 @@ class FabricationSection(MiniDatabaseSection):
             piece_int = int(piece)
             if not self._allow_draw(relevant_map, comp_key, draw_int):
                 continue
-            if not self._allow_piece(relevant_map, comp_key, draw_int, piece_int):
+            draw_map = relevant_map.get(comp_key)
+            if not draw_map:
+                allowed_pieces = {
+                    candidate
+                    for candidate in available_by_draw.get((comp_key, draw_int), {})
+                    if candidate > 0
+                }
+            else:
+                relevant_pieces = draw_map.get(draw_int)
+                if relevant_pieces is None:
+                    relevant_pieces = draw_map.get(None)
+                if relevant_pieces and None in relevant_pieces:
+                    allowed_pieces = {
+                        candidate
+                        for candidate in available_by_draw.get((comp_key, draw_int), {})
+                        if candidate > 0
+                    }
+                else:
+                    piece_records = available_by_draw.get((comp_key, draw_int), {})
+                    allowed_pieces = set(
+                        _relevant_sibling_piece_candidates(
+                            piece_records.keys(),
+                            relevant_pieces,
+                            piece_records,
+                        )
+                    )
+            if piece_int not in allowed_pieces:
                 continue
             filtered.set_piece(comp_key, draw_int, piece_int, dict(piece_data))
         return filtered
@@ -8518,14 +8771,32 @@ class FabricationSection(MiniDatabaseSection):
             for draw, pieces in draws.items():
                 if draw is None:
                     continue
-                for piece in pieces:
-                    if piece is None:
-                        continue
+                candidate_pieces: List[int] = []
+                if isinstance(source_index, FabricationIndex):
+                    piece_records = {
+                        int(piece_value): dict(piece_data)
+                        for (piece_comp, piece_draw, piece_value), piece_data in source_index.piece_level.items()
+                        if str(piece_comp).strip() == comp_key and int(piece_draw) == int(draw)
+                    }
+                    available_pieces = {
+                        int(piece_value) for piece_value in piece_records.keys()
+                    }
+                    candidate_pieces = _relevant_sibling_piece_candidates(
+                        available_pieces,
+                        pieces,
+                        piece_records,
+                    )
+                if not candidate_pieces:
+                    candidate_pieces = _relevant_sibling_piece_candidates(
+                        [],
+                        pieces,
+                    )
+                for piece in candidate_pieces:
                     key = (comp_key, int(draw), int(piece))
                     if key in existing:
                         continue
                     piece_record = (
-                        source_index.get_piece(comp_key, int(draw), int(piece))
+                        source_index.get_piece(comp_key, int(draw), piece)
                         if isinstance(source_index, FabricationIndex)
                         else None
                     )
@@ -8537,7 +8808,7 @@ class FabricationSection(MiniDatabaseSection):
                     row = _fabrication_row_from_records(
                         comp_key,
                         int(draw),
-                        int(piece),
+                        piece,
                         piece_record,
                         draw_record,
                         columns=columns,
@@ -8725,7 +8996,11 @@ class FabricationSection(MiniDatabaseSection):
         super().import_project_payload(payload)
         self._source_status_cache.clear()
         self._normalize_temperature_columns()
-        if self._rebuild_table_from_raw_index():
+        saved_rows = payload.get("rows") if isinstance(payload, Mapping) else None
+        if (
+            not isinstance(saved_rows, (list, tuple))
+            or len(saved_rows) == 0
+        ) and self._rebuild_table_from_raw_index():
             return
         table = self.data.table
         if isinstance(table, pd.DataFrame):
@@ -8787,27 +9062,37 @@ class FabricationSection(MiniDatabaseSection):
 
     def set_import_separation(self, enabled: bool) -> None:
         self._separate_imported = bool(enabled)
-        if self._rebuild_table_from_raw_index():
-            return
-        try:
-            index = self.store.load_payload("fabrication_index")
-        except Exception:
-            index = None
-        if not isinstance(index, FabricationIndex):
-            return
-        table = _fabrication_index_to_frame(index)
+        table = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            if self._rebuild_table_from_raw_index():
+                return
+            try:
+                index = self.store.load_payload("fabrication_index")
+            except Exception:
+                index = None
+            if not isinstance(index, FabricationIndex):
+                return
+            table = _fabrication_index_to_frame(index)
         table = self._apply_imported_separation(table)
         self.data.table = table
+        try:
+            self.store.save(self.data)
+        except Exception:
+            pass
         self.model.set_frame(table)
+        self._hide_columns(["_source_paths", "_source_path"])
         self._auto_fit_columns()
         self._update_status()
 
     def _apply_imported_separation(self, table: pd.DataFrame) -> pd.DataFrame:
-        if not self._separate_imported:
-            return table
         if not isinstance(table, pd.DataFrame) or table.empty:
             return table
-        if "Data source" not in table.columns:
+        if "Data source" not in table.columns or "Composition" not in table.columns:
+            return table
+        table = table.loc[
+            table["Composition"].astype(str).str.strip() != "Imported data:"
+        ].copy()
+        if not self._separate_imported:
             return table
         imported_mask = table["Data source"].astype(str).str.contains("Imported", na=False)
         if not imported_mask.any():
@@ -9067,6 +9352,28 @@ class AnnealingSection(MiniDatabaseSection):
         if header is not None:
             header.setStretchLastSection(False)
             header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+
+    def _auto_fit_columns(self) -> None:  # type: ignore[override]
+        super()._auto_fit_columns()
+        QtCore.QTimer.singleShot(0, self._ensure_preview_columns_wide)
+
+    def _ensure_preview_columns_wide(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+        required_widths = {
+            ANNEALING_HIGH_GRAPH_COLUMN: ANNEALING_GRAPH_WIDTH + 80,
+            ANNEALING_OTHER_GRAPH_COLUMN: self._preview_icon_width() + 80,
+        }
+        for column_name, minimum in required_widths.items():
+            if column_name not in frame.columns:
+                continue
+            idx = frame.columns.get_loc(column_name)
+            if table.columnWidth(idx) < minimum:
+                table.setColumnWidth(idx, minimum)
 
     def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
         super().apply_data(data)
@@ -9450,6 +9757,15 @@ class AnnealingSection(MiniDatabaseSection):
             _high_record, other_records = _select_anchor_and_other_records(records)
             if other_records:
                 max_other = max(max_other, len(other_records))
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            other_file_column = "Other annealing files"
+            for _, row in frame.iterrows():
+                max_other = max(
+                    max_other,
+                    _shape_memory_graph_item_count(row.get(ANNEALING_OTHER_GRAPH_COLUMN)),
+                    _shape_memory_graph_item_count(row.get(other_file_column)),
+                )
         self._preview_other_count = max_other
         self._invalidate_previews()
         self._update_preview_icon_size()
@@ -9631,10 +9947,16 @@ class AnnealingSection(MiniDatabaseSection):
                 pixmap = _render_measurement_pixmap(target, self.logger)
             else:
                 if other_records:
+                    preview_count = max(
+                        len(other_records),
+                        _shape_memory_graph_item_count(row.get(ANNEALING_OTHER_GRAPH_COLUMN)),
+                        _shape_memory_graph_item_count(row.get("Other annealing files")),
+                        1,
+                    )
                     signature = tuple(
                         str(getattr(record, "path", "")) for record in other_records
                     )
-                    cache_key = (key, column, signature)
+                    cache_key = (key, column, signature, preview_count)
                     cached = self._pixmap_cache.get(cache_key)
                     if cached is not None:
                         return cached
@@ -9645,7 +9967,8 @@ class AnnealingSection(MiniDatabaseSection):
                             pixmaps.append(preview)
                     pixmap = _combine_pixmaps_side_by_side(
                         pixmaps,
-                        width_px=self._preview_icon_width(),
+                        width_px=ANNEALING_GRAPH_WIDTH * preview_count
+                        + self._preview_spacing * (preview_count - 1),
                         height_px=ANNEALING_GRAPH_HEIGHT,
                         spacing=self._preview_spacing,
                         scale_to_fit=False,
@@ -14154,14 +14477,25 @@ class VideoSection(MiniDatabaseSection):
                 draw_map = relevant_map.get(str(composition).strip())
                 if not draw_map:
                     continue
-                allowed = draw_map.get(int(draw))
-                fallback = draw_map.get(None)
-                if allowed and int(piece) in {int(value) for value in allowed if value is not None}:
-                    filtered.append(path)
+                relevant_pieces = draw_map.get(int(draw))
+                if relevant_pieces is not None:
+                    allowed_pieces = {
+                        int(value)
+                        for value in relevant_pieces
+                        if value is not None and int(value) > 0
+                    }
+                    if int(piece) in allowed_pieces:
+                        filtered.append(path)
                     continue
-                if fallback and int(piece) in {int(value) for value in fallback if value is not None}:
-                    filtered.append(path)
-                    continue
+                fallback_pieces = draw_map.get(None)
+                if fallback_pieces is not None:
+                    allowed_pieces = {
+                        int(value)
+                        for value in fallback_pieces
+                        if value is not None and int(value) > 0
+                    }
+                    if int(piece) in allowed_pieces:
+                        filtered.append(path)
                 continue
             draw_key = _draw_key(path)
             if draw_key is None:
@@ -14418,7 +14752,7 @@ class VideoSection(MiniDatabaseSection):
         self._video_source_status_cache.clear()
         self._load_overrides()
         self._normalize_temperature_columns()
-        self._apply_overrides_to_model()
+        self._apply_overrides_to_model(preserve_existing=True)
         self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
         QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
@@ -14432,7 +14766,7 @@ class VideoSection(MiniDatabaseSection):
 
     def sync_with_fabrication(self) -> None:
         self._video_source_status_cache.clear()
-        self._apply_overrides_to_model()
+        self._apply_overrides_to_model(preserve_existing=True)
         self._hide_columns(self._HIDDEN_VIDEO_COLUMNS)
         QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
@@ -14876,17 +15210,23 @@ class VideoSection(MiniDatabaseSection):
             )
         return updated
 
-    def _apply_overrides_to_model(self) -> None:
+    def _apply_overrides_to_model(self, *, preserve_existing: bool = False) -> None:
         frame = self.model.frame()
         fabrication_frame = self._fabrication_table()
         self._refresh_fabrication_lookup_cache()
         index = self._load_video_index()
+        has_existing_frame = isinstance(frame, pd.DataFrame) and not frame.empty
+        should_rebuild = not has_existing_frame
         if (
-            (isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty)
-            or index
-            or not isinstance(frame, pd.DataFrame)
-            or frame.empty
+            not should_rebuild
+            and not preserve_existing
+            and (
+                (isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty)
+                or bool(index)
+            )
         ):
+            should_rebuild = True
+        if should_rebuild:
             frame = _video_index_to_frame(index, fabrication_frame)
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return
@@ -15444,8 +15784,8 @@ class _VideoReviewDialog(QtWidgets.QDialog):
 
     def _update_table_height(self) -> None:
         header = self.table.horizontalHeader()
-        header_height = header.height() if header is not None else 24
-        row_height = self.table.rowHeight(0) if self.table.rowCount() else 28
+        header_height = max(header.height(), 30) if header is not None else 30
+        row_height = max(self.table.rowHeight(0), 38) if self.table.rowCount() else 38
         frame = self.table.frameWidth() * 2
         target_height = header_height + row_height + frame + 4
         self.table.setFixedHeight(target_height)
@@ -15879,8 +16219,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_WIDTH
 
     def _preview_icon_height(self) -> int:
         return ANNEALING_GRAPH_HEIGHT
@@ -15899,8 +16238,12 @@ class VsmHysteresisSection(MiniDatabaseSection):
             pass
         header = table.verticalHeader()
         if header is not None:
+            row_height = max(height + 24, ANNEALING_GRAPH_HEIGHT + 24)
             try:
-                header.setDefaultSectionSize(max(height + 24, ANNEALING_GRAPH_HEIGHT + 24))
+                header.setDefaultSectionSize(row_height)
+                header.setMinimumSectionSize(row_height)
+                for row_index in range(table.model().rowCount() if table.model() is not None else 0):
+                    header.resizeSection(row_index, row_height)
             except Exception:
                 pass
         self._auto_fit_columns()
@@ -16273,8 +16616,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_WIDTH
 
     def _preview_icon_height(self) -> int:
         return ANNEALING_GRAPH_HEIGHT
@@ -16293,8 +16635,12 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             pass
         header = table.verticalHeader()
         if header is not None:
+            row_height = max(height + 24, ANNEALING_GRAPH_HEIGHT + 24)
             try:
-                header.setDefaultSectionSize(max(height + 24, ANNEALING_GRAPH_HEIGHT + 24))
+                header.setMinimumSectionSize(row_height)
+                header.setDefaultSectionSize(row_height)
+                for row_index in range(table.model().rowCount() if table.model() is not None else 0):
+                    header.resizeSection(row_index, row_height)
             except Exception:
                 pass
         self._auto_fit_columns()
@@ -16327,12 +16673,12 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             )
             pixmaps = [item.pixmap for item in items if item.pixmap is not None]
             if pixmaps:
-                pixmap = _combine_pixmaps_side_by_side(
+                pixmap = _combine_pixmaps_vertical(
                     pixmaps,
                     width_px=self._preview_icon_width(),
                     height_px=self._preview_icon_height(),
                     spacing=self._preview_spacing,
-                    scale_to_fit=False,
+                    scale_to_fit=True,
                 )
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
@@ -16688,8 +17034,7 @@ class DmaIsoStressSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_WIDTH
 
     def _preview_icon_height(self) -> int:
         return ANNEALING_GRAPH_HEIGHT
@@ -16742,12 +17087,12 @@ class DmaIsoStressSection(MiniDatabaseSection):
             )
             pixmaps = [item.pixmap for item in items if item.pixmap is not None]
             if pixmaps:
-                pixmap = _combine_pixmaps_side_by_side(
+                pixmap = _combine_pixmaps_vertical(
                     pixmaps,
                     width_px=self._preview_icon_width(),
                     height_px=self._preview_icon_height(),
                     spacing=self._preview_spacing,
-                    scale_to_fit=False,
+                    scale_to_fit=True,
                 )
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
@@ -16880,6 +17225,16 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
     section_key = "shape_memory_stress_strain"
     section_title = "Shape memory stress/strain"
     supported_suffixes = (".txt",)
+    HIDDEN_SECTION_COLUMNS = (
+        "Sample",
+        "_sample",
+        "_group_key",
+        "_sources",
+        _SHAPE_MEMORY_GROUP_KEY_COLUMN,
+        _SHAPE_MEMORY_GROUP_ORDER_COLUMN,
+        _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN,
+        _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
+    )
     VALUE_COLUMNS = [
         SHAPE_MEMORY_DISPLACEMENT_COLUMN,
         SHAPE_MEMORY_LOAD_COLUMN,
@@ -16907,17 +17262,20 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._record_groups_by_key: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
         self._hidden_paths: Set[str] = set()
         self._all_records: List[ShapeMemoryStressStrainRecord] = []
+        self._records_by_path: Dict[str, ShapeMemoryStressStrainRecord] = {}
         self._microscope_snapshot: pd.DataFrame | None = None
         self._preview_group_count = 1
         self._preview_spacing = 6
         self._table_splitter: QtWidgets.QSplitter | None = None
         self._preview_panel: _ShapeMemoryPreviewPanel | None = None
         self._preview_toggle: QtWidgets.QCheckBox | None = None
+        self._graph_column_toggle: QtWidgets.QCheckBox | None = None
         super().__init__(logger, log_callback, parent)
         self._normalise_value_columns()
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
+            self.model.set_background_provider(self._background_brush_for_cell)
         self.open_graphs_button = QtWidgets.QPushButton("Open graphs")
         self.open_graphs_button.clicked.connect(self._open_selected_graphs)
         self.controls_layout.addWidget(self.open_graphs_button)
@@ -16933,6 +17291,12 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         )
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
+        self.clear_values_button = QtWidgets.QPushButton("Clear selected values")
+        self.clear_values_button.setToolTip(
+            "Clear saved standard/fracture values for the selected shape-memory rows."
+        )
+        self.clear_values_button.clicked.connect(self._clear_selected_values)
+        self.controls_layout.addWidget(self.clear_values_button)
         self.visibility_button = QtWidgets.QPushButton("Visibility...")
         self.visibility_button.setToolTip(
             "Show or hide specific shape-memory graphs."
@@ -16943,6 +17307,10 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._preview_toggle.setChecked(self._preview_panel_visible())
         self._preview_toggle.toggled.connect(self._toggle_preview_panel)
         self.controls_layout.addWidget(self._preview_toggle)
+        self._graph_column_toggle = QtWidgets.QCheckBox("Show graph column")
+        self._graph_column_toggle.setChecked(self._graph_column_visible())
+        self._graph_column_toggle.toggled.connect(self._toggle_graph_column)
+        self.controls_layout.addWidget(self._graph_column_toggle)
         header = self.table_view.verticalHeader() if self.table_view is not None else None
         if header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
@@ -16952,7 +17320,9 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         if selection_model is not None:
             selection_model.selectionChanged.connect(self._handle_selection_changed)
         self._refresh_record_groups()
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._expand_rows_per_graph()
+        self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
@@ -16986,7 +17356,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         splitter.addWidget(table)
         preview_panel = _ShapeMemoryPreviewPanel(self.logger, splitter)
         preview_panel.pointPicked.connect(self._apply_picked_selection)
-        preview_panel.currentRecordChanged.connect(self._update_preview)
+        preview_panel.currentRecordChanged.connect(self._sync_preview_saved_values)
         splitter.addWidget(preview_panel)
         self._preview_panel = preview_panel
         self._table_splitter = splitter
@@ -17072,7 +17442,15 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
             sample_column="_sample",
         )
+        for column in (
+            list(_SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS)
+            + list(_SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS)
+        ):
+            if column not in table.columns:
+                table[column] = None
         existing_entries = self.entries_snapshot()
+        existing_record_entries = self.record_entries_snapshot()
+        records_by_key = _group_graph_records_by_key(records)
         if existing_entries:
             for row_index, row in table.iterrows():
                 row_key = _row_to_microwire_key(row)
@@ -17086,9 +17464,42 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                         table[column] = None
                     if column in payload:
                         table.at[row_index, column] = payload.get(column)
-        for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
-            if column not in table.columns:
-                table[column] = None
+        if existing_record_entries:
+            for row_index, row in table.iterrows():
+                row_key = _row_to_microwire_key(row)
+                if not row_key:
+                    continue
+                standard_entry: Dict[str, Any] = {}
+                fracture_entry: Dict[str, Any] = {}
+                for record in records_by_key.get(row_key, []):
+                    path_key = _record_path_key(record)
+                    if not path_key:
+                        continue
+                    entry = existing_record_entries.get(path_key, {})
+                    if not isinstance(entry, dict) or not entry:
+                        continue
+                    if _shape_memory_is_fracture_record(record):
+                        for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
+                            if column in entry and column not in fracture_entry:
+                                fracture_entry[column] = entry[column]
+                    else:
+                        for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
+                            if column in entry and column not in standard_entry:
+                                standard_entry[column] = entry[column]
+                for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
+                    if (
+                        column in standard_entry
+                        and column in table.columns
+                        and not _shape_memory_has_value(table.at[row_index, column])
+                    ):
+                        table.at[row_index, column] = standard_entry[column]
+                for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
+                    if (
+                        column in fracture_entry
+                        and column in table.columns
+                        and not _shape_memory_has_value(table.at[row_index, column])
+                    ):
+                        table.at[row_index, column] = fracture_entry[column]
         return SectionProcessResult(
             table=table,
             processed=processed,
@@ -17099,7 +17510,9 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         super().refresh()
         self._normalise_value_columns()
         self._refresh_record_groups()
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._expand_rows_per_graph()
+        self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
@@ -17158,27 +17571,140 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
         self._refresh_record_groups()
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._expand_rows_per_graph()
+        self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
+
+    def _saved_records_for_rows(
+        self,
+        rows: Sequence[pd.Series] | pd.DataFrame,
+    ) -> List[ShapeMemoryStressStrainRecord]:
+        if isinstance(rows, pd.DataFrame):
+            row_iterable = [row for _, row in rows.iterrows()]
+        else:
+            row_iterable = list(rows)
+        if not row_iterable:
+            return []
+
+        sample = ""
+        source_order: List[str] = []
+        source_labels: Dict[str, Optional[str]] = {}
+
+        for row in row_iterable:
+            sample = sample or (_row_sample_value(row) or "")
+            raw_sources = row.get("_sources")
+            if isinstance(raw_sources, str):
+                source_values = [raw_sources]
+            elif isinstance(raw_sources, (list, tuple, set)):
+                source_values = [str(value) for value in raw_sources if str(value or "").strip()]
+            else:
+                source_values = []
+            source_values = [value.strip() for value in source_values if value.strip()]
+            if not source_values:
+                continue
+
+            raw_labels = row.get(SHAPE_MEMORY_STRESS_STRAIN_COLUMN)
+            if isinstance(raw_labels, str):
+                label_values = [raw_labels.strip()]
+            elif isinstance(raw_labels, (list, tuple, set)):
+                label_values = [
+                    str(value).strip() for value in raw_labels if str(value or "").strip()
+                ]
+            else:
+                label_values = []
+
+            for index, source_text in enumerate(source_values):
+                if source_text not in source_order:
+                    source_order.append(source_text)
+                label = (
+                    label_values[index]
+                    if index < len(label_values) and label_values[index]
+                    else None
+                )
+                if label and source_text not in source_labels:
+                    source_labels[source_text] = label
+
+        saved_records: List[ShapeMemoryStressStrainRecord] = []
+        for source_text in source_order:
+            try:
+                source_path = Path(source_text)
+            except Exception:
+                continue
+            saved_records.append(
+                ShapeMemoryStressStrainRecord(
+                    path=source_path,
+                    sample=sample or source_path.stem,
+                    data=pd.DataFrame(),
+                    key=None,
+                    label=source_labels.get(source_text),
+                )
+            )
+        return saved_records
+
+    @staticmethod
+    def _group_rows_for_expansion(frame: pd.DataFrame) -> List[Tuple[str, List[pd.Series]]]:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return []
+        keyed = frame.copy()
+        expand_keys: List[str] = []
+        expand_orders: List[float] = []
+        for idx, (_, row) in enumerate(keyed.iterrows()):
+            row_key = _row_to_microwire_key(row)
+            group_key = str(row.get(_SHAPE_MEMORY_GROUP_KEY_COLUMN) or row_key or "").strip()
+            if _shape_memory_row_has_record_metadata(row) and group_key:
+                expand_keys.append(group_key)
+            else:
+                expand_keys.append(f"row-{idx}")
+            if _SHAPE_MEMORY_GROUP_ORDER_COLUMN in keyed.columns:
+                try:
+                    order_value = float(row.get(_SHAPE_MEMORY_GROUP_ORDER_COLUMN))
+                except Exception:
+                    order_value = float(idx)
+            else:
+                order_value = float(idx)
+            expand_orders.append(order_value)
+        keyed["_shape_memory_expand_key"] = expand_keys
+        keyed["_shape_memory_expand_order"] = expand_orders
+        grouped_rows: List[Tuple[str, List[pd.Series]]] = []
+        grouped = keyed.sort_values(
+            by=["_shape_memory_expand_order"],
+            kind="stable",
+        ).groupby("_shape_memory_expand_key", sort=False)
+        for group_key, group in grouped:
+            group_frame = group.drop(
+                columns=["_shape_memory_expand_key", "_shape_memory_expand_order"]
+            )
+            grouped_rows.append((str(group_key), [row for _, row in group_frame.iterrows()]))
+        return grouped_rows
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
         self._normalise_value_columns()
         self._refresh_record_groups()
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._expand_rows_per_graph()
+        self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
     def _refresh_record_groups(self) -> None:
         grouped: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
-        try:
-            payload = self.store.load_payload("shape_memory_stress_strain_records")
-        except Exception:
-            payload = None
+        payload = None
+        if _section_payload_enabled(self, "shape_memory_stress_strain_records"):
+            try:
+                payload = self.store.load_payload("shape_memory_stress_strain_records")
+            except Exception:
+                payload = None
         all_records = list(payload) if isinstance(payload, list) else []
         self._all_records = list(all_records)
         visible_records = self._visible_records(all_records)
+        self._records_by_path = {}
+        for record in visible_records:
+            path_key = _record_path_key(record)
+            if path_key:
+                self._records_by_path[path_key] = record
         if visible_records:
             for record in visible_records:
                 sample = getattr(record, "sample", None)
@@ -17225,9 +17751,255 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             except Exception:
                 pass
 
+    def _expand_rows_per_graph(self) -> None:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+
+        sample_entries = self.entries_snapshot()
+        record_entries = self.record_entries_snapshot()
+        microscope_frame = (
+            self._microscope_snapshot.copy()
+            if isinstance(self._microscope_snapshot, pd.DataFrame)
+            else MiniDatabaseStore("microscope").load().table
+        )
+        microscope_lookup = _microscope_diameter_lookup(microscope_frame)
+        expanded_rows: List[Dict[str, Any]] = []
+
+        for idx, (sample_group_key, group_rows) in enumerate(
+            self._group_rows_for_expansion(frame)
+        ):
+            if not group_rows:
+                continue
+            base_row = group_rows[0]
+            row_dict = dict(base_row)
+            row_key = ""
+            sample_entry: Dict[str, Any] = {}
+            standard_source = ""
+            fracture_source = ""
+            diameter_um: Optional[float] = None
+            for group_row in group_rows:
+                group_row_key = _row_to_microwire_key(group_row)
+                if group_row_key and not row_key:
+                    row_key = group_row_key
+                    sample_entry = sample_entries.get(group_row_key, {})
+                if not standard_source:
+                    standard_source = str(
+                        group_row.get(_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN) or ""
+                    ).strip()
+                if not fracture_source:
+                    fracture_source = str(
+                        group_row.get(_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN) or ""
+                    ).strip()
+                if diameter_um is None:
+                    try:
+                        candidate_diameter = float(group_row.get(MICROSCOPE_D_COLUMN))
+                    except Exception:
+                        candidate_diameter = None
+                    if candidate_diameter is not None:
+                        diameter_um = candidate_diameter
+            if diameter_um is None and row_key:
+                diameter_um = microscope_lookup.get(row_key)
+
+            records = self._records_for_row(base_row)
+            if not records:
+                records = self._saved_records_for_rows(group_rows)
+            if not records:
+                for order, group_row in enumerate(group_rows):
+                    if not (
+                        _shape_memory_row_has_record_metadata(group_row)
+                        or _shape_memory_row_has_saved_payload(group_row)
+                    ):
+                        continue
+                    preserved_row = dict(group_row)
+                    preserved_row[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = sample_group_key
+                    preserved_row[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
+                    expanded_rows.append(preserved_row)
+                continue
+
+            standard_count = sum(
+                1 for record in records if not _shape_memory_is_fracture_record(record)
+            )
+            fracture_count = sum(
+                1 for record in records if _shape_memory_is_fracture_record(record)
+            )
+
+            def _record_sort_key(record: ShapeMemoryStressStrainRecord) -> Tuple[int, float, int, str]:
+                current = _shape_memory_current_mA_from_record(record)
+                try:
+                    numeric = float(current) if current is not None else math.inf
+                except Exception:
+                    numeric = math.inf
+                is_fracture = 1 if _shape_memory_is_fracture_record(record) else 0
+                label = _record_label_for_display(record)
+                return (0 if math.isfinite(numeric) else 1, numeric, is_fracture, label.casefold())
+
+            for order, record in enumerate(sorted(records, key=_record_sort_key)):
+                path_key = _record_path_key(record) or ""
+                entry = record_entries.get(path_key, {})
+                is_fracture = _shape_memory_is_fracture_record(record)
+                current_value = _shape_memory_current_mA_from_record(record)
+                density = _current_density_from_diameter_um(current_value, diameter_um)
+                new_row = dict(row_dict)
+                new_row["_sources"] = [path_key] if path_key else []
+                new_row[SHAPE_MEMORY_STRESS_STRAIN_COLUMN] = _record_label_for_display(record)
+                for column in _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS:
+                    new_row[column] = None
+                for column in _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS:
+                    new_row[column] = None
+                new_row[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+                new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+                new_row[_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] = None
+                new_row[_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN] = None
+
+                if is_fracture:
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = current_value
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = density
+                    new_row[_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN] = path_key or None
+                else:
+                    new_row[SHAPE_MEMORY_CURRENT_COLUMN] = current_value
+                    new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = density
+                    new_row[_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] = path_key or None
+
+                standard_entry: Dict[str, Any] = {}
+                fracture_entry: Dict[str, Any] = {}
+                standard_current_confirmed = False
+                fracture_current_confirmed = False
+                if is_fracture:
+                    for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
+                        if column in entry:
+                            fracture_entry[column] = entry[column]
+                    if fracture_entry:
+                        fracture_current_confirmed = True
+                    if not fracture_entry and fracture_source and path_key == fracture_source:
+                        for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
+                            if column in sample_entry:
+                                fracture_entry[column] = sample_entry[column]
+                        if fracture_entry:
+                            fracture_current_confirmed = True
+                    elif not fracture_entry and not fracture_source and fracture_count == 1:
+                        for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS:
+                            if column in sample_entry:
+                                fracture_entry[column] = sample_entry[column]
+                else:
+                    for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
+                        if column in entry:
+                            standard_entry[column] = entry[column]
+                    if standard_entry:
+                        standard_current_confirmed = True
+                    if not standard_entry and standard_source and path_key == standard_source:
+                        for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
+                            if column in sample_entry:
+                                standard_entry[column] = sample_entry[column]
+                        if standard_entry:
+                            standard_current_confirmed = True
+                    elif not standard_entry and not standard_source and standard_count == 1:
+                        for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS:
+                            if column in sample_entry:
+                                standard_entry[column] = sample_entry[column]
+
+                for column in _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS:
+                    if column in standard_entry:
+                        new_row[column] = standard_entry[column]
+                for column in _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS:
+                    if column in fracture_entry:
+                        new_row[column] = fracture_entry[column]
+                if not standard_current_confirmed:
+                    new_row[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+                    new_row[_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] = None
+                if not fracture_current_confirmed:
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+                    new_row[_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN] = None
+                if not _shape_memory_payload_has_values(
+                    new_row,
+                    _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS,
+                ):
+                    new_row[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+                    new_row[_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] = None
+                if not _shape_memory_payload_has_values(
+                    new_row,
+                    _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS,
+                ):
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+                    new_row[_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN] = None
+                new_row[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = sample_group_key
+                new_row[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
+                expanded_rows.append(new_row)
+
+        if not expanded_rows:
+            return
+        expanded_frame = pd.DataFrame(expanded_rows)
+        if frame.columns.equals(expanded_frame.columns) and expanded_frame.equals(frame):
+            return
+        self.data.table = expanded_frame
+        self.model.set_frame(expanded_frame)
+
+    def _records_for_row(self, row: pd.Series) -> List[ShapeMemoryStressStrainRecord]:
+        sources = row.get("_sources")
+        if isinstance(sources, (list, tuple, set)):
+            matched: List[ShapeMemoryStressStrainRecord] = []
+            for source in sources:
+                path_key = str(source or "").strip()
+                if not path_key:
+                    continue
+                record = self._records_by_path.get(path_key)
+                if record is not None:
+                    matched.append(record)
+            if matched:
+                return matched
+        sample = _row_sample_value(row)
+        if sample:
+            matched = self._record_groups.get(sample, [])
+            if matched:
+                return list(matched)
+        row_key = _row_to_microwire_key(row)
+        if row_key:
+            matched = self._record_groups_by_key.get(row_key, [])
+            if matched:
+                return list(matched)
+        return []
+
+    def _background_brush_for_cell(
+        self,
+        row: pd.Series,
+        column_label: str,
+    ) -> Optional[QtGui.QBrush]:
+        _ = column_label
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return None
+        try:
+            row_idx = int(row.name)
+        except Exception:
+            return None
+        if row_idx < 0 or row_idx >= len(frame.index):
+            return None
+
+        group_index = 0
+        previous_group: Optional[str] = None
+        for idx in range(row_idx + 1):
+            current_row = frame.iloc[idx]
+            current_group = str(
+                current_row.get(_SHAPE_MEMORY_GROUP_KEY_COLUMN)
+                or _row_to_microwire_key(current_row)
+                or f"row-{idx}"
+            )
+            if previous_group is None:
+                previous_group = current_group
+            elif current_group != previous_group:
+                group_index += 1
+                previous_group = current_group
+        color = QtGui.QColor("#1a1a1a" if group_index % 2 == 0 else "#202733")
+        return QtGui.QBrush(color)
+
     def _preview_icon_width(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_WIDTH
 
     def _preview_icon_height(self) -> int:
         return ANNEALING_GRAPH_HEIGHT
@@ -17235,6 +18007,31 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
     def _update_preview_icon_size(self) -> None:
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
+            return
+        if not self._graph_column_visible():
+            try:
+                icon_extent = table.style().pixelMetric(
+                    QtWidgets.QStyle.PixelMetric.PM_SmallIconSize
+                )
+            except Exception:
+                icon_extent = 16
+            if icon_extent <= 0:
+                icon_extent = 16
+            try:
+                table.setIconSize(QtCore.QSize(icon_extent, icon_extent))
+            except Exception:
+                pass
+            header = table.verticalHeader()
+            if header is not None:
+                row_height = table.fontMetrics().height() + 8
+                try:
+                    header.setMinimumSectionSize(max(1, row_height))
+                    header.setDefaultSectionSize(row_height)
+                    for row_index in range(table.model().rowCount() if table.model() is not None else 0):
+                        header.resizeSection(row_index, row_height)
+                except Exception:
+                    pass
+            self._auto_fit_columns()
             return
         width = self._preview_icon_width()
         height = self._preview_icon_height()
@@ -17246,8 +18043,12 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             pass
         header = table.verticalHeader()
         if header is not None:
+            row_height = max(height + 24, ANNEALING_GRAPH_HEIGHT + 24)
             try:
-                header.setDefaultSectionSize(max(height + 24, ANNEALING_GRAPH_HEIGHT + 24))
+                header.setMinimumSectionSize(row_height)
+                header.setDefaultSectionSize(row_height)
+                for row_index in range(table.model().rowCount() if table.model() is not None else 0):
+                    header.resizeSection(row_index, row_height)
             except Exception:
                 pass
         self._auto_fit_columns()
@@ -17262,14 +18063,15 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         sample = _row_sample_value(row)
         if not sample:
             return None
-        cache_key = f"{sample}|{column}"
+        sources = row.get("_sources")
+        if isinstance(sources, (list, tuple, set)):
+            source_key = "|".join(str(source) for source in sources if source)
+        else:
+            source_key = ""
+        cache_key = f"{sample}|{column}|{source_key}"
         if cache_key in self._pixmap_cache:
             return self._pixmap_cache[cache_key]
-        records = self._record_groups.get(sample, [])
-        if not records:
-            row_key = _row_to_microwire_key(row)
-            if row_key:
-                records = self._record_groups_by_key.get(row_key, [])
+        records = self._records_for_row(row)
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
             items = _shape_memory_stress_strain_preview_items(
@@ -17280,12 +18082,12 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             )
             pixmaps = [item.pixmap for item in items if item.pixmap is not None]
             if pixmaps:
-                pixmap = _combine_pixmaps_side_by_side(
+                pixmap = _combine_pixmaps_vertical(
                     pixmaps,
                     width_px=self._preview_icon_width(),
                     height_px=self._preview_icon_height(),
                     spacing=self._preview_spacing,
-                    scale_to_fit=False,
+                    scale_to_fit=True,
                 )
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
@@ -17299,15 +18101,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             series = self._row_series(row_index)
             if series is None:
                 continue
-            sample = _row_sample_value(series)
-            if not sample:
-                continue
-            matched = self._record_groups.get(sample, [])
-            if not matched:
-                row_key = _row_to_microwire_key(series)
-                if row_key:
-                    matched = self._record_groups_by_key.get(row_key, [])
-            records.extend(matched)
+            records.extend(self._records_for_row(series))
         return records
 
     def _selected_preview_records(self) -> List[ShapeMemoryStressStrainRecord]:
@@ -17317,13 +18111,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         series = self._row_series(rows[0])
         if series is None:
             return []
-        sample = _row_sample_value(series)
-        matched = self._record_groups.get(sample, []) if sample else []
-        if not matched:
-            row_key = _row_to_microwire_key(series)
-            if row_key:
-                matched = self._record_groups_by_key.get(row_key, [])
-        return list(matched)
+        return list(self._records_for_row(series))
 
     def _update_preview(self) -> None:
         panel = self._preview_panel
@@ -17336,6 +18124,12 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         first = records[0]
         title = getattr(first, "sample", None) or self.section_title
         panel.update_selection(str(title), records)
+        self._sync_preview_saved_values()
+
+    def _sync_preview_saved_values(self) -> None:
+        panel = self._preview_panel
+        if panel is None:
+            return
         rows = self._selected_rows()
         selection_row = None
         if rows:
@@ -17367,14 +18161,13 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             key = _row_to_microwire_key(row)
             if not key:
                 continue
-            entry: Dict[str, Any] = {}
+            entry = snapshot.setdefault(key, {})
             for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
                 value = row.get(column)
-                if value in (None, ""):
+                if not _shape_memory_has_value(value):
                     continue
-                entry[column] = value
-            if entry:
-                snapshot[key] = entry
+                if column not in entry:
+                    entry[column] = value
         return snapshot
 
     def record_entries_snapshot(self) -> Dict[str, Dict[str, Any]]:
@@ -17386,11 +18179,14 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             if not isinstance(key, str) or not isinstance(value, dict):
                 continue
             cleaned: Dict[str, Any] = {}
-            for column in self.VALUE_COLUMNS + self.FRACTURE_COLUMNS:
+            for column in (
+                list(_SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS)
+                + list(_SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS)
+            ):
                 if column not in value:
                     continue
                 payload = value.get(column)
-                if payload in (None, ""):
+                if not _shape_memory_has_value(payload):
                     continue
                 cleaned[column] = payload
             if cleaned:
@@ -17400,6 +18196,10 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
     def set_microscope_snapshot(self, frame: pd.DataFrame | None) -> None:
         self._microscope_snapshot = frame.copy() if isinstance(frame, pd.DataFrame) else None
         self._normalise_value_columns()
+        self._refresh_record_groups()
+        self._expand_rows_per_graph()
+        self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         self._update_preview()
 
     def _shape_memory_selection_from_row(
@@ -17481,13 +18281,125 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             stress_mpa=stress_mpa,
         )
 
+    @staticmethod
+    def _row_targets(row: pd.Series) -> Set[str]:
+        label = str(row.get(SHAPE_MEMORY_STRESS_STRAIN_COLUMN) or "").casefold()
+        targets: Set[str] = set()
+        if "fracture" in label:
+            targets.add("fracture")
+        else:
+            targets.add("standard")
+        return targets
+
+    def _clear_selected_values(self) -> None:
+        rows = self._selected_rows()
+        frame = self.model.frame()
+        if not rows or not isinstance(frame, pd.DataFrame) or frame.empty:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to clear their saved values.",
+            )
+            return
+        updated = frame.copy()
+        raw = self.data.extra.get("record_entries")
+        raw_entries = dict(raw) if isinstance(raw, dict) else {}
+        changed = False
+
+        for row_index in rows:
+            if row_index < 0 or row_index >= len(updated.index):
+                continue
+            row = updated.iloc[row_index]
+            path_keys = [
+                str(path).strip()
+                for path in row.get("_sources", [])
+                if str(path or "").strip()
+            ]
+            if not path_keys:
+                standard_source = str(
+                    row.get(_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN) or ""
+                ).strip()
+                fracture_source = str(
+                    row.get(_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN) or ""
+                ).strip()
+                path_keys = [value for value in (standard_source, fracture_source) if value]
+
+            for target in self._row_targets(row):
+                if target == "fracture":
+                    columns = [
+                        SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
+                    ]
+                    entry_columns = [
+                        SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
+                        SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
+                    ]
+                else:
+                    columns = [
+                        SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                        SHAPE_MEMORY_LOAD_COLUMN,
+                        SHAPE_MEMORY_STRAIN_COLUMN,
+                        SHAPE_MEMORY_STRESS_COLUMN,
+                        SHAPE_MEMORY_CURRENT_COLUMN,
+                        SHAPE_MEMORY_CURRENT_DENSITY_COLUMN,
+                    ]
+                    entry_columns = [
+                        SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                        SHAPE_MEMORY_LOAD_COLUMN,
+                        SHAPE_MEMORY_STRAIN_COLUMN,
+                        SHAPE_MEMORY_STRESS_COLUMN,
+                        SHAPE_MEMORY_CURRENT_COLUMN,
+                        SHAPE_MEMORY_CURRENT_DENSITY_COLUMN,
+                    ]
+                for column in columns:
+                    if column in updated.columns:
+                        updated.at[row_index, column] = None
+                        changed = True
+                for path_key in path_keys:
+                    entry = raw_entries.get(path_key)
+                    if not isinstance(entry, dict):
+                        continue
+                    trimmed = dict(entry)
+                    for column in entry_columns:
+                        trimmed.pop(column, None)
+                    if trimmed:
+                        raw_entries[path_key] = trimmed
+                    else:
+                        raw_entries.pop(path_key, None)
+                    changed = True
+
+        if not changed:
+            return
+        self.data.table = updated
+        self.data.extra["record_entries"] = raw_entries
+        self.model.set_frame(updated)
+        self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
+        self._update_preview()
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to persist cleared shape-memory values")
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
+
     def _normalise_value_columns(self) -> None:
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame):
             return
         updated = frame.copy()
         changed = False
-        for old_name, new_name in _SHAPE_MEMORY_COLUMN_ALIASES.items():
+        legacy_aliases = dict(_SHAPE_MEMORY_COLUMN_ALIASES)
+        legacy_aliases.update(_SHAPE_MEMORY_CURRENT_COLUMN_ALIASES)
+        for old_name, new_name in legacy_aliases.items():
             if old_name not in updated.columns:
                 continue
             if new_name not in updated.columns:
@@ -17513,17 +18425,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             if isinstance(self._microscope_snapshot, pd.DataFrame)
             else MiniDatabaseStore("microscope").load().table
         )
-        microscope_lookup: Dict[str, Optional[float]] = {}
-        if isinstance(microscope_frame, pd.DataFrame) and not microscope_frame.empty and "_key" in microscope_frame.columns:
-            for _, row in microscope_frame.iterrows():
-                key = _row_to_microwire_key(row)
-                if not key:
-                    continue
-                try:
-                    d_value = float(row.get(MICROSCOPE_D_COLUMN))
-                except Exception:
-                    d_value = math.nan
-                microscope_lookup[key] = d_value if math.isfinite(d_value) and d_value > 0 else None
+        microscope_lookup = _microscope_diameter_lookup(microscope_frame)
         for row_index, row in updated.iterrows():
             row_key = _row_to_microwire_key(row)
             sources = row.get("_sources")
@@ -17553,21 +18455,26 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 source_column: str,
                 values: List[float],
             ) -> None:
-                source_text = str(updated.at[row_index, source_column] or "").strip()
+                raw_source_value = updated.at[row_index, source_column]
+                source_text = (
+                    str(raw_source_value).strip()
+                    if _shape_memory_has_value(raw_source_value)
+                    else ""
+                )
                 chosen_current: Optional[float] = None
                 if source_text:
                     chosen_current = _shape_memory_current_mA_from_record(
                         ShapeMemoryStressStrainRecord(path=Path(source_text), sample="", data=pd.DataFrame())
                     )
-                elif values:
-                    unique = list(dict.fromkeys(float(v) for v in values))
-                    if len(unique) == 1:
-                        chosen_current = unique[0]
-                if updated.at[row_index, column] in (None, ""):
+                if not _shape_memory_has_value(updated.at[row_index, column]):
                     updated.at[row_index, column] = chosen_current
                     if chosen_current is not None:
                         changed = True
-                if updated.at[row_index, density_column] in (None, "") and row_key and chosen_current is not None:
+                if (
+                    not _shape_memory_has_value(updated.at[row_index, density_column])
+                    and row_key
+                    and chosen_current is not None
+                ):
                     diameter_um = microscope_lookup.get(row_key)
                     if diameter_um is None:
                         return
@@ -17589,31 +18496,22 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
                 _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
                 fracture_currents,
             )
-            standard_has_values = any(
-                updated.at[row_index, column] not in (None, "")
-                and not (isinstance(updated.at[row_index, column], float) and math.isnan(updated.at[row_index, column]))
-                for column in (
-                    SHAPE_MEMORY_DISPLACEMENT_COLUMN,
-                    SHAPE_MEMORY_LOAD_COLUMN,
-                    SHAPE_MEMORY_STRAIN_COLUMN,
-                    SHAPE_MEMORY_STRESS_COLUMN,
-                )
+            standard_has_values = _shape_memory_payload_has_values(
+                updated.loc[row_index],
+                _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS,
             )
             if not standard_has_values:
                 updated.at[row_index, SHAPE_MEMORY_CURRENT_COLUMN] = None
                 updated.at[row_index, SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
-            fracture_has_values = any(
-                updated.at[row_index, column] not in (None, "")
-                and not (isinstance(updated.at[row_index, column], float) and math.isnan(updated.at[row_index, column]))
-                for column in (
-                    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
-                    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
-                    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
-                )
+                updated.at[row_index, _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN] = None
+            fracture_has_values = _shape_memory_payload_has_values(
+                updated.loc[row_index],
+                _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS,
             )
             if not fracture_has_values:
                 updated.at[row_index, SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
                 updated.at[row_index, SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+                updated.at[row_index, _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN] = None
         if changed or not frame.columns.equals(updated.columns) or not updated.equals(frame):
             self.data.table = updated
             self.model.set_frame(updated)
@@ -17624,16 +18522,55 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
 
     def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
         super().apply_data(data)
+        if self._preview_toggle is not None:
+            blocker = QtCore.QSignalBlocker(self._preview_toggle)
+            self._preview_toggle.setChecked(self._preview_panel_visible())
+            del blocker
+        if self._graph_column_toggle is not None:
+            blocker = QtCore.QSignalBlocker(self._graph_column_toggle)
+            self._graph_column_toggle.setChecked(self._graph_column_visible())
+            del blocker
         self._normalise_value_columns()
         self._refresh_record_groups()
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._expand_rows_per_graph()
+        self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         self._toggle_preview_panel(self._preview_panel_visible())
         self._update_preview()
 
     def _preview_panel_visible(self) -> bool:
         extra = self.data.extra if isinstance(self.data.extra, dict) else {}
-        visible = extra.get("preview_panel_visible", True)
+        visible = extra.get("preview_panel_visible", False)
         return bool(visible)
+
+    def _graph_column_visible(self) -> bool:
+        extra = self.data.extra if isinstance(self.data.extra, dict) else {}
+        visible = extra.get("graph_column_visible", True)
+        return bool(visible)
+
+    def _hide_shape_memory_columns(self) -> None:
+        self._hide_columns(self.HIDDEN_SECTION_COLUMNS)
+
+    def _apply_graph_column_visibility(self) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or SHAPE_MEMORY_STRESS_STRAIN_COLUMN not in frame.columns:
+            return
+        column_index = int(frame.columns.get_loc(SHAPE_MEMORY_STRESS_STRAIN_COLUMN))
+        self.table_view.setColumnHidden(column_index, not self._graph_column_visible())
+        self._update_preview_icon_size()
+
+    def _toggle_graph_column(self, checked: bool) -> None:
+        extra = self.data.extra if isinstance(self.data.extra, dict) else {}
+        extra = dict(extra)
+        extra["graph_column_visible"] = bool(checked)
+        self.data.extra = extra
+        self._apply_graph_column_visibility()
+        try:
+            self.store.save(self.data)
+        except Exception:
+            pass
 
     def _toggle_preview_panel(self, checked: bool) -> None:
         extra = self.data.extra if isinstance(self.data.extra, dict) else {}
@@ -17726,7 +18663,8 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             updated.at[row_index, column] = value
         self.data.table = updated
         self.model.set_frame(updated)
-        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+        self._hide_shape_memory_columns()
+        self._apply_graph_column_visibility()
         try:
             if self.table_view is not None:
                 self.table_view.selectRow(row_index)
@@ -17741,10 +18679,23 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             if path_key:
                 record_entries = self.record_entries_snapshot()
                 entry = dict(record_entries.get(path_key, {}))
-                entry.update({key: value for key, value in updates.items() if value not in (None, "")})
+                bundle_columns = (
+                    _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS
+                    if target == "fracture"
+                    else _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS
+                )
+                for column in bundle_columns:
+                    value = updates.get(column)
+                    if _shape_memory_has_value(value):
+                        entry[column] = value
+                    else:
+                        entry.pop(column, None)
                 raw = self.data.extra.get("record_entries")
                 raw_entries = dict(raw) if isinstance(raw, dict) else {}
-                raw_entries[path_key] = entry
+                if entry:
+                    raw_entries[path_key] = entry
+                else:
+                    raw_entries.pop(path_key, None)
                 self.data.extra["record_entries"] = raw_entries
                 try:
                     self.store.save(self.data)
@@ -20323,6 +21274,7 @@ class CompareSection(MiniDatabaseSection):
         self._compare_view_mode = "matrix"
         self._compare_fields: Set[str] = set()
         self._compare_field_order: List[str] = []
+        self._matrix_view_dirty = True
         self._matrix_column_keys: Dict[str, str] = {}
         self._matrix_graph_rows: Set[str] = set()
         self._matrix_pixmap_cache: Dict[Tuple[object, ...], QtGui.QPixmap] = {}
@@ -20415,6 +21367,10 @@ class CompareSection(MiniDatabaseSection):
         self._set_compare_view_mode(self._compare_view_mode)
         self._update_preview_graph_buttons()
         self._update_status()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        self._update_matrix_view()
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         table = QtWidgets.QTableView(parent)
@@ -20547,6 +21503,8 @@ class CompareSection(MiniDatabaseSection):
         section = self.sections.get(section_key)
         if section is None:
             return None
+        if not _section_payload_enabled(section, name):
+            return None
         return section.store.load_payload(name)
 
     def _row_key(self, row: pd.Series) -> str:
@@ -20597,6 +21555,7 @@ class CompareSection(MiniDatabaseSection):
         self._update_compare_view_controls()
         self._update_preview_graph_buttons()
         self._update_graph_preview_panel()
+        self._update_matrix_view()
 
     def _update_compare_view_controls(self) -> None:
         is_matrix = self._compare_view_mode == "matrix"
@@ -20910,11 +21869,17 @@ class CompareSection(MiniDatabaseSection):
     def _update_matrix_view(self) -> None:
         if not hasattr(self, "matrix_model"):
             return
+        self._matrix_view_dirty = True
+        if self._compare_view_mode != "matrix":
+            return
+        if not self.isVisible():
+            return
         self._matrix_pixmap_cache.clear()
         matrix_frame = self._build_matrix_frame()
         self.matrix_model.set_frame(matrix_frame)
         self._update_matrix_row_heights()
         self._update_matrix_column_widths()
+        self._matrix_view_dirty = False
 
     def _record_signature(self, records: Sequence[object]) -> Tuple[str, ...]:
         signature: List[str] = []
@@ -21779,8 +22744,10 @@ class AssemblySection(QtWidgets.QWidget):
         self._imported_rows: Dict[str, Dict[str, Any]] = {}
         self._imported_sources: List[str] = []
         self._show_imported = True
+        self._show_oe_samples = False
         self._preview_search_text: str = ""
         self._project_path_getter: Callable[[], Optional[Path]] | None = None
+        self._preview_background_cache: Dict[Any, QtGui.QBrush] = {}
 
         self._output_dir = str(Path.cwd())
         self._output_name = DEFAULT_OUTPUT_NAME
@@ -21830,6 +22797,10 @@ class AssemblySection(QtWidgets.QWidget):
         self.graph_panel_checkbox.setChecked(False)
         self.graph_panel_checkbox.toggled.connect(self._toggle_graph_preview_panel)
         graph_row.addWidget(self.graph_panel_checkbox)
+        self.oe_samples_checkbox = QtWidgets.QCheckBox("Show oe samples")
+        self.oe_samples_checkbox.setChecked(self._show_oe_samples)
+        self.oe_samples_checkbox.toggled.connect(self.set_show_oe_samples)
+        graph_row.addWidget(self.oe_samples_checkbox)
         self.open_high_plot_button = QtWidgets.QPushButton("Open 1000 mA graph")
         self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
         self.open_high_plot_button.setEnabled(False)
@@ -22174,6 +23145,7 @@ class AssemblySection(QtWidgets.QWidget):
             ],
             "imported_sources": list(self._imported_sources),
             "show_imported": bool(self._show_imported),
+            "show_oe_samples": bool(self._show_oe_samples),
         }
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:
@@ -22277,6 +23249,15 @@ class AssemblySection(QtWidgets.QWidget):
         show_imported = payload.get("show_imported")
         if isinstance(show_imported, bool):
             self._show_imported = show_imported
+        show_oe_samples = payload.get("show_oe_samples")
+        if isinstance(show_oe_samples, bool):
+            self._show_oe_samples = show_oe_samples
+        if hasattr(self, "oe_samples_checkbox"):
+            try:
+                self.oe_samples_checkbox.blockSignals(True)
+                self.oe_samples_checkbox.setChecked(bool(self._show_oe_samples))
+            finally:
+                self.oe_samples_checkbox.blockSignals(False)
         self._measured_preview_frame = None
         self._raw_preview_frame = frame
         self._refresh_preview_frame()
@@ -22611,6 +23592,16 @@ class AssemblySection(QtWidgets.QWidget):
         else:
             self._update_preview(pd.DataFrame())
 
+    def set_show_oe_samples(self, enabled: bool) -> None:
+        self._show_oe_samples = bool(enabled)
+        if hasattr(self, "oe_samples_checkbox"):
+            try:
+                self.oe_samples_checkbox.blockSignals(True)
+                self.oe_samples_checkbox.setChecked(self._show_oe_samples)
+            finally:
+                self.oe_samples_checkbox.blockSignals(False)
+        self._refresh_preview_frame()
+
     def clear_imported_data(self) -> None:
         if not self._imported_rows and not self._imported_sources:
             return
@@ -22621,6 +23612,22 @@ class AssemblySection(QtWidgets.QWidget):
             self._update_preview(base_frame)
         else:
             self._update_preview(pd.DataFrame())
+
+    @staticmethod
+    def _row_is_oe_sample(row: pd.Series) -> bool:
+        key = _row_to_microwire_key(row)
+        if key:
+            parsed = _microwire_key_from_string(key)
+            if parsed is not None:
+                suffix = str(parsed[3] or "").strip().lower()
+                if suffix == "oe":
+                    return True
+        microwire = str(row.get("Microwire") or "").strip()
+        parsed = _microwire_parts_from_label_safe(microwire)
+        if parsed is None:
+            return False
+        suffix = str(parsed[2] or "").strip().lower()
+        return suffix == "oe"
         self._mark_dirty()
 
     def imported_sources(self) -> List[str]:
@@ -22685,10 +23692,28 @@ class AssemblySection(QtWidgets.QWidget):
         section = self.sections.get(section_key)
         if section is None:
             return None
+        if not _section_payload_enabled(section, name):
+            return None
         return section.store.load_payload(name)
 
     def _selected_sections(self) -> set[str]:
         return {key for key, enabled in self._section_states.items() if enabled}
+
+    @staticmethod
+    def _merge_fabrication_indexes(
+        base_index: FabricationIndex,
+        overlay_index: FabricationIndex,
+    ) -> FabricationIndex:
+        merged = FabricationIndex()
+        for (composition, draw), payload in getattr(base_index, "draw_level", {}).items():
+            merged.set_draw(str(composition), int(draw), dict(payload))
+        for (composition, draw, piece), payload in getattr(base_index, "piece_level", {}).items():
+            merged.set_piece(str(composition), int(draw), int(piece), dict(payload))
+        for (composition, draw), payload in getattr(overlay_index, "draw_level", {}).items():
+            merged.set_draw(str(composition), int(draw), dict(payload))
+        for (composition, draw, piece), payload in getattr(overlay_index, "piece_level", {}).items():
+            merged.set_piece(str(composition), int(draw), int(piece), dict(payload))
+        return merged
 
     def _prepare_builder_inputs(
         self,
@@ -22725,12 +23750,24 @@ class AssemblySection(QtWidgets.QWidget):
                 self.log(f"Skipping {label} because no data were found.", level=logging.WARNING)
 
         fabrication_index = FabricationIndex()
-        if "fabrication" in selected:
-            payload = self._load_payload("fabrication", "fabrication_index")
-            if isinstance(payload, FabricationIndex):
-                fabrication_index = payload
+        fabrication_payload = self._load_payload("fabrication", "fabrication_index")
+        if isinstance(fabrication_payload, FabricationIndex):
+            fabrication_index = fabrication_payload
+        fabrication_section = self.sections.get("fabrication")
+        fabrication_table = None
+        if isinstance(fabrication_section, FabricationSection):
+            if isinstance(fabrication_section.data.table, pd.DataFrame) and not fabrication_section.data.table.empty:
+                fabrication_table = fabrication_section.data.table
             else:
-                _mark_missing("fabrication")
+                fabrication_table = fabrication_section.model.frame()
+        table_index = self._fabrication_index_from_frame(fabrication_table)
+        if table_index.draw_level or table_index.piece_level:
+            fabrication_index = self._merge_fabrication_indexes(
+                fabrication_index,
+                table_index,
+            )
+        if "fabrication" in selected and not (fabrication_index.draw_level or fabrication_index.piece_level):
+            _mark_missing("fabrication")
 
         annealing_records_payload = self._load_payload("annealing", "annealing_records")
         annealing_records: List[MeasurementRecord] = []
@@ -22767,19 +23804,20 @@ class AssemblySection(QtWidgets.QWidget):
             )
 
         video_index: Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary] = {}
-        if "videos" in selected:
-            payload = self._load_payload("videos", "video_index")
-            if isinstance(payload, dict):
-                video_index = payload
-            else:
-                if require_payloads:
-                    self.log("Skipping videos because no data were found.", level=logging.WARNING)
-                else:
-                    _mark_missing("videos")
+        video_payload = self._load_payload("videos", "video_index")
+        if isinstance(video_payload, dict):
+            video_index = video_payload
         video_overrides: Dict[str, Dict[str, Any]] = {}
         video_section = self.sections.get("videos")
         if isinstance(video_section, VideoSection):
             video_overrides = video_section.overrides_snapshot()
+            if not video_index:
+                video_index = video_section._load_video_index()
+        if "videos" in selected and not video_index and not video_overrides:
+            if require_payloads:
+                self.log("Skipping videos because no data were found.", level=logging.WARNING)
+            else:
+                _mark_missing("videos")
 
         strain_records: Dict[MicrowireKey, StrainRecord] = {}
         if "strain" in selected:
@@ -23129,34 +24167,146 @@ class AssemblySection(QtWidgets.QWidget):
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return frame
         groups = self._ensure_shape_memory_stress_strain_groups()
+        section_row_map: Dict[str, List[pd.Series]] = {}
+        section_standard_entry_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        section_fracture_entry_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        section = self.sections.get("shape_memory_stress_strain")
+        if isinstance(section, ShapeMemoryStressStrainSection):
+            section_frame = section.model.frame()
+            if isinstance(section_frame, pd.DataFrame) and not section_frame.empty:
+                for _, candidate_row in section_frame.iterrows():
+                    section_key = _row_to_microwire_key(candidate_row)
+                    if not section_key:
+                        continue
+                    section_row_map.setdefault(section_key, []).append(candidate_row.copy())
+                    standard_source = str(
+                        candidate_row.get(_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN) or ""
+                    ).strip()
+                    if standard_source:
+                        entry = {
+                            column: candidate_row.get(column)
+                            for column in _SHAPE_MEMORY_STANDARD_ENTRY_COLUMNS
+                            if _shape_memory_has_value(candidate_row.get(column))
+                        }
+                        if entry:
+                            section_standard_entry_map.setdefault(section_key, {})[
+                                standard_source
+                            ] = entry
+                    fracture_source = str(
+                        candidate_row.get(_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN) or ""
+                    ).strip()
+                    if fracture_source:
+                        entry = {
+                            column: candidate_row.get(column)
+                            for column in _SHAPE_MEMORY_FRACTURE_ENTRY_COLUMNS
+                            if _shape_memory_has_value(candidate_row.get(column))
+                        }
+                        if entry:
+                            section_fracture_entry_map.setdefault(section_key, {})[
+                                fracture_source
+                            ] = entry
+
+        def _diameter_from_row_payload(payload: Mapping[str, Any]) -> Optional[float]:
+            for column in (MICROSCOPE_D_COLUMN, "d (µm)", "d (um)"):
+                try:
+                    value = payload.get(column)
+                except Exception:
+                    value = None
+                try:
+                    if value is not None:
+                        numeric = float(value)
+                        if math.isfinite(numeric) and numeric > 0:
+                            return numeric
+                except Exception:
+                    continue
+            return None
+
+        def _current_from_source_or_label(source_text: str, label_value: object) -> Optional[float]:
+            if source_text:
+                current = _shape_memory_current_mA_from_record(
+                    ShapeMemoryStressStrainRecord(path=Path(source_text), sample="", data=pd.DataFrame())
+                )
+                if current is not None:
+                    return current
+            if isinstance(label_value, (list, tuple, set)):
+                for item in label_value:
+                    current = _shape_memory_current_mA_from_text(item)
+                    if current is not None:
+                        return current
+                return None
+            return _shape_memory_current_mA_from_text(label_value)
+
+        def _expanded_row_from_section_row(
+            base_row: Mapping[str, Any],
+            section_row: pd.Series,
+            row_key: str,
+            order: int,
+        ) -> Optional[Dict[str, Any]]:
+            payload = dict(base_row)
+            section_payload = section_row.to_dict()
+            for column in (
+                SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+                "_sources",
+                _SHAPE_MEMORY_STANDARD_SOURCE_COLUMN,
+                _SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN,
+            ):
+                if column in section_payload:
+                    payload[column] = section_payload.get(column)
+            for column in _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS + _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS:
+                payload[column] = section_payload.get(column)
+            diameter_um = (
+                _diameter_from_row_payload(section_payload)
+                or _diameter_from_row_payload(payload)
+            )
+            standard_source = str(section_payload.get(_SHAPE_MEMORY_STANDARD_SOURCE_COLUMN) or "").strip()
+            fracture_source = str(section_payload.get(_SHAPE_MEMORY_FRACTURE_SOURCE_COLUMN) or "").strip()
+            payload[SHAPE_MEMORY_CURRENT_COLUMN] = None
+            payload[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+            payload[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+            payload[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
+            if _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS):
+                standard_current = _current_from_source_or_label(
+                    standard_source,
+                    section_payload.get(SHAPE_MEMORY_STRESS_STRAIN_COLUMN),
+                )
+                if standard_current is not None:
+                    payload[SHAPE_MEMORY_CURRENT_COLUMN] = standard_current
+                    payload[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = _current_density_from_diameter_um(
+                        standard_current,
+                        diameter_um,
+                    )
+            if _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS):
+                fracture_current = _current_from_source_or_label(
+                    fracture_source,
+                    section_payload.get(SHAPE_MEMORY_STRESS_STRAIN_COLUMN),
+                )
+                if fracture_current is not None:
+                    payload[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = fracture_current
+                    payload[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = _current_density_from_diameter_um(
+                        fracture_current,
+                        diameter_um,
+                    )
+            _clear_orphan_currents(payload)
+            if not (
+                _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS)
+                or _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS)
+            ):
+                return None
+            payload[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = row_key
+            payload[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
+            return payload
+
         def _clear_orphan_currents(payload: Dict[str, Any]) -> None:
-            standard_has_values = any(
-                payload.get(column) not in (None, "")
-                and not (
-                    isinstance(payload.get(column), float)
-                    and math.isnan(payload.get(column))
-                )
-                for column in (
-                    SHAPE_MEMORY_DISPLACEMENT_COLUMN,
-                    SHAPE_MEMORY_LOAD_COLUMN,
-                    SHAPE_MEMORY_STRAIN_COLUMN,
-                    SHAPE_MEMORY_STRESS_COLUMN,
-                )
+            standard_has_values = _shape_memory_payload_has_values(
+                payload,
+                _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS,
             )
             if not standard_has_values:
                 payload[SHAPE_MEMORY_CURRENT_COLUMN] = None
                 payload[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
-            fracture_has_values = any(
-                payload.get(column) not in (None, "")
-                and not (
-                    isinstance(payload.get(column), float)
-                    and math.isnan(payload.get(column))
-                )
-                for column in (
-                    SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
-                    SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
-                    SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
-                )
+            fracture_has_values = _shape_memory_payload_has_values(
+                payload,
+                _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS,
             )
             if not fracture_has_values:
                 payload[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
@@ -23166,11 +24316,24 @@ class AssemblySection(QtWidgets.QWidget):
         for idx, row in frame.iterrows():
             row_dict = dict(row)
             row_key = _row_to_microwire_key(pd.Series(row_dict))
+            section_standard_entries = section_standard_entry_map.get(row_key or "", {})
+            section_fracture_entries = section_fracture_entry_map.get(row_key or "", {})
             if not row_key:
                 row_dict[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = f"row-{idx}"
                 row_dict[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = 0
                 expanded_rows.append(row_dict)
                 continue
+            section_rows = section_row_map.get(row_key or "", [])
+            if section_rows:
+                appended = False
+                for order, section_row in enumerate(section_rows):
+                    payload = _expanded_row_from_section_row(row_dict, section_row, row_key, order)
+                    if payload is None:
+                        continue
+                    expanded_rows.append(payload)
+                    appended = True
+                if appended:
+                    continue
             records = list(groups.get(row_key, []))
             if not records:
                 source_paths: List[Path] = []
@@ -23254,6 +24417,8 @@ class AssemblySection(QtWidgets.QWidget):
 
                     standard_entry: Dict[str, Any] = {}
                     fracture_entry: Dict[str, Any] = {}
+                    standard_current_confirmed = False
+                    fracture_current_confirmed = False
                     if is_fracture:
                         for column in (
                             SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
@@ -23262,6 +24427,11 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry:
                                 fracture_entry[column] = entry[column]
+                        if fracture_entry:
+                            fracture_current_confirmed = True
+                        if not fracture_entry:
+                            fracture_entry = dict(section_fracture_entries.get(path_key, {}))
+                            fracture_current_confirmed = bool(fracture_entry)
                         if not fracture_entry and fracture_source and path_key == fracture_source:
                             for column in (
                                 SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
@@ -23270,6 +24440,8 @@ class AssemblySection(QtWidgets.QWidget):
                             ):
                                 if column in sample_entry:
                                     fracture_entry[column] = sample_entry[column]
+                            if fracture_entry:
+                                fracture_current_confirmed = True
                         elif not fracture_entry and not fracture_source and fracture_source_count == 1:
                             for column in (
                                 SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
@@ -23287,6 +24459,11 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry:
                                 standard_entry[column] = entry[column]
+                        if standard_entry:
+                            standard_current_confirmed = True
+                        if not standard_entry:
+                            standard_entry = dict(section_standard_entries.get(path_key, {}))
+                            standard_current_confirmed = bool(standard_entry)
                         if not standard_entry and standard_source and path_key == standard_source:
                             for column in (
                                 SHAPE_MEMORY_DISPLACEMENT_COLUMN,
@@ -23296,6 +24473,8 @@ class AssemblySection(QtWidgets.QWidget):
                             ):
                                 if column in sample_entry:
                                     standard_entry[column] = sample_entry[column]
+                            if standard_entry:
+                                standard_current_confirmed = True
                         elif not standard_entry and not standard_source and standard_source_count == 1:
                             for column in (
                                 SHAPE_MEMORY_DISPLACEMENT_COLUMN,
@@ -23319,6 +24498,12 @@ class AssemblySection(QtWidgets.QWidget):
                         SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
                     ):
                         new_row[column] = fracture_entry.get(column)
+                    if not standard_current_confirmed:
+                        new_row[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                        new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
+                    if not fracture_current_confirmed:
+                        new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = None
+                        new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = None
                     _clear_orphan_currents(new_row)
                     fallback_rows.append(new_row)
 
@@ -23335,6 +24520,11 @@ class AssemblySection(QtWidgets.QWidget):
 
                     for order, payload in enumerate(sorted(fallback_rows, key=_fallback_sort_key)):
                         _clear_orphan_currents(payload)
+                        if not (
+                            _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS)
+                            or _shape_memory_payload_has_values(payload, _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS)
+                        ):
+                            continue
                         payload[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = row_key
                         payload[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
                         expanded_rows.append(payload)
@@ -23358,6 +24548,12 @@ class AssemblySection(QtWidgets.QWidget):
                 diameter_um = float(d_value) if d_value is not None else None
             except Exception:
                 diameter_um = None
+            standard_count = sum(
+                1 for record in records if not _shape_memory_is_fracture_record(record)
+            )
+            fracture_count = sum(
+                1 for record in records if _shape_memory_is_fracture_record(record)
+            )
 
             for order, ((_, current_sort), current_records) in enumerate(sorted_groups):
                 current_value = None if math.isinf(current_sort) else current_sort
@@ -23379,6 +24575,8 @@ class AssemblySection(QtWidgets.QWidget):
 
                 standard_entry: Dict[str, Any] = {}
                 fracture_entry: Dict[str, Any] = {}
+                standard_current_confirmed = False
+                fracture_current_confirmed = False
                 has_fracture_record = False
                 for record in current_records:
                     path_key = _record_path_key(record)
@@ -23396,6 +24594,27 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry and column not in fracture_entry:
                                 fracture_entry[column] = entry[column]
+                        if fracture_entry:
+                            fracture_current_confirmed = True
+                        if not fracture_entry and path_key:
+                            source_entry = section_fracture_entries.get(path_key, {})
+                            for column in (
+                                SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                            ):
+                                if column in source_entry and column not in fracture_entry:
+                                    fracture_entry[column] = source_entry[column]
+                            if fracture_entry:
+                                fracture_current_confirmed = True
+                        if not fracture_entry and not section_fracture_entries and fracture_count == 1:
+                            for column in (
+                                SHAPE_MEMORY_FRACTURE_LOAD_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
+                                SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
+                            ):
+                                if column in sample_entry and column not in fracture_entry:
+                                    fracture_entry[column] = sample_entry[column]
                     else:
                         for column in (
                             SHAPE_MEMORY_DISPLACEMENT_COLUMN,
@@ -23405,6 +24624,29 @@ class AssemblySection(QtWidgets.QWidget):
                         ):
                             if column in entry and column not in standard_entry:
                                 standard_entry[column] = entry[column]
+                        if standard_entry:
+                            standard_current_confirmed = True
+                        if not standard_entry and path_key:
+                            source_entry = section_standard_entries.get(path_key, {})
+                            for column in (
+                                SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                                SHAPE_MEMORY_LOAD_COLUMN,
+                                SHAPE_MEMORY_STRAIN_COLUMN,
+                                SHAPE_MEMORY_STRESS_COLUMN,
+                            ):
+                                if column in source_entry and column not in standard_entry:
+                                    standard_entry[column] = source_entry[column]
+                            if standard_entry:
+                                standard_current_confirmed = True
+                        if not standard_entry and not section_standard_entries and standard_count == 1:
+                            for column in (
+                                SHAPE_MEMORY_DISPLACEMENT_COLUMN,
+                                SHAPE_MEMORY_LOAD_COLUMN,
+                                SHAPE_MEMORY_STRAIN_COLUMN,
+                                SHAPE_MEMORY_STRESS_COLUMN,
+                            ):
+                                if column in sample_entry and column not in standard_entry:
+                                    standard_entry[column] = sample_entry[column]
 
                 if len(sorted_groups) == 1 and sample_entry:
                     for column in (
@@ -23436,13 +24678,22 @@ class AssemblySection(QtWidgets.QWidget):
                     SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
                 ):
                     new_row[column] = fracture_entry.get(column)
-                if has_fracture_record:
+                if has_fracture_record and fracture_current_confirmed:
                     new_row[SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN] = current_value
                     new_row[SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN] = _current_density_from_diameter_um(
                         current_value,
                         diameter_um,
                     )
+                if not standard_current_confirmed:
+                    new_row[SHAPE_MEMORY_CURRENT_COLUMN] = None
+                    new_row[SHAPE_MEMORY_CURRENT_DENSITY_COLUMN] = None
 
+                _clear_orphan_currents(new_row)
+                if not (
+                    _shape_memory_payload_has_values(new_row, _SHAPE_MEMORY_STANDARD_VALUE_COLUMNS)
+                    or _shape_memory_payload_has_values(new_row, _SHAPE_MEMORY_FRACTURE_VALUE_COLUMNS)
+                ):
+                    continue
                 new_row[_SHAPE_MEMORY_GROUP_KEY_COLUMN] = row_key
                 new_row[_SHAPE_MEMORY_GROUP_ORDER_COLUMN] = order
                 expanded_rows.append(new_row)
@@ -23458,12 +24709,24 @@ class AssemblySection(QtWidgets.QWidget):
             display_frame = pd.DataFrame()
             self._preview_row_index_map = []
         else:
-            sorted_frame, row_map = self._apply_sort_spec(raw_frame)
+            working_frame = raw_frame
+            row_map = list(range(len(raw_frame.index)))
+            if not self._show_oe_samples:
+                keep_positions = [
+                    idx
+                    for idx, (_, row) in enumerate(raw_frame.iterrows())
+                    if not self._row_is_oe_sample(row)
+                ]
+                working_frame = raw_frame.iloc[keep_positions].reset_index(drop=True)
+                row_map = keep_positions
+            sorted_frame, sorted_row_map = self._apply_sort_spec(working_frame)
+            row_map = [row_map[idx] for idx in sorted_row_map if 0 <= int(idx) < len(row_map)]
             selected_columns = self._resolve_selected_columns(sorted_frame.columns)
             display_frame = sorted_frame.loc[:, selected_columns] if selected_columns else sorted_frame.loc[:, []]
             total_rows = len(display_frame.index)
             display_frame, row_map = self._apply_search_filter(display_frame, row_map)
             self._preview_row_index_map = row_map
+        self._rebuild_preview_background_cache(display_frame)
         self.preview_model.set_frame(display_frame)
         if self._column_order:
             try:
@@ -23630,43 +24893,51 @@ class AssemblySection(QtWidgets.QWidget):
         ):
             indexed = frame.copy()
             indexed["_source_row_index"] = list(range(len(indexed.index)))
-            first_rows = (
-                indexed.sort_values(
+
+            sort_columns: List[str] = []
+            ascending: List[bool] = []
+            for column, is_ascending in self._sort_spec:
+                if column in indexed.columns and column not in sort_columns:
+                    sort_columns.append(column)
+                    ascending.append(bool(is_ascending))
+            for fallback_column in ("Microwire", "Composition"):
+                if fallback_column in indexed.columns and fallback_column not in sort_columns:
+                    sort_columns.append(fallback_column)
+                    ascending.append(True)
+
+            if sort_columns:
+                row_sorted = indexed.sort_values(
+                    by=sort_columns + [_SHAPE_MEMORY_GROUP_ORDER_COLUMN],
+                    ascending=ascending + [True],
+                    kind="mergesort",
+                    key=lambda col: col.map(DataFrameModel._sort_value) if hasattr(col, "map") else col,
+                )
+            else:
+                row_sorted = indexed.sort_values(
                     by=[_SHAPE_MEMORY_GROUP_ORDER_COLUMN],
                     ascending=[True],
                     kind="mergesort",
                 )
-                .drop_duplicates(subset=[_SHAPE_MEMORY_GROUP_KEY_COLUMN], keep="first")
-            )
-            if self._sort_spec:
-                sort_columns: List[str] = []
-                ascending: List[bool] = []
-                for column, is_ascending in self._sort_spec:
-                    if (
-                        column in first_rows.columns
-                        and column not in sort_columns
-                        and not str(column).startswith("_")
-                    ):
-                        sort_columns.append(column)
-                        ascending.append(bool(is_ascending))
-                if sort_columns:
-                    first_rows = first_rows.sort_values(
-                        by=sort_columns,
-                        ascending=ascending,
-                        kind="mergesort",
-                        key=lambda col: col.map(DataFrameModel._sort_value) if hasattr(col, "map") else col,
-                    )
-            block_order = {
-                str(row[_SHAPE_MEMORY_GROUP_KEY_COLUMN]): idx
-                for idx, (_, row) in enumerate(first_rows.iterrows())
-            }
+
+            block_order: Dict[str, int] = {}
+            for _, row in row_sorted.iterrows():
+                key = str(row[_SHAPE_MEMORY_GROUP_KEY_COLUMN])
+                if key not in block_order:
+                    block_order[key] = len(block_order)
+
             indexed["_block_sort_index"] = indexed[_SHAPE_MEMORY_GROUP_KEY_COLUMN].map(
                 lambda value: block_order.get(str(value), len(block_order))
             )
+            within_group_columns = list(sort_columns)
+            within_group_ascending = list(ascending)
+            if _SHAPE_MEMORY_GROUP_ORDER_COLUMN not in within_group_columns:
+                within_group_columns.append(_SHAPE_MEMORY_GROUP_ORDER_COLUMN)
+                within_group_ascending.append(True)
             sorted_frame = indexed.sort_values(
-                by=["_block_sort_index", _SHAPE_MEMORY_GROUP_ORDER_COLUMN],
-                ascending=[True, True],
+                by=["_block_sort_index", *within_group_columns],
+                ascending=[True, *within_group_ascending],
                 kind="mergesort",
+                key=lambda col: col.map(DataFrameModel._sort_value) if hasattr(col, "map") else col,
             ).reset_index(drop=True)
             row_map = [int(value) for value in sorted_frame["_source_row_index"].tolist()]
             sorted_frame = sorted_frame.drop(columns=["_source_row_index", "_block_sort_index"])
@@ -23693,6 +24964,10 @@ class AssemblySection(QtWidgets.QWidget):
             if column in frame.columns and column not in sort_columns:
                 sort_columns.append(column)
                 ascending.append(bool(is_ascending))
+        for fallback_column in ("Microwire", "Composition"):
+            if fallback_column in frame.columns and fallback_column not in sort_columns:
+                sort_columns.append(fallback_column)
+                ascending.append(True)
         if not sort_columns:
             return frame.copy(), [
                 _index_position(frame.index, idx, fallback)
@@ -23913,23 +25188,24 @@ class AssemblySection(QtWidgets.QWidget):
         column_label: str,
     ) -> Optional[QtGui.QBrush]:
         _ = column_label
-        frame = self.preview_model.frame()
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return None
         try:
-            row_idx = int(row.name)
+            brush = self._preview_background_cache.get(row.name)
         except Exception:
-            return None
-        if row_idx < 0 or row_idx >= len(frame.index):
-            return None
+            brush = None
+        return brush
+
+    def _rebuild_preview_background_cache(self, frame: pd.DataFrame) -> None:
+        cache: Dict[Any, QtGui.QBrush] = {}
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            self._preview_background_cache = cache
+            return
         group_index = 0
         previous_group: Optional[str] = None
-        for idx in range(row_idx + 1):
-            current_row = frame.iloc[idx]
+        for row_label, row in frame.iterrows():
             current_group = "|".join(
                 [
-                    str(current_row.get("Composition") or "").strip(),
-                    str(current_row.get("Microwire") or "").strip(),
+                    str(row.get("Composition") or "").strip(),
+                    str(row.get("Microwire") or "").strip(),
                 ]
             )
             if previous_group is None:
@@ -23937,8 +25213,103 @@ class AssemblySection(QtWidgets.QWidget):
             elif current_group != previous_group:
                 group_index += 1
                 previous_group = current_group
-        color = QtGui.QColor("#1a1a1a" if group_index % 2 == 0 else "#202733")
-        return QtGui.QBrush(color)
+            cache[row_label] = QtGui.QBrush(
+                QtGui.QColor("#1a1a1a" if group_index % 2 == 0 else "#202733")
+            )
+        self._preview_background_cache = cache
+
+    @staticmethod
+    def _fabrication_index_from_frame(frame: Optional[pd.DataFrame]) -> FabricationIndex:
+        index = FabricationIndex()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return index
+
+        def _is_missing(value: Any) -> bool:
+            if value is None:
+                return True
+            if isinstance(value, str) and not value.strip():
+                return True
+            try:
+                return bool(pd.isna(value))
+            except Exception:
+                return False
+
+        def _assign_if_present(target: Dict[str, object], field: str, value: Any) -> None:
+            if not _is_missing(value):
+                target[field] = value
+
+        for _, row in frame.iterrows():
+            composition = str(row.get("Composition") or "").strip()
+            if not composition or composition == "Imported data:":
+                continue
+            try:
+                draw = int(row.get("Draw"))
+                piece = int(row.get("Piece"))
+            except (TypeError, ValueError):
+                microwire = str(row.get("Microwire") or "").strip()
+                parsed = _microwire_parts_from_label_safe(microwire)
+                if parsed is None:
+                    continue
+                try:
+                    draw = int(parsed[0])
+                    piece = int(parsed[1])
+                except (TypeError, ValueError):
+                    continue
+
+            piece_key = (composition, draw, piece)
+            draw_key = (composition, draw)
+            piece_data = dict(index.piece_level.get(piece_key, {}))
+            draw_data = dict(index.draw_level.get(draw_key, {}))
+
+            source_value: object = row.get("Data source") or "Manual"
+            source_paths = row.get("_source_paths")
+            if isinstance(source_paths, (list, tuple, set)):
+                for candidate in source_paths:
+                    if candidate:
+                        source_value = candidate
+                        break
+            _assign_if_present(piece_data, "length_m", row.get("Length (m)"))
+            _assign_if_present(piece_data, "piece_date", row.get("Piece date"))
+            _assign_if_present(piece_data, "fabrication_resistance_ohm", row.get("Resistance (Ω)"))
+            _assign_if_present(piece_data, "glass_pull_off", row.get(GLASS_PULL_COLUMN))
+            _assign_if_present(piece_data, "notes", row.get("Notes"))
+            _assign_if_present(piece_data, "_source_path", source_value)
+
+            temperature_value = row.get(CORE_TEMPERATURE_COLUMN)
+            if _is_missing(temperature_value):
+                temperature_value = row.get("Temperature (°C)")
+            _assign_if_present(draw_data, "fabrication_temperature_c", temperature_value)
+            _assign_if_present(
+                draw_data,
+                "fabrication_glass_temperature_c",
+                row.get(GLASS_TEMPERATURE_COLUMN),
+            )
+            _assign_if_present(draw_data, "mass_g", row.get("Mass (g)"))
+            _assign_if_present(
+                draw_data,
+                "winding_speed_m_per_min",
+                row.get("Winding speed (m/min)"),
+            )
+            _assign_if_present(
+                draw_data,
+                "glass_feed_mm_per_min",
+                row.get("Glass feeding (mm/min)"),
+            )
+            _assign_if_present(draw_data, "underpressure", row.get("Underpressure"))
+            _assign_if_present(
+                draw_data,
+                "production_datetime",
+                row.get("Production datetime"),
+            )
+            _assign_if_present(draw_data, "fabrication_resistance_ohm", row.get("Resistance (Ω)"))
+            _assign_if_present(draw_data, "notes", row.get("Notes"))
+            _assign_if_present(draw_data, "_source_path", source_value)
+
+            if piece_data:
+                index.set_piece(composition, draw, piece, piece_data)
+            if draw_data:
+                index.set_draw(composition, draw, draw_data)
+        return index
 
     def _group_annealing_records(
         self,
@@ -25915,6 +27286,7 @@ class AssemblySection(QtWidgets.QWidget):
             column_filter=column_filter,
             column_order=column_order,
             sort_spec=sort_spec,
+            include_microscope_crops=False,
         )
         build_kwargs = {
             "fabrication_index": fabrication_index,
@@ -25940,7 +27312,7 @@ class AssemblySection(QtWidgets.QWidget):
             ),
             "fmr_records": fmr_records if "fmr" in selected else [],
             "microscope_index": microscope_index if "microscope" in selected else {},
-            "video_index": video_index if "videos" in selected else {},
+            "video_index": video_index,
             "video_overrides": video_overrides,
             "strain_records": strain_records if "strain" in selected else {},
             "strain_entries": strain_entries if "strain" in selected else {},
@@ -25949,6 +27321,7 @@ class AssemblySection(QtWidgets.QWidget):
             ),
             "phase_points": phase_points,
             "transition_temps": transition_points,
+            "include_fabrication_draw_siblings": True,
         }
 
         self._combine_output_dir = output_dir
@@ -26030,6 +27403,7 @@ class AssemblySection(QtWidgets.QWidget):
             export_formats=(),
             plot_backends=(),
             output_name=output_name,
+            include_microscope_crops=False,
         )
 
         build_kwargs = {
@@ -26056,7 +27430,7 @@ class AssemblySection(QtWidgets.QWidget):
             ),
             "fmr_records": fmr_records if "fmr" in selected else [],
             "microscope_index": microscope_index if "microscope" in selected else {},
-            "video_index": video_index if "videos" in selected else {},
+            "video_index": video_index,
             "video_overrides": video_overrides,
             "strain_records": strain_records if "strain" in selected else {},
             "strain_entries": strain_entries if "strain" in selected else {},
@@ -26066,6 +27440,7 @@ class AssemblySection(QtWidgets.QWidget):
             "phase_points": phase_points,
             "transition_temps": transition_points,
             "skip_exports": True,
+            "include_fabrication_draw_siblings": True,
         }
         self._preview_thread = QtCore.QThread(self)
         self._preview_worker = PreviewWorker(config, build_kwargs, self.logger)
@@ -26603,7 +27978,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._update_project_title()
         self._set_initial_geometry()
         self._retabify_primary_docks()
-        QtCore.QTimer.singleShot(0, self._maybe_auto_open_last_project)
+        QtCore.QTimer.singleShot(150, self._maybe_auto_open_last_project)
 
     def _dock_switcher_supported(self) -> bool:
         override = os.environ.get("MW_DISABLE_DOCK_SWITCHER", "")
@@ -27792,6 +29167,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                         pass
 
     def _refresh_sections_after_project_load(self) -> None:
+        self._sync_microscope_dependent_sections()
         for key, section in self.sections.items():
             if isinstance(section, MiniDatabaseSection):
                 try:
