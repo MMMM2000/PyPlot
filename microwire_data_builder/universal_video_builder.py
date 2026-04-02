@@ -214,16 +214,18 @@ class UniversalVideoSection(VideoSection):
         self.refresh_button.setText("Refresh fabrication data")
         self._insert_add_microwire_controls()
         self._build_visual_shell()
+        self._apply_layout_polish()
         self._refresh_available_frames_from_state()
         self._refresh_selector_catalog()
         self._refresh_dashboard()
 
     def _insert_add_microwire_controls(self) -> None:
         container = QtWidgets.QWidget(self)
+        container.setObjectName("universalVideoSelectorRow")
         grid = QtWidgets.QGridLayout(container)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(4)
+        grid.setVerticalSpacing(6)
 
         composition_label = QtWidgets.QLabel("Composition")
         composition_label.setAlignment(
@@ -241,6 +243,7 @@ class UniversalVideoSection(VideoSection):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
+        self.composition_combo.setMinimumHeight(34)
         line_edit = self.composition_combo.lineEdit()
         if line_edit is not None:
             line_edit.textEdited.connect(self._handle_composition_changed)
@@ -257,6 +260,7 @@ class UniversalVideoSection(VideoSection):
         self.draw_menu.set_placeholder_text("Select draw(s)")
         self.draw_menu.selection_changed.connect(self._refresh_piece_options)
         self.draw_menu.setMinimumWidth(210)
+        self.draw_menu.button.setMinimumHeight(34)
         grid.addWidget(self.draw_menu, 1, 1)
 
         piece_label = QtWidgets.QLabel("Piece")
@@ -270,12 +274,14 @@ class UniversalVideoSection(VideoSection):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
+        self.piece_combo.setMinimumHeight(34)
         self.piece_combo.addItem("All pieces", None)
         grid.addWidget(self.piece_combo, 1, 2)
 
         self.add_rows_button = QtWidgets.QPushButton("Add/select microwire(s)", self)
         self.add_rows_button.clicked.connect(self._add_selected_microwires)
         self.add_rows_button.setMinimumWidth(180)
+        self.add_rows_button.setMinimumHeight(34)
         self.add_rows_button.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Fixed,
             QtWidgets.QSizePolicy.Policy.Fixed,
@@ -290,11 +296,12 @@ class UniversalVideoSection(VideoSection):
 
     def _build_visual_shell(self) -> None:
         guidance = QtWidgets.QLabel(
-            "Color logic: red means the row has no linked video, amber means the video exists but manual review is still incomplete, green marks first-time fills, and darker amber marks explicit overwrites.",
+            "State colors: red = no video, amber = review pending, green = first fill, dark amber = overwritten value.",
             self,
         )
         guidance.setWordWrap(True)
         self.main_layout.insertWidget(2, guidance)
+        self.guidance_label = guidance
 
         if isinstance(self.search_edit, QtWidgets.QLineEdit):
             self.search_edit.setPlaceholderText("Filter the loaded rows by composition, draw, piece, notes, or any visible column")
@@ -302,6 +309,96 @@ class UniversalVideoSection(VideoSection):
         if isinstance(self.table_view, QtWidgets.QTableView):
             self.table_view.verticalHeader().setDefaultSectionSize(28)
             self.table_view.setShowGrid(False)
+
+    def _apply_layout_polish(self) -> None:
+        self.main_layout.setContentsMargins(14, 14, 14, 12)
+        self.main_layout.setSpacing(12)
+        if isinstance(self.controls_layout, QtWidgets.QHBoxLayout):
+            self.controls_layout.setSpacing(8)
+        for button in (self.source_button, self.open_sources_button, self.refresh_button, self.stop_button):
+            if isinstance(button, QtWidgets.QPushButton):
+                button.setMinimumHeight(34)
+        if isinstance(self.status_label, QtWidgets.QLabel):
+            self.status_label.setContentsMargins(2, 2, 2, 0)
+        guidance = getattr(self, "guidance_label", None)
+        if isinstance(guidance, QtWidgets.QLabel):
+            guidance.setContentsMargins(2, 2, 2, 2)
+        if isinstance(self.search_edit, QtWidgets.QLineEdit):
+            self.search_edit.setMinimumHeight(34)
+        if isinstance(self.search_clear_button, QtWidgets.QPushButton):
+            self.search_clear_button.setMinimumHeight(34)
+        self._wrap_header_rows()
+
+    def _wrap_header_rows(self) -> None:
+        layout = self.main_layout
+        if not isinstance(layout, QtWidgets.QVBoxLayout):
+            return
+        if getattr(self, "_header_frame", None) is not None:
+            return
+        if layout.count() < 2:
+            return
+
+        panel_item = layout.takeAt(layout.count() - 1)
+        panel_widget = panel_item.widget() if panel_item is not None else None
+        panel_layout = panel_item.layout() if panel_item is not None else None
+
+        header_items: List[QtWidgets.QLayoutItem] = []
+        while layout.count():
+            item = layout.takeAt(0)
+            if item is not None:
+                header_items.append(item)
+
+        header_frame = QtWidgets.QFrame(self)
+        header_frame.setObjectName("universalVideoHeader")
+        header_layout = QtWidgets.QVBoxLayout(header_frame)
+        header_layout.setContentsMargins(14, 14, 14, 12)
+        header_layout.setSpacing(10)
+
+        for item in header_items:
+            widget = item.widget()
+            nested_layout = item.layout()
+            spacer = item.spacerItem()
+            if widget is not None:
+                header_layout.addWidget(widget)
+            elif nested_layout is not None:
+                header_layout.addLayout(nested_layout)
+            elif spacer is not None:
+                header_layout.addItem(spacer)
+
+        header_frame.setStyleSheet(
+            """
+            QFrame#universalVideoHeader {
+                background-color: rgba(255, 255, 255, 0.03);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 12px;
+            }
+            QFrame#universalVideoHeader QLabel {
+                padding-left: 0px;
+            }
+            QFrame#universalVideoHeader QLabel#universalVideoGuidance {
+                color: rgba(255, 255, 255, 0.72);
+            }
+            QFrame#universalVideoHeader QLabel#universalVideoStatus {
+                color: rgba(255, 255, 255, 0.82);
+            }
+            QWidget#universalVideoSelectorRow QLabel {
+                color: rgba(255, 255, 255, 0.74);
+            }
+            """
+        )
+
+        guidance = getattr(self, "guidance_label", None)
+        if isinstance(guidance, QtWidgets.QLabel):
+            guidance.setObjectName("universalVideoGuidance")
+        if isinstance(self.status_label, QtWidgets.QLabel):
+            self.status_label.setObjectName("universalVideoStatus")
+
+        layout.addWidget(header_frame, 0)
+        if panel_widget is not None:
+            layout.addWidget(panel_widget, 1)
+        elif panel_layout is not None:
+            layout.addLayout(panel_layout, 1)
+        self._header_frame = header_frame
 
     def _refresh_dashboard(self) -> None:
         return
@@ -793,8 +890,8 @@ class UniversalVideoBuilderWindow(QtWidgets.QMainWindow):
 
         central = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         self.log_view = QtWidgets.QPlainTextEdit(self)
         self.log_view.setReadOnly(True)
@@ -823,6 +920,7 @@ class UniversalVideoBuilderWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(0, 6)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([760, 80])
+        splitter.setHandleWidth(8)
         layout.addWidget(splitter, 1)
         self.setCentralWidget(central)
 
