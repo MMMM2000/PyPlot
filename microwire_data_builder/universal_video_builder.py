@@ -207,6 +207,14 @@ class UniversalVideoSection(VideoSection):
         self._available_fabrication_frame = pd.DataFrame(columns=_fabrication_frame_columns())
         self._available_table = pd.DataFrame()
         super().__init__(logger, log_callback, parent)
+        self.connected_source_label = QtWidgets.QLabel(self)
+        self.connected_source_label.setObjectName("universalVideoConnectedSource")
+        self.connected_source_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        if isinstance(self.controls_layout, QtWidgets.QHBoxLayout):
+            self.controls_layout.insertWidget(2, self.connected_source_label, 1)
         self.source_button.show()
         self.source_button.setText("Connect fabrication folder…")
         self.source_button.setToolTip("Select a fabrication root folder containing spreadsheets and videos.")
@@ -214,6 +222,7 @@ class UniversalVideoSection(VideoSection):
         self._insert_add_microwire_controls()
         self._build_visual_shell()
         self._apply_layout_polish()
+        self._update_connected_source_label()
         self._refresh_available_frames_from_state()
         self._refresh_selector_catalog()
         self._refresh_dashboard()
@@ -380,6 +389,10 @@ class UniversalVideoSection(VideoSection):
             QFrame#universalVideoHeader QLabel#universalVideoStatus {
                 color: rgba(255, 255, 255, 0.82);
             }
+            QLabel#universalVideoConnectedSource {
+                color: rgba(255, 255, 255, 0.64);
+                padding-left: 10px;
+            }
             QWidget#universalVideoSelectorRow QLabel {
                 color: rgba(255, 255, 255, 0.74);
             }
@@ -401,6 +414,69 @@ class UniversalVideoSection(VideoSection):
 
     def _refresh_dashboard(self) -> None:
         return
+
+    def _update_connected_source_label(self) -> None:
+        label = getattr(self, "connected_source_label", None)
+        if not isinstance(label, QtWidgets.QLabel):
+            return
+        sources = [str(value).strip() for value in self.data.sources if str(value).strip()]
+        if not sources:
+            label.setText("No folder connected")
+            label.setToolTip("")
+            return
+        if len(sources) == 1:
+            path = Path(sources[0])
+            label.setText(f"Connected: {path.name or str(path)}")
+            label.setToolTip(str(path))
+            return
+        first = Path(sources[0])
+        label.setText(f"Connected: {first.name or str(first)} +{len(sources) - 1} more")
+        label.setToolTip("\n".join(sources))
+
+    def set_sources(self, sources: Iterable[str]) -> None:  # type: ignore[override]
+        super().set_sources(sources)
+        self._update_connected_source_label()
+
+    def _sync_sources(self) -> None:  # type: ignore[override]
+        super()._sync_sources()
+        self._update_connected_source_label()
+        if self.data.sources:
+            return
+        self._available_fabrication_frame = pd.DataFrame(columns=_fabrication_frame_columns())
+        self._available_table = pd.DataFrame()
+        self.data.processed = {}
+        self.data.table = pd.DataFrame(columns=self.model.frame().columns)
+        self.store.save(self.data)
+        self.model.set_frame(self.data.table)
+        self._refresh_selector_catalog()
+        self._update_status()
+
+    def reset_to_blank(self) -> None:  # type: ignore[override]
+        self._available_fabrication_frame = pd.DataFrame(columns=_fabrication_frame_columns())
+        self._available_table = pd.DataFrame()
+        super().reset_to_blank()
+        self._update_connected_source_label()
+        self._refresh_selector_catalog()
+        self._refresh_dashboard()
+
+    def _add_source(self) -> None:  # type: ignore[override]
+        start_dir = _dialog_start_directory()
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            self.section_title,
+            str(start_dir),
+        )
+        if not directory:
+            return
+        self.set_sources([directory])
+        self._available_fabrication_frame = pd.DataFrame(columns=_fabrication_frame_columns())
+        self._available_table = pd.DataFrame()
+        self.data.table = pd.DataFrame(columns=self.model.frame().columns)
+        self.store.save(self.data)
+        self.model.set_frame(self.data.table)
+        self._refresh_selector_catalog()
+        self._update_status()
+        QtCore.QTimer.singleShot(0, self.refresh)
 
     def _current_column_order(self) -> List[str]:
         if not isinstance(self.table_view, QtWidgets.QTableView):
@@ -459,13 +535,6 @@ class UniversalVideoSection(VideoSection):
         column_order = payload.get("column_order")
         if isinstance(column_order, (list, tuple)):
             self._apply_column_order([str(value) for value in column_order])
-        self._refresh_selector_catalog()
-        self._refresh_dashboard()
-
-    def reset_to_blank(self) -> None:  # type: ignore[override]
-        self._available_fabrication_frame = pd.DataFrame(columns=_fabrication_frame_columns())
-        self._available_table = pd.DataFrame()
-        super().reset_to_blank()
         self._refresh_selector_catalog()
         self._refresh_dashboard()
 
