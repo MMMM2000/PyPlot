@@ -9430,10 +9430,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         tree.blockSignals(True)
         try:
+            tree.setCurrentItem(found_items[0])
             tree.clearSelection()
             for found_item in found_items:
                 found_item.setSelected(True)
-            tree.setCurrentItem(found_items[0])
         finally:
             tree.blockSignals(False)
         self._handle_object_selection_changed()
@@ -9452,6 +9452,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def _request_figure_draw(self, figure: Any) -> None:
         self._request_canvas_draw(getattr(figure, "canvas", None))
+
+    @staticmethod
+    def _event_has_shift(event: Any) -> bool:
+        key = str(getattr(event, "key", "") or "").strip().lower()
+        if "shift" in key:
+            return True
+        gui_event = getattr(event, "guiEvent", None)
+        modifiers = getattr(gui_event, "modifiers", lambda: None)()
+        if modifiers is None:
+            return False
+        try:
+            return bool(modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        except Exception:
+            return False
 
     @staticmethod
     def _selection_artists(selection: tuple[str, Any] | None) -> tuple[Any, ...]:
@@ -9590,6 +9604,133 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if tab is not None:
                 self._rebuild_object_manager_for_tab(tab)
                 self._select_objects_in_manager(updated)
+
+    def _return_to_select_tool(self) -> None:
+        controls = self._annotation_controls
+        action = controls.select_action
+        if isinstance(action, QtGui.QAction):
+            action.blockSignals(True)
+            action.setChecked(True)
+            action.blockSignals(False)
+        self._set_annotation_tool("select")
+
+    def _extend_text_selection(self, text_artist: Text) -> tuple[str, Any]:
+        existing = self._format_selection
+        if existing and existing[0] == "text" and isinstance(existing[1], tuple):
+            merged: list[Text] = [entry for entry in existing[1] if isinstance(entry, Text)]
+            if text_artist not in merged:
+                merged.append(text_artist)
+            return ("text", tuple(merged))
+        return ("text", (text_artist,))
+
+    def _shape_drag_geometry(self, artist: Any) -> dict[str, Any] | None:
+        kind = self._graph_object_kind(artist)
+        if kind == "shape_line" and isinstance(artist, Line2D):
+            try:
+                x_data = list(float(value) for value in artist.get_xdata())
+                y_data = list(float(value) for value in artist.get_ydata())
+            except Exception:
+                return None
+            return {"kind": kind, "x": x_data, "y": y_data}
+        if kind == "arrow" and isinstance(artist, FancyArrowPatch):
+            positions = getattr(artist, "_mw_arrow_positions", None)
+            if not (isinstance(positions, tuple) and len(positions) == 2):
+                try:
+                    vertices = artist.get_path().vertices
+                    positions = (
+                        (float(vertices[0][0]), float(vertices[0][1])),
+                        (float(vertices[-1][0]), float(vertices[-1][1])),
+                    )
+                except Exception:
+                    return None
+            return {"kind": kind, "posA": positions[0], "posB": positions[1]}
+        if kind == "rectangle" and isinstance(artist, Rectangle):
+            try:
+                return {
+                    "kind": kind,
+                    "x": float(artist.get_x()),
+                    "y": float(artist.get_y()),
+                    "width": float(artist.get_width()),
+                    "height": float(artist.get_height()),
+                }
+            except Exception:
+                return None
+        if kind == "ellipse" and isinstance(artist, Ellipse):
+            try:
+                return {
+                    "kind": kind,
+                    "center": (float(artist.center[0]), float(artist.center[1])),
+                    "width": float(artist.width),
+                    "height": float(artist.height),
+                }
+            except Exception:
+                return None
+        return None
+
+    def _move_shape_artist(
+        self,
+        artist: Any,
+        geometry: dict[str, Any],
+        *,
+        dx: float,
+        dy: float,
+    ) -> bool:
+        kind = str(geometry.get("kind") or "")
+        try:
+            if kind == "shape_line" and isinstance(artist, Line2D):
+                x_data = [float(value) + dx for value in geometry.get("x", [])]
+                y_data = [float(value) + dy for value in geometry.get("y", [])]
+                artist.set_data(x_data, y_data)
+                return True
+            if kind == "arrow" and isinstance(artist, FancyArrowPatch):
+                pos_a = geometry.get("posA")
+                pos_b = geometry.get("posB")
+                if not (isinstance(pos_a, tuple) and isinstance(pos_b, tuple)):
+                    return False
+                new_a = (float(pos_a[0]) + dx, float(pos_a[1]) + dy)
+                new_b = (float(pos_b[0]) + dx, float(pos_b[1]) + dy)
+                artist.set_positions(new_a, new_b)
+                setattr(artist, "_mw_arrow_positions", (new_a, new_b))
+                return True
+            if kind == "rectangle" and isinstance(artist, Rectangle):
+                artist.set_x(float(geometry.get("x", 0.0)) + dx)
+                artist.set_y(float(geometry.get("y", 0.0)) + dy)
+                return True
+            if kind == "ellipse" and isinstance(artist, Ellipse):
+                center = geometry.get("center")
+                if not isinstance(center, tuple):
+                    return False
+                artist.center = (float(center[0]) + dx, float(center[1]) + dy)
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _start_selected_shape_drag(self, event: Any, hit_shape: Any) -> bool:
+        if getattr(event, "button", None) != 1:
+            return False
+        x0 = getattr(event, "xdata", None)
+        y0 = getattr(event, "ydata", None)
+        if x0 is None or y0 is None:
+            return False
+        selection = self._format_selection
+        if not selection or selection[0] != "shape":
+            return False
+        target = selection[1]
+        if target is not hit_shape:
+            return False
+        geometry = self._shape_drag_geometry(hit_shape)
+        if geometry is None:
+            return False
+        self._annotation_interaction = {
+            "tool": "move_shape",
+            "axes": getattr(hit_shape, "axes", None),
+            "canvas": getattr(event, "canvas", None),
+            "start": (float(x0), float(y0)),
+            "shape": hit_shape,
+            "geometry": geometry,
+        }
+        return True
 
     @staticmethod
     def _strip_outer_math(text: str) -> str:
@@ -17435,6 +17576,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return artist
 
     def _select_graph_object_from_canvas(self, event: Any, candidates: list[Any]) -> Any | None:
+        shift_pressed = self._event_has_shift(event)
         for axes in candidates:
             direct_text_targets: list[Any] = [
                 getattr(axes, "title", None),
@@ -17459,30 +17601,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     direct_text_targets.append(legend_title)
             for text_artist in direct_text_targets:
                 if isinstance(text_artist, Text) and self._artist_hit(text_artist, event):
-                    existing = self._format_selection
-                    if (
-                        existing
-                        and existing[0] == "text"
-                        and isinstance(existing[1], tuple)
-                        and text_artist in existing[1]
-                    ):
-                        self._set_format_selection(existing)
-                        self._select_objects_in_manager(existing[1])
+                    if shift_pressed:
+                        selection = self._extend_text_selection(text_artist)
+                        self._set_format_selection(selection)
+                        self._select_objects_in_manager(selection[1])
                     else:
                         self._set_format_selection(("text", (text_artist,)))
                         self._select_object_in_manager(text_artist)
                     return text_artist
             for text_artist in self._iter_graph_object_texts(axes):
                 if self._artist_hit(text_artist, event):
-                    existing = self._format_selection
-                    if (
-                        existing
-                        and existing[0] == "text"
-                        and isinstance(existing[1], tuple)
-                        and text_artist in existing[1]
-                    ):
-                        self._set_format_selection(existing)
-                        self._select_objects_in_manager(existing[1])
+                    if shift_pressed:
+                        selection = self._extend_text_selection(text_artist)
+                        self._set_format_selection(selection)
+                        self._select_objects_in_manager(selection[1])
                     else:
                         self._set_format_selection(("text", (text_artist,)))
                         self._select_object_in_manager(text_artist)
@@ -17556,6 +17688,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             try:
                 axes.add_patch(preview)
                 setattr(preview, "_mw_arrowstyle", "->")
+                setattr(preview, "_mw_arrow_positions", ((float(x0), float(y0)), (float(x0), float(y0))))
             except Exception:
                 preview = None
         elif tool == "rectangle":
@@ -17589,6 +17722,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             preview.set_data([x0, x1], [y0, y1])
         elif tool == "arrow" and isinstance(preview, FancyArrowPatch):
             preview.set_positions((x0, y0), (x1, y1))
+            setattr(preview, "_mw_arrow_positions", ((float(x0), float(y0)), (float(x1), float(y1))))
         elif tool == "rectangle" and isinstance(preview, Rectangle):
             preview.set_x(min(x0, x1))
             preview.set_y(min(y0, y1))
@@ -17625,6 +17759,27 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 if axes is not None:
                     self._request_figure_draw(getattr(axes, "figure", None))
             return
+        if str(interaction.get("tool") or "") == "move_shape":
+            x1 = getattr(event, "xdata", None)
+            y1 = getattr(event, "ydata", None)
+            if x1 is None or y1 is None:
+                return
+            x0, y0 = interaction.get("start", (0.0, 0.0))
+            shape = interaction.get("shape")
+            geometry = interaction.get("geometry")
+            if shape is None or not isinstance(geometry, dict):
+                return
+            moved = self._move_shape_artist(
+                shape,
+                geometry,
+                dx=float(x1) - float(x0),
+                dy=float(y1) - float(y0),
+            )
+            if moved:
+                axes = interaction.get("axes")
+                if axes is not None:
+                    self._request_figure_draw(getattr(axes, "figure", None))
+            return
         x1 = getattr(event, "xdata", None)
         y1 = getattr(event, "ydata", None)
         if x1 is None or y1 is None:
@@ -17650,6 +17805,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if str(interaction.get("tool") or "") == "move_text":
             self._annotation_interaction = None
             self._mark_project_dirty()
+            axes = interaction.get("axes")
+            if axes is not None:
+                self._request_figure_draw(getattr(axes, "figure", None))
+            return
+        if str(interaction.get("tool") or "") == "move_shape":
+            self._annotation_interaction = None
+            shape = interaction.get("shape")
+            if shape is not None:
+                self._mark_graph_artist_changed(shape)
             axes = interaction.get("axes")
             if axes is not None:
                 self._request_figure_draw(getattr(axes, "figure", None))
@@ -17688,6 +17852,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._mark_graph_artist_changed(preview)
         self._set_format_selection(("shape", preview))
         self._select_object_in_manager(preview)
+        self._return_to_select_tool()
 
     def _handle_canvas_button_press(self, event: Any) -> None:
         if self._is_canvas_context_click(event):
@@ -17703,6 +17868,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if selected_artist is not None:
                 if isinstance(selected_artist, Text):
                     self._start_selected_text_drag(event, selected_artist)
+                elif self._graph_object_kind(selected_artist) in {"shape_line", "arrow", "rectangle", "ellipse"}:
+                    self._start_selected_shape_drag(event, selected_artist)
                 return
         if tool in {"text", "callout"}:
             if getattr(event, "button", None) == 1 and candidates:
@@ -17746,6 +17913,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                             self._mark_graph_artist_changed(artist)
                             self._set_format_selection(("text", (artist,)))
                             self._select_object_in_manager(artist)
+                            self._return_to_select_tool()
                     return
         elif tool in {"arrow", "shape_line", "rectangle", "ellipse"}:
             if getattr(event, "button", None) == 1 and candidates:

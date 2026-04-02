@@ -15,6 +15,7 @@ from plotting.pyplot.window import (
     CreateGraphDialog,
     FigureLayoutDialog,
     GraphSelectionDialog,
+    GraphTextDialog,
     TabDescriptor,
     WorkbookData,
     WorksheetColumnMeta,
@@ -332,6 +333,152 @@ def test_dragging_selected_annotation_text_updates_position() -> None:
         x_value, y_value = artist.get_position()
         assert x_value == 2.5
         assert y_value == 4.0
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_shift_click_adds_text_selection_from_canvas(monkeypatch) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+        first = window._create_text_annotation(  # noqa: SLF001
+            axes,
+            x=1.0,
+            y=2.0,
+            payload=_GraphTextDialogResult(
+                text="First",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=False,
+                italic=False,
+                underline=False,
+            ),
+        )
+        second = window._create_text_annotation(  # noqa: SLF001
+            axes,
+            x=3.0,
+            y=4.0,
+            payload=_GraphTextDialogResult(
+                text="Second",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=False,
+                italic=False,
+                underline=False,
+            ),
+        )
+        assert first is not None and second is not None
+        window._rebuild_object_manager_for_tab(window.tab_widget.currentWidget())  # noqa: SLF001
+
+        monkeypatch.setattr(
+            window,
+            "_artist_hit",
+            lambda artist, event: artist is getattr(event, "target", None),
+        )
+
+        first_event = SimpleNamespace(target=first, key="", guiEvent=None)
+        second_event = SimpleNamespace(target=second, key="shift", guiEvent=None)
+
+        selected = window._select_graph_object_from_canvas(first_event, [axes])  # noqa: SLF001
+        assert selected is first
+        selected = window._select_graph_object_from_canvas(second_event, [axes])  # noqa: SLF001
+        assert selected is second
+
+        selection = window._format_selection  # noqa: SLF001
+        assert selection is not None
+        assert selection[0] == "text"
+        assert set(selection[1]) == {first, second}
+        assert len(window.object_tree.selectedItems()) == 2
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_dragging_selected_arrow_updates_position() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        canvas = window._current_canvas()  # noqa: SLF001
+        assert axes is not None and canvas is not None
+
+        window._set_annotation_tool("arrow")  # noqa: SLF001
+        create_press = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=0.5, ydata=1.0, dblclick=False)
+        create_move = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=2.5, ydata=1.0, dblclick=False)
+        create_release = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=2.5, ydata=1.0, dblclick=False)
+        window._handle_canvas_button_press(create_press)  # noqa: SLF001
+        window._handle_canvas_motion(create_move)  # noqa: SLF001
+        window._handle_canvas_button_release(create_release)  # noqa: SLF001
+
+        arrow = next(shape for shape in window._iter_graph_object_shapes(axes) if shape.__class__.__name__ == "FancyArrowPatch")  # noqa: SLF001
+        window._set_format_selection(("shape", arrow))  # noqa: SLF001
+
+        drag_press = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=0.5, ydata=1.0, dblclick=False)
+        drag_move = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=1.5, ydata=2.0, dblclick=False)
+        drag_release = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=1.5, ydata=2.0, dblclick=False)
+        assert window._start_selected_shape_drag(drag_press, arrow)  # noqa: SLF001
+        window._handle_canvas_motion(drag_move)  # noqa: SLF001
+        window._handle_canvas_button_release(drag_release)  # noqa: SLF001
+
+        positions = getattr(arrow, "_mw_arrow_positions", None)
+        assert positions == ((1.5, 2.0), (3.5, 2.0))
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_annotation_tools_return_to_select_after_creation(monkeypatch) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        canvas = window._current_canvas()  # noqa: SLF001
+        assert axes is not None and canvas is not None
+
+        payload = _GraphTextDialogResult(
+            text="Placed",
+            font_family="DejaVu Serif",
+            font_size=14.0,
+            color="#111111",
+            bold=False,
+            italic=False,
+            underline=False,
+        )
+        monkeypatch.setattr(
+            GraphTextDialog,
+            "exec",
+            lambda self: int(QtWidgets.QDialog.DialogCode.Accepted),
+        )
+        monkeypatch.setattr(
+            GraphTextDialog,
+            "result_payload",
+            lambda self: payload,
+        )
+
+        window._set_annotation_tool("text")  # noqa: SLF001
+        text_press = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=1.0, ydata=2.0, dblclick=False)
+        window._handle_canvas_button_press(text_press)  # noqa: SLF001
+        assert window._annotation_tool == "select"  # noqa: SLF001
+
+        window._set_annotation_tool("arrow")  # noqa: SLF001
+        arrow_press = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=2.0, ydata=3.0, dblclick=False)
+        arrow_move = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=4.0, ydata=3.0, dblclick=False)
+        arrow_release = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=4.0, ydata=3.0, dblclick=False)
+        window._handle_canvas_button_press(arrow_press)  # noqa: SLF001
+        window._handle_canvas_motion(arrow_move)  # noqa: SLF001
+        window._handle_canvas_button_release(arrow_release)  # noqa: SLF001
+        assert window._annotation_tool == "select"  # noqa: SLF001
     finally:
         window._clear_project_dirty()  # noqa: SLF001
         window.close()
