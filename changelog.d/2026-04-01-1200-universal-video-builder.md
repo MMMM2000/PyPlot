@@ -5,3 +5,4 @@
 - Made source-video launching more robust by falling back to the native OS file opener when Qt refuses to open a valid local video file.
 - Added dedicated `.pydpj` save/load support for the new workflow under the `MicrowireVideoBuilder` project kind.
 - Added project docs for the new manual-only workflow and documented that it does not use OCR.
+- Fixed the Universal Video Builder so broad fabrication roots are scanned independently of annealing or microscope relevance filters from other builder sections, and ignore temporary `~$` Excel lock files during cataloging.

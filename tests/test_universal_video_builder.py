@@ -313,6 +313,36 @@ def test_universal_video_builder_window_scan_keeps_table_empty_until_add(
     window.close()
 
 
+def test_universal_video_builder_candidate_scan_ignores_video_relevance_filter(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "storage"
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: storage_root)
+    root = _sample_builder_root(tmp_path)
+
+    section = uvb.UniversalVideoSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(section)
+    section.set_sources([str(root)])
+    monkeypatch.setattr(
+        builder_ui.VideoSection,
+        "_load_relevant_map",
+        lambda self: ({"Ni50Fe27Ga23": {2: {1}}}, {"Ni50Fe27Ga23"}),
+    )
+
+    all_candidates = uvb.scan_universal_video_inputs([root])
+    filtered_candidates = builder_ui.VideoSection._collect_candidates(section)
+    universal_candidates = section._collect_candidates()
+
+    assert len(all_candidates) > 0
+    assert len(filtered_candidates) < len(all_candidates)
+    assert len(universal_candidates) == len(all_candidates)
+    assert {str(path.resolve()) for path in universal_candidates} == {
+        str(path.resolve()) for path in all_candidates
+    }
+
+
 def test_universal_video_builder_close_event_honors_unsaved_prompt(
     qtbot,
     monkeypatch: pytest.MonkeyPatch,

@@ -100,6 +100,8 @@ def scan_universal_video_inputs(roots: Sequence[Path]) -> List[Path]:
         for path in iterator:
             if not path.is_file():
                 continue
+            if path.name.startswith("~$"):
+                continue
             suffix = path.suffix.lower()
             if suffix not in ALL_SUPPORTED_EXTENSIONS:
                 continue
@@ -477,6 +479,13 @@ class UniversalVideoSection(VideoSection):
         self._refresh_selector_catalog()
         self._update_status()
         QtCore.QTimer.singleShot(0, self.refresh)
+
+    def _collect_candidates(self) -> List[Path]:  # type: ignore[override]
+        # Universal video builder must index every supported file under the
+        # connected fabrication root. Unlike the original video tab, it should
+        # not inherit annealing/microscope relevance filtering from other
+        # builder sections.
+        return scan_universal_video_inputs([Path(source) for source in self.data.sources])
 
     def _current_column_order(self) -> List[str]:
         if not isinstance(self.table_view, QtWidgets.QTableView):
