@@ -43,6 +43,8 @@ from matplotlib.backends import backend_qt as _backend_qt
 from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
+from matplotlib import font_manager as mpl_font_manager
+from matplotlib import patheffects as mpl_patheffects
 from matplotlib.patches import Ellipse, FancyArrowPatch, Patch, Rectangle
 from matplotlib.text import Text
 from matplotlib import colors as mcolors
@@ -3519,6 +3521,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._annotation_interaction: Dict[str, Any] | None = None
         self._copied_graph_object_payloads: list[dict[str, Any]] = []
         self._annotation_guides: list[Any] = []
+        self._selection_highlight_artists: list[Any] = []
         self._graph_object_counter = 0
         self._tight_layout_warning_signatures: set[tuple[int, str]] = set()
         self._last_tight_layout_warning_message: str | None = None
@@ -4244,7 +4247,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     "svg.fonttype": "none",
                 }
             ):
-                figure.savefig(str(path), **save_kwargs)
+                with self._selection_highlight_suspended():
+                    figure.savefig(str(path), **save_kwargs)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
                 target,
@@ -4361,7 +4365,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             if dpi is not None:
                 save_kwargs["dpi"] = dpi
             try:
-                figure.savefig(str(path), **save_kwargs)
+                with self._selection_highlight_suspended():
+                    figure.savefig(str(path), **save_kwargs)
             except Exception:
                 continue
             exported += 1
@@ -4428,7 +4433,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         "svg.fonttype": "none",
                     }
                 ):
-                    figure.savefig(str(path), **save_kwargs)
+                    with self._selection_highlight_suspended():
+                        figure.savefig(str(path), **save_kwargs)
             except Exception:
                 continue
             finally:
@@ -7802,41 +7808,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._refresh_connected_action = refresh_connected_action
         self._style_toolbar_button(toolbar, refresh_connected_action)
 
-        save_action = toolbar.addAction("Save graph...")
+        save_action = toolbar.addAction("Save graph as...")
         save_action.setEnabled(False)
         save_action.triggered.connect(self._save_current_graph)
         self.save_graph_button = save_action
         self._style_toolbar_button(toolbar, save_action)
-
-        paper_png_action = toolbar.addAction("Paper PNG")
-        paper_png_action.setEnabled(False)
-        paper_png_action.triggered.connect(self._export_current_graph_paper_png)
-        self._paper_png_action = paper_png_action
-        self._style_toolbar_button(toolbar, paper_png_action)
-
-        paper_pdf_action = toolbar.addAction("Paper PDF")
-        paper_pdf_action.setEnabled(False)
-        paper_pdf_action.triggered.connect(self._export_current_graph_paper_pdf)
-        self._paper_pdf_action = paper_pdf_action
-        self._style_toolbar_button(toolbar, paper_pdf_action)
-
-        paper_tiff_action = toolbar.addAction("Paper TIFF")
-        paper_tiff_action.setEnabled(False)
-        paper_tiff_action.triggered.connect(self._export_current_graph_paper_tiff)
-        self._paper_tiff_action = paper_tiff_action
-        self._style_toolbar_button(toolbar, paper_tiff_action)
-
-        paper_eps_action = toolbar.addAction("Paper EPS")
-        paper_eps_action.setEnabled(False)
-        paper_eps_action.triggered.connect(self._export_current_graph_paper_eps)
-        self._paper_eps_action = paper_eps_action
-        self._style_toolbar_button(toolbar, paper_eps_action)
-
-        transparent_png_action = toolbar.addAction("Transparent PNG")
-        transparent_png_action.setEnabled(False)
-        transparent_png_action.triggered.connect(self._export_current_graph_transparent_png)
-        self._transparent_png_action = transparent_png_action
-        self._style_toolbar_button(toolbar, transparent_png_action)
 
         normalize_action = toolbar.addAction("Normalize Y")
         normalize_action.setEnabled(False)
@@ -9419,13 +9395,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return labels.get(kind or "", fallback)
 
     def _select_object_in_manager(self, artist: Any) -> None:
+        self._select_objects_in_manager((artist,))
+
+    def _select_objects_in_manager(self, artists: Sequence[Any]) -> None:
         tree = getattr(self, "object_tree", None)
         if not isinstance(tree, QtWidgets.QTreeWidget):
+            return
+        targets = {artist for artist in artists if artist is not None}
+        if not targets:
             return
 
         def _walk(item: QtWidgets.QTreeWidgetItem) -> QtWidgets.QTreeWidgetItem | None:
             data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-            if isinstance(data, dict) and data.get("object") is artist:
+            if isinstance(data, dict) and data.get("object") in targets:
                 return item
             for index in range(item.childCount()):
                 found = _walk(item.child(index))
@@ -9433,21 +9415,181 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     return found
             return None
 
-        found_item = None
+        found_items: list[QtWidgets.QTreeWidgetItem] = []
         for index in range(tree.topLevelItemCount()):
-            found_item = _walk(tree.topLevelItem(index))
-            if found_item is not None:
-                break
-        if found_item is None:
+            top = tree.topLevelItem(index)
+            stack = [top]
+            while stack:
+                item = stack.pop()
+                data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict) and data.get("object") in targets:
+                    found_items.append(item)
+                for child_index in range(item.childCount() - 1, -1, -1):
+                    stack.append(item.child(child_index))
+        if not found_items:
             return
         tree.blockSignals(True)
         try:
             tree.clearSelection()
-            found_item.setSelected(True)
-            tree.setCurrentItem(found_item)
+            for found_item in found_items:
+                found_item.setSelected(True)
+            tree.setCurrentItem(found_items[0])
         finally:
             tree.blockSignals(False)
         self._handle_object_selection_changed()
+
+    @staticmethod
+    def _request_canvas_draw(canvas: Any) -> None:
+        if canvas is None:
+            return
+        try:
+            canvas.draw_idle()
+        except Exception:
+            try:
+                canvas.draw()
+            except Exception:
+                pass
+
+    def _request_figure_draw(self, figure: Any) -> None:
+        self._request_canvas_draw(getattr(figure, "canvas", None))
+
+    @staticmethod
+    def _selection_artists(selection: tuple[str, Any] | None) -> tuple[Any, ...]:
+        if not selection:
+            return ()
+        role, target = selection
+        if role == "text":
+            return tuple(text for text in (target if isinstance(target, tuple) else (target,)) if isinstance(text, Text))
+        if role == "line" and isinstance(target, Line2D):
+            return (target,)
+        if role == "shape" and isinstance(target, (Line2D, Patch)):
+            return (target,)
+        return ()
+
+    def _clear_selection_highlight(self) -> None:
+        if not self._selection_highlight_artists:
+            return
+        figures: set[Any] = set()
+        for artist in list(self._selection_highlight_artists):
+            try:
+                original = getattr(artist, "_mw_selection_saved_path_effects")
+            except Exception:
+                original = None
+            try:
+                artist.set_path_effects(original or [])
+            except Exception:
+                pass
+            try:
+                delattr(artist, "_mw_selection_saved_path_effects")
+            except Exception:
+                pass
+            figure = getattr(artist, "figure", None)
+            if figure is None:
+                axes = getattr(artist, "axes", None)
+                figure = getattr(axes, "figure", None)
+            if figure is not None:
+                figures.add(figure)
+        self._selection_highlight_artists = []
+        for figure in figures:
+            self._request_figure_draw(figure)
+
+    def _apply_selection_highlight(self, selection: tuple[str, Any] | None) -> None:
+        artists = self._selection_artists(selection)
+        if not artists:
+            return
+        figures: set[Any] = set()
+        for artist in artists:
+            try:
+                original = artist.get_path_effects()
+            except Exception:
+                original = []
+            try:
+                setattr(artist, "_mw_selection_saved_path_effects", list(original or []))
+            except Exception:
+                pass
+            try:
+                if isinstance(artist, Text):
+                    effects = [
+                        mpl_patheffects.withStroke(linewidth=3.0, foreground="#ffd54a"),
+                        mpl_patheffects.Normal(),
+                    ]
+                elif isinstance(artist, Line2D):
+                    base_width = 1.0
+                    try:
+                        base_width = max(1.0, float(artist.get_linewidth()))
+                    except Exception:
+                        pass
+                    effects = [
+                        mpl_patheffects.Stroke(linewidth=base_width + 3.0, foreground="#ffd54a"),
+                        mpl_patheffects.Normal(),
+                    ]
+                else:
+                    effects = [
+                        mpl_patheffects.Stroke(linewidth=3.0, foreground="#ffd54a"),
+                        mpl_patheffects.Normal(),
+                    ]
+                artist.set_path_effects(effects)
+            except Exception:
+                continue
+            figure = getattr(artist, "figure", None)
+            if figure is None:
+                axes = getattr(artist, "axes", None)
+                figure = getattr(axes, "figure", None)
+            if figure is not None:
+                figures.add(figure)
+            self._selection_highlight_artists.append(artist)
+        for figure in figures:
+            self._request_figure_draw(figure)
+
+    @contextmanager
+    def _selection_highlight_suspended(self) -> Iterator[None]:
+        selection = self._format_selection
+        had_highlight = bool(self._selection_highlight_artists)
+        if had_highlight:
+            self._clear_selection_highlight()
+        try:
+            yield
+        finally:
+            if had_highlight:
+                self._apply_selection_highlight(selection)
+
+    def _resolved_text_family_name(self, text: Text) -> str:
+        fallback = "DejaVu Serif"
+        try:
+            families = list(text.get_fontfamily())
+        except Exception:
+            families = []
+        if families:
+            fallback = str(families[0]) or fallback
+        try:
+            font_path = mpl_font_manager.findfont(
+                text.get_fontproperties(),
+                fallback_to_default=True,
+            )
+            resolved = str(mpl_font_manager.FontProperties(fname=font_path).get_name() or "").strip()
+            if resolved:
+                return resolved
+        except Exception:
+            pass
+        return fallback
+
+    def _notify_text_artists_changed(
+        self,
+        texts: Sequence[Text],
+        *,
+        rebuild_object_tree: bool = False,
+    ) -> None:
+        updated = [text for text in texts if isinstance(text, Text)]
+        if not updated:
+            return
+        for text in updated:
+            self._redraw_artist(text)
+        self._mark_project_dirty()
+        if rebuild_object_tree:
+            tab = self._tab_for_axes(getattr(updated[0], "axes", None))
+            if tab is not None:
+                self._rebuild_object_manager_for_tab(tab)
+                self._select_objects_in_manager(updated)
 
     @staticmethod
     def _strip_outer_math(text: str) -> str:
@@ -15005,6 +15147,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             self._set_format_selection(None)
 
     def _set_format_selection(self, selection: tuple[str, Any] | None) -> None:
+        self._clear_selection_highlight()
         if selection is not None:
             kind, target = selection
             if kind == "text":
@@ -15018,6 +15161,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             elif kind == "shape" and not isinstance(target, (Line2D, Patch)):
                 selection = None
         self._format_selection = selection
+        self._apply_selection_highlight(selection)
         self._update_format_toolbar_state()
 
     def _update_format_toolbar_state(self) -> None:
@@ -15119,12 +15263,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 if text is not None:
                     if font_combo is not None:
                         font_combo.blockSignals(True)
-                        families = []
-                        try:
-                            families = list(text.get_fontfamily())
-                        except Exception:
-                            families = []
-                        font_combo.setCurrentText(str(families[0]) if families else "DejaVu Serif")
+                        font_combo.setCurrentText(self._resolved_text_family_name(text))
                         font_combo.blockSignals(False)
                         font_combo.setEnabled(True)
                     if size_spin is not None:
@@ -15468,12 +15607,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         token = str(family or "").strip() or "DejaVu Serif"
         texts = selection[1]
+        updated: list[Text] = []
         for text in texts:
             try:
                 text.set_fontfamily(token)
             except Exception:
                 continue
-            self._redraw_artist(text)
+            updated.append(text)
+        self._notify_text_artists_changed(updated)
         self._update_format_toolbar_state()
 
     def _edit_text_payload_for_selection(self) -> _GraphTextDialogResult | None:
@@ -15484,15 +15625,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         first_text = texts[0] if isinstance(texts, tuple) and texts else None
         if not isinstance(first_text, Text):
             return None
-        try:
-            families = list(first_text.get_fontfamily())
-        except Exception:
-            families = []
         dialog = GraphTextDialog(
             self,
             title="Edit text",
             initial_text=str(getattr(first_text, "_mw_raw_text", first_text.get_text()) or ""),
-            font_family=str(families[0]) if families else "DejaVu Serif",
+            font_family=self._resolved_text_family_name(first_text),
             font_size=float(first_text.get_fontsize()),
             color=self._qcolor_from_mpl(first_text.get_color()),
             bold=self._text_is_bold(first_text),
@@ -15509,6 +15646,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not selection or selection[0] != "text":
             return
         texts = selection[1]
+        updated: list[Text] = []
         for text in texts:
             if not isinstance(text, Text):
                 continue
@@ -15530,7 +15668,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 text.set_underline(bool(payload.underline))
             except Exception:
                 continue
-            self._redraw_artist(text)
+            updated.append(text)
+        self._notify_text_artists_changed(updated, rebuild_object_tree=True)
         self._update_format_toolbar_state()
 
     def _apply_text_strikethrough(self, checked: bool) -> None:
@@ -15540,6 +15679,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not selection or selection[0] != "text":
             return
         texts = selection[1]
+        updated: list[Text] = []
         for text in texts:
             raw = str(getattr(text, "_mw_raw_text", text.get_text()) or "")
             setattr(text, "_mw_raw_text", raw)
@@ -15553,7 +15693,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 )
             except Exception:
                 continue
-            self._redraw_artist(text)
+            updated.append(text)
+        self._notify_text_artists_changed(updated)
         self._update_format_toolbar_state()
 
     def _edit_selected_text(self) -> None:
@@ -15604,6 +15745,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         delta_x = float(x_spin.value()) - float(x_value)
         delta_y = float(y_spin.value()) - float(y_value)
         rotation = float(rotation_spin.value())
+        updated: list[Text] = []
         for text in texts:
             try:
                 current_x, current_y = text.get_position()
@@ -15611,7 +15753,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 text.set_rotation(rotation)
             except Exception:
                 continue
-            self._redraw_artist(text)
+            updated.append(text)
+        self._notify_text_artists_changed(updated)
 
     def _align_selected_text_annotations(self, mode: str) -> None:
         texts = self._selected_annotation_texts()
@@ -15633,32 +15776,27 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             target_x = min(xs)
             for text, _x_value, y_value in positions:
                 text.set_position((target_x, y_value))
-                self._redraw_artist(text)
         elif token == "hcenter":
             target_x = sum(xs) / len(xs)
             for text, _x_value, y_value in positions:
                 text.set_position((target_x, y_value))
-                self._redraw_artist(text)
         elif token == "right":
             target_x = max(xs)
             for text, _x_value, y_value in positions:
                 text.set_position((target_x, y_value))
-                self._redraw_artist(text)
         elif token == "top":
             target_y = max(ys)
             for text, x_value, _y_value in positions:
                 text.set_position((x_value, target_y))
-                self._redraw_artist(text)
         elif token == "vcenter":
             target_y = sum(ys) / len(ys)
             for text, x_value, _y_value in positions:
                 text.set_position((x_value, target_y))
-                self._redraw_artist(text)
         elif token == "bottom":
             target_y = min(ys)
             for text, x_value, _y_value in positions:
                 text.set_position((x_value, target_y))
-                self._redraw_artist(text)
+        self._notify_text_artists_changed([text for text, _x_value, _y_value in positions])
 
     def _selected_graph_object_payloads(self) -> list[dict[str, Any]]:
         selection = self._format_selection
@@ -15773,12 +15911,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not selection or selection[0] != "text":
             return
         texts = selection[1]
+        updated: list[Text] = []
         for text in texts:
             try:
                 text.set_fontsize(value)
             except Exception:
                 continue
-            self._redraw_artist(text)
+            updated.append(text)
+        self._notify_text_artists_changed(updated)
         self._update_format_toolbar_state()
 
     def _apply_text_bold(self, checked: bool) -> None:
@@ -15788,12 +15928,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not selection or selection[0] != "text":
             return
         texts = selection[1]
+        updated: list[Text] = []
         for text in texts:
             try:
                 text.set_fontweight("bold" if checked else "normal")
             except Exception:
                 continue
-            self._redraw_artist(text)
+            updated.append(text)
+        self._notify_text_artists_changed(updated)
         self._update_format_toolbar_state()
 
     def _apply_text_italic(self, checked: bool) -> None:
@@ -15803,12 +15945,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not selection or selection[0] != "text":
             return
         texts = selection[1]
+        updated: list[Text] = []
         for text in texts:
             try:
                 text.set_fontstyle("italic" if checked else "normal")
             except Exception:
                 continue
-            self._redraw_artist(text)
+            updated.append(text)
+        self._notify_text_artists_changed(updated)
         self._update_format_toolbar_state()
 
     def _apply_text_underline(self, checked: bool) -> None:
@@ -15818,12 +15962,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not selection or selection[0] != "text":
             return
         texts = selection[1]
+        updated: list[Text] = []
         for text in texts:
             try:
                 text.set_underline(bool(checked))
             except Exception:
                 continue
-            self._redraw_artist(text)
+            updated.append(text)
+        self._notify_text_artists_changed(updated)
         self._update_format_toolbar_state()
 
     def _apply_text_subscript(self) -> None:
@@ -15833,6 +15979,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         script, ok = QtWidgets.QInputDialog.getText(self, "Subscript", "Subscript text:")
         if not ok or not str(script).strip():
             return
+        updated: list[Text] = []
         for text in selection[1]:
             base = self._strip_outer_math(str(getattr(text, "_mw_raw_text", text.get_text()) or "")) or "x"
             raw = f"${base}_{{{str(script).strip()}}}$"
@@ -15842,7 +15989,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 text.set_text(raw)
             except Exception:
                 continue
-            self._redraw_artist(text)
+            updated.append(text)
+        self._notify_text_artists_changed(updated, rebuild_object_tree=True)
         self._update_format_toolbar_state()
 
     def _apply_text_superscript(self) -> None:
@@ -15852,6 +16000,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         script, ok = QtWidgets.QInputDialog.getText(self, "Superscript", "Superscript text:")
         if not ok or not str(script).strip():
             return
+        updated: list[Text] = []
         for text in selection[1]:
             base = self._strip_outer_math(str(getattr(text, "_mw_raw_text", text.get_text()) or "")) or "x"
             raw = f"${base}^{{{str(script).strip()}}}$"
@@ -15861,7 +16010,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 text.set_text(raw)
             except Exception:
                 continue
-            self._redraw_artist(text)
+            updated.append(text)
+        self._notify_text_artists_changed(updated, rebuild_object_tree=True)
         self._update_format_toolbar_state()
 
     def _apply_text_subsuperscript(self) -> None:
@@ -15874,6 +16024,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         superscript, ok = QtWidgets.QInputDialog.getText(self, "Superscript", "Superscript text:")
         if not ok or not str(superscript).strip():
             return
+        updated: list[Text] = []
         for text in selection[1]:
             base = self._strip_outer_math(str(getattr(text, "_mw_raw_text", text.get_text()) or "")) or "x"
             raw = f"${base}_{{{str(subscript).strip()}}}^{{{str(superscript).strip()}}}$"
@@ -15883,7 +16034,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 text.set_text(raw)
             except Exception:
                 continue
-            self._redraw_artist(text)
+            updated.append(text)
+        self._notify_text_artists_changed(updated, rebuild_object_tree=True)
         self._update_format_toolbar_state()
 
     def _choose_format_color(self) -> None:
@@ -15916,6 +16068,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         mpl_color = self._mpl_color_from_qcolor(color)
         if role == "text":
             texts = target if isinstance(target, tuple) else (target,)
+            updated: list[Text] = []
             for text in texts:
                 if not isinstance(text, Text):
                     continue
@@ -15923,7 +16076,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     text.set_color(mpl_color)
                 except Exception:
                     continue
-                self._redraw_artist(text)
+                updated.append(text)
+            self._notify_text_artists_changed(updated)
         elif role == "line" and isinstance(target, Line2D):
             try:
                 target.set_color(mpl_color)
@@ -17280,18 +17434,64 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._mark_graph_object(artist, "text", label=payload.text)
         return artist
 
-    def _select_graph_object_from_canvas(self, event: Any, candidates: list[Any]) -> bool:
+    def _select_graph_object_from_canvas(self, event: Any, candidates: list[Any]) -> Any | None:
         for axes in candidates:
+            direct_text_targets: list[Any] = [
+                getattr(axes, "title", None),
+                getattr(getattr(axes, "xaxis", None), "label", None),
+                getattr(getattr(axes, "yaxis", None), "label", None),
+            ]
+            legend = None
+            try:
+                legend = axes.get_legend()
+            except Exception:
+                legend = None
+            if legend is not None:
+                try:
+                    direct_text_targets.extend(list(legend.get_texts()))
+                except Exception:
+                    pass
+                try:
+                    legend_title = legend.get_title()
+                except Exception:
+                    legend_title = None
+                if legend_title is not None:
+                    direct_text_targets.append(legend_title)
+            for text_artist in direct_text_targets:
+                if isinstance(text_artist, Text) and self._artist_hit(text_artist, event):
+                    existing = self._format_selection
+                    if (
+                        existing
+                        and existing[0] == "text"
+                        and isinstance(existing[1], tuple)
+                        and text_artist in existing[1]
+                    ):
+                        self._set_format_selection(existing)
+                        self._select_objects_in_manager(existing[1])
+                    else:
+                        self._set_format_selection(("text", (text_artist,)))
+                        self._select_object_in_manager(text_artist)
+                    return text_artist
             for text_artist in self._iter_graph_object_texts(axes):
                 if self._artist_hit(text_artist, event):
-                    self._set_format_selection(("text", (text_artist,)))
-                    self._select_object_in_manager(text_artist)
-                    return True
+                    existing = self._format_selection
+                    if (
+                        existing
+                        and existing[0] == "text"
+                        and isinstance(existing[1], tuple)
+                        and text_artist in existing[1]
+                    ):
+                        self._set_format_selection(existing)
+                        self._select_objects_in_manager(existing[1])
+                    else:
+                        self._set_format_selection(("text", (text_artist,)))
+                        self._select_object_in_manager(text_artist)
+                    return text_artist
             for shape_artist in reversed(self._iter_graph_object_shapes(axes)):
                 if self._artist_hit(shape_artist, event):
                     self._set_format_selection(("shape", shape_artist))
                     self._select_object_in_manager(shape_artist)
-                    return True
+                    return shape_artist
             try:
                 lines = list(axes.get_lines())
             except Exception:
@@ -17303,8 +17503,41 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     continue
                 if self._artist_hit(line, event):
                     self._set_format_selection(("line", line))
-                    return True
-        return False
+                    return line
+        return None
+
+    def _start_selected_text_drag(self, event: Any, hit_text: Text) -> bool:
+        if not isinstance(hit_text, Text):
+            return False
+        if getattr(event, "button", None) != 1:
+            return False
+        if self._graph_object_kind(hit_text) != "text":
+            return False
+        x0 = getattr(event, "xdata", None)
+        y0 = getattr(event, "ydata", None)
+        if x0 is None or y0 is None:
+            return False
+        texts = self._selected_annotation_texts()
+        if hit_text not in texts:
+            texts = (hit_text,)
+        start_positions: dict[Text, tuple[float, float]] = {}
+        for text in texts:
+            try:
+                position = text.get_position()
+                start_positions[text] = (float(position[0]), float(position[1]))
+            except Exception:
+                continue
+        if not start_positions:
+            return False
+        self._annotation_interaction = {
+            "tool": "move_text",
+            "axes": getattr(hit_text, "axes", None),
+            "canvas": getattr(event, "canvas", None),
+            "start": (float(x0), float(y0)),
+            "texts": tuple(start_positions.keys()),
+            "start_positions": start_positions,
+        }
+        return True
 
     def _start_annotation_drag(self, event: Any, tool: str, axes: Any) -> None:
         x0 = getattr(event, "xdata", None)
@@ -17372,6 +17605,26 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         if interaction.get("canvas") is not getattr(event, "canvas", None):
             return
+        if str(interaction.get("tool") or "") == "move_text":
+            x1 = getattr(event, "xdata", None)
+            y1 = getattr(event, "ydata", None)
+            if x1 is None or y1 is None:
+                return
+            x0, y0 = interaction.get("start", (0.0, 0.0))
+            delta_x = float(x1) - float(x0)
+            delta_y = float(y1) - float(y0)
+            updated = False
+            for text, (start_x, start_y) in dict(interaction.get("start_positions") or {}).items():
+                try:
+                    text.set_position((float(start_x) + delta_x, float(start_y) + delta_y))
+                except Exception:
+                    continue
+                updated = True
+            if updated:
+                axes = interaction.get("axes")
+                if axes is not None:
+                    self._request_figure_draw(getattr(axes, "figure", None))
+            return
         x1 = getattr(event, "xdata", None)
         y1 = getattr(event, "ydata", None)
         if x1 is None or y1 is None:
@@ -17393,6 +17646,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not isinstance(interaction, dict):
             return
         if interaction.get("canvas") is not getattr(event, "canvas", None):
+            return
+        if str(interaction.get("tool") or "") == "move_text":
+            self._annotation_interaction = None
+            self._mark_project_dirty()
+            axes = interaction.get("axes")
+            if axes is not None:
+                self._request_figure_draw(getattr(axes, "figure", None))
             return
         x1 = getattr(event, "xdata", None)
         y1 = getattr(event, "ydata", None)
@@ -17439,7 +17699,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         tool = str(self._annotation_tool or "select")
         if tool == "select" and not bool(getattr(event, "dblclick", False)):
             self._clear_annotation_guides()
-            if self._select_graph_object_from_canvas(event, candidates):
+            selected_artist = self._select_graph_object_from_canvas(event, candidates)
+            if selected_artist is not None:
+                if isinstance(selected_artist, Text):
+                    self._start_selected_text_drag(event, selected_artist)
                 return
         if tool in {"text", "callout"}:
             if getattr(event, "button", None) == 1 and candidates:

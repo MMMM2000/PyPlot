@@ -49,6 +49,27 @@ def _find_tree_item_by_object(tree: QtWidgets.QTreeWidget, target: object) -> bo
     return False
 
 
+def _tree_item_for_object(
+    tree: QtWidgets.QTreeWidget,
+    target: object,
+) -> QtWidgets.QTreeWidgetItem | None:
+    def _walk(item: QtWidgets.QTreeWidgetItem) -> QtWidgets.QTreeWidgetItem | None:
+        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(data, dict) and data.get("object") is target:
+            return item
+        for index in range(item.childCount()):
+            found = _walk(item.child(index))
+            if found is not None:
+                return found
+        return None
+
+    for index in range(tree.topLevelItemCount()):
+        found = _walk(tree.topLevelItem(index))
+        if found is not None:
+            return found
+    return None
+
+
 def test_blank_graph_supports_text_annotations_and_mathtext_formatting(monkeypatch) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(plotters={})
@@ -243,6 +264,94 @@ def test_annotation_copy_paste_and_duplicate() -> None:
         assert len(texts) == 3
     finally:
         window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_object_manager_multi_text_selection_applies_font_to_all() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+        axes.set_xlabel("Field")
+        axes.set_ylabel("Flux")
+        window._rebuild_object_manager_for_tab(window.tab_widget.currentWidget())  # noqa: SLF001
+
+        x_item = _tree_item_for_object(window.object_tree, axes.xaxis.label)
+        y_item = _tree_item_for_object(window.object_tree, axes.yaxis.label)
+        assert x_item is not None and y_item is not None
+
+        window.object_tree.clearSelection()
+        x_item.setSelected(True)
+        y_item.setSelected(True)
+        window._handle_object_selection_changed()  # noqa: SLF001
+        window._apply_text_family("DejaVu Sans")  # noqa: SLF001
+
+        assert axes.xaxis.label.get_fontfamily()[0] == "DejaVu Sans"
+        assert axes.yaxis.label.get_fontfamily()[0] == "DejaVu Sans"
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_dragging_selected_annotation_text_updates_position() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        canvas = window._current_canvas()  # noqa: SLF001
+        assert axes is not None and canvas is not None
+        artist = window._create_text_annotation(  # noqa: SLF001
+            axes,
+            x=1.0,
+            y=2.0,
+            payload=_GraphTextDialogResult(
+                text="Drag",
+                font_family="DejaVu Serif",
+                font_size=14.0,
+                color="#111111",
+                bold=False,
+                italic=False,
+                underline=False,
+            ),
+        )
+        assert artist is not None
+        window._set_format_selection(("text", (artist,)))  # noqa: SLF001
+
+        press = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=1.0, ydata=2.0, dblclick=False)
+        move = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=2.5, ydata=4.0, dblclick=False)
+        release = SimpleNamespace(button=1, canvas=canvas, inaxes=axes, xdata=2.5, ydata=4.0, dblclick=False)
+        assert window._start_selected_text_drag(press, artist)  # noqa: SLF001
+        window._handle_canvas_motion(move)  # noqa: SLF001
+        window._handle_canvas_button_release(release)  # noqa: SLF001
+
+        x_value, y_value = artist.get_position()
+        assert x_value == 2.5
+        assert y_value == 4.0
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_action_toolbar_uses_single_save_graph_entry() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        toolbar = getattr(window, "_action_toolbar", None)  # noqa: SLF001
+        assert isinstance(toolbar, QtWidgets.QToolBar)
+        labels = [action.text() for action in toolbar.actions() if action.text()]
+        assert "Save graph as..." in labels
+        assert "Paper PNG" not in labels
+        assert "Paper PDF" not in labels
+        assert "Paper TIFF" not in labels
+        assert "Paper EPS" not in labels
+        assert "Transparent PNG" not in labels
+    finally:
         window.close()
         app.processEvents()
 
