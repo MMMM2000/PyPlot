@@ -71,6 +71,26 @@ def _tree_item_for_object(
     return None
 
 
+def _tree_item_for_label(
+    tree: QtWidgets.QTreeWidget,
+    label: str,
+) -> QtWidgets.QTreeWidgetItem | None:
+    def _walk(item: QtWidgets.QTreeWidgetItem) -> QtWidgets.QTreeWidgetItem | None:
+        if item.text(0) == label:
+            return item
+        for index in range(item.childCount()):
+            found = _walk(item.child(index))
+            if found is not None:
+                return found
+        return None
+
+    for index in range(tree.topLevelItemCount()):
+        found = _walk(tree.topLevelItem(index))
+        if found is not None:
+            return found
+    return None
+
+
 def test_blank_graph_supports_text_annotations_and_mathtext_formatting(monkeypatch) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(plotters={})
@@ -298,6 +318,121 @@ def test_object_manager_multi_text_selection_applies_font_to_all() -> None:
         app.processEvents()
 
 
+def test_tick_labels_are_selectable_text_targets() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        canvas = window._current_canvas()  # noqa: SLF001
+        assert axes is not None and canvas is not None
+        axes.plot([0, 1, 2], [1, 2, 3])
+        axes.set_xticks([0, 1, 2])
+        canvas.draw()
+        window._rebuild_object_manager_for_tab(window.tab_widget.currentWidget())  # noqa: SLF001
+
+        tick = next(label for label in axes.get_xticklabels() if label.get_text() == "1")
+        tick_item = _tree_item_for_object(window.object_tree, tick)
+        assert tick_item is not None
+
+        window.object_tree.clearSelection()
+        tick_item.setSelected(True)
+        window._handle_object_selection_changed()  # noqa: SLF001
+        window._apply_text_family("DejaVu Sans")  # noqa: SLF001
+
+        selection = window._format_selection  # noqa: SLF001
+        assert selection is not None
+        assert selection[0] == "text"
+        assert tick in selection[1]
+        assert tick.get_fontfamily()[0] == "DejaVu Sans"
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_tick_labels_appear_under_collapsed_axis_groups() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        canvas = window._current_canvas()  # noqa: SLF001
+        assert axes is not None and canvas is not None
+        axes.plot([0, 1, 2], [1, 2, 3])
+        axes.set_xticks([0, 1, 2])
+        axes.set_yticks([1, 2, 3])
+        canvas.draw()
+        window._rebuild_object_manager_for_tab(window.tab_widget.currentWidget())  # noqa: SLF001
+
+        x_group = _tree_item_for_label(window.object_tree, "X tick labels")
+        y_group = _tree_item_for_label(window.object_tree, "Y tick labels")
+        assert x_group is not None
+        assert y_group is not None
+        assert x_group.childCount() >= 3
+        assert y_group.childCount() >= 3
+        assert x_group.isExpanded() is False
+        assert y_group.isExpanded() is False
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_canvas_selection_can_target_tick_labels(monkeypatch) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        axes = window._current_axes()  # noqa: SLF001
+        canvas = window._current_canvas()  # noqa: SLF001
+        assert axes is not None and canvas is not None
+        axes.plot([0, 1, 2], [1, 2, 3])
+        axes.set_xticks([0, 1, 2])
+        canvas.draw()
+        tick = next(label for label in axes.get_xticklabels() if label.get_text() == "1")
+
+        monkeypatch.setattr(
+            window,
+            "_artist_hit",
+            lambda artist, event: artist is getattr(event, "target", None),
+        )
+
+        selected = window._select_graph_object_from_canvas(  # noqa: SLF001
+            SimpleNamespace(target=tick, key="", guiEvent=None),
+            [axes],
+        )
+        assert selected is tick
+        selection = window._format_selection  # noqa: SLF001
+        assert selection is not None
+        assert selection[0] == "text"
+        assert tick in selection[1]
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
+def test_automation_can_bypass_close_prompt(monkeypatch) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window._create_blank_graph()  # noqa: SLF001
+        window._mark_project_dirty()  # noqa: SLF001
+        monkeypatch.setenv("PYPLOT_SKIP_CLOSE_PROMPT", "1")
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "exec",
+            lambda self: (_ for _ in ()).throw(AssertionError("Close prompt should be bypassed")),
+        )
+        assert window._confirm_close_with_unsaved_data() is True  # noqa: SLF001
+    finally:
+        monkeypatch.delenv("PYPLOT_SKIP_CLOSE_PROMPT", raising=False)
+        window._clear_project_dirty()  # noqa: SLF001
+        window.close()
+        app.processEvents()
+
+
 def test_dragging_selected_annotation_text_updates_position() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(plotters={})
@@ -493,11 +628,28 @@ def test_action_toolbar_uses_single_save_graph_entry() -> None:
         assert isinstance(toolbar, QtWidgets.QToolBar)
         labels = [action.text() for action in toolbar.actions() if action.text()]
         assert "Save graph as..." in labels
+        assert "Figure sources..." in labels
+        assert "Connect folders..." in labels
+        assert "Figure sources" not in labels
+        assert "Connect folders" not in labels
         assert "Paper PNG" not in labels
         assert "Paper PDF" not in labels
         assert "Paper TIFF" not in labels
         assert "Paper EPS" not in labels
         assert "Transparent PNG" not in labels
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_graph_format_section_button_uses_ellipsis() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        buttons = list(getattr(window, "_graph_section_buttons", []) or [])  # noqa: SLF001
+        labels = [button.text() for button in buttons if isinstance(button, QtWidgets.QToolButton)]
+        assert "Graph formatting..." in labels
+        assert "Graph formatting" not in labels
     finally:
         window.close()
         app.processEvents()

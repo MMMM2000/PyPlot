@@ -7288,7 +7288,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     ) -> QtWidgets.QToolButton:
         button = _GraphSectionButton(anchor, self._set_graph_settings_anchor, self)
         button.setObjectName(f"mw_graph_section_{title.lower().replace(' ', '_')}")
-        button.setText(title)
+        label = title
+        if menu is None and not label.endswith("..."):
+            label = f"{label}..."
+        button.setText(label)
         button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
         if isinstance(menu, QtWidgets.QMenu):
             button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -7791,13 +7794,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._clone_figure_action = clone_figure_action
         self._style_toolbar_button(toolbar, clone_figure_action)
 
-        figure_sources_action = toolbar.addAction("Figure sources")
+        figure_sources_action = toolbar.addAction("Figure sources...")
         figure_sources_action.setEnabled(False)
         figure_sources_action.triggered.connect(self._show_current_layout_sources)
         self._figure_sources_action = figure_sources_action
         self._style_toolbar_button(toolbar, figure_sources_action)
 
-        connect_action = toolbar.addAction("Connect folders")
+        connect_action = toolbar.addAction("Connect folders...")
         connect_action.triggered.connect(self._connect_data_from_folder)
         self._connect_folder_action = connect_action
         self._style_toolbar_button(toolbar, connect_action)
@@ -9393,6 +9396,32 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             "ellipse": "Ellipse",
         }
         return labels.get(kind or "", fallback)
+
+    @staticmethod
+    def _axis_tick_label_artists(axes: Any) -> list[Text]:
+        tick_labels: list[Text] = []
+        getters = (
+            getattr(axes, "get_xticklabels", None),
+            getattr(axes, "get_yticklabels", None),
+        )
+        for getter in getters:
+            if not callable(getter):
+                continue
+            try:
+                labels = list(getter())
+            except Exception:
+                labels = []
+            for label in labels:
+                if not isinstance(label, Text):
+                    continue
+                try:
+                    text = str(label.get_text() or "").strip()
+                except Exception:
+                    text = ""
+                if not text:
+                    continue
+                tick_labels.append(label)
+        return tick_labels
 
     def _select_object_in_manager(self, artist: Any) -> None:
         self._select_objects_in_manager((artist,))
@@ -13396,6 +13425,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         super().closeEvent(event)
 
     def _confirm_close_with_unsaved_data(self) -> bool:
+        if self._automation_close_prompt_bypass_enabled():
+            return True
         if not self._project_dirty or not self._has_project_data_to_save():
             return True
         dialog = QtWidgets.QMessageBox(self)
@@ -13418,6 +13449,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if clicked is discard_button:
             return True
         return False
+
+    def _automation_close_prompt_bypass_enabled(self) -> bool:
+        app = QtWidgets.QApplication.instance()
+        if isinstance(app, QtWidgets.QApplication):
+            try:
+                if bool(app.property("mw_skip_close_prompt")):
+                    return True
+            except Exception:
+                pass
+        token = str(os.environ.get("PYPLOT_SKIP_CLOSE_PROMPT", "") or "").strip().lower()
+        return token in {"1", "true", "yes", "on"}
 
     def _save_before_close(self) -> bool:
         previous_dirty = self._project_dirty
@@ -15019,13 +15061,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             figure_legends = []
 
-        def _make_item(label: str, kind: str | None = None, obj: Any | None = None) -> QtWidgets.QTreeWidgetItem:
+        def _make_item(
+            label: str,
+            kind: str | None = None,
+            obj: Any | None = None,
+            *,
+            selectable: bool = True,
+        ) -> QtWidgets.QTreeWidgetItem:
             item = QtWidgets.QTreeWidgetItem([label])
-            item.setFlags(
-                item.flags()
-                | QtCore.Qt.ItemFlag.ItemIsEnabled
-                | QtCore.Qt.ItemFlag.ItemIsSelectable
-            )
+            flags = item.flags() | QtCore.Qt.ItemFlag.ItemIsEnabled
+            if selectable:
+                flags |= QtCore.Qt.ItemFlag.ItemIsSelectable
+            else:
+                flags &= ~QtCore.Qt.ItemFlag.ItemIsSelectable
+            item.setFlags(flags)
             if kind and obj is not None:
                 item.setData(0, QtCore.Qt.ItemDataRole.UserRole, {"kind": kind, "object": obj})
                 if kind in {"legend", "line", "shape"}:
@@ -15040,6 +15089,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return item
 
         legends: list[Any] = []
+        collapsed_tick_groups: list[QtWidgets.QTreeWidgetItem] = []
         for axis_index, axis in enumerate(axes_list, start=1):
             axis_title = ""
             try:
@@ -15088,6 +15138,40 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     {"kind": "text", "object": y_artist},
                 )
             axis_item.addChild(y_label_item)
+            try:
+                x_ticks = [
+                    tick_artist
+                    for tick_artist in list(getattr(axis, "get_xticklabels", lambda: [])())
+                    if isinstance(tick_artist, Text) and str(tick_artist.get_text() or "").strip()
+                ]
+            except Exception:
+                x_ticks = []
+            try:
+                y_ticks = [
+                    tick_artist
+                    for tick_artist in list(getattr(axis, "get_yticklabels", lambda: [])())
+                    if isinstance(tick_artist, Text) and str(tick_artist.get_text() or "").strip()
+                ]
+            except Exception:
+                y_ticks = []
+            if x_ticks:
+                x_tick_group = _make_item("X tick labels", selectable=False)
+                for tick_artist in x_ticks:
+                    tick_text = self._graph_object_label(tick_artist, fallback="Tick")
+                    x_tick_group.addChild(
+                        _make_item(f"Tick: {tick_text}", kind="text", obj=tick_artist)
+                    )
+                axis_item.addChild(x_tick_group)
+                collapsed_tick_groups.append(x_tick_group)
+            if y_ticks:
+                y_tick_group = _make_item("Y tick labels", selectable=False)
+                for tick_artist in y_ticks:
+                    tick_text = self._graph_object_label(tick_artist, fallback="Tick")
+                    y_tick_group.addChild(
+                        _make_item(f"Tick: {tick_text}", kind="text", obj=tick_artist)
+                    )
+                axis_item.addChild(y_tick_group)
+                collapsed_tick_groups.append(y_tick_group)
             try:
                 legend = axis.get_legend()
                 if legend is not None:
@@ -15249,8 +15333,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             self._apply_object_item_visibility(legend_item, legend_visible)
             root_item.addChild(legend_item)
 
-
         tree.expandAll()
+        for group_item in collapsed_tick_groups:
+            try:
+                tree.collapseItem(group_item)
+            except Exception:
+                pass
         self._object_tree_updating = False
         tree.blockSignals(False)
 
@@ -17583,6 +17671,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 getattr(getattr(axes, "xaxis", None), "label", None),
                 getattr(getattr(axes, "yaxis", None), "label", None),
             ]
+            direct_text_targets.extend(self._axis_tick_label_artists(axes))
             legend = None
             try:
                 legend = axes.get_legend()
