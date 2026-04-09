@@ -1468,7 +1468,7 @@ def test_fabrication_augments_rows_for_microscope_only_samples() -> None:
         assert row["Composition"] == "TestCompI"
         assert row["Draw"] == 3
         assert row["Piece"] == 2
-        assert row["Data source"] == "Measured"
+        assert row["Data source"] == "Microscope only"
         assert pd.isna(row[builder_ui.MICROSCOPE_D_COLUMN])
         assert pd.isna(row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
         assert pd.isna(row["d/D"])
@@ -2510,7 +2510,6 @@ def test_fabrication_import_project_payload_prefers_saved_rows_over_stale_raw_in
             section.raw_index_payload_name,
         } else None  # type: ignore[method-assign]
         section._load_relevant_map = lambda: ({}, set())  # type: ignore[method-assign]
-
         payload = {
             "columns": [
                 "Composition",
@@ -2554,13 +2553,17 @@ def test_fabrication_filter_index_keeps_all_available_pieces_on_relevant_draw() 
     section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
     try:
         index = builder_ui.FabricationIndex()
-        index.set_draw("Ni50Fe27Ga23", 5, {"mass_g": 1.2})
+        index.set_draw(
+            "Ni50Fe27Ga23",
+            5,
+            {"mass_g": 1.2, "_source_path": "C:/fabrication/source.xlsx"},
+        )
         for piece in range(0, 8):
             index.set_piece(
                 "Ni50Fe27Ga23",
                 5,
                 piece,
-                {"length_m": float(piece)},
+                {"length_m": float(piece), "_source_path": "C:/fabrication/source.xlsx"},
             )
 
         filtered = section._filter_index(
@@ -2583,13 +2586,17 @@ def test_fabrication_augment_table_adds_all_available_sibling_pieces_from_same_d
     section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
     try:
         index = builder_ui.FabricationIndex()
-        index.set_draw("Ni50Fe27Ga23", 5, {"mass_g": 1.2})
+        index.set_draw(
+            "Ni50Fe27Ga23",
+            5,
+            {"mass_g": 1.2, "_source_path": "C:/fabrication/source.xlsx"},
+        )
         for piece in range(0, 8):
             index.set_piece(
                 "Ni50Fe27Ga23",
                 5,
                 piece,
-                {"length_m": float(piece)},
+                {"length_m": float(piece), "_source_path": "C:/fabrication/source.xlsx"},
             )
         frame = pd.DataFrame(
             [
@@ -2611,6 +2618,15 @@ def test_fabrication_augment_table_adds_all_available_sibling_pieces_from_same_d
 
         assert augmented["Draw"].tolist() == [5, 5, 5, 5, 5, 5, 5]
         assert augmented["Piece"].tolist() == [4, 1, 2, 3, 5, 6, 7]
+        assert augmented["Data source"].tolist() == [
+            "Measured",
+            "Fabrication only",
+            "Fabrication only",
+            "Fabrication only",
+            "Fabrication only",
+            "Fabrication only",
+            "Fabrication only",
+        ]
     finally:
         section.close()
 

@@ -3301,8 +3301,37 @@ def _fabrication_row_from_records(
     if any("Imported" in source for source in sources):
         row["Data source"] = "Imported"
     elif sources:
-        row["Data source"] = "Measured"
+        row["Data source"] = "Fabrication only"
     return row
+
+
+def _data_source_with_import(label: Optional[str]) -> str:
+    text = str(label or "").strip()
+    if not text:
+        return "Imported"
+    if "Imported" in text:
+        return text
+    if text == "Fabrication only":
+        return "Fabrication + Imported"
+    return f"{text} + Imported"
+
+
+def _primary_saved_source_path(record: Mapping[str, Any]) -> Optional[str]:
+    raw_sources = record.get("_source_paths")
+    if isinstance(raw_sources, (list, tuple, set)):
+        for candidate in raw_sources:
+            if not candidate:
+                continue
+            try:
+                resolved = str(Path(candidate))
+            except Exception:
+                resolved = str(candidate)
+            if resolved:
+                return resolved
+    source_label = str(record.get("Data source") or "").strip()
+    if source_label and any(token in source_label for token in ("\\", "/", ":")):
+        return source_label
+    return None
 
 
 def _is_blank(value: Any) -> bool:
@@ -8294,6 +8323,7 @@ class FabricationSection(MiniDatabaseSection):
             relevant_map,
             source_index=raw_index,
         )
+        table = self._apply_fabrication_source_labels(table)
         table = self._apply_imported_separation(table)
         return table, filtered_index, removed_draws, removed_pieces
 
@@ -8443,7 +8473,7 @@ class FabricationSection(MiniDatabaseSection):
         if len(missing_entries) > 3:
             preview += ", …"
         message = (
-            f"{base_message} — Missing fabrication data for {len(missing_entries)} measured wire(s): {preview}"
+            f"{base_message} — Missing fabrication data for {len(missing_entries)} visible wire(s): {preview}"
         )
         self.status_label.setText(message)
         try:
@@ -8525,13 +8555,79 @@ class FabricationSection(MiniDatabaseSection):
     ) -> str:
         in_annealing = key in annealing_keys
         in_microscope = key in microscope_keys
-        if in_annealing and in_microscope:
-            return "Current annealing + microscope"
-        if in_annealing:
-            return "Current annealing only"
         if in_microscope:
             return "Microscope only"
-        return "Measured only"
+        if in_annealing:
+            return "Measured"
+        return "Fabrication only"
+
+    @staticmethod
+    def _row_source_paths(row: pd.Series) -> List[str]:
+        raw_sources = row.get("_source_paths")
+        if not isinstance(raw_sources, (list, tuple, set)):
+            return []
+        sources: List[str] = []
+        for candidate in raw_sources:
+            if not candidate:
+                continue
+            try:
+                resolved = str(Path(candidate))
+            except Exception:
+                resolved = str(candidate)
+            if resolved and resolved not in sources:
+                sources.append(resolved)
+        return sources
+
+    def _resolve_fabrication_data_source(
+        self,
+        row: pd.Series,
+        annealing_keys: Set[Tuple[str, int, int]],
+        microscope_keys: Set[Tuple[str, int, int]],
+    ) -> Optional[str]:
+        composition = str(row.get("Composition") or "").strip()
+        if not composition or composition == "Imported data:":
+            return str(row.get("Data source") or "").strip() or None
+
+        current_source = str(row.get("Data source") or "").strip()
+        source_paths = self._row_source_paths(row)
+        has_imported = "Imported" in current_source or any(
+            "Imported" in source for source in source_paths
+        )
+
+        try:
+            key = (
+                composition,
+                int(row.get("Draw")),
+                int(row.get("Piece")),
+            )
+        except Exception:
+            key = None
+
+        label: Optional[str] = None
+        if key is not None:
+            label = self._source_label_for_key(key, annealing_keys, microscope_keys)
+            if label == "Fabrication only" and not source_paths:
+                label = None
+        if label is None and current_source and "Imported" not in current_source:
+            label = current_source
+        if has_imported:
+            return _data_source_with_import(label)
+        return label
+
+    def _apply_fabrication_source_labels(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return frame
+        annealing_keys, microscope_keys = self._measured_keys_by_source()
+        updated = frame.copy()
+        for row_idx in range(len(updated.index)):
+            row = updated.iloc[row_idx]
+            label = self._resolve_fabrication_data_source(
+                row,
+                annealing_keys,
+                microscope_keys,
+            )
+            updated.iat[row_idx, updated.columns.get_loc("Data source")] = label
+        return updated
 
     def _load_relevant_map(
         self,
@@ -8597,9 +8693,9 @@ class FabricationSection(MiniDatabaseSection):
         dialog.resize(980, 640)
         layout = QtWidgets.QVBoxLayout(dialog)
         summary = QtWidgets.QLabel(
-            f"{len(entries)} measured wire(s) still have missing fabrication fields."
+            f"{len(entries)} visible wire(s) still have missing fabrication fields."
             if entries
-            else "No measured wires are currently missing fabrication fields."
+            else "No visible wires are currently missing fabrication fields."
         )
         summary.setWordWrap(True)
         layout.addWidget(summary)
@@ -8638,6 +8734,7 @@ class FabricationSection(MiniDatabaseSection):
         relevant_map, _ = self._load_relevant_map()
         if isinstance(table, pd.DataFrame):
             updated = self._augment_table_with_relevant_microscope_rows(table, relevant_map)
+            updated = self._apply_fabrication_source_labels(updated)
             if not updated.equals(table):
                 self.data.table = updated
                 self.model.set_frame(updated)
@@ -8813,15 +8910,14 @@ class FabricationSection(MiniDatabaseSection):
                         draw_record,
                         columns=columns,
                     )
-                    if row.get("Data source") in (None, ""):
-                        row["Data source"] = self._source_label_for_key(
-                            key,
-                            annealing_keys,
-                            microscope_keys,
-                        )
+                    row["Data source"] = self._resolve_fabrication_data_source(
+                        pd.Series(row),
+                        annealing_keys,
+                        microscope_keys,
+                    )
                     new_rows.append(row)
         if not new_rows:
-            return updated
+            return self._apply_fabrication_source_labels(updated)
         appended = pd.DataFrame(new_rows)
         for column in columns:
             if column not in appended.columns:
@@ -8841,7 +8937,8 @@ class FabricationSection(MiniDatabaseSection):
             dict(row)
             for row in appended.loc[:, columns].to_dict(orient="records")
         ]
-        return pd.DataFrame(existing_rows + new_rows, columns=columns)
+        combined = pd.DataFrame(existing_rows + new_rows, columns=columns)
+        return self._apply_fabrication_source_labels(combined)
 
     @staticmethod
     def _normalise_token(text: str) -> str:
@@ -9216,7 +9313,7 @@ class FabricationSection(MiniDatabaseSection):
                 "fabrication_resistance_ohm": record.get("Resistance (Ω)"),
                 "glass_pull_off": record.get(GLASS_PULL_COLUMN),
                 "notes": record.get("Notes"),
-                "_source_path": record.get("Data source") or "Imported",
+                "_source_path": _primary_saved_source_path(record) or "Imported",
             }
             temperature_value = record.get(CORE_TEMPERATURE_COLUMN)
             if temperature_value in (None, ""):
@@ -9232,7 +9329,7 @@ class FabricationSection(MiniDatabaseSection):
                 "production_datetime": record.get("Production datetime"),
                 "fabrication_resistance_ohm": record.get("Resistance (Ω)"),
                 "notes": record.get("Notes"),
-                "_source_path": record.get("Data source") or "Imported",
+                "_source_path": _primary_saved_source_path(record) or "Imported",
             }
             before = bool(index.get_piece(composition, draw_x, piece_y))
             index.set_piece(composition, int(draw_x), int(piece_y), piece_data)
@@ -15187,6 +15284,7 @@ class VideoSection(MiniDatabaseSection):
         updated = self._ensure_core_columns(table.copy())
         fabrication_frame = self._fabrication_table()
         cumulative_map = self._build_cumulative_lengths(updated, fabrication_frame)
+        shared_video_end_lengths: Dict[Tuple[str, int], Any] = {}
         for idx, row in updated.iterrows():
             key_raw = row.get("_group_key")
             key = str(key_raw).strip() if key_raw not in (None, "") else ""
@@ -15195,6 +15293,29 @@ class VideoSection(MiniDatabaseSection):
                 for column, value in overrides.items():
                     if column in updated.columns:
                         updated.at[idx, column] = value
+            try:
+                composition = str(updated.at[idx, "Composition"]).strip()
+                draw = int(updated.at[idx, "Draw"])
+            except (TypeError, ValueError):
+                composition = ""
+                draw = 0
+            end_length = updated.at[idx, VIDEO_END_LENGTH_COLUMN]
+            if composition and not self._is_missing(end_length):
+                shared_video_end_lengths.setdefault((composition, draw), end_length)
+        if shared_video_end_lengths:
+            for idx, row in updated.iterrows():
+                if not self._is_missing(row.get(VIDEO_END_LENGTH_COLUMN)):
+                    continue
+                try:
+                    composition = str(row.get("Composition") or "").strip()
+                    draw = int(row.get("Draw"))
+                except (TypeError, ValueError):
+                    continue
+                shared_value = shared_video_end_lengths.get((composition, draw))
+                if self._is_missing(shared_value):
+                    continue
+                updated.at[idx, VIDEO_END_LENGTH_COLUMN] = shared_value
+        for idx, row in updated.iterrows():
             try:
                 composition = str(updated.at[idx, "Composition"]).strip()
                 draw = int(updated.at[idx, "Draw"])
@@ -23537,8 +23658,9 @@ class AssemblySection(QtWidgets.QWidget):
                         updated = True
                 if updated:
                     current_source = str(row.get("Data source") or "").strip()
-                    if current_source and "Imported" not in current_source:
-                        merged_frame.at[row_idx, "Data source"] = "Measured + Imported"
+                    merged_frame.at[row_idx, "Data source"] = _data_source_with_import(
+                        current_source
+                    )
             else:
                 append_rows.append(record)
         if append_rows:

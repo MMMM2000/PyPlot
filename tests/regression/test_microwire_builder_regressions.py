@@ -841,6 +841,72 @@ def test_video_cumulative_length_uses_raw_fabrication_pieces_not_just_visible_ro
         section.close()
 
 
+def test_video_end_length_backfills_new_sibling_rows_from_same_draw() -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = VideoSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section._store_overrides = lambda: None  # type: ignore[method-assign]
+        source_key = (str(Path("C:/videos/one.mkv")),)
+        section._video_source_status_cache = {source_key: True}
+        fabrication_frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "Length (m)": 6.0,
+                },
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/2",
+                    "Draw": 1,
+                    "Piece": 2,
+                    "Length (m)": 8.0,
+                },
+            ]
+        )
+        section._fabrication_table = lambda: fabrication_frame  # type: ignore[method-assign]
+        section._overrides = {
+            "CompA|1|1": {VIDEO_END_LENGTH_COLUMN: 25.0},
+        }
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/1",
+                    "Draw": 1,
+                    "Piece": 1,
+                    "_group_key": "CompA|1|1",
+                    "_sources": list(source_key),
+                    "Length (m)": 6.0,
+                    VIDEO_END_LENGTH_COLUMN: None,
+                },
+                {
+                    "Composition": "CompA",
+                    "Microwire": "1/2",
+                    "Draw": 1,
+                    "Piece": 2,
+                    "_group_key": "CompA|1|2",
+                    "_sources": list(source_key),
+                    "Length (m)": 8.0,
+                    VIDEO_END_LENGTH_COLUMN: None,
+                },
+            ]
+        )
+
+        updated = section._apply_overrides_to_table(frame)
+
+        assert float(updated.iloc[0][VIDEO_END_LENGTH_COLUMN]) == pytest.approx(25.0)
+        assert float(updated.iloc[1][VIDEO_END_LENGTH_COLUMN]) == pytest.approx(25.0)
+        assert updated.iloc[0][VIDEO_MW_LENGTH_COLUMN] == "19-25"
+        assert updated.iloc[1][VIDEO_MW_LENGTH_COLUMN] == "11-19"
+    finally:
+        section.close()
+
+
 def test_video_section_filters_candidates_to_measured_wires(tmp_path: Path) -> None:
     section = VideoSection.__new__(VideoSection)
     candidates = [
