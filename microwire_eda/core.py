@@ -41,11 +41,28 @@ STATUS_OK = "OK"
 STATUS_BROKE = "Broke"
 STATUS_NO_DATA = "No data"
 
+AGGREGATION_RAW = "raw"
+AGGREGATION_PER_WIRE_MEDIAN = "per_wire_median"
+AGGREGATION_PER_WIRE_BEST = "per_wire_best"
+SUPPORTED_AGGREGATION_MODES = (
+    AGGREGATION_RAW,
+    AGGREGATION_PER_WIRE_MEDIAN,
+    AGGREGATION_PER_WIRE_BEST,
+)
+
 STATUS_COLORS = {
     STATUS_OK: "#2e8b57",
     STATUS_BROKE: "#d94f4f",
     STATUS_NO_DATA: "#9c9c9c",
 }
+
+DERIVED_GEOMETRY_COLUMNS = [
+    "coat_thickness_um",
+    "core_fraction_linear",
+    "glass_area_fraction",
+    "metal_area_um2",
+    "glass_area_um2",
+]
 
 GEOMETRY_COLUMNS = ["d (µm)", "D (µm)", "d/D"]
 FABRICATION_COLUMNS = [
@@ -73,6 +90,28 @@ ANNEALING_COLUMNS = [
     "Ms current density (A/mm^2)",
     "Low mA value (mA)",
 ]
+STRESS_TEST_CURRENT_COLUMNS = [
+    "Stress/strain current (mA)",
+    "Stress/strain current density (A/mm^2)",
+    "Fracture stress/strain current (mA)",
+    "Fracture stress/strain current density (A/mm^2)",
+]
+CURRENT_FEATURES = list(dict.fromkeys(ANNEALING_COLUMNS + STRESS_TEST_CURRENT_COLUMNS))
+COMPOSITION_FEATURES = [
+    "Mn",
+    "Ni",
+    "Fe",
+    "Ga",
+    "Co",
+    "Cu",
+    "Si",
+    "Sn",
+    "has_Mn",
+    "has_Co",
+    "has_Cu",
+    "has_Si",
+    "has_Sn",
+]
 FUNCTIONAL_COLUMNS = [
     "Strain (%)",
     "Fracture strain (%)",
@@ -96,16 +135,25 @@ REPORT_EXTRA_COLUMNS = [
     "Data source",
 ]
 PROCESS_FEATURES = FABRICATION_COLUMNS + ANNEALING_COLUMNS
-NUMERIC_ANALYSIS_FEATURES = GEOMETRY_COLUMNS + PROCESS_FEATURES
+NUMERIC_ANALYSIS_FEATURES = (
+    GEOMETRY_COLUMNS
+    + DERIVED_GEOMETRY_COLUMNS
+    + PROCESS_FEATURES
+    + STRESS_TEST_CURRENT_COLUMNS
+    + COMPOSITION_FEATURES
+)
 
 CANONICAL_COLUMNS = (
     ["Composition", "Microwire", "Production datetime"]
     + GEOMETRY_COLUMNS
+    + DERIVED_GEOMETRY_COLUMNS
     + FABRICATION_COLUMNS
     + ANNEALING_COLUMNS
+    + STRESS_TEST_CURRENT_COLUMNS
     + FUNCTIONAL_COLUMNS
     + LEGACY_OUTCOME_COLUMNS
     + DERIVED_OUTCOME_COLUMNS
+    + COMPOSITION_FEATURES
 )
 
 SUMMARY_TABLE_ORDER = [
@@ -122,10 +170,18 @@ SUMMARY_TABLE_ORDER = [
     "process_fracture_strain_correlations",
     "process_stress_correlations",
     "process_fracture_stress_correlations",
+    "current_strain_correlations",
+    "current_fracture_strain_correlations",
+    "current_stress_correlations",
+    "current_fracture_stress_correlations",
     "geometry_strain_correlations",
     "geometry_fracture_strain_correlations",
     "geometry_stress_correlations",
     "geometry_fracture_stress_correlations",
+    "composition_strain_correlations",
+    "composition_fracture_strain_correlations",
+    "composition_stress_correlations",
+    "composition_fracture_stress_correlations",
     "legacy_breakage_summary",
     "time_summary",
 ]
@@ -156,7 +212,7 @@ HEADER_ALIASES = {
     "d (âµm)": "d (µm)",
     "d (μm)": "d (µm)",
     "d (î¼m)": "d (µm)",
-    "d (痠)": "d (µm)",
+    "d (µ)": "d (µm)",
     "d [µm]": "d (µm)",
     "d [um]": "d (µm)",
     "d_um": "d (µm)",
@@ -164,7 +220,7 @@ HEADER_ALIASES = {
     "D (âµm)": "D (µm)",
     "D (μm)": "D (µm)",
     "D (î¼m)": "D (µm)",
-    "D (痠)": "D (µm)",
+    "D (µ)": "D (µm)",
     "D [µm]": "D (µm)",
     "D [um]": "D (µm)",
     "D_um": "D (µm)",
@@ -190,7 +246,7 @@ _DIAMETER_SUFFIX_ALIASES = {
     "(μm)",
     "(âµm)",
     "(î¼m)",
-    "(痠)",
+    "(µ)",
     "(um)",
     "[µm]",
     "[μm]",
@@ -242,6 +298,7 @@ class MicrowireEdaConfig:
     copy_project: bool = True
     rebuild_project_if_assemble_missing: bool = True
     force_project_rebuild: bool = False
+    aggregation_mode: str = AGGREGATION_RAW
     include_legacy_breakage_analysis: bool = True
     include_composition_splits: bool = True
     write_findings: bool = True
@@ -344,6 +401,79 @@ def _parse_numeric(value: object) -> float:
         return float(match.group(0))
     except ValueError:
         return math.nan
+
+
+def _first_non_empty(series: pd.Series) -> object:
+    for value in series.tolist():
+        if value is None:
+            continue
+        if isinstance(value, float) and math.isnan(value):
+            continue
+        if str(value).strip() == "":
+            continue
+        return value
+    return math.nan
+
+
+def _parse_composition_parts(value: object) -> dict[str, float]:
+    parts = {element: 0.0 for element in ["Mn", "Ni", "Fe", "Ga", "Co", "Cu", "Si", "Sn"]}
+    text = str(value or "").strip()
+    if not text:
+        return parts
+    for element, number in re.findall(r"([A-Z][a-z]?)(\d+(?:\.\d+)?)", text):
+        if element in parts:
+            parts[element] += float(number)
+    return parts
+
+
+def _wire_group_columns(frame: pd.DataFrame) -> list[str]:
+    columns = [column for column in ["Composition", "Microwire"] if column in frame.columns]
+    return columns if len(columns) == 2 else []
+
+
+def _aggregate_repeated_measurements(frame: pd.DataFrame, mode: str) -> pd.DataFrame:
+    if frame.empty or mode == AGGREGATION_RAW:
+        return frame.reset_index(drop=True).copy()
+    group_columns = _wire_group_columns(frame)
+    if not group_columns:
+        return frame.reset_index(drop=True).copy()
+    if mode not in SUPPORTED_AGGREGATION_MODES:
+        raise ValueError(f"Unsupported Microwire EDA aggregation mode: {mode}")
+
+    outcome_max_columns = set(
+        FUNCTIONAL_COLUMNS
+        + DERIVED_OUTCOME_COLUMNS
+        + STRESS_TEST_CURRENT_COLUMNS
+        + ["is_broken"]
+    )
+
+    def _aggregate_column(series: pd.Series, *, column: str) -> object:
+        if column in group_columns:
+            return _first_non_empty(series)
+        if pd.api.types.is_numeric_dtype(series):
+            values = pd.to_numeric(series, errors="coerce").dropna()
+            if values.empty:
+                return math.nan
+            if mode == AGGREGATION_PER_WIRE_MEDIAN:
+                if column in {"is_broken", "Broke", "Brittle"}:
+                    return float(values.max())
+                return float(values.median())
+            if column in outcome_max_columns or column in {"Broke", "Brittle"}:
+                return float(values.max())
+            return float(values.iloc[0])
+        if pd.api.types.is_datetime64_any_dtype(series):
+            values = series.dropna()
+            return values.iloc[0] if not values.empty else pd.NaT
+        return _first_non_empty(series)
+
+    rows: list[dict[str, object]] = []
+    for _, subset in frame.groupby(group_columns, dropna=True, sort=False):
+        row: dict[str, object] = {}
+        for column in frame.columns:
+            row[str(column)] = _aggregate_column(subset[column], column=str(column))
+        row["measurement_count"] = int(len(subset.index))
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def _parse_boolish(value: object) -> int | None:
@@ -706,10 +836,37 @@ def canonicalise_frame(frame: pd.DataFrame) -> pd.DataFrame:
     if "Production datetime" in clean.columns:
         clean["Production datetime"] = _coerce_datetime(clean["Production datetime"])
 
-    numeric_candidates = set(GEOMETRY_COLUMNS + FABRICATION_COLUMNS + ANNEALING_COLUMNS + FUNCTIONAL_COLUMNS)
+    numeric_candidates = set(
+        GEOMETRY_COLUMNS
+        + FABRICATION_COLUMNS
+        + ANNEALING_COLUMNS
+        + STRESS_TEST_CURRENT_COLUMNS
+        + FUNCTIONAL_COLUMNS
+    )
     for column in numeric_candidates:
         if column in clean.columns:
             clean[column] = clean[column].map(_parse_numeric)
+
+    diameter = _first_present(clean, [GEOMETRY_COLUMNS[0]])
+    outer_diameter = _first_present(clean, [GEOMETRY_COLUMNS[1]])
+    ratio = _first_present(clean, ["d/D"])
+    if diameter is not None and outer_diameter is not None:
+        d_series = pd.to_numeric(diameter, errors="coerce")
+        D_series = pd.to_numeric(outer_diameter, errors="coerce")
+        if ratio is None or pd.to_numeric(ratio, errors="coerce").notna().sum() == 0:
+            clean["d/D"] = d_series / D_series
+        clean["coat_thickness_um"] = (D_series - d_series) / 2.0
+        clean["core_fraction_linear"] = d_series / D_series
+        clean["glass_area_fraction"] = 1.0 - (d_series / D_series) ** 2
+        clean["metal_area_um2"] = math.pi * (d_series / 2.0) ** 2
+        clean["glass_area_um2"] = math.pi * (D_series / 2.0) ** 2 - clean["metal_area_um2"]
+
+    if "Composition" in clean.columns:
+        composition_frame = clean["Composition"].map(_parse_composition_parts).apply(pd.Series)
+        for column in composition_frame.columns:
+            clean[column] = pd.to_numeric(composition_frame[column], errors="coerce")
+        for element in ["Mn", "Co", "Cu", "Si", "Sn"]:
+            clean[f"has_{element}"] = clean.get(element, pd.Series(dtype=float)).fillna(0.0).gt(0).astype(float)
 
     for column in LEGACY_OUTCOME_COLUMNS:
         if column in clean.columns:
@@ -836,8 +993,13 @@ def _count_notna(frame: pd.DataFrame, column: str) -> int:
 
 
 def _row_counts(frame: pd.DataFrame) -> dict[str, int]:
+    unique_wires = 0
+    group_columns = _wire_group_columns(frame)
+    if group_columns:
+        unique_wires = int(frame.loc[:, group_columns].dropna().drop_duplicates().shape[0])
     return {
         "all_rows": int(len(frame.index)),
+        "unique_wires": unique_wires,
         "known_outcome": int(frame.get("is_broken", pd.Series(dtype=float)).notna().sum()),
         "numeric_strain": _count_notna(frame, "strain_abs"),
         "numeric_fracture_strain": _count_notna(frame, "fracture_strain_abs"),
@@ -873,12 +1035,14 @@ def _coverage_table(frame: pd.DataFrame, *, columns: Sequence[str] | None = None
     return pd.DataFrame(rows)
 
 
-def _row_scope_table(requested: str, applied: str, counts: Mapping[str, int]) -> pd.DataFrame:
+def _row_scope_table(requested: str, applied: str, counts: Mapping[str, int], aggregation_mode: str) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {"metric": "requested_scope", "value": requested},
             {"metric": "applied_scope", "value": applied},
+            {"metric": "aggregation_mode", "value": aggregation_mode},
             {"metric": "rows", "value": counts.get("all_rows", 0)},
+            {"metric": "unique_wires", "value": counts.get("unique_wires", 0)},
             {"metric": "numeric_strain", "value": counts.get("numeric_strain", 0)},
             {"metric": "numeric_fracture_strain", "value": counts.get("numeric_fracture_strain", 0)},
             {"metric": "numeric_stress", "value": counts.get("numeric_stress", 0)},
@@ -1327,6 +1491,7 @@ def _summarise_table(table: pd.DataFrame, *, limit: int = 3) -> list[dict[str, A
 def _generate_findings(
     frame: pd.DataFrame,
     *,
+    config: MicrowireEdaConfig,
     counts: Mapping[str, int],
     tables: Mapping[str, pd.DataFrame],
     include_legacy_breakage_analysis: bool,
@@ -1335,6 +1500,14 @@ def _generate_findings(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     total_rows = int(counts.get("all_rows", 0))
+
+    def _preferred_top_row(table: pd.DataFrame, preferred_features: Sequence[str] | None = None) -> pd.Series:
+        if preferred_features:
+            preferred = table.loc[table["feature"].isin(preferred_features)]
+            if not preferred.empty:
+                return preferred.iloc[0]
+        return table.iloc[0]
+
     findings.append(
         {
             "category": "data_quality",
@@ -1360,6 +1533,27 @@ def _generate_findings(
                 "headline": "Assemble rows were rebuilt transiently from the project sections.",
                 "detail": "This run did not rely only on already-saved Assemble rows. Microwire EDA rebuilt the assembled dataframe in-process from the Builder project sections, without mutating the source project file.",
                 "evidence": {},
+                "confidence": "high",
+            }
+        )
+
+    if config.aggregation_mode != AGGREGATION_RAW:
+        mode_label = {
+            AGGREGATION_PER_WIRE_MEDIAN: "per-wire median",
+            AGGREGATION_PER_WIRE_BEST: "per-wire best",
+        }.get(config.aggregation_mode, config.aggregation_mode)
+        findings.append(
+            {
+                "category": "data_quality",
+                "headline": f"Repeated measurements were aggregated in {mode_label} mode.",
+                "detail": (
+                    f"This run collapses duplicate Composition+Microwire rows before ranking signals. "
+                    f"Rows analysed after aggregation: {total_rows}; unique wires: {int(counts.get('unique_wires', 0))}."
+                ),
+                "evidence": {
+                    "aggregation_mode": config.aggregation_mode,
+                    "unique_wires": int(counts.get("unique_wires", 0)),
+                },
                 "confidence": "high",
             }
         )
@@ -1394,7 +1588,7 @@ def _generate_findings(
                 }
             )
             continue
-        top_row = table.iloc[0]
+        top_row = _preferred_top_row(table, FABRICATION_COLUMNS)
         direction = "higher" if float(top_row["rho"]) >= 0 else "lower"
         headline = f"Top process signal for {label}: {top_row['feature']}."
         detail_prefix = "The strongest available process-side monotonic association"
@@ -1414,6 +1608,48 @@ def _generate_findings(
                 ),
                 "evidence": {"top_rows": _summarise_table(table)},
                 "confidence": confidence,
+            }
+        )
+
+    for label, table_key in [
+        ("strain", "current_strain_correlations"),
+        ("fracture strain", "current_fracture_strain_correlations"),
+        ("stress", "current_stress_correlations"),
+        ("fracture stress", "current_fracture_stress_correlations"),
+    ]:
+        table = tables.get(table_key, pd.DataFrame())
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            continue
+        top_row = table.iloc[0]
+        findings.append(
+            {
+                "category": "derived_signal",
+                "headline": f"Top current-side signal for {label}: {top_row['feature']}.",
+                "detail": (
+                    f"The strongest current or current-density association with {label} is {top_row['feature']} "
+                    f"(Spearman rho={float(top_row['rho']):.3f}, n={int(top_row['n'])}). "
+                    "Interpret current-density signals carefully because they partly inherit diameter algebra."
+                ),
+                "evidence": {"top_rows": _summarise_table(table)},
+                "confidence": "low" if int(top_row["n"]) < 6 else "medium",
+            }
+        )
+        break
+
+    composition_signal = tables.get("composition_fracture_stress_correlations", pd.DataFrame())
+    if isinstance(composition_signal, pd.DataFrame) and not composition_signal.empty:
+        top_row = composition_signal.iloc[0]
+        findings.append(
+            {
+                "category": "cohorts",
+                "headline": f"Top parsed-composition signal for fracture stress: {top_row['feature']}.",
+                "detail": (
+                    f"The strongest available parsed-composition association with fracture stress is {top_row['feature']} "
+                    f"(Spearman rho={float(top_row['rho']):.3f}, n={int(top_row['n'])}). "
+                    "Treat elemental signals cautiously because composition families are imbalanced and element percentages are not independent."
+                ),
+                "evidence": {"top_rows": _summarise_table(composition_signal)},
+                "confidence": "low" if int(top_row["n"]) < 8 else "medium",
             }
         )
 
@@ -1495,17 +1731,25 @@ def _build_tables(
 ) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, str]]:
     tables: dict[str, pd.DataFrame] = {
         "coverage": _coverage_table(frame, columns=_report_relevant_columns(frame)),
-        "row_scope": _row_scope_table(config.row_scope, applied_scope, counts),
+        "row_scope": _row_scope_table(config.row_scope, applied_scope, counts, config.aggregation_mode),
         "endpoint_coverage": _endpoint_coverage_table(frame),
         "duplicate_wires": _duplicate_wire_table(frame),
         "process_strain_correlations": _target_correlation_table(frame, target="strain_abs", features=PROCESS_FEATURES),
         "process_fracture_strain_correlations": _target_correlation_table(frame, target="fracture_strain_abs", features=PROCESS_FEATURES),
         "process_stress_correlations": _target_correlation_table(frame, target="Stress (MPa)", features=PROCESS_FEATURES),
         "process_fracture_stress_correlations": _target_correlation_table(frame, target="Fracture stress (MPa)", features=PROCESS_FEATURES),
-        "geometry_strain_correlations": _target_correlation_table(frame, target="strain_abs", features=GEOMETRY_COLUMNS),
-        "geometry_fracture_strain_correlations": _target_correlation_table(frame, target="fracture_strain_abs", features=GEOMETRY_COLUMNS),
-        "geometry_stress_correlations": _target_correlation_table(frame, target="Stress (MPa)", features=GEOMETRY_COLUMNS),
-        "geometry_fracture_stress_correlations": _target_correlation_table(frame, target="Fracture stress (MPa)", features=GEOMETRY_COLUMNS),
+        "current_strain_correlations": _target_correlation_table(frame, target="strain_abs", features=CURRENT_FEATURES),
+        "current_fracture_strain_correlations": _target_correlation_table(frame, target="fracture_strain_abs", features=CURRENT_FEATURES),
+        "current_stress_correlations": _target_correlation_table(frame, target="Stress (MPa)", features=CURRENT_FEATURES),
+        "current_fracture_stress_correlations": _target_correlation_table(frame, target="Fracture stress (MPa)", features=CURRENT_FEATURES),
+        "geometry_strain_correlations": _target_correlation_table(frame, target="strain_abs", features=GEOMETRY_COLUMNS + DERIVED_GEOMETRY_COLUMNS),
+        "geometry_fracture_strain_correlations": _target_correlation_table(frame, target="fracture_strain_abs", features=GEOMETRY_COLUMNS + DERIVED_GEOMETRY_COLUMNS),
+        "geometry_stress_correlations": _target_correlation_table(frame, target="Stress (MPa)", features=GEOMETRY_COLUMNS + DERIVED_GEOMETRY_COLUMNS),
+        "geometry_fracture_stress_correlations": _target_correlation_table(frame, target="Fracture stress (MPa)", features=GEOMETRY_COLUMNS + DERIVED_GEOMETRY_COLUMNS),
+        "composition_strain_correlations": _target_correlation_table(frame, target="strain_abs", features=COMPOSITION_FEATURES),
+        "composition_fracture_strain_correlations": _target_correlation_table(frame, target="fracture_strain_abs", features=COMPOSITION_FEATURES),
+        "composition_stress_correlations": _target_correlation_table(frame, target="Stress (MPa)", features=COMPOSITION_FEATURES),
+        "composition_fracture_stress_correlations": _target_correlation_table(frame, target="Fracture stress (MPa)", features=COMPOSITION_FEATURES),
         "time_summary": _time_summary_table(frame),
     }
     skipped_sections: dict[str, str] = {}
@@ -1567,6 +1811,8 @@ def run_analysis(
     progress("Canonicalising columns")
     canonical_frame = canonicalise_frame(raw_frame)
     scoped_frame, applied_scope = apply_row_scope(canonical_frame, config)
+    progress("Applying repeated-measurement aggregation")
+    scoped_frame = _aggregate_repeated_measurements(scoped_frame, config.aggregation_mode)
     scoped_frame = _ordered_export_frame(scoped_frame)
     counts = _row_counts(scoped_frame)
     progress("Preparing analysis tables")
@@ -1578,6 +1824,7 @@ def run_analysis(
     )
     findings, sufficiency_summary = _generate_findings(
         scoped_frame,
+        config=config,
         counts=counts,
         tables=tables,
         include_legacy_breakage_analysis=config.include_legacy_breakage_analysis,
@@ -1614,6 +1861,8 @@ def _findings_markdown(
         "## Summary",
         "",
         f"- Rows analysed: {analysis.row_counts.get('all_rows', 0)}",
+        f"- Unique wires analysed: {analysis.row_counts.get('unique_wires', 0)}",
+        f"- Aggregation mode: {analysis.config.aggregation_mode}",
         f"- Strain rows: {analysis.row_counts.get('numeric_strain', 0)}",
         f"- Fracture strain rows: {analysis.row_counts.get('numeric_fracture_strain', 0)}",
         f"- Stress rows: {analysis.row_counts.get('numeric_stress', 0)}",
@@ -1642,6 +1891,8 @@ def _findings_markdown(
             "",
             "- These findings are observational and intended to guide follow-up experiments, not to prove causality.",
             "- Sparse endpoint coverage can change apparent rankings quickly as more measurements are added.",
+            "- Current-density signals partly inherit measured diameter and should not be treated as fully independent material variables.",
+            "- Repeated measurements can change rankings materially; compare raw, per-wire median, and per-wire best views before locking in a design rule.",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -1697,6 +1948,17 @@ def _html_document(
             ],
         ),
         (
+            "current",
+            "Current to outcome",
+            "Current and current-density correlations, reported separately because some current-density terms are derived from measured diameter.",
+            [
+                _table_html(analysis.tables["current_strain_correlations"]),
+                _table_html(analysis.tables["current_fracture_strain_correlations"]),
+                _table_html(analysis.tables["current_stress_correlations"]),
+                _table_html(analysis.tables["current_fracture_stress_correlations"]),
+            ],
+        ),
+        (
             "geometry",
             "Geometry to outcome",
             "Geometry-side correlations and scatter views for d, D, and d/D.",
@@ -1705,6 +1967,17 @@ def _html_document(
                 _table_html(analysis.tables["geometry_fracture_strain_correlations"]),
                 _table_html(analysis.tables["geometry_stress_correlations"]),
                 _table_html(analysis.tables["geometry_fracture_stress_correlations"]),
+            ],
+        ),
+        (
+            "composition-signals",
+            "Composition to outcome",
+            "Parsed elemental-content correlations that complement the nominal composition labels. Treat these cautiously because composition features are not independent.",
+            [
+                _table_html(analysis.tables["composition_strain_correlations"]),
+                _table_html(analysis.tables["composition_fracture_strain_correlations"]),
+                _table_html(analysis.tables["composition_stress_correlations"]),
+                _table_html(analysis.tables["composition_fracture_stress_correlations"]),
             ],
         ),
         (
@@ -1811,7 +2084,7 @@ def _html_document(
 </head>
 <body>
   <h1>{html.escape(title)}</h1>
-  <p class="lead">Analysis-first exploratory report for microwire assemble data. Modern strain and fracture endpoints are primary; legacy broke/OK labels remain auxiliary context only.</p>
+  <p class="lead">Analysis-first exploratory report for microwire assemble data. Modern strain and fracture endpoints are primary; legacy broke/OK labels remain auxiliary context only. Aggregation mode: {html.escape(analysis.config.aggregation_mode)}.</p>
   {copy_note}
   {''.join(parts)}
 </body>
@@ -1843,6 +2116,7 @@ def _write_findings_json(
         "working_input_path": str(analysis.working_input_path) if analysis.working_input_path is not None else None,
         "copied_project_path": str(analysis.copied_project_path) if analysis.copied_project_path is not None else None,
         "used_project_rebuild": bool(analysis.used_project_rebuild),
+        "aggregation_mode": analysis.config.aggregation_mode,
         "row_counts": dict(analysis.row_counts),
         "sufficiency_summary": dict(analysis.sufficiency_summary),
         "findings": analysis.findings,
@@ -1872,6 +2146,7 @@ def _write_manifest(
         "input_kind": analysis.input_kind,
         "row_scope_requested": analysis.config.row_scope,
         "row_scope_applied": analysis.applied_scope,
+        "aggregation_mode": analysis.config.aggregation_mode,
         "report_title": analysis.config.report_title,
         "output_dir": str(path.parent),
         "report_path": str(report_path),
@@ -1934,6 +2209,12 @@ def write_analysis_artifacts(
             _correlation_bar_figure(analysis.tables["process_fracture_stress_correlations"], title="Top process correlations with fracture stress"),
         ),
         (
+            "current",
+            "current_strain_correlation",
+            "Top current correlations with |Strain|",
+            _correlation_bar_figure(analysis.tables["current_strain_correlations"], title="Top current correlations with |Strain|"),
+        ),
+        (
             "geometry",
             "geometry_strain_scatter",
             "Geometry vs |Strain|",
@@ -1961,6 +2242,18 @@ def write_analysis_artifacts(
     ]
     if analysis.config.include_composition_splits:
         figure_specs.insert(2, ("cohorts", "composition_coverage", "Composition coverage", _composition_coverage_figure(analysis.scoped_frame)))
+    figure_specs.insert(
+        5,
+        (
+            "composition-signals",
+            "composition_fracture_stress_correlation",
+            "Top composition correlations with fracture stress",
+            _correlation_bar_figure(
+                analysis.tables["composition_fracture_stress_correlations"],
+                title="Top composition correlations with fracture stress",
+            ),
+        ),
+    )
     if analysis.config.include_legacy_breakage_analysis:
         figure_specs.append(
             (

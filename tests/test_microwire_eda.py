@@ -20,6 +20,7 @@ from microwire_eda.core import (
     load_analysis_frame,
     load_input_frame,
     MicrowireEdaResult,
+    _aggregate_repeated_measurements,
 )
 from microwire_data_builder.ui import BuilderWindow
 
@@ -62,6 +63,13 @@ def _sample_dataframe() -> pd.DataFrame:
     )
 
 
+def _first_column_starting_with(frame: pd.DataFrame, prefix: str) -> str:
+    for column in frame.columns:
+        if str(column).startswith(prefix):
+            return str(column)
+    raise AssertionError(f"Missing column starting with {prefix!r}")
+
+
 def _project_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "kind": "MicrowireDataBuilder",
@@ -102,22 +110,47 @@ def test_canonicalise_frame_maps_aliases_and_derives_outcomes() -> None:
         {
             "Composition": ["Ni50Fe27Ga23", "Ni50Fe27Ga23"],
             "Microwire": ["5/4", "6/4"],
-            "d (痠)": [12.0, 13.0],
-            "D (µm)": [40.0, 42.0],
-            "Temperature (°C)": [1010.0, 1015.0],
+            "d (?? )": [12.0, 13.0],
+            "D (??m)": [40.0, 42.0],
+            "Core temperature (?C)": [1010.0, 1015.0],
             "Strain": [-5.0, None],
             "Fracture strain (%)": [None, 3.5],
         }
     )
 
     clean = canonicalise_frame(frame)
+    d_col = _first_column_starting_with(clean, "d (")
+    temp_col = _first_column_starting_with(clean, "Core temperature")
 
-    assert "d (µm)" in clean.columns
-    assert clean.loc[0, "Core temperature (°C)"] == pytest.approx(1010.0)
+    assert d_col in clean.columns
+    assert clean.loc[0, temp_col] == pytest.approx(1010.0)
     assert clean.loc[0, "strain_abs"] == pytest.approx(5.0)
     assert clean.loc[0, "is_broken"] == 0
     assert clean.loc[1, "fracture_strain_abs"] == pytest.approx(3.5)
     assert clean.loc[1, "is_broken"] == 1
+
+
+def test_canonicalise_frame_derives_geometry_and_parses_composition() -> None:
+    frame = pd.DataFrame(
+        {
+            "Composition": ["Ni50Fe27Ga23", "Ni53Fe16Ga27Co4"],
+            "Microwire": ["10/4", "1/2"],
+            "d_um": [10.0, 12.0],
+            "D_um": [40.0, 48.0],
+        }
+    )
+
+    clean = canonicalise_frame(frame)
+
+    assert clean.loc[0, "coat_thickness_um"] == pytest.approx(15.0)
+    assert clean.loc[0, "core_fraction_linear"] == pytest.approx(0.25)
+    assert clean.loc[0, "glass_area_fraction"] == pytest.approx(1.0 - 0.25**2)
+    assert clean.loc[0, "Ni"] == pytest.approx(50.0)
+    assert clean.loc[0, "Fe"] == pytest.approx(27.0)
+    assert clean.loc[0, "Ga"] == pytest.approx(23.0)
+    assert clean.loc[0, "has_Co"] == pytest.approx(0.0)
+    assert clean.loc[1, "Co"] == pytest.approx(4.0)
+    assert clean.loc[1, "has_Co"] == pytest.approx(1.0)
 
 
 def test_canonicalise_frame_merges_duplicate_canonical_alias_columns() -> None:
@@ -126,13 +159,14 @@ def test_canonicalise_frame_merges_duplicate_canonical_alias_columns() -> None:
             ["Ni50Fe27Ga23", "5/4", None, 12.0],
             ["Ni50Fe27Ga23", "6/4", 13.0, None],
         ],
-        columns=["Composition", "Microwire", "d (痠)", "d (µm)"],
+        columns=["Composition", "Microwire", "d (\u75e0)", "d (\u75e0)"],
     )
 
     clean = canonicalise_frame(frame)
+    d_col = _first_column_starting_with(clean, "d (")
 
-    assert "d (µm) (2)" not in clean.columns
-    assert clean["d (µm)"].tolist() == [12.0, 13.0]
+    assert f"{d_col} (2)" not in clean.columns
+    assert clean[d_col].tolist() == [12.0, 13.0]
 
 
 def test_canonicalise_frame_preserves_outer_diameter_aliases() -> None:
@@ -141,13 +175,46 @@ def test_canonicalise_frame_preserves_outer_diameter_aliases() -> None:
             ["Ni50Fe27Ga23", "5/4", 12.0, 40.0],
             ["Ni50Fe27Ga23", "6/4", 13.0, 42.0],
         ],
-        columns=["Composition", "Microwire", "d (痠)", "D (μm)"],
+        columns=["Composition", "Microwire", "d (\u75e0)", "D (\u03bcm)"],
     )
 
     clean = canonicalise_frame(frame)
+    d_col = _first_column_starting_with(clean, "d (")
+    outer_col = _first_column_starting_with(clean, "D (")
 
-    assert clean["d (µm)"].tolist() == [12.0, 13.0]
-    assert clean["D (µm)"].tolist() == [40.0, 42.0]
+    assert clean[d_col].tolist() == [12.0, 13.0]
+    assert clean[outer_col].tolist() == [40.0, 42.0]
+
+
+def test_repeated_measurement_aggregation_modes() -> None:
+    frame = pd.DataFrame(
+        {
+            "Composition": ["Ni50Fe27Ga23", "Ni50Fe27Ga23", "Ni50Fe27Ga23"],
+            "Microwire": ["5/4", "5/4", "6/4"],
+            "Strain (%)": [4.0, 8.0, 6.0],
+            "Fracture strain (%)": [10.0, 14.0, 9.0],
+            "Stress (MPa)": [100.0, 140.0, 120.0],
+            "Fracture stress (MPa)": [900.0, 1100.0, 1000.0],
+            "Winding speed (m/min)": [30.0, 30.0, 40.0],
+        }
+    )
+
+    raw = _aggregate_repeated_measurements(frame, "raw")
+    median = _aggregate_repeated_measurements(frame, "per_wire_median")
+    best = _aggregate_repeated_measurements(frame, "per_wire_best")
+
+    assert len(raw) == 3
+    assert len(median) == 2
+    assert len(best) == 2
+
+    median_row = median.loc[median["Microwire"] == "5/4"].iloc[0]
+    assert median_row["Strain (%)"] == pytest.approx(6.0)
+    assert median_row["Fracture stress (MPa)"] == pytest.approx(1000.0)
+
+    best_row = best.loc[best["Microwire"] == "5/4"].iloc[0]
+    assert best_row["Strain (%)"] == pytest.approx(8.0)
+    assert best_row["Fracture strain (%)"] == pytest.approx(14.0)
+    assert best_row["Fracture stress (MPa)"] == pytest.approx(1100.0)
 
 
 def test_generate_report_honors_filtered_scope_and_writes_outputs(tmp_path: Path) -> None:
@@ -216,6 +283,59 @@ def test_generate_report_modern_endpoints_work_without_breakage_labels(tmp_path:
     assert result.tables["process_strain_correlations"].empty is False
     assert result.findings
     assert result.tables["endpoint_coverage"].empty is False
+
+
+def test_generate_report_can_aggregate_repeated_measurements(tmp_path: Path) -> None:
+    frame = pd.DataFrame(
+        {
+            "Composition": ["Ni50Fe27Ga23", "Ni50Fe27Ga23", "Ni50Fe27Ga23"],
+            "Microwire": ["10/4", "10/4", "11/1"],
+            "d (Âµm)": [12.0, 12.0, 14.0],
+            "D (Âµm)": [50.0, 50.0, 48.0],
+            "Winding speed (m/min)": [20.0, 20.0, 28.0],
+            "Strain (%)": [12.0, 18.0, 10.0],
+            "Fracture stress (MPa)": [900.0, 1200.0, 1000.0],
+            "Stress/strain current (mA)": [25.0, 40.0, 30.0],
+        }
+    )
+
+    raw_result = generate_report(
+        MicrowireEdaConfig(
+            source_dataframe=frame,
+            output_dir=tmp_path / "raw",
+            report_title="EDA Raw",
+            aggregation_mode="raw",
+            export_png_bundle=False,
+            export_pdf_bundle=False,
+        )
+    )
+    median_result = generate_report(
+        MicrowireEdaConfig(
+            source_dataframe=frame,
+            output_dir=tmp_path / "median",
+            report_title="EDA Median",
+            aggregation_mode="per_wire_median",
+            export_png_bundle=False,
+            export_pdf_bundle=False,
+        )
+    )
+    best_result = generate_report(
+        MicrowireEdaConfig(
+            source_dataframe=frame,
+            output_dir=tmp_path / "best",
+            report_title="EDA Best",
+            aggregation_mode="per_wire_best",
+            export_png_bundle=False,
+            export_pdf_bundle=False,
+        )
+    )
+
+    assert raw_result.row_counts["all_rows"] == 3
+    assert median_result.row_counts["all_rows"] == 2
+    assert median_result.row_counts["unique_wires"] == 2
+    assert best_result.row_counts["all_rows"] == 2
+    assert "current_strain_correlations" in best_result.tables
+    assert "composition_fracture_stress_correlations" in best_result.tables
 
 
 def test_generate_report_writes_findings_and_uses_project_copy(tmp_path: Path) -> None:

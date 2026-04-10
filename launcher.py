@@ -696,6 +696,12 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         action="store_true",
         help="Rebuild Assemble rows transiently from the Builder project sections even when saved Assemble rows already exist.",
     )
+    parser.add_argument(
+        "--microwire-eda-aggregation",
+        choices=("raw", "per_wire_median", "per_wire_best"),
+        default="raw",
+        help="How Microwire EDA should treat repeated measurements of the same Composition+Microwire key.",
+    )
     parser.set_defaults(
         visual_origin=True,
         microwire_eda_copy_project=True,
@@ -747,6 +753,7 @@ def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
         working_copy_dir=working_copy_dir,
         copy_project=bool(getattr(args, "microwire_eda_copy_project", True)),
         force_project_rebuild=bool(getattr(args, "microwire_eda_force_project_rebuild", False)),
+        aggregation_mode=str(getattr(args, "microwire_eda_aggregation", "raw") or "raw"),
         include_legacy_breakage_analysis=bool(getattr(args, "microwire_eda_legacy_breakage", True)),
         include_composition_splits=bool(getattr(args, "microwire_eda_composition_splits", True)),
         write_findings=bool(getattr(args, "microwire_eda_findings", True)),
