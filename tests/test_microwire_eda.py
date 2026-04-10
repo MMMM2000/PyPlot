@@ -153,6 +153,24 @@ def test_canonicalise_frame_derives_geometry_and_parses_composition() -> None:
     assert clean.loc[1, "has_Co"] == pytest.approx(1.0)
 
 
+def test_canonicalise_frame_supports_legacy_mojibake_diameter_suffixes() -> None:
+    frame = pd.DataFrame(
+        {
+            "Composition": ["Ni50Fe27Ga23"],
+            "Microwire": ["10/4"],
+            "d (\u75e0)": [10.0],
+            "D (\u75e0)": [40.0],
+        }
+    )
+
+    clean = canonicalise_frame(frame)
+
+    assert clean.loc[0, "d (µm)"] == pytest.approx(10.0)
+    assert clean.loc[0, "D (µm)"] == pytest.approx(40.0)
+    assert clean.loc[0, "coat_thickness_um"] == pytest.approx(15.0)
+    assert clean.loc[0, "core_fraction_linear"] == pytest.approx(0.25)
+
+
 def test_canonicalise_frame_merges_duplicate_canonical_alias_columns() -> None:
     frame = pd.DataFrame(
         [
@@ -215,6 +233,26 @@ def test_repeated_measurement_aggregation_modes() -> None:
     assert best_row["Strain (%)"] == pytest.approx(8.0)
     assert best_row["Fracture strain (%)"] == pytest.approx(14.0)
     assert best_row["Fracture stress (MPa)"] == pytest.approx(1100.0)
+
+
+def test_repeated_measurement_aggregation_preserves_rows_without_complete_wire_keys() -> None:
+    frame = pd.DataFrame(
+        {
+            "Composition": ["Ni50Fe27Ga23", "Ni50Fe27Ga23", None, "Ni50Fe27Ga23"],
+            "Microwire": ["5/4", "5/4", "2/1", None],
+            "Strain (%)": [4.0, 8.0, 6.0, 7.0],
+            "Stress (MPa)": [100.0, 140.0, 120.0, 130.0],
+        }
+    )
+
+    median = _aggregate_repeated_measurements(frame, "per_wire_median")
+
+    assert len(median) == 3
+    assert median["measurement_count"].tolist() == [2, 1, 1]
+    assert median.loc[0, "Microwire"] == "5/4"
+    assert median.loc[1, "Microwire"] == "2/1"
+    assert pd.isna(median.loc[2, "Microwire"])
+    assert pd.isna(median.loc[1, "Composition"])
 
 
 def test_generate_report_honors_filtered_scope_and_writes_outputs(tmp_path: Path) -> None:

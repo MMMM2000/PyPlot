@@ -92,6 +92,8 @@ The raw view answers reproducibility and dispersion questions. The median view a
 
 If a trend appears only in the best-per-wire view, it should be labeled as capability-sensitive rather than robust.
 
+Rows missing a complete `Composition + Microwire` key should not be silently dropped in aggregated modes. Preserve them as single-measurement rows so data sparsity is explicit rather than hidden by grouping.
+
 Legacy breakage is still useful for backward compatibility, but it is no longer the center of the report because newer measurements contain real normal-strain and fracture-strain/stress values.
 
 ## Report Sections

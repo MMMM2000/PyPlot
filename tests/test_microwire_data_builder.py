@@ -1524,6 +1524,43 @@ def test_fabrication_appends_placeholder_for_measured_wire_without_fabrication_d
         section.close()
 
 
+def test_fabrication_source_label_prefers_measured_when_annealing_and_microscope_exist() -> None:
+    _ensure_qapp()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        label = section._source_label_for_key(
+            ("TestCompDual", 1, 2),
+            {("TestCompDual", 1, 2)},
+            {("TestCompDual", 1, 2)},
+        )
+        assert label == "Measured"
+    finally:
+        section.close()
+
+
+def test_apply_fabrication_source_labels_adds_missing_data_source_column() -> None:
+    _ensure_qapp()
+    section = builder_ui.FabricationSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        section._measured_keys_by_source = lambda: ({("TestCompSource", 2, 3)}, set())
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompSource",
+                    "Draw": 2,
+                    "Piece": 3,
+                }
+            ]
+        )
+
+        updated = section._apply_fabrication_source_labels(frame)
+
+        assert "Data source" in updated.columns
+        assert updated.loc[0, "Data source"] == "Measured"
+    finally:
+        section.close()
+
+
 def test_assembly_import_dedupes_duplicate_columns() -> None:
     _ensure_qapp()
     assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)

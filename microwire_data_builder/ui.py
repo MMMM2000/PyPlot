@@ -8555,6 +8555,8 @@ class FabricationSection(MiniDatabaseSection):
     ) -> str:
         in_annealing = key in annealing_keys
         in_microscope = key in microscope_keys
+        if in_annealing and in_microscope:
+            return "Measured"
         if in_microscope:
             return "Microscope only"
         if in_annealing:
@@ -8619,6 +8621,9 @@ class FabricationSection(MiniDatabaseSection):
             return frame
         annealing_keys, microscope_keys = self._measured_keys_by_source()
         updated = frame.copy()
+        if "Data source" not in updated.columns:
+            updated["Data source"] = None
+        data_source_idx = updated.columns.get_loc("Data source")
         for row_idx in range(len(updated.index)):
             row = updated.iloc[row_idx]
             label = self._resolve_fabrication_data_source(
@@ -8626,7 +8631,7 @@ class FabricationSection(MiniDatabaseSection):
                 annealing_keys,
                 microscope_keys,
             )
-            updated.iat[row_idx, updated.columns.get_loc("Data source")] = label
+            updated.iat[row_idx, data_source_idx] = label
         return updated
 
     def _load_relevant_map(

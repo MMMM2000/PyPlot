@@ -246,6 +246,7 @@ _DIAMETER_SUFFIX_ALIASES = {
     "(μm)",
     "(âµm)",
     "(î¼m)",
+    "(痠)",
     "(µ)",
     "(um)",
     "[µm]",
@@ -466,14 +467,34 @@ def _aggregate_repeated_measurements(frame: pd.DataFrame, mode: str) -> pd.DataF
             return values.iloc[0] if not values.empty else pd.NaT
         return _first_non_empty(series)
 
-    rows: list[dict[str, object]] = []
-    for _, subset in frame.groupby(group_columns, dropna=True, sort=False):
+    def _has_complete_wire_key(row: pd.Series) -> bool:
+        for column in group_columns:
+            value = row.get(column)
+            if value is None:
+                return False
+            if isinstance(value, float) and math.isnan(value):
+                return False
+            if str(value).strip() == "":
+                return False
+        return True
+
+    valid_mask = frame.apply(_has_complete_wire_key, axis=1)
+    grouped_frame = frame.loc[valid_mask]
+    passthrough_frame = frame.loc[~valid_mask]
+
+    ordered_rows: list[tuple[int, dict[str, object]]] = []
+    for _, subset in grouped_frame.groupby(group_columns, dropna=False, sort=False):
         row: dict[str, object] = {}
         for column in frame.columns:
             row[str(column)] = _aggregate_column(subset[column], column=str(column))
         row["measurement_count"] = int(len(subset.index))
-        rows.append(row)
-    return pd.DataFrame(rows)
+        ordered_rows.append((int(subset.index[0]), row))
+    for row_idx, row in passthrough_frame.iterrows():
+        preserved = row.to_dict()
+        preserved["measurement_count"] = 1
+        ordered_rows.append((int(row_idx), preserved))
+    ordered_rows.sort(key=lambda item: item[0])
+    return pd.DataFrame([row for _, row in ordered_rows]).reset_index(drop=True)
 
 
 def _parse_boolish(value: object) -> int | None:
