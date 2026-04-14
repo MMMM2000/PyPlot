@@ -198,6 +198,14 @@ ANNEALING_LEGACY_OTHER_GRAPH_COLUMN = "Graph — other mA"
 GRAPH_PREVIEW_WIDTH = 720
 GRAPH_PREVIEW_HEIGHT = 420
 MAX_PLOT_POINTS = 2000
+VSM_HYSTERESIS_PREVIEW_RANGE_SETTING = "vsm_hysteresis_preview_range_oe"
+VSM_HYSTERESIS_DEFAULT_PREVIEW_RANGE_OE = 1000.0
+VSM_HYSTERESIS_PREVIEW_RANGE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("±1000 Oe", "1000"),
+    ("±2000 Oe", "2000"),
+    ("±5000 Oe", "5000"),
+    ("Auto/full range", "auto"),
+)
 ANNEALING_AS_COLUMN = "As1 (mA)"
 ANNEALING_AF1_COLUMN = "Af1 (mA)"
 ANNEALING_MS_COLUMN = "Ms1 (mA)"
@@ -343,6 +351,37 @@ def _builder_settings() -> QtCore.QSettings:
         )
         return QtCore.QSettings(str(settings_file), QtCore.QSettings.Format.IniFormat)
     return QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
+
+
+def _parse_vsm_hysteresis_preview_range_oe(value: Any) -> Optional[float]:
+    if value is None:
+        return VSM_HYSTERESIS_DEFAULT_PREVIEW_RANGE_OE
+    text = str(value).strip().lower()
+    if not text:
+        return VSM_HYSTERESIS_DEFAULT_PREVIEW_RANGE_OE
+    if text in {"auto", "full", "none", "0"}:
+        return None
+    try:
+        limit = float(text)
+    except (TypeError, ValueError):
+        return VSM_HYSTERESIS_DEFAULT_PREVIEW_RANGE_OE
+    if not math.isfinite(limit) or limit <= 0:
+        return VSM_HYSTERESIS_DEFAULT_PREVIEW_RANGE_OE
+    return limit
+
+
+def _load_vsm_hysteresis_preview_range_oe(
+    settings: Optional[QtCore.QSettings] = None,
+) -> Optional[float]:
+    resolved = settings or _builder_settings()
+    try:
+        stored = resolved.value(
+            VSM_HYSTERESIS_PREVIEW_RANGE_SETTING,
+            str(int(VSM_HYSTERESIS_DEFAULT_PREVIEW_RANGE_OE)),
+        )
+    except Exception:
+        stored = str(int(VSM_HYSTERESIS_DEFAULT_PREVIEW_RANGE_OE))
+    return _parse_vsm_hysteresis_preview_range_oe(stored)
 
 
 def _shape_memory_has_value(value: Any) -> bool:
@@ -4083,6 +4122,7 @@ def _plot_vsm_hysteresis_figure(
     *,
     width_px: int,
     height_px: int,
+    x_limit_oe: Optional[float] = None,
 ) -> Optional["plt.Figure"]:
     if isinstance(record, VsmHysteresisRecord):
         records = [record]
@@ -4202,6 +4242,10 @@ def _plot_vsm_hysteresis_figure(
     ax.set_title(title)
     ax.set_xlabel(x_column)
     ax.set_ylabel(y_column)
+    if x_limit_oe is None:
+        x_limit_oe = _load_vsm_hysteresis_preview_range_oe()
+    if x_limit_oe is not None and math.isfinite(x_limit_oe) and x_limit_oe > 0:
+        ax.set_xlim(-float(x_limit_oe), float(x_limit_oe))
     if len(valid_records) > 1:
         ax.legend(loc="best")
     try:
@@ -10487,6 +10531,8 @@ class MicroscopeSection(MiniDatabaseSection):
 
     def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
         super().apply_data(data)
+        self._load_extra_state()
+        self._apply_overrides_to_table(restore_selection=False)
         self._normalise_brittle_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
         if hasattr(self, "other_end_checkbox"):
@@ -10901,6 +10947,44 @@ class MicroscopeSection(MiniDatabaseSection):
 
     def _protected_key_tokens(self) -> Set[str]:
         return {str(key) for key in self._overrides.keys()} | {str(key) for key in self._validated.keys()}
+
+    def _load_existing_microscope_index(self) -> Dict[MicrowireKey, MicroscopeMeasurements]:
+        try:
+            payload = self.store.load_payload("microscope_index")
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            return {}
+        existing: Dict[MicrowireKey, MicroscopeMeasurements] = {}
+        for key, value in payload.items():
+            if not isinstance(key, tuple) or len(key) != 4:
+                continue
+            if not isinstance(value, MicroscopeMeasurements):
+                continue
+            try:
+                composition = str(key[0])
+                draw = int(key[1])
+                piece = int(key[2])
+                suffix = key[3] if key[3] is None else str(key[3])
+            except Exception:
+                continue
+            existing[(composition, draw, piece, suffix)] = value
+        return existing
+
+    @staticmethod
+    def _merge_microscope_indexes(
+        existing: Mapping[MicrowireKey, MicroscopeMeasurements],
+        refreshed: Mapping[MicrowireKey, MicroscopeMeasurements],
+    ) -> Dict[MicrowireKey, MicroscopeMeasurements]:
+        merged: Dict[MicrowireKey, MicroscopeMeasurements] = {}
+        for source in (existing, refreshed):
+            for key, value in source.items():
+                if not isinstance(key, tuple) or len(key) != 4:
+                    continue
+                if not isinstance(value, MicroscopeMeasurements):
+                    continue
+                merged[key] = value
+        return merged
 
     def _build_initial_table_frame(self, expected_keys: Set[MicrowireKey]) -> pd.DataFrame:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
@@ -12471,6 +12555,13 @@ class MicroscopeSection(MiniDatabaseSection):
         progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
     ) -> SectionProcessResult:
         self._refresh_validations()
+        existing_index = self._load_existing_microscope_index()
+        existing_processed = (
+            dict(self.data.processed)
+            if isinstance(getattr(self.data, "processed", None), dict)
+            else {}
+        )
+        existing_cache = dict(self._ocr_cache)
         unique_paths = list(dict.fromkeys(Path(p) for p in paths))
         run_ocr = self._force_ocr_next or not getattr(self, "defer_ocr_checkbox", QtWidgets.QCheckBox()).isChecked()
         self._force_ocr_next = False
@@ -12502,6 +12593,8 @@ class MicroscopeSection(MiniDatabaseSection):
                 discovered_keys.add(parsed_key)
         if discovered_keys:
             expected_keys = set(expected_keys) | discovered_keys
+        if existing_index:
+            expected_keys = set(expected_keys) | set(existing_index.keys())
 
         def _emit_partial(key: MicrowireKey, measurement: MicroscopeMeasurements) -> None:
             try:
@@ -12545,7 +12638,7 @@ class MicroscopeSection(MiniDatabaseSection):
 
         if not run_ocr:
             table = self._build_initial_table_frame(expected_keys)
-            processed: Dict[str, float] = {}
+            processed: Dict[str, float] = dict(existing_processed)
             for path in unique_paths:
                 try:
                     processed[str(path)] = float(path.stat().st_mtime)
@@ -12566,23 +12659,26 @@ class MicroscopeSection(MiniDatabaseSection):
             update_callback=_emit_partial,
             cache=cache_lookup,
         )
-        self._ocr_cache = dict(cache_map)
+        merged_cache = dict(existing_cache)
+        merged_cache.update(cache_map)
+        self._ocr_cache = merged_cache
         if expected_keys:
             for key in expected_keys:
                 index.setdefault(key, MicroscopeMeasurements())
+        merged_index = self._merge_microscope_indexes(existing_index, index)
         self._check_cancelled()
         filtered_overrides = {
             key: value
             for key, value in self._overrides.items()
             if any(
                 key == _microwire_key_to_str((comp, draw, piece, suffix))
-                for comp, draw, piece, suffix in index.keys()
+                for comp, draw, piece, suffix in merged_index.keys()
             )
         }
         self._overrides = filtered_overrides
-        table = _microscope_index_to_frame(index, filtered_overrides)
+        table = _microscope_index_to_frame(merged_index, filtered_overrides)
 
-        processed: Dict[str, float] = {}
+        processed: Dict[str, float] = dict(existing_processed)
         for path in unique_paths:
             try:
                 processed[str(path)] = float(path.stat().st_mtime)
@@ -12601,9 +12697,9 @@ class MicroscopeSection(MiniDatabaseSection):
                     count += 1
             return count
 
-        total_records = len(index)
-        total_core = sum(_count_measurements(m.core) for m in index.values())
-        total_glass = sum(_count_measurements(m.glass) for m in index.values())
+        total_records = len(merged_index)
+        total_core = sum(_count_measurements(m.core) for m in merged_index.values())
+        total_glass = sum(_count_measurements(m.glass) for m in merged_index.values())
         if total_core or total_glass:
             self.log(
                 f"Microscope OCR detected {total_core} core and {total_glass} glass diameter(s) across {total_records} microwire(s).",
@@ -12623,12 +12719,18 @@ class MicroscopeSection(MiniDatabaseSection):
         return SectionProcessResult(
             table=table,
             processed=processed,
-            payloads={"microscope_index": index},
+            payloads={"microscope_index": merged_index},
             extra=extra_payload,
         )
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
+        self._load_extra_state()
+        self._apply_overrides_to_table(restore_selection=False)
+        try:
+            self.store.save(self.data)
+        except Exception:
+            pass
         self._update_missing_summary()
         self._update_review_buttons()
         self._ensure_valid_selection()
@@ -16095,6 +16197,20 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self.visibility_button.setToolTip("Show or hide specific VSM hysteresis graphs.")
         self.visibility_button.clicked.connect(self._open_visibility_dialog)
         self.controls_layout.addWidget(self.visibility_button)
+        self.preview_range_label = QtWidgets.QLabel("Preview range:")
+        self.preview_range_label.setToolTip(
+            "Choose the default X-axis field range used for VSM hysteresis previews."
+        )
+        self.controls_layout.addWidget(self.preview_range_label)
+        self.preview_range_combo = QtWidgets.QComboBox(self)
+        self.preview_range_combo.setToolTip(
+            "Zoom the preview loops to a smaller field window or show the full measured range."
+        )
+        for label, value in VSM_HYSTERESIS_PREVIEW_RANGE_OPTIONS:
+            self.preview_range_combo.addItem(label, value)
+        self._load_preview_range_setting()
+        self.preview_range_combo.currentIndexChanged.connect(self._handle_preview_range_changed)
+        self.controls_layout.addWidget(self.preview_range_combo)
         header = self.table_view.verticalHeader() if self.table_view is not None else None
         if header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
@@ -16344,8 +16460,43 @@ class VsmHysteresisSection(MiniDatabaseSection):
             except Exception:
                 pass
 
+    def _load_preview_range_setting(self) -> None:
+        stored = _load_vsm_hysteresis_preview_range_oe()
+        target = "auto" if stored is None else str(int(stored))
+        index = self.preview_range_combo.findData(target)
+        if index < 0:
+            index = 0
+        blocker = QtCore.QSignalBlocker(self.preview_range_combo)
+        self.preview_range_combo.setCurrentIndex(index)
+        del blocker
+
+    def _refresh_preview_pixmaps(self) -> None:
+        self._pixmap_cache.clear()
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+        if isinstance(self.table_view, QtWidgets.QTableView):
+            try:
+                self.table_view.viewport().update()
+            except Exception:
+                pass
+
+    def _handle_preview_range_changed(self, _: int) -> None:
+        data = self.preview_range_combo.currentData()
+        value = str(data).strip() if data is not None else str(int(VSM_HYSTERESIS_DEFAULT_PREVIEW_RANGE_OE))
+        settings = _builder_settings()
+        try:
+            settings.setValue(VSM_HYSTERESIS_PREVIEW_RANGE_SETTING, value)
+            settings.sync()
+        except Exception:
+            self.logger.exception("Failed to store VSM hysteresis preview range setting")
+        self._refresh_preview_pixmaps()
+
     def _preview_icon_width(self) -> int:
-        return ANNEALING_GRAPH_WIDTH
+        count = max(int(getattr(self, "_preview_group_count", 1)), 1)
+        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
 
     def _preview_icon_height(self) -> int:
         return ANNEALING_GRAPH_HEIGHT
@@ -16742,7 +16893,8 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        return ANNEALING_GRAPH_WIDTH
+        count = max(int(getattr(self, "_preview_group_count", 1)), 1)
+        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
 
     def _preview_icon_height(self) -> int:
         return ANNEALING_GRAPH_HEIGHT
@@ -16799,7 +16951,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             )
             pixmaps = [item.pixmap for item in items if item.pixmap is not None]
             if pixmaps:
-                pixmap = _combine_pixmaps_vertical(
+                pixmap = _combine_pixmaps_side_by_side(
                     pixmaps,
                     width_px=self._preview_icon_width(),
                     height_px=self._preview_icon_height(),

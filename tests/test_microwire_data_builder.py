@@ -167,6 +167,165 @@ def test_vsm_temperature_preview_keeps_dual_axis_legend_in_section_order() -> No
         builder_ui.plt.close(figure)
 
 
+def test_vsm_hysteresis_section_preview_icon_width_scales_with_group_count() -> None:
+    _ensure_qapp()
+    section = builder_ui.VsmHysteresisSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        section._preview_group_count = 2
+        assert section._preview_icon_width() == (
+            builder_ui.ANNEALING_GRAPH_WIDTH * 2 + section._preview_spacing
+        )
+    finally:
+        section.close()
+
+
+def test_plot_vsm_hysteresis_figure_defaults_to_zoomed_preview_range(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    record = builder_ui.VsmHysteresisRecord(
+        path=Path("loop.dat"),
+        sample="Sample",
+        data=pd.DataFrame(
+            {
+                "Applied Field For Plot": [-10000.0, -5000.0, 0.0, 5000.0, 10000.0],
+                "Signal X direction": [-1.0, -0.7, 0.0, 0.7, 1.0],
+            }
+        ),
+        angle=0.0,
+    )
+
+    figure = builder_ui._plot_vsm_hysteresis_figure(
+        [record],
+        logging.getLogger("test"),
+        width_px=720,
+        height_px=360,
+    )
+    assert figure is not None
+    try:
+        xlim = figure.axes[0].get_xlim()
+        assert xlim == pytest.approx((-1000.0, 1000.0))
+    finally:
+        builder_ui.plt.close(figure)
+
+
+def test_plot_vsm_hysteresis_figure_respects_auto_preview_range(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    settings = QtCore.QSettings(str(settings_path), QtCore.QSettings.Format.IniFormat)
+    settings.setValue(builder_ui.VSM_HYSTERESIS_PREVIEW_RANGE_SETTING, "auto")
+    settings.sync()
+
+    record = builder_ui.VsmHysteresisRecord(
+        path=Path("loop.dat"),
+        sample="Sample",
+        data=pd.DataFrame(
+            {
+                "Applied Field For Plot": [-10000.0, -5000.0, 0.0, 5000.0, 10000.0],
+                "Signal X direction": [-1.0, -0.7, 0.0, 0.7, 1.0],
+            }
+        ),
+        angle=0.0,
+    )
+
+    figure = builder_ui._plot_vsm_hysteresis_figure(
+        [record],
+        logging.getLogger("test"),
+        width_px=720,
+        height_px=360,
+    )
+    assert figure is not None
+    try:
+        xlim = figure.axes[0].get_xlim()
+        assert xlim[0] < -9000.0
+        assert xlim[1] > 9000.0
+    finally:
+        builder_ui.plt.close(figure)
+
+
+def test_vsm_hysteresis_section_preview_range_change_persists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    section = builder_ui.VsmHysteresisSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        assert section.preview_range_combo.currentData() == "1000"
+        section._pixmap_cache["sample|Graph"] = QtGui.QPixmap(10, 10)
+        section.preview_range_combo.setCurrentIndex(section.preview_range_combo.findData("auto"))
+        QtWidgets.QApplication.processEvents()
+
+        settings = QtCore.QSettings(str(settings_path), QtCore.QSettings.Format.IniFormat)
+        assert settings.value(builder_ui.VSM_HYSTERESIS_PREVIEW_RANGE_SETTING) == "auto"
+        assert section._pixmap_cache == {}
+    finally:
+        section.close()
+
+
+def test_vsm_temperature_section_preview_icon_width_scales_with_group_count() -> None:
+    _ensure_qapp()
+    section = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        section._preview_group_count = 2
+        assert section._preview_icon_width() == (
+            builder_ui.ANNEALING_GRAPH_WIDTH * 2 + section._preview_spacing
+        )
+    finally:
+        section.close()
+
+
+def test_vsm_temperature_section_combines_preview_pixmaps_side_by_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        record = core.VsmTemperatureScanRecord(
+            path=Path("scan.txt"),
+            sample="Ni48Fe27Ga21Cu2 2/4",
+            data=pd.DataFrame({"temperature": [20.0, 30.0], "field": [5.0, 5.0], "signal": [1.0, 0.9]}),
+            key="Ni48Fe27Ga21Cu2|2|4",
+            label="scan",
+        )
+        section._record_groups = {record.sample: [record, record]}
+        section._preview_group_count = 2
+
+        def _fake_preview_items(*args: object, **kwargs: object) -> list[builder_ui._GraphPreviewItem]:
+            pixmap_a = QtGui.QPixmap(builder_ui.ANNEALING_GRAPH_WIDTH, builder_ui.ANNEALING_GRAPH_HEIGHT)
+            pixmap_a.fill(QtGui.QColor("#d94f4f"))
+            pixmap_b = QtGui.QPixmap(builder_ui.ANNEALING_GRAPH_WIDTH, builder_ui.ANNEALING_GRAPH_HEIGHT)
+            pixmap_b.fill(QtGui.QColor("#2e8b57"))
+            return [
+                builder_ui._GraphPreviewItem("A", pixmap_a),
+                builder_ui._GraphPreviewItem("B", pixmap_b),
+            ]
+
+        monkeypatch.setattr(builder_ui, "_vsm_temperature_preview_items", _fake_preview_items)
+
+        row = pd.Series(
+            {
+                "Composition": "Ni48Fe27Ga21Cu2",
+                "Microwire": "2/4",
+                "Sample": record.sample,
+            }
+        )
+        pixmap = section._preview_decoration(row, builder_ui.VSM_TEMPERATURE_SCAN_COLUMN)
+
+        assert isinstance(pixmap, QtGui.QPixmap)
+        assert not pixmap.isNull()
+        assert pixmap.width() == section._preview_icon_width()
+        assert pixmap.height() == section._preview_icon_height()
+        assert pixmap.width() > builder_ui.ANNEALING_GRAPH_WIDTH
+    finally:
+        section.close()
+
+
 def test_render_measurement_pixmap_uses_readable_default_preview_size() -> None:
     _ensure_qapp()
     record = SimpleNamespace(
@@ -1121,6 +1280,199 @@ def test_microscope_collect_candidates_keeps_all_files_when_ocr_is_deferred(
 
         assert core_path in candidates
         assert glass_path in candidates
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_process_merges_existing_rows_when_refresh_scans_new_subset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        section.reset_to_blank()
+        monkeypatch.setattr(section, "_expected_microwire_keys", lambda: set())
+        section._expected_keys_current = set()
+        old_key = ("TestCompOld", 1, 1, None)
+        old_row = {
+            "Composition": "TestCompOld",
+            "Microwire": "1/1",
+            builder_ui.MICROSCOPE_D_COLUMN: 10.0,
+            builder_ui.MICROSCOPE_CAP_D_COLUMN: 40.0,
+            "d/D": 0.25,
+            BRITTLE_COLUMN: None,
+            builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+            builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+            "_key": "TestCompOld|1|1",
+            "_core_image": None,
+            "_glass_image": None,
+            "_images": [],
+        }
+        existing_index = {
+            old_key: builder_ui.MicroscopeMeasurements(
+                core=[builder_ui.MicroscopeDetection(value=10.0, image_path=tmp_path / "old_core.jpg")],
+                glass=[builder_ui.MicroscopeDetection(value=40.0, image_path=tmp_path / "old_glass.jpg")],
+            )
+        }
+        section.apply_data(
+            MiniDatabaseData(
+                table=pd.DataFrame([old_row]),
+                processed={str(tmp_path / "old_core.jpg"): 1.0},
+                extra={
+                    "overrides": {"TestCompOld|1|1": {"d": 10.0, "D": 40.0}},
+                    "validated": {
+                        "TestCompOld|1|1": {
+                            "d": 10.0,
+                            "D": 40.0,
+                            "d_reviewed": True,
+                            "D_reviewed": True,
+                        }
+                    },
+                },
+            )
+        )
+        section._overrides = {"TestCompOld|1|1": {"d": 10.0, "D": 40.0}}
+        section._validated = {
+            "TestCompOld|1|1": {
+                "d": 10.0,
+                "D": 40.0,
+                "d_reviewed": True,
+                "D_reviewed": True,
+            }
+        }
+        monkeypatch.setattr(section, "_load_existing_microscope_index", lambda: existing_index)
+        section.defer_ocr_checkbox.setChecked(False)
+
+        new_core = tmp_path / "TestCompNew 2_3 core.jpg"
+        new_glass = tmp_path / "TestCompNew 2_3 glass.jpg"
+        for path in (new_core, new_glass):
+            path.write_bytes(b"test")
+
+        new_index = {
+            ("TestCompNew", 2, 3, None): builder_ui.MicroscopeMeasurements(
+                core=[builder_ui.MicroscopeDetection(value=12.0, image_path=new_core)],
+                glass=[builder_ui.MicroscopeDetection(value=48.0, image_path=new_glass)],
+            )
+        }
+
+        monkeypatch.setattr(
+            builder_ui,
+            "_group_microscope_measurements",
+            lambda *args, **kwargs: (new_index, {}),
+        )
+
+        result = section.process([new_core, new_glass])
+
+        assert set(result.payloads["microscope_index"].keys()) == {
+            ("TestCompOld", 1, 1, None),
+            ("TestCompNew", 2, 3, None),
+        }
+        keys = set(result.table["_key"].tolist())
+        assert keys == {"TestCompOld|1|1", "TestCompNew|2|3"}
+        assert result.extra["overrides"]["TestCompOld|1|1"]["d"] == pytest.approx(10.0)
+        assert "TestCompOld|1|1" in result.extra["validated"]
+        assert str(tmp_path / "old_core.jpg") in result.processed
+        assert str(new_core) in result.processed
+        assert str(new_glass) in result.processed
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_apply_data_rehydrates_reviewed_diameters() -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        key = "Ni46Fe23Ga23Co8|1|1"
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni46Fe23Ga23Co8",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    BRITTLE_COLUMN: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": key,
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                }
+            ]
+        )
+
+        section.apply_data(
+            MiniDatabaseData(
+                table=frame,
+                extra={
+                    "validated": {
+                        key: {
+                            "d": 6.7,
+                            "D": 34.4,
+                            "d_reviewed": True,
+                            "D_reviewed": True,
+                        }
+                    }
+                },
+            )
+        )
+
+        updated = section.model.frame()
+        assert updated.at[0, builder_ui.MICROSCOPE_D_COLUMN] == pytest.approx(6.7)
+        assert updated.at[0, builder_ui.MICROSCOPE_CAP_D_COLUMN] == pytest.approx(34.4)
+        assert updated.at[0, "d/D"] == pytest.approx(round(6.7 / 34.4, 3))
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_handle_worker_finished_rehydrates_reviewed_diameters() -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        key = "Ni46Fe23Ga23Co8|1|1"
+        section._validated = {
+            key: {
+                "d": 6.7,
+                "D": 34.4,
+                "d_reviewed": True,
+                "D_reviewed": True,
+            }
+        }
+        result = builder_ui.SectionProcessResult(
+            table=pd.DataFrame(
+                [
+                    {
+                        "Composition": "Ni46Fe23Ga23Co8",
+                        "Microwire": "1/1",
+                        builder_ui.MICROSCOPE_D_COLUMN: None,
+                        builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                        "d/D": None,
+                        BRITTLE_COLUMN: None,
+                        builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                        builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                        "_key": key,
+                        "_core_image": None,
+                        "_glass_image": None,
+                        "_images": [],
+                    }
+                ]
+            ),
+            processed={},
+            payloads={},
+            extra={"validated": dict(section._validated)},
+        )
+
+        section._handle_worker_finished(result)
+
+        updated = section.model.frame()
+        assert updated.at[0, builder_ui.MICROSCOPE_D_COLUMN] == pytest.approx(6.7)
+        assert updated.at[0, builder_ui.MICROSCOPE_CAP_D_COLUMN] == pytest.approx(34.4)
+        assert updated.at[0, "d/D"] == pytest.approx(round(6.7 / 34.4, 3))
     finally:
         section._shutdown_background_threads()
         section.close()
