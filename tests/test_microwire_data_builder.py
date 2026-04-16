@@ -1369,6 +1369,11 @@ def test_microscope_process_merges_existing_rows_when_refresh_scans_new_subset(
             ("TestCompOld", 1, 1, None),
             ("TestCompNew", 2, 3, None),
         }
+        old_measurement = result.payloads["microscope_index"][("TestCompOld", 1, 1, None)]
+        assert len(old_measurement.core) == 1
+        assert len(old_measurement.glass) == 1
+        assert old_measurement.best_core() == pytest.approx(10.0)
+        assert old_measurement.best_glass() == pytest.approx(40.0)
         keys = set(result.table["_key"].tolist())
         assert keys == {"TestCompOld|1|1", "TestCompNew|2|3"}
         assert result.extra["overrides"]["TestCompOld|1|1"]["d"] == pytest.approx(10.0)

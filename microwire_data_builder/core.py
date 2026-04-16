@@ -5565,7 +5565,7 @@ def build_database(
             "Measured"
             if records
             else "Fabrication only"
-            if piece_info is not None or draw_info is not None
+            if piece_info or draw_info
             else "Microscope only"
         )
         phase_entry = phase_points_map.get(key_str, {})

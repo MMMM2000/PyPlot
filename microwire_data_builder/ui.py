@@ -12662,10 +12662,10 @@ class MicroscopeSection(MiniDatabaseSection):
         merged_cache = dict(existing_cache)
         merged_cache.update(cache_map)
         self._ocr_cache = merged_cache
+        merged_index = self._merge_microscope_indexes(existing_index, index)
         if expected_keys:
             for key in expected_keys:
-                index.setdefault(key, MicroscopeMeasurements())
-        merged_index = self._merge_microscope_indexes(existing_index, index)
+                merged_index.setdefault(key, MicroscopeMeasurements())
         self._check_cancelled()
         filtered_overrides = {
             key: value
@@ -21781,9 +21781,12 @@ class CompareSection(MiniDatabaseSection):
         section = self.sections.get(section_key)
         if section is None:
             return None
-        if not _section_payload_enabled(section, name):
+        if _section_payload_enabled(section, name):
+            return section.store.load_payload(name)
+        try:
+            return section.store.load_payload(name)
+        except Exception:
             return None
-        return section.store.load_payload(name)
 
     def _row_key(self, row: pd.Series) -> str:
         key = _row_to_microwire_key(row)
@@ -23971,9 +23974,12 @@ class AssemblySection(QtWidgets.QWidget):
         section = self.sections.get(section_key)
         if section is None:
             return None
-        if not _section_payload_enabled(section, name):
+        if _section_payload_enabled(section, name):
+            return section.store.load_payload(name)
+        try:
+            return section.store.load_payload(name)
+        except Exception:
             return None
-        return section.store.load_payload(name)
 
     def _selected_sections(self) -> set[str]:
         return {key for key, enabled in self._section_states.items() if enabled}
