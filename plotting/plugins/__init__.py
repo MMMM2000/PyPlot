@@ -25,6 +25,7 @@ from .vsm_temperature_scan import VSMTemperatureScanPlugin
 from .vsm_isotherms import VSMIsothermsPlugin
 from .dma_iso_stress import DmaIsoStressPlugin
 from .fmr import FmrPlugin
+from .r_vs_t import RVsTPlugin
 
 
 def builtin_plugin_registry() -> dict[str, type[PyPlotPlugin]]:
@@ -54,6 +55,7 @@ __all__ = [
     "VSMIsothermsPlugin",
     "DmaIsoStressPlugin",
     "FmrPlugin",
+    "RVsTPlugin",
     "register_plugin",
     "get_plugin_registry",
     "iter_registered_plugins",

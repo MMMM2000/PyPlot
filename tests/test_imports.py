@@ -21,6 +21,8 @@ def test_packages_importable():
     assert importlib.import_module('plotting.plugins.stress_dependence.core')
     assert importlib.import_module('plotting.plugins.stress_sensitivity.core')
     assert importlib.import_module('plotting.plugins.current_annealing.core')
+    assert importlib.import_module('plotting.plugins.r_vs_t')
+    assert importlib.import_module('plotting.plugins.r_vs_t.core')
     assert importlib.import_module('plotting.plugins.vsm_hysteresis.vsm_hysteresis_loops')
     assert importlib.import_module('plotting.plugins.vsm_isotherms')
     assert importlib.import_module('plotting.plugins.vsm_isotherms.core')
