@@ -61,10 +61,6 @@ EXPERIMENTS: Dict[str, ExperimentFactory] = {
     "Current Annealing Unit Converter": _lazy(
         "experiments.current_annealing_converter", label="Current Annealing Unit Converter"
     ),
-    "Microscope OCR Debug": _lazy("experiments.ocr_debug", label="Microscope OCR Debug"),
-    "PaddleOCR-VL PDF Converter": _lazy(
-        "experiments.paddleocr_vl_pdf", label="PaddleOCR-VL PDF Converter"
-    ),
     "VSM Folder Export": _lazy(
         "experiments.vsm_folder_export", "launch_gui", label="VSM Folder Export"
     ),

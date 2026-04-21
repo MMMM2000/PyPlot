@@ -10443,7 +10443,7 @@ class _MicroscopePreviewLabel(QtWidgets.QLabel):
 
 class MicroscopeSection(MiniDatabaseSection):
     section_key = "microscope"
-    section_title = "Microscope OCR"
+    section_title = "Microscope"
     supported_suffixes = MICROSCOPE_EXTENSIONS
     partial_row_ready = QtCore.pyqtSignal(dict)
 
@@ -10454,15 +10454,12 @@ class MicroscopeSection(MiniDatabaseSection):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._overrides: Dict[str, Dict[str, float]] = {}
-        self._ocr_cache: Dict[str, MicroscopeCacheEntry] = {}
         self._validated: Dict[str, Dict[str, Any]] = {}
         self._selected_key: str | None = None
-        self._ocr_debug_enabled = False
         self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
         self._expected_keys_current: Set[MicrowireKey] = set()
         self._prepopulated_keys: Set[str] = set()
         self._table_splitter: QtWidgets.QSplitter | None = None
-        self._force_ocr_next = False
         self._active_column: str = ""
         self._pending_advance_key: str | None = None
         self._pending_advance_column: str | None = None
@@ -10481,12 +10478,6 @@ class MicroscopeSection(MiniDatabaseSection):
                 self.other_end_checkbox.setChecked(self._show_other_ends)
                 self.other_end_checkbox.toggled.connect(self._toggle_other_ends)
                 self.controls_layout.addWidget(self.other_end_checkbox)
-                self.defer_ocr_checkbox = QtWidgets.QCheckBox("Defer OCR")
-                self.defer_ocr_checkbox.setChecked(True)
-                self.controls_layout.addWidget(self.defer_ocr_checkbox)
-                self.run_ocr_button = QtWidgets.QPushButton("Run OCR now")
-                self.run_ocr_button.clicked.connect(self._trigger_ocr_run)
-                self.controls_layout.addWidget(self.run_ocr_button)
             except Exception:
                 pass
 
@@ -10562,22 +10553,6 @@ class MicroscopeSection(MiniDatabaseSection):
                 for key, value in stored_overrides.items()
                 if isinstance(value, dict)
             }
-
-        stored_cache = self.data.extra.get("ocr_cache")
-        if isinstance(stored_cache, dict):
-            cache: Dict[str, MicroscopeCacheEntry] = {}
-            for key, payload in stored_cache.items():
-                entry: Optional[MicroscopeCacheEntry]
-                if isinstance(payload, MicroscopeCacheEntry):
-                    entry = payload
-                elif isinstance(payload, dict):
-                    entry = MicroscopeCacheEntry.from_dict(payload)
-                else:
-                    entry = None
-                if entry is None:
-                    continue
-                cache[str(key)] = entry
-            self._ocr_cache = cache
 
         stored_validated = self.data.extra.get("validated")
         if isinstance(stored_validated, dict):
@@ -10784,7 +10759,6 @@ class MicroscopeSection(MiniDatabaseSection):
     def reset_to_blank(self) -> None:  # type: ignore[override]
         super().reset_to_blank()
         self._overrides.clear()
-        self._ocr_cache.clear()
         self._validated.clear()
         self._prepopulated_keys.clear()
         self._expected_keys_current = set()
@@ -10817,27 +10791,7 @@ class MicroscopeSection(MiniDatabaseSection):
         return suffix != "oe"
 
     def _collect_candidates(self) -> List[Path]:  # type: ignore[override]
-        base = MiniDatabaseSection._collect_candidates(self)
-        defer_ocr_checkbox = getattr(self, "defer_ocr_checkbox", None)
-        defer_ocr = bool(
-            isinstance(defer_ocr_checkbox, QtWidgets.QCheckBox)
-            and defer_ocr_checkbox.isChecked()
-        )
-        if defer_ocr and not self._force_ocr_next:
-            return base
-        pending: List[Path] = []
-        processed = self.data.processed
-        for path in base:
-            key = str(path)
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                continue
-            if float(processed.get(key, -1.0)) != float(mtime):
-                pending.append(path)
-        if pending:
-            return pending
-        return base
+        return MiniDatabaseSection._collect_candidates(self)
 
     def _auto_fit_columns(self) -> None:  # type: ignore[override]
         super()._auto_fit_columns()
@@ -11823,34 +11777,6 @@ class MicroscopeSection(MiniDatabaseSection):
                     pass
                 self._handle_selection_changed()
 
-    def set_ocr_debug_enabled(self, enabled: bool) -> None:
-        self._ocr_debug_enabled = bool(enabled)
-
-    def _ocr_debug_callback(self, path: Path, result: MicroscopeOCRResult) -> None:
-        if not self._ocr_debug_enabled:
-            return
-        values = [
-            f"{float(value):.3f}"
-            for value in result.values
-            if isinstance(value, (int, float)) and math.isfinite(float(value))
-        ]
-        value_text = ", ".join(values) if values else "—"
-        sample_texts: List[str] = []
-        for detection in result.detections:
-            raw = getattr(detection, "text", None)
-            if raw:
-                cleaned = str(raw).replace("\n", " ").strip()
-                if cleaned:
-                    sample_texts.append(cleaned)
-        for text in result.texts:
-            cleaned = str(text).replace("\n", " ").strip()
-            if cleaned:
-                sample_texts.append(cleaned)
-        text_preview = " | ".join(sample_texts) if sample_texts else "—"
-        message = f"OCR debug {Path(path).name}: values={value_text}"
-        message += f"; text={text_preview}"
-        self.log(message, level=logging.INFO)
-
     def _update_hidden_columns(self) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return
@@ -12377,10 +12303,6 @@ class MicroscopeSection(MiniDatabaseSection):
         self.mark_reviewed_button.setText("Update review" if is_reviewed else "Mark reviewed")
         self.clear_review_button.setEnabled(has_any_review)
 
-    def _trigger_ocr_run(self) -> None:
-        self._force_ocr_next = True
-        self.refresh()
-
     def _store_overrides(self, *, restore_selection: bool = True) -> None:
         self.data.extra["overrides"] = self._overrides
         self.store.save(self.data)
@@ -12436,6 +12358,57 @@ class MicroscopeSection(MiniDatabaseSection):
         self._update_review_buttons()
         if restore_selection:
             self._restore_selection()
+
+    @staticmethod
+    def _build_microscope_index_from_table(
+        table: pd.DataFrame,
+    ) -> Dict[MicrowireKey, MicroscopeMeasurements]:
+        index: Dict[MicrowireKey, MicroscopeMeasurements] = {}
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            return index
+        for _, row in table.iterrows():
+            key = _microwire_key_from_string(str(row.get("_key") or "").strip())
+            if key is None:
+                continue
+            measurements = index.setdefault(key, MicroscopeMeasurements())
+            core_path = row.get("_core_image")
+            glass_path = row.get("_glass_image")
+            try:
+                core_image = Path(core_path) if core_path else None
+            except Exception:
+                core_image = None
+            try:
+                glass_image = Path(glass_path) if glass_path else None
+            except Exception:
+                glass_image = None
+
+            d_value = row.get(MICROSCOPE_D_COLUMN)
+            if isinstance(d_value, (int, float)) and math.isfinite(float(d_value)) and float(d_value) > 0:
+                detection = MicroscopeDetection(
+                    value=float(d_value),
+                    image_path=core_image,
+                    source="manual",
+                )
+                detection.category = "core"
+                measurements.core.append(detection)
+            elif core_image is not None:
+                measurements.add_placeholder("core", core_image)
+
+            D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
+            if isinstance(D_value, (int, float)) and math.isfinite(float(D_value)) and float(D_value) > 0:
+                detection = MicroscopeDetection(
+                    value=float(D_value),
+                    image_path=glass_image,
+                    source="manual",
+                )
+                detection.category = "glass"
+                measurements.glass.append(detection)
+            elif glass_image is not None:
+                measurements.add_placeholder("glass", glass_image)
+
+            if str(row.get(BRITTLE_COLUMN) or "").strip().lower() == "brittle":
+                measurements.brittle = True
+        return index
 
     def refresh(self) -> None:
         self._refresh_validations()
@@ -12555,16 +12528,12 @@ class MicroscopeSection(MiniDatabaseSection):
         progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
     ) -> SectionProcessResult:
         self._refresh_validations()
-        existing_index = self._load_existing_microscope_index()
         existing_processed = (
             dict(self.data.processed)
             if isinstance(getattr(self.data, "processed", None), dict)
             else {}
         )
-        existing_cache = dict(self._ocr_cache)
         unique_paths = list(dict.fromkeys(Path(p) for p in paths))
-        run_ocr = self._force_ocr_next or not getattr(self, "defer_ocr_checkbox", QtWidgets.QCheckBox()).isChecked()
-        self._force_ocr_next = False
 
         def _progress(idx: int, total: int) -> None:
             self._check_cancelled()
@@ -12581,7 +12550,6 @@ class MicroscopeSection(MiniDatabaseSection):
             except Exception:
                 pass
 
-        debug_cb = self._ocr_debug_callback if self._ocr_debug_enabled else None
         expected_keys = self._expected_keys_current or self._expected_microwire_keys()
         discovered_keys: Set[MicrowireKey] = set()
         for candidate in unique_paths:
@@ -12593,80 +12561,9 @@ class MicroscopeSection(MiniDatabaseSection):
                 discovered_keys.add(parsed_key)
         if discovered_keys:
             expected_keys = set(expected_keys) | discovered_keys
-        if existing_index:
-            expected_keys = set(expected_keys) | set(existing_index.keys())
-
-        def _emit_partial(key: MicrowireKey, measurement: MicroscopeMeasurements) -> None:
-            try:
-                row = self._record_to_row(key, measurement)
-            except Exception:
-                return
-            try:
-                self.partial_row_ready.emit(row)
-            except Exception:
-                pass
-
-        cache_lookup: Dict[str, MicroscopeCacheEntry] = {}
-        for candidate in unique_paths:
-            path_obj = Path(candidate)
-            key_tuple = _microscope_key(path_obj)
-            if key_tuple is None:
-                continue
-            comp, draw, piece, suffix = key_tuple
-            if expected_keys and (comp, draw, piece, suffix) not in expected_keys:
-                if (comp, draw, piece, None) not in expected_keys:
-                    continue
-            key = _microwire_key_to_str((comp, draw, piece, suffix))
-            validated_entry = self._validated.get(key)
-            if not isinstance(validated_entry, dict):
-                continue
-            sources = validated_entry.get("sources")
-            if not isinstance(sources, list):
-                continue
-            path_key = self._path_key(path_obj)
-            if not any(
-                isinstance(source, dict)
-                and source.get("path")
-                and self._path_key(Path(source.get("path"))) == path_key
-                for source in sources
-            ):
-                continue
-            cache_entry = self._ocr_cache.get(path_key)
-            if cache_entry is None:
-                continue
-            cache_lookup[path_key] = cache_entry
-
-        if not run_ocr:
-            table = self._build_initial_table_frame(expected_keys)
-            processed: Dict[str, float] = dict(existing_processed)
-            for path in unique_paths:
-                try:
-                    processed[str(path)] = float(path.stat().st_mtime)
-                except OSError:
-                    continue
-            return SectionProcessResult(
-                table=table,
-                processed=processed,
-                payloads=self.data.extra.get("payloads", {}),
-                extra=self.data.extra,
-            )
-
-        index, cache_map = _group_microscope_measurements(
-            unique_paths,
-            self.logger,
-            progress_callback=_progress if progress is not None else None,
-            debug_callback=debug_cb,
-            update_callback=_emit_partial,
-            cache=cache_lookup,
-        )
-        merged_cache = dict(existing_cache)
-        merged_cache.update(cache_map)
-        self._ocr_cache = merged_cache
-        merged_index = self._merge_microscope_indexes(existing_index, index)
-        if expected_keys:
-            for key in expected_keys:
-                merged_index.setdefault(key, MicroscopeMeasurements())
+        table = self._build_initial_table_frame(expected_keys)
         self._check_cancelled()
+        merged_index = self._build_microscope_index_from_table(table)
         filtered_overrides = {
             key: value
             for key, value in self._overrides.items()
@@ -12685,35 +12582,8 @@ class MicroscopeSection(MiniDatabaseSection):
             except OSError:
                 continue
 
-        def _count_measurements(entries: Sequence[MicroscopeDetection]) -> int:
-            count = 0
-            for entry in entries:
-                value = getattr(entry, "value", None)
-                try:
-                    numeric = float(value)
-                except (TypeError, ValueError):
-                    numeric = math.nan
-                if math.isfinite(numeric) and numeric > 0:
-                    count += 1
-            return count
-
-        total_records = len(merged_index)
-        total_core = sum(_count_measurements(m.core) for m in merged_index.values())
-        total_glass = sum(_count_measurements(m.glass) for m in merged_index.values())
-        if total_core or total_glass:
-            self.log(
-                f"Microscope OCR detected {total_core} core and {total_glass} glass diameter(s) across {total_records} microwire(s).",
-                level=logging.INFO,
-            )
-        else:
-            self.log(
-                "Microscope OCR completed but no diameters were detected. Ensure the PaddleOCR models are installed and the microscope captures contain visible annotations.",
-                level=logging.WARNING,
-            )
-        cache_payload = {key: entry.as_dict() for key, entry in self._ocr_cache.items()}
         extra_payload = {
             "overrides": filtered_overrides,
-            "ocr_cache": cache_payload,
             "validated": self._validated,
         }
         return SectionProcessResult(
@@ -28085,24 +27955,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
         _pump_events()
 
         self._developer_options = developer_options()
-        self._ocr_debug_supported = all(
-            hasattr(self._developer_options, attr)
-            for attr in ("ocr_debug", "ocr_debug_changed")
-        )
-        if self._ocr_debug_supported:
-            try:
-                self._developer_options.ocr_debug_changed.connect(
-                    self._handle_ocr_debug_changed
-                )
-            except Exception:
-                self._ocr_debug_supported = False
-        initial_debug = False
-        if self._ocr_debug_supported:
-            try:
-                initial_debug = bool(self._developer_options.ocr_debug())
-            except Exception:
-                initial_debug = False
-        self._handle_ocr_debug_changed(initial_debug)
         if hasattr(self._developer_options, "message_log_capture_changed"):
             try:
                 self._developer_options.message_log_capture_changed.connect(
@@ -28627,14 +28479,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.move(bounded_left, bounded_top)
         finally:
             self._clamp_active = False
-
-    def _handle_ocr_debug_changed(self, enabled: bool) -> None:
-        section = getattr(self, "microscope_section", None)
-        if isinstance(section, MicroscopeSection):
-            try:
-                section.set_ocr_debug_enabled(bool(enabled))
-            except Exception:
-                pass
 
     def _handle_log_capture_changed(self, enabled: bool) -> None:
         self._log_capture_enabled = bool(enabled)

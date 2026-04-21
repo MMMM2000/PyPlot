@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +15,6 @@ import numpy as np
 import pytest
 from PyQt6 import QtCore, QtGui, QtTest, QtWidgets
 
-from microwire_data_builder import ocr as ocr_module
 from microwire_data_builder import ui as builder_ui
 from microwire_data_builder.ui import BuilderWindow, MicroscopeSection
 from microwire_data_builder.storage import MiniDatabaseData
@@ -933,52 +931,6 @@ def test_compare_section_defers_matrix_build_until_visible() -> None:
         section.close()
 
 
-def test_get_paddle_ocr_disabled_on_py313_without_override(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    if sys.version_info < (3, 13):
-        pytest.skip("runtime guard only applies on Python 3.13+")
-    ocr_module._create_default_ocr.cache_clear()
-    monkeypatch.delenv("MICROWIRE_DISABLE_PADDLE_OCR", raising=False)
-    monkeypatch.delenv("MICROWIRE_ENABLE_PADDLE_OCR_UNSAFE", raising=False)
-    called = {"value": False}
-
-    def _stub():
-        called["value"] = True
-        return object()
-
-    monkeypatch.setattr(ocr_module, "_create_default_ocr", _stub)
-    monkeypatch.setattr(ocr_module, "_UNSAFE_RUNTIME_WARNED", False, raising=False)
-    assert ocr_module.get_paddle_ocr(logging.getLogger("test")) is None
-    assert called["value"] is False
-
-
-def test_paddle_candidate_kwargs_include_ascii_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from microwire_data_builder import ocr
-
-    monkeypatch.setattr(ocr, "_CACHE_ROOT", tmp_path)
-    home_dir = tmp_path / "paddleocr_home"
-    home_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(ocr, "_PADDLE_HOME", home_dir, raising=False)
-
-    params = [
-        inspect.Parameter("self", inspect.Parameter.POSITIONAL_OR_KEYWORD),
-        inspect.Parameter("lang", inspect.Parameter.KEYWORD_ONLY, default="en"),
-        inspect.Parameter("home_path", inspect.Parameter.KEYWORD_ONLY, default=None),
-        inspect.Parameter("use_angle_cls", inspect.Parameter.KEYWORD_ONLY, default=True),
-    ]
-    signature = inspect.Signature(parameters=params)
-
-    combos = ocr._candidate_kwargs(signature)
-    assert combos, "expected candidate kwargs to be generated"
-
-    for combo in combos:
-        if "home_path" in combo:
-            value = combo["home_path"]
-            assert value == str(home_dir)
-            value.encode("ascii")
-
-
 def test_filename_parser_extracts_metadata(tmp_path: Path) -> None:
     path = tmp_path / "Ni50Fe27Ga23 6_4a s2 30mA.txt"
     path.write_text("0.1 0.2 2.0\n")
@@ -1258,33 +1210,6 @@ def test_microscope_apply_data_marks_existing_brittle_glass_rows(tmp_path: Path)
         section.close()
 
 
-def test_microscope_collect_candidates_keeps_all_files_when_ocr_is_deferred(
-    tmp_path: Path,
-) -> None:
-    _ensure_qapp()
-    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
-    try:
-        core_path = tmp_path / "Ni46Fe23Ga23Co8 1-1oe core.jpg"
-        glass_path = tmp_path / "Ni46Fe23Ga23Co8 1-1oe glass.jpg"
-        for path in (core_path, glass_path):
-            path.write_bytes(b"test")
-
-        section.set_sources([str(tmp_path)])
-        section.data.processed = {
-            str(core_path): core_path.stat().st_mtime,
-            str(glass_path): glass_path.stat().st_mtime,
-        }
-        section.defer_ocr_checkbox.setChecked(True)
-
-        candidates = section._collect_candidates()
-
-        assert core_path in candidates
-        assert glass_path in candidates
-    finally:
-        section._shutdown_background_threads()
-        section.close()
-
-
 def test_microscope_process_merges_existing_rows_when_refresh_scans_new_subset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1343,31 +1268,16 @@ def test_microscope_process_merges_existing_rows_when_refresh_scans_new_subset(
             }
         }
         monkeypatch.setattr(section, "_load_existing_microscope_index", lambda: existing_index)
-        section.defer_ocr_checkbox.setChecked(False)
-
         new_core = tmp_path / "TestCompNew 2_3 core.jpg"
         new_glass = tmp_path / "TestCompNew 2_3 glass.jpg"
         for path in (new_core, new_glass):
             path.write_bytes(b"test")
-
-        new_index = {
-            ("TestCompNew", 2, 3, None): builder_ui.MicroscopeMeasurements(
-                core=[builder_ui.MicroscopeDetection(value=12.0, image_path=new_core)],
-                glass=[builder_ui.MicroscopeDetection(value=48.0, image_path=new_glass)],
-            )
-        }
-
-        monkeypatch.setattr(
-            builder_ui,
-            "_group_microscope_measurements",
-            lambda *args, **kwargs: (new_index, {}),
-        )
+        section._prepopulate_image_refs([new_core, new_glass])
 
         result = section.process([new_core, new_glass])
 
         assert set(result.payloads["microscope_index"].keys()) == {
             ("TestCompOld", 1, 1, None),
-            ("TestCompNew", 2, 3, None),
         }
         old_measurement = result.payloads["microscope_index"][("TestCompOld", 1, 1, None)]
         assert len(old_measurement.core) == 1
@@ -1375,12 +1285,74 @@ def test_microscope_process_merges_existing_rows_when_refresh_scans_new_subset(
         assert old_measurement.best_core() == pytest.approx(10.0)
         assert old_measurement.best_glass() == pytest.approx(40.0)
         keys = set(result.table["_key"].tolist())
-        assert keys == {"TestCompOld|1|1", "TestCompNew|2|3"}
+        assert keys == {"TestCompOld|1|1"}
         assert result.extra["overrides"]["TestCompOld|1|1"]["d"] == pytest.approx(10.0)
         assert "TestCompOld|1|1" in result.extra["validated"]
         assert str(tmp_path / "old_core.jpg") in result.processed
         assert str(new_core) in result.processed
         assert str(new_glass) in result.processed
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_process_preserves_existing_index_payload_when_ocr_is_deferred(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        section.reset_to_blank()
+        monkeypatch.setattr(section, "_expected_microwire_keys", lambda: set())
+        section._expected_keys_current = set()
+
+        old_key = ("TestCompOld", 1, 1, None)
+        old_core = tmp_path / "TestCompOld 1_1 core.jpg"
+        old_glass = tmp_path / "TestCompOld 1_1 glass.jpg"
+        old_core.write_bytes(b"core")
+        old_glass.write_bytes(b"glass")
+
+        existing_index = {
+            old_key: builder_ui.MicroscopeMeasurements(
+                core=[builder_ui.MicroscopeDetection(value=10.0, image_path=old_core)],
+                glass=[builder_ui.MicroscopeDetection(value=40.0, image_path=old_glass)],
+            )
+        }
+        section.store.save_payload("microscope_index", existing_index)
+
+        section.apply_data(
+            MiniDatabaseData(
+                table=pd.DataFrame(
+                    [
+                        {
+                            "Composition": "TestCompOld",
+                            "Microwire": "1/1",
+                            builder_ui.MICROSCOPE_D_COLUMN: 10.0,
+                            builder_ui.MICROSCOPE_CAP_D_COLUMN: 40.0,
+                            "d/D": 0.25,
+                            BRITTLE_COLUMN: None,
+                            builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                            builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                            "_key": "TestCompOld|1|1",
+                            "_core_image": str(old_core),
+                            "_glass_image": str(old_glass),
+                            "_images": [str(old_core), str(old_glass)],
+                        }
+                    ]
+                ),
+                extra={"payloads": {"microscope_index": "microscope_index"}},
+            )
+        )
+
+        result = section.process([old_core, old_glass])
+
+        payload = result.payloads["microscope_index"]
+        assert isinstance(payload, dict)
+        assert set(payload.keys()) == {old_key}
+        measurement = payload[old_key]
+        assert measurement.best_core() == pytest.approx(10.0)
+        assert measurement.best_glass() == pytest.approx(40.0)
     finally:
         section._shutdown_background_threads()
         section.close()
@@ -3294,8 +3266,6 @@ def test_safe_plot_stem_removes_path_separators() -> None:
 
 def test_build_database_integration(tmp_path: Path) -> None:
     pytest.importorskip("openpyxl")
-    if ocr_module.get_paddle_ocr() is None:
-        pytest.skip("PaddleOCR is not available in this environment.")
     base = Path("sample_data/database_builder")
     anneal_files = [
         base / "current annealing data" / "Ni55Fe18Ga27 4_1 s1 1000mA.txt",
@@ -3324,8 +3294,8 @@ def test_build_database_integration(tmp_path: Path) -> None:
     assert row["File 1000 mA"] == anneal_files[0].name
     assert row["Other annealing files"] == [anneal_files[1].name]
     assert pd.isna(row[core.STRAIN_COLUMN])
-    assert pd.notna(row["d (µm)"])
-    assert pd.notna(row["D (µm)"])
+    assert pd.isna(row[builder_ui.MICROSCOPE_D_COLUMN])
+    assert pd.isna(row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
     assert row["Production datetime"] == "2024-11-26 08:50:00"
     assert "csv" in result.exports
     assert Path(result.exports["csv"]).exists()
@@ -3708,70 +3678,6 @@ def test_microscope_images_populate_diameters(tmp_path: Path, monkeypatch: pytes
     assert float(row[D_col]) == pytest.approx(212.4)
     expected_ratio = round(16.7 / 212.4, 3)
     assert float(row[ratio_col]) == pytest.approx(expected_ratio)
-
-
-def test_microscope_ocr_extracts_bracketed_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from PIL import Image as PILImage
-
-    image_path = tmp_path / "Ni55Fe18Ga27 4_1 core.jpg"
-    PILImage.new("RGB", (320, 180), color="white").save(image_path)
-
-    class FakeOCR:
-        def ocr(self, image, cls: bool = True):  # pragma: no cover - simple stub
-            return [
-                [
-                    (
-                        [[0, 0], [160, 0], [160, 40], [0, 40]],
-                        ("[1]6.7um", 0.95),
-                    ),
-                    (
-                        [[0, 60], [220, 60], [220, 110], [0, 110]],
-                        ("[2]134.5um", 0.94),
-                    ),
-                ]
-            ]
-
-    monkeypatch.setattr(core, "get_paddle_ocr", lambda logger=None: FakeOCR())
-
-    result = core._extract_microscope_diameters(image_path, logging.getLogger("test"))
-    assert any(abs(value - 6.7) < 1e-3 for value in result.values)
-    assert any(abs(value - 134.5) < 1e-3 for value in result.values)
-
-    grouped, _ = core._group_microscope_measurements([image_path], logging.getLogger("test"))
-    key = core._microscope_key(image_path)
-    assert key in grouped
-    measurements = grouped[key]
-    assert measurements.best_core() == pytest.approx(6.7, rel=1e-3)
-    assert measurements.best_glass() == pytest.approx(134.5, rel=1e-3)
-
-
-def test_microscope_ocr_fallback_without_units(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from PIL import Image as PILImage
-
-    image_path = tmp_path / "Ni55Fe18Ga27 4_1 core.jpg"
-    PILImage.new("RGB", (320, 180), color="white").save(image_path)
-
-    class BareOCR:
-        def ocr(self, image, cls: bool = True):  # pragma: no cover - simple stub
-            return [
-                [
-                    (
-                        [[0, 0], [160, 0], [160, 40], [0, 40]],
-                        ("[1]6.7", 0.92),
-                    ),
-                ]
-            ]
-
-    monkeypatch.setattr(core, "get_paddle_ocr", lambda logger=None: BareOCR())
-
-    result = core._extract_microscope_diameters(image_path, logging.getLogger("test"))
-    assert any(abs(value - 6.7) < 1e-3 for value in result.values)
-
-    grouped, _ = core._group_microscope_measurements([image_path], logging.getLogger("test"))
-    key = core._microscope_key(image_path)
-    assert key in grouped
-    measurements = grouped[key]
-    assert measurements.best_core() == pytest.approx(6.7, rel=1e-3)
 
 
 def test_parse_microscope_candidates_prefers_primary_marker() -> None:
