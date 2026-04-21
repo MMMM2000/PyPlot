@@ -51,9 +51,11 @@ before choosing the Origin backend.
   optional continuous sweeps, then export to Origin or TXT directly from PyPlot.
 - Serial Data Logger - capture instrument output with live plots and flexible
   filename templates.
-- Mini DMA Logger - drive a small stepper stage and serial scale with live
-  load/displacement, stress/strain, and time traces, named sessions with TXT/CSV/JSON
-  outputs, and displacement-controlled ramp, cycle, or hold recipes.
+- Mini DMA Logger - drive a small stepper stage, serial scale, and current-annealing
+  supply with preload-aware strain zeroing, `.pydpj` specimen import, configurable
+  multi-axis plot tiles, named TXT/CSV/JSON sessions, displacement-controlled
+  ramp/cycle/hold recipes, and early Hsw distribution plateau sweeps in load,
+  stress, or strain units.
 - Microwire Data Builder - combine fabrication spreadsheets and annealing logs
   into an analysis-ready table.
 - Universal Serial Emulator - spin up loopback serial pairs to exercise loggers

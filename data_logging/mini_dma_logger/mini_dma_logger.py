@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
 from threading import Event
-from typing import Any
+from typing import Any, Callable, Iterable, Mapping
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -64,6 +64,64 @@ WINDOWS: list[QtWidgets.QWidget] = []
 GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
+PROJECT_EXTENSION = ".pydpj"
+PRELOAD_PENDING = "pending"
+PRELOAD_ACTIVE = "active"
+PRELOAD_DISABLED = "disabled"
+SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
+    "hmp4030": {
+        "label": "HMP4030 (original)",
+        "start_current_mA": 1.0,
+        "min_start_current_mA": 1.0,
+        "max_voltage": 30.0,
+        "channel_select": 3,
+        "reset_on_start": True,
+        "voltage_first": False,
+    },
+    "owon_spe6102": {
+        "label": "Owon SPE6102",
+        "start_current_mA": 10.0,
+        "min_start_current_mA": 10.0,
+        "max_voltage": 62.0,
+        "channel_select": 0,
+        "reset_on_start": False,
+        "voltage_first": True,
+    },
+}
+HEATING_MODE_OFF = "off"
+HEATING_MODE_CONSTANT = "constant"
+HEATING_MODE_RAMP = "ramp"
+HEATING_MODE_TRIANGLE = "triangle"
+HEATING_MODE_LABELS = {
+    HEATING_MODE_OFF: "Off",
+    HEATING_MODE_CONSTANT: "Constant current",
+    HEATING_MODE_RAMP: "Current ramp",
+    HEATING_MODE_TRIANGLE: "Current triangle",
+}
+HEATING_LIMIT_STOP = "stop"
+HEATING_LIMIT_HOLD = "hold"
+HEATING_LIMIT_DISABLE = "disable"
+HEATING_LIMIT_LABELS = {
+    HEATING_LIMIT_STOP: "Stop recipe",
+    HEATING_LIMIT_HOLD: "Hold current",
+    HEATING_LIMIT_DISABLE: "Turn output off",
+}
+HSW_BASIS_LOAD_G = "load_g"
+HSW_BASIS_STRESS_MPA = "stress_mpa"
+HSW_BASIS_STRAIN_PCT = "strain_pct"
+HSW_BASIS_LABELS = {
+    HSW_BASIS_LOAD_G: "Load (g)",
+    HSW_BASIS_STRESS_MPA: "Stress (MPa)",
+    HSW_BASIS_STRAIN_PCT: "Strain (%)",
+}
+PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d", "Diameter", "diameter_um")
+PROJECT_ROW_CURRENT_KEYS = (
+    "Stress/strain current (mA)",
+    "Current (mA)",
+    "Fracture stress/strain current (mA)",
+)
+PROJECT_ROW_MICROWIRE_KEYS = ("Microwire", "Wire")
+PROJECT_ROW_SPECIMEN_KEYS = ("Specimen", "Sample", "Piece", "Sample name")
 
 
 def _default_download_dir() -> str:
@@ -121,6 +179,44 @@ def _parse_first_float(text: str) -> float | None:
         return float(token)
     except ValueError:
         return None
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        numeric = float(str(value).replace(",", "."))
+    except Exception:
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _normalized_token(text: Any) -> str:
+    token = str(text or "").strip().lower()
+    token = token.replace("_", "").replace("-", "").replace(" ", "")
+    return token
+
+
+def _normalized_microwire_token(text: Any) -> str:
+    token = str(text or "").strip().lower()
+    token = token.replace("_", "/").replace("-", "/")
+    token = re.sub(r"\s+", "", token)
+    return token
+
+
+def _normalized_column_key(text: Any) -> str:
+    token = str(text or "").strip().lower()
+    token = token.replace("µ", "u").replace("μ", "u").replace("?", "u")
+    return re.sub(r"[^a-z0-9]+", "", token)
+
+
+def _project_row_value(row: Mapping[str, Any], aliases: Iterable[str]) -> Any:
+    alias_map = {_normalized_column_key(alias): alias for alias in aliases}
+    for key, value in row.items():
+        if _normalized_column_key(key) in alias_map:
+            return value
+    for alias in aliases:
+        if alias in row:
+            return row.get(alias)
+    return None
 
 
 def _extract_status_value(text: str, label: str) -> str | None:
@@ -199,15 +295,115 @@ class MeasurementPoint:
     position_mm: float
     raw_load_g: float
     load_g: float
+    preload_state: str
     strain_pct: float | None
     stress_mpa: float | None
+    current_set_mA: float | None
+    current_measured_mA: float | None
+    voltage_V: float | None
+    resistance_ohm: float | None
+    power_W: float | None
+    automation_phase: str
+    automation_basis: str | None
+    automation_target_value: float | None
+    plateau_index: int | None
+    plateau_label: str | None
 
 
 @dataclass
 class AutomationStep:
     action: str
     target_mm: float | None = None
+    target_value: float | None = None
+    basis: str | None = None
     note: str = ""
+
+
+@dataclass
+class PlotChannel:
+    key: str
+    label: str
+    color: str
+    getter: Callable[[MeasurementPoint], float | None]
+
+
+@dataclass
+class PlotTileWidgets:
+    visible: QtWidgets.QCheckBox
+    x_combo: QtWidgets.QComboBox
+    y_left_combo: QtWidgets.QComboBox
+    y_right_combo: QtWidgets.QComboBox
+
+
+@dataclass
+class ProjectImportResult:
+    path: Path
+    section: str
+    diameter_mm: float | None
+    current_mA: float | None
+    matched_row: dict[str, Any]
+
+
+class PlotConfigDialog(QtWidgets.QDialog):
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Configure plot dashboard")
+        self.setModal(False)
+        self.resize(860, 320)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        self.body_layout = QtWidgets.QVBoxLayout()
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self.body_layout, stretch=1)
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        close_button = QtWidgets.QPushButton("Close", self)
+        close_button.clicked.connect(self.close)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+
+class CollapsibleSection(QtWidgets.QFrame):
+    def __init__(
+        self,
+        title: str,
+        *,
+        expanded: bool = True,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.setStyleSheet("QFrame { border: 1px solid palette(mid); border-radius: 8px; }")
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        self.toggle_button = QtWidgets.QToolButton(self)
+        self.toggle_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(expanded)
+        self.toggle_button.setText(title)
+        self.toggle_button.clicked.connect(self._handle_toggled)
+        root.addWidget(self.toggle_button)
+        self.content = QtWidgets.QWidget(self)
+        self.content_layout = QtWidgets.QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(4, 0, 4, 2)
+        self.content_layout.setSpacing(8)
+        root.addWidget(self.content)
+        self.set_expanded(expanded)
+
+    def _handle_toggled(self, checked: bool) -> None:
+        self.set_expanded(checked)
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.toggle_button.setChecked(expanded)
+        self.toggle_button.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if expanded else QtCore.Qt.ArrowType.RightArrow
+        )
+        self.content.setVisible(expanded)
+
+    def is_expanded(self) -> bool:
+        return self.toggle_button.isChecked()
 
 
 class ScaleWorker(QtCore.QObject):
@@ -346,6 +542,136 @@ class TicController:
         self.run("--exit-safe-start", "--position", str(int(position_steps)))
 
 
+class PowerSupplyController:
+    def __init__(
+        self,
+        *,
+        port_name: str,
+        baudrate: int,
+        profile_id: str,
+        max_voltage_v: float,
+        device_serial: str = "",
+    ) -> None:
+        self.port_name = port_name.strip()
+        self.baudrate = int(baudrate)
+        self.profile_id = profile_id if profile_id in SUPPLY_PROFILES else "hmp4030"
+        self.profile = dict(SUPPLY_PROFILES[self.profile_id])
+        self.max_voltage_v = float(max_voltage_v)
+        self.device_serial = device_serial.strip()
+        self._serial: Any = None
+
+    def connect(self) -> None:
+        if serial is None:
+            raise RuntimeError("pyserial is not available.")
+        if not self.port_name:
+            raise RuntimeError("Select a power-supply serial port first.")
+        if self._serial is not None and getattr(self._serial, "is_open", False):
+            return
+        self._serial = serial.Serial(
+            self.port_name,
+            baudrate=self.baudrate,
+            timeout=0.5,
+            write_timeout=0.5,
+        )
+        self._serial.rts = False
+        self._serial.dtr = False
+        time.sleep(0.08)
+
+    def disconnect(self) -> None:
+        port = self._serial
+        self._serial = None
+        if port is not None:
+            try:
+                port.close()
+            except Exception:
+                pass
+
+    def is_connected(self) -> bool:
+        return self._serial is not None and bool(getattr(self._serial, "is_open", False))
+
+    def _require_port(self) -> Any:
+        if not self.is_connected():
+            raise RuntimeError("Power supply is not connected.")
+        return self._serial
+
+    def _write_command(self, command: str, *, settle_s: float = 0.08) -> None:
+        port = self._require_port()
+        payload = command.rstrip() + "\n"
+        port.reset_input_buffer()
+        port.write(payload.encode("ascii", errors="ignore"))
+        port.flush()
+        if settle_s > 0:
+            time.sleep(settle_s)
+
+    def _read_line(self, *, timeout_s: float = 0.7) -> str:
+        port = self._require_port()
+        deadline = time.time() + max(0.1, timeout_s)
+        chunks: list[bytes] = []
+        while time.time() < deadline:
+            line = port.readline()
+            if line:
+                chunks.append(line)
+                if line.endswith(b"\n") or line.endswith(b"\r"):
+                    break
+        return b"".join(chunks).decode("ascii", errors="ignore").strip()
+
+    def command(self, command: str, *, settle_s: float = 0.08) -> None:
+        self._write_command(command, settle_s=settle_s)
+
+    def query_float(self, command: str, *, settle_s: float = 0.08, timeout_s: float = 0.7) -> float | None:
+        self._write_command(command, settle_s=settle_s)
+        return _parse_first_float(self._read_line(timeout_s=timeout_s))
+
+    def initialize_output(
+        self,
+        *,
+        current_mA: float,
+        reset_on_start: bool,
+        force_voltage_first: bool | None = None,
+    ) -> None:
+        channel = int(self.profile.get("channel_select", 0) or 0)
+        if reset_on_start:
+            self.command("*RST", settle_s=1.2)
+        if channel > 0:
+            self.command(f"INST:NSEL {channel}")
+        limit_v = max(0.0, float(self.max_voltage_v))
+        current_a = max(0.0, float(current_mA)) / 1000.0
+        voltage_first = bool(self.profile.get("voltage_first", False)) if force_voltage_first is None else bool(force_voltage_first)
+        if voltage_first:
+            self.command(f"VOLT {limit_v:.1f}")
+            self.command(f"CURR {current_a:.3f}")
+        else:
+            self.command(f"CURR {current_a:.3f}")
+            self.command(f"VOLT {limit_v:.1f}")
+        self.command("OUTP ON")
+
+    def set_current_mA(self, current_mA: float) -> None:
+        self.command(f"CURR {max(0.0, float(current_mA)) / 1000.0:.3f}")
+
+    def output_on(self) -> None:
+        self.command("OUTP ON")
+
+    def output_off(self) -> None:
+        self.command("OUTP OFF")
+
+    def measure(self) -> dict[str, float | None]:
+        voltage_v = self.query_float("MEAS:VOLT?")
+        current_a = self.query_float("MEAS:CURR?")
+        current_mA = None if current_a is None else current_a * 1000.0
+        resistance_ohm = None
+        power_w = None
+        if voltage_v is not None and current_a is not None:
+            if abs(current_a) > 1e-12:
+                resistance_ohm = voltage_v / current_a
+            power_w = voltage_v * current_a
+        return {
+            "voltage_V": voltage_v,
+            "current_mA": current_mA,
+            "resistance_ohm": resistance_ohm,
+            "power_W": power_w,
+        }
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, log_dir: str | None = None) -> None:
         super().__init__()
@@ -373,13 +699,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_json_path: Path | None = None
         self._load_offset_g = 0.0
         self._position_reference_mm = 0.0
+        self._preload_reference_armed = False
+        self._preload_trigger_elapsed_s: float | None = None
+        self._builder_project_path: Path | None = None
+        self._builder_project_match: ProjectImportResult | None = None
+        self._supply_controller: PowerSupplyController | None = None
+        self._supply_snapshot: dict[str, float | None] = {
+            "voltage_V": None,
+            "current_mA": None,
+            "resistance_ohm": None,
+            "power_W": None,
+        }
+        self._supply_output_enabled = False
+        self._supply_last_setpoint_mA: float | None = None
+        self._heating_program_current_mA: float | None = None
+        self._heating_program_direction = 1.0
         self._automation_active = False
         self._automation_steps: list[AutomationStep] = []
         self._automation_index = 0
         self._automation_interval_ms = 1000
         self._automation_name = ""
+        self._automation_phase = "idle"
+        self._automation_basis: str | None = None
+        self._automation_target_value: float | None = None
+        self._automation_plateau_index: int | None = None
+        self._automation_plateau_label: str | None = None
         self._recipe_origin_mm = 0.0
         self._recipe_estimated_points = 0
+        self._plot_tiles: list[PlotTileWidgets] = []
         self._build_ui(log_dir or _default_download_dir())
         self._status_timer = QtCore.QTimer(self)
         self._status_timer.setInterval(1000)
@@ -416,8 +763,8 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(10)
 
-        overview_box = self._group_box("Overview")
-        overview_layout = QtWidgets.QVBoxLayout(overview_box)
+        self.overview_section = CollapsibleSection("Overview", expanded=False, parent=control_panel)
+        overview_layout = self.overview_section.content_layout
         overview_label = QtWidgets.QLabel(
             "Mini DMA is a hardware-driven stress/strain logger for your small stepper stage and "
             "serial balance. The current build is focused on safe mechanical probing, repeatable "
@@ -462,7 +809,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cards_grid.addWidget(motion_card, 1, 0)
         cards_grid.addWidget(recipe_card, 1, 1)
         overview_layout.addLayout(cards_grid)
-        controls.addWidget(overview_box)
+        controls.addWidget(self.overview_section)
 
         tabs = QtWidgets.QTabWidget(control_panel)
         controls.addWidget(tabs)
@@ -627,6 +974,128 @@ class MainWindow(QtWidgets.QMainWindow):
         hardware_layout.addStretch(1)
         tabs.addTab(hardware_tab, "Hardware")
 
+        heating_tab = QtWidgets.QWidget(tabs)
+        heating_layout = QtWidgets.QVBoxLayout(heating_tab)
+        heating_layout.setContentsMargins(0, 0, 0, 0)
+        heating_layout.setSpacing(10)
+
+        supply_box = self._group_box("Current Annealing")
+        supply_form = QtWidgets.QFormLayout(supply_box)
+        self.combo_supply_port = QtWidgets.QComboBox(supply_box)
+        refresh_supply_button = QtWidgets.QPushButton("Refresh ports", supply_box)
+        refresh_supply_button.clicked.connect(self._refresh_supply_ports)
+        supply_port_row = QtWidgets.QHBoxLayout()
+        supply_port_row.addWidget(self.combo_supply_port, stretch=1)
+        supply_port_row.addWidget(refresh_supply_button)
+        supply_form.addRow("Port", supply_port_row)
+
+        self.combo_supply_baud = QtWidgets.QComboBox(supply_box)
+        for baud in ("9600", "19200", "38400", "57600", "115200"):
+            self.combo_supply_baud.addItem(baud)
+        self.combo_supply_baud.setCurrentText("9600")
+        supply_form.addRow("Baud", self.combo_supply_baud)
+
+        self.combo_supply_profile = QtWidgets.QComboBox(supply_box)
+        for profile_id, profile in SUPPLY_PROFILES.items():
+            self.combo_supply_profile.addItem(str(profile.get("label", profile_id)), profile_id)
+        self.combo_supply_profile.currentIndexChanged.connect(self._apply_supply_profile_defaults)
+        supply_form.addRow("Profile", self.combo_supply_profile)
+
+        self.spin_supply_voltage_limit = QtWidgets.QDoubleSpinBox(supply_box)
+        self.spin_supply_voltage_limit.setDecimals(2)
+        self.spin_supply_voltage_limit.setRange(0.0, 1000.0)
+        self.spin_supply_voltage_limit.setValue(30.0)
+        self.spin_supply_voltage_limit.setSuffix(" V")
+        supply_form.addRow("Voltage limit", self.spin_supply_voltage_limit)
+
+        self.spin_supply_manual_current = QtWidgets.QDoubleSpinBox(supply_box)
+        self.spin_supply_manual_current.setDecimals(2)
+        self.spin_supply_manual_current.setRange(0.0, 5000.0)
+        self.spin_supply_manual_current.setValue(1.0)
+        self.spin_supply_manual_current.setSuffix(" mA")
+        supply_form.addRow("Manual set current", self.spin_supply_manual_current)
+
+        connect_supply_row = QtWidgets.QHBoxLayout()
+        connect_supply_button = QtWidgets.QPushButton("Connect supply", supply_box)
+        connect_supply_button.clicked.connect(self._connect_supply)
+        connect_supply_row.addWidget(connect_supply_button)
+        disconnect_supply_button = QtWidgets.QPushButton("Disconnect supply", supply_box)
+        disconnect_supply_button.clicked.connect(self._disconnect_supply)
+        connect_supply_row.addWidget(disconnect_supply_button)
+        supply_form.addRow("", connect_supply_row)
+
+        manual_supply_row = QtWidgets.QHBoxLayout()
+        apply_current_button = QtWidgets.QPushButton("Apply current", supply_box)
+        apply_current_button.clicked.connect(self._apply_manual_supply_current)
+        manual_supply_row.addWidget(apply_current_button)
+        output_on_button = QtWidgets.QPushButton("Output on", supply_box)
+        output_on_button.clicked.connect(self._enable_supply_output)
+        manual_supply_row.addWidget(output_on_button)
+        output_off_button = QtWidgets.QPushButton("Output off", supply_box)
+        output_off_button.clicked.connect(self._disable_supply_output)
+        manual_supply_row.addWidget(output_off_button)
+        supply_form.addRow("", manual_supply_row)
+
+        read_supply_button = QtWidgets.QPushButton("Read supply now", supply_box)
+        read_supply_button.clicked.connect(self._refresh_supply_snapshot)
+        supply_form.addRow("", read_supply_button)
+
+        self.label_supply_status = QtWidgets.QLabel("Supply disconnected.")
+        self.label_supply_status.setWordWrap(True)
+        supply_form.addRow("", self.label_supply_status)
+        self.label_supply_live = QtWidgets.QLabel("Set - | Current - | Voltage - | Resistance - | Power -")
+        self.label_supply_live.setWordWrap(True)
+        supply_form.addRow("", self.label_supply_live)
+        heating_layout.addWidget(supply_box)
+
+        heating_recipe_box = self._group_box("Heating Program")
+        heating_recipe_form = QtWidgets.QFormLayout(heating_recipe_box)
+        self.combo_heating_mode = QtWidgets.QComboBox(heating_recipe_box)
+        for mode_key, label in HEATING_MODE_LABELS.items():
+            self.combo_heating_mode.addItem(label, mode_key)
+        self.combo_heating_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
+        heating_recipe_form.addRow("Program", self.combo_heating_mode)
+
+        self.spin_heat_constant_current = QtWidgets.QDoubleSpinBox(heating_recipe_box)
+        self.spin_heat_constant_current.setDecimals(2)
+        self.spin_heat_constant_current.setRange(0.0, 5000.0)
+        self.spin_heat_constant_current.setValue(50.0)
+        self.spin_heat_constant_current.setSuffix(" mA")
+        heating_recipe_form.addRow("Constant current", self.spin_heat_constant_current)
+
+        self.spin_heat_start_current = QtWidgets.QDoubleSpinBox(heating_recipe_box)
+        self.spin_heat_start_current.setDecimals(2)
+        self.spin_heat_start_current.setRange(0.0, 5000.0)
+        self.spin_heat_start_current.setValue(10.0)
+        self.spin_heat_start_current.setSuffix(" mA")
+        heating_recipe_form.addRow("Ramp start", self.spin_heat_start_current)
+
+        self.spin_heat_max_current = QtWidgets.QDoubleSpinBox(heating_recipe_box)
+        self.spin_heat_max_current.setDecimals(2)
+        self.spin_heat_max_current.setRange(0.0, 5000.0)
+        self.spin_heat_max_current.setValue(100.0)
+        self.spin_heat_max_current.setSuffix(" mA")
+        heating_recipe_form.addRow("Ramp max", self.spin_heat_max_current)
+
+        self.spin_heat_step_current = QtWidgets.QDoubleSpinBox(heating_recipe_box)
+        self.spin_heat_step_current.setDecimals(2)
+        self.spin_heat_step_current.setRange(0.01, 5000.0)
+        self.spin_heat_step_current.setValue(5.0)
+        self.spin_heat_step_current.setSuffix(" mA")
+        heating_recipe_form.addRow("Ramp step", self.spin_heat_step_current)
+
+        self.combo_heat_limit_action = QtWidgets.QComboBox(heating_recipe_box)
+        for action_key, label in HEATING_LIMIT_LABELS.items():
+            self.combo_heat_limit_action.addItem(label, action_key)
+        heating_recipe_form.addRow("Voltage-limit action", self.combo_heat_limit_action)
+
+        self.check_output_off_on_stop = QtWidgets.QCheckBox("Turn output off when the session stops", heating_recipe_box)
+        self.check_output_off_on_stop.setChecked(True)
+        heating_recipe_form.addRow("", self.check_output_off_on_stop)
+        heating_layout.addWidget(heating_recipe_box)
+        heating_layout.addStretch(1)
+        tabs.addTab(heating_tab, "Heating")
+
         specimen_tab = QtWidgets.QWidget(tabs)
         specimen_layout = QtWidgets.QVBoxLayout(specimen_tab)
         specimen_layout.setContentsMargins(0, 0, 0, 0)
@@ -661,7 +1130,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_initial_length.setRange(0.0, 1000.0)
         self.spin_initial_length.setValue(30.0)
         self.spin_initial_length.setSuffix(" mm")
-        sample_form.addRow("Initial length", self.spin_initial_length)
+        sample_form.addRow("Gauge length l0", self.spin_initial_length)
 
         self.spin_diameter = QtWidgets.QDoubleSpinBox(sample_box)
         self.spin_diameter.setDecimals(5)
@@ -669,6 +1138,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_diameter.setValue(0.03)
         self.spin_diameter.setSuffix(" mm")
         sample_form.addRow("Wire diameter", self.spin_diameter)
+
+        self.check_zero_on_preload = QtWidgets.QCheckBox(
+            "Zero strain/stress only after preload is reached",
+            sample_box,
+        )
+        self.check_zero_on_preload.setChecked(True)
+        sample_form.addRow("", self.check_zero_on_preload)
+        self.spin_preload_threshold_g = QtWidgets.QDoubleSpinBox(sample_box)
+        self.spin_preload_threshold_g.setDecimals(4)
+        self.spin_preload_threshold_g.setRange(0.0, 1000.0)
+        self.spin_preload_threshold_g.setValue(0.02)
+        self.spin_preload_threshold_g.setSuffix(" g")
+        sample_form.addRow("Preload threshold", self.spin_preload_threshold_g)
+        preload_button = QtWidgets.QPushButton("Set current position as gauge zero", sample_box)
+        preload_button.clicked.connect(self._set_reference_from_current_position)
+        sample_form.addRow("", preload_button)
 
         self.edit_sample_name = QtWidgets.QLineEdit(sample_box)
         sample_form.addRow("Sample name", self.edit_sample_name)
@@ -680,6 +1165,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_run_notes.setFixedHeight(80)
         sample_form.addRow("Run notes", self.edit_run_notes)
         specimen_layout.addWidget(sample_box)
+
+        project_box = self._group_box("Builder Project")
+        project_form = QtWidgets.QFormLayout(project_box)
+        self.edit_project_path = QtWidgets.QLineEdit(project_box)
+        project_path_row = QtWidgets.QHBoxLayout()
+        project_path_row.addWidget(self.edit_project_path, stretch=1)
+        browse_project_button = QtWidgets.QPushButton("Browse", project_box)
+        browse_project_button.clicked.connect(self._choose_builder_project)
+        project_path_row.addWidget(browse_project_button)
+        import_project_button = QtWidgets.QPushButton("Import sample info", project_box)
+        import_project_button.clicked.connect(self._import_builder_project)
+        project_path_row.addWidget(import_project_button)
+        project_form.addRow("Project (.pydpj)", project_path_row)
+        self.label_project_status = QtWidgets.QLabel(
+            "Load a Microwire Data Builder project to auto-fill diameter and sample metadata."
+        )
+        self.label_project_status.setWordWrap(True)
+        project_form.addRow("", self.label_project_status)
+        specimen_layout.addWidget(project_box)
 
         logging_box = self._group_box("Session")
         logging_form = QtWidgets.QFormLayout(logging_box)
@@ -738,6 +1242,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_recipe_mode.addItem("One-way ramp", "ramp")
         self.combo_recipe_mode.addItem("Cyclic triangle", "cycle")
         self.combo_recipe_mode.addItem("Position hold", "hold")
+        self.combo_recipe_mode.addItem("Hsw distribution", "distribution")
         self.combo_recipe_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
         automation_form.addRow("Recipe type", self.combo_recipe_mode)
 
@@ -812,6 +1317,69 @@ class MainWindow(QtWidgets.QMainWindow):
         hold_form.addRow("Record interval", self.spin_hold_interval)
         self.recipe_stack.addWidget(hold_page)
 
+        distribution_page = QtWidgets.QWidget(self.recipe_stack)
+        distribution_form = QtWidgets.QFormLayout(distribution_page)
+        self.combo_distribution_basis = QtWidgets.QComboBox(automation_box)
+        for basis_key, label in HSW_BASIS_LABELS.items():
+            self.combo_distribution_basis.addItem(label, basis_key)
+        distribution_form.addRow("Control basis", self.combo_distribution_basis)
+        self.spin_distribution_start = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_start.setDecimals(3)
+        self.spin_distribution_start.setRange(-100000.0, 100000.0)
+        self.spin_distribution_start.setValue(10.0)
+        distribution_form.addRow("Start", self.spin_distribution_start)
+        self.spin_distribution_end = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_end.setDecimals(3)
+        self.spin_distribution_end.setRange(-100000.0, 100000.0)
+        self.spin_distribution_end.setValue(100.0)
+        distribution_form.addRow("End", self.spin_distribution_end)
+        self.spin_distribution_step = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_step.setDecimals(3)
+        self.spin_distribution_step.setRange(0.001, 100000.0)
+        self.spin_distribution_step.setValue(10.0)
+        distribution_form.addRow("Step", self.spin_distribution_step)
+        self.spin_distribution_tolerance = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_tolerance.setDecimals(4)
+        self.spin_distribution_tolerance.setRange(0.0001, 100000.0)
+        self.spin_distribution_tolerance.setValue(0.5)
+        distribution_form.addRow("Target tolerance", self.spin_distribution_tolerance)
+        self.spin_distribution_nudge_mm = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_nudge_mm.setDecimals(4)
+        self.spin_distribution_nudge_mm.setRange(0.0001, 10.0)
+        self.spin_distribution_nudge_mm.setValue(0.01)
+        self.spin_distribution_nudge_mm.setSuffix(" mm")
+        distribution_form.addRow("Seek nudge", self.spin_distribution_nudge_mm)
+        self.spin_distribution_points = QtWidgets.QSpinBox(automation_box)
+        self.spin_distribution_points.setRange(1, 1000000)
+        self.spin_distribution_points.setValue(10000)
+        distribution_form.addRow("Points per plateau", self.spin_distribution_points)
+        self.spin_distribution_interval = QtWidgets.QSpinBox(automation_box)
+        self.spin_distribution_interval.setRange(10, 60000)
+        self.spin_distribution_interval.setValue(100)
+        self.spin_distribution_interval.setSuffix(" ms")
+        distribution_form.addRow("Record interval", self.spin_distribution_interval)
+        self.spin_distribution_settle_s = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_settle_s.setDecimals(2)
+        self.spin_distribution_settle_s.setRange(0.0, 3600.0)
+        self.spin_distribution_settle_s.setValue(1.0)
+        self.spin_distribution_settle_s.setSuffix(" s")
+        distribution_form.addRow("Plateau settle", self.spin_distribution_settle_s)
+        self.check_distribution_return_sweep = QtWidgets.QCheckBox(
+            "Sweep back to the start target after the forward pass",
+            automation_box,
+        )
+        self.check_distribution_return_sweep.setChecked(True)
+        distribution_form.addRow("", self.check_distribution_return_sweep)
+        distribution_hint = QtWidgets.QLabel(
+            "Closed-loop in Mini DMA terms: the stage nudges until load, stress, or strain is within tolerance, "
+            "then records the requested point count before moving to the next plateau.",
+            distribution_page,
+        )
+        distribution_hint.setWordWrap(True)
+        distribution_hint.setStyleSheet("color: palette(mid);")
+        distribution_form.addRow("", distribution_hint)
+        self.recipe_stack.addWidget(distribution_page)
+
         automation_form.addRow("", self.recipe_stack)
         self.check_return_to_origin = QtWidgets.QCheckBox(
             "Return to the recipe start position when finished",
@@ -872,6 +1440,9 @@ class MainWindow(QtWidgets.QMainWindow):
         hero_font.setBold(True)
         hero_title.setFont(hero_font)
         hero_layout.addWidget(hero_title)
+        self.button_plot_setup = QtWidgets.QPushButton("Configure plots", hero_box)
+        self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
+        hero_layout.addWidget(self.button_plot_setup)
         hero_layout.addStretch(1)
         self.label_recipe_banner = QtWidgets.QLabel("Manual mode", hero_box)
         self.label_recipe_banner.setAlignment(
@@ -879,6 +1450,65 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         hero_layout.addWidget(self.label_recipe_banner)
         plot_layout.addWidget(hero_box, stretch=0)
+
+        self.plot_config_dialog = PlotConfigDialog(self)
+        plot_config_box = self._group_box("Plot Dashboard")
+        plot_config_layout = QtWidgets.QGridLayout(plot_config_box)
+        plot_config_layout.setContentsMargins(8, 8, 8, 8)
+        plot_config_layout.setHorizontalSpacing(10)
+        plot_config_layout.setVerticalSpacing(6)
+        preset_row = QtWidgets.QHBoxLayout()
+        dma_preset_button = QtWidgets.QPushButton("DMA preset", plot_config_box)
+        dma_preset_button.clicked.connect(lambda: self._apply_plot_preset("dma"))
+        preset_row.addWidget(dma_preset_button)
+        heating_preset_button = QtWidgets.QPushButton("Heating preset", plot_config_box)
+        heating_preset_button.clicked.connect(lambda: self._apply_plot_preset("heating"))
+        preset_row.addWidget(heating_preset_button)
+        mechanical_preset_button = QtWidgets.QPushButton("Mechanical preset", plot_config_box)
+        mechanical_preset_button.clicked.connect(lambda: self._apply_plot_preset("mechanical"))
+        preset_row.addWidget(mechanical_preset_button)
+        preset_row.addStretch(1)
+        plot_config_layout.addWidget(QtWidgets.QLabel("Presets", plot_config_box), 0, 0)
+        plot_config_layout.addLayout(preset_row, 0, 1, 1, 5)
+
+        header_labels = ("Tile", "Show", "Bottom X", "Left Y", "Right Y")
+        for column, label in enumerate(header_labels):
+            plot_config_layout.addWidget(QtWidgets.QLabel(label, plot_config_box), 1, column)
+
+        self._plot_tiles = []
+        for tile_index in range(4):
+            visible = QtWidgets.QCheckBox(plot_config_box)
+            visible.setChecked(True)
+            x_combo = QtWidgets.QComboBox(plot_config_box)
+            y_left_combo = QtWidgets.QComboBox(plot_config_box)
+            y_right_combo = QtWidgets.QComboBox(plot_config_box)
+            for combo in (x_combo, y_left_combo):
+                for channel in self._plot_channels():
+                    combo.addItem(channel.label, channel.key)
+            y_right_combo.addItem("(none)", "")
+            for channel in self._plot_channels():
+                y_right_combo.addItem(channel.label, channel.key)
+            for widget in (visible, x_combo, y_left_combo, y_right_combo):
+                signal = (
+                    widget.toggled
+                    if isinstance(widget, QtWidgets.QCheckBox)
+                    else widget.currentIndexChanged
+                )
+                signal.connect(self._refresh_plots)
+            plot_config_layout.addWidget(QtWidgets.QLabel(f"Plot {tile_index + 1}", plot_config_box), tile_index + 2, 0)
+            plot_config_layout.addWidget(visible, tile_index + 2, 1)
+            plot_config_layout.addWidget(x_combo, tile_index + 2, 2)
+            plot_config_layout.addWidget(y_left_combo, tile_index + 2, 3)
+            plot_config_layout.addWidget(y_right_combo, tile_index + 2, 4)
+            self._plot_tiles.append(
+                PlotTileWidgets(
+                    visible=visible,
+                    x_combo=x_combo,
+                    y_left_combo=y_left_combo,
+                    y_right_combo=y_right_combo,
+                )
+            )
+        self.plot_config_dialog.body_layout.addWidget(plot_config_box)
 
         plot_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical, plot_panel)
         plot_splitter.setChildrenCollapsible(False)
@@ -894,10 +1524,6 @@ class MainWindow(QtWidgets.QMainWindow):
             plot_canvas_layout.addWidget(NavigationToolbar(self.canvas, plot_canvas_container))
         if self.canvas is not None:
             plot_canvas_layout.addWidget(self.canvas, stretch=1)
-        grid = self.figure.add_gridspec(2, 2, height_ratios=[1.0, 1.15], hspace=0.30, wspace=0.16)
-        self.ax_load = self.figure.add_subplot(grid[0, 0])
-        self.ax_stress = self.figure.add_subplot(grid[0, 1])
-        self.ax_time = self.figure.add_subplot(grid[1, :])
 
         log_container = QtWidgets.QWidget(plot_splitter)
         log_layout = QtWidgets.QVBoxLayout(log_container)
@@ -933,6 +1559,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_cycle_count,
             self.spin_hold_target,
             self.spin_hold_duration_s,
+            self.spin_distribution_start,
+            self.spin_distribution_end,
+            self.spin_distribution_step,
+            self.spin_distribution_tolerance,
+            self.spin_distribution_nudge_mm,
+            self.spin_distribution_points,
+            self.spin_distribution_settle_s,
+            self.spin_heat_constant_current,
+            self.spin_heat_start_current,
+            self.spin_heat_max_current,
         ):
             widget.valueChanged.connect(self._update_recipe_mode_ui)
         for widget in (
@@ -941,11 +1577,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_cycle_step,
             self.spin_cycle_interval,
             self.spin_hold_interval,
+            self.spin_distribution_interval,
+            self.spin_heat_step_current,
         ):
             widget.valueChanged.connect(self._update_recipe_mode_ui)
         self.check_return_to_origin.toggled.connect(self._update_recipe_mode_ui)
+        self.check_distribution_return_sweep.toggled.connect(self._update_recipe_mode_ui)
+        self.check_zero_on_preload.toggled.connect(self._refresh_live_labels)
+        self.spin_preload_threshold_g.valueChanged.connect(self._refresh_live_labels)
+        self.combo_heat_limit_action.currentIndexChanged.connect(self._update_recipe_mode_ui)
+        self.combo_heating_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
+        self.combo_distribution_basis.currentIndexChanged.connect(self._update_distribution_basis_ui)
+        self.combo_distribution_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
 
         self.statusBar().showMessage("Ready")
+        self._refresh_supply_ports()
+        self._apply_supply_profile_defaults()
+        self._update_distribution_basis_ui()
+        self._apply_plot_preset("dma")
         self._update_recipe_mode_ui()
         self._refresh_plots()
 
@@ -984,6 +1633,148 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(detail_label)
         return card, value_label
 
+    def _plot_channels(self) -> list[PlotChannel]:
+        return [
+            PlotChannel("elapsed_s", "Time (s)", "#ef4444", lambda point: point.elapsed_s),
+            PlotChannel("position_mm", "Displacement (mm)", "#60a5fa", lambda point: point.position_mm),
+            PlotChannel("raw_load_g", "Raw load (g)", "#f59e0b", lambda point: point.raw_load_g),
+            PlotChannel("load_g", "Effective load (g)", "#38bdf8", lambda point: point.load_g),
+            PlotChannel(
+                "strain_pct",
+                "Strain (%)",
+                "#22c55e",
+                lambda point: point.strain_pct,
+            ),
+            PlotChannel(
+                "stress_mpa",
+                "Stress (MPa)",
+                "#a78bfa",
+                lambda point: point.stress_mpa,
+            ),
+            PlotChannel(
+                "current_set_mA",
+                "Set current (mA)",
+                "#f97316",
+                lambda point: point.current_set_mA,
+            ),
+            PlotChannel(
+                "current_measured_mA",
+                "Measured current (mA)",
+                "#fb7185",
+                lambda point: point.current_measured_mA,
+            ),
+            PlotChannel("voltage_V", "Voltage (V)", "#facc15", lambda point: point.voltage_V),
+            PlotChannel(
+                "resistance_ohm",
+                "Resistance (Ohm)",
+                "#14b8a6",
+                lambda point: point.resistance_ohm,
+            ),
+            PlotChannel("power_W", "Power (W)", "#c084fc", lambda point: point.power_W),
+        ]
+
+    def _plot_channel(self, key: str) -> PlotChannel | None:
+        for channel in self._plot_channels():
+            if channel.key == key:
+                return channel
+        return None
+
+    def _compact_plot_label(self, label: str) -> str:
+        compact = re.sub(r"\s*\([^)]*\)", "", label).strip()
+        compact = compact.replace("Effective load", "Load")
+        compact = compact.replace("Measured current", "Current")
+        compact = compact.replace("Displacement", "Disp.")
+        compact = compact.replace("Resistance", "Res.")
+        return compact
+
+    def _plot_title(
+        self,
+        x_channel: PlotChannel,
+        y_left_channel: PlotChannel,
+        y_right_channel: PlotChannel | None,
+    ) -> str:
+        x_label = self._compact_plot_label(x_channel.label)
+        left_label = self._compact_plot_label(y_left_channel.label)
+        if y_right_channel is None:
+            return f"{left_label} vs {x_label}"
+        right_label = self._compact_plot_label(y_right_channel.label)
+        return f"{left_label} + {right_label} vs {x_label}"
+
+    def _apply_plot_preset(self, preset: str) -> None:
+        presets = {
+            "dma": [
+                ("elapsed_s", "load_g", "current_measured_mA"),
+                ("elapsed_s", "position_mm", "strain_pct"),
+                ("position_mm", "load_g", ""),
+                ("strain_pct", "stress_mpa", ""),
+            ],
+            "heating": [
+                ("elapsed_s", "current_measured_mA", "voltage_V"),
+                ("elapsed_s", "resistance_ohm", "power_W"),
+                ("elapsed_s", "load_g", "position_mm"),
+                ("strain_pct", "stress_mpa", "current_measured_mA"),
+            ],
+            "mechanical": [
+                ("position_mm", "load_g", ""),
+                ("strain_pct", "stress_mpa", ""),
+                ("elapsed_s", "load_g", ""),
+                ("elapsed_s", "position_mm", "strain_pct"),
+            ],
+        }
+        config = presets.get(preset, presets["dma"])
+        for index, tile in enumerate(self._plot_tiles):
+            x_key, y_left, y_right = config[index]
+            tile.visible.setChecked(True)
+            x_index = tile.x_combo.findData(x_key)
+            if x_index >= 0:
+                tile.x_combo.setCurrentIndex(x_index)
+            y_left_index = tile.y_left_combo.findData(y_left)
+            if y_left_index >= 0:
+                tile.y_left_combo.setCurrentIndex(y_left_index)
+            y_right_index = tile.y_right_combo.findData(y_right)
+            if y_right_index >= 0:
+                tile.y_right_combo.setCurrentIndex(y_right_index)
+        self._refresh_plots()
+
+    def _plot_theme(self) -> dict[str, Any]:
+        palette = self.palette()
+        app = QtWidgets.QApplication.instance()
+        style_hints = app.styleHints() if isinstance(app, QtWidgets.QApplication) else None
+        color_scheme = style_hints.colorScheme() if style_hints is not None else QtCore.Qt.ColorScheme.Light
+        window = palette.color(QtGui.QPalette.ColorRole.Window)
+        base = palette.color(QtGui.QPalette.ColorRole.Base)
+        text = palette.color(QtGui.QPalette.ColorRole.Text)
+        mid = palette.color(QtGui.QPalette.ColorRole.Mid)
+        grid = QtGui.QColor(mid)
+        grid.setAlpha(160 if color_scheme == QtCore.Qt.ColorScheme.Dark else 120)
+        return {
+            "dark": color_scheme == QtCore.Qt.ColorScheme.Dark,
+            "figure_rgb": window.getRgbF()[:3],
+            "axes_rgb": base.getRgbF()[:3],
+            "text_rgb": text.getRgbF()[:3],
+            "grid_rgba": grid.getRgbF(),
+        }
+
+    def _show_plot_config_dialog(self) -> None:
+        if self.plot_config_dialog.isHidden():
+            self.plot_config_dialog.show()
+        self.plot_config_dialog.raise_()
+        self.plot_config_dialog.activateWindow()
+
+    def _refresh_supply_ports(self) -> None:
+        current = self.combo_supply_port.currentData() or self.settings.value("supply_port", "", type=str)
+        self.combo_supply_port.clear()
+        if list_ports is None:
+            self.combo_supply_port.addItem("pyserial unavailable", "")
+            return
+        for port in list_ports.comports():
+            label = f"{port.device} - {port.description}"
+            self.combo_supply_port.addItem(label, port.device)
+        if current:
+            index = self.combo_supply_port.findData(current)
+            if index >= 0:
+                self.combo_supply_port.setCurrentIndex(index)
+
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
@@ -991,7 +1782,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(message, 5000)
 
     def _refresh_scale_ports(self) -> None:
-        current = self.combo_scale_port.currentData()
+        current = self.combo_scale_port.currentData() or self.settings.value("scale_port", "", type=str)
         self.combo_scale_port.clear()
         if list_ports is None:
             self.combo_scale_port.addItem("pyserial unavailable", "")
@@ -1003,7 +1794,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_scale_port.addItem(label, port.device)
             if current and port.device == current:
                 seen = True
-            if port.device.upper() == "COM4":
+            description = port.description.lower()
+            if "prolific" in description or "pl2303" in description:
+                preferred_index = self.combo_scale_port.count() - 1
+            elif preferred_index < 0 and port.device.upper() == "COM4":
                 preferred_index = self.combo_scale_port.count() - 1
         if current and seen:
             index = self.combo_scale_port.findData(current)
@@ -1011,12 +1805,310 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.combo_scale_port.setCurrentIndex(index)
         elif preferred_index >= 0:
             self.combo_scale_port.setCurrentIndex(preferred_index)
+        elif self.combo_scale_port.count():
+            self.combo_scale_port.setCurrentIndex(0)
 
     def _build_tic_controller(self) -> TicController:
         return TicController(
             command_path=self.edit_ticcmd_path.text(),
             device_serial=self.edit_tic_serial.text(),
         )
+
+    def _build_supply_controller(self) -> PowerSupplyController:
+        return PowerSupplyController(
+            port_name=str(self.combo_supply_port.currentData() or "").strip(),
+            baudrate=int(self.combo_supply_baud.currentText()),
+            profile_id=str(self.combo_supply_profile.currentData() or "hmp4030"),
+            max_voltage_v=float(self.spin_supply_voltage_limit.value()),
+        )
+
+    def _apply_supply_profile_defaults(self) -> None:
+        profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
+        profile = SUPPLY_PROFILES.get(profile_id, SUPPLY_PROFILES["hmp4030"])
+        self.spin_supply_voltage_limit.setValue(float(profile.get("max_voltage", 30.0)))
+        self.spin_supply_manual_current.setValue(float(profile.get("start_current_mA", 1.0)))
+        self.spin_heat_start_current.setValue(float(profile.get("start_current_mA", 1.0)))
+        self.spin_heat_constant_current.setValue(max(float(profile.get("start_current_mA", 1.0)), 10.0))
+
+    def _connect_supply(self) -> None:
+        self._disconnect_supply()
+        controller = self._build_supply_controller()
+        try:
+            controller.connect()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to connect power supply: {exc}")
+            return
+        self._supply_controller = controller
+        self.label_supply_status.setText(
+            f"Supply connected on {controller.port_name} at {controller.baudrate} baud ({controller.profile['label']})."
+        )
+        self._log(self.label_supply_status.text())
+        self._refresh_supply_snapshot()
+
+    def _disconnect_supply(self) -> None:
+        if self._supply_controller is not None:
+            self._supply_controller.disconnect()
+        self._supply_controller = None
+        self._supply_output_enabled = False
+        self.label_supply_status.setText("Supply disconnected.")
+        self._refresh_supply_live_label()
+
+    def _refresh_supply_live_label(self) -> None:
+        setpoint_text = "-" if self._supply_last_setpoint_mA is None else f"{self._supply_last_setpoint_mA:.2f} mA"
+        current_text = "-" if self._supply_snapshot["current_mA"] is None else f"{self._supply_snapshot['current_mA']:.2f} mA"
+        voltage_text = "-" if self._supply_snapshot["voltage_V"] is None else f"{self._supply_snapshot['voltage_V']:.3f} V"
+        resistance_text = "-" if self._supply_snapshot["resistance_ohm"] is None else f"{self._supply_snapshot['resistance_ohm']:.3f} Ohm"
+        power_text = "-" if self._supply_snapshot["power_W"] is None else f"{self._supply_snapshot['power_W']:.4f} W"
+        self.label_supply_live.setText(
+            f"Set {setpoint_text} | Current {current_text} | Voltage {voltage_text} | "
+            f"Resistance {resistance_text} | Power {power_text}"
+        )
+
+    def _refresh_supply_snapshot(self) -> dict[str, float | None]:
+        if self._supply_controller is None or not self._supply_controller.is_connected():
+            self._refresh_supply_live_label()
+            return dict(self._supply_snapshot)
+        try:
+            self._supply_snapshot = dict(self._supply_controller.measure())
+        except Exception as exc:
+            self._log(f"Supply read failed: {exc}")
+        self._refresh_supply_live_label()
+        self._handle_supply_limit_condition()
+        return dict(self._supply_snapshot)
+
+    def _apply_manual_supply_current(self) -> None:
+        if self._supply_controller is None or not self._supply_controller.is_connected():
+            QtWidgets.QMessageBox.information(self, APP_NAME, "Connect the power supply first.")
+            return
+        try:
+            controller = self._supply_controller
+            assert controller is not None
+            controller.initialize_output(
+                current_mA=float(self.spin_supply_manual_current.value()),
+                reset_on_start=bool(controller.profile.get("reset_on_start", False)),
+            )
+            self._supply_output_enabled = True
+            self._supply_last_setpoint_mA = float(self.spin_supply_manual_current.value())
+            self._heating_program_current_mA = self._supply_last_setpoint_mA
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to apply current: {exc}")
+            return
+        self.label_supply_status.setText("Supply output enabled from the manual current control.")
+        self._refresh_supply_snapshot()
+
+    def _enable_supply_output(self) -> None:
+        if self._supply_controller is None or not self._supply_controller.is_connected():
+            QtWidgets.QMessageBox.information(self, APP_NAME, "Connect the power supply first.")
+            return
+        try:
+            self._supply_controller.output_on()
+            self._supply_output_enabled = True
+            self.label_supply_status.setText("Supply output enabled.")
+            self._refresh_supply_snapshot()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to enable output: {exc}")
+
+    def _disable_supply_output(self) -> None:
+        if self._supply_controller is None or not self._supply_controller.is_connected():
+            return
+        try:
+            self._supply_controller.output_off()
+        except Exception as exc:
+            self._log(f"Failed to disable supply output: {exc}")
+        self._supply_output_enabled = False
+        self.label_supply_status.setText("Supply output disabled.")
+        self._refresh_supply_snapshot()
+
+    def _set_reference_from_current_position(self) -> None:
+        self._position_reference_mm = self._current_position_mm
+        self._preload_reference_armed = False
+        self._preload_trigger_elapsed_s = 0.0 if self._session_active else None
+        self._refresh_live_labels()
+        self._log(f"Gauge zero moved to the current position ({self._current_position_mm:.4f} mm).")
+
+    def _heating_mode(self) -> str:
+        return str(self.combo_heating_mode.currentData() or HEATING_MODE_OFF)
+
+    def _prepare_heating_for_session(self) -> None:
+        mode = self._heating_mode()
+        if mode == HEATING_MODE_OFF:
+            return
+        if self._supply_controller is None or not self._supply_controller.is_connected():
+            self._log("Heating program is enabled, but the power supply is not connected.")
+            return
+        if mode == HEATING_MODE_CONSTANT:
+            target = float(self.spin_heat_constant_current.value())
+        else:
+            target = float(self.spin_heat_start_current.value())
+        self._heating_program_current_mA = target
+        self._heating_program_direction = 1.0
+        self._supply_controller.initialize_output(
+            current_mA=target,
+            reset_on_start=bool(self._supply_controller.profile.get("reset_on_start", False)),
+        )
+        self._supply_output_enabled = True
+        self._supply_last_setpoint_mA = target
+        self.label_supply_status.setText(
+            f"Heating program armed in {HEATING_MODE_LABELS.get(mode, mode)} mode."
+        )
+        self._refresh_supply_snapshot()
+
+    def _advance_heating_after_record(self) -> None:
+        if self._supply_controller is None or not self._supply_controller.is_connected():
+            return
+        mode = self._heating_mode()
+        if mode in {HEATING_MODE_OFF, HEATING_MODE_CONSTANT}:
+            return
+        current = self._heating_program_current_mA
+        if current is None:
+            current = float(self.spin_heat_start_current.value())
+        step = abs(float(self.spin_heat_step_current.value()))
+        upper = max(float(self.spin_heat_start_current.value()), float(self.spin_heat_max_current.value()))
+        lower = min(float(self.spin_heat_start_current.value()), float(self.spin_heat_max_current.value()))
+        next_current = current + (self._heating_program_direction * step)
+        if mode == HEATING_MODE_RAMP:
+            next_current = min(upper, next_current)
+        else:
+            if next_current >= upper:
+                next_current = upper
+                self._heating_program_direction = -1.0
+            elif next_current <= lower:
+                next_current = lower
+                self._heating_program_direction = 1.0
+        if abs(next_current - current) < 1e-12:
+            return
+        try:
+            self._supply_controller.set_current_mA(next_current)
+            self._heating_program_current_mA = next_current
+            self._supply_last_setpoint_mA = next_current
+        except Exception as exc:
+            self._log(f"Heating step failed: {exc}")
+
+    def _handle_supply_limit_condition(self) -> None:
+        limit_v = float(self.spin_supply_voltage_limit.value())
+        measured_v = self._supply_snapshot.get("voltage_V")
+        if measured_v is None or limit_v <= 0:
+            return
+        if measured_v < limit_v * 0.995:
+            return
+        action = str(self.combo_heat_limit_action.currentData() or HEATING_LIMIT_STOP)
+        self._log(f"Supply voltage reached the configured limit ({measured_v:.3f} V / {limit_v:.3f} V).")
+        if action == HEATING_LIMIT_DISABLE:
+            self._disable_supply_output()
+        elif action == HEATING_LIMIT_HOLD:
+            return
+        else:
+            self._stop_auto_ramp(log_completion=False)
+
+    def _choose_builder_project(self) -> None:
+        start_dir = str(self._builder_project_path.parent) if self._builder_project_path is not None else self.edit_log_dir.text().strip()
+        path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open Microwire Builder project",
+            start_dir,
+            f"Microwire Project (*{PROJECT_EXTENSION});;All files (*)",
+        )
+        if path_str:
+            self.edit_project_path.setText(path_str)
+
+    def _project_match_score(self, row: Mapping[str, Any]) -> int:
+        score = 0
+        composition = _normalized_token(self.edit_name_composition.text())
+        microwire = _normalized_microwire_token(self.edit_name_wire.text())
+        specimen = _normalized_token(self.edit_name_specimen.text())
+        row_composition = _normalized_token(row.get("Composition"))
+        row_microwire = _normalized_microwire_token(_project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS))
+        row_specimen = _normalized_token(_project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS))
+        if composition and row_composition == composition:
+            score += 5
+        if microwire and row_microwire == microwire:
+            score += 5
+        if specimen and row_specimen == specimen:
+            score += 3
+        diameter = _safe_float(_project_row_value(row, PROJECT_ROW_DIAMETER_KEYS))
+        if diameter and diameter > 0:
+            score += 2
+        return score
+
+    def _find_project_sample(self, payload: Any, path: Path) -> ProjectImportResult | None:
+        rows_by_section: list[tuple[str, list[Any]]] = []
+        if isinstance(payload, Mapping):
+            sections = payload.get("sections", {})
+            if isinstance(sections, Mapping):
+                preferred_sections = ("microscope", "assemble", "shape_memory_stress_strain")
+                for section_name in preferred_sections:
+                    section_payload = sections.get(section_name)
+                    if not isinstance(section_payload, Mapping):
+                        continue
+                    rows = section_payload.get("rows")
+                    if isinstance(rows, list):
+                        rows_by_section.append((section_name, rows))
+            top_level_rows = payload.get("rows")
+            if isinstance(top_level_rows, list):
+                rows_by_section.append(("rows", top_level_rows))
+        elif isinstance(payload, list):
+            rows_by_section.append(("rows", payload))
+        if not rows_by_section:
+            return None
+        best_score = -1
+        best_match: ProjectImportResult | None = None
+        for section_name, rows in rows_by_section:
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                score = self._project_match_score(row)
+                if score < 0:
+                    continue
+                diameter_um = _safe_float(_project_row_value(row, PROJECT_ROW_DIAMETER_KEYS))
+                current_mA = _safe_float(_project_row_value(row, PROJECT_ROW_CURRENT_KEYS))
+                if score > best_score:
+                    best_score = score
+                    best_match = ProjectImportResult(
+                        path=path,
+                        section=section_name,
+                        diameter_mm=None if diameter_um is None else diameter_um / 1000.0,
+                        current_mA=current_mA,
+                        matched_row=dict(row),
+                    )
+        return best_match if best_score >= 0 else None
+
+    def _import_builder_project(self) -> None:
+        path = Path(self.edit_project_path.text().strip())
+        if not path.exists():
+            QtWidgets.QMessageBox.warning(self, APP_NAME, "Choose a valid .pydpj file first.")
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to read project file: {exc}")
+            return
+        match = self._find_project_sample(payload, path)
+        if match is None:
+            self.label_project_status.setText(
+                "Project loaded, but no matching sample row was found from the current naming fields."
+            )
+            return
+        self._builder_project_path = path
+        self._builder_project_match = match
+        row = match.matched_row
+        if row.get("Composition"):
+            self.edit_name_composition.setText(str(row.get("Composition")))
+        microwire_value = _project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS)
+        if microwire_value:
+            self.edit_name_wire.setText(str(microwire_value))
+        specimen_value = _project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS)
+        if specimen_value:
+            self.edit_name_specimen.setText(str(specimen_value))
+        if match.diameter_mm is not None:
+            self.spin_diameter.setValue(match.diameter_mm)
+        if match.current_mA is not None:
+            self.spin_heat_constant_current.setValue(match.current_mA)
+        self.label_project_status.setText(
+            f"Imported {path.name} -> section {match.section}, diameter "
+            f"{'-' if match.diameter_mm is None else f'{match.diameter_mm:.5f} mm'}"
+            f"{'' if match.current_mA is None else f', current {match.current_mA:.2f} mA'}."
+        )
+        self._sync_auto_name_fields()
 
     def _toggle_scale_connection(self) -> None:
         if self._scale_thread is not None:
@@ -1113,11 +2205,26 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         return " ".join(part for part in parts if part)
 
+    def _distribution_log_suffix(self) -> str:
+        basis = self._distribution_basis()
+        basis_label = {
+            HSW_BASIS_LOAD_G: "load",
+            HSW_BASIS_STRESS_MPA: "stress",
+            HSW_BASIS_STRAIN_PCT: "strain",
+        }.get(basis, "distribution")
+        start_token = f"{self.spin_distribution_start.value():.3f}".rstrip("0").rstrip(".")
+        end_token = f"{self.spin_distribution_end.value():.3f}".rstrip("0").rstrip(".")
+        step_token = f"{self.spin_distribution_step.value():.3f}".rstrip("0").rstrip(".")
+        return f"hsw-{basis_label}-{start_token}-{end_token}-step{step_token}"
+
     def _apply_name_fields(self) -> None:
         built = self._build_sample_name()
         if built:
             self.edit_sample_name.setText(built)
-            safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", built).strip(" .")
+            log_label = built
+            if str(self.combo_recipe_mode.currentData() or "") == "distribution":
+                log_label = f"{built} {self._distribution_log_suffix()}".strip()
+            safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
             self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
             self._log(f"Applied naming fields: {built}")
 
@@ -1126,7 +2233,10 @@ class MainWindow(QtWidgets.QMainWindow):
             built = self._build_sample_name()
             if built:
                 self.edit_sample_name.setText(built)
-                safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", built).strip(" .")
+                log_label = built
+                if str(self.combo_recipe_mode.currentData() or "") == "distribution":
+                    log_label = f"{built} {self._distribution_log_suffix()}".strip()
+                safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
                 self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
 
     def _set_position_reference_now(self) -> None:
@@ -1134,9 +2244,95 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         self._log(f"Reference position set to the current stage position ({self._position_reference_mm:.4f} mm).")
 
+    def _distribution_basis(self) -> str:
+        return str(self.combo_distribution_basis.currentData() or HSW_BASIS_STRESS_MPA)
+
+    def _distribution_units(self, basis: str | None = None) -> tuple[str, int]:
+        basis = basis or self._distribution_basis()
+        if basis == HSW_BASIS_LOAD_G:
+            return " g", 4
+        if basis == HSW_BASIS_STRAIN_PCT:
+            return " %", 4
+        return " MPa", 3
+
+    def _update_distribution_basis_ui(self) -> None:
+        suffix, decimals = self._distribution_units()
+        for widget in (
+            self.spin_distribution_start,
+            self.spin_distribution_end,
+            self.spin_distribution_step,
+            self.spin_distribution_tolerance,
+        ):
+            widget.blockSignals(True)
+            widget.setDecimals(decimals)
+            widget.setSuffix(suffix)
+            widget.blockSignals(False)
+
+    def _build_distribution_targets(
+        self,
+        start_value: float,
+        end_value: float,
+        step_value: float,
+        *,
+        include_return: bool,
+    ) -> list[float]:
+        if step_value <= 0.0:
+            raise ValueError("Distribution step must be greater than zero.")
+        delta_value = end_value - start_value
+        if delta_value == 0.0:
+            targets = [start_value]
+        else:
+            sign = 1.0 if delta_value >= 0.0 else -1.0
+            count = max(1, int(math.ceil(abs(delta_value) / step_value)))
+            targets = [
+                start_value + sign * min(index * step_value, abs(delta_value))
+                for index in range(0, count + 1)
+            ]
+        if include_return and len(targets) > 1:
+            targets.extend(reversed(targets[:-1]))
+        return targets
+
+    def _current_distribution_value(self, basis: str) -> float | None:
+        effective_load = self._current_effective_load_g()
+        if basis == HSW_BASIS_LOAD_G:
+            return effective_load
+        if basis == HSW_BASIS_STRESS_MPA:
+            return stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
+        preload_state = self._current_preload_state(effective_load)
+        if preload_state == PRELOAD_PENDING:
+            return None
+        return strain_percent(
+            self._current_position_mm,
+            float(self.spin_initial_length.value()),
+            self._position_reference_mm,
+        )
+
+    def _distribution_target_reached(self, basis: str, target_value: float, tolerance: float) -> bool:
+        current_value = self._current_distribution_value(basis)
+        if current_value is None:
+            return False
+        return abs(target_value - current_value) <= tolerance
+
+    def _seek_distribution_target(self, basis: str, target_value: float, tolerance: float) -> bool:
+        if self._distribution_target_reached(basis, target_value, tolerance):
+            return True
+        current_value = self._current_distribution_value(basis)
+        if current_value is None:
+            current_value = 0.0
+        delta_value = target_value - current_value
+        if abs(delta_value) <= tolerance:
+            return True
+        nudge_mm = abs(float(self.spin_distribution_nudge_mm.value()))
+        if nudge_mm <= 0.0:
+            raise ValueError("Set a non-zero seek nudge for Hsw distribution.")
+        target_mm = self._current_position_mm + math.copysign(nudge_mm, delta_value)
+        if not self._move_to_position_mm(target_mm):
+            return False
+        return self._distribution_target_reached(basis, target_value, tolerance)
+
     def _update_recipe_mode_ui(self) -> None:
         mode = str(self.combo_recipe_mode.currentData() or "ramp")
-        page_index = {"ramp": 0, "cycle": 1, "hold": 2}.get(mode, 0)
+        page_index = {"ramp": 0, "cycle": 1, "hold": 2, "distribution": 3}.get(mode, 0)
         self.recipe_stack.setCurrentIndex(page_index)
         if mode == "cycle":
             summary = (
@@ -1150,12 +2346,48 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{self.spin_hold_duration_s.value():.1f} s."
             )
             banner = "Hold recipe"
+        elif mode == "distribution":
+            basis = self._distribution_basis()
+            suffix, _ = self._distribution_units(basis)
+            summary = (
+                f"Recipe ready: Hsw distribution from {self.spin_distribution_start.value():.4f}{suffix} "
+                f"to {self.spin_distribution_end.value():.4f}{suffix} in "
+                f"{self.spin_distribution_step.value():.4f}{suffix} steps, "
+                f"{self.spin_distribution_points.value()} point(s) per plateau."
+            )
+            if self.check_distribution_return_sweep.isChecked():
+                summary += " Includes a reverse sweep."
+            summary += (
+                f" Target tolerance {self.spin_distribution_tolerance.value():.4f}{suffix} "
+                f"with {self.spin_distribution_nudge_mm.value():.4f} mm seek nudges and "
+                f"{self.spin_distribution_settle_s.value():.2f} s settling."
+            )
+            banner = "Hsw distribution"
         else:
             summary = (
                 f"Recipe ready: one-way ramp of {self.spin_ramp_distance.value():.4f} mm "
                 f"from the current position."
             )
             banner = "Ramp recipe"
+        heating_mode = self._heating_mode()
+        if heating_mode == HEATING_MODE_CONSTANT:
+            summary += f" Heating: hold {self.spin_heat_constant_current.value():.2f} mA."
+        elif heating_mode == HEATING_MODE_RAMP:
+            summary += (
+                f" Heating: ramp {self.spin_heat_start_current.value():.2f} → "
+                f"{self.spin_heat_max_current.value():.2f} mA in {self.spin_heat_step_current.value():.2f} mA steps."
+            )
+        elif heating_mode == HEATING_MODE_TRIANGLE:
+            summary += (
+                f" Heating: triangle between {self.spin_heat_start_current.value():.2f} and "
+                f"{self.spin_heat_max_current.value():.2f} mA."
+            )
+        preload_text = (
+            f" Strain zero waits for {self.spin_preload_threshold_g.value():.4f} g preload."
+            if self.check_zero_on_preload.isChecked() and self.spin_preload_threshold_g.value() > 0
+            else " Strain zero follows the current reference immediately."
+        )
+        summary += preload_text
         self.label_recipe_summary.setText(summary)
         self.label_recipe_banner.setText(banner)
         try:
@@ -1380,6 +2612,8 @@ class MainWindow(QtWidgets.QMainWindow):
         txt_handle.write(f"# Notes\t{self.edit_run_notes.toPlainText().strip()}\n")
         txt_handle.write(f"# Initial length mm\t{self.spin_initial_length.value():.6f}\n")
         txt_handle.write(f"# Wire diameter mm\t{self.spin_diameter.value():.6f}\n")
+        txt_handle.write(f"# Preload zeroing\t{self.check_zero_on_preload.isChecked()}\n")
+        txt_handle.write(f"# Preload threshold g\t{self.spin_preload_threshold_g.value():.6f}\n")
         txt_handle.write(f"# Recipe mode\t{self.combo_recipe_mode.currentText()}\n")
         txt_handle.write(f"# Recipe summary\t{self.label_recipe_summary.text()}\n")
         txt_handle.flush()
@@ -1389,11 +2623,23 @@ class MainWindow(QtWidgets.QMainWindow):
             fieldnames=[
                 "elapsed_s",
                 "timestamp_utc",
+                "recipe_mode",
+                "automation_phase",
+                "automation_basis",
+                "automation_target_value",
+                "plateau_index",
+                "plateau_label",
                 "position_mm",
                 "raw_load_g",
                 "load_g",
+                "preload_state",
                 "strain_pct",
                 "stress_mpa",
+                "current_set_mA",
+                "current_measured_mA",
+                "voltage_V",
+                "resistance_ohm",
+                "power_W",
             ],
         )
         writer.writeheader()
@@ -1413,8 +2659,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "notes": self.edit_run_notes.toPlainText().strip(),
             "initial_length_mm": float(self.spin_initial_length.value()),
             "wire_diameter_mm": float(self.spin_diameter.value()),
+            "preload_zeroing_enabled": self.check_zero_on_preload.isChecked(),
+            "preload_threshold_g": float(self.spin_preload_threshold_g.value()),
             "steps_per_mm": float(self.spin_steps_per_mm.value()),
             "position_reference_mm": float(self._position_reference_mm),
+            "preload_reference_armed": self._preload_reference_armed,
+            "preload_trigger_elapsed_s": self._preload_trigger_elapsed_s,
             "soft_limits_enabled": self.check_soft_limits.isChecked(),
             "soft_limit_min_mm": float(self.spin_soft_min_mm.value()),
             "soft_limit_max_mm": float(self.spin_soft_max_mm.value()),
@@ -1427,9 +2677,35 @@ class MainWindow(QtWidgets.QMainWindow):
                 "request_command": self.edit_scale_request.text(),
                 "line_ending": self.edit_scale_terminator.text(),
             },
+            "heating": {
+                "port": str(self.combo_supply_port.currentData() or ""),
+                "baud": int(self.combo_supply_baud.currentText()),
+                "profile": str(self.combo_supply_profile.currentData() or "hmp4030"),
+                "voltage_limit_v": float(self.spin_supply_voltage_limit.value()),
+                "mode": self._heating_mode(),
+                "constant_current_mA": float(self.spin_heat_constant_current.value()),
+                "start_current_mA": float(self.spin_heat_start_current.value()),
+                "max_current_mA": float(self.spin_heat_max_current.value()),
+                "step_current_mA": float(self.spin_heat_step_current.value()),
+                "limit_action": str(self.combo_heat_limit_action.currentData() or HEATING_LIMIT_STOP),
+                "output_off_on_stop": self.check_output_off_on_stop.isChecked(),
+            },
             "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
             "recipe_summary": self.label_recipe_summary.text(),
             "recipe_estimated_points": int(self._recipe_estimated_points),
+            "hsw_distribution": {
+                "basis": self._distribution_basis(),
+                "start": float(self.spin_distribution_start.value()),
+                "end": float(self.spin_distribution_end.value()),
+                "step": float(self.spin_distribution_step.value()),
+                "tolerance": float(self.spin_distribution_tolerance.value()),
+                "seek_nudge_mm": float(self.spin_distribution_nudge_mm.value()),
+                "settle_s": float(self.spin_distribution_settle_s.value()),
+                "points_per_plateau": int(self.spin_distribution_points.value()),
+                "interval_ms": int(self.spin_distribution_interval.value()),
+                "return_sweep": self.check_distribution_return_sweep.isChecked(),
+            },
+            "builder_project": None if self._builder_project_path is None else str(self._builder_project_path),
         }
 
     def _write_session_metadata(self, *, finished_utc: str | None = None) -> None:
@@ -1446,6 +2722,25 @@ class MainWindow(QtWidgets.QMainWindow):
             payload["finished_utc"] = finished_utc
         self._session_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
+    def _set_automation_context(
+        self,
+        *,
+        phase: str,
+        basis: str | None = None,
+        target_value: float | None = None,
+        plateau_index: int | None = None,
+    ) -> None:
+        self._automation_phase = phase
+        self._automation_basis = basis
+        self._automation_target_value = target_value
+        self._automation_plateau_index = plateau_index
+        if basis and target_value is not None:
+            label = HSW_BASIS_LABELS.get(basis, basis)
+            suffix, _ = self._distribution_units(basis)
+            self._automation_plateau_label = f"{label} {target_value:.4f}{suffix}"
+        else:
+            self._automation_plateau_label = None
+
     def _start_session(self) -> None:
         if self._session_active:
             return
@@ -1461,6 +2756,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.check_tare_on_start.isChecked():
             self._load_offset_g = -self._latest_scale_value_g
         self._position_reference_mm = self._current_position_mm
+        self._preload_reference_armed = (
+            self.check_zero_on_preload.isChecked() and self.spin_preload_threshold_g.value() > 0
+        )
+        self._preload_trigger_elapsed_s = None
         self._session_points = []
         self._session_active = True
         self._session_start_monotonic = time.monotonic()
@@ -1473,6 +2772,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_stop_session.setEnabled(True)
         self.label_session_status.setText(f"Session running -> {txt_path.name}")
         self._log(f"Session started: {txt_path}")
+        self._prepare_heating_for_session()
         self._write_session_metadata()
         self._refresh_live_labels()
         self._record_current_point()
@@ -1495,12 +2795,66 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_session_status.setText(f"Session saved ({point_count} point(s))")
         if self._session_base_path is not None:
             self._log(f"Session stopped. Saved {point_count} point(s) to {self._session_base_path}.")
+        if self.check_output_off_on_stop.isChecked():
+            self._disable_supply_output()
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
         self._refresh_live_labels()
 
     def _current_effective_load_g(self) -> float:
         return self._latest_scale_value_g + self._load_offset_g
+
+    def _current_preload_state(self, load_g: float) -> str:
+        if not self.check_zero_on_preload.isChecked() or self.spin_preload_threshold_g.value() <= 0:
+            return PRELOAD_DISABLED
+        if self._preload_reference_armed:
+            return PRELOAD_PENDING
+        if self._preload_trigger_elapsed_s is not None:
+            return PRELOAD_ACTIVE
+        if abs(load_g) >= float(self.spin_preload_threshold_g.value()):
+            return PRELOAD_ACTIVE
+        return PRELOAD_PENDING
+
+    def _capture_measurement_point(self, *, elapsed_s: float, position_mm: float, raw_load_g: float, load_g: float) -> MeasurementPoint:
+        preload_state = self._current_preload_state(load_g)
+        if preload_state == PRELOAD_PENDING and abs(load_g) >= float(self.spin_preload_threshold_g.value()):
+            self._position_reference_mm = position_mm
+            self._preload_reference_armed = False
+            self._preload_trigger_elapsed_s = elapsed_s
+            preload_state = PRELOAD_ACTIVE
+            self._log(
+                f"Preload reached at {load_g:.5f} g. Gauge zero moved to {position_mm:.4f} mm."
+            )
+        strain = None
+        stress = None
+        if preload_state != PRELOAD_PENDING:
+            strain = strain_percent(
+                displacement_mm=position_mm,
+                initial_length_mm=float(self.spin_initial_length.value()),
+                reference_mm=self._position_reference_mm,
+            )
+            stress = stress_mpa_from_load_g(load_g, float(self.spin_diameter.value()))
+        snapshot = self._refresh_supply_snapshot()
+        return MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc=_utc_timestamp(),
+            position_mm=position_mm,
+            raw_load_g=raw_load_g,
+            load_g=load_g,
+            preload_state=preload_state,
+            strain_pct=strain,
+            stress_mpa=stress,
+            current_set_mA=self._supply_last_setpoint_mA,
+            current_measured_mA=snapshot.get("current_mA"),
+            voltage_V=snapshot.get("voltage_V"),
+            resistance_ohm=snapshot.get("resistance_ohm"),
+            power_W=snapshot.get("power_W"),
+            automation_phase=self._automation_phase,
+            automation_basis=self._automation_basis,
+            automation_target_value=self._automation_target_value,
+            plateau_index=self._automation_plateau_index,
+            plateau_label=self._automation_plateau_label,
+        )
 
     def _record_current_point(self) -> None:
         if not self._session_active:
@@ -1516,20 +2870,11 @@ class MainWindow(QtWidgets.QMainWindow):
         position_mm = self._current_position_mm
         raw_load_g = self._latest_scale_value_g
         load_g = self._current_effective_load_g()
-        strain = strain_percent(
-            displacement_mm=position_mm,
-            initial_length_mm=float(self.spin_initial_length.value()),
-            reference_mm=self._position_reference_mm,
-        )
-        stress = stress_mpa_from_load_g(load_g, float(self.spin_diameter.value()))
-        point = MeasurementPoint(
+        point = self._capture_measurement_point(
             elapsed_s=elapsed_s,
-            timestamp_utc=_utc_timestamp(),
             position_mm=position_mm,
             raw_load_g=raw_load_g,
             load_g=load_g,
-            strain_pct=strain,
-            stress_mpa=stress,
         )
         self._session_points.append(point)
         self._write_point(point)
@@ -1540,6 +2885,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Recorded point #{len(self._session_points)} at {position_mm:.4f} mm, "
             f"{load_g:.5f} g."
         )
+        self._advance_heating_after_record()
 
     def _write_point(self, point: MeasurementPoint) -> None:
         if self._session_txt_handle is None or self._session_csv_writer is None:
@@ -1557,11 +2903,25 @@ class MainWindow(QtWidgets.QMainWindow):
             {
                 "elapsed_s": f"{point.elapsed_s:.6f}",
                 "timestamp_utc": point.timestamp_utc,
+                "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
+                "automation_phase": point.automation_phase,
+                "automation_basis": "" if point.automation_basis is None else point.automation_basis,
+                "automation_target_value": ""
+                if point.automation_target_value is None
+                else f"{point.automation_target_value:.6f}",
+                "plateau_index": "" if point.plateau_index is None else point.plateau_index,
+                "plateau_label": "" if point.plateau_label is None else point.plateau_label,
                 "position_mm": f"{point.position_mm:.6f}",
                 "raw_load_g": f"{point.raw_load_g:.6f}",
                 "load_g": f"{point.load_g:.6f}",
+                "preload_state": point.preload_state,
                 "strain_pct": "" if point.strain_pct is None else f"{point.strain_pct:.6f}",
                 "stress_mpa": "" if point.stress_mpa is None else f"{point.stress_mpa:.6f}",
+                "current_set_mA": "" if point.current_set_mA is None else f"{point.current_set_mA:.6f}",
+                "current_measured_mA": "" if point.current_measured_mA is None else f"{point.current_measured_mA:.6f}",
+                "voltage_V": "" if point.voltage_V is None else f"{point.voltage_V:.6f}",
+                "resistance_ohm": "" if point.resistance_ohm is None else f"{point.resistance_ohm:.6f}",
+                "power_W": "" if point.power_W is None else f"{point.power_W:.6f}",
             }
         )
         if self._session_csv_handle is not None:
@@ -1585,6 +2945,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_interval_ms = interval_ms
         self._recipe_origin_mm = self._current_position_mm
         self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
+        self._set_automation_context(phase="start")
         self._auto_ramp_timer.start(interval_ms)
         self._log(summary)
         self._refresh_live_labels()
@@ -1596,6 +2957,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_steps = []
         self._automation_index = 0
         self._auto_ramp_timer.stop()
+        self._set_automation_context(phase="idle")
         if log_completion:
             self._log("Recipe stopped.")
         self._refresh_live_labels()
@@ -1663,6 +3025,60 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return steps, summary, interval_ms
 
+        if mode == "distribution":
+            basis = self._distribution_basis()
+            start_value = float(self.spin_distribution_start.value())
+            end_value = float(self.spin_distribution_end.value())
+            step_value = abs(float(self.spin_distribution_step.value()))
+            points_per_plateau = int(self.spin_distribution_points.value())
+            interval_ms = int(self.spin_distribution_interval.value())
+            settle_s = float(self.spin_distribution_settle_s.value())
+            if points_per_plateau <= 0:
+                raise ValueError("Set at least one point per Hsw plateau.")
+            targets = self._build_distribution_targets(
+                start_value,
+                end_value,
+                step_value,
+                include_return=self.check_distribution_return_sweep.isChecked(),
+            )
+            steps = []
+            for plateau_index, target in enumerate(targets, start=1):
+                steps.append(
+                    AutomationStep(
+                        "seek_target",
+                        target_value=target,
+                        basis=basis,
+                        note=str(plateau_index),
+                    )
+                )
+                settle_steps = max(0, int(math.ceil((settle_s * 1000.0) / interval_ms)))
+                steps.extend(
+                    AutomationStep(
+                        "settle",
+                        target_value=target,
+                        basis=basis,
+                        note=str(plateau_index),
+                    )
+                    for _ in range(settle_steps)
+                )
+                steps.extend(
+                    AutomationStep(
+                        "record",
+                        target_value=target,
+                        basis=basis,
+                        note=str(plateau_index),
+                    )
+                    for _ in range(points_per_plateau)
+                )
+            steps = self._append_return_to_origin(steps)
+            suffix, _ = self._distribution_units(basis)
+            summary = (
+                f"Started Hsw distribution recipe: {start_value:.4f}{suffix} to {end_value:.4f}{suffix}, "
+                f"step {step_value:.4f}{suffix}, {points_per_plateau} point(s) per plateau, "
+                f"interval {interval_ms} ms, settle {settle_s:.2f} s."
+            )
+            return steps, summary, interval_ms
+
         total_distance_mm = float(self.spin_ramp_distance.value())
         step_mm = abs(float(self.spin_ramp_step.value()))
         interval_ms = int(self.spin_ramp_interval.value())
@@ -1689,15 +3105,66 @@ class MainWindow(QtWidgets.QMainWindow):
         step = self._automation_steps[self._automation_index]
         self._automation_index += 1
         if step.action == "move":
+            self._set_automation_context(phase="move")
             if step.target_mm is None or not self._move_to_position_mm(step.target_mm):
                 self._stop_auto_ramp(log_completion=False)
+        elif step.action == "seek_target":
+            if step.target_value is None or not step.basis:
+                self._stop_auto_ramp(log_completion=False)
+                return
+            plateau_index = int(step.note) if step.note.isdigit() else None
+            self._set_automation_context(
+                phase="seek",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=plateau_index,
+            )
+            tolerance = abs(float(self.spin_distribution_tolerance.value()))
+            if tolerance <= 0.0:
+                self._stop_auto_ramp(log_completion=False)
+                self._log("Hsw distribution stopped because the target tolerance is zero.")
+                return
+            try:
+                reached = self._seek_distribution_target(step.basis, step.target_value, tolerance)
+            except Exception as exc:
+                self._stop_auto_ramp(log_completion=False)
+                self._log(f"Hsw distribution stopped: {exc}")
+                return
+            if reached:
+                current_value = self._current_distribution_value(step.basis)
+                if current_value is None:
+                    current_value = 0.0
+                label = HSW_BASIS_LABELS.get(step.basis, step.basis)
+                self._log(
+                    f"Reached {label} plateau {step.target_value:.4f} "
+                    f"(live {current_value:.4f})."
+                )
+            else:
+                self._automation_index -= 1
+        elif step.action == "settle":
+            plateau_index = int(step.note) if step.note.isdigit() else None
+            self._set_automation_context(
+                phase="settle",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=plateau_index,
+            )
         elif step.action == "record":
+            plateau_index = int(step.note) if step.note.isdigit() else None
+            self._set_automation_context(
+                phase="record",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=plateau_index,
+            )
             self._record_current_point()
         self._refresh_live_labels()
 
     def _handle_status_timer(self) -> None:
         if self._automation_active or self._session_active:
             self._refresh_tic_status()
+        if self._supply_controller is not None and self._supply_controller.is_connected():
+            self._refresh_supply_snapshot()
         if self._automation_active and self._is_max_load_exceeded():
             self._log(
                 f"Automation stopped because effective load {self._current_effective_load_g():.5f} g exceeded "
@@ -1717,17 +3184,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_reference_status.setText(
             f"Reference position: {self._position_reference_mm:.4f} mm | "
             f"Last target: {self._last_move_target_mm:.4f} mm"
+            f"{' | waiting for preload' if self._preload_reference_armed else ''}"
         )
 
-        strain = strain_percent(
-            self._current_position_mm,
-            float(self.spin_initial_length.value()),
-            self._position_reference_mm,
-        )
-        stress = stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
+        preload_state = self._current_preload_state(effective_load)
+        if preload_state == PRELOAD_PENDING:
+            strain = None
+            stress = None
+        else:
+            strain = strain_percent(
+                self._current_position_mm,
+                float(self.spin_initial_length.value()),
+                self._position_reference_mm,
+            )
+            stress = stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
         self.label_live_summary.setText(
             f"Live strain: {'-' if strain is None else f'{strain:.4f} %'} | "
             f"Live stress: {'-' if stress is None else f'{stress:.4f} MPa'}"
+            f" | Heating: {'off' if not self._supply_output_enabled else f'{self._supply_last_setpoint_mA or 0.0:.2f} mA'}"
         )
         session_value = "Running" if self._session_active else "Idle"
         self.label_card_session.setText(
@@ -1746,58 +3220,105 @@ class MainWindow(QtWidgets.QMainWindow):
                 f" | limits {min(self.spin_soft_min_mm.value(), self.spin_soft_max_mm.value()):.2f}"
                 f" to {max(self.spin_soft_min_mm.value(), self.spin_soft_max_mm.value()):.2f}"
             )
+        if preload_state == PRELOAD_PENDING:
+            motion_state += f" | preload < {self.spin_preload_threshold_g.value():.4f} g"
         self.label_card_motion.setText(motion_state)
         if self._automation_active:
             recipe_state = (
                 f"{self._automation_name} | done {self._automation_index}"
                 f"/{max(1, len(self._automation_steps))}"
             )
+            if self._automation_plateau_label:
+                recipe_state += f" | {self._automation_phase} {self._automation_plateau_label}"
+            elif self._automation_phase not in {"idle", "start"}:
+                recipe_state += f" | {self._automation_phase}"
         else:
             recipe_state = str(self.combo_recipe_mode.currentText())
         self.label_card_recipe.setText(recipe_state)
+        self._refresh_supply_live_label()
 
     def _refresh_plots(self) -> None:
-        for axis in (self.ax_load, self.ax_stress, self.ax_time):
-            axis.clear()
+        theme = self._plot_theme()
+        self.figure.clear()
+        self.figure.set_facecolor(theme["figure_rgb"])
+        grid = self.figure.add_gridspec(2, 2, hspace=0.46, wspace=0.34)
+        active_tiles = [tile for tile in self._plot_tiles if tile.visible.isChecked()]
+        if not active_tiles:
+            active_tiles = list(self._plot_tiles[:1])
+        for tile_index, tile in enumerate(active_tiles[:4]):
+            row, column = divmod(tile_index, 2)
+            axis = self.figure.add_subplot(grid[row, column])
+            axis.set_facecolor(theme["axes_rgb"])
+            for spine in axis.spines.values():
+                spine.set_color(theme["text_rgb"])
+            axis.tick_params(colors=theme["text_rgb"])
+            axis.xaxis.label.set_color(theme["text_rgb"])
+            axis.yaxis.label.set_color(theme["text_rgb"])
+            axis.title.set_color(theme["text_rgb"])
+            axis.grid(True, color=theme["grid_rgba"], alpha=0.6)
 
-        self.ax_load.set_title("Load vs Displacement")
-        self.ax_load.set_xlabel("Displacement (mm)")
-        self.ax_load.set_ylabel("Load (g)")
-        self.ax_load.grid(True, alpha=0.3)
+            x_channel = self._plot_channel(str(tile.x_combo.currentData() or "elapsed_s"))
+            y_left_channel = self._plot_channel(str(tile.y_left_combo.currentData() or "load_g"))
+            y_right_channel = self._plot_channel(str(tile.y_right_combo.currentData() or ""))
+            if x_channel is None or y_left_channel is None:
+                continue
 
-        self.ax_stress.set_title("Stress vs Strain")
-        self.ax_stress.set_xlabel("Strain (%)")
-        self.ax_stress.set_ylabel("Stress (MPa)")
-        self.ax_stress.grid(True, alpha=0.3)
+            axis.set_xlabel(x_channel.label, fontsize=9, labelpad=4)
+            axis.set_ylabel(y_left_channel.label, fontsize=8, labelpad=3)
+            axis.set_title(self._plot_title(x_channel, y_left_channel, y_right_channel), fontsize=9, pad=8)
 
-        self.ax_time.set_title("Load vs Time")
-        self.ax_time.set_xlabel("Elapsed time (s)")
-        self.ax_time.set_ylabel("Load (g)")
-        self.ax_time.grid(True, alpha=0.3)
-
-        if self._session_points:
-            positions = [point.position_mm for point in self._session_points]
-            loads = [point.load_g for point in self._session_points]
-            elapsed = [point.elapsed_s for point in self._session_points]
-            strains = [point.strain_pct for point in self._session_points]
-            stresses = [point.stress_mpa for point in self._session_points]
-
-            self.ax_load.plot(positions, loads, marker="o", linewidth=1.5, color="#1f77b4")
-            self.ax_time.plot(elapsed, loads, marker="o", linewidth=1.5, color="#d62728")
-
-            stress_pairs = [
-                (strain, stress)
-                for strain, stress in zip(strains, stresses)
-                if strain is not None and stress is not None
+            left_pairs = [
+                (x_channel.getter(point), y_left_channel.getter(point))
+                for point in self._session_points
             ]
-            if stress_pairs:
-                self.ax_stress.plot(
-                    [pair[0] for pair in stress_pairs],
-                    [pair[1] for pair in stress_pairs],
+            left_pairs = [(x_value, y_value) for x_value, y_value in left_pairs if x_value is not None and y_value is not None]
+            if left_pairs:
+                axis.plot(
+                    [x_value for x_value, _ in left_pairs],
+                    [y_value for _, y_value in left_pairs],
+                    color=y_left_channel.color,
+                    linewidth=1.7,
                     marker="o",
-                    linewidth=1.5,
-                    color="#2ca02c",
+                    markersize=3.2,
                 )
+            else:
+                axis.text(
+                    0.5,
+                    0.5,
+                    "No data for selected channels",
+                    ha="center",
+                    va="center",
+                    color=theme["text_rgb"],
+                    transform=axis.transAxes,
+                )
+
+            if y_right_channel is not None:
+                twin = axis.twinx()
+                twin.set_facecolor((0, 0, 0, 0))
+                for spine in twin.spines.values():
+                    spine.set_color(theme["text_rgb"])
+                twin.tick_params(colors=theme["text_rgb"])
+                twin.yaxis.label.set_color(theme["text_rgb"])
+                twin.set_ylabel(y_right_channel.label, fontsize=8, labelpad=3)
+                right_pairs = [
+                    (x_channel.getter(point), y_right_channel.getter(point))
+                    for point in self._session_points
+                ]
+                right_pairs = [
+                    (x_value, y_value)
+                    for x_value, y_value in right_pairs
+                    if x_value is not None and y_value is not None
+                ]
+                if right_pairs:
+                    twin.plot(
+                        [x_value for x_value, _ in right_pairs],
+                        [y_value for _, y_value in right_pairs],
+                        color=y_right_channel.color,
+                        linewidth=1.5,
+                        marker="s",
+                        markersize=3.0,
+                    )
+        self.figure.subplots_adjust(left=0.07, right=0.94, top=0.90, bottom=0.12, hspace=0.50, wspace=0.34)
 
         if self.canvas is not None:
             self.canvas.draw_idle()
@@ -1818,6 +3339,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("scale_interval_ms", self.spin_scale_interval.value())
         self.settings.setValue("scale_request", self.edit_scale_request.text())
         self.settings.setValue("scale_terminator", self.edit_scale_terminator.text())
+        self.settings.setValue("overview_expanded", self.overview_section.is_expanded())
+        self.settings.setValue("supply_port", self.combo_supply_port.currentData() or "")
+        self.settings.setValue("supply_baud", self.combo_supply_baud.currentText())
+        self.settings.setValue("supply_profile", self.combo_supply_profile.currentData() or "hmp4030")
+        self.settings.setValue("supply_voltage_limit_v", self.spin_supply_voltage_limit.value())
+        self.settings.setValue("supply_manual_current_mA", self.spin_supply_manual_current.value())
         self.settings.setValue("ticcmd_path", self.edit_ticcmd_path.text())
         self.settings.setValue("tic_serial", self.edit_tic_serial.text())
         self.settings.setValue("steps_per_mm", self.spin_steps_per_mm.value())
@@ -1829,6 +3356,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("max_load_g", self.spin_max_load_g.value())
         self.settings.setValue("initial_length_mm", self.spin_initial_length.value())
         self.settings.setValue("diameter_mm", self.spin_diameter.value())
+        self.settings.setValue("preload_zeroing_enabled", self.check_zero_on_preload.isChecked())
+        self.settings.setValue("preload_threshold_g", self.spin_preload_threshold_g.value())
         self.settings.setValue("name_composition", self.edit_name_composition.text())
         self.settings.setValue("name_wire", self.edit_name_wire.text())
         self.settings.setValue("name_specimen", self.edit_name_specimen.text())
@@ -1836,6 +3365,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("auto_name", self.check_auto_name.isChecked())
         self.settings.setValue("sample_name", self.edit_sample_name.text())
         self.settings.setValue("run_notes", self.edit_run_notes.toPlainText())
+        self.settings.setValue("builder_project_path", self.edit_project_path.text())
         self.settings.setValue("log_dir", self.edit_log_dir.text())
         self.settings.setValue("log_name", self.edit_log_name.text())
         self.settings.setValue(
@@ -1855,6 +3385,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("hold_target_mm", self.spin_hold_target.value())
         self.settings.setValue("hold_duration_s", self.spin_hold_duration_s.value())
         self.settings.setValue("hold_interval_ms", self.spin_hold_interval.value())
+        self.settings.setValue("distribution_basis", self.combo_distribution_basis.currentData() or HSW_BASIS_STRESS_MPA)
+        self.settings.setValue("distribution_start", self.spin_distribution_start.value())
+        self.settings.setValue("distribution_end", self.spin_distribution_end.value())
+        self.settings.setValue("distribution_step", self.spin_distribution_step.value())
+        self.settings.setValue("distribution_tolerance", self.spin_distribution_tolerance.value())
+        self.settings.setValue("distribution_nudge_mm", self.spin_distribution_nudge_mm.value())
+        self.settings.setValue("distribution_settle_s", self.spin_distribution_settle_s.value())
+        self.settings.setValue("distribution_points", self.spin_distribution_points.value())
+        self.settings.setValue("distribution_interval_ms", self.spin_distribution_interval.value())
+        self.settings.setValue("distribution_return_sweep", self.check_distribution_return_sweep.isChecked())
+        self.settings.setValue("heating_mode", self.combo_heating_mode.currentData() or HEATING_MODE_OFF)
+        self.settings.setValue("heat_constant_current_mA", self.spin_heat_constant_current.value())
+        self.settings.setValue("heat_start_current_mA", self.spin_heat_start_current.value())
+        self.settings.setValue("heat_max_current_mA", self.spin_heat_max_current.value())
+        self.settings.setValue("heat_step_current_mA", self.spin_heat_step_current.value())
+        self.settings.setValue("heat_limit_action", self.combo_heat_limit_action.currentData() or HEATING_LIMIT_STOP)
+        self.settings.setValue("output_off_on_stop", self.check_output_off_on_stop.isChecked())
+        for index, tile in enumerate(self._plot_tiles):
+            prefix = f"plot_tile_{index}"
+            self.settings.setValue(f"{prefix}_visible", tile.visible.isChecked())
+            self.settings.setValue(f"{prefix}_x", tile.x_combo.currentData() or "elapsed_s")
+            self.settings.setValue(f"{prefix}_y_left", tile.y_left_combo.currentData() or "load_g")
+            self.settings.setValue(f"{prefix}_y_right", tile.y_right_combo.currentData() or "")
         self.settings.sync()
 
     def _restore_settings(self) -> None:
@@ -1864,6 +3417,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_scale_interval.setValue(int(self.settings.value("scale_interval_ms", 250)))
         scale_request = self.settings.value("scale_request", "\\x1bp", type=str)
         scale_terminator = self.settings.value("scale_terminator", "", type=str)
+        self.overview_section.set_expanded(
+            bool(self.settings.value("overview_expanded", False, type=bool))
+        )
         if baud == "9600" and (not scale_request) and scale_terminator == "\\r\\n":
             baud = "600"
             self.combo_scale_baud.setCurrentText(baud)
@@ -1871,6 +3427,15 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_terminator = ""
         self.edit_scale_request.setText(scale_request)
         self.edit_scale_terminator.setText(scale_terminator)
+        supply_baud = self.settings.value("supply_baud", "9600", type=str)
+        if self.combo_supply_baud.findText(supply_baud) >= 0:
+            self.combo_supply_baud.setCurrentText(supply_baud)
+        supply_profile = self.settings.value("supply_profile", "hmp4030", type=str)
+        supply_profile_index = self.combo_supply_profile.findData(supply_profile)
+        if supply_profile_index >= 0:
+            self.combo_supply_profile.setCurrentIndex(supply_profile_index)
+        self.spin_supply_voltage_limit.setValue(float(self.settings.value("supply_voltage_limit_v", 30.0)))
+        self.spin_supply_manual_current.setValue(float(self.settings.value("supply_manual_current_mA", 1.0)))
         saved_ticcmd = self.settings.value("ticcmd_path", "ticcmd", type=str)
         discovered_ticcmd = _find_ticcmd()
         if saved_ticcmd.strip().lower() == "ticcmd" and discovered_ticcmd != "ticcmd":
@@ -1886,6 +3451,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_max_load_g.setValue(float(self.settings.value("max_load_g", 25.0)))
         self.spin_initial_length.setValue(float(self.settings.value("initial_length_mm", 30.0)))
         self.spin_diameter.setValue(float(self.settings.value("diameter_mm", 0.03)))
+        self.check_zero_on_preload.setChecked(bool(self.settings.value("preload_zeroing_enabled", True, type=bool)))
+        self.spin_preload_threshold_g.setValue(float(self.settings.value("preload_threshold_g", 0.02)))
         self.edit_name_composition.setText(self.settings.value("name_composition", "", type=str))
         self.edit_name_wire.setText(self.settings.value("name_wire", "", type=str))
         self.edit_name_specimen.setText(self.settings.value("name_specimen", "", type=str))
@@ -1893,6 +3460,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_auto_name.setChecked(bool(self.settings.value("auto_name", True, type=bool)))
         self.edit_sample_name.setText(self.settings.value("sample_name", "", type=str))
         self.edit_run_notes.setPlainText(self.settings.value("run_notes", "", type=str))
+        self.edit_project_path.setText(self.settings.value("builder_project_path", "", type=str))
         restored_log_dir = self.settings.value("log_dir", self.edit_log_dir.text(), type=str)
         if self._provided_log_dir:
             self.edit_log_dir.setText(self._provided_log_dir)
@@ -1922,6 +3490,46 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_hold_target.setValue(float(self.settings.value("hold_target_mm", 0.5)))
         self.spin_hold_duration_s.setValue(float(self.settings.value("hold_duration_s", 10.0)))
         self.spin_hold_interval.setValue(int(self.settings.value("hold_interval_ms", 1000)))
+        distribution_basis = self.settings.value("distribution_basis", HSW_BASIS_STRESS_MPA, type=str)
+        distribution_basis_index = self.combo_distribution_basis.findData(distribution_basis)
+        if distribution_basis_index >= 0:
+            self.combo_distribution_basis.setCurrentIndex(distribution_basis_index)
+        self.spin_distribution_start.setValue(float(self.settings.value("distribution_start", 10.0)))
+        self.spin_distribution_end.setValue(float(self.settings.value("distribution_end", 100.0)))
+        self.spin_distribution_step.setValue(float(self.settings.value("distribution_step", 10.0)))
+        self.spin_distribution_tolerance.setValue(float(self.settings.value("distribution_tolerance", 0.5)))
+        self.spin_distribution_nudge_mm.setValue(float(self.settings.value("distribution_nudge_mm", 0.01)))
+        self.spin_distribution_settle_s.setValue(float(self.settings.value("distribution_settle_s", 1.0)))
+        self.spin_distribution_points.setValue(int(self.settings.value("distribution_points", 10000)))
+        self.spin_distribution_interval.setValue(int(self.settings.value("distribution_interval_ms", 100)))
+        self.check_distribution_return_sweep.setChecked(
+            bool(self.settings.value("distribution_return_sweep", True, type=bool))
+        )
+        heating_mode = self.settings.value("heating_mode", HEATING_MODE_OFF, type=str)
+        heating_index = self.combo_heating_mode.findData(heating_mode)
+        if heating_index >= 0:
+            self.combo_heating_mode.setCurrentIndex(heating_index)
+        self.spin_heat_constant_current.setValue(float(self.settings.value("heat_constant_current_mA", 50.0)))
+        self.spin_heat_start_current.setValue(float(self.settings.value("heat_start_current_mA", 10.0)))
+        self.spin_heat_max_current.setValue(float(self.settings.value("heat_max_current_mA", 100.0)))
+        self.spin_heat_step_current.setValue(float(self.settings.value("heat_step_current_mA", 5.0)))
+        heat_limit_action = self.settings.value("heat_limit_action", HEATING_LIMIT_STOP, type=str)
+        heat_limit_index = self.combo_heat_limit_action.findData(heat_limit_action)
+        if heat_limit_index >= 0:
+            self.combo_heat_limit_action.setCurrentIndex(heat_limit_index)
+        self.check_output_off_on_stop.setChecked(bool(self.settings.value("output_off_on_stop", True, type=bool)))
+        for index, tile in enumerate(self._plot_tiles):
+            prefix = f"plot_tile_{index}"
+            tile.visible.setChecked(bool(self.settings.value(f"{prefix}_visible", True, type=bool)))
+            x_index = tile.x_combo.findData(self.settings.value(f"{prefix}_x", "elapsed_s", type=str))
+            if x_index >= 0:
+                tile.x_combo.setCurrentIndex(x_index)
+            y_left_index = tile.y_left_combo.findData(self.settings.value(f"{prefix}_y_left", "load_g", type=str))
+            if y_left_index >= 0:
+                tile.y_left_combo.setCurrentIndex(y_left_index)
+            y_right_index = tile.y_right_combo.findData(self.settings.value(f"{prefix}_y_right", "", type=str))
+            if y_right_index >= 0:
+                tile.y_right_combo.setCurrentIndex(y_right_index)
         self._sync_auto_name_fields()
         self._update_recipe_mode_ui()
 
@@ -1930,6 +3538,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_auto_ramp(log_completion=False)
         self._disconnect_scale()
         self._stop_session()
+        self._disconnect_supply()
         super().closeEvent(event)
 
 
