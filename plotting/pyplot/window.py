@@ -36,6 +36,7 @@ from functools import partial
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 import matplotlib as mpl
+import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends import backend_qtagg as _backend_qtagg
 from matplotlib.backends.backend_qt import NavigationToolbar2QT
@@ -101,6 +102,7 @@ UNIT_SUFFIX_BRACKET_RE = re.compile(r"^(?P<prefix>.*?)(?:\s*)\[(?P<unit>[^\[\]]{
 OUTLIER_IQR_FACTOR = 1.5
 OUTLIER_MIN_POINTS = 8
 OUTLIER_ZSCORE_THRESHOLD = 3.5
+OUTLIER_LOCAL_HALF_WINDOW = 10
 ORIGIN_EXPORT_COLOR_CYCLE: tuple[str, ...] = (
     "#1f77b4",
     "#ff7f0e",
@@ -1284,6 +1286,9 @@ class GraphLineState:
     extra_lines: List[Any] = field(default_factory=list)
     full_x: Any | None = None
     full_y: Any | None = None
+    source_row_ids: np.ndarray | None = None
+    worksheet_key: Hashable | None = None
+    source_file: str | None = None
 
     def iter_lines(self) -> Iterable[Any]:
         """Yield all Matplotlib line objects associated with this state."""
@@ -1373,6 +1378,37 @@ class WorksheetOutlierFinding:
     @property
     def outlier_count(self) -> int:
         return len(self.row_indices)
+
+
+@dataclass(frozen=True)
+class GraphSaveOptions:
+    """Describe one interactive graph-export request."""
+
+    suffix: str
+    dpi: float | None = None
+    transparent: bool = False
+
+
+@dataclass(frozen=True)
+class GraphPointRef:
+    """Reference one plotted data point back to its source row."""
+
+    line_key: tuple[str, float | str]
+    point_index: int
+    x: float
+    y: float
+    source_row_id: int | None = None
+    worksheet_key: Hashable | None = None
+
+
+@dataclass(frozen=True)
+class GraphOutlierMethodResult:
+    """Capture one graph-level outlier method result."""
+
+    key: str
+    title: str
+    masks_by_line: Dict[tuple[str, float | str], np.ndarray]
+    total_flagged: int
 
 
 class WorksheetTableModel(QtCore.QAbstractTableModel):
@@ -3460,6 +3496,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._shared_plot_workbook_by_tab: Dict[QtWidgets.QWidget, Hashable] = {}
         self._pruning_shared_plot_workbooks = False
         self._worksheet_models: Dict[Hashable, WorksheetTableModel] = {}
+        self._bad_data_mode = False
+        self._bad_data_interaction: Dict[str, Any] | None = None
+        self._bad_data_selections: Dict[QtWidgets.QWidget, Dict[tuple[tuple[str, float | str], int], GraphPointRef]] = {}
+        self._bad_data_overlays: Dict[QtWidgets.QWidget, Any] = {}
         self._project_tree_update_depth = 0
         self._project_tree_updates_prev = True
         self._primary_dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
@@ -4009,7 +4049,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 pass
 
     def _save_current_graph(self) -> None:
-        self._save_graph_for_current_tab()
+        options = self._prompt_graph_save_options(parent=self)
+        if options is None:
+            return
+        self._save_graph_for_current_tab(
+            preferred_suffix=options.suffix,
+            dpi_override=options.dpi,
+            transparent=options.transparent,
+        )
 
     def _copy_graph_to_clipboard(
         self,
@@ -4091,7 +4138,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if chosen is copy_action:
             self._copy_graph_to_clipboard(canvas=canvas)
         elif chosen is export_action:
-            self._save_graph_for_current_tab(parent=self)
+            self._save_current_graph()
 
     @staticmethod
     def _is_canvas_context_click(event: Any) -> bool:
@@ -4281,6 +4328,83 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             settings.setValue("last_graph_format", final_suffix)
             settings.sync()
         return True
+
+    def _prompt_graph_save_options(
+        self,
+        *,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> GraphSaveOptions | None:
+        target = parent or self
+        dialog = QtWidgets.QDialog(target)
+        dialog.setWindowTitle("Save graph")
+        dialog.setModal(True)
+        dialog.resize(360, 0)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        note = QtWidgets.QLabel(
+            "Choose export options first. The file picker will open after you confirm."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(8)
+        layout.addLayout(form)
+
+        format_combo = QtWidgets.QComboBox(dialog)
+        format_combo.addItem("PNG image", ".png")
+        format_combo.addItem("PDF document", ".pdf")
+        format_combo.addItem("TIFF image", ".tif")
+        format_combo.addItem("SVG image", ".svg")
+        format_combo.addItem("EPS document", ".eps")
+        current_suffix = str(getattr(self, "_last_graph_format", ".png") or ".png").lower()
+        current_index = format_combo.findData(current_suffix)
+        format_combo.setCurrentIndex(current_index if current_index >= 0 else 0)
+        form.addRow("Format", format_combo)
+
+        dpi_combo = QtWidgets.QComboBox(dialog)
+        dpi_combo.addItem("Use Matplotlib default", None)
+        dpi_combo.addItem("300 dpi", 300.0)
+        dpi_combo.addItem("600 dpi", 600.0)
+        dpi_combo.addItem("1200 dpi", 1200.0)
+        dpi_combo.setCurrentIndex(1 if current_suffix in {".png", ".tif", ".tiff"} else 0)
+        form.addRow("Raster DPI", dpi_combo)
+
+        transparent_cb = QtWidgets.QCheckBox("Transparent background", dialog)
+        form.addRow("", transparent_cb)
+
+        def _sync_export_controls() -> None:
+            suffix = str(format_combo.currentData() or ".png").lower()
+            raster_format = suffix in {".png", ".tif", ".tiff"}
+            dpi_combo.setEnabled(raster_format)
+            if not raster_format:
+                dpi_combo.setCurrentIndex(0)
+            transparent_cb.setEnabled(suffix in {".png", ".pdf", ".svg", ".eps", ".tif", ".tiff"})
+
+        format_combo.currentIndexChanged.connect(_sync_export_controls)
+        _sync_export_controls()
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return None
+
+        suffix = str(format_combo.currentData() or ".png").lower()
+        dpi_data = dpi_combo.currentData()
+        dpi = float(dpi_data) if isinstance(dpi_data, (int, float)) and float(dpi_data) > 0 else None
+        transparent = bool(transparent_cb.isChecked())
+        return GraphSaveOptions(suffix=suffix, dpi=dpi, transparent=transparent)
 
     def _export_current_graph_paper_png(self) -> None:
         self._save_graph_for_current_tab(preferred_suffix=".png", dpi_override=300.0)
@@ -6180,7 +6304,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             export_button.setEnabled(has_worksheets)
         outlier_button = getattr(self, "check_outliers_button", None)
         if isinstance(outlier_button, QtGui.QAction):
-            outlier_button.setEnabled(has_worksheets)
+            outlier_button.setEnabled(has_worksheets or self._current_tab_descriptor() is not None)
         open_button = getattr(self, "open_origin_button", None)
         if isinstance(open_button, QtGui.QAction):
             plugin = getattr(self, "_current_plugin", None)
@@ -6192,11 +6316,222 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 plugin_name = getattr(self, "_current_plotter_name", None)
                 token = plugin_name if isinstance(plugin_name, str) and plugin_name.strip() else None
                 open_button.setEnabled(bool(self._shared_plot_workbooks_for_plugin(token)))
+        self._update_bad_data_actions()
+
+    def _current_plugin_supports_bad_data_removal(self) -> bool:
+        plugin = getattr(self, "_current_plugin", None)
+        return isinstance(plugin, PyPlotPlugin) and bool(plugin.supports_graph_point_removal())
+
+    @staticmethod
+    def _descriptor_has_point_provenance(descriptor: TabDescriptor | None) -> bool:
+        if descriptor is None:
+            return False
+        for state in descriptor.lines.values():
+            source_row_ids = getattr(state, "source_row_ids", None)
+            worksheet_key = getattr(state, "worksheet_key", None)
+            if isinstance(source_row_ids, np.ndarray) and source_row_ids.size and worksheet_key is not None:
+                return True
+        return False
+
+    def _update_bad_data_actions(self) -> None:
+        descriptor = self._current_tab_descriptor()
+        can_select = self._current_plugin_supports_bad_data_removal() and self._descriptor_has_point_provenance(
+            descriptor
+        )
+        remove_action = getattr(self, "remove_bad_data_button", None)
+        if isinstance(remove_action, QtGui.QAction):
+            block = remove_action.blockSignals(True)
+            remove_action.setEnabled(can_select)
+            if not can_select and remove_action.isChecked():
+                remove_action.setChecked(False)
+            elif can_select:
+                remove_action.setChecked(bool(self._bad_data_mode))
+            remove_action.blockSignals(block)
+        delete_action = getattr(self, "delete_bad_data_button", None)
+        current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        has_selection = bool(
+            can_select
+            and isinstance(current_tab, QtWidgets.QWidget)
+            and self._bad_data_selections.get(current_tab)
+        )
+        if isinstance(delete_action, QtGui.QAction):
+            delete_action.setEnabled(has_selection)
+
+    def _handle_remove_bad_data_toggled(self, checked: bool) -> None:
+        self._bad_data_mode = bool(checked)
+        if not self._bad_data_mode:
+            self._bad_data_interaction = None
+        self._update_bad_data_actions()
+
+    @staticmethod
+    def _graph_line_xy(state: GraphLineState) -> tuple[np.ndarray, np.ndarray]:
+        x_values = np.asarray(state.x_data(), dtype=float)
+        y_values = np.asarray(state.y_data(), dtype=float)
+        valid = np.isfinite(x_values) & np.isfinite(y_values)
+        if not np.any(valid):
+            return np.asarray([], dtype=float), np.asarray([], dtype=float)
+        return x_values[valid], y_values[valid]
+
+    @staticmethod
+    def _safe_quantile(values: np.ndarray, q: float, *, fallback: float = 0.0) -> float:
+        finite = values[np.isfinite(values)]
+        if finite.size <= 0:
+            return float(fallback)
+        try:
+            return float(np.quantile(finite, q))
+        except Exception:
+            return float(fallback)
+
+    @staticmethod
+    def _detect_isolated_x_jump_mask(x_values: np.ndarray, y_values: np.ndarray) -> np.ndarray:
+        count = len(x_values)
+        mask = np.zeros(count, dtype=bool)
+        if count < 3:
+            return mask
+        step_x = np.abs(np.diff(x_values))
+        step_y = np.abs(np.diff(y_values))
+        base_x = max(PyPlotWindow._safe_quantile(step_x, 0.8, fallback=0.0), 1e-9)
+        base_y = max(PyPlotWindow._safe_quantile(step_y, 0.8, fallback=0.0), 1e-9)
+        for index in range(1, count - 1):
+            prev_step = abs(x_values[index] - x_values[index - 1])
+            next_step = abs(x_values[index + 1] - x_values[index])
+            x_residual = abs(x_values[index] - ((x_values[index - 1] + x_values[index + 1]) / 2.0))
+            y_residual = abs(y_values[index] - ((y_values[index - 1] + y_values[index + 1]) / 2.0))
+            if (
+                x_residual >= (2.4 * base_x)
+                and y_residual <= (4.0 * base_y)
+                and prev_step <= (1.75 * base_x)
+                and next_step >= (4.0 * base_x)
+            ):
+                mask[index] = True
+        return mask
+
+    @staticmethod
+    def _detect_jump_y_mask(x_values: np.ndarray, y_values: np.ndarray) -> np.ndarray:
+        count = len(y_values)
+        mask = np.zeros(count, dtype=bool)
+        if count < 3:
+            return mask
+        step_y = np.abs(np.diff(y_values))
+        threshold = max(PyPlotWindow._safe_quantile(step_y, 0.995, fallback=0.0), 1e-9) * 1.1
+        if threshold <= 0:
+            return mask
+        for index in range(1, count - 1):
+            local_jump = max(abs(y_values[index] - y_values[index - 1]), abs(y_values[index + 1] - y_values[index]))
+            if local_jump > threshold:
+                mask[index] = True
+        return mask
+
+    @staticmethod
+    def _detect_local_residual_mask(x_values: np.ndarray, y_values: np.ndarray) -> np.ndarray:
+        count = len(x_values)
+        mask = np.zeros(count, dtype=bool)
+        if count < 3:
+            return mask
+        residuals = np.zeros(count, dtype=float)
+        for index in range(1, count - 1):
+            x0, y0 = x_values[index - 1], y_values[index - 1]
+            x1, y1 = x_values[index + 1], y_values[index + 1]
+            dx = x1 - x0
+            dy = y1 - y0
+            denom = math.hypot(dx, dy)
+            if denom <= 0:
+                continue
+            residuals[index] = abs((dy * x_values[index]) - (dx * y_values[index]) + (x1 * y0) - (y1 * x0)) / denom
+        threshold = max(PyPlotWindow._safe_quantile(residuals, 0.995, fallback=0.0), 1e-9)
+        mask = residuals > threshold
+        if mask.size:
+            mask[0] = False
+            mask[-1] = False
+        return mask
+
+    @staticmethod
+    def _detect_percentile_step_mask(x_values: np.ndarray, y_values: np.ndarray) -> np.ndarray:
+        count = len(x_values)
+        mask = np.zeros(count, dtype=bool)
+        if count < 3:
+            return mask
+        dx = np.diff(x_values)
+        dy = np.diff(y_values)
+        step = np.hypot(dx, dy)
+        threshold = max(PyPlotWindow._safe_quantile(step, 0.995, fallback=0.0), 1e-9)
+        for index in range(1, count - 1):
+            if max(step[index - 1], step[index]) > threshold:
+                mask[index] = True
+        return mask
+
+    @staticmethod
+    def _compare_graph_outlier_methods(
+        line_states: Sequence[GraphLineState],
+    ) -> Dict[str, GraphOutlierMethodResult]:
+        method_specs = (
+            ("isolated_x_jump", "Isolated X jump", PyPlotWindow._detect_isolated_x_jump_mask),
+            ("jump_y", "Jump in Y", PyPlotWindow._detect_jump_y_mask),
+            ("local_residual", "Local line residual", PyPlotWindow._detect_local_residual_mask),
+            ("percentile_step", "Percentile step", PyPlotWindow._detect_percentile_step_mask),
+        )
+        results: Dict[str, GraphOutlierMethodResult] = {}
+        for key, title, detector in method_specs:
+            masks_by_line: Dict[tuple[str, float | str], np.ndarray] = {}
+            total = 0
+            for state in line_states:
+                x_values, y_values = PyPlotWindow._graph_line_xy(state)
+                if x_values.size <= 0:
+                    mask = np.zeros(0, dtype=bool)
+                else:
+                    mask = detector(x_values, y_values)
+                masks_by_line[state.key] = mask
+                total += int(mask.sum())
+            results[key] = GraphOutlierMethodResult(
+                key=key,
+                title=title,
+                masks_by_line=masks_by_line,
+                total_flagged=total,
+            )
+        return results
+
+    def _graph_line_states_for_descriptor(self, descriptor: TabDescriptor | None) -> list[GraphLineState]:
+        if descriptor is None:
+            return []
+        states: list[GraphLineState] = []
+        for state in descriptor.lines.values():
+            line = getattr(state, "line", None)
+            if line is None:
+                continue
+            is_visible = getattr(line, "get_visible", None)
+            if callable(is_visible) and not bool(is_visible()):
+                continue
+            states.append(state)
+        return states
+
+    @staticmethod
+    def _outlier_candidate_columns(
+        frame: pd.DataFrame,
+        worksheet: WorksheetData | None = None,
+    ) -> list[str]:
+        columns = [str(column) for column in frame.columns]
+        axis_roles = str(getattr(worksheet, "axis_roles", "") or "")
+        candidates: list[str] = []
+        if axis_roles:
+            for index, role in enumerate(axis_roles):
+                if index >= len(columns):
+                    break
+                column_name = columns[index]
+                if role.upper() in {"X", "Y"} and is_numeric_dtype(frame[column_name]):
+                    candidates.append(column_name)
+        if candidates:
+            return candidates
+        return [
+            str(column)
+            for column in frame.columns
+            if is_numeric_dtype(frame[column]) and not is_bool_dtype(frame[column])
+        ]
 
     @staticmethod
     def _detect_outlier_rows(
         frame: pd.DataFrame,
         *,
+        candidate_columns: Sequence[str] | None = None,
         iqr_factor: float = OUTLIER_IQR_FACTOR,
         min_points: int = OUTLIER_MIN_POINTS,
         zscore_threshold: float = OUTLIER_ZSCORE_THRESHOLD,
@@ -6208,7 +6543,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         combined_mask = pd.Series(False, index=frame.index, dtype=bool)
         column_hits: Dict[str, int] = {}
-        for column in frame.columns:
+        columns_to_check = list(candidate_columns) if candidate_columns else [str(column) for column in frame.columns]
+        for column in columns_to_check:
+            if column not in frame.columns:
+                continue
             series = frame[column]
             if is_bool_dtype(series):
                 continue
@@ -6219,23 +6557,37 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             if len(valid) < max(2, int(min_points)):
                 continue
 
-            q1 = float(valid.quantile(0.25))
-            q3 = float(valid.quantile(0.75))
+            window_size = max(int(min_points), (OUTLIER_LOCAL_HALF_WINDOW * 2) + 1)
+            rolling = values.rolling(
+                window=window_size,
+                center=True,
+                min_periods=max(3, int(min_points)),
+            )
+            median = rolling.median()
+            q1 = rolling.quantile(0.25)
+            q3 = rolling.quantile(0.75)
             iqr = q3 - q1
+            mean = rolling.mean()
+            std = rolling.std(ddof=0)
+
             col_mask = pd.Series(False, index=frame.index, dtype=bool)
-            if np.isfinite(iqr) and iqr > 0:
-                lower = q1 - float(iqr_factor) * iqr
-                upper = q3 + float(iqr_factor) * iqr
-                col_mask = values.lt(lower) | values.gt(upper)
-            else:
-                mean = float(valid.mean())
-                std = float(valid.std(ddof=0))
-                if np.isfinite(std) and std > 0:
-                    z = (values - mean).abs() / std
-                    col_mask = z > float(zscore_threshold)
-                else:
-                    continue
-            col_mask = col_mask.fillna(False).astype(bool)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                iqr_mask = (iqr > 0) & ((values - median).abs() > float(iqr_factor) * iqr)
+                z_mask = (iqr <= 0) & (std > 0) & (((values - mean).abs() / std) > float(zscore_threshold))
+            close_mask = np.isclose(
+                values.to_numpy(dtype=float, na_value=np.nan),
+                median.to_numpy(dtype=float, na_value=np.nan),
+                rtol=1e-6,
+                atol=1e-12,
+                equal_nan=False,
+            )
+            flat_mask = (
+                (iqr <= 0)
+                & values.notna()
+                & median.notna()
+                & pd.Series(~close_mask, index=frame.index)
+            )
+            col_mask = (iqr_mask | z_mask | flat_mask).fillna(False).astype(bool)
             count = int(col_mask.sum())
             if count <= 0:
                 continue
@@ -6249,7 +6601,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             frame = worksheet.dataframe
             if frame is None or frame.empty:
                 continue
-            row_mask, column_hits = self._detect_outlier_rows(frame)
+            candidate_columns = PyPlotWindow._outlier_candidate_columns(frame, worksheet)
+            row_mask, column_hits = self._detect_outlier_rows(
+                frame,
+                candidate_columns=candidate_columns,
+            )
             if not column_hits:
                 continue
             row_indices = np.flatnonzero(row_mask.to_numpy(dtype=bool)).astype(int).tolist()
@@ -6314,6 +6670,127 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         preview.reset_index(drop=True, inplace=True)
         return preview
 
+    @staticmethod
+    def _outlier_plot_axis_label(
+        worksheet: WorksheetData | None,
+        column_name: str,
+    ) -> str:
+        if worksheet is not None:
+            meta = worksheet.columns.get(column_name)
+            if isinstance(meta, WorksheetColumnMeta):
+                label = str(meta.long_name or "").strip() or str(column_name)
+                units = str(meta.units or "").strip()
+                if units:
+                    return f"{label} [{units}]"
+                return label
+        return str(column_name)
+
+    @staticmethod
+    def _preferred_outlier_x_column(
+        frame: pd.DataFrame,
+        worksheet: WorksheetData | None,
+        *,
+        exclude: str,
+    ) -> str | None:
+        columns = [str(column) for column in frame.columns]
+        axis_roles = str(getattr(worksheet, "axis_roles", "") or "")
+        if axis_roles:
+            for index, role in enumerate(axis_roles):
+                if index >= len(columns):
+                    break
+                column_name = columns[index]
+                if role.upper() == "X" and column_name != exclude and is_numeric_dtype(frame[column_name]):
+                    return column_name
+
+        preferred_names = (
+            "temperature",
+            "temp",
+            "pv_c",
+            "sp_c",
+            "field",
+            "time",
+            "t_elapsed_s",
+            "elapsed",
+            "index",
+            "x",
+        )
+        lowered = {str(column).strip().lower(): str(column) for column in frame.columns}
+        for name in preferred_names:
+            candidate = lowered.get(name)
+            if candidate and candidate != exclude and is_numeric_dtype(frame[candidate]):
+                return candidate
+
+        numeric_columns = [
+            str(column)
+            for column in frame.columns
+            if str(column) != exclude and is_numeric_dtype(frame[column])
+        ]
+        return numeric_columns[0] if numeric_columns else None
+
+    def _create_outlier_preview_figure(
+        self,
+        finding: WorksheetOutlierFinding,
+    ) -> Figure | None:
+        worksheet = self._worksheets.get(finding.worksheet_key)
+        frame = worksheet.dataframe if worksheet is not None else pd.DataFrame()
+        if frame.empty:
+            return None
+
+        mask = finding.row_mask.reindex(frame.index, fill_value=False).astype(bool)
+        flagged_numeric_columns = [str(column) for column in finding.column_hits if column in frame.columns]
+        if not flagged_numeric_columns:
+            return None
+
+        figure, axes = plt.subplots(
+            len(flagged_numeric_columns),
+            1,
+            figsize=(6.4, max(2.8, 2.8 * len(flagged_numeric_columns))),
+            squeeze=False,
+        )
+        palette = ("#2563eb", "#7c3aed", "#059669", "#ea580c")
+        row_numbers = np.arange(1, len(frame.index) + 1, dtype=float)
+
+        for axis, column_name, color in zip(axes.flatten(), flagged_numeric_columns, palette * len(flagged_numeric_columns)):
+            x_values = row_numbers
+            x_label = "Row"
+            y_values = pd.to_numeric(frame[column_name], errors="coerce").to_numpy(dtype=float)
+            valid = np.isfinite(x_values) & np.isfinite(y_values)
+            if not np.any(valid):
+                continue
+            x_plot = x_values[valid]
+            y_plot = y_values[valid]
+            flagged = mask.to_numpy(dtype=bool)[valid]
+
+            axis.scatter(
+                x_plot,
+                y_plot,
+                color="#6b7280",
+                s=18,
+                alpha=0.85,
+                label="Data",
+            )
+            if np.any(flagged):
+                axis.scatter(
+                    x_plot[flagged],
+                    y_plot[flagged],
+                    s=38,
+                    color=color,
+                    edgecolors="#111827",
+                    linewidths=0.45,
+                    zorder=4,
+                    label="Flagged",
+                )
+            axis.set_xlabel(x_label)
+            axis.set_ylabel(PyPlotWindow._outlier_plot_axis_label(worksheet, column_name))
+            axis.set_title(str(column_name), fontsize=10)
+            axis.grid(True, linestyle="--", alpha=0.25)
+            axis.tick_params(axis="both", labelsize=9)
+            if np.any(flagged):
+                axis.legend(loc="best", fontsize=8)
+
+        figure.tight_layout()
+        return figure
+
     def _build_outlier_preview_tab(
         self,
         finding: WorksheetOutlierFinding,
@@ -6329,6 +6806,25 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if preview.empty:
             layout.addWidget(QtWidgets.QLabel("No preview rows are available for this worksheet."))
             return container
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical, container)
+        splitter.setChildrenCollapsible(False)
+
+        figure = self._create_outlier_preview_figure(finding)
+        if figure is not None:
+            graph_container = QtWidgets.QWidget(splitter)
+            graph_layout = QtWidgets.QVBoxLayout(graph_container)
+            graph_layout.setContentsMargins(0, 0, 0, 0)
+            graph_layout.setSpacing(4)
+            graph_hint = QtWidgets.QLabel(
+                "Flagged points are highlighted in red on the preview graph."
+            )
+            graph_hint.setWordWrap(True)
+            graph_layout.addWidget(graph_hint)
+            canvas = FigureCanvas(figure)
+            canvas.setMinimumHeight(220)
+            graph_layout.addWidget(canvas, 1)
+            splitter.addWidget(graph_container)
 
         table = QtWidgets.QTableWidget(preview.shape[0], preview.shape[1], container)
         table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -6355,8 +6851,61 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if header is not None:
             header.setStretchLastSection(True)
         table.resizeColumnsToContents()
-        layout.addWidget(table, 1)
+        splitter.addWidget(table)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        layout.addWidget(splitter, 1)
         return container
+
+    @staticmethod
+    def _clear_layout(layout: QtWidgets.QLayout | None) -> None:
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                PyPlotWindow._clear_layout(child_layout)
+            del item
+
+    def _create_outlier_preview_placeholder(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget(parent)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        label = QtWidgets.QLabel("Loading preview...")
+        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        label.setWordWrap(True)
+        layout.addWidget(label, 1)
+        container.setProperty("mw_outlier_preview_loaded", False)
+        return container
+
+    def _ensure_outlier_preview_loaded(
+        self,
+        tabs: QtWidgets.QTabWidget,
+        findings: Sequence[WorksheetOutlierFinding],
+        index: int,
+    ) -> None:
+        if index < 0 or index >= len(findings):
+            return
+        page = tabs.widget(index)
+        if not isinstance(page, QtWidgets.QWidget):
+            return
+        if bool(page.property("mw_outlier_preview_loaded")):
+            return
+        layout = page.layout()
+        if not isinstance(layout, QtWidgets.QVBoxLayout):
+            return
+        built = self._build_outlier_preview_tab(findings[index])
+        self._clear_layout(layout)
+        layout.addWidget(built, 1)
+        page.setProperty("mw_outlier_preview_loaded", True)
+        QtWidgets.QApplication.processEvents(
+            QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+        )
 
     def _apply_outlier_findings(self, findings: Sequence[WorksheetOutlierFinding]) -> int:
         removed_rows = 0
@@ -6391,6 +6940,231 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             self._mark_project_dirty()
         return removed_rows
 
+    def _graph_point_refs_for_method(
+        self,
+        descriptor: TabDescriptor,
+        result: GraphOutlierMethodResult,
+    ) -> list[GraphPointRef]:
+        refs_by_key = {
+            (ref.line_key, ref.point_index): ref
+            for ref in self._iter_point_refs_for_descriptor(descriptor)
+        }
+        refs: list[GraphPointRef] = []
+        for line_state in self._graph_line_states_for_descriptor(descriptor):
+            mask = result.masks_by_line.get(line_state.key)
+            if mask is None or not np.any(mask):
+                continue
+            for index, flagged in enumerate(mask.tolist()):
+                if not flagged:
+                    continue
+                ref = refs_by_key.get((line_state.key, index))
+                if ref is not None:
+                    refs.append(ref)
+        return refs
+
+    def _create_graph_outlier_comparison_figure(
+        self,
+        descriptor: TabDescriptor,
+        results: Sequence[GraphOutlierMethodResult],
+    ) -> Figure:
+        line_states = self._graph_line_states_for_descriptor(descriptor)
+        figure, axes_grid = plt.subplots(2, 2, figsize=(10.5, 7.8), squeeze=False)
+        axes_list = list(axes_grid.flatten())
+        for axis, result in zip(axes_list, results):
+            legend_drawn = False
+            for state in line_states:
+                x_values, y_values = self._graph_line_xy(state)
+                if x_values.size <= 0:
+                    continue
+                line = getattr(state, "line", None)
+                color = "#6b7280"
+                if line is not None:
+                    getter = getattr(line, "get_color", None)
+                    if callable(getter):
+                        try:
+                            color = str(getter())
+                        except Exception:
+                            color = "#6b7280"
+                label = state.label if not legend_drawn else "_nolegend_"
+                axis.plot(
+                    x_values,
+                    y_values,
+                    color=color,
+                    linewidth=1.4,
+                    marker="o",
+                    markersize=2.2,
+                    alpha=0.9,
+                    label=label,
+                )
+                mask = result.masks_by_line.get(state.key)
+                if mask is not None and np.any(mask):
+                    axis.scatter(
+                        x_values[mask],
+                        y_values[mask],
+                        s=22,
+                        color="#111111",
+                        edgecolors="#ffffff",
+                        linewidths=0.35,
+                        zorder=5,
+                        label="Flagged" if not legend_drawn else "_nolegend_",
+                    )
+                legend_drawn = True
+            axis.set_title(f"{result.title}\nflagged: {result.total_flagged}", fontsize=10)
+            axis.set_xlabel(descriptor.x_label or "X")
+            axis.set_ylabel(descriptor.y_label or "Y")
+            axis.grid(True, linestyle="--", alpha=0.25)
+            if axis is axes_list[0]:
+                axis.legend(loc="best", fontsize=8)
+        for axis in axes_list[len(results):]:
+            axis.set_visible(False)
+        figure.tight_layout()
+        return figure
+
+    def _populate_graph_outlier_table(
+        self,
+        table: QtWidgets.QTableWidget,
+        descriptor: TabDescriptor,
+        result: GraphOutlierMethodResult,
+    ) -> int:
+        refs = self._graph_point_refs_for_method(descriptor, result)
+        headers = ["Series", "Row", "X", "Y", "Worksheet"]
+        table.clear()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(refs))
+        for row_index, ref in enumerate(refs):
+            values = [
+                str(ref.line_key[0]),
+                "" if ref.source_row_id is None else str(int(ref.source_row_id) + 1),
+                f"{ref.x:.6g}",
+                f"{ref.y:.6g}",
+                "" if ref.worksheet_key is None else str(ref.worksheet_key).split("::")[-1],
+            ]
+            for col_index, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(value)
+                table.setItem(row_index, col_index, item)
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(True)
+        table.resizeColumnsToContents()
+        return len(refs)
+
+    def _show_graph_outliers_dialog(self, descriptor: TabDescriptor) -> None:
+        line_states = self._graph_line_states_for_descriptor(descriptor)
+        if not line_states:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Check outliers",
+                "The current graph does not have any visible plotted series.",
+            )
+            return
+        methods = self._compare_graph_outlier_methods(line_states)
+        ordered_results = [
+            methods[key]
+            for key in ("isolated_x_jump", "jump_y", "local_residual", "percentile_step")
+            if key in methods
+        ]
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Check outliers")
+        dialog.resize(1100, 820)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        summary = QtWidgets.QLabel(
+            "Comparison view uses the actual plotted graph. Review the methods below and choose one if you want to remove its flagged points."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        figure = self._create_graph_outlier_comparison_figure(descriptor, ordered_results)
+        canvas = FigureCanvas(figure)
+        canvas.setMinimumHeight(420)
+        layout.addWidget(canvas, 1)
+
+        controls_row = QtWidgets.QHBoxLayout()
+        controls_row.setSpacing(8)
+        controls_row.addWidget(QtWidgets.QLabel("Review method:"))
+        method_combo = QtWidgets.QComboBox(dialog)
+        for result in ordered_results:
+            method_combo.addItem(f"{result.title} ({result.total_flagged})", result.key)
+        controls_row.addWidget(method_combo, 0)
+        method_summary = QtWidgets.QLabel("")
+        method_summary.setWordWrap(True)
+        controls_row.addWidget(method_summary, 1)
+        layout.addLayout(controls_row)
+
+        table = QtWidgets.QTableWidget(dialog)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.setMinimumHeight(180)
+        layout.addWidget(table)
+
+        buttons = QtWidgets.QDialogButtonBox(dialog)
+        remove_button = buttons.addButton(
+            "Remove flagged rows",
+            QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole,
+        )
+        close_button = buttons.addButton(
+            "Keep data",
+            QtWidgets.QDialogButtonBox.ButtonRole.RejectRole,
+        )
+        remove_button.setDefault(False)
+        close_button.setDefault(True)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        selected_method: dict[str, GraphOutlierMethodResult] = {}
+
+        def _refresh_current_method() -> None:
+            method_key = str(method_combo.currentData() or "")
+            result = methods.get(method_key)
+            if result is None:
+                table.setRowCount(0)
+                method_summary.setText("No method selected.")
+                remove_button.setEnabled(False)
+                selected_method.clear()
+                return
+            selected_method["value"] = result
+            count = self._populate_graph_outlier_table(table, descriptor, result)
+            method_summary.setText(
+                f"{result.title} flagged {count} point(s) on the current graph."
+            )
+            can_remove = bool(
+                self._current_plugin_supports_bad_data_removal()
+                and count > 0
+                and self._descriptor_has_point_provenance(descriptor)
+            )
+            remove_button.setEnabled(can_remove)
+
+        method_combo.currentIndexChanged.connect(lambda _index: _refresh_current_method())
+        _refresh_current_method()
+
+        def _accept_remove() -> None:
+            result = selected_method.get("value")
+            if result is None:
+                dialog.reject()
+                return
+            refs = self._graph_point_refs_for_method(descriptor, result)
+            if not refs:
+                dialog.reject()
+                return
+            plugin = getattr(self, "_current_plugin", None)
+            if not isinstance(plugin, PyPlotPlugin) or not plugin.supports_graph_point_removal():
+                dialog.reject()
+                return
+            removed = int(plugin.remove_graph_points(descriptor=descriptor, point_refs=refs))
+            if removed > 0:
+                self._append_log(
+                    f"Outlier cleanup removed {removed} point(s) using {result.title}."
+                )
+            dialog.accept()
+
+        remove_button.clicked.connect(_accept_remove)
+        dialog.exec()
+
     def _show_check_outliers_dialog(self) -> None:
         worksheet_count = len(self._worksheets)
         if worksheet_count <= 0:
@@ -6412,7 +7186,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
 
         total_rows = sum(finding.outlier_count for finding in findings)
-        detail_text = self._format_outlier_findings(findings)
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Check outliers")
         dialog.resize(980, 600)
@@ -6437,15 +7210,23 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         tabs = QtWidgets.QTabWidget(dialog)
         for finding in findings:
             title = f"{finding.workbook_name} / {finding.worksheet_name}"
-            tabs.addTab(self._build_outlier_preview_tab(finding), title)
+            tabs.addTab(self._create_outlier_preview_placeholder(tabs), title)
+        tabs.currentChanged.connect(
+            lambda idx, tabs=tabs, findings=findings: self._ensure_outlier_preview_loaded(
+                tabs,
+                findings,
+                idx,
+            )
+        )
         dialog_layout.addWidget(tabs, 1)
-
-        if detail_text:
-            detail_box = QtWidgets.QPlainTextEdit(dialog)
-            detail_box.setReadOnly(True)
-            detail_box.setPlainText(detail_text)
-            detail_box.setMaximumHeight(120)
-            dialog_layout.addWidget(detail_box)
+        QtCore.QTimer.singleShot(
+            0,
+            lambda tabs=tabs, findings=findings: self._ensure_outlier_preview_loaded(
+                tabs,
+                findings,
+                tabs.currentIndex(),
+            ),
+        )
 
         buttons = QtWidgets.QDialogButtonBox(dialog)
         remove_button = buttons.addButton(
@@ -6477,6 +7258,277 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         """Backward-compatible alias for older action wiring."""
 
         self._show_check_outliers_dialog()
+
+    def _iter_point_refs_for_descriptor(self, descriptor: TabDescriptor) -> Iterator[GraphPointRef]:
+        for state in self._graph_line_states_for_descriptor(descriptor):
+            source_row_ids = getattr(state, "source_row_ids", None)
+            worksheet_key = getattr(state, "worksheet_key", None)
+            if not isinstance(source_row_ids, np.ndarray):
+                continue
+            x_values, y_values = self._graph_line_xy(state)
+            count = min(len(x_values), len(y_values), int(source_row_ids.size))
+            for index in range(count):
+                yield GraphPointRef(
+                    line_key=state.key,
+                    point_index=index,
+                    x=float(x_values[index]),
+                    y=float(y_values[index]),
+                    source_row_id=int(source_row_ids[index]),
+                    worksheet_key=worksheet_key,
+                )
+
+    def _selected_bad_point_refs(self, tab: QtWidgets.QWidget | None = None) -> list[GraphPointRef]:
+        if tab is None:
+            tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        if not isinstance(tab, QtWidgets.QWidget):
+            return []
+        refs = self._bad_data_selections.get(tab, {})
+        return list(refs.values())
+
+    def _update_bad_data_overlay(self, tab: QtWidgets.QWidget | None = None) -> None:
+        if tab is None:
+            tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        if not isinstance(tab, QtWidgets.QWidget):
+            return
+        descriptor = self._tab_descriptors.get(tab)
+        axes = getattr(descriptor, "axes", None) if descriptor is not None else None
+        canvas = self._canvas_by_tab.get(tab)
+        if axes is None or canvas is None:
+            return
+        overlay = self._bad_data_overlays.pop(tab, None)
+        if overlay is not None:
+            try:
+                overlay.remove()
+            except Exception:
+                pass
+        refs = self._selected_bad_point_refs(tab)
+        if refs:
+            offsets = np.asarray([[ref.x, ref.y] for ref in refs], dtype=float)
+            overlay = axes.scatter(
+                offsets[:, 0],
+                offsets[:, 1],
+                s=70,
+                facecolors="#facc15",
+                edgecolors="#111827",
+                linewidths=0.9,
+                zorder=7,
+                label="_mw_bad_data_selection",
+            )
+            self._bad_data_overlays[tab] = overlay
+        try:
+            canvas.draw_idle()
+        except Exception:
+            pass
+        self._update_bad_data_actions()
+
+    def _toggle_bad_point_ref(self, tab: QtWidgets.QWidget, ref: GraphPointRef) -> None:
+        bucket = self._bad_data_selections.setdefault(tab, {})
+        key = (ref.line_key, ref.point_index)
+        if key in bucket:
+            bucket.pop(key, None)
+        else:
+            bucket[key] = ref
+        if not bucket:
+            self._bad_data_selections.pop(tab, None)
+        self._update_bad_data_overlay(tab)
+
+    def _add_bad_point_refs(self, tab: QtWidgets.QWidget, refs: Iterable[GraphPointRef]) -> None:
+        bucket = self._bad_data_selections.setdefault(tab, {})
+        added = False
+        for ref in refs:
+            key = (ref.line_key, ref.point_index)
+            if key in bucket:
+                continue
+            bucket[key] = ref
+            added = True
+        if added:
+            self._update_bad_data_overlay(tab)
+
+    def _nearest_bad_point_ref(
+        self,
+        event: Any,
+        descriptor: TabDescriptor,
+        *,
+        max_distance_px: float = 10.0,
+    ) -> GraphPointRef | None:
+        axes = getattr(descriptor, "axes", None)
+        if axes is None:
+            return None
+        ex = getattr(event, "x", None)
+        ey = getattr(event, "y", None)
+        if ex is None or ey is None:
+            return None
+        best: tuple[float, GraphPointRef] | None = None
+        for ref in self._iter_point_refs_for_descriptor(descriptor):
+            try:
+                px, py = axes.transData.transform((ref.x, ref.y))
+            except Exception:
+                continue
+            distance = math.hypot(float(px) - float(ex), float(py) - float(ey))
+            if distance > max_distance_px:
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, ref)
+        return best[1] if best is not None else None
+
+    def _bad_point_refs_in_rect(
+        self,
+        descriptor: TabDescriptor,
+        *,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+    ) -> list[GraphPointRef]:
+        x_min, x_max = sorted((float(x0), float(x1)))
+        y_min, y_max = sorted((float(y0), float(y1)))
+        refs: list[GraphPointRef] = []
+        for ref in self._iter_point_refs_for_descriptor(descriptor):
+            if x_min <= ref.x <= x_max and y_min <= ref.y <= y_max:
+                refs.append(ref)
+        return refs
+
+    def _start_bad_data_drag(self, event: Any, axes: Any) -> None:
+        x0 = getattr(event, "xdata", None)
+        y0 = getattr(event, "ydata", None)
+        canvas = getattr(event, "canvas", None)
+        tab = self._tab_for_canvas(canvas)
+        if x0 is None or y0 is None or tab is None:
+            return
+        preview = Rectangle(
+            (float(x0), float(y0)),
+            0.0,
+            0.0,
+            fill=False,
+            linestyle="--",
+            linewidth=1.1,
+            edgecolor="#f59e0b",
+            zorder=6,
+        )
+        try:
+            axes.add_patch(preview)
+        except Exception:
+            return
+        self._bad_data_interaction = {
+            "canvas": canvas,
+            "tab": tab,
+            "axes": axes,
+            "start": (float(x0), float(y0)),
+            "press_px": (float(getattr(event, "x", 0.0) or 0.0), float(getattr(event, "y", 0.0) or 0.0)),
+            "preview": preview,
+        }
+        self._redraw_artist(preview)
+
+    def _update_bad_data_preview_geometry(self, interaction: Dict[str, Any], x1: float, y1: float) -> None:
+        preview = interaction.get("preview")
+        if not isinstance(preview, Rectangle):
+            return
+        x0, y0 = interaction.get("start", (0.0, 0.0))
+        preview.set_x(min(x0, x1))
+        preview.set_y(min(y0, y1))
+        preview.set_width(abs(x1 - x0))
+        preview.set_height(abs(y1 - y0))
+
+    def _handle_bad_data_button_press(self, event: Any) -> bool:
+        if not self._bad_data_mode or getattr(event, "button", None) != 1:
+            return False
+        descriptor = self._current_tab_descriptor()
+        if not self._descriptor_has_point_provenance(descriptor):
+            return False
+        candidates = self._event_candidate_axes(event)
+        if not candidates:
+            return False
+        axes = candidates[0]
+        if getattr(event, "xdata", None) is None or getattr(event, "ydata", None) is None:
+            return False
+        self._start_bad_data_drag(event, axes)
+        return True
+
+    def _handle_bad_data_motion(self, event: Any) -> bool:
+        interaction = self._bad_data_interaction
+        if not isinstance(interaction, dict):
+            return False
+        if interaction.get("canvas") is not getattr(event, "canvas", None):
+            return False
+        x1 = getattr(event, "xdata", None)
+        y1 = getattr(event, "ydata", None)
+        if x1 is None or y1 is None:
+            return True
+        self._update_bad_data_preview_geometry(interaction, float(x1), float(y1))
+        preview = interaction.get("preview")
+        if preview is not None:
+            self._redraw_artist(preview)
+        return True
+
+    def _handle_bad_data_button_release(self, event: Any) -> bool:
+        interaction = self._bad_data_interaction
+        if not isinstance(interaction, dict):
+            return False
+        if interaction.get("canvas") is not getattr(event, "canvas", None):
+            return False
+        self._bad_data_interaction = None
+        preview = interaction.get("preview")
+        if preview is not None:
+            try:
+                preview.remove()
+            except Exception:
+                pass
+        tab = interaction.get("tab")
+        descriptor = self._tab_descriptors.get(tab) if isinstance(tab, QtWidgets.QWidget) else None
+        if not isinstance(tab, QtWidgets.QWidget) or descriptor is None:
+            return True
+        x1 = getattr(event, "xdata", None)
+        y1 = getattr(event, "ydata", None)
+        if x1 is None or y1 is None:
+            self._update_bad_data_overlay(tab)
+            return True
+        px0, py0 = interaction.get("press_px", (0.0, 0.0))
+        px1 = float(getattr(event, "x", px0) or px0)
+        py1 = float(getattr(event, "y", py0) or py0)
+        if math.hypot(px1 - px0, py1 - py0) <= 5.0:
+            ref = self._nearest_bad_point_ref(event, descriptor)
+            if ref is not None:
+                self._toggle_bad_point_ref(tab, ref)
+            else:
+                self._update_bad_data_overlay(tab)
+            return True
+        x0, y0 = interaction.get("start", (float(x1), float(y1)))
+        refs = self._bad_point_refs_in_rect(
+            descriptor,
+            x0=float(x0),
+            y0=float(y0),
+            x1=float(x1),
+            y1=float(y1),
+        )
+        self._add_bad_point_refs(tab, refs)
+        return True
+
+    def _delete_selected_bad_data_points(self) -> None:
+        current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        if not isinstance(current_tab, QtWidgets.QWidget):
+            return
+        descriptor = self._tab_descriptors.get(current_tab)
+        refs = self._selected_bad_point_refs(current_tab)
+        if descriptor is None or not refs:
+            return
+        plugin = getattr(self, "_current_plugin", None)
+        if not isinstance(plugin, PyPlotPlugin) or not plugin.supports_graph_point_removal():
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Remove bad data points",
+            f"Delete {len(refs)} selected point(s) from the current graph data?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        removed = int(plugin.remove_graph_points(descriptor=descriptor, point_refs=refs))
+        if removed > 0:
+            self._bad_data_mode = False
+            self._bad_data_selections.pop(current_tab, None)
+            self._update_bad_data_overlay(current_tab)
+            self._update_bad_data_actions()
 
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
         raise NotImplementedError
@@ -7808,36 +8860,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.save_graph_button = save_action
         self._style_toolbar_button(toolbar, save_action)
 
-        paper_png_action = toolbar.addAction("Paper PNG")
-        paper_png_action.setEnabled(False)
-        paper_png_action.triggered.connect(self._export_current_graph_paper_png)
-        self._paper_png_action = paper_png_action
-        self._style_toolbar_button(toolbar, paper_png_action)
-
-        paper_pdf_action = toolbar.addAction("Paper PDF")
-        paper_pdf_action.setEnabled(False)
-        paper_pdf_action.triggered.connect(self._export_current_graph_paper_pdf)
-        self._paper_pdf_action = paper_pdf_action
-        self._style_toolbar_button(toolbar, paper_pdf_action)
-
-        paper_tiff_action = toolbar.addAction("Paper TIFF")
-        paper_tiff_action.setEnabled(False)
-        paper_tiff_action.triggered.connect(self._export_current_graph_paper_tiff)
-        self._paper_tiff_action = paper_tiff_action
-        self._style_toolbar_button(toolbar, paper_tiff_action)
-
-        paper_eps_action = toolbar.addAction("Paper EPS")
-        paper_eps_action.setEnabled(False)
-        paper_eps_action.triggered.connect(self._export_current_graph_paper_eps)
-        self._paper_eps_action = paper_eps_action
-        self._style_toolbar_button(toolbar, paper_eps_action)
-
-        transparent_png_action = toolbar.addAction("Transparent PNG")
-        transparent_png_action.setEnabled(False)
-        transparent_png_action.triggered.connect(self._export_current_graph_transparent_png)
-        self._transparent_png_action = transparent_png_action
-        self._style_toolbar_button(toolbar, transparent_png_action)
-
         normalize_action = toolbar.addAction("Normalize Y")
         normalize_action.setEnabled(False)
         normalize_action.triggered.connect(self._normalize_current_graph)
@@ -7873,6 +8895,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         check_outliers_action.triggered.connect(self._show_check_outliers_dialog)
         self.check_outliers_button = check_outliers_action
         self._style_toolbar_button(toolbar, check_outliers_action)
+
+        remove_bad_data_action = toolbar.addAction("Remove bad data points...")
+        remove_bad_data_action.setCheckable(True)
+        remove_bad_data_action.setEnabled(False)
+        remove_bad_data_action.toggled.connect(self._handle_remove_bad_data_toggled)
+        self.remove_bad_data_button = remove_bad_data_action
+        self._style_toolbar_button(toolbar, remove_bad_data_action)
+
+        delete_selected_points_action = toolbar.addAction("Delete selected points")
+        delete_selected_points_action.setEnabled(False)
+        delete_selected_points_action.triggered.connect(self._delete_selected_bad_data_points)
+        self.delete_bad_data_button = delete_selected_points_action
+        self._style_toolbar_button(toolbar, delete_selected_points_action)
 
     def _setup_navigation_toolbar(self) -> None:
         toolbar = QtWidgets.QToolBar("Navigation", self)
@@ -7984,6 +9019,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if tab is None:
             return None
         return self._axes_by_tab.get(tab)
+
+    def _current_tab_descriptor(self) -> TabDescriptor | None:
+        current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        if not isinstance(current_tab, QtWidgets.QWidget):
+            return None
+        return self._tab_descriptors.get(current_tab)
+
+    def _tab_for_canvas(self, canvas: FigureCanvas | None) -> QtWidgets.QWidget | None:
+        if canvas is None:
+            return None
+        for candidate_tab, candidate_canvas in self._canvas_by_tab.items():
+            if candidate_canvas is canvas:
+                return candidate_tab
+        return None
 
     def _set_navigation_mode(self, mode: Optional[str]) -> None:
         if mode not in {"zoom", "pan"}:
@@ -9031,11 +10080,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         is_layout_graph = bool(descriptor is not None and descriptor.kind == "layout_graph")
         for button in (
             getattr(self, "save_graph_button", None),
-            getattr(self, "_paper_png_action", None),
-            getattr(self, "_paper_pdf_action", None),
-            getattr(self, "_paper_tiff_action", None),
-            getattr(self, "_paper_eps_action", None),
-            getattr(self, "_transparent_png_action", None),
             getattr(self, "_export_all_figures_action", None),
         ):
             if hasattr(button, "setEnabled"):
@@ -9050,6 +10094,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         ):
             if isinstance(action, QtGui.QAction):
                 action.setEnabled(is_layout_graph)
+        self._update_bad_data_actions()
 
     def _update_normalize_enabled(self) -> None:
         button = getattr(self, "normalize_button", None)
@@ -17367,6 +18412,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             preview.height = abs(y1 - y0)
 
     def _handle_canvas_motion(self, event: Any) -> None:
+        if self._handle_bad_data_motion(event):
+            return
         interaction = self._annotation_interaction
         if not isinstance(interaction, dict):
             return
@@ -17389,6 +18436,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             self._redraw_artist(preview)
 
     def _handle_canvas_button_release(self, event: Any) -> None:
+        if self._handle_bad_data_button_release(event):
+            return
         interaction = self._annotation_interaction
         if not isinstance(interaction, dict):
             return
@@ -17434,6 +18483,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             self._show_canvas_context_menu(event)
             return
         if self._nav_mode in {"zoom", "pan"}:
+            return
+        if self._handle_bad_data_button_press(event):
             return
         candidates = self._event_candidate_axes(event)
         tool = str(self._annotation_tool or "select")
@@ -17801,6 +18852,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return None
         title = self.tab_widget.tabText(index)
         icon = self.tab_widget.tabIcon(index)
+        overlay = self._bad_data_overlays.pop(tab, None)
+        if overlay is not None:
+            try:
+                overlay.remove()
+            except Exception:
+                pass
+        self._bad_data_selections.pop(tab, None)
         descriptor = self._tab_descriptors.pop(tab, None)
         canvas = self._canvas_by_tab.pop(tab, None)
         axes = self._axes_by_tab.pop(tab, None)
@@ -18091,6 +19149,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         # Update cursor label immediately when switching tabs
         self._update_cursor_status(None)
         self._update_navigation_enabled()
+        self._update_bad_data_actions()
         if tab is not None:
             axes = self._axes_by_tab.get(tab)
             figure = getattr(axes, "figure", None) if axes is not None else None

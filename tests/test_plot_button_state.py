@@ -73,6 +73,40 @@ def test_plot_button_requires_data_before_click() -> None:
         app.processEvents()
 
 
+def test_shared_toolbar_uses_single_save_graph_action() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        toolbar = getattr(window, "_action_toolbar", None)
+        assert isinstance(toolbar, QtWidgets.QToolBar)
+        action_texts = [action.text() for action in toolbar.actions() if action.text()]
+
+        assert "Save graph..." in action_texts
+        assert "Paper PNG" not in action_texts
+        assert "Paper PDF" not in action_texts
+        assert "Paper TIFF" not in action_texts
+        assert "Paper EPS" not in action_texts
+        assert "Transparent PNG" not in action_texts
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_shared_toolbar_exposes_bad_data_cleanup_actions() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        toolbar = getattr(window, "_action_toolbar", None)
+        assert isinstance(toolbar, QtWidgets.QToolBar)
+        action_texts = [action.text() for action in toolbar.actions() if action.text()]
+
+        assert "Remove bad data points..." in action_texts
+        assert "Delete selected points" in action_texts
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_graph_formatting_controls_apply_to_current_axes() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()

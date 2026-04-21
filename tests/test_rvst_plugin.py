@@ -44,9 +44,11 @@ def test_load_file_reads_semicolon_rvst_csv(tmp_path: Path) -> None:
         "sp_c",
         "pv_c",
         "resistance_ohm",
+        "_source_row_id",
     ]
     assert df["pv_c"].tolist() == pytest.approx([-42.5, -42.6])
     assert df["resistance_ohm"].tolist() == pytest.approx([0.065962, 0.065963])
+    assert df["_source_row_id"].tolist() == [0, 1]
 
 
 def test_load_file_filters_impossible_temperature_glitches(tmp_path: Path) -> None:
@@ -113,6 +115,24 @@ def test_split_heating_cooling_uses_setpoint_direction_when_measured_temperature
     segments = rvst_core.split_heating_cooling(df)
 
     assert [segment.label for segment in segments] == ["Heating 1", "Cooling 1"]
+
+
+def test_split_heating_cooling_preserves_source_row_ids() -> None:
+    df = pd.DataFrame(
+        {
+            "_source_row_id": [10, 11, 12, 13, 14, 15],
+            "sp_c": [-10.0, -8.0, -6.0, -8.0, -10.0, -12.0],
+            "pv_c": [-10.1, -8.2, -6.2, -7.9, -10.1, -12.2],
+            "resistance_ohm": [1.0, 1.1, 1.2, 1.15, 1.05, 0.95],
+        }
+    )
+
+    segments = rvst_core.split_heating_cooling(df)
+
+    assert [segment.frame["_source_row_id"].tolist() for segment in segments] == [
+        [10, 11, 12],
+        [12, 13, 14, 15],
+    ]
 
 
 def test_plot_one_uses_measured_temperature_and_grouped_legend_labels() -> None:

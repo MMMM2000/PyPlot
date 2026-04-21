@@ -96,6 +96,7 @@ def load_file(path: str | Path) -> pd.DataFrame:
         frame = frame.loc[valid_resistance].reset_index(drop=True)
     if frame.empty:
         raise ValueError(f"{path}: no usable samples after parsing")
+    frame["_source_row_id"] = np.arange(len(frame), dtype=int)
     return frame
 
 
@@ -152,7 +153,7 @@ def split_heating_cooling(df: pd.DataFrame) -> list[RVsTSegment]:
     )
     resistances = pd.to_numeric(df["resistance_ohm"], errors="coerce").to_numpy(dtype=float)
     mask = np.isfinite(temperatures) & np.isfinite(setpoints) & np.isfinite(resistances)
-    frame = df.loc[mask].reset_index(drop=True)
+    frame = df.loc[mask].copy().reset_index(drop=True)
     temperatures = temperatures[mask]
     setpoints = setpoints[mask]
     resistances = resistances[mask]
@@ -167,7 +168,7 @@ def split_heating_cooling(df: pd.DataFrame) -> list[RVsTSegment]:
         if end <= start:
             continue
         slice_start = start if index == 0 else max(0, start - 1)
-        segment_frame = frame.iloc[slice_start:end].reset_index(drop=True)
+        segment_frame = frame.iloc[slice_start:end].copy().reset_index(drop=True)
         segment_x = temperatures[slice_start:end]
         segment_y = resistances[slice_start:end]
         if direction >= 0:
