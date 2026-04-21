@@ -6112,6 +6112,22 @@ def _microscope_index_to_frame(
 ) -> pd.DataFrame:
     columns = MICROSCOPE_TABLE_COLUMNS.copy()
 
+    def _category_value(
+        detection: Optional[MicroscopeDetection],
+        expected_category: str,
+    ) -> Optional[float]:
+        if not isinstance(detection, MicroscopeDetection):
+            return None
+        if getattr(detection, "category", None) != expected_category:
+            return None
+        try:
+            numeric = float(detection.value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(numeric) or numeric <= 0:
+            return None
+        return numeric
+
     def _image_path(entries: Sequence[MicroscopeDetection]) -> Optional[str]:
         for detection in entries:
             crop = getattr(detection, "crop_path", None)
@@ -6136,10 +6152,10 @@ def _microscope_index_to_frame(
         override = overrides.get(key, {})
         d_value = override.get("d")
         if d_value is None:
-            d_value = measurements.best_core()
+            d_value = _category_value(measurements.best_core_detection(), "core")
         D_value = override.get("D")
         if D_value is None:
-            D_value = measurements.best_glass()
+            D_value = _category_value(measurements.best_glass_detection(), "glass")
         ratio = None
         if isinstance(d_value, (int, float)) and isinstance(D_value, (int, float)) and D_value:
             try:
@@ -10902,44 +10918,6 @@ class MicroscopeSection(MiniDatabaseSection):
     def _protected_key_tokens(self) -> Set[str]:
         return {str(key) for key in self._overrides.keys()} | {str(key) for key in self._validated.keys()}
 
-    def _load_existing_microscope_index(self) -> Dict[MicrowireKey, MicroscopeMeasurements]:
-        try:
-            payload = self.store.load_payload("microscope_index")
-        except Exception:
-            payload = None
-        if not isinstance(payload, dict):
-            return {}
-        existing: Dict[MicrowireKey, MicroscopeMeasurements] = {}
-        for key, value in payload.items():
-            if not isinstance(key, tuple) or len(key) != 4:
-                continue
-            if not isinstance(value, MicroscopeMeasurements):
-                continue
-            try:
-                composition = str(key[0])
-                draw = int(key[1])
-                piece = int(key[2])
-                suffix = key[3] if key[3] is None else str(key[3])
-            except Exception:
-                continue
-            existing[(composition, draw, piece, suffix)] = value
-        return existing
-
-    @staticmethod
-    def _merge_microscope_indexes(
-        existing: Mapping[MicrowireKey, MicroscopeMeasurements],
-        refreshed: Mapping[MicrowireKey, MicroscopeMeasurements],
-    ) -> Dict[MicrowireKey, MicroscopeMeasurements]:
-        merged: Dict[MicrowireKey, MicroscopeMeasurements] = {}
-        for source in (existing, refreshed):
-            for key, value in source.items():
-                if not isinstance(key, tuple) or len(key) != 4:
-                    continue
-                if not isinstance(value, MicroscopeMeasurements):
-                    continue
-                merged[key] = value
-        return merged
-
     def _build_initial_table_frame(self, expected_keys: Set[MicrowireKey]) -> pd.DataFrame:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         if frame.empty:
@@ -11031,6 +11009,180 @@ class MicroscopeSection(MiniDatabaseSection):
         self.model.set_frame(frame)
         self._auto_fit_columns()
         self._update_missing_summary()
+
+    @staticmethod
+    def _merge_rows_into_frame(
+        frame: pd.DataFrame,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> pd.DataFrame:
+        if not rows:
+            if isinstance(frame, pd.DataFrame):
+                return frame.copy()
+            return pd.DataFrame(columns=MICROSCOPE_TABLE_COLUMNS)
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            columns: List[object] = []
+            for row in rows:
+                for column in row.keys():
+                    if column not in columns:
+                        columns.append(column)
+            merged = pd.DataFrame(columns=columns)
+        else:
+            merged = frame.copy()
+        if "_key" not in merged.columns:
+            merged["_key"] = pd.Series([None] * len(merged))
+        existing_rows: List[Dict[str, Any]] = []
+        if not merged.empty:
+            try:
+                cleaned_frame = merged.dropna(how="all")
+            except Exception:
+                cleaned_frame = merged
+            if not cleaned_frame.empty:
+                existing_rows = [
+                    dict(existing_row)
+                    for existing_row in cleaned_frame.to_dict(orient="records")
+                ]
+        row_map: Dict[str, Dict[str, Any]] = {}
+        ordered_keys: List[str] = []
+        for existing_row in existing_rows:
+            key = str(existing_row.get("_key", ""))
+            row_map[key] = existing_row
+            ordered_keys.append(key)
+        for row in rows:
+            key = str(row.get("_key", ""))
+            target = row_map.get(key)
+            if target is None:
+                target = {}
+                row_map[key] = target
+                ordered_keys.append(key)
+            for column, value in row.items():
+                target[column] = value
+        merged = pd.DataFrame([row_map[key] for key in ordered_keys if key in row_map])
+        for column in MICROSCOPE_TABLE_COLUMNS:
+            if column not in merged.columns:
+                merged[column] = pd.Series([None] * len(merged))
+        merged = merged.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        return merged
+
+    def _build_image_ref_rows(
+        self,
+        candidates: Iterable[Path],
+        expected_keys: Set[MicrowireKey],
+        frame: pd.DataFrame,
+    ) -> List[Dict[str, Any]]:
+        candidate_list = [Path(path) for path in candidates]
+        expected = set(expected_keys)
+        for path in candidate_list:
+            key_tuple = _microscope_key(path)
+            if key_tuple is not None:
+                expected.add(key_tuple)
+        allowed: Set[str] | None = None
+        if expected:
+            allowed = set()
+            for item in expected:
+                composition: object
+                draw: object
+                piece: object
+                suffix: object | None
+                try:
+                    composition, draw, piece, suffix = item  # type: ignore[misc]
+                except Exception:
+                    try:
+                        composition, draw, piece = item  # type: ignore[misc]
+                    except Exception:
+                        continue
+                    suffix = None
+                try:
+                    key_token = _microwire_key_to_str(
+                        (str(composition), int(draw), int(piece), suffix)
+                    )
+                except Exception:
+                    continue
+                allowed.add(key_token)
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for path in candidate_list:
+            key_tuple = _microscope_key(path)
+            if key_tuple is None:
+                continue
+            composition, draw, piece, suffix = key_tuple
+            key = _microwire_key_to_str((composition, draw, piece, suffix))
+            if allowed is not None and key not in allowed:
+                continue
+            entry = grouped.setdefault(
+                key,
+                {
+                    "_key": key,
+                    "Composition": composition,
+                    "Microwire": _microwire_label(draw, piece, suffix),
+                    "_images": [],
+                },
+            )
+            images: List[str] = entry.setdefault("_images", [])  # type: ignore[assignment]
+            image_path = str(path)
+            if image_path not in images:
+                images.append(image_path)
+            category = _microscope_category(path)
+            if category == "core" and not entry.get("_core_image"):
+                entry["_core_image"] = image_path
+            elif category == "glass" and not entry.get("_glass_image"):
+                entry["_glass_image"] = image_path
+
+        existing_row_map: Dict[str, Dict[str, Any]] = {}
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            try:
+                for row in frame.to_dict(orient="records"):
+                    existing_row_map[str(row.get("_key", ""))] = dict(row)
+            except Exception:
+                existing_row_map = {}
+
+        rows_to_apply: List[Dict[str, Any]] = []
+        for key, payload in grouped.items():
+            images_list = payload.get("_images", [])
+            if isinstance(images_list, list):
+                payload["_images"] = list(dict.fromkeys(images_list))
+            existing_row = existing_row_map.get(key, {})
+            existing_d = existing_row.get(MICROSCOPE_D_COLUMN)
+            existing_D = existing_row.get(MICROSCOPE_CAP_D_COLUMN)
+            existing_ratio = existing_row.get("d/D")
+            existing_brittle = existing_row.get(BRITTLE_COLUMN)
+            existing_core_image = existing_row.get("_core_image")
+            existing_glass_image = existing_row.get("_glass_image")
+            existing_images = existing_row.get("_images")
+            merged_images: List[str] = []
+            if isinstance(existing_images, (list, tuple)):
+                merged_images.extend(str(item) for item in existing_images if item)
+            merged_images.extend(str(item) for item in payload.get("_images", []) if item)
+            merged_images = list(dict.fromkeys(merged_images))
+            rows_to_apply.append(
+                {
+                    "Composition": payload.get("Composition", ""),
+                    "Microwire": payload.get("Microwire", ""),
+                    MICROSCOPE_D_COLUMN: existing_d,
+                    MICROSCOPE_CAP_D_COLUMN: existing_D,
+                    "d/D": existing_ratio,
+                    BRITTLE_COLUMN: (
+                        existing_brittle
+                        if existing_brittle
+                        else (
+                            "brittle"
+                            if (
+                                any("brittle" in str(item).lower() for item in merged_images)
+                                or (
+                                    (payload.get("_glass_image") or existing_glass_image)
+                                    and not (payload.get("_core_image") or existing_core_image)
+                                )
+                            )
+                            else None
+                        )
+                    ),
+                    MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": key,
+                    "_core_image": payload.get("_core_image") or existing_core_image,
+                    "_glass_image": payload.get("_glass_image") or existing_glass_image,
+                    "_images": merged_images,
+                }
+            )
+        return rows_to_apply
 
     @staticmethod
     def _is_valid_diameter(value: object) -> bool:
@@ -11171,42 +11323,16 @@ class MicroscopeSection(MiniDatabaseSection):
             return
         pending = list(self._pending_partial_rows)
         self._pending_partial_rows.clear()
-        for row in pending:
-            self._apply_partial_row_now(row)
+        self._apply_partial_rows_now(pending)
 
     def _apply_partial_row_now(self, row: dict) -> None:
+        self._apply_partial_rows_now([row])
+
+    def _apply_partial_rows_now(self, rows: Sequence[dict]) -> None:
+        if not rows:
+            return
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
-        if frame.empty:
-            frame = pd.DataFrame(columns=row.keys())
-        else:
-            frame = frame.copy()
-        key = str(row.get("_key", ""))
-        if "_key" not in frame.columns:
-            frame["_key"] = pd.Series([None] * len(frame))
-        existing_idx = frame.index[frame["_key"] == key].tolist()
-        if existing_idx:
-            idx = existing_idx[0]
-            for column, value in row.items():
-                if column not in frame.columns:
-                    frame[column] = pd.Series([None] * len(frame))
-                frame.at[idx, column] = value
-        else:
-            existing_rows: List[Dict[str, Any]] = []
-            if not frame.empty:
-                try:
-                    cleaned_frame = frame.dropna(how="all")
-                except Exception:
-                    cleaned_frame = frame
-                if not cleaned_frame.empty:
-                    existing_rows = [
-                        dict(existing_row)
-                        for existing_row in cleaned_frame.to_dict(orient="records")
-                    ]
-            frame = pd.DataFrame(existing_rows + [row])
-        for column in MICROSCOPE_TABLE_COLUMNS:
-            if column not in frame.columns:
-                frame[column] = pd.Series([None] * len(frame))
-        frame = frame.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        frame = self._merge_rows_into_frame(frame, rows)
         self.data.table = frame
         self.model.set_frame(frame)
         self._auto_fit_columns()
@@ -12413,113 +12539,26 @@ class MicroscopeSection(MiniDatabaseSection):
     def refresh(self) -> None:
         self._refresh_validations()
         self._expected_keys_current = self._expected_microwire_keys()
-        if self._expected_keys_current:
-            self._prepare_initial_table(self._expected_keys_current)
         super().refresh()
-        if self.data.table.empty and self._expected_keys_current:
-            self._prepare_initial_table(self._expected_keys_current)
-        self._apply_overrides_to_table()
-        self._update_hidden_columns()
-        self._update_missing_summary()
-        self._update_review_buttons()
 
     def _prepopulate_image_refs(self, candidates: Iterable[Path]) -> None:
-        candidate_list = [Path(path) for path in candidates]
-        expected = set(self._expected_keys_current or self._expected_microwire_keys())
-        for path in candidate_list:
-            key_tuple = _microscope_key(path)
-            if key_tuple is not None:
-                expected.add(key_tuple)
-        allowed: Set[str] | None = None
-        if expected:
-            allowed = set()
-            for item in expected:
-                composition: object
-                draw: object
-                piece: object
-                suffix: object | None
-                try:
-                    composition, draw, piece, suffix = item  # type: ignore[misc]
-                except Exception:
-                    try:
-                        composition, draw, piece = item  # type: ignore[misc]
-                    except Exception:
-                        continue
-                    suffix = None
-                try:
-                    key_token = _microwire_key_to_str(
-                        (str(composition), int(draw), int(piece), suffix)
-                    )
-                except Exception:
-                    continue
-                allowed.add(key_token)
-        grouped: Dict[str, Dict[str, Any]] = {}
-        for path in candidate_list:
-            key_tuple = _microscope_key(path)
-            if key_tuple is None:
-                continue
-            composition, draw, piece, suffix = key_tuple
-            key = _microwire_key_to_str((composition, draw, piece, suffix))
-            if allowed is not None and key not in allowed:
-                continue
-            entry = grouped.setdefault(
-                key,
-                {
-                    "_key": key,
-                    "Composition": composition,
-                    "Microwire": _microwire_label(draw, piece, suffix),
-                    "_images": [],
-                },
-            )
-            images: List[str] = entry.setdefault("_images", [])  # type: ignore[assignment]
-            image_path = str(path)
-            if image_path not in images:
-                images.append(image_path)
-            category = _microscope_category(path)
-            if category == "core" and not entry.get("_core_image"):
-                entry["_core_image"] = image_path
-            elif category == "glass" and not entry.get("_glass_image"):
-                entry["_glass_image"] = image_path
-
-        for key, payload in grouped.items():
-            images_list = payload.get("_images", [])
-            if isinstance(images_list, list):
-                payload["_images"] = list(dict.fromkeys(images_list))
-            row = {
-                "Composition": payload.get("Composition", ""),
-                "Microwire": payload.get("Microwire", ""),
-                MICROSCOPE_D_COLUMN: None,
-                MICROSCOPE_CAP_D_COLUMN: None,
-                "d/D": None,
-                BRITTLE_COLUMN: (
-                    "brittle"
-                    if (
-                        any("brittle" in str(item).lower() for item in payload.get("_images", []))
-                        or (
-                            payload.get("_glass_image")
-                            and not payload.get("_core_image")
-                        )
-                    )
-                    else None
-                ),
-                MICROSCOPE_IMAGE_COLUMNS[0]: None,
-                MICROSCOPE_IMAGE_COLUMNS[1]: None,
-                "_key": key,
-                "_core_image": payload.get("_core_image"),
-                "_glass_image": payload.get("_glass_image"),
-                "_images": payload.get("_images", []),
-            }
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        rows_to_apply = self._build_image_ref_rows(
+            candidates,
+            set(self._expected_keys_current or self._expected_microwire_keys()),
+            frame,
+        )
+        for row in rows_to_apply:
+            key = str(row.get("_key", ""))
             self._pixmap_cache.pop((key, MICROSCOPE_IMAGE_COLUMNS[0]), None)
             self._pixmap_cache.pop((key, MICROSCOPE_IMAGE_COLUMNS[1]), None)
-            self._apply_partial_row(row)
             self._prepopulated_keys.add(key)
-
-        if grouped:
+        if rows_to_apply:
+            self._apply_partial_rows_now(rows_to_apply)
+        if rows_to_apply:
             self._update_missing_summary()
 
     def _start_section_worker(self, candidates: List[Path]) -> None:  # type: ignore[override]
-        if candidates:
-            self._prepopulate_image_refs(candidates)
         super()._start_section_worker(candidates)
 
     def process(
@@ -12563,6 +12602,9 @@ class MicroscopeSection(MiniDatabaseSection):
             expected_keys = set(expected_keys) | discovered_keys
         table = self._build_initial_table_frame(expected_keys)
         self._check_cancelled()
+        rows_to_apply = self._build_image_ref_rows(unique_paths, expected_keys, table)
+        if rows_to_apply:
+            table = self._merge_rows_into_frame(table, rows_to_apply)
         merged_index = self._build_microscope_index_from_table(table)
         filtered_overrides = {
             key: value
@@ -12572,8 +12614,6 @@ class MicroscopeSection(MiniDatabaseSection):
                 for comp, draw, piece, suffix in merged_index.keys()
             )
         }
-        self._overrides = filtered_overrides
-        table = _microscope_index_to_frame(merged_index, filtered_overrides)
 
         processed: Dict[str, float] = dict(existing_processed)
         for path in unique_paths:

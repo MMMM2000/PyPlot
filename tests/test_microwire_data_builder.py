@@ -1210,6 +1210,131 @@ def test_microscope_apply_data_marks_existing_brittle_glass_rows(tmp_path: Path)
         section.close()
 
 
+def test_microscope_prepopulate_preserves_existing_diameters(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        key = "Ni46Fe23Ga23Co8|1|1"
+        existing_core = tmp_path / "existing core.jpg"
+        existing_glass = tmp_path / "existing glass.jpg"
+        new_core = tmp_path / "Ni46Fe23Ga23Co8 1_1 core.jpg"
+        new_glass = tmp_path / "Ni46Fe23Ga23Co8 1_1 glass.jpg"
+        for path in (existing_core, existing_glass, new_core, new_glass):
+            path.write_bytes(b"test")
+
+        section.apply_data(
+            MiniDatabaseData(
+                table=pd.DataFrame(
+                    [
+                        {
+                            "Composition": "Ni46Fe23Ga23Co8",
+                            "Microwire": "1/1",
+                            builder_ui.MICROSCOPE_D_COLUMN: 6.7,
+                            builder_ui.MICROSCOPE_CAP_D_COLUMN: 34.4,
+                            "d/D": round(6.7 / 34.4, 3),
+                            BRITTLE_COLUMN: None,
+                            builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                            builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                            "_key": key,
+                            "_core_image": str(existing_core),
+                            "_glass_image": str(existing_glass),
+                            "_images": [str(existing_core), str(existing_glass)],
+                        }
+                    ]
+                )
+            )
+        )
+
+        section._expected_keys_current = {("Ni46Fe23Ga23Co8", 1, 1, None)}
+        section._prepopulate_image_refs([new_core, new_glass])
+
+        row = section._row_for_key(key)
+        assert row is not None
+        assert row[builder_ui.MICROSCOPE_D_COLUMN] == pytest.approx(6.7)
+        assert row[builder_ui.MICROSCOPE_CAP_D_COLUMN] == pytest.approx(34.4)
+        assert row["d/D"] == pytest.approx(round(6.7 / 34.4, 3))
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_record_to_row_does_not_duplicate_single_side_measurement() -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        key = ("Ni50Fe27Ga23", 1, 1, None)
+        measurement = builder_ui.MicroscopeMeasurements(
+            core=[
+                builder_ui.MicroscopeDetection(
+                    value=15.0,
+                    image_path=Path("core.jpg"),
+                    source="manual",
+                )
+            ]
+        )
+        measurement.core[0].category = "core"
+
+        row = section._record_to_row(key, measurement)
+
+        assert row[builder_ui.MICROSCOPE_D_COLUMN] == pytest.approx(15.0)
+        assert pd.isna(row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
+        assert pd.isna(row["d/D"])
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_index_to_frame_does_not_duplicate_single_side_measurement() -> None:
+    measurement = builder_ui.MicroscopeMeasurements(
+        core=[
+            builder_ui.MicroscopeDetection(
+                value=30.0,
+                image_path=Path("core.jpg"),
+                source="manual",
+            )
+        ]
+    )
+    measurement.core[0].category = "core"
+
+    frame = builder_ui._microscope_index_to_frame(
+        {("Ni50Fe27Ga23", 2, 4, None): measurement},
+        {},
+    )
+
+    assert len(frame.index) == 1
+    row = frame.iloc[0]
+    assert row[builder_ui.MICROSCOPE_D_COLUMN] == pytest.approx(30.0)
+    assert pd.isna(row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
+    assert pd.isna(row["d/D"])
+
+
+def test_microscope_prepopulate_batches_table_updates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        fit_calls: list[str] = []
+        monkeypatch.setattr(section, "_auto_fit_columns", lambda: fit_calls.append("fit"))
+        section._expected_keys_current = {
+            ("Ni50Fe27Ga23", 1, 1, None),
+            ("Ni50Fe27Ga23", 1, 2, None),
+        }
+        paths = [
+            tmp_path / "Ni50Fe27Ga23 1_1 core.jpg",
+            tmp_path / "Ni50Fe27Ga23 1_1 glass.jpg",
+            tmp_path / "Ni50Fe27Ga23 1_2 core.jpg",
+            tmp_path / "Ni50Fe27Ga23 1_2 glass.jpg",
+        ]
+        for path in paths:
+            path.write_bytes(b"test")
+
+        section._prepopulate_image_refs(paths)
+
+        assert len(fit_calls) == 1
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_microscope_process_merges_existing_rows_when_refresh_scans_new_subset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1225,72 +1350,118 @@ def test_microscope_process_merges_existing_rows_when_refresh_scans_new_subset(
             "Composition": "TestCompOld",
             "Microwire": "1/1",
             builder_ui.MICROSCOPE_D_COLUMN: 10.0,
-            builder_ui.MICROSCOPE_CAP_D_COLUMN: 40.0,
-            "d/D": 0.25,
+            builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+            "d/D": None,
             BRITTLE_COLUMN: None,
             builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
             builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
             "_key": "TestCompOld|1|1",
-            "_core_image": None,
+            "_core_image": str(tmp_path / "old_core.jpg"),
             "_glass_image": None,
-            "_images": [],
-        }
-        existing_index = {
-            old_key: builder_ui.MicroscopeMeasurements(
-                core=[builder_ui.MicroscopeDetection(value=10.0, image_path=tmp_path / "old_core.jpg")],
-                glass=[builder_ui.MicroscopeDetection(value=40.0, image_path=tmp_path / "old_glass.jpg")],
-            )
+            "_images": [str(tmp_path / "old_core.jpg")],
         }
         section.apply_data(
             MiniDatabaseData(
                 table=pd.DataFrame([old_row]),
                 processed={str(tmp_path / "old_core.jpg"): 1.0},
                 extra={
-                    "overrides": {"TestCompOld|1|1": {"d": 10.0, "D": 40.0}},
+                    "overrides": {"TestCompOld|1|1": {"d": 10.0}},
                     "validated": {
                         "TestCompOld|1|1": {
                             "d": 10.0,
-                            "D": 40.0,
                             "d_reviewed": True,
-                            "D_reviewed": True,
                         }
                     },
                 },
             )
         )
-        section._overrides = {"TestCompOld|1|1": {"d": 10.0, "D": 40.0}}
+        section._overrides = {"TestCompOld|1|1": {"d": 10.0}}
         section._validated = {
             "TestCompOld|1|1": {
                 "d": 10.0,
-                "D": 40.0,
                 "d_reviewed": True,
-                "D_reviewed": True,
             }
         }
-        monkeypatch.setattr(section, "_load_existing_microscope_index", lambda: existing_index)
-        new_core = tmp_path / "TestCompNew 2_3 core.jpg"
-        new_glass = tmp_path / "TestCompNew 2_3 glass.jpg"
+        new_core = tmp_path / "Ni50Fe27Ga23 2_3 core.jpg"
+        new_glass = tmp_path / "Ni50Fe27Ga23 2_3 glass.jpg"
         for path in (new_core, new_glass):
             path.write_bytes(b"test")
-        section._prepopulate_image_refs([new_core, new_glass])
 
         result = section.process([new_core, new_glass])
 
         assert set(result.payloads["microscope_index"].keys()) == {
             ("TestCompOld", 1, 1, None),
+            ("Ni50Fe27Ga23", 2, 3, None),
         }
         old_measurement = result.payloads["microscope_index"][("TestCompOld", 1, 1, None)]
         assert len(old_measurement.core) == 1
-        assert len(old_measurement.glass) == 1
+        assert len(old_measurement.glass) == 0
         assert old_measurement.best_core() == pytest.approx(10.0)
-        assert old_measurement.best_glass() == pytest.approx(40.0)
         keys = set(result.table["_key"].tolist())
-        assert keys == {"TestCompOld|1|1"}
+        assert keys == {"TestCompOld|1|1", "Ni50Fe27Ga23|2|3"}
+        old_result_row = result.table.loc[result.table["_key"] == "TestCompOld|1|1"].iloc[0]
+        new_result_row = result.table.loc[result.table["_key"] == "Ni50Fe27Ga23|2|3"].iloc[0]
+        assert old_result_row[builder_ui.MICROSCOPE_D_COLUMN] == pytest.approx(10.0)
+        assert pd.isna(old_result_row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
+        assert pd.isna(new_result_row[builder_ui.MICROSCOPE_D_COLUMN])
+        assert pd.isna(new_result_row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
+        assert str(new_core) in new_result_row["_images"]
+        assert str(new_glass) in new_result_row["_images"]
         assert result.extra["overrides"]["TestCompOld|1|1"]["d"] == pytest.approx(10.0)
         assert "TestCompOld|1|1" in result.extra["validated"]
         assert str(tmp_path / "old_core.jpg") in result.processed
         assert str(new_core) in result.processed
         assert str(new_glass) in result.processed
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_refresh_does_not_mutate_table_before_worker_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "2/4",
+                    builder_ui.MICROSCOPE_D_COLUMN: 30.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    BRITTLE_COLUMN: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "Ni50Fe27Ga23|2|4",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame.copy(), extra={}))
+        monkeypatch.setattr(
+            section,
+            "_expected_microwire_keys",
+            lambda: {("Ni50Fe27Ga23", 2, 4, None), ("Ni50Fe27Ga23", 2, 5, None)},
+        )
+        called: list[bool] = []
+
+        def _fake_refresh(self: builder_ui.MiniDatabaseSection) -> None:
+            called.append(True)
+
+        monkeypatch.setattr(builder_ui.MiniDatabaseSection, "refresh", _fake_refresh)
+
+        section.refresh()
+
+        assert called == [True]
+        refreshed = section.model.frame()
+        assert list(refreshed["_key"]) == ["Ni50Fe27Ga23|2|4"]
+        row = refreshed.iloc[0]
+        assert row[builder_ui.MICROSCOPE_D_COLUMN] == pytest.approx(30.0)
+        assert pd.isna(row[builder_ui.MICROSCOPE_CAP_D_COLUMN])
     finally:
         section._shutdown_background_threads()
         section.close()
