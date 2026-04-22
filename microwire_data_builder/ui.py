@@ -9940,12 +9940,8 @@ class AnnealingSection(MiniDatabaseSection):
         all_records = list(payload) if isinstance(payload, list) else []
         self._all_records = list(all_records)
         visible_records = self._visible_records(all_records)
-        display_records = _filter_vsm_hysteresis_records_by_angle_mode(
-            visible_records,
-            self._current_angle_filter_mode(),
-        )
-        if display_records:
-            for record in display_records:
+        if visible_records:
+            for record in visible_records:
                 metadata = getattr(record, "metadata", None)
                 if metadata is None:
                     continue
