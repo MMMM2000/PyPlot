@@ -5,8 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Hashable, Iterable
 
 import pandas as pd
-from PyQt6 import QtCore, QtWidgets
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
@@ -28,56 +27,90 @@ class RVsTPlugin(PyPlotPlugin):
         self._plot_tabs: list[QtWidgets.QWidget] = []
         self._workbook_keys: dict[str, str] = {}
         self._panel_widget: QtWidgets.QWidget | None = None
+        self._plot_mode = "raw"
+        self._residual_action: QtGui.QAction | None = None
 
     def activate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(False)
+        self._ensure_residual_action()
         self.update_ui()
 
     def deactivate(self) -> None:  # type: ignore[override]
+        self._remove_residual_action()
         self.host._set_data_sources_visible(False)
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
         if self._panel_widget is not None:
             return self._panel_widget
+
         container = QtWidgets.QWidget(self.host)
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
         window_module = window_api()
-        overview_section, overview_layout = window_module.create_toolbar_section("Overview", parent=container)
+        overview_section, overview_layout = window_module.create_toolbar_section(
+            "Overview",
+            parent=container,
+        )
         summary = QtWidgets.QLabel(
             "Load R vs T CSV files to plot measured temperature against resistance "
             "with heating and cooling separated in one graph."
         )
         summary.setWordWrap(True)
         overview_layout.addWidget(summary)
+
         overview_layout.addStretch(1)
         layout.addWidget(overview_section)
         layout.addStretch(1)
         self._panel_widget = container
         return container
 
-    def settings_widget(self) -> QtWidgets.QWidget:  # type: ignore[override]
-        if self._settings_widget is not None:
-            return self._settings_widget
-        container = QtWidgets.QWidget(self.host)
-        layout = QtWidgets.QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+    def _ensure_residual_action(self) -> None:
+        if isinstance(self._residual_action, QtGui.QAction):
+            return
+        toolbar = getattr(self.host, "_script_toolbar", None)
+        plot_action = getattr(self.host, "plot_button", None)
+        style_toolbar_button = getattr(self.host, "_style_toolbar_button", None)
+        if not isinstance(toolbar, QtWidgets.QToolBar):
+            return
+        action = QtGui.QAction("Plot residuals", toolbar)
+        action.triggered.connect(self.generate_residuals)
+        if isinstance(plot_action, QtGui.QAction):
+            toolbar_actions = list(toolbar.actions())
+            try:
+                plot_index = toolbar_actions.index(plot_action)
+            except ValueError:
+                plot_index = -1
+            if plot_index >= 0 and plot_index + 1 < len(toolbar_actions):
+                toolbar.insertAction(toolbar_actions[plot_index + 1], action)
+            else:
+                toolbar.addAction(action)
+        else:
+            toolbar.addAction(action)
+        if callable(style_toolbar_button):
+            style_toolbar_button(toolbar, action, object_name="mw_plot_residuals_action")
+        extra_actions = getattr(self.host, "_plugin_extra_actions", None)
+        if isinstance(extra_actions, list):
+            extra_actions.append(action)
+        self._residual_action = action
 
-        window_module = window_api()
-        origin_section, origin_layout = window_module.create_toolbar_section("Origin export", parent=container)
-        note = QtWidgets.QLabel(
-            "Uses shared PyPlot Origin export through generated worksheets and shared graph workbooks."
-        )
-        note.setWordWrap(True)
-        origin_layout.addWidget(note)
-        origin_layout.addStretch(1)
-        layout.addWidget(origin_section)
-        layout.addStretch(1)
-        self._settings_widget = container
-        return container
+    def _remove_residual_action(self) -> None:
+        action = self._residual_action
+        if not isinstance(action, QtGui.QAction):
+            self._residual_action = None
+            return
+        toolbar = getattr(self.host, "_script_toolbar", None)
+        if isinstance(toolbar, QtWidgets.QToolBar):
+            toolbar.removeAction(action)
+        extra_actions = getattr(self.host, "_plugin_extra_actions", None)
+        if isinstance(extra_actions, list) and action in extra_actions:
+            extra_actions.remove(action)
+        action.deleteLater()
+        self._residual_action = None
+
+    def settings_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
+        return None
 
     def _portable_path(self, path: Path | None, base_path: Path | None) -> str | None:
         helper = getattr(self.host, "_portable_path", None)
@@ -163,27 +196,37 @@ class RVsTPlugin(PyPlotPlugin):
         self._register_workbooks()
         return True
 
-    def _create_plot_tab(self, path_str: str, df: pd.DataFrame) -> QtWidgets.QWidget | None:
-        window_module = window_api()
+    def _plot_figure_and_segments(
+        self,
+        path_str: str,
+        df: pd.DataFrame,
+    ) -> tuple[Any, list[Any], str, str] | None:
         title = rvst_core.format_rvst_title(Path(path_str).stem)
-        segments = rvst_core.split_heating_cooling(df)
         try:
-            fig, _ = rvst_core.plot_one(df, title)
+            if self._plot_mode == "residual":
+                fig, _ = rvst_core.plot_residuals_one(df, title)
+                segments = rvst_core.fit_linear_residuals(df)
+                y_label = "Residual [Ohm]"
+            else:
+                fig, _ = rvst_core.plot_one(df, title)
+                segments = rvst_core.split_heating_cooling(df)
+                y_label = "Resistance [Ohm]"
         except Exception as exc:
             self._log(f"Failed to plot {Path(path_str).name}: {exc}", level="error")
             return None
-        canvas = FigureCanvas(fig)
-        canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
-        canvas.setMinimumSize(0, 0)
-        canvas.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
-        tab = QtWidgets.QWidget()
-        tab_layout = QtWidgets.QVBoxLayout(tab)
-        tab_layout.setContentsMargins(0, 0, 0, 0)
-        tab_layout.addWidget(canvas)
-        ax = fig.axes[0] if fig.axes else None
+        return fig, segments, title, y_label
+
+    def _create_descriptor(
+        self,
+        *,
+        path_str: str,
+        title: str,
+        canvas: Any,
+        ax: Any,
+        segments: list[Any],
+        default_y_label: str,
+    ) -> Any:
+        window_module = window_api()
         lines: dict[tuple[str, float | str], GraphLineState] = {}
         if ax is not None:
             workbook_key = self._workbook_keys.get(path_str, f"rvst::{path_str}")
@@ -194,13 +237,15 @@ class RVsTPlugin(PyPlotPlugin):
                 source_row_ids = None
                 worksheet_key = None
                 if segment is not None:
-                    if "_source_row_id" in segment.frame.columns:
+                    frame = getattr(segment, "frame", None)
+                    segment_label = getattr(segment, "label", label)
+                    if isinstance(frame, pd.DataFrame) and "_source_row_id" in frame.columns:
                         source_row_ids = (
-                            pd.to_numeric(segment.frame["_source_row_id"], errors="coerce")
+                            pd.to_numeric(frame["_source_row_id"], errors="coerce")
                             .to_numpy(dtype=float)
                             .astype(int, copy=False)
                         )
-                    worksheet_key = self._worksheet_key_for_segment(workbook_key, segment.label)
+                    worksheet_key = self._worksheet_key_for_segment(workbook_key, str(segment_label))
                 state = window_module.GraphLineState(
                     key=(label, float(index)),
                     label=label,
@@ -214,51 +259,112 @@ class RVsTPlugin(PyPlotPlugin):
                     source_file=path_str,
                 )
                 lines[state.key] = state
-        descriptor = window_module.TabDescriptor(
+        return window_module.TabDescriptor(
             kind="r_vs_t",
             title=ax.get_title() if ax else title,
             root_label=Path(path_str).name,
-            x_label=ax.get_xlabel() if ax else "Temperature [°C]",
-            y_label=ax.get_ylabel() if ax else "Resistance [Ω]",
+            x_label=ax.get_xlabel() if ax else "Temperature [degC]",
+            y_label=ax.get_ylabel() if ax else default_y_label,
             canvas=canvas,
             axes=ax,
             lines=lines,
-            metadata={"source_file": path_str, "saved_path": ""},
+            metadata={
+                "source_file": path_str,
+                "saved_path": "",
+                "plot_mode": self._plot_mode,
+            },
+        )
+
+    def _create_plot_tab(self, path_str: str, df: pd.DataFrame) -> QtWidgets.QWidget | None:
+        window_module = window_api()
+        plotted = self._plot_figure_and_segments(path_str, df)
+        if plotted is None:
+            return None
+        fig, segments, title, default_y_label = plotted
+        canvas_class = getattr(window_module, "PlotFigureCanvas", None)
+        canvas = canvas_class(fig) if callable(canvas_class) else fig.canvas
+        if canvas is None:
+            self._log(
+                f"Failed to create a figure canvas for {Path(path_str).name}.",
+                level="error",
+            )
+            return None
+        canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+        canvas.setMinimumSize(0, 0)
+        canvas.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        tab = QtWidgets.QWidget()
+        tab_layout = QtWidgets.QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(canvas)
+        ax = fig.axes[0] if fig.axes else None
+        descriptor = self._create_descriptor(
+            path_str=path_str,
+            title=title,
+            canvas=canvas,
+            ax=ax,
+            segments=segments,
+            default_y_label=default_y_label,
         )
         self.host.tab_widget.addTab(tab, Path(path_str).name)
         self.host._register_plot_tab(tab, canvas, ax, descriptor)
         self._plot_tabs.append(tab)
         return tab
 
+    def _build_replacement_plot_content(self, path_str: str, df: pd.DataFrame) -> tuple[Any, Any, Any] | None:
+        window_module = window_api()
+        plotted = self._plot_figure_and_segments(path_str, df)
+        if plotted is None:
+            return None
+        fig, segments, title, default_y_label = plotted
+        canvas_class = getattr(window_module, "PlotFigureCanvas", None)
+        canvas = canvas_class(fig) if callable(canvas_class) else fig.canvas
+        if canvas is None:
+            self._log(
+                f"Failed to create a figure canvas for {Path(path_str).name}.",
+                level="error",
+            )
+            return None
+        canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+        canvas.setMinimumSize(0, 0)
+        canvas.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        ax = fig.axes[0] if fig.axes else None
+        descriptor = self._create_descriptor(
+            path_str=path_str,
+            title=title,
+            canvas=canvas,
+            ax=ax,
+            segments=segments,
+            default_y_label=default_y_label,
+        )
+        return canvas, ax, descriptor
+
     def _replace_plot_tab_for_source(self, path_str: str) -> QtWidgets.QWidget | None:
         target_tab: QtWidgets.QWidget | None = None
-        target_index = -1
         for tab in list(self._plot_tabs):
             descriptor = self.host._tab_descriptors.get(tab)
             metadata = getattr(descriptor, "metadata", {}) if descriptor is not None else {}
             if isinstance(metadata, dict) and metadata.get("source_file") == path_str:
                 target_tab = tab
-                target_index = self.host.tab_widget.indexOf(tab)
                 break
-        if target_tab is not None:
-            self.host._clear_tab_list([target_tab])
-            try:
-                self._plot_tabs.remove(target_tab)
-            except ValueError:
-                pass
-        replacement = self._create_plot_tab(path_str, self._data_by_file[path_str])
-        if replacement is None:
+        if target_tab is None:
+            return self._create_plot_tab(path_str, self._data_by_file[path_str])
+        built = self._build_replacement_plot_content(path_str, self._data_by_file[path_str])
+        if built is None:
             return None
-        current_index = self.host.tab_widget.indexOf(replacement)
-        if target_index >= 0 and current_index >= 0 and current_index != target_index:
-            try:
-                self.host.tab_widget.tabBar().moveTab(current_index, target_index)
-            except Exception:
-                pass
-        index = self.host.tab_widget.indexOf(replacement)
+        canvas, ax, descriptor = built
+        replacer = getattr(self.host, "_replace_plot_tab_contents", None)
+        if callable(replacer):
+            replacer(target_tab, canvas, ax, descriptor)
+        index = self.host.tab_widget.indexOf(target_tab)
         if index >= 0:
             self.host.tab_widget.setCurrentIndex(index)
-        return replacement
+        return target_tab
 
     def _worksheet_key_for_segment(self, workbook_key: Hashable, segment_label: str) -> str:
         return self.host._worksheet_key(workbook_key, segment_label)
@@ -275,6 +381,13 @@ class RVsTPlugin(PyPlotPlugin):
         self.update_ui()
 
     def generate(self) -> None:  # type: ignore[override]
+        self._generate_mode("raw")
+
+    def generate_residuals(self) -> None:
+        self._generate_mode("residual")
+
+    def _generate_mode(self, mode: str) -> None:
+        self._plot_mode = "residual" if str(mode).strip().lower() == "residual" else "raw"
         if not self._data_by_file:
             self.load_data()
         if not self._data_by_file:
@@ -286,11 +399,8 @@ class RVsTPlugin(PyPlotPlugin):
         update_shared_progress = getattr(self.host, "_update_task_progress", None)
         end_shared_progress = getattr(self.host, "_end_task_progress", None)
         if callable(begin_shared_progress):
-            begin_shared_progress(
-                "Generating R vs T plots...",
-                maximum=max(1, total_paths),
-                value=0,
-            )
+            label = "Generating residual plots..." if self._plot_mode == "residual" else "Generating R vs T plots..."
+            begin_shared_progress(label, maximum=max(1, total_paths), value=0)
         completed = 0
         progress_interval = 1 if total_paths <= 25 else max(1, total_paths // 100)
         suspend_tree_updates = getattr(self.host, "_suspend_project_tree_updates", None)
@@ -315,7 +425,8 @@ class RVsTPlugin(PyPlotPlugin):
             update_shared_progress(value=completed, maximum=max(1, total_paths))
         if callable(end_shared_progress):
             end_shared_progress()
-        self._log(f"Generated {len(self._plot_tabs)} R vs T graph(s).")
+        mode_label = "residual" if self._plot_mode == "residual" else "R vs T"
+        self._log(f"Generated {len(self._plot_tabs)} {mode_label} graph(s).")
         self.update_ui()
 
     def serialize_project_state(self, *, base_path: Path | None) -> dict[str, Any] | None:
@@ -346,9 +457,15 @@ class RVsTPlugin(PyPlotPlugin):
             "open_plot_sources": plots,
             "current_plot_source": current_source,
             "had_plots": bool(self._plot_tabs),
+            "plot_mode": self._plot_mode,
         }
 
     def restore_project_state(self, state: dict[str, Any], *, project_dir: Path) -> None:  # type: ignore[override]
+        self._plot_mode = (
+            "residual"
+            if str(state.get("plot_mode", "raw")).strip().lower() == "residual"
+            else "raw"
+        )
         loaded_paths_payload = state.get("loaded_paths")
         resolved_paths: list[Path] = []
         if isinstance(loaded_paths_payload, list):
@@ -388,6 +505,8 @@ class RVsTPlugin(PyPlotPlugin):
 
     def update_ui(self) -> None:
         has_data = bool(self._data_by_file)
+        if isinstance(self._residual_action, QtGui.QAction):
+            self._residual_action.setEnabled(has_data)
         self.apply_shared_action_state(
             can_plot=True,
             can_save_graph=bool(self._plot_tabs),
@@ -428,9 +547,9 @@ class RVsTPlugin(PyPlotPlugin):
                 columns={
                     "iso_time": "Timestamp",
                     "t_elapsed_s": "Elapsed (s)",
-                    "sp_c": "Setpoint (°C)",
-                    "pv_c": "Temperature (°C)",
-                    "resistance_ohm": "Resistance (Ω)",
+                    "sp_c": "Setpoint (degC)",
+                    "pv_c": "Temperature (degC)",
+                    "resistance_ohm": "Resistance (Ohm)",
                 }
             )
             worksheet = host._create_worksheet_from_frame(workbook, segment.label, renamed)
@@ -438,9 +557,9 @@ class RVsTPlugin(PyPlotPlugin):
             columns = worksheet.columns
             for column_name, unit, long_name in (
                 ("Elapsed (s)", "s", "Elapsed time"),
-                ("Setpoint (°C)", "°C", "Setpoint"),
-                ("Temperature (°C)", "°C", "Temperature"),
-                ("Resistance (Ω)", "Ω", "Resistance"),
+                ("Setpoint (degC)", "degC", "Setpoint"),
+                ("Temperature (degC)", "degC", "Temperature"),
+                ("Resistance (Ohm)", "Ohm", "Resistance"),
             ):
                 meta = columns.get(column_name)
                 if isinstance(meta, window_module.WorksheetColumnMeta):

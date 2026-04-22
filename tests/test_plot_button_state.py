@@ -10,6 +10,8 @@ import pytest
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib import colors as mcolors
 from matplotlib import ticker as mticker
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import pandas as pd
 
 from plotting.pyplot.app import PyPlotWorkbench
@@ -23,6 +25,7 @@ from plotting.pyplot.window import (
     PRIMARY_DOCK_MAX_FRACTION,
     PRIMARY_DOCK_DEFAULT_WIDTH,
     WorkbookData,
+    TabDescriptor,
     WorksheetColumnMeta,
     WorksheetData,
 )
@@ -88,6 +91,7 @@ def test_shared_toolbar_uses_single_save_graph_action() -> None:
         assert "Paper EPS" not in action_texts
         assert "Transparent PNG" not in action_texts
     finally:
+        window._project_dirty = False  # noqa: SLF001
         window.close()
         app.processEvents()
 
@@ -101,8 +105,9 @@ def test_shared_toolbar_exposes_bad_data_cleanup_actions() -> None:
         action_texts = [action.text() for action in toolbar.actions() if action.text()]
 
         assert "Remove bad data points..." in action_texts
-        assert "Delete selected points" in action_texts
+        assert "Delete selected points" not in action_texts
     finally:
+        window._project_dirty = False  # noqa: SLF001
         window.close()
         app.processEvents()
 
@@ -263,6 +268,49 @@ def test_apply_graph_format_updates_legend_orientation() -> None:
 
         orientation_combo.setCurrentIndex(orientation_combo.findData("vertical"))
         window._apply_graph_format(apply_all=False)
+        legend = axes.get_legend()
+        assert legend is not None
+        assert getattr(legend, "_mw_orientation", None) == "vertical"
+        assert int(getattr(legend, "_ncol", 1)) == 1
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_register_plot_tab_applies_plugin_legend_orientation_defaults() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._graph_option_defaults_by_plugin["R vs T"] = {
+            "legend_orientation": "vertical",
+            "legend_columns": 1,
+            "legend_location": "best",
+            "legend_show_symbols": True,
+            "legend_text_follow_colors": True,
+            "legend_draggable": True,
+        }
+        fig, axes = plt.subplots()
+        axes.plot([1.0, 2.0, 3.0], [1.0, 2.0, 3.0], label="Heating 1")
+        axes.plot([1.0, 2.0, 3.0], [1.1, 2.1, 3.1], label="Cooling 1")
+        axes.plot([1.0, 2.0, 3.0], [1.2, 2.2, 3.2], label="Heating 2")
+        axes.plot([1.0, 2.0, 3.0], [1.3, 2.3, 3.3], label="Cooling 2")
+        axes.legend(loc="best", ncol=4)
+        canvas = FigureCanvas(fig)
+        tab = QtWidgets.QWidget()
+        descriptor = TabDescriptor(
+            kind="r_vs_t",
+            title="Test",
+            root_label="Test",
+            x_label="Temperature [°C]",
+            y_label="Resistance [Ω]",
+            canvas=canvas,
+            axes=axes,
+            lines={},
+            metadata={"plugin": "R vs T"},
+        )
+
+        window._register_plot_tab(tab, canvas, axes, descriptor)  # noqa: SLF001
+
         legend = axes.get_legend()
         assert legend is not None
         assert getattr(legend, "_mw_orientation", None) == "vertical"
@@ -573,21 +621,34 @@ def test_tight_layout_warning_apply_to_all_uses_one_dialog(
         app.processEvents()
 
 
-def test_tight_layout_warning_uses_saved_plugin_override_without_prompt(
+def test_tight_layout_warning_with_saved_plugin_override_still_prompts_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
     try:
-        window._create_blank_graph()
-        axes = window._current_axes()
-        assert axes is not None
-        figure = axes.figure
+        fake_axes = object()
+        figure = SimpleNamespace(axes=[fake_axes])
 
         calls = {"override": 0, "dialog": 0}
         monkeypatch.setattr(window, "_can_show_tight_layout_warning_dialog", lambda: True)
         monkeypatch.setattr(window, "_plugin_name_for_axes", lambda _axes: "Temperature Sensitivity")
         monkeypatch.setattr(window, "_has_plugin_graph_option_override", lambda _name: True)
+        monkeypatch.setattr(
+            window,
+            "_tight_layout_warning_details",
+            lambda _figure: ("Axes 1 title (42.0 pt)", "Axes 1 title: 42.0 pt"),
+        )
+        monkeypatch.setattr(
+            window,
+            "_tight_layout_font_recommendations",
+            lambda _figure: {
+                "title_font": 14.0,
+                "label_font": 11.0,
+                "tick_font": 9.0,
+                "legend_font_size": 8.0,
+            },
+        )
 
         def _fake_override(_axes: object, _recommendations: dict[str, float]) -> bool:
             calls["override"] += 1
@@ -608,8 +669,69 @@ def test_tight_layout_warning_uses_saved_plugin_override_without_prompt(
             ],
             context="Graph formatting",
         )
-        assert calls["override"] == 1
-        assert calls["dialog"] == 0
+        assert calls["override"] == 0
+        assert calls["dialog"] == 1
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_apply_plugin_graph_option_override_does_not_persist_effective_geometry() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._graph_option_defaults_global = window._clean_graph_option_payload(
+            {
+                "title_font": 16,
+                "label_font": 12,
+                "tick_font": 10,
+                "figure_width": 8.4,
+                "figure_height": 5.6,
+            }
+        )
+        window._graph_option_defaults_by_plugin = {}
+
+        class _FakePlugin:
+            @staticmethod
+            def graph_option_defaults() -> dict[str, float]:
+                return {
+                    "title_font": 14,
+                    "label_font": 11,
+                    "tick_font": 9,
+                    "figure_width": 9.0,
+                    "figure_height": 5.4,
+                }
+
+        window._plugin_instances["R vs T"] = _FakePlugin()
+        window._current_plotter_name = "R vs T"
+
+        captured: dict[str, object] = {}
+
+        def _capture_store(**kwargs: object) -> None:
+            captured.update(kwargs)
+
+        window._store_graph_option_defaults = _capture_store  # type: ignore[method-assign]
+        window._append_log = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        window._plugin_name_for_axes = lambda _axes: "R vs T"  # type: ignore[method-assign]
+
+        assert window._apply_plugin_graph_option_override_for_axes(  # noqa: SLF001
+            object(),
+            {
+                "title_font": 13.0,
+                "label_font": 10.0,
+                "tick_font": 8.0,
+                "legend_font_size": 9.0,
+            },
+        )
+
+        payload = captured.get("plugin_payload")
+        assert isinstance(payload, dict)
+        assert payload["title_font"] == 13.0
+        assert payload["label_font"] == 10.0
+        assert payload["tick_font"] == 8.0
+        assert payload["legend_font_size"] == 9.0
+        assert "figure_width" not in payload
+        assert "figure_height" not in payload
     finally:
         window.close()
         app.processEvents()
@@ -707,6 +829,91 @@ def test_switching_tabs_preserves_maximized_subwindow_mode() -> None:
         assert not first_sub.isHidden()
         assert bool(getattr(window.tab_widget, "_global_maximized", False))
         assert bool(getattr(window.tab_widget, "_fullscreen_lock", False))
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_showing_hidden_tab_respects_fullscreen_lock() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.resize(1600, 980)
+        window._create_blank_graph()
+        first_tab = window.tab_widget.currentWidget()
+        assert isinstance(first_tab, QtWidgets.QWidget)
+        window._create_blank_graph()
+        second_tab = window.tab_widget.currentWidget()
+        assert isinstance(second_tab, QtWidgets.QWidget)
+
+        tab_proxy = window.tab_widget
+        subwindow_for = getattr(tab_proxy, "_subwindow_for", None)
+        maximize_single = getattr(tab_proxy, "_maximize_single", None)
+        assert callable(subwindow_for)
+        assert callable(maximize_single)
+
+        first_sub = subwindow_for(first_tab)
+        second_sub = subwindow_for(second_tab)
+        assert isinstance(first_sub, QtWidgets.QMdiSubWindow)
+        assert isinstance(second_sub, QtWidgets.QMdiSubWindow)
+
+        maximize_single(first_sub)
+        app.processEvents()
+        fullscreen_geometry = first_sub.geometry()
+        assert fullscreen_geometry.isValid()
+
+        # Simulate a restore path where the fullscreen lock is still active even if
+        # `_global_maximized` has temporarily fallen out of sync.
+        tab_proxy._fullscreen_lock = True  # noqa: SLF001
+        tab_proxy._global_maximized = False  # noqa: SLF001
+
+        window._set_tab_visibility(second_tab, False)  # noqa: SLF001
+        app.processEvents()
+        window._show_tab(second_tab)  # noqa: SLF001
+        app.processEvents()
+
+        shown_geometry = second_sub.geometry()
+        assert shown_geometry.width() >= fullscreen_geometry.width() - 2
+        assert shown_geometry.height() >= fullscreen_geometry.height() - 2
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_switching_tabs_in_fullscreen_hides_previous_normal_windows() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.resize(1600, 980)
+        window._create_blank_graph()
+        first_tab = window.tab_widget.currentWidget()
+        assert isinstance(first_tab, QtWidgets.QWidget)
+        window._create_blank_graph()
+        second_tab = window.tab_widget.currentWidget()
+        assert isinstance(second_tab, QtWidgets.QWidget)
+
+        tab_proxy = window.tab_widget
+        subwindow_for = getattr(tab_proxy, "_subwindow_for", None)
+        maximize_single = getattr(tab_proxy, "_maximize_single", None)
+        assert callable(subwindow_for)
+        assert callable(maximize_single)
+
+        first_sub = subwindow_for(first_tab)
+        second_sub = subwindow_for(second_tab)
+        assert isinstance(first_sub, QtWidgets.QMdiSubWindow)
+        assert isinstance(second_sub, QtWidgets.QMdiSubWindow)
+
+        maximize_single(first_sub)
+        app.processEvents()
+        assert not first_sub.isHidden()
+        assert second_sub.isHidden()
+
+        window._show_tab(second_tab)  # noqa: SLF001
+        app.processEvents()
+
+        assert second_sub.isVisible()
+        assert not second_sub.isHidden()
+        assert first_sub.isHidden()
     finally:
         window.close()
         app.processEvents()
@@ -835,6 +1042,40 @@ def test_current_annealing_generate_updates_shared_progress(
         assert "begin" in kinds
         assert "update" in kinds
         assert "end" in kinds
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_rvst_plugin_places_plot_residuals_in_plugin_toolbar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
+        combo = getattr(window, "_plotter_combo", None)
+        assert isinstance(combo, QtWidgets.QComboBox)
+        index = combo.findText("R vs T")
+        assert index >= 0
+        combo.setCurrentIndex(index)
+        app.processEvents()
+
+        plugin = getattr(window, "_current_plugin", None)
+        assert plugin is not None
+        panel = plugin.panel_widget()
+        assert isinstance(panel, QtWidgets.QWidget)
+        button_texts = [
+            button.text().strip()
+            for button in panel.findChildren(QtWidgets.QPushButton)
+            if button.text().strip()
+        ]
+        assert "Plot residuals" not in button_texts
+
+        toolbar = getattr(window, "_script_toolbar", None)
+        assert isinstance(toolbar, QtWidgets.QToolBar)
+        action_texts = [action.text().strip() for action in toolbar.actions() if action.text().strip()]
+        assert "Plot residuals" in action_texts
     finally:
         window.close()
         app.processEvents()
@@ -1779,7 +2020,65 @@ def test_hidden_subwindow_restore_keeps_manual_geometry_offscreen() -> None:
         app.processEvents()
 
 
-def test_primary_dock_target_width_scales_on_large_window() -> None:
+def test_normal_subwindow_state_change_does_not_reapply_global_layout() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.resize(1500, 950)
+        window._create_blank_graph()
+        window._create_blank_graph()
+        app.processEvents()
+
+        tab_proxy = window.tab_widget
+        set_mode = getattr(tab_proxy, "set_arrangement_mode", None)
+        subwindow_for = getattr(tab_proxy, "_subwindow_for", None)
+        assert callable(set_mode)
+        assert callable(subwindow_for)
+
+        set_mode("cascade")
+        first_tab = tab_proxy.widget(0)
+        second_tab = tab_proxy.widget(1)
+        assert isinstance(first_tab, QtWidgets.QWidget)
+        assert isinstance(second_tab, QtWidgets.QWidget)
+
+        first_sub = subwindow_for(first_tab)
+        second_sub = subwindow_for(second_tab)
+        assert isinstance(first_sub, QtWidgets.QMdiSubWindow)
+        assert isinstance(second_sub, QtWidgets.QMdiSubWindow)
+
+        expected = QtCore.QRect(180, 160, 640, 420)
+        tab_proxy.setCurrentWidget(first_tab)
+        app.processEvents()
+        first_sub.setGeometry(expected)
+        setattr(first_sub, "_mw_user_sized", True)
+        app.processEvents()
+
+        calls: list[object] = []
+        original_apply = tab_proxy._apply_global_window_state  # noqa: SLF001
+
+        def _record_apply(*args: object, **kwargs: object) -> None:
+            calls.append((args, kwargs))
+            original_apply(*args, **kwargs)
+
+        tab_proxy._apply_global_window_state = _record_apply  # type: ignore[method-assign]  # noqa: SLF001
+        try:
+            tab_proxy._handle_subwindow_state_change(False, source=first_sub)  # noqa: SLF001
+            app.processEvents()
+        finally:
+            tab_proxy._apply_global_window_state = original_apply  # type: ignore[method-assign]  # noqa: SLF001
+
+        restored = first_sub.geometry()
+        assert calls == []
+        assert restored == expected
+        assert second_sub.geometry().isValid()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_primary_dock_target_width_prefers_saved_width_on_large_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
     try:
@@ -1787,14 +2086,12 @@ def test_primary_dock_target_width_scales_on_large_window() -> None:
         app.processEvents()
         dock = getattr(window, "project_dock", None)
         assert isinstance(dock, QtWidgets.QDockWidget)
+        monkeypatch.setattr(window, "_load_primary_dock_width", lambda candidate: 260 if candidate is dock else None)  # noqa: SLF001
         target = window._primary_dock_target_width(  # noqa: SLF001 - internal sizing helper
             dock,
             PRIMARY_DOCK_DEFAULT_WIDTH,
         )
-        expected_min = int(window.width() * PRIMARY_DOCK_EXPANDED_FRACTION)
-        if PRIMARY_DOCK_EXPANDED_MAX > 0:
-            expected_min = min(expected_min, PRIMARY_DOCK_EXPANDED_MAX)
-        assert target >= expected_min
+        assert target == window._clamp_primary_dock_width(dock, 260)  # noqa: SLF001
     finally:
         window.close()
         app.processEvents()
@@ -1817,6 +2114,89 @@ def test_primary_dock_target_width_caps_large_persisted_values() -> None:
         if PRIMARY_DOCK_EXPANDED_MAX > 0:
             expected_max = min(expected_max, PRIMARY_DOCK_EXPANDED_MAX)
         assert target <= expected_max
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_primary_dock_width_needs_update_respects_small_differences() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        dock = getattr(window, "project_dock", None)
+        assert isinstance(dock, QtWidgets.QDockWidget)
+        dock.resize(320, dock.height() or 400)
+        app.processEvents()
+        current_width = dock.width()
+        assert current_width > 0
+        assert window._primary_dock_width_needs_update(dock, current_width + 1) is False  # noqa: SLF001
+        assert window._primary_dock_width_needs_update(dock, current_width + 6) is True  # noqa: SLF001
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_primary_dock_visibility_change_ignored_while_suppressed() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        dock = getattr(window, "project_dock", None)
+        assert isinstance(dock, QtWidgets.QDockWidget)
+        original = bool(window._retabify_pending)  # noqa: SLF001
+        window._suppress_primary_dock_events = 1  # noqa: SLF001
+        window._handle_primary_dock_visibility_changed(dock)  # noqa: SLF001
+        assert bool(window._retabify_pending) is original  # noqa: SLF001
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_dock_switcher_hide_persists_current_dock_width() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        panels = [panel for panel in getattr(window, "_dock_switcher_panels", []) if isinstance(panel, QtWidgets.QDockWidget)]
+        assert panels
+        switcher = panels[0].widget()
+        assert switcher is not None
+        docks = getattr(switcher, "_docks", [])
+        project_dock = getattr(window, "project_dock", None)
+        assert isinstance(project_dock, QtWidgets.QDockWidget)
+        assert project_dock in docks
+        index = docks.index(project_dock)
+
+        getattr(switcher, "_dock_widths")[project_dock] = 280  # noqa: SLF001
+        project_dock.resize(220, project_dock.height() or 400)
+        app.processEvents()
+
+        switcher._handle_visibility_change(index, False)  # noqa: SLF001
+
+        assert window._primary_dock_widths[project_dock] == 220  # noqa: SLF001
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_store_side_panel_state_persists_user_shrunk_dock_width() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        project_dock = getattr(window, "project_dock", None)
+        object_dock = getattr(window, "object_dock", None)
+        assert isinstance(project_dock, QtWidgets.QDockWidget)
+        assert isinstance(object_dock, QtWidgets.QDockWidget)
+
+        window._primary_dock_widths[project_dock] = 280  # noqa: SLF001
+        window._primary_dock_widths[object_dock] = 300  # noqa: SLF001
+        project_dock.resize(210, project_dock.height() or 400)
+        object_dock.resize(230, object_dock.height() or 400)
+
+        window._store_side_panel_state()  # noqa: SLF001
+
+        project_value = int(window.settings.value(window._primary_dock_width_key(project_dock)))  # noqa: SLF001
+        object_value = int(window.settings.value(window._primary_dock_width_key(object_dock)))  # noqa: SLF001
+        assert project_value == 210
+        assert object_value == 230
     finally:
         window.close()
         app.processEvents()

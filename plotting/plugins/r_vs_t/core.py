@@ -16,12 +16,15 @@ from plotting.shared.readability import apply_readability
 
 SHOW_LEGEND = True
 LEGEND_SIZE = 12
+LEGEND_ORIENTATION = "auto"
 TICK_SIZE = 10
 AXIS_LABEL_SIZE = 12
 TITLE_SIZE = 16
 MAX_ABS_TEMPERATURE_C = 250.0
 RESISTANCE_DROPOUT_RATIO = 0.1
 RESISTANCE_DROPOUT_WINDOW = 9
+HEATING_COLORS = ["#dc2626", "#f97316", "#ea580c", "#ef4444"]
+COOLING_COLORS = ["#2563eb", "#0ea5e9", "#1d4ed8", "#06b6d4"]
 
 _SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 
@@ -32,6 +35,19 @@ class RVsTSegment:
     kind: str
     x: np.ndarray
     y: np.ndarray
+    frame: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class RVsTResidualSegment:
+    label: str
+    kind: str
+    x: np.ndarray
+    y: np.ndarray
+    fit_y: np.ndarray
+    residual_y: np.ndarray
+    slope: float
+    intercept: float
     frame: pd.DataFrame
 
 
@@ -191,6 +207,44 @@ def split_heating_cooling(df: pd.DataFrame) -> list[RVsTSegment]:
     return segments
 
 
+def _segment_color(segment: RVsTSegment) -> str:
+    match = re.search(r"(\d+)\s*$", str(segment.label))
+    segment_index = max(int(match.group(1)) - 1, 0) if match else 0
+    palette = HEATING_COLORS if segment.kind == "heating" else COOLING_COLORS
+    return palette[segment_index % len(palette)]
+
+
+def fit_linear_residuals(df: pd.DataFrame) -> list[RVsTResidualSegment]:
+    fitted: list[RVsTResidualSegment] = []
+    for segment in split_heating_cooling(df):
+        x = np.asarray(segment.x, dtype=float)
+        y = np.asarray(segment.y, dtype=float)
+        if x.size >= 2 and np.unique(x).size >= 2:
+            slope, intercept = np.polyfit(x, y, 1)
+        elif y.size:
+            slope = 0.0
+            intercept = float(y[0])
+        else:
+            slope = 0.0
+            intercept = 0.0
+        fit_y = (slope * x) + intercept
+        residual_y = y - fit_y
+        fitted.append(
+            RVsTResidualSegment(
+                label=segment.label,
+                kind=segment.kind,
+                x=x,
+                y=y,
+                fit_y=fit_y,
+                residual_y=residual_y,
+                slope=float(slope),
+                intercept=float(intercept),
+                frame=segment.frame,
+            )
+        )
+    return fitted
+
+
 def plot_one(
     df: pd.DataFrame,
     title: str,
@@ -200,12 +254,9 @@ def plot_one(
     fig, ax = plt.subplots(figsize=figsize)
     segments = split_heating_cooling(df)
     legend_handles: list[Line2D] = []
-    legend_kinds: set[str] = set()
-    palette = {"heating": "#d32f2f", "cooling": "#1976d2"}
-    names = {"heating": "Heating", "cooling": "Cooling"}
 
     for segment in segments:
-        color = palette[segment.kind]
+        color = _segment_color(segment)
         ax.plot(
             segment.x,
             segment.y,
@@ -213,22 +264,20 @@ def plot_one(
             marker="o",
             markersize=3.2,
             linewidth=1.8,
-            label=names[segment.kind] if segment.kind not in legend_kinds else "_nolegend_",
+            label=segment.label,
         )
-        if segment.kind not in legend_kinds:
-            legend_handles.append(
-                Line2D(
-                    [],
-                    [],
-                    color=color,
-                    marker="o",
-                    linestyle="-",
-                    markersize=4.0,
-                    linewidth=1.8,
-                    label=names[segment.kind],
-                )
+        legend_handles.append(
+            Line2D(
+                [],
+                [],
+                color=color,
+                marker="o",
+                linestyle="-",
+                markersize=4.0,
+                linewidth=1.8,
+                label=segment.label,
             )
-            legend_kinds.add(segment.kind)
+        )
 
     ax.set_xlabel("Temperature [°C]", fontsize=AXIS_LABEL_SIZE)
     ax.set_ylabel("Resistance [Ω]", fontsize=AXIS_LABEL_SIZE)
@@ -260,3 +309,77 @@ def plot_one(
     fig.tight_layout()
     apply_readability(ax, dict(globals()))
     return fig, title.replace(os.sep, "_")
+
+
+def plot_residuals_one(
+    df: pd.DataFrame,
+    title: str,
+    *,
+    figsize: tuple[float, float] = (6.0, 4.0),
+) -> tuple[Figure, str]:
+    fig, ax = plt.subplots(figsize=figsize)
+    legend_handles: list[Line2D] = []
+
+    for segment in fit_linear_residuals(df):
+        color = _segment_color(
+            RVsTSegment(
+                label=segment.label,
+                kind=segment.kind,
+                x=segment.x,
+                y=segment.y,
+                frame=segment.frame,
+            )
+        )
+        ax.plot(
+            segment.x,
+            segment.residual_y,
+            color=color,
+            marker="o",
+            markersize=3.2,
+            linewidth=1.8,
+            label=segment.label,
+        )
+        legend_handles.append(
+            Line2D(
+                [],
+                [],
+                color=color,
+                marker="o",
+                linestyle="-",
+                markersize=4.0,
+                linewidth=1.8,
+                label=segment.label,
+            )
+        )
+
+    ax.axhline(0.0, color="#475569", linestyle="--", linewidth=1.0, alpha=0.8)
+    ax.set_xlabel("Temperature [Â°C]", fontsize=AXIS_LABEL_SIZE)
+    ax.set_ylabel("Residual [Î©]", fontsize=AXIS_LABEL_SIZE)
+    ax.set_title(f"{title} residual", fontsize=TITLE_SIZE, pad=10)
+    ax.grid(True, ls="--", alpha=0.3)
+    if SHOW_LEGEND and legend_handles:
+        legend = ax.legend(
+            handles=legend_handles,
+            loc="best",
+            labelcolor="linecolor",
+            handlelength=2.0,
+            fontsize=LEGEND_SIZE,
+            framealpha=0.9,
+        )
+        if legend is not None:
+            handles_attr = getattr(legend, "legendHandles", None)
+            if handles_attr is None:
+                handles_attr = getattr(legend, "legend_handles", [])
+            for handle in handles_attr:
+                try:
+                    handle.set_marker("")
+                except Exception:
+                    pass
+            for handle, text in zip(handles_attr, legend.get_texts()):
+                get_color = getattr(handle, "get_color", None)
+                if callable(get_color):
+                    text.set_color(get_color())
+    ax.tick_params(axis="both", labelsize=TICK_SIZE)
+    fig.tight_layout()
+    apply_readability(ax, dict(globals()))
+    return fig, f"{title.replace(os.sep, '_')}_residual"

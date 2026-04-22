@@ -121,6 +121,14 @@ ORIGIN_EXPORT_LAYER_BOTTOM = 20.0
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
 
+class _BadDataSelectionDialog(QtWidgets.QDialog):
+    dismissed = QtCore.pyqtSignal()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self.dismissed.emit()
+        super().closeEvent(event)
+
+
 def _install_safe_qt_draw_idle() -> None:
     """Suppress known offscreen Qt font-metric crashes during deferred redraw."""
 
@@ -763,6 +771,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._cached_pinned_name: str | None = self._load_cached_pinned_name()
         self._dock_index_map: Dict[QtWidgets.QDockWidget, int] = {}
         self._default_tab_colors: Dict[int, QtGui.QColor] = {}
+        self._syncing = True
 
         for idx, dock in enumerate(self._docks):
             tab_index = self._tab_bar.addTab(dock.windowTitle())
@@ -809,6 +818,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         if self._docks:
             self._tab_bar.setCurrentIndex(0)
         self._collapse_all()
+        self._syncing = False
 
 
     # Event handling -------------------------------------------------
@@ -945,9 +955,6 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                 self._syncing = True
                 self._tab_bar.setCurrentIndex(index)
                 self._syncing = False
-            refresher = getattr(main, "_refresh_primary_dock_layout", None)
-            if callable(refresher):
-                QtCore.QTimer.singleShot(0, refresher)
         else:
             if not current.isFloating():
                 measured_width = current.width()
@@ -3500,11 +3507,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._bad_data_interaction: Dict[str, Any] | None = None
         self._bad_data_selections: Dict[QtWidgets.QWidget, Dict[tuple[tuple[str, float | str], int], GraphPointRef]] = {}
         self._bad_data_overlays: Dict[QtWidgets.QWidget, Any] = {}
+        self._bad_data_dialog: _BadDataSelectionDialog | None = None
+        self._bad_data_dialog_status_label: QtWidgets.QLabel | None = None
+        self._bad_data_dialog_remove_button: QtWidgets.QPushButton | None = None
+        self._bad_data_dialog_syncing = False
         self._project_tree_update_depth = 0
         self._project_tree_updates_prev = True
         self._primary_dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
         self._primary_dock_layout_refreshing = False
         self._dock_resize_refresh_pending = False
+        self._suppress_primary_dock_events = 0
         self._log_alert_enabled: bool = False
         self._left_dock_switcher_widget: _DockSwitcherWidget | None = None
         self._log_view_watcher: _LogViewWatcher | None = None
@@ -6347,21 +6359,133 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             elif can_select:
                 remove_action.setChecked(bool(self._bad_data_mode))
             remove_action.blockSignals(block)
-        delete_action = getattr(self, "delete_bad_data_button", None)
         current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
         has_selection = bool(
             can_select
             and isinstance(current_tab, QtWidgets.QWidget)
             and self._bad_data_selections.get(current_tab)
         )
-        if isinstance(delete_action, QtGui.QAction):
-            delete_action.setEnabled(has_selection)
+        if not can_select and self._bad_data_mode:
+            self._set_bad_data_mode(False)
+            return
+        self._update_bad_data_dialog_state(has_selection=has_selection, can_select=can_select)
 
     def _handle_remove_bad_data_toggled(self, checked: bool) -> None:
-        self._bad_data_mode = bool(checked)
-        if not self._bad_data_mode:
+        self._set_bad_data_mode(bool(checked))
+
+    def _ensure_bad_data_dialog(self) -> _BadDataSelectionDialog:
+        dialog = self._bad_data_dialog
+        if dialog is not None:
+            return dialog
+        dialog = _BadDataSelectionDialog(self)
+        dialog.setWindowTitle("Remove bad data points")
+        dialog.setModal(False)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        dialog.setWindowFlags(
+            dialog.windowFlags()
+            | QtCore.Qt.WindowType.Tool
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+        )
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        title_label = QtWidgets.QLabel("Selection mode is active for the current graph.", dialog)
+        title_label.setWordWrap(True)
+        layout.addWidget(title_label)
+        hint_label = QtWidgets.QLabel(
+            "Drag a rectangle to add points. Click a plotted point to select or deselect it.",
+            dialog,
+        )
+        hint_label.setWordWrap(True)
+        layout.addWidget(hint_label)
+        status_label = QtWidgets.QLabel("No points selected.", dialog)
+        status_label.setWordWrap(True)
+        layout.addWidget(status_label)
+        button_row = QtWidgets.QHBoxLayout()
+        remove_button = QtWidgets.QPushButton("Remove selected points", dialog)
+        remove_button.clicked.connect(self._delete_selected_bad_data_points)
+        close_button = QtWidgets.QPushButton("Close", dialog)
+        close_button.clicked.connect(lambda: self._set_bad_data_mode(False))
+        button_row.addWidget(remove_button)
+        button_row.addStretch(1)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+        dialog.dismissed.connect(self._handle_bad_data_dialog_dismissed)
+        dialog.resize(360, dialog.sizeHint().height())
+        self._bad_data_dialog = dialog
+        self._bad_data_dialog_status_label = status_label
+        self._bad_data_dialog_remove_button = remove_button
+        return dialog
+
+    def _handle_bad_data_dialog_dismissed(self) -> None:
+        if self._bad_data_dialog_syncing:
+            return
+        if self._bad_data_mode:
+            self._set_bad_data_mode(False)
+
+    def _clear_bad_data_selection(self) -> None:
+        tabs = list(self._bad_data_selections.keys())
+        for tab in tabs:
+            self._bad_data_selections.pop(tab, None)
+            self._update_bad_data_overlay(tab)
+
+    def _set_bad_data_mode(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._bad_data_mode:
+            self._update_bad_data_actions()
+            return
+        self._bad_data_mode = enabled
+        if enabled:
             self._bad_data_interaction = None
+            dialog = self._ensure_bad_data_dialog()
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        else:
+            self._bad_data_interaction = None
+            self._clear_bad_data_selection()
+            dialog = self._bad_data_dialog
+            if dialog is not None and dialog.isVisible():
+                self._bad_data_dialog_syncing = True
+                try:
+                    dialog.close()
+                finally:
+                    self._bad_data_dialog_syncing = False
         self._update_bad_data_actions()
+
+    def _update_bad_data_dialog_state(
+        self,
+        *,
+        has_selection: bool | None = None,
+        can_select: bool | None = None,
+    ) -> None:
+        dialog = self._bad_data_dialog
+        if dialog is None:
+            return
+        current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        selected_count = 0
+        if isinstance(current_tab, QtWidgets.QWidget):
+            selected_count = len(self._bad_data_selections.get(current_tab, {}))
+        if has_selection is None:
+            has_selection = selected_count > 0
+        if can_select is None:
+            descriptor = self._current_tab_descriptor()
+            can_select = self._current_plugin_supports_bad_data_removal() and self._descriptor_has_point_provenance(
+                descriptor
+            )
+        status_label = self._bad_data_dialog_status_label
+        if status_label is not None:
+            if not can_select:
+                status_label.setText("Selection is unavailable for the current graph.")
+            elif selected_count == 0:
+                status_label.setText("No points selected yet.")
+            elif selected_count == 1:
+                status_label.setText("1 point selected.")
+            else:
+                status_label.setText(f"{selected_count} points selected.")
+        remove_button = self._bad_data_dialog_remove_button
+        if remove_button is not None:
+            remove_button.setEnabled(bool(can_select and has_selection))
 
     @staticmethod
     def _graph_line_xy(state: GraphLineState) -> tuple[np.ndarray, np.ndarray]:
@@ -7514,21 +7638,31 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         plugin = getattr(self, "_current_plugin", None)
         if not isinstance(plugin, PyPlotPlugin) or not plugin.supports_graph_point_removal():
             return
-        answer = QtWidgets.QMessageBox.question(
-            self,
-            "Remove bad data points",
-            f"Delete {len(refs)} selected point(s) from the current graph data?",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-            QtWidgets.QMessageBox.StandardButton.No,
+        message_parent: QtWidgets.QWidget = self
+        dialog = self._bad_data_dialog
+        if isinstance(dialog, QtWidgets.QDialog) and dialog.isVisible():
+            message_parent = dialog
+        confirm_box = QtWidgets.QMessageBox(message_parent)
+        confirm_box.setWindowTitle("Remove bad data points")
+        confirm_box.setText(f"Delete {len(refs)} selected point(s) from the current graph data?")
+        confirm_box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        confirm_box.setStandardButtons(
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
         )
+        confirm_box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.No)
+        try:
+            confirm_box.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+            confirm_box.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
+        except Exception:
+            pass
+        answer = QtWidgets.QMessageBox.StandardButton(confirm_box.exec())
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
         removed = int(plugin.remove_graph_points(descriptor=descriptor, point_refs=refs))
         if removed > 0:
-            self._bad_data_mode = False
             self._bad_data_selections.pop(current_tab, None)
             self._update_bad_data_overlay(current_tab)
-            self._update_bad_data_actions()
+            self._set_bad_data_mode(False)
 
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
         raise NotImplementedError
@@ -7760,11 +7894,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
         object_dock.setMinimumWidth(PRIMARY_DOCK_MIN_WIDTH)
         self.object_dock = object_dock
-        if sys.platform != "darwin":
-            object_dock.visibilityChanged.connect(
-                lambda _: QtCore.QTimer.singleShot(50, self._normalize_docks_initial)
-            )
-
         graph_dock: QtWidgets.QDockWidget | None = None
         graph_panel: QtWidgets.QWidget | None = None
         self.graph_dock = None
@@ -7775,13 +7904,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._setup_navigation_toolbar()
         self._setup_format_toolbar()
         self._setup_annotation_toolbar()
-        QtCore.QTimer.singleShot(0, self._normalize_docks_initial)
         self._layout_fixed_once = False
-        if isinstance(project_dock, QtWidgets.QDockWidget):
-            if sys.platform != "darwin":
-                project_dock.visibilityChanged.connect(
-                    lambda _: QtCore.QTimer.singleShot(50, self._normalize_docks_initial)
-                )
+
+        for candidate_dock in (project_dock, log_dock, graph_dock, object_dock):
+            if not isinstance(candidate_dock, QtWidgets.QDockWidget):
+                continue
+            stored_width = self._load_primary_dock_width(candidate_dock)
+            if isinstance(stored_width, int) and stored_width > 0:
+                self._primary_dock_widths[candidate_dock] = stored_width
 
         self._dock_switcher_panels: list[QtWidgets.QDockWidget | None] = []
         dock_switcher_enabled = self._dock_switcher_supported()
@@ -8802,6 +8932,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.plot_button = generate_action
         self._style_toolbar_button(toolbar, generate_action, object_name="mw_plot_action")
 
+        self._plugin_extra_actions: list[QtGui.QAction] = []
+
         self._init_graph_settings_menu(toolbar)
 
     def _setup_action_toolbar(self) -> None:
@@ -8902,12 +9034,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         remove_bad_data_action.toggled.connect(self._handle_remove_bad_data_toggled)
         self.remove_bad_data_button = remove_bad_data_action
         self._style_toolbar_button(toolbar, remove_bad_data_action)
-
-        delete_selected_points_action = toolbar.addAction("Delete selected points")
-        delete_selected_points_action.setEnabled(False)
-        delete_selected_points_action.triggered.connect(self._delete_selected_bad_data_points)
-        self.delete_bad_data_button = delete_selected_points_action
-        self._style_toolbar_button(toolbar, delete_selected_points_action)
 
     def _setup_navigation_toolbar(self) -> None:
         toolbar = QtWidgets.QToolBar("Navigation", self)
@@ -12185,12 +12311,106 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             metadata={"source_titles": [self._tab_descriptors.get(tab_ref).title for tab_ref in selected_tabs if self._tab_descriptors.get(tab_ref) is not None]},
         )
 
+    def _dispose_registered_canvas(self, canvas: FigureCanvas | None) -> None:
+        if canvas is None:
+            return
+        helper = self._navigation_helpers.pop(canvas, None)
+        if helper is not None:
+            helper.setParent(None)
+            helper.deleteLater()
+        if self._nav_active_canvas is canvas:
+            self._deactivate_navigation_mode()
+        cid = self._cursor_connections.pop(canvas, None)
+        if cid is not None:
+            try:
+                canvas.mpl_disconnect(cid)
+            except Exception:
+                pass
+        edit_cid = self._edit_connections.pop(canvas, None)
+        if edit_cid is not None:
+            try:
+                canvas.mpl_disconnect(edit_cid)
+            except Exception:
+                pass
+        resize_cid = self._resize_connections.pop(canvas, None)
+        if resize_cid is not None:
+            try:
+                canvas.mpl_disconnect(resize_cid)
+            except Exception:
+                pass
+        motion_cid = self._annotation_motion_connections.pop(canvas, None)
+        if motion_cid is not None:
+            try:
+                canvas.mpl_disconnect(motion_cid)
+            except Exception:
+                pass
+        release_cid = self._annotation_release_connections.pop(canvas, None)
+        if release_cid is not None:
+            try:
+                canvas.mpl_disconnect(release_cid)
+            except Exception:
+                pass
+        copy_shortcut = self._canvas_copy_shortcuts.pop(canvas, None)
+        if copy_shortcut is not None:
+            try:
+                copy_shortcut.setParent(None)
+                copy_shortcut.deleteLater()
+            except Exception:
+                pass
+        try:
+            delattr(canvas, "_mw_display_scale_refresh")
+        except Exception:
+            pass
+        self._canvas_base_size_inches.pop(canvas, None)
+        self._canvas_base_dpi.pop(canvas, None)
+        self._canvas_display_scale.pop(canvas, None)
+        self._canvas_scaling_guard.discard(canvas)
+
+    def _replace_plot_tab_contents(
+        self,
+        tab: QtWidgets.QWidget,
+        canvas: FigureCanvas,
+        axes: Any,
+        descriptor: TabDescriptor | None = None,
+    ) -> None:
+        overlay = self._bad_data_overlays.pop(tab, None)
+        if overlay is not None:
+            try:
+                overlay.remove()
+            except Exception:
+                pass
+        self._bad_data_selections.pop(tab, None)
+        old_canvas = self._canvas_by_tab.pop(tab, None)
+        self._axes_by_tab.pop(tab, None)
+        self._tab_descriptors.pop(tab, None)
+        self._remove_shared_plot_workbook_for_tab(tab)
+        self._dispose_registered_canvas(old_canvas)
+        layout = tab.layout()
+        if not isinstance(layout, QtWidgets.QVBoxLayout):
+            layout = QtWidgets.QVBoxLayout(tab)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+        while layout.count():
+            item = layout.takeAt(0)
+            child = item.widget()
+            if child is None:
+                continue
+            try:
+                child.setParent(None)
+                child.deleteLater()
+            except Exception:
+                pass
+        layout.addWidget(canvas)
+        self._register_plot_tab(tab, canvas, axes, descriptor, record_history=False)
+
     def _register_plot_tab(
         self,
         tab: QtWidgets.QWidget,
         canvas: FigureCanvas,
         axes: Any,
         descriptor: TabDescriptor | None = None,
+        *,
+        record_history: bool = True,
     ) -> None:
         self._canvas_by_tab[tab] = canvas
         self._axes_by_tab[tab] = axes
@@ -12235,6 +12455,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             pass
         try:
+            setattr(canvas, "_mw_display_scale_refresh", lambda c=canvas: self._handle_canvas_resize(c))
+        except Exception:
+            pass
+        try:
             motion_cid = canvas.mpl_connect(
                 "motion_notify_event", self._handle_canvas_motion
             )
@@ -12273,10 +12497,22 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             plugin_name = self._tab_plugin_name(descriptor)
             if plugin_name and isinstance(descriptor.metadata, dict) and "plugin" not in descriptor.metadata:
                 descriptor.metadata["plugin"] = plugin_name
-            item = self._ensure_graph_tree_item(tab, descriptor)
+            item = self._graph_tree_items.get(tab)
+            if not self._is_live_tree_item(item):
+                item = None
+            if item is None:
+                item = self._ensure_graph_tree_item(tab, descriptor)
+            elif isinstance(item, QtWidgets.QTreeWidgetItem):
+                label = descriptor.root_label or descriptor.title or "Plot"
+                self._set_tree_item_text(
+                    item,
+                    name=label,
+                    details=descriptor.title or "",
+                )
+                self._assign_project_payload(item, ("graph", tab))
             if item is not None:
                 self._graph_tree_items[tab] = item
-            if not self._history.is_replaying:
+            if record_history and not self._history.is_replaying:
                 info_holder: Dict[str, Any] = {"info": None}
 
                 def _undo_creation() -> None:
@@ -12294,6 +12530,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     redo=_redo_creation,
                 )
             self._register_shared_plot_workbook_for_tab(tab, descriptor)
+            if axes is not None:
+                try:
+                    self._sync_axes_legend_with_visible_lines(
+                        axes,
+                        plugin_name=plugin_name,
+                    )
+                except Exception:
+                    pass
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
         if self._dark_mode_enabled:
@@ -14267,7 +14511,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.addDockWidget(area, panel)
         reference = docks[0]
         try:
-            self.splitDockWidget(panel, reference, QtCore.Qt.Orientation.Horizontal)
+            if side == "right":
+                self.splitDockWidget(reference, panel, QtCore.Qt.Orientation.Horizontal)
+            else:
+                self.splitDockWidget(panel, reference, QtCore.Qt.Orientation.Horizontal)
         except Exception:
             pass
         if side == "left":
@@ -14301,6 +14548,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not all_docks:
             return
         self._primary_dock_layout_refreshing = True
+        self._suppress_primary_dock_events += 1
         try:
             docks: list[QtWidgets.QDockWidget] = []
             widths: list[int] = []
@@ -14314,9 +14562,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         continue
                 base_width = self._primary_dock_widths.get(dock, 0)
                 if base_width <= 0:
-                    base_width = PRIMARY_DOCK_DEFAULT_WIDTH
+                    loaded_width = self._load_primary_dock_width(dock)
+                    base_width = (
+                        loaded_width
+                        if isinstance(loaded_width, int) and loaded_width > 0
+                        else PRIMARY_DOCK_DEFAULT_WIDTH
+                    )
+                target_width = self._clamp_primary_dock_width(dock, base_width)
+                if not self._primary_dock_width_needs_update(dock, target_width):
+                    continue
                 docks.append(dock)
-                widths.append(self._primary_dock_target_width(dock, base_width))
+                widths.append(target_width)
             if not docks:
                 return
             try:
@@ -14328,6 +14584,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     except Exception:
                         continue
         finally:
+            self._suppress_primary_dock_events = max(0, self._suppress_primary_dock_events - 1)
             self._primary_dock_layout_refreshing = False
 
     def _apply_initial_primary_dock_size(
@@ -14342,6 +14599,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         width = max(width, min_width)
         width = self._clamp_primary_dock_width(dock, width)
         self._primary_dock_widths[dock] = width
+        if not self._primary_dock_width_needs_update(dock, width):
+            return
+        self._suppress_primary_dock_events += 1
         try:
             self.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
         except Exception:
@@ -14349,6 +14609,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 dock.resize(width, dock.height())
             except Exception:
                 pass
+        finally:
+            self._suppress_primary_dock_events = max(0, self._suppress_primary_dock_events - 1)
 
     def _load_primary_dock_width(self, dock: QtWidgets.QDockWidget | None) -> int | None:
         if not isinstance(dock, QtWidgets.QDockWidget):
@@ -14404,15 +14666,24 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if width <= 0:
             width = default_width
         width = max(width, PRIMARY_DOCK_MIN_WIDTH)
-        if dock.objectName() in {"projectExplorerDock", "objectManagerDock"}:
-            window_width = max(self.width(), self.size().width(), PRIMARY_DOCK_DEFAULT_WIDTH * 4)
-            if window_width >= PRIMARY_DOCK_EXPAND_THRESHOLD:
-                expanded_min = int(window_width * PRIMARY_DOCK_EXPANDED_FRACTION)
-                if PRIMARY_DOCK_EXPANDED_MAX > 0:
-                    expanded_min = min(expanded_min, PRIMARY_DOCK_EXPANDED_MAX)
-                width = max(width, expanded_min)
-
         return self._clamp_primary_dock_width(dock, width)
+
+    def _primary_dock_width_needs_update(
+        self,
+        dock: QtWidgets.QDockWidget | None,
+        target_width: int,
+        *,
+        tolerance: int = 2,
+    ) -> bool:
+        if not isinstance(dock, QtWidgets.QDockWidget):
+            return False
+        try:
+            current_width = int(dock.width())
+        except Exception:
+            current_width = 0
+        if current_width <= 0:
+            return True
+        return abs(current_width - int(target_width)) > max(0, int(tolerance))
 
     def _primary_dock_visibility_key(self, dock: QtWidgets.QDockWidget | None) -> str | None:
         if not isinstance(dock, QtWidgets.QDockWidget):
@@ -14454,15 +14725,23 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             pass
 
-    def _remember_primary_dock_width(self, dock: QtWidgets.QDockWidget | None) -> None:
+    def _remember_primary_dock_width(
+        self,
+        dock: QtWidgets.QDockWidget | None,
+        *,
+        prefer_current: bool = False,
+    ) -> None:
         if not isinstance(dock, QtWidgets.QDockWidget):
             return
         key = self._primary_dock_width_key(dock)
         if key is None or not isinstance(self.settings, QtCore.QSettings):
             return
         width = dock.width()
+        stored_width = self._primary_dock_widths.get(dock, 0)
+        if not prefer_current and width > 0 and stored_width > width:
+            width = stored_width
         if width <= 0:
-            width = self._primary_dock_widths.get(dock, 0)
+            width = stored_width
         if width <= 0:
             return
         width = self._clamp_primary_dock_width(dock, width)
@@ -14480,7 +14759,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             getattr(self, "log_dock", None),
             getattr(self, "object_dock", None),
         ):
-            self._remember_primary_dock_width(dock)
+            self._remember_primary_dock_width(dock, prefer_current=True)
         try:
             self.settings.sync()
         except Exception:
@@ -14506,6 +14785,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 except Exception:
                     pass
             self._remember_primary_dock_state(dock, visible=should_show)
+        self._ensure_right_primary_dock_layout()
 
     def _ensure_primary_docks_pinned(self) -> None:
         """Keep the primary explorers docked when they are supposed to be visible."""
@@ -14524,6 +14804,53 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 dock.raise_()
             except Exception:
                 pass
+        self._ensure_right_primary_dock_layout()
+
+    def _ensure_right_primary_dock_layout(self) -> None:
+        object_dock = getattr(self, "object_dock", None)
+        right_switcher = next(
+            (
+                panel
+                for panel in getattr(self, "_dock_switcher_panels", [])
+                if isinstance(panel, QtWidgets.QDockWidget)
+                and panel.objectName() == "mw_right_dock_switcher"
+            ),
+            None,
+        )
+        if not isinstance(object_dock, QtWidgets.QDockWidget) or not isinstance(
+            right_switcher, QtWidgets.QDockWidget
+        ):
+            return
+        self._suppress_primary_dock_events += 1
+        try:
+            try:
+                object_dock.setFloating(False)
+            except Exception:
+                pass
+            try:
+                right_switcher.setFloating(False)
+            except Exception:
+                pass
+            try:
+                if self.dockWidgetArea(object_dock) != QtCore.Qt.DockWidgetArea.RightDockWidgetArea:
+                    self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
+            except Exception:
+                pass
+            try:
+                if self.dockWidgetArea(right_switcher) != QtCore.Qt.DockWidgetArea.RightDockWidgetArea:
+                    self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, right_switcher)
+            except Exception:
+                pass
+            try:
+                self.splitDockWidget(
+                    object_dock,
+                    right_switcher,
+                    QtCore.Qt.Orientation.Horizontal,
+                )
+            except Exception:
+                pass
+        finally:
+            self._suppress_primary_dock_events = max(0, self._suppress_primary_dock_events - 1)
 
     def _pin_primary_dock_switchers(self) -> None:
         panels = getattr(self, "_dock_switcher_panels", [])
@@ -14557,25 +14884,36 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         dock: QtWidgets.QDockWidget,
         area: QtCore.Qt.DockWidgetArea,
     ) -> None:
+        if getattr(self, "_suppress_primary_dock_events", 0):
+            return
         if getattr(self, "_retabbing_docks", False):
             return
-        if area in (
+        if area not in (
             QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
             QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
         ):
-            self._queue_retabify_primary_docks()
+            return
+        self._remember_primary_dock_width(dock, prefer_current=True)
 
     def _handle_primary_dock_visibility_changed(
         self, dock: QtWidgets.QDockWidget
     ) -> None:
+        if getattr(self, "_suppress_primary_dock_events", 0):
+            return
         if getattr(self, "_retabbing_docks", False):
             return
         _ = dock
         self._remember_primary_dock_state(dock, visible=dock.isVisible())
         if dock.isVisible():
-            self._queue_retabify_primary_docks()
+            width = self._primary_dock_widths.get(dock, 0)
+            if width <= 0:
+                loaded_width = self._load_primary_dock_width(dock)
+                if isinstance(loaded_width, int) and loaded_width > 0:
+                    width = loaded_width
+            if width > 0:
+                self._apply_dock_width(dock, width)
             return
-        self._remember_primary_dock_width(dock)
+        self._remember_primary_dock_width(dock, prefer_current=True)
 
     def _queue_retabify_primary_docks(self) -> None:
         if getattr(self, "_retabify_pending", False):
@@ -14592,6 +14930,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         self._retabify_pending = False
         self._retabbing_docks = True
+        self._suppress_primary_dock_events += 1
         try:
             project_dock = getattr(self, "project_dock", None)
             log_dock = getattr(self, "log_dock", None)
@@ -14664,25 +15003,28 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     )
                 except Exception:
                     pass
-                try:
-                    right_switcher.raise_()
-                except Exception:
-                    pass
                 panel = right_switcher.widget()
                 if isinstance(panel, _DockSwitcherWidget):
                     panel.mark_tabbed(object_dock)
+                try:
+                    object_dock.raise_()
+                except Exception:
+                    pass
 
             for dock, width in tracked_widths.items():
                 width = self._clamp_primary_dock_width(dock, width)
                 self._primary_dock_widths[dock] = width
                 self._apply_dock_width(dock, width)
         finally:
+            self._suppress_primary_dock_events = max(0, self._suppress_primary_dock_events - 1)
             self._retabbing_docks = False
 
     def _apply_dock_width(self, dock: QtWidgets.QDockWidget, width: int) -> None:
         if not isinstance(dock, QtWidgets.QDockWidget) or dock.isFloating() or width <= 0:
             return
         width = self._clamp_primary_dock_width(dock, width)
+        if not self._primary_dock_width_needs_update(dock, width):
+            return
         try:
             screen = QtGui.QGuiApplication.screenAt(dock.mapToGlobal(dock.rect().center()))
             if screen is None:
@@ -14701,6 +15043,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 return
             if dock_widget.isFloating():
                 return
+            if not self._primary_dock_width_needs_update(dock_widget, width):
+                return
+            self._suppress_primary_dock_events += 1
             try:
                 dock_widget.resize(width, dock_widget.height() or dock_widget.sizeHint().height())
             except Exception:
@@ -14709,24 +15054,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 self.resizeDocks([dock_widget], [width], QtCore.Qt.Orientation.Horizontal)
             except Exception:
                 pass
-            try:
-                frame = self.frameGeometry()
-                screen = QtGui.QGuiApplication.screenAt(frame.center())
-                if screen is None:
-                    screen = QtGui.QGuiApplication.primaryScreen()
-                if screen is not None:
-                    available_rect = screen.availableGeometry()
-                    new_left = max(
-                        available_rect.left(),
-                        min(frame.left(), available_rect.right() - frame.width()),
-                    )
-                    new_top = max(
-                        available_rect.top(),
-                        min(frame.top(), available_rect.bottom() - frame.height()),
-                    )
-                    self.move(new_left, new_top)
-            except Exception:
-                pass
+            finally:
+                self._suppress_primary_dock_events = max(0, self._suppress_primary_dock_events - 1)
 
         QtCore.QTimer.singleShot(0, _resize)
 
@@ -17600,16 +17929,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     has_saved_override = bool(override_checker(plugin_name_for_axes))
                 except Exception:
                     has_saved_override = False
-        if has_saved_override and can_apply_override:
-            self._apply_tight_layout_warning_choice(
-                choice="override",
-                figure=figure,
-                recommendations=recommendations,
-                can_apply_override=can_apply_override,
-                apply_override_handler=apply_override_handler,
-                axes_for_override=axes_for_override,
-            )
-            return
         context_key = self._tight_layout_warning_context_key(context_label)
         expiry = float(self._tight_layout_bulk_choice_expiry_by_context.get(context_key, 0.0))
         if expiry > 0.0 and time.monotonic() > expiry:
@@ -18652,7 +18971,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             tab.setVisible(visible)
         if visible:
-            maximized = bool(getattr(self.tab_widget, "_global_maximized", False))
+            maximized = bool(
+                getattr(self.tab_widget, "_global_maximized", False)
+                or getattr(self.tab_widget, "_fullscreen_lock", False)
+            )
             fitter = getattr(self.tab_widget, "_fit_subwindow", None)
             maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
             self._hidden_tabs.discard(tab)
@@ -18862,54 +19184,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         descriptor = self._tab_descriptors.pop(tab, None)
         canvas = self._canvas_by_tab.pop(tab, None)
         axes = self._axes_by_tab.pop(tab, None)
-        if canvas is not None:
-            helper = self._navigation_helpers.pop(canvas, None)
-            if helper is not None:
-                helper.setParent(None)
-                helper.deleteLater()
-            if self._nav_active_canvas is canvas:
-                self._deactivate_navigation_mode()
-            cid = self._cursor_connections.pop(canvas, None)
-            if cid is not None:
-                try:
-                    canvas.mpl_disconnect(cid)
-                except Exception:
-                    pass
-            edit_cid = self._edit_connections.pop(canvas, None)
-            if edit_cid is not None:
-                try:
-                    canvas.mpl_disconnect(edit_cid)
-                except Exception:
-                    pass
-            resize_cid = self._resize_connections.pop(canvas, None)
-            if resize_cid is not None:
-                try:
-                    canvas.mpl_disconnect(resize_cid)
-                except Exception:
-                    pass
-            motion_cid = self._annotation_motion_connections.pop(canvas, None)
-            if motion_cid is not None:
-                try:
-                    canvas.mpl_disconnect(motion_cid)
-                except Exception:
-                    pass
-            release_cid = self._annotation_release_connections.pop(canvas, None)
-            if release_cid is not None:
-                try:
-                    canvas.mpl_disconnect(release_cid)
-                except Exception:
-                    pass
-            copy_shortcut = self._canvas_copy_shortcuts.pop(canvas, None)
-            if copy_shortcut is not None:
-                try:
-                    copy_shortcut.setParent(None)
-                    copy_shortcut.deleteLater()
-                except Exception:
-                    pass
-            self._canvas_base_size_inches.pop(canvas, None)
-            self._canvas_base_dpi.pop(canvas, None)
-            self._canvas_display_scale.pop(canvas, None)
-            self._canvas_scaling_guard.discard(canvas)
+        self._dispose_registered_canvas(canvas)
         item = self._graph_tree_items.pop(tab, None)
         if item is not None:
             parent = item.parent()
@@ -18948,7 +19223,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return info
 
     def _normalize_docks_initial(self) -> None:
-        """Ensure visible primary docks start at readable sizes."""
+        """Restore visible primary docks to their stored session widths."""
 
         if getattr(self, "_normalizing_docks", False):
             return
@@ -18968,25 +19243,38 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     continue
                 if not self._primary_dock_should_show(dock):
                     continue
-                width = self._primary_dock_target_width(dock, PRIMARY_DOCK_DEFAULT_WIDTH)
+                width = self._load_primary_dock_width(dock)
+                if width is None or width <= 0:
+                    width = self._primary_dock_widths.get(dock, 0)
+                if width <= 0:
+                    width = PRIMARY_DOCK_DEFAULT_WIDTH
+                width = self._clamp_primary_dock_width(dock, width)
                 dock_specs.append((dock, width))
                 try:
                     dock.setFloating(False)
                     dock.show()
                 except Exception:
                     pass
-            for dock, width in dock_specs:
+            docks_to_resize = [
+                (dock, width)
+                for dock, width in dock_specs
+                if self._primary_dock_width_needs_update(dock, width)
+            ]
+            for dock, width in docks_to_resize:
                 try:
                     self._apply_dock_width(dock, width)
                 except Exception:
                     pass
-            if dock_specs:
+            if docks_to_resize:
                 docks = [dock for dock, _ in dock_specs]
                 widths = [width for _, width in dock_specs]
+                self._suppress_primary_dock_events += 1
                 try:
                     self.resizeDocks(docks, widths, QtCore.Qt.Orientation.Horizontal)
                 except Exception:
                     pass
+                finally:
+                    self._suppress_primary_dock_events = max(0, self._suppress_primary_dock_events - 1)
             panels = [
                 panel
                 for panel in getattr(self, "_dock_switcher_panels", [])
@@ -19051,8 +19339,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
         super().changeEvent(event)
         if event.type() == QtCore.QEvent.Type.WindowStateChange:
-            QtCore.QTimer.singleShot(0, self._refresh_primary_dock_layout)
-            QtCore.QTimer.singleShot(20, self._normalize_docks_initial)
             QtCore.QTimer.singleShot(0, self._refresh_status_bar_layout)
             return
         if event.type() == QtCore.QEvent.Type.ActivationChange and self.isActiveWindow():
@@ -19061,40 +19347,16 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._refresh_status_bar_layout()
-        if self._primary_dock_layout_refreshing:
-            return
-        if self._dock_resize_refresh_pending:
-            return
-        self._dock_resize_refresh_pending = True
-
-        def _refresh_after_resize() -> None:
-            self._dock_resize_refresh_pending = False
-            if self._primary_dock_layout_refreshing:
-                return
-            try:
-                self._refresh_primary_dock_layout()
-            except Exception:
-                pass
-
-        QtCore.QTimer.singleShot(0, _refresh_after_resize)
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._refresh_status_bar_layout()
         if not getattr(self, "_layout_fixed_once", False):
             self._layout_fixed_once = True
-            QtCore.QTimer.singleShot(0, self._apply_initial_dock_sizes)
-            QtCore.QTimer.singleShot(0, self._refresh_primary_dock_layout)
-            QtCore.QTimer.singleShot(10, self._ensure_primary_docks_pinned)
-            QtCore.QTimer.singleShot(25, self._queue_retabify_primary_docks)
-            QtCore.QTimer.singleShot(50, self._normalize_docks_initial)
-            if sys.platform != "darwin":
-                QtCore.QTimer.singleShot(150, self._normalize_docks_initial)
-        if sys.platform == "darwin":
-            QtCore.QTimer.singleShot(150, self._normalize_docks_initial)
-        else:
-            QtCore.QTimer.singleShot(100, self._normalize_docks_initial)
-            QtCore.QTimer.singleShot(300, self._normalize_docks_initial)
+            QtCore.QTimer.singleShot(0, self._restore_primary_dock_states)
+            QtCore.QTimer.singleShot(10, self._apply_initial_dock_sizes)
+            QtCore.QTimer.singleShot(25, self._ensure_primary_docks_pinned)
+            QtCore.QTimer.singleShot(50, self._refresh_primary_dock_layout)
 
     def _restore_tab_from_info(self, info: _RemovedTabInfo) -> None:
         insert_index = min(info.index, self.tab_widget.count())
@@ -19440,8 +19702,33 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
         finally:
             self._resizing = False
         super().resizeEvent(event)
+        try:
+            self._owner._remember_subwindow_geometry(self)  # noqa: SLF001
+        except Exception:
+            pass
         self._sync_child_geometry()
         self._sync_child_geometry_deferred()
+
+    def moveEvent(self, event: QtGui.QMoveEvent) -> None:  # type: ignore[override]
+        result = super().moveEvent(event)
+        owner = self._owner
+        if owner is None:
+            return result
+        if getattr(owner, "_global_maximized", False) or getattr(owner, "_fullscreen_lock", False):
+            return result
+        if getattr(owner, "_arranging_subwindows", False):
+            return result
+        try:
+            buttons = QtWidgets.QApplication.mouseButtons()
+        except Exception:
+            buttons = QtCore.Qt.MouseButton.NoButton
+        if bool(buttons & QtCore.Qt.MouseButton.LeftButton):
+            try:
+                setattr(self, "_mw_user_sized", True)
+            except Exception:
+                pass
+        owner._remember_subwindow_geometry(self)  # noqa: SLF001
+        return result
 
 
 class _MdiTabProxy(QtWidgets.QWidget):
@@ -19563,6 +19850,90 @@ class _MdiTabProxy(QtWidgets.QWidget):
         except Exception:
             return False
 
+    def _capture_widget_window_state(self, widget: QtWidgets.QWidget | None) -> dict[str, Any]:
+        state: dict[str, Any] = {}
+        sub = self._subwindow_for(widget)
+        if not self._is_live_subwindow(sub):
+            return state
+        self._remember_subwindow_geometry(sub)
+        stored = getattr(sub, "_mw_saved_geometry", None)
+        if isinstance(stored, QtCore.QRect) and stored.isValid():
+            state["saved_geometry"] = QtCore.QRect(stored)
+        try:
+            state["user_sized"] = bool(getattr(sub, "_mw_user_sized", False))
+        except Exception:
+            state["user_sized"] = False
+        try:
+            state["hidden"] = bool(
+                sub in self._hidden_subwindows
+                or widget in self._hidden_tabs
+                or sub.isHidden()
+            )
+        except Exception:
+            state["hidden"] = False
+        try:
+            state["maximized"] = bool(
+                self._global_maximized
+                or self._fullscreen_lock
+                or sub.isMaximized()
+                or sub.isFullScreen()
+            )
+        except Exception:
+            state["maximized"] = bool(self._global_maximized or self._fullscreen_lock)
+        state["current"] = self.currentWidget() is widget
+        return state
+
+    def _restore_widget_window_state(
+        self,
+        widget: QtWidgets.QWidget | None,
+        state: dict[str, Any] | None,
+    ) -> None:
+        if widget is None or not isinstance(state, dict) or not state:
+            return
+        sub = self._subwindow_for(widget)
+        if not self._is_live_subwindow(sub):
+            return
+        saved_geometry = state.get("saved_geometry")
+        user_sized = bool(state.get("user_sized", False))
+        hidden = bool(state.get("hidden", False))
+        maximized = bool(state.get("maximized", False))
+        current = bool(state.get("current", False))
+        try:
+            setattr(sub, "_mw_user_sized", user_sized)
+        except Exception:
+            pass
+        if isinstance(saved_geometry, QtCore.QRect) and saved_geometry.isValid():
+            try:
+                setattr(sub, "_mw_saved_geometry", QtCore.QRect(saved_geometry))
+            except Exception:
+                pass
+        if hidden:
+            self._set_tab_visibility(widget, False)
+        else:
+            self._hidden_tabs.discard(widget)
+            self._hidden_subwindows.discard(sub)
+            self._maximized_hidden.discard(sub)
+            try:
+                sub.show()
+                sub.showNormal()
+            except Exception:
+                pass
+            if isinstance(saved_geometry, QtCore.QRect) and saved_geometry.isValid():
+                try:
+                    sub.setGeometry(QtCore.QRect(saved_geometry))
+                except Exception:
+                    pass
+            self._sync_subwindow_child_widget(sub)
+            self._refresh_subwindow_figure_layout(sub, deferred=True)
+        if current:
+            index = self.indexOf(widget)
+            if index >= 0:
+                self._activate_index(index)
+        if maximized and not hidden:
+            self._fullscreen_lock = True
+            self._global_maximized = True
+            self._maximize_single(sub)
+
     def _subwindow_aspect_ratio(self, sub: _ManagedSubWindow | None) -> float:
         if sub is None:
             return 1.6
@@ -19626,6 +19997,15 @@ class _MdiTabProxy(QtWidgets.QWidget):
         if callable(sync):
             try:
                 sync()
+            except Exception:
+                pass
+        canvas = _MdiTabProxy._canvas_for_subwindow(sub)
+        if canvas is None:
+            return
+        refresh = getattr(canvas, "_mw_display_scale_refresh", None)
+        if callable(refresh):
+            try:
+                refresh()
             except Exception:
                 pass
 
@@ -19719,10 +20099,23 @@ class _MdiTabProxy(QtWidgets.QWidget):
     def _is_maximized_target(self, sub: _ManagedSubWindow | None) -> bool:
         if not self._is_live_subwindow(sub):
             return False
-        if not (self._global_maximized or self._fullscreen_lock):
+        if not self._fullscreen_session_active():
             return False
         active = self._mdi.activeSubWindow()
         return active is sub
+
+    def _fullscreen_session_active(self) -> bool:
+        if self._global_maximized or self._fullscreen_lock:
+            return True
+        active = self._mdi.activeSubWindow()
+        if not isinstance(active, _ManagedSubWindow):
+            return False
+        if not self._is_live_subwindow(active):
+            return False
+        try:
+            return bool(active.isMaximized() or active.isFullScreen())
+        except Exception:
+            return False
 
     def _maybe_apply_maximize(self, sub: _ManagedSubWindow) -> None:
         self._apply_fullscreen_geometry(sub)
@@ -19734,7 +20127,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._purge_stale_subwindow_refs()
         if sub is not None and not self._is_live_subwindow(sub):
             return
-        was_global_maximized = bool(self._global_maximized or self._fullscreen_lock)
+        was_global_maximized = self._fullscreen_session_active()
         widget = sub.widget() if sub is not None else None
         index = self.indexOf(widget) if widget is not None else -1
         if sub is not None:
@@ -19766,7 +20159,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         sub = self._subwindow_for(widget)
         if not self._is_live_subwindow(sub):
             return
-        was_global_maximized = bool(self._global_maximized or self._fullscreen_lock)
+        was_global_maximized = self._fullscreen_session_active()
         restored_from_hidden = False
         self._blocking = True
         if sub in self._hidden_subwindows or sub in self._maximized_hidden:
@@ -19839,6 +20232,11 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 if (
                     isinstance(source, _ManagedSubWindow)
                     and self._is_live_subwindow(source)
+                    and (
+                        source_was_maximized
+                        or self._fullscreen_lock
+                        or self._global_maximized
+                    )
                 ):
                     try:
                         if not source.isMaximized() and not source.isFullScreen():
@@ -19898,7 +20296,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._visibility_queue.remove(sub)
         except ValueError:
             pass
-        if self._global_maximized or self._fullscreen_lock:
+        if self._fullscreen_session_active():
             QtCore.QTimer.singleShot(0, self._reconcile_maximized_state)
 
     def _apply_global_window_state(self, *, active: _ManagedSubWindow | None = None) -> None:
@@ -19906,7 +20304,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._syncing_state = True
         try:
             active_sub = active or self._mdi.activeSubWindow()
-            if self._global_maximized or self._fullscreen_lock:
+            if self._fullscreen_session_active():
                 if active_sub is not None:
                     self._maximize_single(active_sub)
                 else:
@@ -19915,6 +20313,12 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 for sub in self._subwindows.values():
                     if sub in self._hidden_subwindows:
                         continue
+                    if sub in self._maximized_hidden:
+                        try:
+                            sub.show()
+                        except Exception:
+                            continue
+                        self._maximized_hidden.discard(sub)
                     sub.show()
                     sub.showNormal()
                     self._maximized_hidden.discard(sub)
@@ -19923,7 +20327,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._syncing_state = False
 
     def _reconcile_maximized_state(self) -> None:
-        if not (self._global_maximized or self._fullscreen_lock):
+        if not self._fullscreen_session_active():
             return
         self._purge_stale_subwindow_refs()
         active = self._mdi.activeSubWindow()
@@ -20037,7 +20441,12 @@ class _MdiTabProxy(QtWidgets.QWidget):
                         lambda s=sub: self._apply_fullscreen_geometry(s),
                     )
             else:
-                self._maximized_hidden.discard(sub)
+                self._remember_subwindow_geometry(sub)
+                try:
+                    sub.hide()
+                except Exception:
+                    continue
+                self._maximized_hidden.add(sub)
 
     def _fit_subwindow(
         self,
@@ -20132,6 +20541,15 @@ class _MdiTabProxy(QtWidgets.QWidget):
             for sub in visible_subwindows
             if self._is_live_subwindow(sub) and sub not in self._hidden_subwindows
         ]
+
+    def _has_manual_subwindow_layout(self) -> bool:
+        for sub in self._ordered_visible_subwindows():
+            try:
+                if bool(getattr(sub, "_mw_user_sized", False)):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _arrange_cascade_visible(self, subwindows: Sequence[_ManagedSubWindow]) -> None:
         if not subwindows:
@@ -20243,13 +20661,18 @@ class _MdiTabProxy(QtWidgets.QWidget):
     def _arrange_subwindows(self) -> None:
         """Lay out visible subwindows using the selected arrangement mode."""
 
-        if self._global_maximized:
+        if self._global_maximized or self._fullscreen_lock:
             return
         viewport = self._mdi.viewport().rect()
         if viewport.width() <= 0 or viewport.height() <= 0:
             return
         visible_subwindows = self._ordered_visible_subwindows()
         if not visible_subwindows:
+            return
+        if self._arrangement_mode == "cascade" and self._has_manual_subwindow_layout():
+            for sub in visible_subwindows:
+                self._sync_subwindow_child_widget(sub)
+                self._refresh_subwindow_figure_layout(sub, deferred=True)
             return
         margin = self._layout_margin
         count = len(visible_subwindows)
@@ -20389,7 +20812,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
             sub.setWindowIcon(icon)
         self._mdi.addSubWindow(sub)
         self._fit_subwindow(sub, remember_manual=False)
-        if self._global_maximized:
+        if self._global_maximized or self._fullscreen_lock:
             self._maximize_single(sub)
         else:
             sub.show()
@@ -20408,8 +20831,12 @@ class _MdiTabProxy(QtWidgets.QWidget):
         if self._global_maximized or self._fullscreen_lock:
             self._maximize_single(sub)
         else:
-            self._arrange_subwindows()
-            self._queue_arrange_subwindows()
+            if self._arrangement_mode == "cascade" and self._has_manual_subwindow_layout():
+                self._sync_subwindow_child_widget(sub)
+                self._refresh_subwindow_figure_layout(sub, deferred=True)
+            else:
+                self._arrange_subwindows()
+                self._queue_arrange_subwindows()
         return index
 
     def removeTab(self, index: int) -> None:
@@ -20464,7 +20891,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._hidden_subwindows.discard(sub)
             self._activate_index(index)
             self._register_visible(sub)
-            if self._global_maximized:
+            if self._global_maximized or self._fullscreen_lock:
                 self._maximize_single(sub)
         else:
             was_active = self._mdi.activeSubWindow() is sub
@@ -20536,8 +20963,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._maximized_hidden.discard(sub)
             sub.show()
             self._register_visible(sub)
-            if self._global_maximized:
-                self._maybe_apply_maximize(sub)
+            if self._fullscreen_session_active():
+                self._maximize_single(sub)
             else:
                 sub.showNormal()
                 if self._arrangement_mode in {"tile_vertical", "tile_horizontal"}:
