@@ -106,12 +106,22 @@ HEATING_LIMIT_LABELS = {
     HEATING_LIMIT_HOLD: "Hold current",
     HEATING_LIMIT_DISABLE: "Turn output off",
 }
+HSW_BASIS_LOAD_G = "load_g"
+HSW_BASIS_STRESS_MPA = "stress_mpa"
+HSW_BASIS_STRAIN_PCT = "strain_pct"
+HSW_BASIS_LABELS = {
+    HSW_BASIS_LOAD_G: "Load (g)",
+    HSW_BASIS_STRESS_MPA: "Stress (MPa)",
+    HSW_BASIS_STRAIN_PCT: "Strain (%)",
+}
 PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d", "Diameter", "diameter_um")
 PROJECT_ROW_CURRENT_KEYS = (
     "Stress/strain current (mA)",
     "Current (mA)",
     "Fracture stress/strain current (mA)",
 )
+PROJECT_ROW_MICROWIRE_KEYS = ("Microwire", "Wire")
+PROJECT_ROW_SPECIMEN_KEYS = ("Specimen", "Sample", "Piece", "Sample name")
 
 
 def _default_download_dir() -> str:
@@ -190,6 +200,23 @@ def _normalized_microwire_token(text: Any) -> str:
     token = token.replace("_", "/").replace("-", "/")
     token = re.sub(r"\s+", "", token)
     return token
+
+
+def _normalized_column_key(text: Any) -> str:
+    token = str(text or "").strip().lower()
+    token = token.replace("µ", "u").replace("μ", "u").replace("?", "u")
+    return re.sub(r"[^a-z0-9]+", "", token)
+
+
+def _project_row_value(row: Mapping[str, Any], aliases: Iterable[str]) -> Any:
+    alias_map = {_normalized_column_key(alias): alias for alias in aliases}
+    for key, value in row.items():
+        if _normalized_column_key(key) in alias_map:
+            return value
+    for alias in aliases:
+        if alias in row:
+            return row.get(alias)
+    return None
 
 
 def _extract_status_value(text: str, label: str) -> str | None:
@@ -276,12 +303,19 @@ class MeasurementPoint:
     voltage_V: float | None
     resistance_ohm: float | None
     power_W: float | None
+    automation_phase: str
+    automation_basis: str | None
+    automation_target_value: float | None
+    plateau_index: int | None
+    plateau_label: str | None
 
 
 @dataclass
 class AutomationStep:
     action: str
     target_mm: float | None = None
+    target_value: float | None = None
+    basis: str | None = None
     note: str = ""
 
 
@@ -308,6 +342,68 @@ class ProjectImportResult:
     diameter_mm: float | None
     current_mA: float | None
     matched_row: dict[str, Any]
+
+
+class PlotConfigDialog(QtWidgets.QDialog):
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Configure plot dashboard")
+        self.setModal(False)
+        self.resize(860, 320)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        self.body_layout = QtWidgets.QVBoxLayout()
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self.body_layout, stretch=1)
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        close_button = QtWidgets.QPushButton("Close", self)
+        close_button.clicked.connect(self.close)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+
+class CollapsibleSection(QtWidgets.QFrame):
+    def __init__(
+        self,
+        title: str,
+        *,
+        expanded: bool = True,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.setStyleSheet("QFrame { border: 1px solid palette(mid); border-radius: 8px; }")
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        self.toggle_button = QtWidgets.QToolButton(self)
+        self.toggle_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(expanded)
+        self.toggle_button.setText(title)
+        self.toggle_button.clicked.connect(self._handle_toggled)
+        root.addWidget(self.toggle_button)
+        self.content = QtWidgets.QWidget(self)
+        self.content_layout = QtWidgets.QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(4, 0, 4, 2)
+        self.content_layout.setSpacing(8)
+        root.addWidget(self.content)
+        self.set_expanded(expanded)
+
+    def _handle_toggled(self, checked: bool) -> None:
+        self.set_expanded(checked)
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.toggle_button.setChecked(expanded)
+        self.toggle_button.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if expanded else QtCore.Qt.ArrowType.RightArrow
+        )
+        self.content.setVisible(expanded)
+
+    def is_expanded(self) -> bool:
+        return self.toggle_button.isChecked()
 
 
 class ScaleWorker(QtCore.QObject):
@@ -623,6 +719,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_index = 0
         self._automation_interval_ms = 1000
         self._automation_name = ""
+        self._automation_phase = "idle"
+        self._automation_basis: str | None = None
+        self._automation_target_value: float | None = None
+        self._automation_plateau_index: int | None = None
+        self._automation_plateau_label: str | None = None
         self._recipe_origin_mm = 0.0
         self._recipe_estimated_points = 0
         self._plot_tiles: list[PlotTileWidgets] = []
@@ -662,8 +763,8 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(10)
 
-        overview_box = self._group_box("Overview")
-        overview_layout = QtWidgets.QVBoxLayout(overview_box)
+        self.overview_section = CollapsibleSection("Overview", expanded=False, parent=control_panel)
+        overview_layout = self.overview_section.content_layout
         overview_label = QtWidgets.QLabel(
             "Mini DMA is a hardware-driven stress/strain logger for your small stepper stage and "
             "serial balance. The current build is focused on safe mechanical probing, repeatable "
@@ -708,7 +809,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cards_grid.addWidget(motion_card, 1, 0)
         cards_grid.addWidget(recipe_card, 1, 1)
         overview_layout.addLayout(cards_grid)
-        controls.addWidget(overview_box)
+        controls.addWidget(self.overview_section)
 
         tabs = QtWidgets.QTabWidget(control_panel)
         controls.addWidget(tabs)
@@ -1141,6 +1242,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_recipe_mode.addItem("One-way ramp", "ramp")
         self.combo_recipe_mode.addItem("Cyclic triangle", "cycle")
         self.combo_recipe_mode.addItem("Position hold", "hold")
+        self.combo_recipe_mode.addItem("Hsw distribution", "distribution")
         self.combo_recipe_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
         automation_form.addRow("Recipe type", self.combo_recipe_mode)
 
@@ -1215,6 +1317,69 @@ class MainWindow(QtWidgets.QMainWindow):
         hold_form.addRow("Record interval", self.spin_hold_interval)
         self.recipe_stack.addWidget(hold_page)
 
+        distribution_page = QtWidgets.QWidget(self.recipe_stack)
+        distribution_form = QtWidgets.QFormLayout(distribution_page)
+        self.combo_distribution_basis = QtWidgets.QComboBox(automation_box)
+        for basis_key, label in HSW_BASIS_LABELS.items():
+            self.combo_distribution_basis.addItem(label, basis_key)
+        distribution_form.addRow("Control basis", self.combo_distribution_basis)
+        self.spin_distribution_start = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_start.setDecimals(3)
+        self.spin_distribution_start.setRange(-100000.0, 100000.0)
+        self.spin_distribution_start.setValue(10.0)
+        distribution_form.addRow("Start", self.spin_distribution_start)
+        self.spin_distribution_end = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_end.setDecimals(3)
+        self.spin_distribution_end.setRange(-100000.0, 100000.0)
+        self.spin_distribution_end.setValue(100.0)
+        distribution_form.addRow("End", self.spin_distribution_end)
+        self.spin_distribution_step = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_step.setDecimals(3)
+        self.spin_distribution_step.setRange(0.001, 100000.0)
+        self.spin_distribution_step.setValue(10.0)
+        distribution_form.addRow("Step", self.spin_distribution_step)
+        self.spin_distribution_tolerance = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_tolerance.setDecimals(4)
+        self.spin_distribution_tolerance.setRange(0.0001, 100000.0)
+        self.spin_distribution_tolerance.setValue(0.5)
+        distribution_form.addRow("Target tolerance", self.spin_distribution_tolerance)
+        self.spin_distribution_nudge_mm = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_nudge_mm.setDecimals(4)
+        self.spin_distribution_nudge_mm.setRange(0.0001, 10.0)
+        self.spin_distribution_nudge_mm.setValue(0.01)
+        self.spin_distribution_nudge_mm.setSuffix(" mm")
+        distribution_form.addRow("Seek nudge", self.spin_distribution_nudge_mm)
+        self.spin_distribution_points = QtWidgets.QSpinBox(automation_box)
+        self.spin_distribution_points.setRange(1, 1000000)
+        self.spin_distribution_points.setValue(10000)
+        distribution_form.addRow("Points per plateau", self.spin_distribution_points)
+        self.spin_distribution_interval = QtWidgets.QSpinBox(automation_box)
+        self.spin_distribution_interval.setRange(10, 60000)
+        self.spin_distribution_interval.setValue(100)
+        self.spin_distribution_interval.setSuffix(" ms")
+        distribution_form.addRow("Record interval", self.spin_distribution_interval)
+        self.spin_distribution_settle_s = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_settle_s.setDecimals(2)
+        self.spin_distribution_settle_s.setRange(0.0, 3600.0)
+        self.spin_distribution_settle_s.setValue(1.0)
+        self.spin_distribution_settle_s.setSuffix(" s")
+        distribution_form.addRow("Plateau settle", self.spin_distribution_settle_s)
+        self.check_distribution_return_sweep = QtWidgets.QCheckBox(
+            "Sweep back to the start target after the forward pass",
+            automation_box,
+        )
+        self.check_distribution_return_sweep.setChecked(True)
+        distribution_form.addRow("", self.check_distribution_return_sweep)
+        distribution_hint = QtWidgets.QLabel(
+            "Closed-loop in Mini DMA terms: the stage nudges until load, stress, or strain is within tolerance, "
+            "then records the requested point count before moving to the next plateau.",
+            distribution_page,
+        )
+        distribution_hint.setWordWrap(True)
+        distribution_hint.setStyleSheet("color: palette(mid);")
+        distribution_form.addRow("", distribution_hint)
+        self.recipe_stack.addWidget(distribution_page)
+
         automation_form.addRow("", self.recipe_stack)
         self.check_return_to_origin = QtWidgets.QCheckBox(
             "Return to the recipe start position when finished",
@@ -1275,6 +1440,9 @@ class MainWindow(QtWidgets.QMainWindow):
         hero_font.setBold(True)
         hero_title.setFont(hero_font)
         hero_layout.addWidget(hero_title)
+        self.button_plot_setup = QtWidgets.QPushButton("Configure plots", hero_box)
+        self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
+        hero_layout.addWidget(self.button_plot_setup)
         hero_layout.addStretch(1)
         self.label_recipe_banner = QtWidgets.QLabel("Manual mode", hero_box)
         self.label_recipe_banner.setAlignment(
@@ -1283,6 +1451,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hero_layout.addWidget(self.label_recipe_banner)
         plot_layout.addWidget(hero_box, stretch=0)
 
+        self.plot_config_dialog = PlotConfigDialog(self)
         plot_config_box = self._group_box("Plot Dashboard")
         plot_config_layout = QtWidgets.QGridLayout(plot_config_box)
         plot_config_layout.setContentsMargins(8, 8, 8, 8)
@@ -1339,7 +1508,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     y_right_combo=y_right_combo,
                 )
             )
-        plot_layout.addWidget(plot_config_box, stretch=0)
+        self.plot_config_dialog.body_layout.addWidget(plot_config_box)
 
         plot_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical, plot_panel)
         plot_splitter.setChildrenCollapsible(False)
@@ -1390,6 +1559,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_cycle_count,
             self.spin_hold_target,
             self.spin_hold_duration_s,
+            self.spin_distribution_start,
+            self.spin_distribution_end,
+            self.spin_distribution_step,
+            self.spin_distribution_tolerance,
+            self.spin_distribution_nudge_mm,
+            self.spin_distribution_points,
+            self.spin_distribution_settle_s,
             self.spin_heat_constant_current,
             self.spin_heat_start_current,
             self.spin_heat_max_current,
@@ -1401,18 +1577,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_cycle_step,
             self.spin_cycle_interval,
             self.spin_hold_interval,
+            self.spin_distribution_interval,
             self.spin_heat_step_current,
         ):
             widget.valueChanged.connect(self._update_recipe_mode_ui)
         self.check_return_to_origin.toggled.connect(self._update_recipe_mode_ui)
+        self.check_distribution_return_sweep.toggled.connect(self._update_recipe_mode_ui)
         self.check_zero_on_preload.toggled.connect(self._refresh_live_labels)
         self.spin_preload_threshold_g.valueChanged.connect(self._refresh_live_labels)
         self.combo_heat_limit_action.currentIndexChanged.connect(self._update_recipe_mode_ui)
         self.combo_heating_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
+        self.combo_distribution_basis.currentIndexChanged.connect(self._update_distribution_basis_ui)
+        self.combo_distribution_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
 
         self.statusBar().showMessage("Ready")
         self._refresh_supply_ports()
         self._apply_supply_profile_defaults()
+        self._update_distribution_basis_ui()
         self._apply_plot_preset("dma")
         self._update_recipe_mode_ui()
         self._refresh_plots()
@@ -1498,6 +1679,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 return channel
         return None
 
+    def _compact_plot_label(self, label: str) -> str:
+        compact = re.sub(r"\s*\([^)]*\)", "", label).strip()
+        compact = compact.replace("Effective load", "Load")
+        compact = compact.replace("Measured current", "Current")
+        compact = compact.replace("Displacement", "Disp.")
+        compact = compact.replace("Resistance", "Res.")
+        return compact
+
+    def _plot_title(
+        self,
+        x_channel: PlotChannel,
+        y_left_channel: PlotChannel,
+        y_right_channel: PlotChannel | None,
+    ) -> str:
+        x_label = self._compact_plot_label(x_channel.label)
+        left_label = self._compact_plot_label(y_left_channel.label)
+        if y_right_channel is None:
+            return f"{left_label} vs {x_label}"
+        right_label = self._compact_plot_label(y_right_channel.label)
+        return f"{left_label} + {right_label} vs {x_label}"
+
     def _apply_plot_preset(self, preset: str) -> None:
         presets = {
             "dma": [
@@ -1553,6 +1755,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "grid_rgba": grid.getRgbF(),
         }
 
+    def _show_plot_config_dialog(self) -> None:
+        if self.plot_config_dialog.isHidden():
+            self.plot_config_dialog.show()
+        self.plot_config_dialog.raise_()
+        self.plot_config_dialog.activateWindow()
+
     def _refresh_supply_ports(self) -> None:
         current = self.combo_supply_port.currentData() or self.settings.value("supply_port", "", type=str)
         self.combo_supply_port.clear()
@@ -1586,7 +1794,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_scale_port.addItem(label, port.device)
             if current and port.device == current:
                 seen = True
-            if port.device.upper() == "COM4":
+            description = port.description.lower()
+            if "prolific" in description or "pl2303" in description:
+                preferred_index = self.combo_scale_port.count() - 1
+            elif preferred_index < 0 and port.device.upper() == "COM4":
                 preferred_index = self.combo_scale_port.count() - 1
         if current and seen:
             index = self.combo_scale_port.findData(current)
@@ -1594,6 +1805,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.combo_scale_port.setCurrentIndex(index)
         elif preferred_index >= 0:
             self.combo_scale_port.setCurrentIndex(preferred_index)
+        elif self.combo_scale_port.count():
+            self.combo_scale_port.setCurrentIndex(0)
 
     def _build_tic_controller(self) -> TicController:
         return TicController(
@@ -1804,52 +2017,50 @@ class MainWindow(QtWidgets.QMainWindow):
         microwire = _normalized_microwire_token(self.edit_name_wire.text())
         specimen = _normalized_token(self.edit_name_specimen.text())
         row_composition = _normalized_token(row.get("Composition"))
-        row_microwire = _normalized_microwire_token(row.get("Microwire"))
-        row_specimen = _normalized_token(row.get("Specimen") or row.get("Sample") or row.get("Piece"))
+        row_microwire = _normalized_microwire_token(_project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS))
+        row_specimen = _normalized_token(_project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS))
         if composition and row_composition == composition:
             score += 5
         if microwire and row_microwire == microwire:
             score += 5
         if specimen and row_specimen == specimen:
             score += 3
-        diameter = None
-        for key in PROJECT_ROW_DIAMETER_KEYS:
-            diameter = _safe_float(row.get(key))
-            if diameter and diameter > 0:
-                score += 2
-                break
+        diameter = _safe_float(_project_row_value(row, PROJECT_ROW_DIAMETER_KEYS))
+        if diameter and diameter > 0:
+            score += 2
         return score
 
-    def _find_project_sample(self, payload: Mapping[str, Any], path: Path) -> ProjectImportResult | None:
-        sections = payload.get("sections", {})
-        if not isinstance(sections, Mapping):
+    def _find_project_sample(self, payload: Any, path: Path) -> ProjectImportResult | None:
+        rows_by_section: list[tuple[str, list[Any]]] = []
+        if isinstance(payload, Mapping):
+            sections = payload.get("sections", {})
+            if isinstance(sections, Mapping):
+                preferred_sections = ("microscope", "assemble", "shape_memory_stress_strain")
+                for section_name in preferred_sections:
+                    section_payload = sections.get(section_name)
+                    if not isinstance(section_payload, Mapping):
+                        continue
+                    rows = section_payload.get("rows")
+                    if isinstance(rows, list):
+                        rows_by_section.append((section_name, rows))
+            top_level_rows = payload.get("rows")
+            if isinstance(top_level_rows, list):
+                rows_by_section.append(("rows", top_level_rows))
+        elif isinstance(payload, list):
+            rows_by_section.append(("rows", payload))
+        if not rows_by_section:
             return None
         best_score = -1
         best_match: ProjectImportResult | None = None
-        preferred_sections = ("microscope", "assemble", "shape_memory_stress_strain")
-        for section_name in preferred_sections:
-            section_payload = sections.get(section_name)
-            if not isinstance(section_payload, Mapping):
-                continue
-            rows = section_payload.get("rows")
-            if not isinstance(rows, list):
-                continue
+        for section_name, rows in rows_by_section:
             for row in rows:
                 if not isinstance(row, Mapping):
                     continue
                 score = self._project_match_score(row)
                 if score < 0:
                     continue
-                diameter_um = None
-                for key in PROJECT_ROW_DIAMETER_KEYS:
-                    diameter_um = _safe_float(row.get(key))
-                    if diameter_um and diameter_um > 0:
-                        break
-                current_mA = None
-                for key in PROJECT_ROW_CURRENT_KEYS:
-                    current_mA = _safe_float(row.get(key))
-                    if current_mA is not None:
-                        break
+                diameter_um = _safe_float(_project_row_value(row, PROJECT_ROW_DIAMETER_KEYS))
+                current_mA = _safe_float(_project_row_value(row, PROJECT_ROW_CURRENT_KEYS))
                 if score > best_score:
                     best_score = score
                     best_match = ProjectImportResult(
@@ -1882,9 +2093,10 @@ class MainWindow(QtWidgets.QMainWindow):
         row = match.matched_row
         if row.get("Composition"):
             self.edit_name_composition.setText(str(row.get("Composition")))
-        if row.get("Microwire"):
-            self.edit_name_wire.setText(str(row.get("Microwire")))
-        specimen_value = row.get("Specimen") or row.get("Sample") or row.get("Piece")
+        microwire_value = _project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS)
+        if microwire_value:
+            self.edit_name_wire.setText(str(microwire_value))
+        specimen_value = _project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS)
         if specimen_value:
             self.edit_name_specimen.setText(str(specimen_value))
         if match.diameter_mm is not None:
@@ -1993,11 +2205,26 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         return " ".join(part for part in parts if part)
 
+    def _distribution_log_suffix(self) -> str:
+        basis = self._distribution_basis()
+        basis_label = {
+            HSW_BASIS_LOAD_G: "load",
+            HSW_BASIS_STRESS_MPA: "stress",
+            HSW_BASIS_STRAIN_PCT: "strain",
+        }.get(basis, "distribution")
+        start_token = f"{self.spin_distribution_start.value():.3f}".rstrip("0").rstrip(".")
+        end_token = f"{self.spin_distribution_end.value():.3f}".rstrip("0").rstrip(".")
+        step_token = f"{self.spin_distribution_step.value():.3f}".rstrip("0").rstrip(".")
+        return f"hsw-{basis_label}-{start_token}-{end_token}-step{step_token}"
+
     def _apply_name_fields(self) -> None:
         built = self._build_sample_name()
         if built:
             self.edit_sample_name.setText(built)
-            safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", built).strip(" .")
+            log_label = built
+            if str(self.combo_recipe_mode.currentData() or "") == "distribution":
+                log_label = f"{built} {self._distribution_log_suffix()}".strip()
+            safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
             self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
             self._log(f"Applied naming fields: {built}")
 
@@ -2006,7 +2233,10 @@ class MainWindow(QtWidgets.QMainWindow):
             built = self._build_sample_name()
             if built:
                 self.edit_sample_name.setText(built)
-                safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", built).strip(" .")
+                log_label = built
+                if str(self.combo_recipe_mode.currentData() or "") == "distribution":
+                    log_label = f"{built} {self._distribution_log_suffix()}".strip()
+                safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
                 self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
 
     def _set_position_reference_now(self) -> None:
@@ -2014,9 +2244,95 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         self._log(f"Reference position set to the current stage position ({self._position_reference_mm:.4f} mm).")
 
+    def _distribution_basis(self) -> str:
+        return str(self.combo_distribution_basis.currentData() or HSW_BASIS_STRESS_MPA)
+
+    def _distribution_units(self, basis: str | None = None) -> tuple[str, int]:
+        basis = basis or self._distribution_basis()
+        if basis == HSW_BASIS_LOAD_G:
+            return " g", 4
+        if basis == HSW_BASIS_STRAIN_PCT:
+            return " %", 4
+        return " MPa", 3
+
+    def _update_distribution_basis_ui(self) -> None:
+        suffix, decimals = self._distribution_units()
+        for widget in (
+            self.spin_distribution_start,
+            self.spin_distribution_end,
+            self.spin_distribution_step,
+            self.spin_distribution_tolerance,
+        ):
+            widget.blockSignals(True)
+            widget.setDecimals(decimals)
+            widget.setSuffix(suffix)
+            widget.blockSignals(False)
+
+    def _build_distribution_targets(
+        self,
+        start_value: float,
+        end_value: float,
+        step_value: float,
+        *,
+        include_return: bool,
+    ) -> list[float]:
+        if step_value <= 0.0:
+            raise ValueError("Distribution step must be greater than zero.")
+        delta_value = end_value - start_value
+        if delta_value == 0.0:
+            targets = [start_value]
+        else:
+            sign = 1.0 if delta_value >= 0.0 else -1.0
+            count = max(1, int(math.ceil(abs(delta_value) / step_value)))
+            targets = [
+                start_value + sign * min(index * step_value, abs(delta_value))
+                for index in range(0, count + 1)
+            ]
+        if include_return and len(targets) > 1:
+            targets.extend(reversed(targets[:-1]))
+        return targets
+
+    def _current_distribution_value(self, basis: str) -> float | None:
+        effective_load = self._current_effective_load_g()
+        if basis == HSW_BASIS_LOAD_G:
+            return effective_load
+        if basis == HSW_BASIS_STRESS_MPA:
+            return stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
+        preload_state = self._current_preload_state(effective_load)
+        if preload_state == PRELOAD_PENDING:
+            return None
+        return strain_percent(
+            self._current_position_mm,
+            float(self.spin_initial_length.value()),
+            self._position_reference_mm,
+        )
+
+    def _distribution_target_reached(self, basis: str, target_value: float, tolerance: float) -> bool:
+        current_value = self._current_distribution_value(basis)
+        if current_value is None:
+            return False
+        return abs(target_value - current_value) <= tolerance
+
+    def _seek_distribution_target(self, basis: str, target_value: float, tolerance: float) -> bool:
+        if self._distribution_target_reached(basis, target_value, tolerance):
+            return True
+        current_value = self._current_distribution_value(basis)
+        if current_value is None:
+            current_value = 0.0
+        delta_value = target_value - current_value
+        if abs(delta_value) <= tolerance:
+            return True
+        nudge_mm = abs(float(self.spin_distribution_nudge_mm.value()))
+        if nudge_mm <= 0.0:
+            raise ValueError("Set a non-zero seek nudge for Hsw distribution.")
+        target_mm = self._current_position_mm + math.copysign(nudge_mm, delta_value)
+        if not self._move_to_position_mm(target_mm):
+            return False
+        return self._distribution_target_reached(basis, target_value, tolerance)
+
     def _update_recipe_mode_ui(self) -> None:
         mode = str(self.combo_recipe_mode.currentData() or "ramp")
-        page_index = {"ramp": 0, "cycle": 1, "hold": 2}.get(mode, 0)
+        page_index = {"ramp": 0, "cycle": 1, "hold": 2, "distribution": 3}.get(mode, 0)
         self.recipe_stack.setCurrentIndex(page_index)
         if mode == "cycle":
             summary = (
@@ -2030,6 +2346,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{self.spin_hold_duration_s.value():.1f} s."
             )
             banner = "Hold recipe"
+        elif mode == "distribution":
+            basis = self._distribution_basis()
+            suffix, _ = self._distribution_units(basis)
+            summary = (
+                f"Recipe ready: Hsw distribution from {self.spin_distribution_start.value():.4f}{suffix} "
+                f"to {self.spin_distribution_end.value():.4f}{suffix} in "
+                f"{self.spin_distribution_step.value():.4f}{suffix} steps, "
+                f"{self.spin_distribution_points.value()} point(s) per plateau."
+            )
+            if self.check_distribution_return_sweep.isChecked():
+                summary += " Includes a reverse sweep."
+            summary += (
+                f" Target tolerance {self.spin_distribution_tolerance.value():.4f}{suffix} "
+                f"with {self.spin_distribution_nudge_mm.value():.4f} mm seek nudges and "
+                f"{self.spin_distribution_settle_s.value():.2f} s settling."
+            )
+            banner = "Hsw distribution"
         else:
             summary = (
                 f"Recipe ready: one-way ramp of {self.spin_ramp_distance.value():.4f} mm "
@@ -2290,6 +2623,12 @@ class MainWindow(QtWidgets.QMainWindow):
             fieldnames=[
                 "elapsed_s",
                 "timestamp_utc",
+                "recipe_mode",
+                "automation_phase",
+                "automation_basis",
+                "automation_target_value",
+                "plateau_index",
+                "plateau_label",
                 "position_mm",
                 "raw_load_g",
                 "load_g",
@@ -2354,6 +2693,18 @@ class MainWindow(QtWidgets.QMainWindow):
             "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
             "recipe_summary": self.label_recipe_summary.text(),
             "recipe_estimated_points": int(self._recipe_estimated_points),
+            "hsw_distribution": {
+                "basis": self._distribution_basis(),
+                "start": float(self.spin_distribution_start.value()),
+                "end": float(self.spin_distribution_end.value()),
+                "step": float(self.spin_distribution_step.value()),
+                "tolerance": float(self.spin_distribution_tolerance.value()),
+                "seek_nudge_mm": float(self.spin_distribution_nudge_mm.value()),
+                "settle_s": float(self.spin_distribution_settle_s.value()),
+                "points_per_plateau": int(self.spin_distribution_points.value()),
+                "interval_ms": int(self.spin_distribution_interval.value()),
+                "return_sweep": self.check_distribution_return_sweep.isChecked(),
+            },
             "builder_project": None if self._builder_project_path is None else str(self._builder_project_path),
         }
 
@@ -2370,6 +2721,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if finished_utc:
             payload["finished_utc"] = finished_utc
         self._session_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _set_automation_context(
+        self,
+        *,
+        phase: str,
+        basis: str | None = None,
+        target_value: float | None = None,
+        plateau_index: int | None = None,
+    ) -> None:
+        self._automation_phase = phase
+        self._automation_basis = basis
+        self._automation_target_value = target_value
+        self._automation_plateau_index = plateau_index
+        if basis and target_value is not None:
+            label = HSW_BASIS_LABELS.get(basis, basis)
+            suffix, _ = self._distribution_units(basis)
+            self._automation_plateau_label = f"{label} {target_value:.4f}{suffix}"
+        else:
+            self._automation_plateau_label = None
 
     def _start_session(self) -> None:
         if self._session_active:
@@ -2479,6 +2849,11 @@ class MainWindow(QtWidgets.QMainWindow):
             voltage_V=snapshot.get("voltage_V"),
             resistance_ohm=snapshot.get("resistance_ohm"),
             power_W=snapshot.get("power_W"),
+            automation_phase=self._automation_phase,
+            automation_basis=self._automation_basis,
+            automation_target_value=self._automation_target_value,
+            plateau_index=self._automation_plateau_index,
+            plateau_label=self._automation_plateau_label,
         )
 
     def _record_current_point(self) -> None:
@@ -2528,6 +2903,14 @@ class MainWindow(QtWidgets.QMainWindow):
             {
                 "elapsed_s": f"{point.elapsed_s:.6f}",
                 "timestamp_utc": point.timestamp_utc,
+                "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
+                "automation_phase": point.automation_phase,
+                "automation_basis": "" if point.automation_basis is None else point.automation_basis,
+                "automation_target_value": ""
+                if point.automation_target_value is None
+                else f"{point.automation_target_value:.6f}",
+                "plateau_index": "" if point.plateau_index is None else point.plateau_index,
+                "plateau_label": "" if point.plateau_label is None else point.plateau_label,
                 "position_mm": f"{point.position_mm:.6f}",
                 "raw_load_g": f"{point.raw_load_g:.6f}",
                 "load_g": f"{point.load_g:.6f}",
@@ -2562,6 +2945,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_interval_ms = interval_ms
         self._recipe_origin_mm = self._current_position_mm
         self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
+        self._set_automation_context(phase="start")
         self._auto_ramp_timer.start(interval_ms)
         self._log(summary)
         self._refresh_live_labels()
@@ -2573,6 +2957,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_steps = []
         self._automation_index = 0
         self._auto_ramp_timer.stop()
+        self._set_automation_context(phase="idle")
         if log_completion:
             self._log("Recipe stopped.")
         self._refresh_live_labels()
@@ -2640,6 +3025,60 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return steps, summary, interval_ms
 
+        if mode == "distribution":
+            basis = self._distribution_basis()
+            start_value = float(self.spin_distribution_start.value())
+            end_value = float(self.spin_distribution_end.value())
+            step_value = abs(float(self.spin_distribution_step.value()))
+            points_per_plateau = int(self.spin_distribution_points.value())
+            interval_ms = int(self.spin_distribution_interval.value())
+            settle_s = float(self.spin_distribution_settle_s.value())
+            if points_per_plateau <= 0:
+                raise ValueError("Set at least one point per Hsw plateau.")
+            targets = self._build_distribution_targets(
+                start_value,
+                end_value,
+                step_value,
+                include_return=self.check_distribution_return_sweep.isChecked(),
+            )
+            steps = []
+            for plateau_index, target in enumerate(targets, start=1):
+                steps.append(
+                    AutomationStep(
+                        "seek_target",
+                        target_value=target,
+                        basis=basis,
+                        note=str(plateau_index),
+                    )
+                )
+                settle_steps = max(0, int(math.ceil((settle_s * 1000.0) / interval_ms)))
+                steps.extend(
+                    AutomationStep(
+                        "settle",
+                        target_value=target,
+                        basis=basis,
+                        note=str(plateau_index),
+                    )
+                    for _ in range(settle_steps)
+                )
+                steps.extend(
+                    AutomationStep(
+                        "record",
+                        target_value=target,
+                        basis=basis,
+                        note=str(plateau_index),
+                    )
+                    for _ in range(points_per_plateau)
+                )
+            steps = self._append_return_to_origin(steps)
+            suffix, _ = self._distribution_units(basis)
+            summary = (
+                f"Started Hsw distribution recipe: {start_value:.4f}{suffix} to {end_value:.4f}{suffix}, "
+                f"step {step_value:.4f}{suffix}, {points_per_plateau} point(s) per plateau, "
+                f"interval {interval_ms} ms, settle {settle_s:.2f} s."
+            )
+            return steps, summary, interval_ms
+
         total_distance_mm = float(self.spin_ramp_distance.value())
         step_mm = abs(float(self.spin_ramp_step.value()))
         interval_ms = int(self.spin_ramp_interval.value())
@@ -2666,9 +3105,58 @@ class MainWindow(QtWidgets.QMainWindow):
         step = self._automation_steps[self._automation_index]
         self._automation_index += 1
         if step.action == "move":
+            self._set_automation_context(phase="move")
             if step.target_mm is None or not self._move_to_position_mm(step.target_mm):
                 self._stop_auto_ramp(log_completion=False)
+        elif step.action == "seek_target":
+            if step.target_value is None or not step.basis:
+                self._stop_auto_ramp(log_completion=False)
+                return
+            plateau_index = int(step.note) if step.note.isdigit() else None
+            self._set_automation_context(
+                phase="seek",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=plateau_index,
+            )
+            tolerance = abs(float(self.spin_distribution_tolerance.value()))
+            if tolerance <= 0.0:
+                self._stop_auto_ramp(log_completion=False)
+                self._log("Hsw distribution stopped because the target tolerance is zero.")
+                return
+            try:
+                reached = self._seek_distribution_target(step.basis, step.target_value, tolerance)
+            except Exception as exc:
+                self._stop_auto_ramp(log_completion=False)
+                self._log(f"Hsw distribution stopped: {exc}")
+                return
+            if reached:
+                current_value = self._current_distribution_value(step.basis)
+                if current_value is None:
+                    current_value = 0.0
+                label = HSW_BASIS_LABELS.get(step.basis, step.basis)
+                self._log(
+                    f"Reached {label} plateau {step.target_value:.4f} "
+                    f"(live {current_value:.4f})."
+                )
+            else:
+                self._automation_index -= 1
+        elif step.action == "settle":
+            plateau_index = int(step.note) if step.note.isdigit() else None
+            self._set_automation_context(
+                phase="settle",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=plateau_index,
+            )
         elif step.action == "record":
+            plateau_index = int(step.note) if step.note.isdigit() else None
+            self._set_automation_context(
+                phase="record",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=plateau_index,
+            )
             self._record_current_point()
         self._refresh_live_labels()
 
@@ -2740,6 +3228,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{self._automation_name} | done {self._automation_index}"
                 f"/{max(1, len(self._automation_steps))}"
             )
+            if self._automation_plateau_label:
+                recipe_state += f" | {self._automation_phase} {self._automation_plateau_label}"
+            elif self._automation_phase not in {"idle", "start"}:
+                recipe_state += f" | {self._automation_phase}"
         else:
             recipe_state = str(self.combo_recipe_mode.currentText())
         self.label_card_recipe.setText(recipe_state)
@@ -2749,7 +3241,7 @@ class MainWindow(QtWidgets.QMainWindow):
         theme = self._plot_theme()
         self.figure.clear()
         self.figure.set_facecolor(theme["figure_rgb"])
-        grid = self.figure.add_gridspec(2, 2, hspace=0.28, wspace=0.22)
+        grid = self.figure.add_gridspec(2, 2, hspace=0.46, wspace=0.34)
         active_tiles = [tile for tile in self._plot_tiles if tile.visible.isChecked()]
         if not active_tiles:
             active_tiles = list(self._plot_tiles[:1])
@@ -2771,9 +3263,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if x_channel is None or y_left_channel is None:
                 continue
 
-            axis.set_xlabel(x_channel.label)
-            axis.set_ylabel(y_left_channel.label)
-            axis.set_title(f"{y_left_channel.label} vs {x_channel.label}")
+            axis.set_xlabel(x_channel.label, fontsize=9, labelpad=4)
+            axis.set_ylabel(y_left_channel.label, fontsize=8, labelpad=3)
+            axis.set_title(self._plot_title(x_channel, y_left_channel, y_right_channel), fontsize=9, pad=8)
 
             left_pairs = [
                 (x_channel.getter(point), y_left_channel.getter(point))
@@ -2807,7 +3299,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     spine.set_color(theme["text_rgb"])
                 twin.tick_params(colors=theme["text_rgb"])
                 twin.yaxis.label.set_color(theme["text_rgb"])
-                twin.set_ylabel(y_right_channel.label)
+                twin.set_ylabel(y_right_channel.label, fontsize=8, labelpad=3)
                 right_pairs = [
                     (x_channel.getter(point), y_right_channel.getter(point))
                     for point in self._session_points
@@ -2826,10 +3318,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         marker="s",
                         markersize=3.0,
                     )
-                    axis.set_title(
-                        f"{y_left_channel.label} / {y_right_channel.label} vs {x_channel.label}"
-                    )
-        self.figure.tight_layout()
+        self.figure.subplots_adjust(left=0.07, right=0.94, top=0.90, bottom=0.12, hspace=0.50, wspace=0.34)
 
         if self.canvas is not None:
             self.canvas.draw_idle()
@@ -2850,6 +3339,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("scale_interval_ms", self.spin_scale_interval.value())
         self.settings.setValue("scale_request", self.edit_scale_request.text())
         self.settings.setValue("scale_terminator", self.edit_scale_terminator.text())
+        self.settings.setValue("overview_expanded", self.overview_section.is_expanded())
         self.settings.setValue("supply_port", self.combo_supply_port.currentData() or "")
         self.settings.setValue("supply_baud", self.combo_supply_baud.currentText())
         self.settings.setValue("supply_profile", self.combo_supply_profile.currentData() or "hmp4030")
@@ -2895,6 +3385,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("hold_target_mm", self.spin_hold_target.value())
         self.settings.setValue("hold_duration_s", self.spin_hold_duration_s.value())
         self.settings.setValue("hold_interval_ms", self.spin_hold_interval.value())
+        self.settings.setValue("distribution_basis", self.combo_distribution_basis.currentData() or HSW_BASIS_STRESS_MPA)
+        self.settings.setValue("distribution_start", self.spin_distribution_start.value())
+        self.settings.setValue("distribution_end", self.spin_distribution_end.value())
+        self.settings.setValue("distribution_step", self.spin_distribution_step.value())
+        self.settings.setValue("distribution_tolerance", self.spin_distribution_tolerance.value())
+        self.settings.setValue("distribution_nudge_mm", self.spin_distribution_nudge_mm.value())
+        self.settings.setValue("distribution_settle_s", self.spin_distribution_settle_s.value())
+        self.settings.setValue("distribution_points", self.spin_distribution_points.value())
+        self.settings.setValue("distribution_interval_ms", self.spin_distribution_interval.value())
+        self.settings.setValue("distribution_return_sweep", self.check_distribution_return_sweep.isChecked())
         self.settings.setValue("heating_mode", self.combo_heating_mode.currentData() or HEATING_MODE_OFF)
         self.settings.setValue("heat_constant_current_mA", self.spin_heat_constant_current.value())
         self.settings.setValue("heat_start_current_mA", self.spin_heat_start_current.value())
@@ -2917,6 +3417,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_scale_interval.setValue(int(self.settings.value("scale_interval_ms", 250)))
         scale_request = self.settings.value("scale_request", "\\x1bp", type=str)
         scale_terminator = self.settings.value("scale_terminator", "", type=str)
+        self.overview_section.set_expanded(
+            bool(self.settings.value("overview_expanded", False, type=bool))
+        )
         if baud == "9600" and (not scale_request) and scale_terminator == "\\r\\n":
             baud = "600"
             self.combo_scale_baud.setCurrentText(baud)
@@ -2987,6 +3490,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_hold_target.setValue(float(self.settings.value("hold_target_mm", 0.5)))
         self.spin_hold_duration_s.setValue(float(self.settings.value("hold_duration_s", 10.0)))
         self.spin_hold_interval.setValue(int(self.settings.value("hold_interval_ms", 1000)))
+        distribution_basis = self.settings.value("distribution_basis", HSW_BASIS_STRESS_MPA, type=str)
+        distribution_basis_index = self.combo_distribution_basis.findData(distribution_basis)
+        if distribution_basis_index >= 0:
+            self.combo_distribution_basis.setCurrentIndex(distribution_basis_index)
+        self.spin_distribution_start.setValue(float(self.settings.value("distribution_start", 10.0)))
+        self.spin_distribution_end.setValue(float(self.settings.value("distribution_end", 100.0)))
+        self.spin_distribution_step.setValue(float(self.settings.value("distribution_step", 10.0)))
+        self.spin_distribution_tolerance.setValue(float(self.settings.value("distribution_tolerance", 0.5)))
+        self.spin_distribution_nudge_mm.setValue(float(self.settings.value("distribution_nudge_mm", 0.01)))
+        self.spin_distribution_settle_s.setValue(float(self.settings.value("distribution_settle_s", 1.0)))
+        self.spin_distribution_points.setValue(int(self.settings.value("distribution_points", 10000)))
+        self.spin_distribution_interval.setValue(int(self.settings.value("distribution_interval_ms", 100)))
+        self.check_distribution_return_sweep.setChecked(
+            bool(self.settings.value("distribution_return_sweep", True, type=bool))
+        )
         heating_mode = self.settings.value("heating_mode", HEATING_MODE_OFF, type=str)
         heating_index = self.combo_heating_mode.findData(heating_mode)
         if heating_index >= 0:
