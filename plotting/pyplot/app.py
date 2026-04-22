@@ -3768,7 +3768,8 @@ class PyPlotWorkbench(PyPlotWindow):
         if not isinstance(plugin_name, str) or not plugin_name.strip():
             return False
 
-        payload = dict(self._effective_graph_options(plugin_name))
+        existing_override = self._graph_option_defaults_by_plugin.get(str(plugin_name))
+        payload = dict(existing_override) if isinstance(existing_override, dict) else {}
         updated = False
         for source_key, target_key in (
             ("title_font", "title_font"),

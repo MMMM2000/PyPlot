@@ -137,6 +137,22 @@ class PyPlotPlugin:
         # asks them to refresh before they override the method.
         return
 
+    def supports_graph_point_removal(self) -> bool:
+        """Return True when the plugin can persist point removals from graphs."""
+
+        return False
+
+    def remove_graph_points(
+        self,
+        *,
+        descriptor: Any,
+        point_refs: Iterable[Any],
+    ) -> int:
+        """Persist removals for selected graph points and return deleted count."""
+
+        _ = (descriptor, point_refs)
+        return 0
+
     # Project persistence ------------------------------------------------
     def serialize_project_state(self, *, base_path: Path | None) -> Dict[str, Any] | None:
         """Return plugin-specific project state to persist, or ``None``."""
