@@ -277,7 +277,7 @@ def test_filter_vsm_hysteresis_records_by_angle_mode_keeps_only_focus_angles() -
 
     filtered = builder_ui._filter_vsm_hysteresis_records_by_angle_mode(records, "0_90")
 
-    assert [record.angle for record in filtered] == [0.0, 90.0, 180.0]
+    assert [record.angle for record in filtered] == [0.0, 90.0]
 
 
 def test_plot_vsm_hysteresis_figure_can_limit_preview_to_0_and_90_deg() -> None:
@@ -466,6 +466,70 @@ def test_vsm_temperature_section_combines_preview_pixmaps_side_by_side(
         assert pixmap.width() == section._preview_icon_width()
         assert pixmap.height() == section._preview_icon_height()
         assert pixmap.width() > builder_ui.ANNEALING_GRAPH_WIDTH
+    finally:
+        section.close()
+
+
+def test_plot_vsm_temperature_scan_figure_can_use_smoothed_preview_mode() -> None:
+    processor = VSMTemperatureScanProcessor()
+    processor.set_show_smoothed(True)
+    processor.set_smoothing_windows(3, 3)
+    record = core.VsmTemperatureScanRecord(
+        path=Path("scan.txt"),
+        sample="Sample",
+        data=pd.DataFrame(
+            {
+                "temperature": [20.0, 40.0, 60.0, 80.0, 100.0],
+                "field": [5.0, 5.0, 5.0, 5.0, 5.0],
+                "signal": [1.0, 0.7, 1.1, 0.6, 1.0],
+                "section_index": [0, 0, 0, 0, 0],
+            }
+        ),
+    )
+
+    raw_figure = builder_ui._plot_vsm_temperature_scan_figure(
+        record,
+        processor,
+        width_px=720,
+        height_px=360,
+        preview_mode="raw",
+    )
+    smooth_figure = builder_ui._plot_vsm_temperature_scan_figure(
+        record,
+        processor,
+        width_px=720,
+        height_px=360,
+        preview_mode="smoothed",
+    )
+    assert raw_figure is not None
+    assert smooth_figure is not None
+    try:
+        raw_y = raw_figure.axes[0].get_lines()[0].get_ydata()
+        smooth_y = smooth_figure.axes[0].get_lines()[0].get_ydata()
+        assert list(raw_y) != list(smooth_y)
+        assert "Smoothed" in smooth_figure.axes[0].get_title()
+    finally:
+        builder_ui.plt.close(raw_figure)
+        builder_ui.plt.close(smooth_figure)
+
+
+def test_vsm_temperature_section_preview_mode_change_persists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    section = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        assert section.preview_mode_combo.currentData() == "raw"
+        section._pixmap_cache["sample|Graph"] = QtGui.QPixmap(10, 10)
+        section.preview_mode_combo.setCurrentIndex(section.preview_mode_combo.findData("smoothed"))
+        QtWidgets.QApplication.processEvents()
+
+        settings = QtCore.QSettings(str(settings_path), QtCore.QSettings.Format.IniFormat)
+        assert settings.value(builder_ui.VSM_TEMPERATURE_PREVIEW_MODE_SETTING) == "smoothed"
+        assert section._pixmap_cache == {}
     finally:
         section.close()
 
