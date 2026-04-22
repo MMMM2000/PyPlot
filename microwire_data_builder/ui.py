@@ -6210,6 +6210,22 @@ def _microscope_index_to_frame(
 ) -> pd.DataFrame:
     columns = MICROSCOPE_TABLE_COLUMNS.copy()
 
+    def _category_value(
+        detection: Optional[MicroscopeDetection],
+        expected_category: str,
+    ) -> Optional[float]:
+        if not isinstance(detection, MicroscopeDetection):
+            return None
+        if getattr(detection, "category", None) != expected_category:
+            return None
+        try:
+            numeric = float(detection.value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(numeric) or numeric <= 0:
+            return None
+        return numeric
+
     def _image_path(entries: Sequence[MicroscopeDetection]) -> Optional[str]:
         for detection in entries:
             crop = getattr(detection, "crop_path", None)
@@ -6234,10 +6250,10 @@ def _microscope_index_to_frame(
         override = overrides.get(key, {})
         d_value = override.get("d")
         if d_value is None:
-            d_value = measurements.best_core()
+            d_value = _category_value(measurements.best_core_detection(), "core")
         D_value = override.get("D")
         if D_value is None:
-            D_value = measurements.best_glass()
+            D_value = _category_value(measurements.best_glass_detection(), "glass")
         ratio = None
         if isinstance(d_value, (int, float)) and isinstance(D_value, (int, float)) and D_value:
             try:
@@ -10551,7 +10567,7 @@ class _MicroscopePreviewLabel(QtWidgets.QLabel):
 
 class MicroscopeSection(MiniDatabaseSection):
     section_key = "microscope"
-    section_title = "Microscope OCR"
+    section_title = "Microscope"
     supported_suffixes = MICROSCOPE_EXTENSIONS
     partial_row_ready = QtCore.pyqtSignal(dict)
 
@@ -10562,15 +10578,12 @@ class MicroscopeSection(MiniDatabaseSection):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._overrides: Dict[str, Dict[str, float]] = {}
-        self._ocr_cache: Dict[str, MicroscopeCacheEntry] = {}
         self._validated: Dict[str, Dict[str, Any]] = {}
         self._selected_key: str | None = None
-        self._ocr_debug_enabled = False
         self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
         self._expected_keys_current: Set[MicrowireKey] = set()
         self._prepopulated_keys: Set[str] = set()
         self._table_splitter: QtWidgets.QSplitter | None = None
-        self._force_ocr_next = False
         self._active_column: str = ""
         self._pending_advance_key: str | None = None
         self._pending_advance_column: str | None = None
@@ -10589,12 +10602,6 @@ class MicroscopeSection(MiniDatabaseSection):
                 self.other_end_checkbox.setChecked(self._show_other_ends)
                 self.other_end_checkbox.toggled.connect(self._toggle_other_ends)
                 self.controls_layout.addWidget(self.other_end_checkbox)
-                self.defer_ocr_checkbox = QtWidgets.QCheckBox("Defer OCR")
-                self.defer_ocr_checkbox.setChecked(True)
-                self.controls_layout.addWidget(self.defer_ocr_checkbox)
-                self.run_ocr_button = QtWidgets.QPushButton("Run OCR now")
-                self.run_ocr_button.clicked.connect(self._trigger_ocr_run)
-                self.controls_layout.addWidget(self.run_ocr_button)
             except Exception:
                 pass
 
@@ -10602,7 +10609,7 @@ class MicroscopeSection(MiniDatabaseSection):
 
         # Always normalise the table after load so legacy "Reviewed" columns
         # are removed even when there are no overrides/validations stored.
-        self._apply_overrides_to_table()
+        self._apply_overrides_to_table(clear_preview_cache=True)
         self._normalise_brittle_column()
         self._update_hidden_columns()
         self._update_missing_summary()
@@ -10624,7 +10631,7 @@ class MicroscopeSection(MiniDatabaseSection):
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
         self._load_extra_state()
-        self._apply_overrides_to_table()
+        self._apply_overrides_to_table(clear_preview_cache=True)
         self._normalise_brittle_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
         if hasattr(self, "other_end_checkbox"):
@@ -10640,7 +10647,7 @@ class MicroscopeSection(MiniDatabaseSection):
     def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
         super().apply_data(data)
         self._load_extra_state()
-        self._apply_overrides_to_table(restore_selection=False)
+        self._apply_overrides_to_table(restore_selection=False, clear_preview_cache=True)
         self._normalise_brittle_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
         if hasattr(self, "other_end_checkbox"):
@@ -10670,22 +10677,6 @@ class MicroscopeSection(MiniDatabaseSection):
                 for key, value in stored_overrides.items()
                 if isinstance(value, dict)
             }
-
-        stored_cache = self.data.extra.get("ocr_cache")
-        if isinstance(stored_cache, dict):
-            cache: Dict[str, MicroscopeCacheEntry] = {}
-            for key, payload in stored_cache.items():
-                entry: Optional[MicroscopeCacheEntry]
-                if isinstance(payload, MicroscopeCacheEntry):
-                    entry = payload
-                elif isinstance(payload, dict):
-                    entry = MicroscopeCacheEntry.from_dict(payload)
-                else:
-                    entry = None
-                if entry is None:
-                    continue
-                cache[str(key)] = entry
-            self._ocr_cache = cache
 
         stored_validated = self.data.extra.get("validated")
         if isinstance(stored_validated, dict):
@@ -10892,7 +10883,6 @@ class MicroscopeSection(MiniDatabaseSection):
     def reset_to_blank(self) -> None:  # type: ignore[override]
         super().reset_to_blank()
         self._overrides.clear()
-        self._ocr_cache.clear()
         self._validated.clear()
         self._prepopulated_keys.clear()
         self._expected_keys_current = set()
@@ -10925,27 +10915,7 @@ class MicroscopeSection(MiniDatabaseSection):
         return suffix != "oe"
 
     def _collect_candidates(self) -> List[Path]:  # type: ignore[override]
-        base = MiniDatabaseSection._collect_candidates(self)
-        defer_ocr_checkbox = getattr(self, "defer_ocr_checkbox", None)
-        defer_ocr = bool(
-            isinstance(defer_ocr_checkbox, QtWidgets.QCheckBox)
-            and defer_ocr_checkbox.isChecked()
-        )
-        if defer_ocr and not self._force_ocr_next:
-            return base
-        pending: List[Path] = []
-        processed = self.data.processed
-        for path in base:
-            key = str(path)
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                continue
-            if float(processed.get(key, -1.0)) != float(mtime):
-                pending.append(path)
-        if pending:
-            return pending
-        return base
+        return MiniDatabaseSection._collect_candidates(self)
 
     def _auto_fit_columns(self) -> None:  # type: ignore[override]
         super()._auto_fit_columns()
@@ -11056,44 +11026,6 @@ class MicroscopeSection(MiniDatabaseSection):
     def _protected_key_tokens(self) -> Set[str]:
         return {str(key) for key in self._overrides.keys()} | {str(key) for key in self._validated.keys()}
 
-    def _load_existing_microscope_index(self) -> Dict[MicrowireKey, MicroscopeMeasurements]:
-        try:
-            payload = self.store.load_payload("microscope_index")
-        except Exception:
-            payload = None
-        if not isinstance(payload, dict):
-            return {}
-        existing: Dict[MicrowireKey, MicroscopeMeasurements] = {}
-        for key, value in payload.items():
-            if not isinstance(key, tuple) or len(key) != 4:
-                continue
-            if not isinstance(value, MicroscopeMeasurements):
-                continue
-            try:
-                composition = str(key[0])
-                draw = int(key[1])
-                piece = int(key[2])
-                suffix = key[3] if key[3] is None else str(key[3])
-            except Exception:
-                continue
-            existing[(composition, draw, piece, suffix)] = value
-        return existing
-
-    @staticmethod
-    def _merge_microscope_indexes(
-        existing: Mapping[MicrowireKey, MicroscopeMeasurements],
-        refreshed: Mapping[MicrowireKey, MicroscopeMeasurements],
-    ) -> Dict[MicrowireKey, MicroscopeMeasurements]:
-        merged: Dict[MicrowireKey, MicroscopeMeasurements] = {}
-        for source in (existing, refreshed):
-            for key, value in source.items():
-                if not isinstance(key, tuple) or len(key) != 4:
-                    continue
-                if not isinstance(value, MicroscopeMeasurements):
-                    continue
-                merged[key] = value
-        return merged
-
     def _build_initial_table_frame(self, expected_keys: Set[MicrowireKey]) -> pd.DataFrame:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         if frame.empty:
@@ -11185,6 +11117,180 @@ class MicroscopeSection(MiniDatabaseSection):
         self.model.set_frame(frame)
         self._auto_fit_columns()
         self._update_missing_summary()
+
+    @staticmethod
+    def _merge_rows_into_frame(
+        frame: pd.DataFrame,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> pd.DataFrame:
+        if not rows:
+            if isinstance(frame, pd.DataFrame):
+                return frame.copy()
+            return pd.DataFrame(columns=MICROSCOPE_TABLE_COLUMNS)
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            columns: List[object] = []
+            for row in rows:
+                for column in row.keys():
+                    if column not in columns:
+                        columns.append(column)
+            merged = pd.DataFrame(columns=columns)
+        else:
+            merged = frame.copy()
+        if "_key" not in merged.columns:
+            merged["_key"] = pd.Series([None] * len(merged))
+        existing_rows: List[Dict[str, Any]] = []
+        if not merged.empty:
+            try:
+                cleaned_frame = merged.dropna(how="all")
+            except Exception:
+                cleaned_frame = merged
+            if not cleaned_frame.empty:
+                existing_rows = [
+                    dict(existing_row)
+                    for existing_row in cleaned_frame.to_dict(orient="records")
+                ]
+        row_map: Dict[str, Dict[str, Any]] = {}
+        ordered_keys: List[str] = []
+        for existing_row in existing_rows:
+            key = str(existing_row.get("_key", ""))
+            row_map[key] = existing_row
+            ordered_keys.append(key)
+        for row in rows:
+            key = str(row.get("_key", ""))
+            target = row_map.get(key)
+            if target is None:
+                target = {}
+                row_map[key] = target
+                ordered_keys.append(key)
+            for column, value in row.items():
+                target[column] = value
+        merged = pd.DataFrame([row_map[key] for key in ordered_keys if key in row_map])
+        for column in MICROSCOPE_TABLE_COLUMNS:
+            if column not in merged.columns:
+                merged[column] = pd.Series([None] * len(merged))
+        merged = merged.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        return merged
+
+    def _build_image_ref_rows(
+        self,
+        candidates: Iterable[Path],
+        expected_keys: Set[MicrowireKey],
+        frame: pd.DataFrame,
+    ) -> List[Dict[str, Any]]:
+        candidate_list = [Path(path) for path in candidates]
+        expected = set(expected_keys)
+        for path in candidate_list:
+            key_tuple = _microscope_key(path)
+            if key_tuple is not None:
+                expected.add(key_tuple)
+        allowed: Set[str] | None = None
+        if expected:
+            allowed = set()
+            for item in expected:
+                composition: object
+                draw: object
+                piece: object
+                suffix: object | None
+                try:
+                    composition, draw, piece, suffix = item  # type: ignore[misc]
+                except Exception:
+                    try:
+                        composition, draw, piece = item  # type: ignore[misc]
+                    except Exception:
+                        continue
+                    suffix = None
+                try:
+                    key_token = _microwire_key_to_str(
+                        (str(composition), int(draw), int(piece), suffix)
+                    )
+                except Exception:
+                    continue
+                allowed.add(key_token)
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for path in candidate_list:
+            key_tuple = _microscope_key(path)
+            if key_tuple is None:
+                continue
+            composition, draw, piece, suffix = key_tuple
+            key = _microwire_key_to_str((composition, draw, piece, suffix))
+            if allowed is not None and key not in allowed:
+                continue
+            entry = grouped.setdefault(
+                key,
+                {
+                    "_key": key,
+                    "Composition": composition,
+                    "Microwire": _microwire_label(draw, piece, suffix),
+                    "_images": [],
+                },
+            )
+            images: List[str] = entry.setdefault("_images", [])  # type: ignore[assignment]
+            image_path = str(path)
+            if image_path not in images:
+                images.append(image_path)
+            category = _microscope_category(path)
+            if category == "core" and not entry.get("_core_image"):
+                entry["_core_image"] = image_path
+            elif category == "glass" and not entry.get("_glass_image"):
+                entry["_glass_image"] = image_path
+
+        existing_row_map: Dict[str, Dict[str, Any]] = {}
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            try:
+                for row in frame.to_dict(orient="records"):
+                    existing_row_map[str(row.get("_key", ""))] = dict(row)
+            except Exception:
+                existing_row_map = {}
+
+        rows_to_apply: List[Dict[str, Any]] = []
+        for key, payload in grouped.items():
+            images_list = payload.get("_images", [])
+            if isinstance(images_list, list):
+                payload["_images"] = list(dict.fromkeys(images_list))
+            existing_row = existing_row_map.get(key, {})
+            existing_d = existing_row.get(MICROSCOPE_D_COLUMN)
+            existing_D = existing_row.get(MICROSCOPE_CAP_D_COLUMN)
+            existing_ratio = existing_row.get("d/D")
+            existing_brittle = existing_row.get(BRITTLE_COLUMN)
+            existing_core_image = existing_row.get("_core_image")
+            existing_glass_image = existing_row.get("_glass_image")
+            existing_images = existing_row.get("_images")
+            merged_images: List[str] = []
+            if isinstance(existing_images, (list, tuple)):
+                merged_images.extend(str(item) for item in existing_images if item)
+            merged_images.extend(str(item) for item in payload.get("_images", []) if item)
+            merged_images = list(dict.fromkeys(merged_images))
+            rows_to_apply.append(
+                {
+                    "Composition": payload.get("Composition", ""),
+                    "Microwire": payload.get("Microwire", ""),
+                    MICROSCOPE_D_COLUMN: existing_d,
+                    MICROSCOPE_CAP_D_COLUMN: existing_D,
+                    "d/D": existing_ratio,
+                    BRITTLE_COLUMN: (
+                        existing_brittle
+                        if existing_brittle
+                        else (
+                            "brittle"
+                            if (
+                                any("brittle" in str(item).lower() for item in merged_images)
+                                or (
+                                    (payload.get("_glass_image") or existing_glass_image)
+                                    and not (payload.get("_core_image") or existing_core_image)
+                                )
+                            )
+                            else None
+                        )
+                    ),
+                    MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": key,
+                    "_core_image": payload.get("_core_image") or existing_core_image,
+                    "_glass_image": payload.get("_glass_image") or existing_glass_image,
+                    "_images": merged_images,
+                }
+            )
+        return rows_to_apply
 
     @staticmethod
     def _is_valid_diameter(value: object) -> bool:
@@ -11325,42 +11431,16 @@ class MicroscopeSection(MiniDatabaseSection):
             return
         pending = list(self._pending_partial_rows)
         self._pending_partial_rows.clear()
-        for row in pending:
-            self._apply_partial_row_now(row)
+        self._apply_partial_rows_now(pending)
 
     def _apply_partial_row_now(self, row: dict) -> None:
+        self._apply_partial_rows_now([row])
+
+    def _apply_partial_rows_now(self, rows: Sequence[dict]) -> None:
+        if not rows:
+            return
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
-        if frame.empty:
-            frame = pd.DataFrame(columns=row.keys())
-        else:
-            frame = frame.copy()
-        key = str(row.get("_key", ""))
-        if "_key" not in frame.columns:
-            frame["_key"] = pd.Series([None] * len(frame))
-        existing_idx = frame.index[frame["_key"] == key].tolist()
-        if existing_idx:
-            idx = existing_idx[0]
-            for column, value in row.items():
-                if column not in frame.columns:
-                    frame[column] = pd.Series([None] * len(frame))
-                frame.at[idx, column] = value
-        else:
-            existing_rows: List[Dict[str, Any]] = []
-            if not frame.empty:
-                try:
-                    cleaned_frame = frame.dropna(how="all")
-                except Exception:
-                    cleaned_frame = frame
-                if not cleaned_frame.empty:
-                    existing_rows = [
-                        dict(existing_row)
-                        for existing_row in cleaned_frame.to_dict(orient="records")
-                    ]
-            frame = pd.DataFrame(existing_rows + [row])
-        for column in MICROSCOPE_TABLE_COLUMNS:
-            if column not in frame.columns:
-                frame[column] = pd.Series([None] * len(frame))
-        frame = frame.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        frame = self._merge_rows_into_frame(frame, rows)
         self.data.table = frame
         self.model.set_frame(frame)
         self._auto_fit_columns()
@@ -11843,7 +11923,8 @@ class MicroscopeSection(MiniDatabaseSection):
         self._store_overrides(
             restore_selection=(
                 advance_request is None and self._pending_advance_column is None
-            )
+            ),
+            autosize=False,
         )
         if validation_changed:
             self._store_validation()
@@ -11930,34 +12011,6 @@ class MicroscopeSection(MiniDatabaseSection):
                 except Exception:
                     pass
                 self._handle_selection_changed()
-
-    def set_ocr_debug_enabled(self, enabled: bool) -> None:
-        self._ocr_debug_enabled = bool(enabled)
-
-    def _ocr_debug_callback(self, path: Path, result: MicroscopeOCRResult) -> None:
-        if not self._ocr_debug_enabled:
-            return
-        values = [
-            f"{float(value):.3f}"
-            for value in result.values
-            if isinstance(value, (int, float)) and math.isfinite(float(value))
-        ]
-        value_text = ", ".join(values) if values else "—"
-        sample_texts: List[str] = []
-        for detection in result.detections:
-            raw = getattr(detection, "text", None)
-            if raw:
-                cleaned = str(raw).replace("\n", " ").strip()
-                if cleaned:
-                    sample_texts.append(cleaned)
-        for text in result.texts:
-            cleaned = str(text).replace("\n", " ").strip()
-            if cleaned:
-                sample_texts.append(cleaned)
-        text_preview = " | ".join(sample_texts) if sample_texts else "—"
-        message = f"OCR debug {Path(path).name}: values={value_text}"
-        message += f"; text={text_preview}"
-        self.log(message, level=logging.INFO)
 
     def _update_hidden_columns(self) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
@@ -12095,6 +12148,62 @@ class MicroscopeSection(MiniDatabaseSection):
                     rows.add(source_row)
         return sorted(rows)
 
+    def _preview_pixmap_for_row(
+        self,
+        row: pd.Series,
+        column_name: str,
+    ) -> Optional[QtGui.QPixmap]:
+        key = str(row.get("_key") or "").strip()
+        if not key:
+            return None
+        if column_name == "_core_image":
+            cache_column = MICROSCOPE_IMAGE_COLUMNS[0]
+        elif column_name == "_glass_image":
+            cache_column = MICROSCOPE_IMAGE_COLUMNS[1]
+        else:
+            return None
+        cache_key = (key, cache_column)
+        cached = self._pixmap_cache.get(cache_key)
+        if cached is not None or cache_key in self._pixmap_cache:
+            return cached
+
+        path_value = row.get(column_name)
+        candidate = None
+        if path_value:
+            try:
+                candidate = Path(path_value)
+            except Exception:
+                candidate = None
+        if candidate is None or not candidate.exists():
+            for source in self._row_sources(row):
+                lower_name = source.name.lower()
+                if column_name == "_core_image" and "core" in lower_name and source.exists():
+                    candidate = source
+                    break
+                if column_name == "_glass_image" and "glass" in lower_name and source.exists():
+                    candidate = source
+                    break
+        if (candidate is None or not candidate.exists()) and row.get("_images"):
+            try:
+                fallback = Path(row["_images"][0])
+                if fallback.exists():
+                    candidate = fallback
+            except Exception:
+                candidate = None
+
+        pixmap: Optional[QtGui.QPixmap] = None
+        if candidate and candidate.exists():
+            reader = QtGui.QImageReader(str(candidate))
+            reader.setAutoTransform(True)
+            reader.setQuality(100)
+            image = reader.read()
+            if not image.isNull():
+                loaded = QtGui.QPixmap.fromImage(image)
+                if not loaded.isNull():
+                    pixmap = loaded
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
+
     def _ensure_valid_selection(self, column_label: str | None = None) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return
@@ -12214,38 +12323,10 @@ class MicroscopeSection(MiniDatabaseSection):
             if not should_show:
                 label.set_placeholder()
                 continue
-            path_value = row.get(column_name)
-            candidate = None
-            if path_value:
-                try:
-                    candidate = Path(path_value)
-                except Exception:
-                    candidate = None
-            if candidate is None or not candidate.exists():
-                for source in self._row_sources(row):
-                    lower_name = source.name.lower()
-                    if column_name == "_core_image" and "core" in lower_name and source.exists():
-                        candidate = source
-                        break
-                    if column_name == "_glass_image" and "glass" in lower_name and source.exists():
-                        candidate = source
-                        break
-            if (candidate is None or not candidate.exists()) and row.get("_images"):
-                try:
-                    fallback = Path(row["_images"][0])
-                    if fallback.exists():
-                        candidate = fallback
-                except Exception:
-                    candidate = None
-            if candidate and candidate.exists():
-                reader = QtGui.QImageReader(str(candidate))
-                reader.setAutoTransform(True)
-                reader.setQuality(100)
-                image = reader.read()
-                pixmap = QtGui.QPixmap.fromImage(image) if not image.isNull() else QtGui.QPixmap()
-                if not pixmap.isNull():
-                    label.set_preview(pixmap)
-                    continue
+            pixmap = self._preview_pixmap_for_row(row, column_name)
+            if pixmap is not None and not pixmap.isNull():
+                label.set_preview(pixmap)
+                continue
             label.set_placeholder()
         if hasattr(self, "core_preview_panel") and hasattr(self, "glass_preview_panel"):
             self.core_preview_panel.setVisible(show_core)
@@ -12280,7 +12361,7 @@ class MicroscopeSection(MiniDatabaseSection):
             self._overrides[selected_key] = override
         else:
             self._overrides.pop(selected_key, None)
-        self._store_overrides(restore_selection=False)
+        self._store_overrides(restore_selection=False, autosize=False)
         self._select_row_for_key(selected_key, advance_column or MICROSCOPE_D_COLUMN)
         self._selected_key = selected_key
         columns: set[str] = set()
@@ -12485,14 +12566,18 @@ class MicroscopeSection(MiniDatabaseSection):
         self.mark_reviewed_button.setText("Update review" if is_reviewed else "Mark reviewed")
         self.clear_review_button.setEnabled(has_any_review)
 
-    def _trigger_ocr_run(self) -> None:
-        self._force_ocr_next = True
-        self.refresh()
-
-    def _store_overrides(self, *, restore_selection: bool = True) -> None:
+    def _store_overrides(
+        self,
+        *,
+        restore_selection: bool = True,
+        autosize: bool = True,
+    ) -> None:
         self.data.extra["overrides"] = self._overrides
         self.store.save(self.data)
-        self._apply_overrides_to_table(restore_selection=restore_selection)
+        self._apply_overrides_to_table(
+            restore_selection=restore_selection,
+            autosize=autosize,
+        )
         self._update_hidden_columns()
         self._update_missing_summary()
         try:
@@ -12501,15 +12586,23 @@ class MicroscopeSection(MiniDatabaseSection):
             pass
         if restore_selection:
             self._restore_selection()
-        self._ensure_table_autosized()
+        if autosize:
+            self._ensure_table_autosized()
 
-    def _apply_overrides_to_table(self, *, restore_selection: bool = True) -> None:
+    def _apply_overrides_to_table(
+        self,
+        *,
+        restore_selection: bool = True,
+        autosize: bool = True,
+        clear_preview_cache: bool = False,
+    ) -> None:
         frame = self.data.table.copy()
         frame = frame.drop(columns=["Reviewed"], errors="ignore")
         if frame.empty:
             self.model.set_frame(frame)
             return
-        self._pixmap_cache.clear()
+        if clear_preview_cache:
+            self._pixmap_cache.clear()
         for index, row in frame.iterrows():
             key = str(row.get("_key"))
             override = self._overrides.get(key)
@@ -12539,122 +12632,87 @@ class MicroscopeSection(MiniDatabaseSection):
             frame.at[index, "d/D"] = round(ratio, 3) if ratio is not None else None
         self.data.table = frame
         self.model.set_frame(frame)
-        self._auto_fit_columns()
+        if autosize:
+            self._auto_fit_columns()
         self._update_missing_summary()
         self._update_review_buttons()
         if restore_selection:
             self._restore_selection()
 
+    @staticmethod
+    def _build_microscope_index_from_table(
+        table: pd.DataFrame,
+    ) -> Dict[MicrowireKey, MicroscopeMeasurements]:
+        index: Dict[MicrowireKey, MicroscopeMeasurements] = {}
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            return index
+        for _, row in table.iterrows():
+            key = _microwire_key_from_string(str(row.get("_key") or "").strip())
+            if key is None:
+                continue
+            measurements = index.setdefault(key, MicroscopeMeasurements())
+            core_path = row.get("_core_image")
+            glass_path = row.get("_glass_image")
+            try:
+                core_image = Path(core_path) if core_path else None
+            except Exception:
+                core_image = None
+            try:
+                glass_image = Path(glass_path) if glass_path else None
+            except Exception:
+                glass_image = None
+
+            d_value = row.get(MICROSCOPE_D_COLUMN)
+            if isinstance(d_value, (int, float)) and math.isfinite(float(d_value)) and float(d_value) > 0:
+                detection = MicroscopeDetection(
+                    value=float(d_value),
+                    image_path=core_image,
+                    source="manual",
+                )
+                detection.category = "core"
+                measurements.core.append(detection)
+            elif core_image is not None:
+                measurements.add_placeholder("core", core_image)
+
+            D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
+            if isinstance(D_value, (int, float)) and math.isfinite(float(D_value)) and float(D_value) > 0:
+                detection = MicroscopeDetection(
+                    value=float(D_value),
+                    image_path=glass_image,
+                    source="manual",
+                )
+                detection.category = "glass"
+                measurements.glass.append(detection)
+            elif glass_image is not None:
+                measurements.add_placeholder("glass", glass_image)
+
+            if str(row.get(BRITTLE_COLUMN) or "").strip().lower() == "brittle":
+                measurements.brittle = True
+        return index
+
     def refresh(self) -> None:
         self._refresh_validations()
         self._expected_keys_current = self._expected_microwire_keys()
-        if self._expected_keys_current:
-            self._prepare_initial_table(self._expected_keys_current)
         super().refresh()
-        if self.data.table.empty and self._expected_keys_current:
-            self._prepare_initial_table(self._expected_keys_current)
-        self._apply_overrides_to_table()
-        self._update_hidden_columns()
-        self._update_missing_summary()
-        self._update_review_buttons()
 
     def _prepopulate_image_refs(self, candidates: Iterable[Path]) -> None:
-        candidate_list = [Path(path) for path in candidates]
-        expected = set(self._expected_keys_current or self._expected_microwire_keys())
-        for path in candidate_list:
-            key_tuple = _microscope_key(path)
-            if key_tuple is not None:
-                expected.add(key_tuple)
-        allowed: Set[str] | None = None
-        if expected:
-            allowed = set()
-            for item in expected:
-                composition: object
-                draw: object
-                piece: object
-                suffix: object | None
-                try:
-                    composition, draw, piece, suffix = item  # type: ignore[misc]
-                except Exception:
-                    try:
-                        composition, draw, piece = item  # type: ignore[misc]
-                    except Exception:
-                        continue
-                    suffix = None
-                try:
-                    key_token = _microwire_key_to_str(
-                        (str(composition), int(draw), int(piece), suffix)
-                    )
-                except Exception:
-                    continue
-                allowed.add(key_token)
-        grouped: Dict[str, Dict[str, Any]] = {}
-        for path in candidate_list:
-            key_tuple = _microscope_key(path)
-            if key_tuple is None:
-                continue
-            composition, draw, piece, suffix = key_tuple
-            key = _microwire_key_to_str((composition, draw, piece, suffix))
-            if allowed is not None and key not in allowed:
-                continue
-            entry = grouped.setdefault(
-                key,
-                {
-                    "_key": key,
-                    "Composition": composition,
-                    "Microwire": _microwire_label(draw, piece, suffix),
-                    "_images": [],
-                },
-            )
-            images: List[str] = entry.setdefault("_images", [])  # type: ignore[assignment]
-            image_path = str(path)
-            if image_path not in images:
-                images.append(image_path)
-            category = _microscope_category(path)
-            if category == "core" and not entry.get("_core_image"):
-                entry["_core_image"] = image_path
-            elif category == "glass" and not entry.get("_glass_image"):
-                entry["_glass_image"] = image_path
-
-        for key, payload in grouped.items():
-            images_list = payload.get("_images", [])
-            if isinstance(images_list, list):
-                payload["_images"] = list(dict.fromkeys(images_list))
-            row = {
-                "Composition": payload.get("Composition", ""),
-                "Microwire": payload.get("Microwire", ""),
-                MICROSCOPE_D_COLUMN: None,
-                MICROSCOPE_CAP_D_COLUMN: None,
-                "d/D": None,
-                BRITTLE_COLUMN: (
-                    "brittle"
-                    if (
-                        any("brittle" in str(item).lower() for item in payload.get("_images", []))
-                        or (
-                            payload.get("_glass_image")
-                            and not payload.get("_core_image")
-                        )
-                    )
-                    else None
-                ),
-                MICROSCOPE_IMAGE_COLUMNS[0]: None,
-                MICROSCOPE_IMAGE_COLUMNS[1]: None,
-                "_key": key,
-                "_core_image": payload.get("_core_image"),
-                "_glass_image": payload.get("_glass_image"),
-                "_images": payload.get("_images", []),
-            }
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        rows_to_apply = self._build_image_ref_rows(
+            candidates,
+            set(self._expected_keys_current or self._expected_microwire_keys()),
+            frame,
+        )
+        for row in rows_to_apply:
+            key = str(row.get("_key", ""))
             self._pixmap_cache.pop((key, MICROSCOPE_IMAGE_COLUMNS[0]), None)
             self._pixmap_cache.pop((key, MICROSCOPE_IMAGE_COLUMNS[1]), None)
-            self._apply_partial_row(row)
             self._prepopulated_keys.add(key)
-
-        if grouped:
+        if rows_to_apply:
+            self._apply_partial_rows_now(rows_to_apply)
+        if rows_to_apply:
             self._update_missing_summary()
 
     def _start_section_worker(self, candidates: List[Path]) -> None:  # type: ignore[override]
-        if candidates:
-            self._prepopulate_image_refs(candidates)
         super()._start_section_worker(candidates)
 
     def process(
@@ -12663,16 +12721,12 @@ class MicroscopeSection(MiniDatabaseSection):
         progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
     ) -> SectionProcessResult:
         self._refresh_validations()
-        existing_index = self._load_existing_microscope_index()
         existing_processed = (
             dict(self.data.processed)
             if isinstance(getattr(self.data, "processed", None), dict)
             else {}
         )
-        existing_cache = dict(self._ocr_cache)
         unique_paths = list(dict.fromkeys(Path(p) for p in paths))
-        run_ocr = self._force_ocr_next or not getattr(self, "defer_ocr_checkbox", QtWidgets.QCheckBox()).isChecked()
-        self._force_ocr_next = False
 
         def _progress(idx: int, total: int) -> None:
             self._check_cancelled()
@@ -12689,7 +12743,6 @@ class MicroscopeSection(MiniDatabaseSection):
             except Exception:
                 pass
 
-        debug_cb = self._ocr_debug_callback if self._ocr_debug_enabled else None
         expected_keys = self._expected_keys_current or self._expected_microwire_keys()
         discovered_keys: Set[MicrowireKey] = set()
         for candidate in unique_paths:
@@ -12701,80 +12754,12 @@ class MicroscopeSection(MiniDatabaseSection):
                 discovered_keys.add(parsed_key)
         if discovered_keys:
             expected_keys = set(expected_keys) | discovered_keys
-        if existing_index:
-            expected_keys = set(expected_keys) | set(existing_index.keys())
-
-        def _emit_partial(key: MicrowireKey, measurement: MicroscopeMeasurements) -> None:
-            try:
-                row = self._record_to_row(key, measurement)
-            except Exception:
-                return
-            try:
-                self.partial_row_ready.emit(row)
-            except Exception:
-                pass
-
-        cache_lookup: Dict[str, MicroscopeCacheEntry] = {}
-        for candidate in unique_paths:
-            path_obj = Path(candidate)
-            key_tuple = _microscope_key(path_obj)
-            if key_tuple is None:
-                continue
-            comp, draw, piece, suffix = key_tuple
-            if expected_keys and (comp, draw, piece, suffix) not in expected_keys:
-                if (comp, draw, piece, None) not in expected_keys:
-                    continue
-            key = _microwire_key_to_str((comp, draw, piece, suffix))
-            validated_entry = self._validated.get(key)
-            if not isinstance(validated_entry, dict):
-                continue
-            sources = validated_entry.get("sources")
-            if not isinstance(sources, list):
-                continue
-            path_key = self._path_key(path_obj)
-            if not any(
-                isinstance(source, dict)
-                and source.get("path")
-                and self._path_key(Path(source.get("path"))) == path_key
-                for source in sources
-            ):
-                continue
-            cache_entry = self._ocr_cache.get(path_key)
-            if cache_entry is None:
-                continue
-            cache_lookup[path_key] = cache_entry
-
-        if not run_ocr:
-            table = self._build_initial_table_frame(expected_keys)
-            processed: Dict[str, float] = dict(existing_processed)
-            for path in unique_paths:
-                try:
-                    processed[str(path)] = float(path.stat().st_mtime)
-                except OSError:
-                    continue
-            return SectionProcessResult(
-                table=table,
-                processed=processed,
-                payloads=self.data.extra.get("payloads", {}),
-                extra=self.data.extra,
-            )
-
-        index, cache_map = _group_microscope_measurements(
-            unique_paths,
-            self.logger,
-            progress_callback=_progress if progress is not None else None,
-            debug_callback=debug_cb,
-            update_callback=_emit_partial,
-            cache=cache_lookup,
-        )
-        merged_cache = dict(existing_cache)
-        merged_cache.update(cache_map)
-        self._ocr_cache = merged_cache
-        merged_index = self._merge_microscope_indexes(existing_index, index)
-        if expected_keys:
-            for key in expected_keys:
-                merged_index.setdefault(key, MicroscopeMeasurements())
+        table = self._build_initial_table_frame(expected_keys)
         self._check_cancelled()
+        rows_to_apply = self._build_image_ref_rows(unique_paths, expected_keys, table)
+        if rows_to_apply:
+            table = self._merge_rows_into_frame(table, rows_to_apply)
+        merged_index = self._build_microscope_index_from_table(table)
         filtered_overrides = {
             key: value
             for key, value in self._overrides.items()
@@ -12783,8 +12768,6 @@ class MicroscopeSection(MiniDatabaseSection):
                 for comp, draw, piece, suffix in merged_index.keys()
             )
         }
-        self._overrides = filtered_overrides
-        table = _microscope_index_to_frame(merged_index, filtered_overrides)
 
         processed: Dict[str, float] = dict(existing_processed)
         for path in unique_paths:
@@ -12793,35 +12776,8 @@ class MicroscopeSection(MiniDatabaseSection):
             except OSError:
                 continue
 
-        def _count_measurements(entries: Sequence[MicroscopeDetection]) -> int:
-            count = 0
-            for entry in entries:
-                value = getattr(entry, "value", None)
-                try:
-                    numeric = float(value)
-                except (TypeError, ValueError):
-                    numeric = math.nan
-                if math.isfinite(numeric) and numeric > 0:
-                    count += 1
-            return count
-
-        total_records = len(merged_index)
-        total_core = sum(_count_measurements(m.core) for m in merged_index.values())
-        total_glass = sum(_count_measurements(m.glass) for m in merged_index.values())
-        if total_core or total_glass:
-            self.log(
-                f"Microscope OCR detected {total_core} core and {total_glass} glass diameter(s) across {total_records} microwire(s).",
-                level=logging.INFO,
-            )
-        else:
-            self.log(
-                "Microscope OCR completed but no diameters were detected. Ensure the PaddleOCR models are installed and the microscope captures contain visible annotations.",
-                level=logging.WARNING,
-            )
-        cache_payload = {key: entry.as_dict() for key, entry in self._ocr_cache.items()}
         extra_payload = {
             "overrides": filtered_overrides,
-            "ocr_cache": cache_payload,
             "validated": self._validated,
         }
         return SectionProcessResult(
@@ -28288,24 +28244,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
         _pump_events()
 
         self._developer_options = developer_options()
-        self._ocr_debug_supported = all(
-            hasattr(self._developer_options, attr)
-            for attr in ("ocr_debug", "ocr_debug_changed")
-        )
-        if self._ocr_debug_supported:
-            try:
-                self._developer_options.ocr_debug_changed.connect(
-                    self._handle_ocr_debug_changed
-                )
-            except Exception:
-                self._ocr_debug_supported = False
-        initial_debug = False
-        if self._ocr_debug_supported:
-            try:
-                initial_debug = bool(self._developer_options.ocr_debug())
-            except Exception:
-                initial_debug = False
-        self._handle_ocr_debug_changed(initial_debug)
         if hasattr(self._developer_options, "message_log_capture_changed"):
             try:
                 self._developer_options.message_log_capture_changed.connect(
@@ -28830,14 +28768,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.move(bounded_left, bounded_top)
         finally:
             self._clamp_active = False
-
-    def _handle_ocr_debug_changed(self, enabled: bool) -> None:
-        section = getattr(self, "microscope_section", None)
-        if isinstance(section, MicroscopeSection):
-            try:
-                section.set_ocr_debug_enabled(bool(enabled))
-            except Exception:
-                pass
 
     def _handle_log_capture_changed(self, enabled: bool) -> None:
         self._log_capture_enabled = bool(enabled)
