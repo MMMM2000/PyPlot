@@ -1335,6 +1335,52 @@ def test_microscope_prepopulate_batches_table_updates(tmp_path: Path, monkeypatc
         section.close()
 
 
+def test_microscope_apply_override_skips_autosize_for_enter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "2/4",
+                    builder_ui.MICROSCOPE_D_COLUMN: 30.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    BRITTLE_COLUMN: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": "Ni50Fe27Ga23|2|4",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                }
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        section._select_row_for_key("Ni50Fe27Ga23|2|4", builder_ui.MICROSCOPE_D_COLUMN)
+        QtWidgets.QApplication.processEvents()
+        section.d_edit.setText("31")
+
+        captured: list[tuple[bool, bool]] = []
+
+        def _fake_store_overrides(*, restore_selection: bool = True, autosize: bool = True) -> None:
+            captured.append((restore_selection, autosize))
+
+        monkeypatch.setattr(section, "_store_overrides", _fake_store_overrides)
+        monkeypatch.setattr(section, "_mark_reviewed", lambda *args, **kwargs: None)
+        monkeypatch.setattr(section, "_advance_to_next_pending", lambda column: None)
+
+        section._apply_override(builder_ui.MICROSCOPE_D_COLUMN)
+
+        assert captured == [(False, False)]
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_microscope_process_merges_existing_rows_when_refresh_scans_new_subset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

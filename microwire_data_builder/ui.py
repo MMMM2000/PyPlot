@@ -10501,7 +10501,7 @@ class MicroscopeSection(MiniDatabaseSection):
 
         # Always normalise the table after load so legacy "Reviewed" columns
         # are removed even when there are no overrides/validations stored.
-        self._apply_overrides_to_table()
+        self._apply_overrides_to_table(clear_preview_cache=True)
         self._normalise_brittle_column()
         self._update_hidden_columns()
         self._update_missing_summary()
@@ -10523,7 +10523,7 @@ class MicroscopeSection(MiniDatabaseSection):
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
         self._load_extra_state()
-        self._apply_overrides_to_table()
+        self._apply_overrides_to_table(clear_preview_cache=True)
         self._normalise_brittle_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
         if hasattr(self, "other_end_checkbox"):
@@ -10539,7 +10539,7 @@ class MicroscopeSection(MiniDatabaseSection):
     def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
         super().apply_data(data)
         self._load_extra_state()
-        self._apply_overrides_to_table(restore_selection=False)
+        self._apply_overrides_to_table(restore_selection=False, clear_preview_cache=True)
         self._normalise_brittle_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
         if hasattr(self, "other_end_checkbox"):
@@ -11815,7 +11815,8 @@ class MicroscopeSection(MiniDatabaseSection):
         self._store_overrides(
             restore_selection=(
                 advance_request is None and self._pending_advance_column is None
-            )
+            ),
+            autosize=False,
         )
         if validation_changed:
             self._store_validation()
@@ -12039,6 +12040,62 @@ class MicroscopeSection(MiniDatabaseSection):
                     rows.add(source_row)
         return sorted(rows)
 
+    def _preview_pixmap_for_row(
+        self,
+        row: pd.Series,
+        column_name: str,
+    ) -> Optional[QtGui.QPixmap]:
+        key = str(row.get("_key") or "").strip()
+        if not key:
+            return None
+        if column_name == "_core_image":
+            cache_column = MICROSCOPE_IMAGE_COLUMNS[0]
+        elif column_name == "_glass_image":
+            cache_column = MICROSCOPE_IMAGE_COLUMNS[1]
+        else:
+            return None
+        cache_key = (key, cache_column)
+        cached = self._pixmap_cache.get(cache_key)
+        if cached is not None or cache_key in self._pixmap_cache:
+            return cached
+
+        path_value = row.get(column_name)
+        candidate = None
+        if path_value:
+            try:
+                candidate = Path(path_value)
+            except Exception:
+                candidate = None
+        if candidate is None or not candidate.exists():
+            for source in self._row_sources(row):
+                lower_name = source.name.lower()
+                if column_name == "_core_image" and "core" in lower_name and source.exists():
+                    candidate = source
+                    break
+                if column_name == "_glass_image" and "glass" in lower_name and source.exists():
+                    candidate = source
+                    break
+        if (candidate is None or not candidate.exists()) and row.get("_images"):
+            try:
+                fallback = Path(row["_images"][0])
+                if fallback.exists():
+                    candidate = fallback
+            except Exception:
+                candidate = None
+
+        pixmap: Optional[QtGui.QPixmap] = None
+        if candidate and candidate.exists():
+            reader = QtGui.QImageReader(str(candidate))
+            reader.setAutoTransform(True)
+            reader.setQuality(100)
+            image = reader.read()
+            if not image.isNull():
+                loaded = QtGui.QPixmap.fromImage(image)
+                if not loaded.isNull():
+                    pixmap = loaded
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
+
     def _ensure_valid_selection(self, column_label: str | None = None) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return
@@ -12158,38 +12215,10 @@ class MicroscopeSection(MiniDatabaseSection):
             if not should_show:
                 label.set_placeholder()
                 continue
-            path_value = row.get(column_name)
-            candidate = None
-            if path_value:
-                try:
-                    candidate = Path(path_value)
-                except Exception:
-                    candidate = None
-            if candidate is None or not candidate.exists():
-                for source in self._row_sources(row):
-                    lower_name = source.name.lower()
-                    if column_name == "_core_image" and "core" in lower_name and source.exists():
-                        candidate = source
-                        break
-                    if column_name == "_glass_image" and "glass" in lower_name and source.exists():
-                        candidate = source
-                        break
-            if (candidate is None or not candidate.exists()) and row.get("_images"):
-                try:
-                    fallback = Path(row["_images"][0])
-                    if fallback.exists():
-                        candidate = fallback
-                except Exception:
-                    candidate = None
-            if candidate and candidate.exists():
-                reader = QtGui.QImageReader(str(candidate))
-                reader.setAutoTransform(True)
-                reader.setQuality(100)
-                image = reader.read()
-                pixmap = QtGui.QPixmap.fromImage(image) if not image.isNull() else QtGui.QPixmap()
-                if not pixmap.isNull():
-                    label.set_preview(pixmap)
-                    continue
+            pixmap = self._preview_pixmap_for_row(row, column_name)
+            if pixmap is not None and not pixmap.isNull():
+                label.set_preview(pixmap)
+                continue
             label.set_placeholder()
         if hasattr(self, "core_preview_panel") and hasattr(self, "glass_preview_panel"):
             self.core_preview_panel.setVisible(show_core)
@@ -12224,7 +12253,7 @@ class MicroscopeSection(MiniDatabaseSection):
             self._overrides[selected_key] = override
         else:
             self._overrides.pop(selected_key, None)
-        self._store_overrides(restore_selection=False)
+        self._store_overrides(restore_selection=False, autosize=False)
         self._select_row_for_key(selected_key, advance_column or MICROSCOPE_D_COLUMN)
         self._selected_key = selected_key
         columns: set[str] = set()
@@ -12429,10 +12458,18 @@ class MicroscopeSection(MiniDatabaseSection):
         self.mark_reviewed_button.setText("Update review" if is_reviewed else "Mark reviewed")
         self.clear_review_button.setEnabled(has_any_review)
 
-    def _store_overrides(self, *, restore_selection: bool = True) -> None:
+    def _store_overrides(
+        self,
+        *,
+        restore_selection: bool = True,
+        autosize: bool = True,
+    ) -> None:
         self.data.extra["overrides"] = self._overrides
         self.store.save(self.data)
-        self._apply_overrides_to_table(restore_selection=restore_selection)
+        self._apply_overrides_to_table(
+            restore_selection=restore_selection,
+            autosize=autosize,
+        )
         self._update_hidden_columns()
         self._update_missing_summary()
         try:
@@ -12441,15 +12478,23 @@ class MicroscopeSection(MiniDatabaseSection):
             pass
         if restore_selection:
             self._restore_selection()
-        self._ensure_table_autosized()
+        if autosize:
+            self._ensure_table_autosized()
 
-    def _apply_overrides_to_table(self, *, restore_selection: bool = True) -> None:
+    def _apply_overrides_to_table(
+        self,
+        *,
+        restore_selection: bool = True,
+        autosize: bool = True,
+        clear_preview_cache: bool = False,
+    ) -> None:
         frame = self.data.table.copy()
         frame = frame.drop(columns=["Reviewed"], errors="ignore")
         if frame.empty:
             self.model.set_frame(frame)
             return
-        self._pixmap_cache.clear()
+        if clear_preview_cache:
+            self._pixmap_cache.clear()
         for index, row in frame.iterrows():
             key = str(row.get("_key"))
             override = self._overrides.get(key)
@@ -12479,7 +12524,8 @@ class MicroscopeSection(MiniDatabaseSection):
             frame.at[index, "d/D"] = round(ratio, 3) if ratio is not None else None
         self.data.table = frame
         self.model.set_frame(frame)
-        self._auto_fit_columns()
+        if autosize:
+            self._auto_fit_columns()
         self._update_missing_summary()
         self._update_review_buttons()
         if restore_selection:
