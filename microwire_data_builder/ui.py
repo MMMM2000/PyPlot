@@ -206,6 +206,18 @@ VSM_HYSTERESIS_PREVIEW_RANGE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("±5000 Oe", "5000"),
     ("Auto/full range", "auto"),
 )
+VSM_HYSTERESIS_ANGLE_FILTER_SETTING = "vsm_hysteresis_angle_filter_mode"
+VSM_HYSTERESIS_DEFAULT_ANGLE_FILTER_MODE = "all"
+VSM_HYSTERESIS_ANGLE_FILTER_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("All angles", "all"),
+    ("0° and 90° only", "0_90"),
+)
+VSM_TEMPERATURE_PREVIEW_MODE_SETTING = "vsm_temperature_preview_mode"
+VSM_TEMPERATURE_DEFAULT_PREVIEW_MODE = "raw"
+VSM_TEMPERATURE_PREVIEW_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("Raw", "raw"),
+    ("Smoothed", "smoothed"),
+)
 ANNEALING_AS_COLUMN = "As1 (mA)"
 ANNEALING_AF1_COLUMN = "Af1 (mA)"
 ANNEALING_MS_COLUMN = "Ms1 (mA)"
@@ -382,6 +394,48 @@ def _load_vsm_hysteresis_preview_range_oe(
     except Exception:
         stored = str(int(VSM_HYSTERESIS_DEFAULT_PREVIEW_RANGE_OE))
     return _parse_vsm_hysteresis_preview_range_oe(stored)
+
+
+def _parse_vsm_hysteresis_angle_filter_mode(value: Any) -> str:
+    text = str(value).strip().lower() if value is not None else ""
+    if text in {"0_90", "0-90", "focused"}:
+        return "0_90"
+    return VSM_HYSTERESIS_DEFAULT_ANGLE_FILTER_MODE
+
+
+def _load_vsm_hysteresis_angle_filter_mode(
+    settings: Optional[QtCore.QSettings] = None,
+) -> str:
+    resolved = settings or _builder_settings()
+    try:
+        stored = resolved.value(
+            VSM_HYSTERESIS_ANGLE_FILTER_SETTING,
+            VSM_HYSTERESIS_DEFAULT_ANGLE_FILTER_MODE,
+        )
+    except Exception:
+        stored = VSM_HYSTERESIS_DEFAULT_ANGLE_FILTER_MODE
+    return _parse_vsm_hysteresis_angle_filter_mode(stored)
+
+
+def _parse_vsm_temperature_preview_mode(value: Any) -> str:
+    text = str(value).strip().lower() if value is not None else ""
+    if text == "smoothed":
+        return "smoothed"
+    return VSM_TEMPERATURE_DEFAULT_PREVIEW_MODE
+
+
+def _load_vsm_temperature_preview_mode(
+    settings: Optional[QtCore.QSettings] = None,
+) -> str:
+    resolved = settings or _builder_settings()
+    try:
+        stored = resolved.value(
+            VSM_TEMPERATURE_PREVIEW_MODE_SETTING,
+            VSM_TEMPERATURE_DEFAULT_PREVIEW_MODE,
+        )
+    except Exception:
+        stored = VSM_TEMPERATURE_DEFAULT_PREVIEW_MODE
+    return _parse_vsm_temperature_preview_mode(stored)
 
 
 def _shape_memory_has_value(value: Any) -> bool:
@@ -4116,6 +4170,34 @@ def _group_vsm_hysteresis_plot_groups(
     return groups
 
 
+def _is_vsm_hysteresis_focus_angle(
+    angle: Optional[float],
+    *,
+    tolerance_deg: float = 0.75,
+) -> bool:
+    value = _coerce_finite_float(angle)
+    if value is None:
+        return False
+    return min(abs(value - 0.0), abs(value - 90.0)) <= tolerance_deg
+
+
+def _filter_vsm_hysteresis_records_by_angle_mode(
+    records: Sequence[VsmHysteresisRecord],
+    angle_filter_mode: str,
+) -> List[VsmHysteresisRecord]:
+    resolved_mode = _parse_vsm_hysteresis_angle_filter_mode(angle_filter_mode)
+    if resolved_mode != "0_90":
+        return [
+            entry for entry in records if isinstance(entry, VsmHysteresisRecord)
+        ]
+    return [
+        entry
+        for entry in records
+        if isinstance(entry, VsmHysteresisRecord)
+        and _is_vsm_hysteresis_focus_angle(getattr(entry, "angle", None))
+    ]
+
+
 def _plot_vsm_hysteresis_figure(
     record: VsmHysteresisRecord | Sequence[VsmHysteresisRecord],
     logger: logging.Logger,
@@ -4123,11 +4205,13 @@ def _plot_vsm_hysteresis_figure(
     width_px: int,
     height_px: int,
     x_limit_oe: Optional[float] = None,
+    angle_filter_mode: str = VSM_HYSTERESIS_DEFAULT_ANGLE_FILTER_MODE,
 ) -> Optional["plt.Figure"]:
     if isinstance(record, VsmHysteresisRecord):
         records = [record]
     else:
         records = [entry for entry in record if isinstance(entry, VsmHysteresisRecord)]
+    records = _filter_vsm_hysteresis_records_by_angle_mode(records, angle_filter_mode)
     if not records:
         return None
     columns_set: set[str] = set()
@@ -4271,6 +4355,7 @@ def _plot_vsm_temperature_scan_figure(
     *,
     width_px: int,
     height_px: int,
+    preview_mode: str = VSM_TEMPERATURE_DEFAULT_PREVIEW_MODE,
 ) -> Optional["plt.Figure"]:
     frame = record.data if isinstance(record.data, pd.DataFrame) else pd.DataFrame()
     if frame.empty:
@@ -4278,8 +4363,11 @@ def _plot_vsm_temperature_scan_figure(
     series = processor._build_series(frame.copy())
     if not series:
         return None
-    color_map = processor.series_color_map(series)
-    field_order = processor.field_axis_order([entry.field for entry in series])
+    prepared = processor._prepare_series(series)
+    if not prepared:
+        return None
+    preview_mode = _parse_vsm_temperature_preview_mode(preview_mode)
+    field_order = processor.field_axis_order([entry.series.field for entry in prepared])
     figsize = (max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
     figure = plt.Figure(figsize=figsize)
     ax_left = figure.add_subplot(111)
@@ -4287,16 +4375,18 @@ def _plot_vsm_temperature_scan_figure(
     axes_map: Dict[float, Any] = {}
     legend_handles: List[Any] = []
     legend_labels: List[str] = []
-    for idx, entry_series in enumerate(series):
-        frame = entry_series.frame
-        temps = frame["temperature"]
-        signal = frame["signal"]
+    for prepared_series in prepared:
+        entry_series = prepared_series.series
+        plot_frame = prepared_series.frame
+        if preview_mode == "smoothed":
+            plot_frame = processor._smooth_frame(plot_frame)
+        temps = plot_frame["temperature"]
+        signal = plot_frame["signal"]
         if len(temps) > MAX_PLOT_POINTS:
             temps = _downsample_series(temps, MAX_PLOT_POINTS)
             signal = signal.loc[temps.index]
-        color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
-        color = color_map.get(color_key, plt.rcParams["axes.prop_cycle"].by_key()["color"][idx % 10])
-        label = f"{entry_series.field:.0f} Oe{processor._direction_label(entry_series.direction, entry_series.segment_index)}"
+        color = prepared_series.color
+        label = prepared_series.legend
         primary = field_order[0] if field_order else entry_series.field
         secondary = field_order[1] if len(field_order) > 1 else None
         if entry_series.field not in axes_map:
@@ -4317,7 +4407,10 @@ def _plot_vsm_temperature_scan_figure(
     variant = getattr(record, "variant", None)
     if isinstance(variant, str) and variant.strip():
         title = f"{title} ({variant.strip()})"
-    ax_left.set_title(f"{title} - VSM Temperature Scan")
+    if preview_mode == "smoothed":
+        ax_left.set_title(f"{title} - Smoothed VSM Temperature Scan")
+    else:
+        ax_left.set_title(f"{title} - VSM Temperature Scan")
     ax_left.set_xlabel("Temperature (°C)")
     ax_left.set_ylabel("Signal X (emu)")
     if ax_right is not None:
@@ -5475,15 +5568,18 @@ def _vsm_hysteresis_preview_items(
     *,
     width_px: int,
     height_px: int,
+    angle_filter_mode: str = VSM_HYSTERESIS_DEFAULT_ANGLE_FILTER_MODE,
 ) -> List[_GraphPreviewItem]:
     items: List[_GraphPreviewItem] = []
-    groups = _group_vsm_hysteresis_plot_groups(records)
+    filtered_records = _filter_vsm_hysteresis_records_by_angle_mode(records, angle_filter_mode)
+    groups = _group_vsm_hysteresis_plot_groups(filtered_records)
     for group in groups:
         figure = _plot_vsm_hysteresis_figure(
             group.records,
             logger,
             width_px=width_px,
             height_px=height_px,
+            angle_filter_mode=angle_filter_mode,
         )
         pixmap = _figure_to_pixmap(figure, logger, width_px=width_px, height_px=height_px)
         if pixmap is None:
@@ -5528,12 +5624,13 @@ def _vsm_temperature_preview_items(
     *,
     width_px: int,
     height_px: int,
+    preview_mode: str = VSM_TEMPERATURE_DEFAULT_PREVIEW_MODE,
 ) -> List[_GraphPreviewItem]:
     processor = _get_vsm_temp_processor(logger)
     if processor is None:
         return []
-    preview_width = max(int(width_px * 1.25), width_px)
-    preview_height = max(int(height_px * 1.25), height_px)
+    preview_width = max(int(width_px), 1)
+    preview_height = max(int(height_px), 1)
     items: List[_GraphPreviewItem] = []
     for record in records:
         figure = _plot_vsm_temperature_scan_figure(
@@ -5541,6 +5638,7 @@ def _vsm_temperature_preview_items(
             processor,
             width_px=preview_width,
             height_px=preview_height,
+            preview_mode=preview_mode,
         )
         pixmap = _figure_to_pixmap(
             figure,
@@ -7111,6 +7209,16 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 frame = model.frame()
             except Exception:
                 frame = None
+        if frame is None and hasattr(model, "sourceModel"):
+            try:
+                source_model = model.sourceModel()
+            except Exception:
+                source_model = None
+            if source_model is not None and hasattr(source_model, "frame"):
+                try:
+                    frame = source_model.frame()
+                except Exception:
+                    frame = None
         if frame is None or getattr(frame, "empty", False):
             return
         try:
@@ -16167,6 +16275,20 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self._load_preview_range_setting()
         self.preview_range_combo.currentIndexChanged.connect(self._handle_preview_range_changed)
         self.controls_layout.addWidget(self.preview_range_combo)
+        self.angle_filter_label = QtWidgets.QLabel("Angles:")
+        self.angle_filter_label.setToolTip(
+            "Choose whether previews show all measured angles or only the 0° and 90° loops."
+        )
+        self.controls_layout.addWidget(self.angle_filter_label)
+        self.angle_filter_combo = QtWidgets.QComboBox(self)
+        self.angle_filter_combo.setToolTip(
+            "Limit the displayed VSM hysteresis loops to improve readability in previews and galleries."
+        )
+        for label, value in VSM_HYSTERESIS_ANGLE_FILTER_OPTIONS:
+            self.angle_filter_combo.addItem(label, value)
+        self._load_angle_filter_setting()
+        self.angle_filter_combo.currentIndexChanged.connect(self._handle_angle_filter_changed)
+        self.controls_layout.addWidget(self.angle_filter_combo)
         header = self.table_view.verticalHeader() if self.table_view is not None else None
         if header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
@@ -16355,8 +16477,12 @@ class VsmHysteresisSection(MiniDatabaseSection):
         all_records = list(payload) if isinstance(payload, list) else []
         self._all_records = list(all_records)
         visible_records = self._visible_records(all_records)
-        if visible_records:
-            for record in visible_records:
+        display_records = _filter_vsm_hysteresis_records_by_angle_mode(
+            visible_records,
+            self._current_angle_filter_mode(),
+        )
+        if display_records:
+            for record in display_records:
                 sample = getattr(record, "sample", None)
                 if isinstance(sample, str) and sample.strip():
                     existing_variant = getattr(record, "variant", None)
@@ -16387,7 +16513,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
                 if isinstance(sample, str) and sample.strip():
                     grouped.setdefault(sample, []).append(record)
         self._record_groups = grouped
-        self._record_groups_by_key = _group_graph_records_by_key(visible_records)
+        self._record_groups_by_key = _group_graph_records_by_key(display_records)
         max_groups = 1
         for records in grouped.values():
             groups = _group_vsm_hysteresis_plot_groups(records)
@@ -16426,6 +16552,19 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self.preview_range_combo.setCurrentIndex(index)
         del blocker
 
+    def _load_angle_filter_setting(self) -> None:
+        mode = _load_vsm_hysteresis_angle_filter_mode()
+        index = self.angle_filter_combo.findData(mode)
+        if index < 0:
+            index = 0
+        blocker = QtCore.QSignalBlocker(self.angle_filter_combo)
+        self.angle_filter_combo.setCurrentIndex(index)
+        del blocker
+
+    def _current_angle_filter_mode(self) -> str:
+        data = self.angle_filter_combo.currentData()
+        return _parse_vsm_hysteresis_angle_filter_mode(data)
+
     def _refresh_preview_pixmaps(self) -> None:
         self._pixmap_cache.clear()
         if isinstance(self.model, DataFrameModel):
@@ -16449,6 +16588,16 @@ class VsmHysteresisSection(MiniDatabaseSection):
         except Exception:
             self.logger.exception("Failed to store VSM hysteresis preview range setting")
         self._refresh_preview_pixmaps()
+
+    def _handle_angle_filter_changed(self, _: int) -> None:
+        mode = self._current_angle_filter_mode()
+        settings = _builder_settings()
+        try:
+            settings.setValue(VSM_HYSTERESIS_ANGLE_FILTER_SETTING, mode)
+            settings.sync()
+        except Exception:
+            self.logger.exception("Failed to store VSM hysteresis angle filter setting")
+        self._refresh_record_groups()
 
     def _preview_icon_width(self) -> int:
         count = max(int(getattr(self, "_preview_group_count", 1)), 1)
@@ -16509,6 +16658,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
                     self.logger,
                     width_px=ANNEALING_GRAPH_WIDTH,
                     height_px=ANNEALING_GRAPH_HEIGHT,
+                    angle_filter_mode=self._current_angle_filter_mode(),
                 )
                 preview = _figure_to_pixmap(
                     figure,
@@ -16563,6 +16713,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
             self.logger,
             width_px=GRAPH_PREVIEW_WIDTH,
             height_px=GRAPH_PREVIEW_HEIGHT,
+            angle_filter_mode=self._current_angle_filter_mode(),
         )
         if not items:
             QtWidgets.QMessageBox.information(
@@ -16687,11 +16838,28 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         self.visibility_button.setToolTip("Show or hide specific VSM temperature scan graphs.")
         self.visibility_button.clicked.connect(self._open_visibility_dialog)
         self.controls_layout.addWidget(self.visibility_button)
+        self.preview_mode_label = QtWidgets.QLabel("Preview:")
+        self.preview_mode_label.setToolTip(
+            "Choose whether VSM temperature previews show the raw traces or the smoothed traces."
+        )
+        self.controls_layout.addWidget(self.preview_mode_label)
+        self.preview_mode_combo = QtWidgets.QComboBox(self)
+        self.preview_mode_combo.setToolTip(
+            "Smoothed previews use the existing VSM temperature scan smoothing settings."
+        )
+        for label, value in VSM_TEMPERATURE_PREVIEW_MODE_OPTIONS:
+            self.preview_mode_combo.addItem(label, value)
+        self._load_preview_mode_setting()
+        self.preview_mode_combo.currentIndexChanged.connect(self._handle_preview_mode_changed)
+        self.controls_layout.addWidget(self.preview_mode_combo)
         header = self.table_view.verticalHeader() if self.table_view is not None else None
         if header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
             header.setDefaultSectionSize(default_height)
             header.setMinimumSectionSize(default_height)
+        table_header = self.table_view.horizontalHeader() if self.table_view is not None else None
+        if table_header is not None:
+            table_header.setStretchLastSection(False)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
@@ -16848,6 +17016,39 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             except Exception:
                 pass
 
+    def _load_preview_mode_setting(self) -> None:
+        mode = _load_vsm_temperature_preview_mode()
+        index = self.preview_mode_combo.findData(mode)
+        if index < 0:
+            index = 0
+        blocker = QtCore.QSignalBlocker(self.preview_mode_combo)
+        self.preview_mode_combo.setCurrentIndex(index)
+        del blocker
+
+    def _current_preview_mode(self) -> str:
+        data = self.preview_mode_combo.currentData()
+        return _parse_vsm_temperature_preview_mode(data)
+
+    def _handle_preview_mode_changed(self, _: int) -> None:
+        mode = self._current_preview_mode()
+        settings = _builder_settings()
+        try:
+            settings.setValue(VSM_TEMPERATURE_PREVIEW_MODE_SETTING, mode)
+            settings.sync()
+        except Exception:
+            self.logger.exception("Failed to store VSM temperature preview mode setting")
+        self._pixmap_cache.clear()
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+        if isinstance(self.table_view, QtWidgets.QTableView):
+            try:
+                self.table_view.viewport().update()
+            except Exception:
+                pass
+
     def _preview_icon_width(self) -> int:
         count = max(int(getattr(self, "_preview_group_count", 1)), 1)
         return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
@@ -16904,6 +17105,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 self.logger,
                 width_px=ANNEALING_GRAPH_WIDTH,
                 height_px=ANNEALING_GRAPH_HEIGHT,
+                preview_mode=self._current_preview_mode(),
             )
             pixmaps = [item.pixmap for item in items if item.pixmap is not None]
             if pixmaps:
@@ -16912,7 +17114,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                     width_px=self._preview_icon_width(),
                     height_px=self._preview_icon_height(),
                     spacing=self._preview_spacing,
-                    scale_to_fit=True,
+                    scale_to_fit=False,
                 )
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
@@ -16947,6 +17149,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             self.logger,
             width_px=GRAPH_PREVIEW_WIDTH,
             height_px=GRAPH_PREVIEW_HEIGHT,
+            preview_mode=self._current_preview_mode(),
         )
         dialog = _GraphGalleryDialog(
             "VSM temperature scan graphs",
