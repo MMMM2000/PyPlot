@@ -523,7 +523,12 @@ def test_push_workbooks_to_origin_creates_graphs(monkeypatch: pytest.MonkeyPatch
         dataframe=df,
         columns={
             "time": WorksheetColumnMeta(long_name="Time", units="s", comments="Sample A"),
-            "value": WorksheetColumnMeta(long_name="Value", units="A", comments="Sample A"),
+            "value": WorksheetColumnMeta(
+                long_name="Value",
+                units="A",
+                comments="Sample A",
+                plot_color="#dc2626",
+            ),
         },
         axis_roles="XY",
     )
@@ -556,6 +561,7 @@ def test_push_workbooks_to_origin_creates_graphs(monkeypatch: pytest.MonkeyPatch
             self.lname = ""
             self.long_name = ""
             self.name = ""
+            self.color = ""
 
     class _FakeLayer:
         def __init__(self, commands: list[str]) -> None:
@@ -643,6 +649,7 @@ def test_push_workbooks_to_origin_creates_graphs(monkeypatch: pytest.MonkeyPatch
     assert len(fake_origin.graphs) == 1
     assert fake_origin.graphs[0].layer.plots
     assert fake_origin.graphs[0].layer.plots[0].lname == "Sample A"
+    assert fake_origin.graphs[0].layer.plots[0].color == "#dc2626"
     assert any(cmd.startswith('label -s -n title "') for cmd in fake_origin.lt_commands)
     assert not any("title.show" in cmd.lower() for cmd in fake_origin.lt_commands)
     assert any('label -s -xb "Time [s]";' in cmd for cmd in fake_origin.lt_commands)
@@ -783,6 +790,7 @@ def test_shared_plot_workbook_is_created_from_plot_tab() -> None:
         assert y_meta.long_name == "Stress"
         assert y_meta.units == "MPa"
         assert y_meta.comments == "Loading 1"
+        assert y_meta.plot_color == "#1f77b4"
     finally:
         window.close()
 

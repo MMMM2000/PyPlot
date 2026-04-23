@@ -292,6 +292,27 @@ def _should_force_light_text(color: Any) -> bool:
     return luminance < 0.6 and spread < 0.12
 
 
+def _normalize_export_color(color: Any) -> str:
+    """Return a stable hex color token for export metadata."""
+
+    if color is None:
+        return ""
+    candidate = color
+    if isinstance(candidate, np.ndarray):
+        if candidate.size == 0:
+            return ""
+        candidate = candidate[0]
+    if isinstance(candidate, (list, tuple)):
+        if not candidate:
+            return ""
+        if isinstance(candidate[0], (list, tuple, np.ndarray)):
+            candidate = candidate[0]
+    try:
+        return str(mcolors.to_hex(candidate, keep_alpha=False))
+    except Exception:
+        return ""
+
+
 def _sync_legend_text_colors(legend: Legend) -> None:
     """Apply text-follows-handle behaviour when requested."""
 
@@ -1325,6 +1346,7 @@ class _TabSeriesExportEntry:
     x_unit: str
     y_label: str
     y_unit: str
+    color: str = ""
     x_scale_factor: float = 1.0
     y_scale_factor: float = 1.0
 
@@ -1344,6 +1366,7 @@ class WorksheetColumnMeta:
     units: str = ""
     comments: str = ""
     formula: str = ""
+    plot_color: str = ""
 
 
 @dataclass
@@ -4848,6 +4871,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 x_label, x_unit, y_label, y_unit = self._axis_label_parts(line_axes)
                 x_factor = self._axis_value_factor(line_axes, axis_name="x")
                 y_factor = self._axis_value_factor(line_axes, axis_name="y")
+                color = _normalize_export_color(
+                    getattr(line_obj, "get_color", lambda: "")()
+                    if line_obj is not None
+                    else ""
+                )
                 entries.append(
                     _TabSeriesExportEntry(
                         label=label,
@@ -4857,6 +4885,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         x_unit=x_unit or default_x_unit,
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
+                        color=color,
                         x_scale_factor=x_factor,
                         y_scale_factor=y_factor,
                     )
@@ -4912,6 +4941,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         x_unit=x_unit or default_x_unit,
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
+                        color=_normalize_export_color(line.get_color()),
                         x_scale_factor=x_factor,
                         y_scale_factor=y_factor,
                     )
@@ -4949,6 +4979,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 x_vals, y_vals = self._paired_numeric_arrays(offsets[:, 0], offsets[:, 1])
                 if x_vals.size == 0 or y_vals.size == 0:
                     continue
+                collection_color = _normalize_export_color(
+                    getattr(collection, "get_edgecolor", lambda: "")()
+                )
+                if not collection_color:
+                    collection_color = _normalize_export_color(
+                        getattr(collection, "get_facecolor", lambda: "")()
+                    )
                 entries.append(
                     _TabSeriesExportEntry(
                         label=label,
@@ -4958,6 +4995,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         x_unit=x_unit or default_x_unit,
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
+                        color=collection_color,
                         x_scale_factor=x_factor,
                         y_scale_factor=y_factor,
                     )
@@ -5058,6 +5096,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 long_name=entry.y_label or "Y",
                 units=entry.y_unit,
                 comments=label,
+                plot_color=entry.color,
             )
             axis_roles.extend(["X", "Y"])
 
@@ -5904,6 +5943,19 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             label = str(column_name)
         return label
 
+    def _origin_plot_color(
+        self,
+        worksheet: WorksheetData,
+        y_index: int,
+    ) -> str:
+        columns = list(worksheet.dataframe.columns)
+        if y_index < 0 or y_index >= len(columns):
+            return ""
+        meta = worksheet.columns.get(columns[y_index])
+        if not isinstance(meta, WorksheetColumnMeta):
+            return ""
+        return str(meta.plot_color or "").strip()
+
     def _origin_graph_templates(self, origin_any: Any) -> list[str]:
         _ = origin_any
         templates: list[str] = ["ORIGIN", "line", "scatter"]
@@ -6105,14 +6157,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 if group_index == 0 and normalized:
                     primary_group_labels.add(normalized)
                 self._apply_origin_plot_label(plot_obj, worksheet, y_index, override_label=label)
-                color_key = normalized or f"group{group_index}:{x_index}:{y_index}"
-                color = color_by_label.get(color_key)
-                if color is None:
-                    color = ORIGIN_EXPORT_COLOR_CYCLE[
-                        next_color_index % len(ORIGIN_EXPORT_COLOR_CYCLE)
-                    ]
-                    color_by_label[color_key] = color
-                    next_color_index += 1
+                color = self._origin_plot_color(worksheet, y_index)
+                if not color:
+                    color_key = normalized or f"group{group_index}:{x_index}:{y_index}"
+                    color = color_by_label.get(color_key)
+                    if color is None:
+                        color = ORIGIN_EXPORT_COLOR_CYCLE[
+                            next_color_index % len(ORIGIN_EXPORT_COLOR_CYCLE)
+                        ]
+                        color_by_label[color_key] = color
+                        next_color_index += 1
                 self._apply_origin_plot_style(plot_obj, color=color)
                 if (
                     group_index > 0
