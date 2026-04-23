@@ -43,6 +43,8 @@ TITLE_SIZE = 16
 SHOW_TICK_LABELS = True
 SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
+INCREASING_COLORS = ["#dc2626", "#f97316", "#ea580c", "#ef4444"]
+DECREASING_COLORS = ["#2563eb", "#0ea5e9", "#1d4ed8", "#06b6d4"]
 
 # Relax figure count warning for batch plotting inside PyPlot tabs
 plt.rcParams["figure.max_open_warning"] = 0
@@ -53,6 +55,7 @@ ORIGIN_MODE: str = ORIGIN_MODES[0]
 
 
 _SUBSCRIPT_PATTERN = re.compile(r"([A-Z][a-z])(\d+)")
+_CURRENT_TARGET_PATTERN = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*mA\b", re.IGNORECASE)
 
 
 def _format_origin_annotation(text: str) -> str:
@@ -69,6 +72,41 @@ def _format_origin_annotation(text: str) -> str:
 
 def _escape_ltalk_text(text: str) -> str:
     return str(text).replace('"', '""')
+
+
+def _expected_current_limit_mA() -> float:
+    return 1000.0
+
+
+def _target_current_from_path(path: str) -> float | None:
+    match = _CURRENT_TARGET_PATTERN.search(Path(path).name)
+    if not match:
+        return None
+    try:
+        return float(match.group("value"))
+    except Exception:
+        return None
+
+
+def _infer_current_scale_to_mA(path: str, raw_currents: pd.Series) -> float:
+    finite = pd.to_numeric(raw_currents, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if finite.empty:
+        return 1.0
+    abs_values = finite.abs()
+    raw_max = float(abs_values.max())
+    if not math.isfinite(raw_max) or raw_max <= 0.0:
+        return 1.0
+
+    target_mA = _target_current_from_path(path)
+    if target_mA is not None and math.isfinite(target_mA) and target_mA > 0.0:
+        candidates = (
+            (1.0, raw_max),
+            (1000.0, raw_max * 1000.0),
+        )
+        best_scale = min(candidates, key=lambda item: abs(item[1] - target_mA))[0]
+        return float(best_scale)
+
+    return 1000.0 if raw_max <= 1.2 else 1.0
 
 
 def load_file(path: str) -> pd.DataFrame:
@@ -115,14 +153,17 @@ def load_file(path: str) -> pd.DataFrame:
         df = df.iloc[1:].reset_index(drop=True)
     if df.empty:
         raise ValueError(f"{path}: no valid samples after parsing")
-    median_abs = float(df["I_A"].abs().median()) if not df["I_A"].empty else 0.0
-    if np.isnan(median_abs):
-        median_abs = 0.0
-    if median_abs > 20.0:
-        df["I_mA"] = df["I_A"]
-        df["I_A"] = df["I_A"] / 1e3
-    else:
+    scale_to_mA = _infer_current_scale_to_mA(path, df["I_A"])
+    if scale_to_mA == 1000.0:
         df["I_mA"] = df["I_A"] * 1e3
+    else:
+        df["I_mA"] = df["I_A"]
+    df["I_A"] = df["I_mA"] / 1e3
+    max_current_mA = float(df["I_mA"].abs().max()) if not df["I_mA"].empty else 0.0
+    if math.isfinite(max_current_mA) and max_current_mA > (_expected_current_limit_mA() + 1e-6):
+        raise ValueError(
+            f"{path}: current exceeds expected {_expected_current_limit_mA():.0f} mA ceiling after unit detection"
+        )
     mask = (
         np.isfinite(df["I_mA"]) &
         np.isfinite(df["R_Ohm"]) &
@@ -210,6 +251,16 @@ def _normalise_origin_mode(mode: str | None) -> str:
     if normalised in {"directional", "experimental", "split"}:
         return ORIGIN_MODES[0]
     return ORIGIN_MODES[0]
+
+
+def _segment_label(direction: float, cycle_index: int) -> str:
+    prefix = "Increasing" if direction >= 0 else "Decreasing"
+    return f"{prefix} {cycle_index}"
+
+
+def _segment_color(direction: float, cycle_index: int) -> str:
+    palette = INCREASING_COLORS if direction >= 0 else DECREASING_COLORS
+    return palette[(max(cycle_index, 1) - 1) % len(palette)]
 
 
 def _clear_layer(layer: Any) -> None:
@@ -630,28 +681,7 @@ def _plot_origin_experimental(
         )
         return
 
-    inc_x: List[float] = []
-    inc_y: List[float] = []
-    dec_x: List[float] = []
-    dec_y: List[float] = []
-
     previous_direction: float | None = None
-    for start, end, direction in segments:
-        if end <= start:
-            previous_direction = direction
-            continue
-        xs = currents[start:end].tolist()
-        ys = resistances[start:end].tolist()
-        target_x, target_y = (inc_x, inc_y) if direction >= 0 else (dec_x, dec_y)
-        if direction < 0 and previous_direction is not None and previous_direction >= 0 and start > 0:
-            xs.insert(0, float(currents[start - 1]))
-            ys.insert(0, float(resistances[start - 1]))
-        if target_x and xs:
-            target_x.append(float('nan'))
-            target_y.append(float('nan'))
-        target_x.extend(xs)
-        target_y.extend(ys)
-        previous_direction = direction
 
     legend_entries: List[Tuple[int, str]] = []
 
@@ -727,11 +757,29 @@ def _plot_origin_experimental(
         pass
 
     col_index = 0
-    if _write_series(col_index, inc_x, inc_y, "Increasing current"):
-        _add_direction_plot(col_index, "Increasing current", '#d32f2f')
-        col_index += 2
-    if _write_series(col_index, dec_x, dec_y, "Decreasing current"):
-        _add_direction_plot(col_index, "Decreasing current", '#1976d2')
+    inc_count = 0
+    dec_count = 0
+    for start, end, direction in segments:
+        if end <= start:
+            previous_direction = direction
+            continue
+        segment_x = currents[start:end].tolist()
+        segment_y = resistances[start:end].tolist()
+        if direction < 0 and previous_direction is not None and previous_direction >= 0 and start > 0:
+            segment_x.insert(0, float(currents[start - 1]))
+            segment_y.insert(0, float(resistances[start - 1]))
+        if direction >= 0:
+            inc_count += 1
+            cycle_index = inc_count
+        else:
+            dec_count += 1
+            cycle_index = dec_count
+        label = _segment_label(direction, cycle_index)
+        color = _segment_color(direction, cycle_index)
+        if _write_series(col_index, segment_x, segment_y, label):
+            _add_direction_plot(col_index, label, color)
+            col_index += 2
+        previous_direction = direction
 
     if not legend_entries:
         _plot_origin_simple(
@@ -786,11 +834,7 @@ def plot_one(
     _, segments = _direction_profile(currents)
     marker_size = 3.0
     line_width = 1.2
-    heating_color = "#dc2626"  # red
-    cooling_color = "#2563eb"  # blue
-
     legend_handles: list[Line2D] = []
-    legend_kinds: set[str] = set()
     if currents.size == 0:
         pass
     elif currents.size == 1:
@@ -808,7 +852,6 @@ def plot_one(
         inc_count = 0
         dec_count = 0
         for start, end, direction in segments:
-            color = heating_color if direction >= 0 else cooling_color
             if end <= start:
                 previous_direction = direction
                 continue
@@ -828,12 +871,12 @@ def plot_one(
                 )
             if direction >= 0:
                 inc_count += 1
-                label = f"Increasing {inc_count}"
-                legend_key = "increasing"
+                cycle_index = inc_count
             else:
                 dec_count += 1
-                label = f"Decreasing {dec_count}"
-                legend_key = "decreasing"
+                cycle_index = dec_count
+            label = _segment_label(direction, cycle_index)
+            color = _segment_color(direction, cycle_index)
             line = ax.plot(
                 segment_currents,
                 segment_resistances,
@@ -846,22 +889,18 @@ def plot_one(
                 linewidth=line_width,
                 label=label,
             )[0]
-            if legend_key not in legend_kinds:
-                legend_handles.append(
-                    Line2D(
-                        [],
-                        [],
-                        color=color,
-                        marker="o",
-                        linestyle="-",
-                        markersize=marker_size,
-                        linewidth=line_width,
-                        label="Increasing current"
-                        if legend_key == "increasing"
-                        else "Decreasing current",
-                    )
+            legend_handles.append(
+                Line2D(
+                    [],
+                    [],
+                    color=color,
+                    marker="o",
+                    linestyle="-",
+                    markersize=marker_size,
+                    linewidth=line_width,
+                    label=label,
                 )
-                legend_kinds.add(legend_key)
+            )
             previous_direction = direction
 
     ax.set_xlabel("Current [mA]", fontsize=AXIS_LABEL_SIZE)

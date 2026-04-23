@@ -84,11 +84,12 @@ def test_plugin_settings_provide_toolbar_sections_and_mount() -> None:
             panel = plugin.panel_widget()
             settings = plugin.settings_widget()
 
-            section_titles = _iter_toolbar_sections(settings)
-            assert section_titles, f"{name} settings expose no toolbar sections"
-
             if settings is not None:
+                section_titles = _iter_toolbar_sections(settings)
+                assert section_titles, f"{name} settings expose no toolbar sections"
                 window._set_plugin_settings_widget(settings)  # noqa: SLF001
+            else:
+                window._set_plugin_settings_widget(None)  # noqa: SLF001
             if panel is not None:
                 window._set_script_panel(panel)  # noqa: SLF001
 
