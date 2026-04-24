@@ -451,8 +451,35 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
 class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
     """Double spin box that avoids padded zero-only decimals in the editor text."""
 
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setKeyboardTracking(False)
+        self.setCorrectionMode(QtWidgets.QAbstractSpinBox.CorrectionMode.CorrectToNearestValue)
+
     def textFromValue(self, value: float) -> str:  # type: ignore[override]
         return _format_compact_number(value, decimals=self.decimals())
+
+    def valueFromText(self, text: str) -> float:  # type: ignore[override]
+        suffix = self.suffix().strip()
+        cleaned = text.strip()
+        if suffix and cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)].strip()
+        parsed = _parse_first_float(cleaned)
+        return self.value() if parsed is None else parsed
+
+    def validate(self, text: str, pos: int) -> tuple[QtGui.QValidator.State, str, int]:  # type: ignore[override]
+        cleaned = text.strip()
+        suffix = self.suffix().strip()
+        if suffix and cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)].strip()
+        if cleaned in {"", "+", "-", ".", ",", "+.", "-.", "+,", "-,"}:
+            return (QtGui.QValidator.State.Intermediate, text, pos)
+        parsed = _parse_first_float(cleaned)
+        if parsed is None:
+            return (QtGui.QValidator.State.Invalid, text, pos)
+        if self.minimum() <= parsed <= self.maximum():
+            return (QtGui.QValidator.State.Acceptable, text, pos)
+        return (QtGui.QValidator.State.Intermediate, text, pos)
 
 
 class PlotConfigDialog(QtWidgets.QDialog):
@@ -856,6 +883,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._control_scroll_area: QtWidgets.QScrollArea | None = None
         self._manual_jog_direction = 0.0
         self._manual_jog_last_tick_s: float | None = None
+        self._manual_jog_pending_mm = 0.0
+        self._last_motion_command_time_s: float | None = None
+        self._last_tic_status_time_s: float | None = None
+        self._last_feedback_wait_log_s = 0.0
         self._manual_jog_timer = QtCore.QTimer(self)
         self._manual_jog_timer.setInterval(50)
         self._manual_jog_timer.timeout.connect(self._handle_manual_jog_timer)
@@ -1018,14 +1049,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.spin_jog_mm = CompactDoubleSpinBox(motion_box)
         self.spin_jog_mm.setDecimals(4)
-        self.spin_jog_mm.setRange(0.01, 10.0)
+        self.spin_jog_mm.setRange(0.0001, 10.0)
         self.spin_jog_mm.setValue(0.1)
         self.spin_jog_mm.setToolTip("Single-click jog distance. Holding the manual arrows uses Manual move speed instead.")
         motion_form.addRow("Jog step", self.spin_jog_mm)
 
         self.spin_motion_speed_mm_s = CompactDoubleSpinBox(motion_box)
         self.spin_motion_speed_mm_s.setDecimals(3)
-        self.spin_motion_speed_mm_s.setRange(0.001, 50.0)
+        self.spin_motion_speed_mm_s.setRange(0.0001, 50.0)
         self.spin_motion_speed_mm_s.setValue(1.0)
         self.spin_motion_speed_mm_s.setSuffix(" mm/s")
         self.spin_motion_speed_mm_s.setToolTip("Linear stage speed for held manual movement.")
@@ -2040,12 +2071,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_distribution_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
         self.combo_current_sweep_basis.currentIndexChanged.connect(self._update_current_sweep_basis_ui)
         self.combo_current_sweep_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
+        self.spin_steps_per_mm.valueChanged.connect(self._clamp_motion_resolution_controls)
+        self.spin_steps_per_mm.valueChanged.connect(self._update_recipe_mode_ui)
 
         self.statusBar().showMessage("Ready")
         self._refresh_supply_ports()
         self._apply_supply_profile_defaults()
         self._update_distribution_basis_ui()
         self._update_current_sweep_basis_ui()
+        self._clamp_motion_resolution_controls()
         self._apply_plot_preset("dma")
         self._update_recipe_mode_ui()
         self._refresh_plots()
@@ -3085,6 +3119,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         self._log(f"Reference position set to the current stage position ({self._position_reference_mm:.4f} mm).")
 
+    def _motor_step_mm(self) -> float:
+        return 1.0 / max(1.0, float(self.spin_steps_per_mm.value()))
+
+    def _minimum_held_speed_mm_s(self) -> float:
+        return self._motor_step_mm()
+
+    def _clamp_motion_resolution_controls(self) -> None:
+        step_mm = self._motor_step_mm()
+        min_speed = self._minimum_held_speed_mm_s()
+        controls = (
+            self.spin_jog_mm,
+            self.spin_distribution_nudge_mm,
+            self.spin_current_sweep_nudge_mm,
+            self.spin_ramp_step,
+            self.spin_cycle_step,
+        )
+        for control in controls:
+            control.blockSignals(True)
+            control.setMinimum(step_mm)
+            if control.value() < step_mm:
+                control.setValue(step_mm)
+            control.blockSignals(False)
+        for control in (
+            self.spin_motion_speed_mm_s,
+            self.spin_ramp_speed_mm_s,
+            self.spin_cycle_speed_mm_s,
+            self.spin_hold_speed_mm_s,
+            self.spin_distribution_seek_speed_mm_s,
+            self.spin_current_sweep_balance_speed_mm_s,
+        ):
+            control.blockSignals(True)
+            control.setMinimum(min_speed)
+            if control.value() < min_speed:
+                control.setValue(min_speed)
+            control.blockSignals(False)
+
     def _distribution_basis(self) -> str:
         return str(self.combo_distribution_basis.currentData() or HSW_BASIS_STRESS_MPA)
 
@@ -3174,8 +3244,9 @@ class MainWindow(QtWidgets.QMainWindow):
             for index in range(0, count + 1)
         ]
 
-    def _current_distribution_value(self, basis: str) -> float | None:
-        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
+    def _current_distribution_value(self, basis: str, *, require_after_last_move: bool = False) -> float | None:
+        after_s = self._last_motion_command_time_s if require_after_last_move else None
+        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading(after_s=after_s):
             return None
         effective_load = self._current_effective_load_g()
         if basis == HSW_BASIS_LOAD_G:
@@ -3206,6 +3277,12 @@ class MainWindow(QtWidgets.QMainWindow):
         plateau = -1 if self._automation_plateau_index is None else int(self._automation_plateau_index)
         return basis, plateau, round(float(target_value), 9)
 
+    def _log_waiting_for_feedback(self, message: str) -> None:
+        now_s = time.monotonic()
+        if now_s - self._last_feedback_wait_log_s >= 2.0:
+            self._last_feedback_wait_log_s = now_s
+            self._log(message)
+
     def _seek_backlash_takeup_mm(self, movement_direction: float) -> float:
         backlash_mm = max(0.0, float(self.spin_backlash_mm.value()))
         if backlash_mm <= 0.0:
@@ -3218,12 +3295,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._distribution_target_reached(basis, target_value, tolerance):
             self._seek_last_error_by_key.pop(self._seek_error_key(basis, target_value), None)
             return True
-        current_value = self._current_distribution_value(basis)
+        current_value = self._current_distribution_value(
+            basis,
+            require_after_last_move=basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA},
+        )
         if current_value is None:
             if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
-                raise RuntimeError(
-                    "Scale reading is stale or unavailable. Wait for a fresh balance reading before Hsw seeking."
-                )
+                self._log_waiting_for_feedback("Waiting for a fresh scale reading before the next load/stress correction.")
+                return False
             current_value = 0.0
         delta_value = target_value - current_value
         if abs(delta_value) <= tolerance:
@@ -3485,6 +3564,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if current_position is not None:
                 self._current_position_steps = current_position
                 self._current_position_mm = current_position / float(self.spin_steps_per_mm.value())
+                self._last_tic_status_time_s = time.time()
         operation_state = _extract_status_value(status_text, "Operation state") or "unknown"
         errors = _extract_status_value(status_text, "Errors currently stopping the motor") or "none"
         self.label_tic_summary.setText(
@@ -3645,6 +3725,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Move command sent to {_format_compact_unit(position_mm, 'mm')} "
             f"({target_steps} steps) at {_format_compact_unit(speed_mm_s, 'mm/s', decimals=3)}."
         )
+        self._last_motion_command_time_s = time.time()
         delta_mm = position_mm - self._relative_motion_base_mm()
         if abs(delta_mm) >= 1e-12:
             self._last_move_direction = math.copysign(1.0, delta_mm)
@@ -3927,9 +4008,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return max(0.0, time.time() - self._latest_scale_timestamp)
 
-    def _has_fresh_scale_reading(self) -> bool:
+    def _has_fresh_scale_reading(self, *, after_s: float | None = None) -> bool:
         age_s = self._scale_reading_age_s()
-        return age_s is not None and age_s <= STALE_SCALE_AFTER_S
+        if age_s is None or age_s > STALE_SCALE_AFTER_S:
+            return False
+        if after_s is not None and (
+            self._latest_scale_timestamp is None or self._latest_scale_timestamp < after_s
+        ):
+            return False
+        return True
 
     def _load_sign(self) -> float:
         return -1.0 if self.check_tension_load_positive.isChecked() else 1.0
@@ -3992,13 +4079,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _record_current_point(self) -> None:
         if not self._session_active:
             QtWidgets.QMessageBox.information(self, APP_NAME, "Start a session before recording points.")
-            return
+            return False
         if self._is_max_load_exceeded():
             self._log(
                 f"Safety stop: applied load {self._current_effective_load_g():.5f} g exceeded "
                 f"the configured limit of {self.spin_max_load_g.value():.5f} g."
             )
             self._stop_auto_ramp(log_completion=False)
+            return False
+        if self._session_active:
+            self._refresh_tic_status()
+        if self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading(
+            after_s=self._last_motion_command_time_s
+        ):
+            self._log("Point not recorded because load/stress feedback is stale after the last move.")
+            if self._automation_active:
+                self._stop_auto_ramp(log_completion=False)
+            return False
         elapsed_s = time.monotonic() - self._session_start_monotonic
         position_mm = self._current_position_mm
         raw_load_g = self._latest_scale_value_g
@@ -4019,6 +4116,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{load_g:.5f} g."
         )
         self._advance_heating_after_record()
+        return True
 
     def _write_point(self, point: MeasurementPoint) -> None:
         if self._session_txt_handle is None or self._session_csv_writer is None:
