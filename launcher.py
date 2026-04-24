@@ -7,7 +7,12 @@ import time
 import logging
 import traceback
 import json
+import secrets
+import socket
+import socketserver
 import tempfile
+import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -215,6 +220,9 @@ def _create_launcher_icon() -> QtGui.QIcon:
 
 class _AutomationRecipeError(Exception):
     """Raised when an automation recipe is invalid or unsupported."""
+
+
+SESSION_PROTOCOL_VERSION = 1
 
 
 @dataclass
@@ -591,6 +599,51 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         help="Wait this many milliseconds after actions before capturing artifacts.",
     )
     parser.add_argument(
+        "--pyplot-session-start",
+        action="store_true",
+        help="Launch a persistent PyPlot automation session and keep it running.",
+    )
+    parser.add_argument(
+        "--pyplot-session-list",
+        action="store_true",
+        help="List currently registered live PyPlot automation sessions and exit.",
+    )
+    parser.add_argument(
+        "--pyplot-session-send",
+        action="store_true",
+        help="Send a JSON automation command to a live PyPlot session and exit.",
+    )
+    parser.add_argument(
+        "--pyplot-session-state",
+        action="store_true",
+        help="Fetch the current state from a live PyPlot session and exit.",
+    )
+    parser.add_argument(
+        "--pyplot-session-close",
+        action="store_true",
+        help="Request that a live PyPlot session close and exit.",
+    )
+    parser.add_argument(
+        "--pyplot-session-id",
+        default=None,
+        help="Live PyPlot session id for session-state/send/close commands.",
+    )
+    parser.add_argument(
+        "--pyplot-session-command-json",
+        default=None,
+        help="Inline JSON command payload for --pyplot-session-send.",
+    )
+    parser.add_argument(
+        "--pyplot-session-command-file",
+        default=None,
+        help="Path to a JSON command payload for --pyplot-session-send.",
+    )
+    parser.add_argument(
+        "--pyplot-session-info-file",
+        default=None,
+        help="When starting a live PyPlot session, also write the session metadata JSON to this path.",
+    )
+    parser.add_argument(
         "--visual-check",
         action="store_true",
         help="Run automated visual verification flow instead of opening the launcher UI.",
@@ -728,6 +781,16 @@ def _is_pyplot_automation_requested(args: argparse.Namespace) -> bool:
     )
 
 
+def _is_pyplot_session_requested(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "pyplot_session_start", False)
+        or getattr(args, "pyplot_session_list", False)
+        or getattr(args, "pyplot_session_send", False)
+        or getattr(args, "pyplot_session_state", False)
+        or getattr(args, "pyplot_session_close", False)
+    )
+
+
 def _is_microwire_eda_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_eda", None))
 
@@ -846,55 +909,12 @@ def _path_payload(paths: list[Path]) -> list[str]:
 
 
 def _pyplot_summary(window: "PyPlotWorkbench", plugin_name: str | None) -> dict[str, Any]:
-    current_tab = window.tab_widget.currentWidget()
-    axes = None
-    try:
-        axes = window._current_axes()
-    except Exception:
-        axes = None
-    current_title = ""
-    current_x = ""
-    current_y = ""
-    if axes is not None:
-        try:
-            current_title = str(axes.get_title() or "")
-        except Exception:
-            current_title = ""
-        try:
-            current_x = str(axes.get_xlabel() or "")
-        except Exception:
-            current_x = ""
-        try:
-            current_y = str(axes.get_ylabel() or "")
-        except Exception:
-            current_y = ""
-    visible_plot_tabs: list[str] = []
-    for index in range(window.tab_widget.count()):
-        try:
-            visible_plot_tabs.append(window.tab_widget.tabText(index))
-        except Exception:
-            continue
-    return {
-        "plugin": plugin_name,
-        "selected_paths": _path_payload(window._selected_paths()),  # type: ignore[attr-defined]
-        "worksheet_count": len(getattr(window, "_worksheets", {})),
-        "workbook_count": len(getattr(window, "_workbooks", {})),
-        "tab_count": int(window.tab_widget.count()),
-        "tab_labels": visible_plot_tabs,
-        "current_tab_label": window.tab_widget.tabText(window.tab_widget.currentIndex())
-        if window.tab_widget.currentIndex() >= 0
-        else "",
-        "current_title": current_title,
-        "current_x_label": current_x,
-        "current_y_label": current_y,
-        "graph_format_visible": bool(
-            isinstance(getattr(window, "_graph_format_dialog", None), QtWidgets.QDialog)
-            and window._graph_format_dialog.isVisible()  # type: ignore[attr-defined]
-        ),
-        "current_tab_has_axes": axes is not None,
-        "object_tree_top_level_count": int(getattr(window, "object_tree", QtWidgets.QTreeWidget()).topLevelItemCount()),
-        "current_widget_has_descriptor": current_tab in getattr(window, "_tab_descriptors", {}),
-    }
+    state_getter = getattr(window, "automation_get_state", None)
+    if callable(state_getter):
+        state = state_getter()
+        if isinstance(state, dict):
+            return state
+    return {"plugin": plugin_name}
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -903,22 +923,241 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _select_pyplot_plugin(window: "PyPlotWorkbench", plugin_name: str) -> None:
-    current = getattr(window, "_current_plotter_name", None)
-    if current == plugin_name and getattr(window, "_current_plugin", None) is not None:
+    selector = getattr(window, "automation_select_plugin", None)
+    if callable(selector):
+        selector(plugin_name)
         return
-    combo = getattr(window, "_plotter_combo", None)
-    if isinstance(combo, QtWidgets.QComboBox):
-        index = combo.findData(plugin_name)
-        if index < 0:
-            raise RuntimeError(f"PyPlot plugin '{plugin_name}' is not available in this session.")
-        combo.setCurrentIndex(index)
-    if getattr(window, "_current_plotter_name", None) == plugin_name:
-        return
-    apply_selected = getattr(window, "_apply_selected_plotter", None)
-    if callable(apply_selected):
-        apply_selected()
-    if getattr(window, "_current_plotter_name", None) != plugin_name:
-        raise RuntimeError(f"Failed to activate PyPlot plugin '{plugin_name}'.")
+    raise RuntimeError("PyPlot plugin selection automation is unavailable.")
+
+
+def _session_registry_dir() -> Path:
+    return Path(tempfile.gettempdir()) / "pyplot_automation_sessions"
+
+
+def _session_record_path(session_id: str) -> Path:
+    return _session_registry_dir() / f"{session_id}.json"
+
+
+def _write_session_record(payload: dict[str, Any]) -> Path:
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        raise RuntimeError("Session record payload is missing session_id.")
+    path = _session_record_path(session_id)
+    _write_json(path, payload)
+    return path
+
+
+def _remove_session_record(session_id: str) -> None:
+    path = _session_record_path(session_id)
+    if path.exists():
+        try:
+            path.unlink()
+        except Exception:
+            pass
+
+
+def _is_process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _load_session_record(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _list_session_records() -> list[dict[str, Any]]:
+    registry = _session_registry_dir()
+    if not registry.exists():
+        return []
+    payloads: list[dict[str, Any]] = []
+    for path in sorted(registry.glob("*.json")):
+        payload = _load_session_record(path)
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _get_session_record(session_id: str) -> dict[str, Any]:
+    token = str(session_id or "").strip()
+    if not token:
+        raise _AutomationRecipeError("PyPlot session id is required.")
+    record_path = _session_record_path(token)
+    payload = _load_session_record(record_path)
+    if not isinstance(payload, dict):
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            time.sleep(0.1)
+            payload = _load_session_record(record_path)
+            if isinstance(payload, dict):
+                break
+    if not isinstance(payload, dict):
+        raise _AutomationRecipeError(f"PyPlot session '{token}' is not available.")
+    return payload
+
+
+class _PyPlotSessionBridge(QtCore.QObject):
+    _command_signal = QtCore.pyqtSignal(object, object)
+
+    def __init__(
+        self,
+        *,
+        window: "PyPlotWorkbench",
+        session_id: str,
+        token: str,
+        port: int,
+        record_path: Path,
+    ) -> None:
+        super().__init__(window)
+        self.window = window
+        self.session_id = session_id
+        self.token = token
+        self.port = port
+        self.record_path = record_path
+        self._command_signal.connect(self._execute_queued_command)
+
+    def session_payload(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "token": self.token,
+            "port": self.port,
+            "pid": os.getpid(),
+            "cwd": str(Path.cwd()),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "plugin": getattr(self.window, "_current_plotter_name", None),
+            "protocol_version": SESSION_PROTOCOL_VERSION,
+        }
+
+    def dispatch_remote_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("token") != self.token:
+            raise RuntimeError("PyPlot session token is invalid.")
+        command = payload.get("command")
+        if not isinstance(command, dict):
+            raise RuntimeError("PyPlot session request must include an object 'command'.")
+        return self._dispatch_on_gui_thread(command)
+
+    def _dispatch_on_gui_thread(self, command: dict[str, Any]) -> dict[str, Any]:
+        if QtCore.QThread.currentThread() is self.thread():
+            return self.window.automation_execute_command(command)
+        holder: dict[str, Any] = {}
+        event = threading.Event()
+        self._command_signal.emit(command, (holder, event))
+        if not event.wait(timeout=60.0):
+            raise TimeoutError("Timed out waiting for PyPlot session command to finish.")
+        error = holder.get("error")
+        if isinstance(error, BaseException):
+            raise error
+        result = holder.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("PyPlot session returned an invalid response payload.")
+        return result
+
+    @QtCore.pyqtSlot(object, object)
+    def _execute_queued_command(self, command: object, transport: object) -> None:
+        holder, event = cast(tuple[dict[str, Any], threading.Event], transport)
+        try:
+            if not isinstance(command, dict):
+                raise RuntimeError("PyPlot session command payload is invalid.")
+            holder["result"] = self.window.automation_execute_command(command)
+        except Exception as exc:
+            holder["error"] = exc
+        finally:
+            event.set()
+
+
+class _PyPlotSessionTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, server_address: tuple[str, int]) -> None:
+        self.bridge: _PyPlotSessionBridge | None = None
+        super().__init__(server_address, _PyPlotSessionRequestHandler)
+
+
+class _PyPlotSessionRequestHandler(socketserver.StreamRequestHandler):
+    def handle(self) -> None:
+        raw = self.rfile.readline(1_000_000)
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            response: dict[str, Any] = {
+                "status": "error",
+                "error": f"Invalid PyPlot session JSON payload: {exc}",
+            }
+        else:
+            if not isinstance(payload, dict):
+                response = {
+                    "status": "error",
+                    "error": "PyPlot session request must be a JSON object.",
+                }
+            else:
+                try:
+                    bridge = getattr(self.server, "bridge", None)  # type: ignore[attr-defined]
+                    if bridge is None:
+                        raise RuntimeError("PyPlot session bridge is not ready.")
+                    response = bridge.dispatch_remote_command(payload)
+                except Exception as exc:
+                    response = {
+                        "status": "error",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+        self.wfile.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+
+
+def _send_pyplot_session_command(
+    session_id: str,
+    command: dict[str, Any],
+    *,
+    timeout_s: float = 120.0,
+) -> dict[str, Any]:
+    record = _get_session_record(session_id)
+    host = str(record.get("host") or "127.0.0.1")
+    port = record.get("port")
+    token = record.get("token")
+    if not isinstance(port, int) or port <= 0:
+        raise _AutomationRecipeError(f"PyPlot session '{session_id}' has an invalid port.")
+    if not isinstance(token, str) or not token:
+        raise _AutomationRecipeError(f"PyPlot session '{session_id}' is missing its auth token.")
+    payload = {
+        "token": token,
+        "command": command,
+    }
+    try:
+        with socket.create_connection((host, port), timeout=max(5.0, float(timeout_s))) as sock:
+            sock.settimeout(max(5.0, float(timeout_s)))
+            raw = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+            sock.sendall(raw)
+            buffer = b""
+            while not buffer.endswith(b"\n"):
+                chunk = sock.recv(65_536)
+                if not chunk:
+                    break
+                buffer += chunk
+    except OSError as exc:
+        raise _AutomationRecipeError(
+            f"Failed to contact PyPlot session '{session_id}' on {host}:{port}: {exc}"
+        ) from exc
+    try:
+        response = json.loads(buffer.decode("utf-8"))
+    except Exception as exc:
+        raise _AutomationRecipeError(
+            f"PyPlot session '{session_id}' returned invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(response, dict):
+        raise _AutomationRecipeError(f"PyPlot session '{session_id}' returned an invalid response.")
+    return response
 
 
 def _export_visible_plot_images(
@@ -1239,52 +1478,58 @@ def _execute_pyplot_automation_request(
         _pump_qt_events(app, rounds=4)
 
         if isinstance(request.load_project_path, Path):
-            window._load_project_from_path(request.load_project_path)  # type: ignore[attr-defined]
-            _pump_qt_events(app, rounds=8)
-            if getattr(window, "_project_path", None) != request.load_project_path:
-                raise RuntimeError(f"Failed to load PyPlot project {request.load_project_path}")
+            loader = getattr(window, "automation_load_project", None)
+            if callable(loader):
+                loader(request.load_project_path)
+            else:
+                raise RuntimeError("PyPlot project-load automation is unavailable.")
 
         if request.plugin_name:
             _select_pyplot_plugin(window, request.plugin_name)
             _pump_qt_events(app, rounds=4)
 
         if request.import_entries:
-            window._import_paths(request.import_entries)  # type: ignore[attr-defined]
-            _pump_qt_events(app, rounds=6)
+            importer = getattr(window, "automation_import_paths", None)
+            if callable(importer):
+                importer(request.import_entries)
+            else:
+                raise RuntimeError("PyPlot import automation is unavailable.")
             imported_paths = list(request.import_entries)
 
-        plugin = getattr(window, "_current_plugin", None)
         if request.generate:
-            if plugin is None:
-                raise RuntimeError("No active PyPlot plugin selected for generate.")
-            plugin.generate()
-            _pump_qt_events(app, rounds=8)
+            generator = getattr(window, "automation_generate", None)
+            if callable(generator):
+                generator()
+            else:
+                raise RuntimeError("PyPlot generate automation is unavailable.")
 
         for graph_payload in request.build_graphs:
-            creator = getattr(window, "_automation_create_graph", None)
-            if not callable(creator):
+            creator = getattr(window, "automation_build_graph", None)
+            if callable(creator):
+                creator(graph_payload)
+            else:
                 raise RuntimeError("PyPlot graph builder automation is unavailable.")
-            creator(graph_payload)
-            _pump_qt_events(app, rounds=6)
 
         for figure_payload in request.create_figures:
-            creator = getattr(window, "_automation_create_figure", None)
-            if not callable(creator):
+            creator = getattr(window, "automation_create_figure", None)
+            if callable(creator):
+                creator(figure_payload)
+            else:
                 raise RuntimeError("PyPlot figure layout automation is unavailable.")
-            creator(figure_payload)
-            _pump_qt_events(app, rounds=6)
 
         if request.open_graph_format:
-            opener = getattr(window, "_open_graph_format_dialog", None)
+            opener = getattr(window, "automation_open_graph_format", None)
             if callable(opener):
                 opener()
-            _pump_qt_events(app, rounds=4)
+            else:
+                raise RuntimeError("PyPlot graph-format automation is unavailable.")
 
         if request.open_origin:
-            if plugin is None:
-                raise RuntimeError("No active PyPlot plugin selected for Origin export.")
-            plugin.open_origin()
-            _pump_qt_events(app, rounds=6)
+            opener = getattr(window, "automation_open_origin", None)
+            if callable(opener):
+                opener()
+            else:
+                raise RuntimeError("PyPlot Origin automation is unavailable.")
 
         wait_ms = max(0, int(request.wait_ms or 0))
         if wait_ms > 0:
@@ -1294,33 +1539,37 @@ def _execute_pyplot_automation_request(
                 time.sleep(min(0.02, max(0.0, deadline - time.time())))
 
         if isinstance(request.window_image_path, Path):
-            target = request.window_image_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _pump_qt_events(app, rounds=4)
-            if not window.grab().save(str(target)):
-                raise RuntimeError(f"Failed to save PyPlot screenshot to {target}")
+            capturer = getattr(window, "automation_capture_window", None)
+            if callable(capturer):
+                capturer(request.window_image_path)
+            else:
+                raise RuntimeError("PyPlot window-capture automation is unavailable.")
 
         if isinstance(request.current_plot_image_path, Path):
-            axes = window._current_axes()  # type: ignore[attr-defined]
-            if axes is None or getattr(axes, "figure", None) is None:
-                raise RuntimeError("No active plot is available for current_plot_image export.")
-            target = request.current_plot_image_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            axes.figure.savefig(target, dpi=160)
+            capturer = getattr(window, "automation_capture_current_plot", None)
+            if callable(capturer):
+                capturer(request.current_plot_image_path)
+            else:
+                raise RuntimeError("PyPlot plot-capture automation is unavailable.")
 
         if isinstance(request.plot_images_dir, Path):
             exported_plot_paths = _export_visible_plot_images(window, app, request.plot_images_dir)
 
         if isinstance(request.export_all_figures_dir, Path) and isinstance(request.export_all_figures_format, str):
-            exporter = getattr(window, "_automation_export_all_figures", None)
+            exporter = getattr(window, "automation_export_all_figures", None)
             if not callable(exporter):
                 raise RuntimeError("PyPlot batch figure export automation is unavailable.")
-            exported_all_figure_paths = exporter(
+            export_result = exporter(
                 output_dir=request.export_all_figures_dir,
                 fmt=request.export_all_figures_format,
                 dpi=request.export_all_figures_dpi,
                 transparent=bool(request.export_all_figures_transparent),
             )
+            exported_all_figure_paths = [
+                Path(item)
+                for item in cast(dict[str, Any], export_result).get("paths", [])
+                if isinstance(item, str)
+            ]
 
         if isinstance(request.review_output_dir, Path):
             theme = theme_manager()
@@ -1342,13 +1591,13 @@ def _execute_pyplot_automation_request(
                     _pump_qt_events(app, rounds=4)
 
         if isinstance(request.save_project_path, Path):
-            target = _normalise_project_path(request.save_project_path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            window._write_project_file(target)  # type: ignore[attr-defined]
-            _pump_qt_events(app, rounds=4)
-            if getattr(window, "_project_path", None) != target or not target.exists():
-                raise RuntimeError(f"Failed to save PyPlot project to {target}")
-            saved_project_path = target
+            saver = getattr(window, "automation_save_project", None)
+            if not callable(saver):
+                raise RuntimeError("PyPlot project-save automation is unavailable.")
+            save_result = saver(request.save_project_path)
+            saved = cast(dict[str, Any], save_result).get("saved_project")
+            if isinstance(saved, str) and saved.strip():
+                saved_project_path = Path(saved)
 
         active_plugin_name = getattr(window, "_current_plotter_name", None) or request.plugin_name
         summary = _pyplot_summary(window, active_plugin_name)
@@ -1457,6 +1706,151 @@ def _run_automation_recipe(args: argparse.Namespace, qt_args: list[str]) -> int:
         print(f"[automation-recipe] {exc}")
         return 2
     return _run_pyplot_automation_request(request, qt_args)
+
+
+def _load_session_command_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    command_file = getattr(args, "pyplot_session_command_file", None)
+    if isinstance(command_file, str) and command_file.strip():
+        path = Path(command_file).expanduser()
+        payload = _load_json_object(path, label="PyPlot session command")
+        return payload
+    command_json = getattr(args, "pyplot_session_command_json", None)
+    if not isinstance(command_json, str) or not command_json.strip():
+        raise _AutomationRecipeError(
+            "PyPlot session send requires either --pyplot-session-command-json or --pyplot-session-command-file."
+        )
+    try:
+        payload = json.loads(command_json)
+    except json.JSONDecodeError as exc:
+        raise _AutomationRecipeError(
+            f"PyPlot session command JSON is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise _AutomationRecipeError("PyPlot session command must be a JSON object.")
+    return payload
+
+
+def _run_pyplot_session_client(args: argparse.Namespace) -> int:
+    try:
+        if getattr(args, "pyplot_session_list", False):
+            response = {
+                "status": "ok",
+                "sessions": _list_session_records(),
+            }
+        elif getattr(args, "pyplot_session_state", False):
+            session_id = str(getattr(args, "pyplot_session_id", None) or "")
+            response = _send_pyplot_session_command(session_id, {"action": "state"})
+        elif getattr(args, "pyplot_session_close", False):
+            session_id = str(getattr(args, "pyplot_session_id", None) or "")
+            response = _send_pyplot_session_command(session_id, {"action": "close"})
+        elif getattr(args, "pyplot_session_send", False):
+            session_id = str(getattr(args, "pyplot_session_id", None) or "")
+            command = _load_session_command_from_args(args)
+            response = _send_pyplot_session_command(session_id, command)
+        else:
+            raise _AutomationRecipeError("No PyPlot session action was requested.")
+    except _AutomationRecipeError as exc:
+        print(f"[pyplot-session] {exc}")
+        return 2
+
+    print(json.dumps(response, ensure_ascii=False))
+    return 0 if response.get("status") == "ok" else 1
+
+
+def _run_pyplot_session_start(args: argparse.Namespace, qt_args: list[str]) -> int:
+    from plotting.pyplot.app import PyPlotWorkbench
+
+    show_window = bool(getattr(args, "pyplot_show_window", False))
+    created_app = False
+    app = QtWidgets.QApplication.instance()
+    if not isinstance(app, QtWidgets.QApplication):
+        if not show_window:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication([sys.argv[0], *qt_args])
+        created_app = True
+        _schedule_theme_application(app)
+    try:
+        app.setQuitOnLastWindowClosed(True)
+    except Exception:
+        pass
+
+    request = _pyplot_request_from_legacy_args(args)
+    window = PyPlotWorkbench(initial_plotter=request.plugin_name)
+    if show_window:
+        window.show()
+    _pump_qt_events(app, rounds=4)
+
+    if request.plugin_name:
+        _select_pyplot_plugin(window, request.plugin_name)
+    if request.import_entries:
+        importer = getattr(window, "automation_import_paths", None)
+        if callable(importer):
+            importer(request.import_entries)
+    if request.generate:
+        generator = getattr(window, "automation_generate", None)
+        if callable(generator):
+            generator()
+    if request.open_graph_format:
+        opener = getattr(window, "automation_open_graph_format", None)
+        if callable(opener):
+            opener()
+    if request.open_origin:
+        opener = getattr(window, "automation_open_origin", None)
+        if callable(opener):
+            opener()
+
+    session_id = uuid.uuid4().hex
+    token = secrets.token_urlsafe(24)
+    server = _PyPlotSessionTcpServer(("127.0.0.1", 0))
+    port = int(server.server_address[1])
+    bridge = _PyPlotSessionBridge(
+        window=window,
+        session_id=session_id,
+        token=token,
+        port=port,
+        record_path=_session_record_path(session_id),
+    )
+    server.bridge = bridge
+    server_thread = threading.Thread(
+        target=server.serve_forever,
+        name=f"PyPlotSessionServer-{session_id}",
+        daemon=True,
+    )
+    server_thread.start()
+
+    session_payload = bridge.session_payload()
+    session_payload["host"] = "127.0.0.1"
+    record_path = _write_session_record(session_payload)
+
+    info_path_value = getattr(args, "pyplot_session_info_file", None)
+    if isinstance(info_path_value, str) and info_path_value.strip():
+        _write_json(Path(info_path_value).expanduser(), session_payload)
+
+    def _cleanup() -> None:
+        _remove_session_record(session_id)
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        try:
+            server.server_close()
+        except Exception:
+            pass
+
+    app.aboutToQuit.connect(_cleanup)
+    window.destroyed.connect(lambda *_args: _cleanup())
+
+    print(json.dumps(session_payload, ensure_ascii=False))
+    try:
+        app.exec()
+    finally:
+        _cleanup()
+        if created_app:
+            try:
+                app.quit()
+            except Exception:
+                pass
+    return 0
 
 
 def _run_pyplot_automation(args: argparse.Namespace, qt_args: list[str]) -> int:
@@ -2127,6 +2521,10 @@ class MasterLauncher(QtWidgets.QWidget):
 def main(argv: list[str] | None = None) -> None:
     argv_list = list(sys.argv if argv is None else argv)
     args, qt_args = _parse_launcher_args(argv_list[1:])
+    if _is_pyplot_session_requested(args):
+        if getattr(args, "pyplot_session_start", False):
+            raise SystemExit(_run_pyplot_session_start(args, qt_args))
+        raise SystemExit(_run_pyplot_session_client(args))
     if args.visual_check:
         raise SystemExit(_run_visual_check(args))
     if getattr(args, "automation_recipe", None):

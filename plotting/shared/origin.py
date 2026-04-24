@@ -273,10 +273,10 @@ def origin_title_xy(layer: Any) -> tuple[float, float] | None:
     y_span = y_to - y_from
     if x_span <= 0.0 or y_span <= 0.0:
         return None
-    # Keep the title above the plotting range. Shared dual-axis exports in
-    # particular need a little extra clearance so the title does not collide
-    # with top-axis labels or legends.
-    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.05))
+    # Keep the title well above the plotting range. Dual-axis exports need
+    # extra clearance so the centered title does not collide with top-axis
+    # tick labels or the mirrored x-axis caption.
+    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.08))
 
 
 def _origin_title_font_size(text: str, default: float) -> float:
@@ -481,7 +481,9 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
             except Exception:
                 pass
             try:
-                set_int("horzalign", 2)
+                # Keep the mirrored top-axis caption centered over the axis
+                # instead of right-aligning it into the legend area.
+                set_int("horzalign", 1)
             except Exception:
                 pass
         set_float = getattr(axis_label, "set_float", None)
@@ -502,11 +504,13 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         if x_span <= 0.0 or y_span <= 0.0:
             return
         try:
-            set_float("x", x_to + (x_span * 0.01))
+            set_float("x", (x_from + x_to) / 2.0)
         except Exception:
             pass
         try:
-            set_float("y", y_to - (y_span * 0.03))
+            # Keep the top-axis caption just above the top ticks instead of
+            # inside the plotting area, where it can overlap the graph title.
+            set_float("y", y_to + (y_span * 0.02))
         except Exception:
             pass
         return
