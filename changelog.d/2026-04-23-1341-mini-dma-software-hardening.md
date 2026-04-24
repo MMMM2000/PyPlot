@@ -3,10 +3,17 @@
 - Mini DMA Logger now keeps the last confirmed stage position separate from the commanded target so strain, stress, and recorded points do not jump ahead of real motion after a move command.
 - Hsw distribution seeking now refuses to act on stale or missing balance readings for load- and stress-based control instead of nudging the stage on old force data.
 - Mini DMA session metadata now preserves the original creation timestamp across JSON sidecar rewrites during a run.
-- Mini DMA now supports active hardware auto-detection for the G&G scale, the serial supply, and the Pololu Tic controller, plus a real G&G remote tare action alongside the existing software tare offset.
+- Mini DMA now supports active hardware auto-detection for the G&G scale, the serial supply, and the Pololu Tic controller, plus a single normal `Tare scale` action that uses the physical G&G remote tare command while keeping software tare as an advanced diagnostic only.
 - Mini DMA naming now mirrors the other microwire loggers more closely by keeping human-readable microwire tokens like `156/2` in the sample name while using file-safe tokens like `156_2` in the output filename.
 - Mini DMA's settings panel now prevents mouse-wheel scrolling from silently changing spin-box and drop-down values, removes horizontal scrolling, and exposes tare actions in the manual setup controls.
+- Mini DMA now hides low-level scale and motor driver settings behind a collapsed advanced hardware panel so routine bench controls are easier to understand.
+- Mini DMA recipe start now performs a hardware preflight that auto-detects/connects required scale and supply devices, reports missing hardware together, and avoids creating run files until preflight succeeds.
+- Mini DMA recipe estimates now switch to minutes/hours for longer runs and include a live progress bar, while the duplicate status-bar log echo is hidden.
+- Mini DMA hides the separate heating program for controlled current-sweep recipes because those recipes control current directly.
+- Mini DMA now includes a controlled current-sweep recipe for holding load or stress while stepping current, with copper-wire defaults of `0` to `20 g` in `5 g` steps and `0` to `25 mA` current sweeps.
+- Mini DMA can treat negative raw scale readings as positive tensile load, logs the main applied-load channel as positive values, and can tare the balance at session start before the first point is recorded.
+- Mini DMA now has an always-visible `EMERGENCY STOP` dashboard button that stops the active recipe/session, halts the Tic motor, and commands the power-supply output off.
 - Added a Mini DMA measurement plan covering the copper-wire first test, the intended isostress current-sweep workflow, saved recipe files, and later dynamic recipes.
 - Microwire Data Builder video overrides now tolerate minimal video tables that are missing derived video-length columns.
-- Added dedicated Mini DMA regression tests for confirmed-position tracking, stale-scale safety, session metadata stability, hardware auto-detection, remote tare wiring, and naming behavior, and expanded import coverage to include the Mini DMA module.
+- Added dedicated Mini DMA regression tests for confirmed-position tracking, stale-scale safety, session metadata stability, hardware auto-detection, scale tare wiring, and naming behavior, and expanded import coverage to include the Mini DMA module.
 - Added `scipy==1.17.1` as a runtime dependency so `microwire_eda` imports and the related launcher test path work in a fresh project environment.

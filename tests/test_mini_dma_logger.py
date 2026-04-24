@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import csv
 import importlib
 import json
 import time
@@ -52,6 +53,7 @@ def _build_window(tmp_path: Path, qtbot) -> mini_dma_mod.MainWindow:
     qtbot.addWidget(window)
     window.check_zero_position_on_start.setChecked(False)
     window.check_tare_on_start.setChecked(False)
+    window.check_hardware_tare_on_start.setChecked(False)
     return window
 
 
@@ -149,6 +151,273 @@ def test_settings_panel_avoids_horizontal_scrolling(tmp_path: Path, qtbot) -> No
         _close_test_window(window)
 
 
+def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData("current_sweep")
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window._update_recipe_mode_ui()
+
+        assert "Estimated duration: 5.3 min" in window.label_recipe_estimate.text()
+        assert window.recipe_progress.maximum() > 100
+        assert window.recipe_progress.value() == 0
+        assert "idle" in window.recipe_progress.format()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hides_separate_heating_program(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData("current_sweep")
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window._update_recipe_mode_ui()
+
+        assert window.heating_recipe_box.isHidden() is True
+        assert "separate heating program is hidden" in window.label_recipe_summary.text()
+
+        ramp_index = window.combo_recipe_mode.findData("ramp")
+        window.combo_recipe_mode.setCurrentIndex(ramp_index)
+        window._update_recipe_mode_ui()
+
+        assert window.heating_recipe_box.isHidden() is False
+    finally:
+        _close_test_window(window)
+
+
+def test_status_bar_is_hidden_so_run_log_is_not_duplicated(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._log("single visible log")
+
+        assert window.statusBar().isHidden() is True
+        assert "single visible log" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert window.advanced_hardware_panel.isVisible() is False
+        assert window.combo_scale_baud.isVisible() is False
+        assert window.edit_scale_request.isVisible() is False
+        assert window.edit_ticcmd_path.isVisible() is False
+        assert window.spin_steps_per_mm.isVisible() is False
+        assert window.button_scale_connect.text() in {"Connect scale", "Disconnect scale"}
+        assert window.button_scale_tare.text() == "Tare scale"
+        assert window.button_advanced_software_tare.isVisible() is False
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_preflight_reports_scale_and_supply_together(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    warnings: list[str] = []
+
+    try:
+        window._ensure_scale_ready_for_recipe = lambda: False  # type: ignore[method-assign]
+        window._ensure_supply_ready_for_recipe = lambda: False  # type: ignore[method-assign]
+
+        monkeypatch.setattr(
+            mini_dma_mod.QtWidgets.QMessageBox,
+            "warning",
+            lambda _parent, _title, message: warnings.append(message),
+        )
+
+        ok = window._preflight_recipe_hardware(
+            [
+                mini_dma_mod.AutomationStep(
+                    "seek_target",
+                    target_value=5.0,
+                    basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+                ),
+                mini_dma_mod.AutomationStep("set_current", current_mA=10.0),
+            ]
+        )
+
+        assert ok is False
+        assert len(warnings) == 1
+        assert "Scale is not connected" in warnings[0]
+        assert "Power supply is not connected" in warnings[0]
+    finally:
+        _close_test_window(window)
+
+
+def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData("current_sweep")
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+
+        steps, summary, interval_ms = window._build_automation_recipe()
+
+        record_steps = [step for step in steps if step.action == "record"]
+        current_steps = [step for step in steps if step.action == "set_current"]
+        seek_targets = [
+            step.target_value
+            for step in steps
+            if step.action == "seek_target" and step.target_value is not None
+        ]
+
+        assert interval_ms == 250
+        assert len(record_steps) == 256
+        assert record_steps[0].basis == mini_dma_mod.HSW_BASIS_LOAD_G
+        assert record_steps[0].target_value == pytest.approx(0.0)
+        assert record_steps[-1].target_value == pytest.approx(0.0)
+        assert {step.target_value for step in record_steps[:-1]} == {0.0, 5.0, 10.0, 15.0, 20.0}
+        assert current_steps[0].current_mA == pytest.approx(0.0)
+        assert max(step.current_mA for step in current_steps if step.current_mA is not None) == pytest.approx(25.0)
+        assert seek_targets[-1] == pytest.approx(0.0)
+        assert "controlled current sweep" in summary.lower()
+    finally:
+        _close_test_window(window)
+
+
+def test_negative_scale_reading_is_reported_as_positive_tensile_load(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.check_tension_load_positive.setChecked(True)
+        window._latest_scale_value_g = -5.0
+        window._load_offset_g = 0.0
+
+        assert window._current_effective_load_g() == pytest.approx(5.0)
+        assert mini_dma_mod.stress_mpa_from_load_g(
+            window._current_effective_load_g(),
+            0.03,
+        ) > 0
+    finally:
+        _close_test_window(window)
+
+
+def test_logged_load_uses_positive_applied_tension(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("positive_tension_log")
+    window.check_tension_load_positive.setChecked(True)
+    window._latest_scale_value_g = -5.0
+    window._latest_scale_text = "-5.000 g"
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        window._start_session()
+        window._stop_session()
+
+        txt_path = tmp_path / "positive_tension_log.txt"
+        csv_path = tmp_path / "positive_tension_log.csv"
+
+        txt_lines = txt_path.read_text(encoding="utf-8").splitlines()
+        assert txt_lines[-1].split("\t")[1] == "5.000000"
+
+        rows = list(csv.DictReader(csv_path.open(encoding="utf-8", newline="")))
+        assert rows[0]["raw_load_g"] == "-5.000000"
+        assert rows[0]["load_g"] == "5.000000"
+    finally:
+        _close_test_window(window)
+
+
+def test_emergency_stop_turns_off_current_halts_tic_and_stops_session(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("emergency_stop")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+
+    class _FakeSupply:
+        def __init__(self) -> None:
+            self.off_count = 0
+
+        def is_connected(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            return None
+
+        def output_off(self) -> None:
+            self.off_count += 1
+
+        def measure(self) -> dict[str, float | None]:
+            return {
+                "current_mA": 0.0,
+                "voltage_V": 0.0,
+                "resistance_ohm": None,
+                "power_W": 0.0,
+            }
+
+    class _FakeTic:
+        def __init__(self) -> None:
+            self.halted = False
+
+        def halt_and_hold(self) -> None:
+            self.halted = True
+
+    supply = _FakeSupply()
+    tic = _FakeTic()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 12.5
+    window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._automation_active = True
+        window._auto_ramp_timer.start(100)
+
+        assert window.button_emergency_stop.text() == "EMERGENCY STOP"
+        assert "background-color: #b91c1c" in window.button_emergency_stop.styleSheet()
+
+        window._emergency_stop()
+
+        assert supply.off_count >= 1
+        assert tic.halted is True
+        assert window._supply_output_enabled is False
+        assert window._supply_last_setpoint_mA == pytest.approx(0.0)
+        assert window._automation_active is False
+        assert window._session_active is False
+        assert not window._auto_ramp_timer.isActive()
+    finally:
+        _close_test_window(window)
+
+
+def test_tensile_load_seek_moves_negative_when_scale_tension_is_negative(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 1.0
+    window.spin_distribution_nudge_mm.setValue(0.1)
+
+    targets: list[float] = []
+
+    def _capture_move(target_mm: float) -> bool:
+        targets.append(target_mm)
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        )
+
+        assert reached is False
+        assert targets == [pytest.approx(0.9)]
+    finally:
+        _close_test_window(window)
+
+
 def test_distribution_seek_rejects_stale_scale_readings(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window._latest_scale_value_g = 12.0
@@ -213,6 +482,33 @@ def test_session_metadata_keeps_original_created_timestamp(
 
         assert first_payload["created_utc"] == second_payload["created_utc"]
         window._stop_session()
+    finally:
+        _close_test_window(window)
+
+
+def test_session_start_aborts_when_requested_scale_tare_fails(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("tare_failure")
+    window.check_hardware_tare_on_start.setChecked(True)
+    window._tare_scale_hardware = lambda: False  # type: ignore[method-assign]
+
+    recorded = False
+
+    def _record_should_not_run() -> None:
+        nonlocal recorded
+        recorded = True
+
+    window._record_current_point = _record_should_not_run  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+
+        assert window._session_active is False
+        assert recorded is False
+        assert not (tmp_path / "tare_failure.txt").exists()
+        assert not (tmp_path / "tare_failure.csv").exists()
+        assert not (tmp_path / "tare_failure.json").exists()
+        assert "scale tare failed" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 

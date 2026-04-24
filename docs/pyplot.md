@@ -102,8 +102,14 @@ Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph forma
 ## Logger Notes
 
 - `Mini DMA Logger` is a launcher workflow rather than a PyPlot plug-in, but it now follows the same microwire-oriented naming flow as the other loggers: the displayed sample name keeps a human-readable microwire token such as `156/2`, while the base filename uses the file-safe form `156_2`.
-- On Windows, Mini DMA can actively auto-detect the connected G&G balance, HMP4030/Owon-style serial supply, and Pololu Tic controller instead of relying on fixed COM assignments. For G&G balances, the logger now also exposes the documented remote tare command in addition to the existing software tare offset.
+- On Windows, Mini DMA can actively auto-detect the connected G&G balance, HMP4030/Owon-style serial supply, and Pololu Tic controller instead of relying on fixed COM assignments. For G&G balances, the normal visible `Tare scale` action uses the documented physical remote tare command; software tare is kept only as an advanced diagnostic.
 - Mini DMA's left settings panel guards spin boxes and drop-downs against mouse-wheel value changes, disables horizontal scrolling, and wraps longer notes/log text to the available width.
+- Mini DMA hides low-level hardware details such as baud rates, request strings, `ticcmd`, serial numbers, and steps-per-mm behind an advanced hardware panel so routine bench use stays focused on connect, tare, jog, and safety actions.
+- Mini DMA recipe start now behaves like a preflight: it builds the recipe, auto-detects/connects required scale and supply hardware, reports all missing devices together, and only then starts the session. Long estimates use minutes/hours and a progress bar tracks recipe execution.
+- Mini DMA hides the separate heating program for controlled current-sweep recipes because those recipes own the current setpoints directly; the run log is the single visible log surface instead of duplicating lines in the status bar.
+- Mini DMA includes a `Controlled current sweep` recipe for copper-wire bring-up and later microwire isostress work: it holds load or stress with motor nudges while stepping current and logging resistance/current/voltage/mechanics channels.
+- Mini DMA treats negative raw scale readings as positive tensile load when that rig convention is enabled, so operators can enter applied load/stress targets as positive values and export the main load channel as positive applied tensile load while preserving the signed raw scale diagnostic.
+- Mini DMA has an always-visible `EMERGENCY STOP` dashboard button that stops the active session/recipe, halts the Tic motor, and commands the supply output off.
 - The Mini DMA measurement roadmap and saved-recipe design notes are tracked in `docs/mini_dma_measurement_plan.md`.
 
 ## Automation

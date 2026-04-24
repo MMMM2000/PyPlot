@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
 from threading import Event
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -172,6 +172,17 @@ def _decode_escape_text(text: str) -> bytes:
         return b""
     normalized = text.encode("utf-8").decode("unicode_escape")
     return normalized.encode("utf-8")
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds < 60.0:
+        return f"{seconds:.1f} s"
+    minutes = seconds / 60.0
+    if minutes < 60.0:
+        return f"{minutes:.1f} min"
+    hours = int(minutes // 60)
+    remaining_minutes = minutes - (hours * 60)
+    return f"{hours:d} h {remaining_minutes:.0f} min"
 
 
 def _parse_first_float(text: str) -> float | None:
@@ -334,6 +345,7 @@ class AutomationStep:
     target_mm: float | None = None
     target_value: float | None = None
     basis: str | None = None
+    current_mA: float | None = None
     note: str = ""
 
 
@@ -792,6 +804,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_steps: list[AutomationStep] = []
         self._automation_index = 0
         self._automation_interval_ms = 1000
+        self._automation_total_steps = 0
         self._automation_name = ""
         self._automation_phase = "idle"
         self._automation_basis: str | None = None
@@ -897,102 +910,52 @@ class MainWindow(QtWidgets.QMainWindow):
         hardware_layout.setSpacing(10)
 
         scale_box = self._group_box("Scale")
+        scale_box.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Maximum,
+        )
         scale_form = QtWidgets.QFormLayout(scale_box)
-        self.combo_scale_port = QtWidgets.QComboBox(scale_box)
-        refresh_ports_button = QtWidgets.QPushButton("Refresh ports", scale_box)
-        refresh_ports_button.clicked.connect(self._refresh_scale_ports)
-        detect_scale_button = QtWidgets.QPushButton("Auto-detect", scale_box)
+        scale_action_row = QtWidgets.QHBoxLayout()
+        detect_scale_button = QtWidgets.QPushButton("Auto-detect scale", scale_box)
         detect_scale_button.clicked.connect(self._auto_detect_scale_port)
-        port_row = QtWidgets.QHBoxLayout()
-        port_row.addWidget(self.combo_scale_port, stretch=1)
-        port_row.addWidget(refresh_ports_button)
-        port_row.addWidget(detect_scale_button)
-        scale_form.addRow("Port", port_row)
-
-        self.combo_scale_baud = QtWidgets.QComboBox(scale_box)
-        for baud in ("600", "1200", "2400", "4800", "9600", "19200", "38400", "115200"):
-            self.combo_scale_baud.addItem(baud)
-        self.combo_scale_baud.setCurrentText("600")
-        scale_form.addRow("Baud", self.combo_scale_baud)
-
-        self.spin_scale_interval = QtWidgets.QSpinBox(scale_box)
-        self.spin_scale_interval.setRange(50, 5000)
-        self.spin_scale_interval.setSuffix(" ms")
-        self.spin_scale_interval.setValue(250)
-        scale_form.addRow("Poll interval", self.spin_scale_interval)
-
-        self.edit_scale_request = QtWidgets.QLineEdit(scale_box)
-        self.edit_scale_request.setPlaceholderText("leave blank if the scale streams continuously")
-        scale_form.addRow("Request command", self.edit_scale_request)
-
-        self.edit_scale_terminator = QtWidgets.QLineEdit(scale_box)
-        self.edit_scale_terminator.setText("")
-        scale_form.addRow("Line ending", self.edit_scale_terminator)
-
-        scale_buttons = QtWidgets.QHBoxLayout()
+        scale_action_row.addWidget(detect_scale_button)
         self.button_scale_connect = QtWidgets.QPushButton("Connect scale", scale_box)
         self.button_scale_connect.clicked.connect(self._toggle_scale_connection)
-        scale_buttons.addWidget(self.button_scale_connect)
-        tare_button = QtWidgets.QPushButton("Software tare", scale_box)
-        tare_button.clicked.connect(self._tare_scale)
-        scale_buttons.addWidget(tare_button)
-        hardware_tare_button = QtWidgets.QPushButton("Remote tare", scale_box)
-        hardware_tare_button.clicked.connect(self._tare_scale_hardware)
-        scale_buttons.addWidget(hardware_tare_button)
-        scale_form.addRow("", scale_buttons)
+        scale_action_row.addWidget(self.button_scale_connect)
+        self.button_scale_tare = QtWidgets.QPushButton("Tare scale", scale_box)
+        self.button_scale_tare.clicked.connect(self._tare_scale_hardware)
+        scale_action_row.addWidget(self.button_scale_tare)
+        scale_form.addRow("", scale_action_row)
 
-        self.label_scale_value = QtWidgets.QLabel("Latest load: 0.000 g")
-        self.label_scale_raw = QtWidgets.QLabel("Raw line: -")
-        self.label_scale_raw.setWordWrap(True)
-        self.label_scale_hint = QtWidgets.QLabel(
-            "G&G RS232 note: these balances often need a DB9 null modem crossover between the "
-            "USB-serial adapter and the scale."
-        )
-        self.label_scale_hint.setWordWrap(True)
-        gng_button = QtWidgets.QPushButton("Apply G&G E-series preset", scale_box)
-        gng_button.clicked.connect(self._apply_gng_scale_preset)
-        probe_button = QtWidgets.QPushButton("Probe scale", scale_box)
-        probe_button.clicked.connect(self._probe_scale_port)
+        self.label_scale_value = QtWidgets.QLabel("Latest load: 0.000 g", scale_box)
+        self.label_scale_value.setWordWrap(True)
         scale_form.addRow("", self.label_scale_value)
-        scale_form.addRow("", self.label_scale_raw)
-        scale_form.addRow("", self.label_scale_hint)
-        preset_row = QtWidgets.QHBoxLayout()
-        preset_row.addWidget(gng_button)
-        preset_row.addWidget(probe_button)
-        scale_form.addRow("", preset_row)
+        scale_help = QtWidgets.QLabel(
+            "Use Auto-detect after reconnecting USB devices. Use Tare scale before a run; the raw serial details are in Advanced hardware settings.",
+            scale_box,
+        )
+        scale_help.setWordWrap(True)
+        scale_help.setStyleSheet("color: #a3a3a3;")
+        scale_form.addRow("", scale_help)
         hardware_layout.addWidget(scale_box)
 
         motion_box = self._group_box("Motion")
-        motion_form = QtWidgets.QFormLayout(motion_box)
-
-        self.edit_ticcmd_path = QtWidgets.QLineEdit(motion_box)
-        self.edit_ticcmd_path.setText(_find_ticcmd())
-        motion_form.addRow("ticcmd path", self.edit_ticcmd_path)
-
-        self.edit_tic_serial = QtWidgets.QLineEdit(motion_box)
-        self.edit_tic_serial.setPlaceholderText("optional when only one Tic is connected")
-        motion_form.addRow("Device serial", self.edit_tic_serial)
-
-        self.spin_steps_per_mm = QtWidgets.QDoubleSpinBox(motion_box)
-        self.spin_steps_per_mm.setDecimals(3)
-        self.spin_steps_per_mm.setRange(1.0, 100000.0)
-        self.spin_steps_per_mm.setValue(100.0)
-        self.spin_steps_per_mm.setToolTip(
-            "Controller position units per mm. Full-step nominal value for your actuator is 100 steps/mm."
+        motion_box.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Maximum,
         )
-        motion_form.addRow("Steps per mm", self.spin_steps_per_mm)
-
+        motion_form = QtWidgets.QFormLayout(motion_box)
         motion_buttons = QtWidgets.QHBoxLayout()
-        refresh_tic_button = QtWidgets.QPushButton("Check Tic", motion_box)
+        refresh_tic_button = QtWidgets.QPushButton("Check motor", motion_box)
         refresh_tic_button.clicked.connect(self._refresh_tic_status)
         motion_buttons.addWidget(refresh_tic_button)
-        detect_tic_button = QtWidgets.QPushButton("Auto-detect Tic", motion_box)
+        detect_tic_button = QtWidgets.QPushButton("Auto-detect motor", motion_box)
         detect_tic_button.clicked.connect(self._auto_detect_tic)
         motion_buttons.addWidget(detect_tic_button)
         zero_tic_button = QtWidgets.QPushButton("Set position = 0", motion_box)
         zero_tic_button.clicked.connect(self._zero_tic_position)
         motion_buttons.addWidget(zero_tic_button)
-        halt_tic_button = QtWidgets.QPushButton("Halt", motion_box)
+        halt_tic_button = QtWidgets.QPushButton("Halt motor", motion_box)
         halt_tic_button.clicked.connect(self._halt_tic)
         motion_buttons.addWidget(halt_tic_button)
         motion_form.addRow("", motion_buttons)
@@ -1012,12 +975,115 @@ class MainWindow(QtWidgets.QMainWindow):
         jog_buttons.addWidget(jog_positive)
         motion_form.addRow("", jog_buttons)
 
-        self.label_tic_position = QtWidgets.QLabel("Position: 0.0000 mm")
-        self.label_tic_summary = QtWidgets.QLabel("Tic status not queried yet.")
+        self.label_tic_position = QtWidgets.QLabel("Position: 0.0000 mm", motion_box)
+        self.label_tic_summary = QtWidgets.QLabel("Motor status not queried yet.", motion_box)
         self.label_tic_summary.setWordWrap(True)
         motion_form.addRow("", self.label_tic_position)
         motion_form.addRow("", self.label_tic_summary)
         hardware_layout.addWidget(motion_box)
+
+        advanced_toggle = QtWidgets.QToolButton(hardware_tab)
+        advanced_toggle.setText("Advanced hardware settings")
+        advanced_toggle.setCheckable(True)
+        advanced_toggle.setChecked(False)
+        advanced_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        advanced_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        hardware_layout.addWidget(advanced_toggle)
+
+        self.advanced_hardware_panel = QtWidgets.QWidget(hardware_tab)
+        advanced_layout = QtWidgets.QVBoxLayout(self.advanced_hardware_panel)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.setSpacing(10)
+        self.advanced_hardware_panel.setVisible(False)
+
+        def _toggle_advanced_hardware(checked: bool) -> None:
+            self.advanced_hardware_panel.setVisible(checked)
+            advanced_toggle.setArrowType(
+                QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow
+            )
+
+        advanced_toggle.toggled.connect(_toggle_advanced_hardware)
+
+        scale_advanced_box = self._group_box("Scale Driver Details")
+        scale_advanced_form = QtWidgets.QFormLayout(scale_advanced_box)
+        self.combo_scale_port = QtWidgets.QComboBox(scale_advanced_box)
+        refresh_ports_button = QtWidgets.QPushButton("Refresh ports", scale_advanced_box)
+        refresh_ports_button.clicked.connect(self._refresh_scale_ports)
+        port_row = QtWidgets.QHBoxLayout()
+        port_row.addWidget(self.combo_scale_port, stretch=1)
+        port_row.addWidget(refresh_ports_button)
+        scale_advanced_form.addRow("Port", port_row)
+
+        self.combo_scale_baud = QtWidgets.QComboBox(scale_advanced_box)
+        for baud in ("600", "1200", "2400", "4800", "9600", "19200", "38400", "115200"):
+            self.combo_scale_baud.addItem(baud)
+        self.combo_scale_baud.setCurrentText("600")
+        scale_advanced_form.addRow("Baud", self.combo_scale_baud)
+
+        self.spin_scale_interval = QtWidgets.QSpinBox(scale_advanced_box)
+        self.spin_scale_interval.setRange(50, 5000)
+        self.spin_scale_interval.setSuffix(" ms")
+        self.spin_scale_interval.setValue(250)
+        scale_advanced_form.addRow("Poll interval", self.spin_scale_interval)
+
+        self.edit_scale_request = QtWidgets.QLineEdit(scale_advanced_box)
+        self.edit_scale_request.setPlaceholderText("leave blank if the scale streams continuously")
+        scale_advanced_form.addRow("Request command", self.edit_scale_request)
+
+        self.edit_scale_terminator = QtWidgets.QLineEdit(scale_advanced_box)
+        self.edit_scale_terminator.setText("")
+        scale_advanced_form.addRow("Line ending", self.edit_scale_terminator)
+
+        self.label_scale_raw = QtWidgets.QLabel("Raw line: -", scale_advanced_box)
+        self.label_scale_raw.setWordWrap(True)
+        self.label_scale_hint = QtWidgets.QLabel(
+            "G&G RS232 note: these balances often need a DB9 null modem crossover between the "
+            "USB-serial adapter and the scale.",
+            scale_advanced_box,
+        )
+        self.label_scale_hint.setWordWrap(True)
+        gng_button = QtWidgets.QPushButton("Apply G&G E-series preset", scale_advanced_box)
+        gng_button.clicked.connect(self._apply_gng_scale_preset)
+        probe_button = QtWidgets.QPushButton("Probe scale", scale_advanced_box)
+        probe_button.clicked.connect(self._probe_scale_port)
+        self.button_advanced_software_tare = QtWidgets.QPushButton(
+            "Diagnostic software tare (app only)",
+            scale_advanced_box,
+        )
+        self.button_advanced_software_tare.setToolTip(
+            "Advanced fallback for diagnostics only: offsets Mini DMA without changing the physical scale display."
+        )
+        self.button_advanced_software_tare.clicked.connect(self._tare_scale)
+        scale_advanced_form.addRow("", self.label_scale_raw)
+        scale_advanced_form.addRow("", self.label_scale_hint)
+        preset_row = QtWidgets.QHBoxLayout()
+        preset_row.addWidget(gng_button)
+        preset_row.addWidget(probe_button)
+        scale_advanced_form.addRow("", preset_row)
+        scale_advanced_form.addRow("", self.button_advanced_software_tare)
+        advanced_layout.addWidget(scale_advanced_box)
+
+        motion_advanced_box = self._group_box("Motor Driver Details")
+        motion_advanced_form = QtWidgets.QFormLayout(motion_advanced_box)
+
+        self.edit_ticcmd_path = QtWidgets.QLineEdit(motion_advanced_box)
+        self.edit_ticcmd_path.setText(_find_ticcmd())
+        motion_advanced_form.addRow("ticcmd path", self.edit_ticcmd_path)
+
+        self.edit_tic_serial = QtWidgets.QLineEdit(motion_advanced_box)
+        self.edit_tic_serial.setPlaceholderText("optional when only one Tic is connected")
+        motion_advanced_form.addRow("Device serial", self.edit_tic_serial)
+
+        self.spin_steps_per_mm = QtWidgets.QDoubleSpinBox(motion_advanced_box)
+        self.spin_steps_per_mm.setDecimals(3)
+        self.spin_steps_per_mm.setRange(1.0, 100000.0)
+        self.spin_steps_per_mm.setValue(100.0)
+        self.spin_steps_per_mm.setToolTip(
+            "Controller position units per mm. Full-step nominal value for your actuator is 100 steps/mm."
+        )
+        motion_advanced_form.addRow("Steps per mm", self.spin_steps_per_mm)
+        advanced_layout.addWidget(motion_advanced_box)
+        hardware_layout.addWidget(self.advanced_hardware_panel)
 
         safety_box = self._group_box("Reference & Safety")
         safety_form = QtWidgets.QFormLayout(safety_box)
@@ -1051,7 +1117,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_max_load_g.setRange(0.001, 1000.0)
         self.spin_max_load_g.setValue(25.0)
         self.spin_max_load_g.setSuffix(" g")
-        safety_form.addRow("Max load", self.spin_max_load_g)
+        safety_form.addRow("Max applied load", self.spin_max_load_g)
+        self.check_tension_load_positive = QtWidgets.QCheckBox(
+            "Treat negative scale readings as positive tensile load",
+            safety_box,
+        )
+        self.check_tension_load_positive.setChecked(True)
+        safety_form.addRow("", self.check_tension_load_positive)
 
         self.label_reference_status = QtWidgets.QLabel("Reference position: 0.0000 mm")
         self.label_reference_status.setWordWrap(True)
@@ -1105,9 +1177,9 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form.addRow("Manual set current", self.spin_supply_manual_current)
 
         connect_supply_row = QtWidgets.QHBoxLayout()
-        connect_supply_button = QtWidgets.QPushButton("Connect supply", supply_box)
-        connect_supply_button.clicked.connect(self._connect_supply)
-        connect_supply_row.addWidget(connect_supply_button)
+        self.button_supply_connect = QtWidgets.QPushButton("Connect supply", supply_box)
+        self.button_supply_connect.clicked.connect(self._connect_supply)
+        connect_supply_row.addWidget(self.button_supply_connect)
         disconnect_supply_button = QtWidgets.QPushButton("Disconnect supply", supply_box)
         disconnect_supply_button.clicked.connect(self._disconnect_supply)
         connect_supply_row.addWidget(disconnect_supply_button)
@@ -1137,51 +1209,58 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form.addRow("", self.label_supply_live)
         heating_layout.addWidget(supply_box)
 
-        heating_recipe_box = self._group_box("Heating Program")
-        heating_recipe_form = QtWidgets.QFormLayout(heating_recipe_box)
-        self.combo_heating_mode = QtWidgets.QComboBox(heating_recipe_box)
+        self.heating_recipe_box = self._group_box("Separate Heating Program")
+        heating_recipe_form = QtWidgets.QFormLayout(self.heating_recipe_box)
+        self.label_heating_program_hint = QtWidgets.QLabel(
+            "Current-sweep recipes control current directly from the recipe. Use this separate program only for ramp/hold/cycle recipes that need independent heating.",
+            self.heating_recipe_box,
+        )
+        self.label_heating_program_hint.setWordWrap(True)
+        self.label_heating_program_hint.setStyleSheet("color: #a3a3a3;")
+        heating_recipe_form.addRow("", self.label_heating_program_hint)
+        self.combo_heating_mode = QtWidgets.QComboBox(self.heating_recipe_box)
         for mode_key, label in HEATING_MODE_LABELS.items():
             self.combo_heating_mode.addItem(label, mode_key)
         self.combo_heating_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
         heating_recipe_form.addRow("Program", self.combo_heating_mode)
 
-        self.spin_heat_constant_current = QtWidgets.QDoubleSpinBox(heating_recipe_box)
+        self.spin_heat_constant_current = QtWidgets.QDoubleSpinBox(self.heating_recipe_box)
         self.spin_heat_constant_current.setDecimals(2)
         self.spin_heat_constant_current.setRange(0.0, 5000.0)
         self.spin_heat_constant_current.setValue(50.0)
         self.spin_heat_constant_current.setSuffix(" mA")
         heating_recipe_form.addRow("Constant current", self.spin_heat_constant_current)
 
-        self.spin_heat_start_current = QtWidgets.QDoubleSpinBox(heating_recipe_box)
+        self.spin_heat_start_current = QtWidgets.QDoubleSpinBox(self.heating_recipe_box)
         self.spin_heat_start_current.setDecimals(2)
         self.spin_heat_start_current.setRange(0.0, 5000.0)
         self.spin_heat_start_current.setValue(10.0)
         self.spin_heat_start_current.setSuffix(" mA")
         heating_recipe_form.addRow("Ramp start", self.spin_heat_start_current)
 
-        self.spin_heat_max_current = QtWidgets.QDoubleSpinBox(heating_recipe_box)
+        self.spin_heat_max_current = QtWidgets.QDoubleSpinBox(self.heating_recipe_box)
         self.spin_heat_max_current.setDecimals(2)
         self.spin_heat_max_current.setRange(0.0, 5000.0)
         self.spin_heat_max_current.setValue(100.0)
         self.spin_heat_max_current.setSuffix(" mA")
         heating_recipe_form.addRow("Ramp max", self.spin_heat_max_current)
 
-        self.spin_heat_step_current = QtWidgets.QDoubleSpinBox(heating_recipe_box)
+        self.spin_heat_step_current = QtWidgets.QDoubleSpinBox(self.heating_recipe_box)
         self.spin_heat_step_current.setDecimals(2)
         self.spin_heat_step_current.setRange(0.01, 5000.0)
         self.spin_heat_step_current.setValue(5.0)
         self.spin_heat_step_current.setSuffix(" mA")
         heating_recipe_form.addRow("Ramp step", self.spin_heat_step_current)
 
-        self.combo_heat_limit_action = QtWidgets.QComboBox(heating_recipe_box)
+        self.combo_heat_limit_action = QtWidgets.QComboBox(self.heating_recipe_box)
         for action_key, label in HEATING_LIMIT_LABELS.items():
             self.combo_heat_limit_action.addItem(label, action_key)
         heating_recipe_form.addRow("Voltage-limit action", self.combo_heat_limit_action)
 
-        self.check_output_off_on_stop = QtWidgets.QCheckBox("Turn output off when the session stops", heating_recipe_box)
+        self.check_output_off_on_stop = QtWidgets.QCheckBox("Turn output off when the session stops", self.heating_recipe_box)
         self.check_output_off_on_stop.setChecked(True)
         heating_recipe_form.addRow("", self.check_output_off_on_stop)
-        heating_layout.addWidget(heating_recipe_box)
+        heating_layout.addWidget(self.heating_recipe_box)
         heating_layout.addStretch(1)
         tabs.addTab(heating_tab, "Heating")
 
@@ -1298,11 +1377,17 @@ class MainWindow(QtWidgets.QMainWindow):
         logging_form.addRow("", self.check_zero_position_on_start)
 
         self.check_tare_on_start = QtWidgets.QCheckBox(
-            "Software tare the latest scale value when the session starts",
+            "Diagnostic: software tare the latest scale value when the session starts",
             logging_box,
         )
-        self.check_tare_on_start.setChecked(True)
-        logging_form.addRow("", self.check_tare_on_start)
+        self.check_tare_on_start.setChecked(False)
+        self.check_tare_on_start.setVisible(False)
+        self.check_hardware_tare_on_start = QtWidgets.QCheckBox(
+            "Tare scale when the session starts",
+            logging_box,
+        )
+        self.check_hardware_tare_on_start.setChecked(True)
+        logging_form.addRow("", self.check_hardware_tare_on_start)
 
         session_buttons = QtWidgets.QHBoxLayout()
         self.button_start_session = QtWidgets.QPushButton("Start session", logging_box)
@@ -1333,6 +1418,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_recipe_mode.addItem("Cyclic triangle", "cycle")
         self.combo_recipe_mode.addItem("Position hold", "hold")
         self.combo_recipe_mode.addItem("Hsw distribution", "distribution")
+        self.combo_recipe_mode.addItem("Controlled current sweep", "current_sweep")
         self.combo_recipe_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
         automation_form.addRow("Recipe type", self.combo_recipe_mode)
 
@@ -1470,6 +1556,76 @@ class MainWindow(QtWidgets.QMainWindow):
         distribution_form.addRow("", distribution_hint)
         self.recipe_stack.addWidget(distribution_page)
 
+        current_sweep_page = QtWidgets.QWidget(self.recipe_stack)
+        current_sweep_form = QtWidgets.QFormLayout(current_sweep_page)
+        self.combo_current_sweep_basis = QtWidgets.QComboBox(automation_box)
+        for basis_key in (HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA):
+            self.combo_current_sweep_basis.addItem(HSW_BASIS_LABELS[basis_key], basis_key)
+        current_sweep_form.addRow("Hold basis", self.combo_current_sweep_basis)
+        self.spin_current_sweep_target_start = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_target_start.setDecimals(3)
+        self.spin_current_sweep_target_start.setRange(-100000.0, 100000.0)
+        self.spin_current_sweep_target_start.setValue(0.0)
+        current_sweep_form.addRow("Target start", self.spin_current_sweep_target_start)
+        self.spin_current_sweep_target_end = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_target_end.setDecimals(3)
+        self.spin_current_sweep_target_end.setRange(-100000.0, 100000.0)
+        self.spin_current_sweep_target_end.setValue(20.0)
+        current_sweep_form.addRow("Target end", self.spin_current_sweep_target_end)
+        self.spin_current_sweep_target_step = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_target_step.setDecimals(3)
+        self.spin_current_sweep_target_step.setRange(0.001, 100000.0)
+        self.spin_current_sweep_target_step.setValue(5.0)
+        current_sweep_form.addRow("Target step", self.spin_current_sweep_target_step)
+        self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
+        self.check_current_sweep_return_target.setChecked(True)
+        current_sweep_form.addRow("", self.check_current_sweep_return_target)
+        self.spin_current_sweep_start_mA = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_start_mA.setDecimals(2)
+        self.spin_current_sweep_start_mA.setRange(0.0, 5000.0)
+        self.spin_current_sweep_start_mA.setValue(0.0)
+        self.spin_current_sweep_start_mA.setSuffix(" mA")
+        current_sweep_form.addRow("Current start", self.spin_current_sweep_start_mA)
+        self.spin_current_sweep_end_mA = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_end_mA.setDecimals(2)
+        self.spin_current_sweep_end_mA.setRange(0.0, 5000.0)
+        self.spin_current_sweep_end_mA.setValue(25.0)
+        self.spin_current_sweep_end_mA.setSuffix(" mA")
+        current_sweep_form.addRow("Current end", self.spin_current_sweep_end_mA)
+        self.spin_current_sweep_step_mA = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_step_mA.setDecimals(2)
+        self.spin_current_sweep_step_mA.setRange(0.01, 5000.0)
+        self.spin_current_sweep_step_mA.setValue(1.0)
+        self.spin_current_sweep_step_mA.setSuffix(" mA")
+        current_sweep_form.addRow("Current step", self.spin_current_sweep_step_mA)
+        self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
+        self.check_current_sweep_reverse_current.setChecked(True)
+        current_sweep_form.addRow("", self.check_current_sweep_reverse_current)
+        self.spin_current_sweep_tolerance = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_tolerance.setDecimals(4)
+        self.spin_current_sweep_tolerance.setRange(0.0001, 100000.0)
+        self.spin_current_sweep_tolerance.setValue(0.25)
+        current_sweep_form.addRow("Hold tolerance", self.spin_current_sweep_tolerance)
+        self.spin_current_sweep_settle_s = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_settle_s.setDecimals(2)
+        self.spin_current_sweep_settle_s.setRange(0.0, 3600.0)
+        self.spin_current_sweep_settle_s.setValue(0.5)
+        self.spin_current_sweep_settle_s.setSuffix(" s")
+        current_sweep_form.addRow("Settle after current", self.spin_current_sweep_settle_s)
+        self.spin_current_sweep_interval = QtWidgets.QSpinBox(automation_box)
+        self.spin_current_sweep_interval.setRange(50, 60000)
+        self.spin_current_sweep_interval.setValue(250)
+        self.spin_current_sweep_interval.setSuffix(" ms")
+        current_sweep_form.addRow("Recipe interval", self.spin_current_sweep_interval)
+        current_sweep_hint = QtWidgets.QLabel(
+            "This recipe holds load or stress with motor nudges while stepping current and recording each point.",
+            current_sweep_page,
+        )
+        current_sweep_hint.setWordWrap(True)
+        current_sweep_hint.setStyleSheet("color: palette(mid);")
+        current_sweep_form.addRow("", current_sweep_hint)
+        self.recipe_stack.addWidget(current_sweep_page)
+
         automation_form.addRow("", self.recipe_stack)
         self.check_return_to_origin = QtWidgets.QCheckBox(
             "Return to the recipe start position when finished",
@@ -1483,14 +1639,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_recipe_estimate = QtWidgets.QLabel("Estimated points: - | Estimated duration: -")
         self.label_recipe_estimate.setWordWrap(True)
         automation_form.addRow("", self.label_recipe_estimate)
+        self.recipe_progress = QtWidgets.QProgressBar(automation_box)
+        self.recipe_progress.setRange(0, 100)
+        self.recipe_progress.setValue(0)
+        self.recipe_progress.setTextVisible(True)
+        self.recipe_progress.setFormat("Recipe progress: idle")
+        automation_form.addRow("", self.recipe_progress)
 
         ramp_buttons = QtWidgets.QHBoxLayout()
-        start_ramp_button = QtWidgets.QPushButton("Start recipe", automation_box)
-        start_ramp_button.clicked.connect(self._start_auto_ramp)
-        ramp_buttons.addWidget(start_ramp_button)
-        stop_ramp_button = QtWidgets.QPushButton("Stop recipe", automation_box)
-        stop_ramp_button.clicked.connect(self._stop_auto_ramp)
-        ramp_buttons.addWidget(stop_ramp_button)
+        self.button_start_recipe = QtWidgets.QPushButton("Start recipe (auto-connect)", automation_box)
+        self.button_start_recipe.clicked.connect(self._start_auto_ramp)
+        ramp_buttons.addWidget(self.button_start_recipe)
+        self.button_stop_recipe = QtWidgets.QPushButton("Stop recipe", automation_box)
+        self.button_stop_recipe.clicked.connect(self._stop_auto_ramp)
+        ramp_buttons.addWidget(self.button_stop_recipe)
         automation_form.addRow("", ramp_buttons)
         experiment_layout.addWidget(automation_box)
 
@@ -1504,12 +1666,9 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_record = QtWidgets.QPushButton("Record point now", manual_box)
         manual_record.clicked.connect(self._record_current_point)
         manual_layout.addWidget(manual_record)
-        manual_hardware_tare = QtWidgets.QPushButton("Remote tare scale", manual_box)
+        manual_hardware_tare = QtWidgets.QPushButton("Tare scale", manual_box)
         manual_hardware_tare.clicked.connect(self._tare_scale_hardware)
         manual_layout.addWidget(manual_hardware_tare)
-        manual_software_tare = QtWidgets.QPushButton("Software tare latest reading", manual_box)
-        manual_software_tare.clicked.connect(self._tare_scale)
-        manual_layout.addWidget(manual_software_tare)
         manual_refresh = QtWidgets.QPushButton("Refresh Tic status", manual_box)
         manual_refresh.clicked.connect(self._refresh_tic_status)
         manual_layout.addWidget(manual_refresh)
@@ -1536,6 +1695,28 @@ class MainWindow(QtWidgets.QMainWindow):
         hero_font.setBold(True)
         hero_title.setFont(hero_font)
         hero_layout.addWidget(hero_title)
+        self.button_emergency_stop = QtWidgets.QPushButton("EMERGENCY STOP", hero_box)
+        self.button_emergency_stop.setObjectName("emergencyStopButton")
+        self.button_emergency_stop.setMinimumHeight(42)
+        self.button_emergency_stop.setMinimumWidth(160)
+        self.button_emergency_stop.setToolTip(
+            "Immediately stop the active recipe/session, halt the Tic motor, and turn the power-supply output off."
+        )
+        self.button_emergency_stop.setStyleSheet(
+            "QPushButton#emergencyStopButton {"
+            "background-color: #b91c1c;"
+            "color: white;"
+            "border: 2px solid #7f1d1d;"
+            "border-radius: 8px;"
+            "font-weight: 800;"
+            "letter-spacing: 1px;"
+            "padding: 8px 16px;"
+            "}"
+            "QPushButton#emergencyStopButton:hover { background-color: #dc2626; }"
+            "QPushButton#emergencyStopButton:pressed { background-color: #7f1d1d; }"
+        )
+        self.button_emergency_stop.clicked.connect(self._emergency_stop)
+        hero_layout.addWidget(self.button_emergency_stop)
         self.button_plot_setup = QtWidgets.QPushButton("Configure plots", hero_box)
         self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
         hero_layout.addWidget(self.button_plot_setup)
@@ -1543,6 +1724,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_recipe_banner = QtWidgets.QLabel("Manual mode", hero_box)
         self.label_recipe_banner.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        self.label_recipe_banner.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
         )
         hero_layout.addWidget(self.label_recipe_banner)
         plot_layout.addWidget(hero_box, stretch=0)
@@ -1637,6 +1822,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_output.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.log_output.setPlaceholderText("Mini DMA log output")
         log_layout.addWidget(self.log_output, stretch=1)
+        self.statusBar().hide()
         plot_splitter.setStretchFactor(0, 5)
         plot_splitter.setStretchFactor(1, 2)
         splitter.addWidget(plot_panel)
@@ -1677,21 +1863,35 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_hold_interval,
             self.spin_distribution_interval,
             self.spin_heat_step_current,
+            self.spin_current_sweep_target_start,
+            self.spin_current_sweep_target_end,
+            self.spin_current_sweep_target_step,
+            self.spin_current_sweep_start_mA,
+            self.spin_current_sweep_end_mA,
+            self.spin_current_sweep_step_mA,
+            self.spin_current_sweep_tolerance,
+            self.spin_current_sweep_settle_s,
+            self.spin_current_sweep_interval,
         ):
             widget.valueChanged.connect(self._update_recipe_mode_ui)
         self.check_return_to_origin.toggled.connect(self._update_recipe_mode_ui)
         self.check_distribution_return_sweep.toggled.connect(self._update_recipe_mode_ui)
+        self.check_current_sweep_return_target.toggled.connect(self._update_recipe_mode_ui)
+        self.check_current_sweep_reverse_current.toggled.connect(self._update_recipe_mode_ui)
         self.check_zero_on_preload.toggled.connect(self._refresh_live_labels)
         self.spin_preload_threshold_g.valueChanged.connect(self._refresh_live_labels)
         self.combo_heat_limit_action.currentIndexChanged.connect(self._update_recipe_mode_ui)
         self.combo_heating_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
         self.combo_distribution_basis.currentIndexChanged.connect(self._update_distribution_basis_ui)
         self.combo_distribution_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
+        self.combo_current_sweep_basis.currentIndexChanged.connect(self._update_current_sweep_basis_ui)
+        self.combo_current_sweep_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
 
         self.statusBar().showMessage("Ready")
         self._refresh_supply_ports()
         self._apply_supply_profile_defaults()
         self._update_distribution_basis_ui()
+        self._update_current_sweep_basis_ui()
         self._apply_plot_preset("dma")
         self._update_recipe_mode_ui()
         self._refresh_plots()
@@ -1776,8 +1976,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return [
             PlotChannel("elapsed_s", "Time (s)", "#ef4444", lambda point: point.elapsed_s),
             PlotChannel("position_mm", "Displacement (mm)", "#60a5fa", lambda point: point.position_mm),
-            PlotChannel("raw_load_g", "Raw load (g)", "#f59e0b", lambda point: point.raw_load_g),
-            PlotChannel("load_g", "Effective load (g)", "#38bdf8", lambda point: point.load_g),
+            PlotChannel("raw_load_g", "Raw scale signed (g)", "#f59e0b", lambda point: point.raw_load_g),
+            PlotChannel("load_g", "Applied tensile load (g)", "#38bdf8", lambda point: point.load_g),
             PlotChannel(
                 "strain_pct",
                 "Strain (%)",
@@ -1982,7 +2182,9 @@ class MainWindow(QtWidgets.QMainWindow):
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
         self.log_output.appendPlainText(line)
-        self.statusBar().showMessage(message, 5000)
+
+    def _set_run_status(self, message: str) -> None:
+        self.label_recipe_banner.setText(message)
 
     def _probe_scale_candidate(self, port_name: str) -> dict[str, Any] | None:
         trials = (
@@ -2114,20 +2316,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_heat_start_current.setValue(float(profile.get("start_current_mA", 1.0)))
         self.spin_heat_constant_current.setValue(max(float(profile.get("start_current_mA", 1.0)), 10.0))
 
-    def _connect_supply(self) -> None:
+    def _connect_supply(self, checked: bool = False, *, show_errors: bool = True) -> bool:
         self._disconnect_supply()
         controller = self._build_supply_controller()
         try:
             controller.connect()
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to connect power supply: {exc}")
-            return
+            if show_errors:
+                QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to connect power supply: {exc}")
+            else:
+                self._log(f"Failed to connect power supply: {exc}")
+            return False
         self._supply_controller = controller
         self.label_supply_status.setText(
             f"Supply connected on {controller.port_name} at {controller.baudrate} baud ({controller.profile['label']})."
         )
         self._log(self.label_supply_status.text())
         self._refresh_supply_snapshot()
+        return True
 
     def _disconnect_supply(self) -> None:
         if self._supply_controller is not None:
@@ -2194,14 +2400,71 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _disable_supply_output(self) -> None:
         if self._supply_controller is None or not self._supply_controller.is_connected():
+            self._supply_output_enabled = False
+            self._supply_last_setpoint_mA = 0.0
             return
         try:
             self._supply_controller.output_off()
         except Exception as exc:
             self._log(f"Failed to disable supply output: {exc}")
         self._supply_output_enabled = False
+        self._supply_last_setpoint_mA = 0.0
         self.label_supply_status.setText("Supply output disabled.")
         self._refresh_supply_snapshot()
+
+    def _emergency_stop(self) -> None:
+        messages: list[str] = []
+
+        if self._automation_active:
+            self._stop_auto_ramp(log_completion=False)
+            messages.append("recipe stopped")
+
+        try:
+            self._disable_supply_output()
+            messages.append("current off")
+        except Exception as exc:
+            messages.append(f"current-off failed: {exc}")
+            self._log(f"Emergency stop could not disable supply output: {exc}")
+            self._supply_output_enabled = False
+            self._supply_last_setpoint_mA = 0.0
+
+        try:
+            self._build_tic_controller().halt_and_hold()
+            messages.append("Tic halted")
+        except Exception as exc:
+            messages.append(f"Tic halt failed: {exc}")
+            self._log(f"Emergency stop could not halt Tic: {exc}")
+
+        if self._session_active:
+            self._stop_session()
+            messages.append("session saved/stopped")
+
+        self._refresh_live_labels()
+        self._refresh_plots()
+        summary = "EMERGENCY STOP: " + ", ".join(messages or ["no active hardware/session state"])
+        self._log(summary)
+        self.statusBar().showMessage(summary, 10000)
+
+    def _set_recipe_current_mA(self, current_mA: float) -> bool:
+        if self._supply_controller is None or not self._supply_controller.is_connected():
+            self._log("Recipe stopped because the power supply is not connected.")
+            return False
+        try:
+            if not self._supply_output_enabled:
+                self._supply_controller.initialize_output(
+                    current_mA=current_mA,
+                    reset_on_start=bool(self._supply_controller.profile.get("reset_on_start", False)),
+                )
+                self._supply_output_enabled = True
+            else:
+                self._supply_controller.set_current_mA(current_mA)
+            self._supply_last_setpoint_mA = current_mA
+            self._heating_program_current_mA = current_mA
+            self._refresh_supply_snapshot()
+        except Exception as exc:
+            self._log(f"Recipe current step failed: {exc}")
+            return False
+        return True
 
     def _set_reference_from_current_position(self) -> None:
         self._position_reference_mm = self._current_position_mm
@@ -2214,6 +2477,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return str(self.combo_heating_mode.currentData() or HEATING_MODE_OFF)
 
     def _prepare_heating_for_session(self) -> None:
+        if str(self.combo_recipe_mode.currentData() or "") == "current_sweep":
+            return
         mode = self._heating_mode()
         if mode == HEATING_MODE_OFF:
             return
@@ -2238,6 +2503,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_supply_snapshot()
 
     def _advance_heating_after_record(self) -> None:
+        if self._automation_name == "current_sweep":
+            return
         if self._supply_controller is None or not self._supply_controller.is_connected():
             return
         mode = self._heating_mode()
@@ -2400,11 +2667,12 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._connect_scale()
 
-    def _connect_scale(self) -> None:
+    def _connect_scale(self, checked: bool = False, *, show_errors: bool = True) -> bool:
         port_name = str(self.combo_scale_port.currentData() or "").strip()
         if not port_name:
-            QtWidgets.QMessageBox.warning(self, APP_NAME, "Select a scale serial port first.")
-            return
+            if show_errors:
+                QtWidgets.QMessageBox.warning(self, APP_NAME, "Select a scale serial port first.")
+            return False
         baudrate = int(self.combo_scale_baud.currentText())
         worker = ScaleWorker(
             port_name=port_name,
@@ -2430,6 +2698,7 @@ class MainWindow(QtWidgets.QMainWindow):
         thread.start()
         self.button_scale_connect.setText("Disconnect scale")
         self._scale_hint_timer.start(SCALE_NO_DATA_HINT_DELAY_MS)
+        return True
 
     def _disconnect_scale(self) -> None:
         worker = self._scale_worker
@@ -2535,7 +2804,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         self._log(
             "Hardware tare command sent to the scale."
-            + (f" Current reading: {raw_text}." if raw_text else "")
+            + (f" Current raw reading: {raw_text}." if raw_text else "")
         )
         return True
 
@@ -2607,6 +2876,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _distribution_basis(self) -> str:
         return str(self.combo_distribution_basis.currentData() or HSW_BASIS_STRESS_MPA)
 
+    def _current_sweep_basis(self) -> str:
+        return str(self.combo_current_sweep_basis.currentData() or HSW_BASIS_LOAD_G)
+
     def _distribution_units(self, basis: str | None = None) -> tuple[str, int]:
         basis = basis or self._distribution_basis()
         if basis == HSW_BASIS_LOAD_G:
@@ -2622,6 +2894,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_distribution_end,
             self.spin_distribution_step,
             self.spin_distribution_tolerance,
+        ):
+            widget.blockSignals(True)
+            widget.setDecimals(decimals)
+            widget.setSuffix(suffix)
+            widget.blockSignals(False)
+
+    def _update_current_sweep_basis_ui(self) -> None:
+        suffix, decimals = self._distribution_units(self._current_sweep_basis())
+        for widget in (
+            self.spin_current_sweep_target_start,
+            self.spin_current_sweep_target_end,
+            self.spin_current_sweep_target_step,
+            self.spin_current_sweep_tolerance,
         ):
             widget.blockSignals(True)
             widget.setDecimals(decimals)
@@ -2651,6 +2936,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if include_return and len(targets) > 1:
             targets.extend(reversed(targets[:-1]))
         return targets
+
+    def _build_numeric_targets(self, start_value: float, end_value: float, step_value: float) -> list[float]:
+        if step_value <= 0.0:
+            raise ValueError("Step size must be greater than zero.")
+        delta_value = end_value - start_value
+        if abs(delta_value) < 1e-12:
+            return [start_value]
+        sign = 1.0 if delta_value >= 0.0 else -1.0
+        count = max(1, int(math.ceil(abs(delta_value) / step_value)))
+        return [
+            start_value + sign * min(index * step_value, abs(delta_value))
+            for index in range(0, count + 1)
+        ]
 
     def _current_distribution_value(self, basis: str) -> float | None:
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
@@ -2691,14 +2989,17 @@ class MainWindow(QtWidgets.QMainWindow):
         nudge_mm = abs(float(self.spin_distribution_nudge_mm.value()))
         if nudge_mm <= 0.0:
             raise ValueError("Set a non-zero seek nudge for Hsw distribution.")
-        target_mm = self._current_position_mm + math.copysign(nudge_mm, delta_value)
+        seek_direction = delta_value
+        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            seek_direction *= self._load_sign()
+        target_mm = self._current_position_mm + math.copysign(nudge_mm, seek_direction)
         if not self._move_to_position_mm(target_mm):
             return False
         return self._distribution_target_reached(basis, target_value, tolerance)
 
     def _update_recipe_mode_ui(self) -> None:
         mode = str(self.combo_recipe_mode.currentData() or "ramp")
-        page_index = {"ramp": 0, "cycle": 1, "hold": 2, "distribution": 3}.get(mode, 0)
+        page_index = {"ramp": 0, "cycle": 1, "hold": 2, "distribution": 3, "current_sweep": 4}.get(mode, 0)
         self.recipe_stack.setCurrentIndex(page_index)
         if mode == "cycle":
             summary = (
@@ -2729,6 +3030,26 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{self.spin_distribution_settle_s.value():.2f} s settling."
             )
             banner = "Hsw distribution"
+        elif mode == "current_sweep":
+            basis = self._current_sweep_basis()
+            suffix, _ = self._distribution_units(basis)
+            summary = (
+                f"Recipe ready: hold {HSW_BASIS_LABELS.get(basis, basis)} targets "
+                f"{self.spin_current_sweep_target_start.value():.4f}{suffix} to "
+                f"{self.spin_current_sweep_target_end.value():.4f}{suffix} in "
+                f"{self.spin_current_sweep_target_step.value():.4f}{suffix} steps while sweeping current "
+                f"{self.spin_current_sweep_start_mA.value():.2f} to "
+                f"{self.spin_current_sweep_end_mA.value():.2f} mA."
+            )
+            if self.check_current_sweep_reverse_current.isChecked():
+                summary += " Current sweeps back at each target."
+            if self.check_current_sweep_return_target.isChecked():
+                summary += " Ends by returning to the start target."
+            summary += (
+                f" Hold tolerance {self.spin_current_sweep_tolerance.value():.4f}{suffix}, "
+                f"settle {self.spin_current_sweep_settle_s.value():.2f} s."
+            )
+            banner = "Controlled current sweep"
         else:
             summary = (
                 f"Recipe ready: one-way ramp of {self.spin_ramp_distance.value():.4f} mm "
@@ -2736,6 +3057,10 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             banner = "Ramp recipe"
         heating_mode = self._heating_mode()
+        self.heating_recipe_box.setVisible(mode != "current_sweep")
+        if mode == "current_sweep":
+            heating_mode = HEATING_MODE_OFF
+            summary += " Heating/current is controlled by this recipe; the separate heating program is hidden."
         if heating_mode == HEATING_MODE_CONSTANT:
             summary += f" Heating: hold {self.spin_heat_constant_current.value():.2f} mA."
         elif heating_mode == HEATING_MODE_RAMP:
@@ -2762,11 +3087,20 @@ class MainWindow(QtWidgets.QMainWindow):
             duration_s = (len(steps) * interval_ms) / 1000.0
             self._recipe_estimated_points = record_points
             self.label_recipe_estimate.setText(
-                f"Estimated points: {record_points} | Estimated duration: {duration_s:.1f} s"
+                f"Estimated points: {record_points} | Estimated duration: {_format_duration(duration_s)}"
             )
+            if not self._automation_active:
+                self._automation_total_steps = len(steps)
+                self.recipe_progress.setRange(0, max(1, len(steps)))
+                self.recipe_progress.setValue(0)
+                self.recipe_progress.setFormat("Recipe progress: idle")
         except Exception:
             self._recipe_estimated_points = 0
             self.label_recipe_estimate.setText("Estimated points: - | Estimated duration: -")
+            if not self._automation_active:
+                self.recipe_progress.setRange(0, 100)
+                self.recipe_progress.setValue(0)
+                self.recipe_progress.setFormat("Recipe progress: unavailable")
 
     def _warn_if_scale_is_silent(self) -> None:
         if self._scale_thread is None or self._scale_no_data_hint_emitted:
@@ -2846,7 +3180,7 @@ class MainWindow(QtWidgets.QMainWindow):
         steps = list(steps)
         steps.extend(
             (
-                AutomationStep("move", final_target, "Return to origin"),
+                AutomationStep("move", target_mm=final_target, note="Return to origin"),
                 AutomationStep("record", note="Origin checkpoint"),
             )
         )
@@ -2914,7 +3248,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _move_to_position_mm(self, position_mm: float) -> bool:
         if self._is_max_load_exceeded():
             self._log(
-                f"Move cancelled because effective load {self._current_effective_load_g():.5f} g exceeds "
+                f"Move cancelled because applied load {self._current_effective_load_g():.5f} g exceeds "
                 f"the safety limit of {self.spin_max_load_g.value():.5f} g."
             )
             if self._automation_active:
@@ -2958,7 +3292,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self,
         *,
         created_utc: str,
-    ) -> tuple[Any, Any, csv.DictWriter[str], Path, Path]:
+    ) -> tuple[Any, Any, csv.DictWriter[str], Path, Path, Path]:
         txt_path, csv_path, json_path = self._session_base_paths()
         if txt_path.exists() or csv_path.exists() or json_path.exists():
             answer = QtWidgets.QMessageBox.question(
@@ -3012,7 +3346,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         writer.writeheader()
         csv_handle.flush()
-        return txt_handle, csv_handle, writer, txt_path, json_path
+        return txt_handle, csv_handle, writer, txt_path, csv_path, json_path
 
     def _session_metadata(self) -> dict[str, Any]:
         return {
@@ -3038,6 +3372,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "soft_limit_max_mm": float(self.spin_soft_max_mm.value()),
             "max_load_limit_enabled": self.check_max_load.isChecked(),
             "max_load_limit_g": float(self.spin_max_load_g.value()),
+            "negative_scale_is_tension": self.check_tension_load_positive.isChecked(),
             "return_to_origin": self.check_return_to_origin.isChecked(),
             "scale": {
                 "port": str(self.combo_scale_port.currentData() or ""),
@@ -3072,6 +3407,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 "points_per_plateau": int(self.spin_distribution_points.value()),
                 "interval_ms": int(self.spin_distribution_interval.value()),
                 "return_sweep": self.check_distribution_return_sweep.isChecked(),
+            },
+            "controlled_current_sweep": {
+                "basis": self._current_sweep_basis(),
+                "target_start": float(self.spin_current_sweep_target_start.value()),
+                "target_end": float(self.spin_current_sweep_target_end.value()),
+                "target_step": float(self.spin_current_sweep_target_step.value()),
+                "return_target": self.check_current_sweep_return_target.isChecked(),
+                "current_start_mA": float(self.spin_current_sweep_start_mA.value()),
+                "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
+                "current_step_mA": float(self.spin_current_sweep_step_mA.value()),
+                "reverse_current": self.check_current_sweep_reverse_current.isChecked(),
+                "tolerance": float(self.spin_current_sweep_tolerance.value()),
+                "settle_s": float(self.spin_current_sweep_settle_s.value()),
+                "interval_ms": int(self.spin_current_sweep_interval.value()),
             },
             "builder_project": None if self._builder_project_path is None else str(self._builder_project_path),
         }
@@ -3114,7 +3463,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         created_utc = _utc_timestamp()
         try:
-            txt_handle, csv_handle, csv_writer, txt_path, json_path = self._prepare_session_files(
+            txt_handle, csv_handle, csv_writer, txt_path, csv_path, json_path = self._prepare_session_files(
                 created_utc=created_utc
             )
         except Exception as exc:
@@ -3125,8 +3474,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_created_utc = created_utc
         if self.check_zero_position_on_start.isChecked():
             self._zero_tic_position()
-        if self.check_tare_on_start.isChecked():
-            self._load_offset_g = -self._latest_scale_value_g
+        try:
+            if self.check_hardware_tare_on_start.isChecked() and not self._tare_scale_hardware():
+                raise RuntimeError("Session start cancelled because scale tare failed.")
+            if self.check_tare_on_start.isChecked():
+                self._load_offset_g = -self._latest_scale_value_g
+        except Exception as exc:
+            for handle in (txt_handle, csv_handle):
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            for path in (txt_path, csv_path, json_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self._session_created_utc = None
+            self._log(str(exc))
+            self._refresh_live_labels()
+            return
         self._position_reference_mm = self._current_position_mm
         self._preload_reference_armed = (
             self.check_zero_on_preload.isChecked() and self.spin_preload_threshold_g.value() > 0
@@ -3182,8 +3549,11 @@ class MainWindow(QtWidgets.QMainWindow):
         age_s = self._scale_reading_age_s()
         return age_s is not None and age_s <= STALE_SCALE_AFTER_S
 
+    def _load_sign(self) -> float:
+        return -1.0 if self.check_tension_load_positive.isChecked() else 1.0
+
     def _current_effective_load_g(self) -> float:
-        return self._latest_scale_value_g + self._load_offset_g
+        return self._load_sign() * (self._latest_scale_value_g + self._load_offset_g)
 
     def _current_preload_state(self, load_g: float) -> str:
         if not self.check_zero_on_preload.isChecked() or self.spin_preload_threshold_g.value() <= 0:
@@ -3243,7 +3613,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._is_max_load_exceeded():
             self._log(
-                f"Safety stop: effective load {self._current_effective_load_g():.5f} g exceeded "
+                f"Safety stop: applied load {self._current_effective_load_g():.5f} g exceeded "
                 f"the configured limit of {self.spin_max_load_g.value():.5f} g."
             )
             self._stop_auto_ramp(log_completion=False)
@@ -3308,20 +3678,80 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_csv_handle is not None:
             self._session_csv_handle.flush()
 
+    def _recipe_requires_scale(self, steps: Sequence[AutomationStep]) -> bool:
+        if self.check_hardware_tare_on_start.isChecked():
+            return True
+        return any(
+            step.action == "seek_target" and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            for step in steps
+        )
+
+    def _recipe_requires_supply(self, steps: Sequence[AutomationStep]) -> bool:
+        if any(step.action == "set_current" for step in steps):
+            return True
+        return str(self.combo_recipe_mode.currentData() or "") != "current_sweep" and self._heating_mode() != HEATING_MODE_OFF
+
+    def _ensure_scale_ready_for_recipe(self) -> bool:
+        if self._scale_thread is not None:
+            return True
+        self._log("Preflight: scale is not connected, trying auto-detect/connect.")
+        if not str(self.combo_scale_port.currentData() or "").strip():
+            self._refresh_scale_ports()
+        self._auto_detect_scale_port()
+        return self._connect_scale(show_errors=False)
+
+    def _ensure_supply_ready_for_recipe(self) -> bool:
+        if self._supply_controller is not None and self._supply_controller.is_connected():
+            return True
+        self._log("Preflight: power supply is not connected, trying auto-detect/connect.")
+        if not str(self.combo_supply_port.currentData() or "").strip():
+            self._refresh_supply_ports()
+        self._auto_detect_supply_port()
+        return self._connect_supply(show_errors=False)
+
+    def _preflight_recipe_hardware(self, steps: Sequence[AutomationStep]) -> bool:
+        issues: list[str] = []
+        if self._recipe_requires_scale(steps) and not self._ensure_scale_ready_for_recipe():
+            issues.append("Scale is not connected. Use Auto-detect scale, then Tare scale, and fix the serial link if it still fails.")
+        if self._recipe_requires_supply(steps) and not self._ensure_supply_ready_for_recipe():
+            issues.append("Power supply is not connected. Use Auto-detect/connect supply and check the supply is powered on.")
+        if not issues:
+            return True
+        message = "Recipe preflight failed:\n\n" + "\n".join(f"- {issue}" for issue in issues)
+        self._log(message.replace("\n", " "))
+        QtWidgets.QMessageBox.warning(self, APP_NAME, message)
+        return False
+
+    def _update_recipe_progress(self, *, complete: bool = False) -> None:
+        total = max(1, self._automation_total_steps or len(self._automation_steps))
+        value = total if complete else min(self._automation_index, total)
+        self.recipe_progress.setRange(0, total)
+        self.recipe_progress.setValue(value)
+        percent = int(round((value / total) * 100.0))
+        if complete:
+            self.recipe_progress.setFormat(f"Recipe progress: complete ({total}/{total})")
+        elif self._automation_active:
+            self.recipe_progress.setFormat(f"Recipe progress: {percent}% ({value}/{total} steps)")
+        else:
+            self.recipe_progress.setFormat("Recipe progress: idle")
+
     def _start_auto_ramp(self) -> None:
         if self._automation_active:
             return
-        if not self._session_active:
-            self._start_session()
-            if not self._session_active:
-                return
         try:
             steps, summary, interval_ms = self._build_automation_recipe()
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
             return
+        if not self._preflight_recipe_hardware(steps):
+            return
+        if not self._session_active:
+            self._start_session()
+            if not self._session_active:
+                return
         self._automation_steps = steps
         self._automation_index = 0
+        self._automation_total_steps = len(steps)
         self._automation_active = True
         self._automation_interval_ms = interval_ms
         self._recipe_origin_mm = self._current_position_mm
@@ -3329,9 +3759,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_automation_context(phase="start")
         self._auto_ramp_timer.start(interval_ms)
         self._log(summary)
+        self._update_recipe_progress()
         self._refresh_live_labels()
 
-    def _stop_auto_ramp(self, *, log_completion: bool = True) -> None:
+    def _stop_auto_ramp(self, *, log_completion: bool = True, keep_progress: bool = False) -> None:
         if not self._automation_active:
             return
         self._automation_active = False
@@ -3341,6 +3772,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_automation_context(phase="idle")
         if log_completion:
             self._log("Recipe stopped.")
+        if not keep_progress:
+            self._update_recipe_progress()
         self._refresh_live_labels()
 
     def _build_segment_targets(
@@ -3460,6 +3893,105 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return steps, summary, interval_ms
 
+        if mode == "current_sweep":
+            basis = self._current_sweep_basis()
+            target_start = float(self.spin_current_sweep_target_start.value())
+            target_end = float(self.spin_current_sweep_target_end.value())
+            target_step = abs(float(self.spin_current_sweep_target_step.value()))
+            current_start = float(self.spin_current_sweep_start_mA.value())
+            current_end = float(self.spin_current_sweep_end_mA.value())
+            current_step = abs(float(self.spin_current_sweep_step_mA.value()))
+            interval_ms = int(self.spin_current_sweep_interval.value())
+            settle_s = float(self.spin_current_sweep_settle_s.value())
+            targets = self._build_numeric_targets(target_start, target_end, target_step)
+            currents = self._build_numeric_targets(current_start, current_end, current_step)
+            if self.check_current_sweep_reverse_current.isChecked() and len(currents) > 1:
+                currents.extend(reversed(currents[:-1]))
+            settle_steps = max(0, int(math.ceil((settle_s * 1000.0) / interval_ms)))
+            steps = []
+            for plateau_index, target in enumerate(targets, start=1):
+                steps.append(
+                    AutomationStep(
+                        "seek_target",
+                        target_value=target,
+                        basis=basis,
+                        note=str(plateau_index),
+                    )
+                )
+                for current in currents:
+                    steps.append(
+                        AutomationStep(
+                            "set_current",
+                            target_value=target,
+                            basis=basis,
+                            current_mA=current,
+                            note=str(plateau_index),
+                        )
+                    )
+                    steps.extend(
+                        AutomationStep(
+                            "settle",
+                            target_value=target,
+                            basis=basis,
+                            current_mA=current,
+                            note=str(plateau_index),
+                        )
+                        for _ in range(settle_steps)
+                    )
+                    steps.append(
+                        AutomationStep(
+                            "seek_target",
+                            target_value=target,
+                            basis=basis,
+                            current_mA=current,
+                            note=str(plateau_index),
+                        )
+                    )
+                    steps.append(
+                        AutomationStep(
+                            "record",
+                            target_value=target,
+                            basis=basis,
+                            current_mA=current,
+                            note=str(plateau_index),
+                        )
+                    )
+            if self.check_current_sweep_return_target.isChecked() and targets:
+                steps.append(
+                    AutomationStep(
+                        "set_current",
+                        target_value=targets[0],
+                        basis=basis,
+                        current_mA=current_start,
+                        note=str(len(targets) + 1),
+                    )
+                )
+                steps.append(
+                    AutomationStep(
+                        "seek_target",
+                        target_value=targets[0],
+                        basis=basis,
+                        current_mA=current_start,
+                        note=str(len(targets) + 1),
+                    )
+                )
+                steps.append(
+                    AutomationStep(
+                        "record",
+                        target_value=targets[0],
+                        basis=basis,
+                        current_mA=current_start,
+                        note=str(len(targets) + 1),
+                    )
+                )
+            suffix, _ = self._distribution_units(basis)
+            summary = (
+                f"Started controlled current sweep: {target_start:.4f}{suffix} to {target_end:.4f}{suffix}, "
+                f"target step {target_step:.4f}{suffix}, current {current_start:.2f} to {current_end:.2f} mA "
+                f"in {current_step:.2f} mA steps."
+            )
+            return steps, summary, interval_ms
+
         total_distance_mm = float(self.spin_ramp_distance.value())
         step_mm = abs(float(self.spin_ramp_step.value()))
         interval_ms = int(self.spin_ramp_interval.value())
@@ -3480,7 +4012,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._automation_active:
             return
         if self._automation_index >= len(self._automation_steps):
-            self._stop_auto_ramp(log_completion=False)
+            self._update_recipe_progress(complete=True)
+            self._stop_auto_ramp(log_completion=False, keep_progress=True)
             self._log("Recipe completed.")
             return
         step = self._automation_steps[self._automation_index]
@@ -3500,16 +4033,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_value=step.target_value,
                 plateau_index=plateau_index,
             )
-            tolerance = abs(float(self.spin_distribution_tolerance.value()))
+            tolerance = abs(
+                float(
+                    self.spin_current_sweep_tolerance.value()
+                    if self._automation_name == "current_sweep"
+                    else self.spin_distribution_tolerance.value()
+                )
+            )
             if tolerance <= 0.0:
                 self._stop_auto_ramp(log_completion=False)
-                self._log("Hsw distribution stopped because the target tolerance is zero.")
+                self._log("Recipe stopped because the target tolerance is zero.")
                 return
             try:
                 reached = self._seek_distribution_target(step.basis, step.target_value, tolerance)
             except Exception as exc:
                 self._stop_auto_ramp(log_completion=False)
-                self._log(f"Hsw distribution stopped: {exc}")
+                self._log(f"Recipe stopped: {exc}")
                 return
             if reached:
                 current_value = self._current_distribution_value(step.basis)
@@ -3522,6 +4061,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self._automation_index -= 1
+        elif step.action == "set_current":
+            plateau_index = int(step.note) if step.note.isdigit() else None
+            self._set_automation_context(
+                phase="current",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=plateau_index,
+            )
+            if step.current_mA is None or not self._set_recipe_current_mA(float(step.current_mA)):
+                self._stop_auto_ramp(log_completion=False)
         elif step.action == "settle":
             plateau_index = int(step.note) if step.note.isdigit() else None
             self._set_automation_context(
@@ -3539,6 +4088,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 plateau_index=plateau_index,
             )
             self._record_current_point()
+        self._update_recipe_progress()
         self._refresh_live_labels()
 
     def _handle_status_timer(self) -> None:
@@ -3548,7 +4098,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_supply_snapshot()
         if self._automation_active and self._is_max_load_exceeded():
             self._log(
-                f"Automation stopped because effective load {self._current_effective_load_g():.5f} g exceeded "
+                f"Automation stopped because applied load {self._current_effective_load_g():.5f} g exceeded "
                 f"the limit of {self.spin_max_load_g.value():.5f} g."
             )
             self._stop_auto_ramp(log_completion=False)
@@ -3556,7 +4106,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_live_labels(self) -> None:
         effective_load = self._current_effective_load_g()
         self.label_scale_value.setText(
-            f"Latest load: {self._latest_scale_value_g:.5f} g (effective {effective_load:.5f} g)"
+            f"Raw scale: {self._latest_scale_value_g:.5f} g | Applied tensile load: {effective_load:.5f} g"
         )
         self.label_scale_raw.setText(f"Raw line: {self._latest_scale_text or '-'}")
         self.label_tic_position.setText(
@@ -3735,6 +4285,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("soft_limit_max_mm", self.spin_soft_max_mm.value())
         self.settings.setValue("max_load_enabled", self.check_max_load.isChecked())
         self.settings.setValue("max_load_g", self.spin_max_load_g.value())
+        self.settings.setValue("negative_scale_is_tension", self.check_tension_load_positive.isChecked())
         self.settings.setValue("initial_length_mm", self.spin_initial_length.value())
         self.settings.setValue("diameter_mm", self.spin_diameter.value())
         self.settings.setValue("preload_zeroing_enabled", self.check_zero_on_preload.isChecked())
@@ -3754,6 +4305,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.check_zero_position_on_start.isChecked(),
         )
         self.settings.setValue("tare_on_start", self.check_tare_on_start.isChecked())
+        self.settings.setValue("hardware_tare_on_start", self.check_hardware_tare_on_start.isChecked())
         self.settings.setValue("recipe_mode", self.combo_recipe_mode.currentData())
         self.settings.setValue("return_to_origin", self.check_return_to_origin.isChecked())
         self.settings.setValue("ramp_distance_mm", self.spin_ramp_distance.value())
@@ -3776,6 +4328,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("distribution_points", self.spin_distribution_points.value())
         self.settings.setValue("distribution_interval_ms", self.spin_distribution_interval.value())
         self.settings.setValue("distribution_return_sweep", self.check_distribution_return_sweep.isChecked())
+        self.settings.setValue("current_sweep_basis", self.combo_current_sweep_basis.currentData() or HSW_BASIS_LOAD_G)
+        self.settings.setValue("current_sweep_target_start", self.spin_current_sweep_target_start.value())
+        self.settings.setValue("current_sweep_target_end", self.spin_current_sweep_target_end.value())
+        self.settings.setValue("current_sweep_target_step", self.spin_current_sweep_target_step.value())
+        self.settings.setValue("current_sweep_return_target", self.check_current_sweep_return_target.isChecked())
+        self.settings.setValue("current_sweep_start_mA", self.spin_current_sweep_start_mA.value())
+        self.settings.setValue("current_sweep_end_mA", self.spin_current_sweep_end_mA.value())
+        self.settings.setValue("current_sweep_step_mA", self.spin_current_sweep_step_mA.value())
+        self.settings.setValue("current_sweep_reverse_current", self.check_current_sweep_reverse_current.isChecked())
+        self.settings.setValue("current_sweep_tolerance", self.spin_current_sweep_tolerance.value())
+        self.settings.setValue("current_sweep_settle_s", self.spin_current_sweep_settle_s.value())
+        self.settings.setValue("current_sweep_interval_ms", self.spin_current_sweep_interval.value())
         self.settings.setValue("heating_mode", self.combo_heating_mode.currentData() or HEATING_MODE_OFF)
         self.settings.setValue("heat_constant_current_mA", self.spin_heat_constant_current.value())
         self.settings.setValue("heat_start_current_mA", self.spin_heat_start_current.value())
@@ -3830,6 +4394,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_soft_max_mm.setValue(float(self.settings.value("soft_limit_max_mm", 5.0)))
         self.check_max_load.setChecked(bool(self.settings.value("max_load_enabled", False, type=bool)))
         self.spin_max_load_g.setValue(float(self.settings.value("max_load_g", 25.0)))
+        self.check_tension_load_positive.setChecked(
+            bool(self.settings.value("negative_scale_is_tension", True, type=bool))
+        )
         self.spin_initial_length.setValue(float(self.settings.value("initial_length_mm", 30.0)))
         self.spin_diameter.setValue(float(self.settings.value("diameter_mm", 0.03)))
         self.check_zero_on_preload.setChecked(bool(self.settings.value("preload_zeroing_enabled", True, type=bool)))
@@ -3854,6 +4421,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.check_tare_on_start.setChecked(
             bool(self.settings.value("tare_on_start", True, type=bool))
+        )
+        self.check_hardware_tare_on_start.setChecked(
+            bool(self.settings.value("hardware_tare_on_start", False, type=bool))
         )
         recipe_mode = self.settings.value("recipe_mode", "ramp", type=str)
         recipe_index = self.combo_recipe_mode.findData(recipe_mode)
@@ -3887,6 +4457,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_distribution_return_sweep.setChecked(
             bool(self.settings.value("distribution_return_sweep", True, type=bool))
         )
+        current_sweep_basis = self.settings.value("current_sweep_basis", HSW_BASIS_LOAD_G, type=str)
+        current_sweep_basis_index = self.combo_current_sweep_basis.findData(current_sweep_basis)
+        if current_sweep_basis_index >= 0:
+            self.combo_current_sweep_basis.setCurrentIndex(current_sweep_basis_index)
+        self.spin_current_sweep_target_start.setValue(float(self.settings.value("current_sweep_target_start", 0.0)))
+        self.spin_current_sweep_target_end.setValue(float(self.settings.value("current_sweep_target_end", 20.0)))
+        self.spin_current_sweep_target_step.setValue(float(self.settings.value("current_sweep_target_step", 5.0)))
+        self.check_current_sweep_return_target.setChecked(
+            bool(self.settings.value("current_sweep_return_target", True, type=bool))
+        )
+        self.spin_current_sweep_start_mA.setValue(float(self.settings.value("current_sweep_start_mA", 0.0)))
+        self.spin_current_sweep_end_mA.setValue(float(self.settings.value("current_sweep_end_mA", 25.0)))
+        self.spin_current_sweep_step_mA.setValue(float(self.settings.value("current_sweep_step_mA", 1.0)))
+        self.check_current_sweep_reverse_current.setChecked(
+            bool(self.settings.value("current_sweep_reverse_current", True, type=bool))
+        )
+        self.spin_current_sweep_tolerance.setValue(float(self.settings.value("current_sweep_tolerance", 0.25)))
+        self.spin_current_sweep_settle_s.setValue(float(self.settings.value("current_sweep_settle_s", 0.5)))
+        self.spin_current_sweep_interval.setValue(int(self.settings.value("current_sweep_interval_ms", 250)))
+        self._update_current_sweep_basis_ui()
         heating_mode = self.settings.value("heating_mode", HEATING_MODE_OFF, type=str)
         heating_index = self.combo_heating_mode.findData(heating_mode)
         if heating_index >= 0:

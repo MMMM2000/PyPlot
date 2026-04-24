@@ -4,22 +4,22 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 
 ## What Already Works
 
-- Scale communication: G&G balance on serial, including live reads and remote tare (`ESC+t`).
+- Scale communication: G&G balance on serial, including live reads and the normal `Tare scale` action (`ESC+t`).
 - Motion communication: Pololu Tic T500 through `ticcmd`, including position zero, jog, halt, and recipe-driven position moves.
 - Supply communication: HMP4030/Owon-style SCPI supply, including current setpoint, output control, and measured voltage/current.
 - `.pydpj` import: the Specimen tab can load a Microwire Data Builder project and fill sample metadata, diameter, and current when a matching row is found.
 - Stress calculation: stress is calculated from effective load and wire diameter.
 - Strain calculation: strain is calculated from displacement and `l0`, and can be delayed until the preload threshold is reached so slack take-up does not pollute strain zero.
-- Logging: CSV includes elapsed time, position, raw/effective load, preload state, strain, stress, current setpoint, measured current, voltage, resistance, power, and recipe context.
+- Logging: CSV includes elapsed time, position, signed raw balance reading, positive applied tensile load, preload state, strain, stress, current setpoint, measured current, voltage, resistance, power, and recipe context.
 - Existing recipes: position ramp, cyclic triangle, position hold, and Hsw distribution by load, stress, or strain.
 
 ## Current UI Map
 
-- `Connections`: scale, motor, safety limits, supply connection, manual current, and live supply readout.
-- `Heating`: heating program settings used during session recording, currently off/constant/ramp/triangle.
+- `Hardware`: routine scale/motor actions, jog, safety limits, plus collapsed advanced serial/motor driver settings.
+- `Heating`: supply connection, manual current, and live supply readout; the separate heating program is hidden when the selected recipe controls current directly.
 - `Specimen`: naming, gauge length, diameter, preload zeroing, `.pydpj` import, output folder, session start/stop.
-- `Recipes`: simple recipe type selection and manual setup actions.
-- Right dashboard: live plot, run log, and plot presets.
+- `Recipes`: simple recipe type selection, estimated points/duration, progress bar, auto-connect start button, and manual setup actions.
+- Right dashboard: live plot, run log, and plot presets. The duplicate status-bar echo is hidden so log lines only appear once.
 
 The UI should stay operational and scan-friendly. The left settings panel must not horizontally scroll, and mouse-wheel scrolling over spin boxes or drop-downs must not silently change values.
 
@@ -29,12 +29,12 @@ Use copper wire first, with conservative settings.
 
 1. Confirm scale, Tic, and supply auto-detection.
 2. Connect scale and supply, then use `Probe scale` and `Read supply now`.
-3. Use `Remote tare scale`.
+3. Use `Tare scale`.
 4. Set a known copper-wire diameter and `l0` manually.
-5. Start a session with heating off.
-6. Use tiny jogs to verify the load sign and motion direction.
-7. Run a small load-controlled or displacement-controlled test below the copper-wire safety limit.
-8. Turn on a small current manually and confirm measured current, voltage, and resistance are logged.
+5. Start with the `Controlled current sweep` recipe. The default copper setup holds applied tensile-load targets `0, 5, 10, 15, 20 g`, sweeps current from `0` to `25 mA` and back at each load, then returns to `0 g`.
+6. Use tiny jogs to verify the load sign and motion direction. On the current rig, negative raw scale readings are treated as positive tensile load, so users should still type positive load targets.
+7. Let `Start recipe (auto-connect)` preflight the scale and supply. For controlled current sweep, the separate heating program is hidden because this recipe controls current directly.
+8. Run the controlled current sweep below the copper-wire safety limit.
 9. Stop the session and inspect CSV columns before using a microwire.
 
 ## Microwire Isostress Goal
@@ -55,10 +55,10 @@ The current UI has parameterized built-in recipes. The next layer should be save
 Suggested step types:
 
 - `connect`: verify expected scale/supply/Tic are reachable.
-- `tare_scale`: send remote tare or apply software tare.
+- `tare_scale`: send the physical scale tare command. Do not silently fall back to software tare; if tare fails, stop and fix the scale/serial problem.
 - `set_gauge_zero`: set current motor position as the strain reference.
 - `wait_for_preload`: wait until effective load exceeds a threshold, then set gauge zero.
-- `set_current`: set a fixed current.
+- `set_current`: set a fixed current. The built-in `Controlled current sweep` recipe already uses this internally.
 - `sweep_current`: sweep current start/end/step while recording.
 - `hold_control`: hold load, stress, strain, or position for duration/points.
 - `move_relative`: move by a relative displacement with safety checks.
@@ -92,7 +92,7 @@ For the isostress experiment, the saved recipe could be represented as:
 
 The most intuitive shape is a guided workflow rather than one long settings page:
 
-- `Setup`: hardware status, auto-detect, scale tare, gauge zero, diameter/project import, safety limits.
+- `Setup`: hardware status, auto-detect, scale tare, gauge zero, diameter/project import, safety limits, with driver-level serial/motor details hidden under advanced settings.
 - `Sample`: naming, `.pydpj` row match, diameter, `l0`, notes.
 - `Program`: saved recipes, recipe preview, natural-language recipe preparation, and explicit step list.
 - `Run`: large live controls, start/pause/stop, current target, stress/load/strain target, live plots, run log.
@@ -104,13 +104,16 @@ The operator should always see:
 - whether strain zero is pending or active
 - whether current is actually flowing
 - the active recipe step and stop condition
-- a single obvious emergency stop/halt path
+- a single obvious emergency stop/halt path that remains visible even while scrolling settings
+- only routine operator controls by default; low-level hardware details should stay in an advanced/config section
+- preflight should auto-detect/connect required hardware before making run files and should report all missing devices together
+- recipe estimates should be human-readable and paired with live progress
 
 ## Next Implementation Priorities
 
-1. Add no-horizontal-scroll UI polish and keep the settings page safe to scroll.
-2. Make tare visible in setup/manual controls and add `tare_scale` as a recipe step.
-3. Add saved recipe files and a previewable step list.
+1. Add saved recipe files and a previewable step list.
+2. Add `tare_scale` as a recipe step that aborts cleanly if the physical scale tare fails.
+3. Continue refining commercial-DMA-style guided workflow: Setup -> Program -> Run -> Review, with expert settings hidden unless needed.
 4. Add an isostress current-sweep recipe type using stress or load as the hold basis.
 5. Add a natural-language recipe preparation path that generates the same saved recipe JSON.
 6. Add isostrain and constant-current stress/strain recipes.

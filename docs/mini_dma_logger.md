@@ -48,8 +48,13 @@ Current intended hardware stack:
 - session naming helpers and run notes
 - settings-panel spin boxes and drop-downs ignore mouse-wheel value changes so scrolling the panel cannot silently alter recipe or hardware options
 - the settings panel disables horizontal scrolling, and note/log text wraps to the available width
+- hardware driver details such as baud rates, serial request commands, `ticcmd`, device serials, and steps-per-mm are hidden by default under `Advanced hardware settings`
+- an always-visible `EMERGENCY STOP` button in the dashboard header stops the active recipe/session, halts the Tic motor, and turns the supply output off
+- recipe start runs a preflight that auto-detects/connects required scale and supply hardware before creating run files, and reports all missing devices together
+- long recipe estimates switch from seconds to minutes/hours and the recipe panel includes a live progress bar
+- log messages appear in the `Run log`; the duplicate status-bar echo is hidden
 - output to `TXT`, `CSV`, and `JSON` metadata sidecar
-- shape-memory-friendly export columns for `Displacement`, `Load`, `Strain`, and `Stress`
+- shape-memory-friendly export columns for `Displacement`, positive applied tensile `Load`, `Strain`, and `Stress`
 
 ### Motion
 
@@ -59,6 +64,7 @@ Current intended hardware stack:
 - halt / stop support
 - jog control
 - displacement-driven automation recipes
+- controlled current-sweep recipe that can hold load or stress while stepping current
 - configurable soft position limits and safety cutoff behavior
 
 ### Scale
@@ -67,9 +73,11 @@ Current intended hardware stack:
 - G&G-oriented serial settings
 - automatic scale-port detection based on a live G&G serial response
 - scale probe / diagnostics
-- software tare
-- hardware tare for G&G-compatible balances via the documented remote tare command
-- load logging into the same session stream as motion and heating
+- one normal `Tare scale` action for G&G-compatible balances via the documented remote tare command
+- optional session-start scale tare before the first recorded point
+- negative raw scale readings can be treated as positive tensile load so recipe targets use intuitive positive values
+- applied tensile load is logged as positive `Load` / `load_g`; the signed raw balance reading remains available as `raw_load_g` for diagnostics
+- software tare is kept only in advanced hardware diagnostics because it offsets Mini DMA without changing the physical scale display
 
 ### Heating / Current Annealing
 
@@ -77,6 +85,7 @@ Current intended hardware stack:
 - automatic supply-port detection for supported SCPI supplies
 - live current / voltage / resistance / power channels
 - recipe support for heating-inclusive workflows
+- the separate heating program is hidden for controlled current-sweep recipes because those recipes own the current setpoints directly
 - behavior patterned after the existing current annealing logger rather than as a separate app
 
 ### Shape-Memory Workflow
@@ -183,7 +192,7 @@ The latest bench session confirmed that the app-level assumptions now match the 
 - G&G remote tare working with `ESC+t`
 - HAMEG `HMP4030` replying on `COM3` at `115200` baud
 - HMP4030 channel `3` sourcing real current through the microwire path at about `15 mA`
-- closed-loop motion against live scale feedback successfully moved the effective load to roughly `-5 g` after tare and back near `0 g`
+- closed-loop motion against live scale feedback successfully moved the raw scale to roughly `-5 g`, reported/logged as about `+5 g` applied tensile load, after tare and then back near `0 g`
 
 This means the main remaining risk is not basic communications anymore, but day-to-day measurement workflow polish and safeguards for real sample runs.
 
@@ -209,7 +218,7 @@ After the correct scale adapter/cable is available:
 2. Keep `Pololu Tic Control Center` closed while Mini DMA is using the controller.
 3. Use `Check Tic` and a tiny jog to confirm motion.
 4. Use `Probe scale` and confirm live readings arrive from the balance.
-5. Verify software tare.
+5. Verify `Tare scale`.
 6. Run a minimal preload-only shape-memory test.
 7. Run a short displacement recipe with logging.
 8. Only after that, try the `Hsw distribution` recipe with very conservative settings.
