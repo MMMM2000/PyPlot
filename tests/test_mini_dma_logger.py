@@ -84,7 +84,7 @@ def _set_copper_current_sweep_defaults(window: mini_dma_mod.MainWindow) -> None:
     window.spin_current_sweep_target_step.setValue(5.0)
     window.check_current_sweep_return_target.setChecked(True)
     window.spin_current_sweep_start_mA.setValue(0.0)
-    window.spin_current_sweep_end_mA.setValue(25.0)
+    window.spin_current_sweep_end_mA.setValue(5.0)
     window.spin_current_sweep_step_mA.setValue(1.0)
     window.check_current_sweep_reverse_current.setChecked(True)
     window.spin_current_sweep_interval.setValue(250)
@@ -97,20 +97,25 @@ def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Pa
         def __init__(self) -> None:
             self.target_steps: int | None = None
 
-        def set_target_position(self, position_steps: int) -> None:
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
             self.target_steps = position_steps
+            self.max_speed = max_speed
 
     controller = _FakeController()
     window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
     window._current_position_mm = 1.25
     window._current_position_steps = 125
     window.spin_steps_per_mm.setValue(100.0)
+    ramp_index = window.combo_recipe_mode.findData("ramp")
+    assert ramp_index >= 0
+    window.combo_recipe_mode.setCurrentIndex(ramp_index)
 
     try:
         moved = window._move_to_position_mm(2.0)
 
         assert moved is True
         assert controller.target_steps == 200
+        assert controller.max_speed == 1000000
         assert window._current_position_mm == pytest.approx(1.25)
         assert window._current_position_steps == 125
         assert window._last_move_target_mm == pytest.approx(2.0)
@@ -125,7 +130,7 @@ def test_move_command_rejects_sub_step_targets(tmp_path: Path, qtbot) -> None:
         def __init__(self) -> None:
             self.called = False
 
-        def set_target_position(self, position_steps: int) -> None:
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
             self.called = True
 
     controller = _FakeController()
@@ -140,6 +145,78 @@ def test_move_command_rejects_sub_step_targets(tmp_path: Path, qtbot) -> None:
         assert moved is False
         assert controller.called is False
         assert "rounds to the current motor step" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_jog_repeats_from_last_commanded_target(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    times = iter([0.0, 1.0, 2.0])
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(times))
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._current_position_steps = 0
+    window._current_position_mm = 0.0
+    window._last_move_target_mm = 0.0
+    window._manual_jog_uses_last_target = False
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_jog_mm.setValue(0.1)
+
+    try:
+        window._jog_relative(-1.0)
+        window._jog_relative(-1.0)
+        window._jog_relative(1.0)
+
+        assert controller.targets == [-10, -20, -10]
+        assert window._last_move_target_mm == pytest.approx(-0.1)
+    finally:
+        _close_test_window(window)
+
+
+def test_held_manual_jog_advances_by_configured_linear_speed(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    times = iter([10.0, 10.12, 10.24])
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(times))
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._current_position_steps = 0
+    window._current_position_mm = 0.0
+    window._last_move_target_mm = 0.0
+    window._manual_jog_uses_last_target = False
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_jog_mm.setValue(0.01)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+
+    try:
+        window._jog_relative(-1.0)
+        window._jog_relative(-1.0)
+        window._jog_relative(-1.0)
+
+        assert controller.targets == [-1, -13, -25]
     finally:
         _close_test_window(window)
 
@@ -183,6 +260,11 @@ def test_settings_panel_avoids_horizontal_scrolling(tmp_path: Path, qtbot) -> No
         assert window.log_output.horizontalScrollBarPolicy() == (
             QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        window.resize(440, 700)
+        window._make_settings_panel_width_friendly()
+        _ensure_app().processEvents()
+        assert window._control_scroll_area.horizontalScrollBar().height() == 0
+        assert window._control_scroll_area.horizontalScrollBar().isVisible() is False
         assert window.edit_run_notes.lineWrapMode() == QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth
         assert window.log_output.lineWrapMode() == QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth
     finally:
@@ -193,13 +275,13 @@ def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtb
     window = _build_window(tmp_path, qtbot)
 
     try:
-        index = window.combo_recipe_mode.findData("current_sweep")
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
         _set_copper_current_sweep_defaults(window)
         window._update_recipe_mode_ui()
 
-        assert "Estimated duration: 5.3 min" in window.label_recipe_estimate.text()
+        assert "Estimated duration: 1.2 min" in window.label_recipe_estimate.text()
         assert "20 g" in window.label_recipe_summary.text()
         assert "20.0000" not in window.label_recipe_summary.text()
         assert window.recipe_progress.maximum() > 100
@@ -228,19 +310,46 @@ def test_current_sweep_hides_separate_heating_program(tmp_path: Path, qtbot) -> 
     window = _build_window(tmp_path, qtbot)
 
     try:
-        index = window.combo_recipe_mode.findData("current_sweep")
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
         window._update_recipe_mode_ui()
 
         assert window.heating_recipe_box.isHidden() is True
-        assert "separate heating program is hidden" in window.label_recipe_summary.text()
+        assert "Recipe controls current" in window.label_recipe_summary.text()
 
         ramp_index = window.combo_recipe_mode.findData("ramp")
         window.combo_recipe_mode.setCurrentIndex(ramp_index)
         window._update_recipe_mode_ui()
 
         assert window.heating_recipe_box.isHidden() is False
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_modes_are_separate_recipe_choices(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        expected = {
+            "Iso-load current sweep": (mini_dma_mod.CURRENT_SWEEP_LOAD, mini_dma_mod.HSW_BASIS_LOAD_G),
+            "Iso-stress current sweep": (mini_dma_mod.CURRENT_SWEEP_STRESS, mini_dma_mod.HSW_BASIS_STRESS_MPA),
+            "Iso-strain current sweep": (mini_dma_mod.CURRENT_SWEEP_STRAIN, mini_dma_mod.HSW_BASIS_STRAIN_PCT),
+        }
+
+        labels = {
+            window.combo_recipe_mode.itemText(index): window.combo_recipe_mode.itemData(index)
+            for index in range(window.combo_recipe_mode.count())
+        }
+
+        assert "Iso-load / iso-stress / iso-strain current sweep" not in labels
+        assert window.combo_current_sweep_basis.isHidden() is True
+        for label, (mode, basis) in expected.items():
+            assert labels[label] == mode
+            index = window.combo_recipe_mode.findData(mode)
+            assert index >= 0
+            window.combo_recipe_mode.setCurrentIndex(index)
+            assert window._current_sweep_basis() == basis
     finally:
         _close_test_window(window)
 
@@ -266,6 +375,16 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.edit_scale_request.isVisible() is False
         assert window.edit_ticcmd_path.isVisible() is False
         assert window.spin_steps_per_mm.isVisible() is False
+        tab_labels = [window._control_scroll_area.widget().findChild(QtWidgets.QTabWidget).tabText(index) for index in range(3)]
+        assert tab_labels == ["Recipe", "Specimen", "Hardware"]
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window._update_recipe_mode_ui()
+
+        assert window.spin_current_sweep_nudge_mm.isHidden() is False
+        assert window.spin_current_sweep_balance_speed_mm_s.isHidden() is False
+        assert window.check_hardware_tare_on_start.isHidden() is False
         assert window.button_scale_connect.text() in {"Connect scale", "Disconnect scale"}
         assert window.button_scale_tare.text() == "Tare scale"
         assert window.button_advanced_software_tare.isVisible() is False
@@ -338,7 +457,7 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
     window = _build_window(tmp_path, qtbot)
 
     try:
-        index = window.combo_recipe_mode.findData("current_sweep")
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
         _set_copper_current_sweep_defaults(window)
@@ -354,17 +473,51 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
         ]
 
         assert interval_ms == 250
-        assert len(record_steps) == 256
+        assert len(record_steps) == 56
         assert record_steps[0].basis == mini_dma_mod.HSW_BASIS_LOAD_G
         assert record_steps[0].target_value == pytest.approx(0.0)
         assert record_steps[-1].target_value == pytest.approx(0.0)
         assert {step.target_value for step in record_steps[:-1]} == {0.0, 5.0, 10.0, 15.0, 20.0}
         assert current_steps[0].current_mA == pytest.approx(0.0)
-        assert max(step.current_mA for step in current_steps if step.current_mA is not None) == pytest.approx(25.0)
+        assert max(step.current_mA for step in current_steps if step.current_mA is not None) == pytest.approx(5.0)
         assert seek_targets[-1] == pytest.approx(0.0)
-        assert "controlled current sweep" in summary.lower()
+        assert "iso-load current sweep" in summary.lower()
     finally:
         _close_test_window(window)
+
+
+def test_tic_target_position_energizes_and_exits_safe_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    controller = mini_dma_mod.TicController(command_path="ticcmd", device_serial="00501366")
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    controller.set_target_position(42, max_speed=12345)
+
+    assert calls == [
+        [
+            "ticcmd.exe",
+            "-d",
+            "00501366",
+            "--energize",
+            "--reset-command-timeout",
+            "--exit-safe-start",
+            "--max-speed",
+            "12345",
+            "--position",
+            "42",
+        ]
+    ]
 
 
 def test_negative_scale_reading_is_reported_as_positive_tensile_load(tmp_path: Path, qtbot) -> None:
@@ -480,7 +633,7 @@ def test_tensile_load_seek_moves_negative_when_scale_tension_is_negative(tmp_pat
 
     targets: list[float] = []
 
-    def _capture_move(target_mm: float) -> bool:
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
         targets.append(target_mm)
         return True
 
@@ -499,6 +652,202 @@ def test_tensile_load_seek_moves_negative_when_scale_tension_is_negative(tmp_pat
         _close_test_window(window)
 
 
+def test_recipe_seek_repeats_from_last_commanded_target(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 1.0
+    window._current_position_steps = 100
+    window._last_move_target_mm = 1.0
+    window._manual_jog_uses_last_target = False
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_distribution_nudge_mm.setValue(0.1)
+
+    try:
+        window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        )
+        window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        )
+
+        assert controller.targets == [90, 80]
+    finally:
+        _close_test_window(window)
+
+
+def test_seek_overshoot_uses_fine_reverse_correction(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    targets: list[float] = []
+
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
+        targets.append(target_mm)
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 1.0
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_distribution_nudge_mm.setValue(0.1)
+
+    try:
+        window._latest_scale_value_g = 0.0
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        ) is False
+
+        window._latest_scale_value_g = -6.0
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        ) is False
+
+        assert targets == [pytest.approx(0.9), pytest.approx(1.025)]
+        assert "Overshoot detected" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 1.0
+    window._current_position_steps = 100
+    window._last_move_target_mm = 1.0
+    window._manual_jog_uses_last_target = False
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_distribution_nudge_mm.setValue(0.1)
+    window.spin_backlash_mm.setValue(0.03)
+
+    try:
+        window._latest_scale_value_g = 0.0
+        window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        )
+
+        window._latest_scale_value_g = -6.0
+        window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        )
+
+        assert controller.targets == [90, 96]
+        assert "backlash take-up" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_seek_uses_recipe_balancing_speed(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.target_steps: int | None = None
+            self.max_speed: int | None = None
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.target_steps = position_steps
+            self.max_speed = max_speed
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 1.0
+    window._current_position_steps = 10000
+    window._last_move_target_mm = 1.0
+    window._manual_jog_uses_last_target = False
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window.spin_steps_per_mm.setValue(10000.0)
+    window.spin_current_sweep_nudge_mm.setValue(0.002)
+    window.spin_current_sweep_balance_speed_mm_s.setValue(0.05)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        )
+
+        assert reached is False
+        assert controller.target_steps == 9980
+        assert controller.max_speed == 5_000_000
+    finally:
+        _close_test_window(window)
+
+
+def test_max_load_limit_allows_relaxing_manual_move(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_max_load.setChecked(True)
+    window.spin_max_load_g.setValue(20.0)
+    window._latest_scale_value_g = -20.03
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window._last_move_target_mm = 0.0
+    window._manual_jog_uses_last_target = False
+    window.spin_steps_per_mm.setValue(100.0)
+
+    try:
+        tensioning_move = window._move_to_position_mm(-0.1, manual_jog=True)
+        relaxing_move = window._move_to_position_mm(0.1, manual_jog=True)
+
+        assert tensioning_move is False
+        assert relaxing_move is True
+        assert controller.targets == [10]
+        assert "Relaxing moves are still allowed" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_distribution_seek_rejects_stale_scale_readings(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window._latest_scale_value_g = 12.0
@@ -508,7 +857,7 @@ def test_distribution_seek_rejects_stale_scale_readings(tmp_path: Path, qtbot) -
 
     called = False
 
-    def _fail_if_called(_target_mm: float) -> bool:
+    def _fail_if_called(_target_mm: float, **_kwargs: object) -> bool:
         nonlocal called
         called = True
         return True

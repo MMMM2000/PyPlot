@@ -11,14 +11,13 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 - Stress calculation: stress is calculated from effective load and wire diameter.
 - Strain calculation: strain is calculated from displacement and `l0`, and can be delayed until the preload threshold is reached so slack take-up does not pollute strain zero.
 - Logging: CSV includes elapsed time, position, signed raw balance reading, positive applied tensile load, preload state, strain, stress, current setpoint, measured current, voltage, resistance, power, and recipe context.
-- Existing recipes: position ramp, cyclic triangle, position hold, and Hsw distribution by load, stress, or strain.
+- Existing recipes: displacement ramp, cyclic displacement, displacement hold, Hsw plateau scan, and separate iso-load, iso-stress, and iso-strain current sweeps.
 
 ## Current UI Map
 
-- `Setup`: routine scale/motor actions, jog, safety limits, plus collapsed advanced serial/motor driver settings.
-- `Power`: supply connection, manual current, and live supply readout; the separate heating program is hidden when the selected recipe controls current directly.
+- `Recipe`: normal bench operation, recipe selection, per-recipe speed controls, current-sweep tare-at-start, estimated points/duration, progress bar, auto-connect start button, and manual move/tare/record actions.
 - `Specimen`: naming, gauge length, diameter, preload zeroing, `.pydpj` import, output folder, session start/stop.
-- `Recipes`: simple recipe type selection, estimated points/duration, progress bar, auto-connect start button, and manual setup actions.
+- `Hardware`: lower-priority scale, motor, power-supply, safety, and advanced serial/motor-driver settings for bring-up or troubleshooting.
 - Right dashboard: live plot, run log, and plot presets. The duplicate status-bar echo is hidden so log lines only appear once.
 
 The UI should stay operational and scan-friendly. The left settings panel must not horizontally scroll, and mouse-wheel scrolling over spin boxes or drop-downs must not silently change values.
@@ -31,10 +30,11 @@ Use copper wire first, with conservative settings.
 2. Connect scale and supply, then use `Probe scale` and `Read supply now`.
 3. Use `Tare scale`.
 4. Set a known copper-wire diameter and `l0` manually.
-5. Start with the `Controlled current sweep` recipe. The default copper setup holds applied tensile-load targets `0, 5, 10, 15, 20 g`, sweeps current from `0` to `25 mA` and back at each load, then returns to `0 g`.
+5. Start with the `Iso-load current sweep` recipe. The copper setup holds applied tensile-load targets `0, 5, 10, 15, 20 g`, uses small correction nudges with overshoot detection, sweeps current from `0` to a conservative low-current maximum and back at each load, then returns to `0 g`.
 6. Use tiny jogs to verify the load sign and motion direction. On the current rig, negative raw scale readings are treated as positive tensile load, so users should still type positive load targets.
-7. Let `Start recipe (auto-connect)` preflight the scale and supply. For controlled current sweep, the separate heating program is hidden because this recipe controls current directly.
-8. Run the controlled current sweep below the copper-wire safety limit.
+7. Let `Start recipe (auto-connect)` preflight the scale and supply. For iso-load, iso-stress, and iso-strain current sweeps, the recipe controls current directly.
+8. Run the current sweep below the copper-wire safety limit.
+9. If the max-load safety limit is exceeded during setup, only tension-increasing moves are blocked; use the relaxing manual arrow to back away from the limit.
 9. Stop the session and inspect CSV columns before using a microwire.
 
 ## Microwire Isostress Goal
@@ -92,7 +92,7 @@ For the isostress experiment, the saved recipe could be represented as:
 
 The most intuitive shape is a guided workflow rather than one long settings page:
 
-- `Setup`: hardware status, auto-detect, scale tare, gauge zero, diameter/project import, safety limits, with driver-level serial/motor details hidden under advanced settings.
+- `Hardware`: hardware status, auto-detect, scale tare, gauge zero, diameter/project import, safety limits, with driver-level serial/motor details hidden under advanced settings.
 - `Sample`: naming, `.pydpj` row match, diameter, `l0`, notes.
 - `Program`: saved recipes, recipe preview, natural-language recipe preparation, and explicit step list.
 - `Run`: large live controls, start/pause/stop, current target, stress/load/strain target, live plots, run log.
@@ -113,7 +113,7 @@ The operator should always see:
 ## Next Implementation Priorities
 
 1. Add saved recipe files and a previewable step list.
-2. Add `tare_scale` as a recipe step that aborts cleanly if the physical scale tare fails.
+2. Add explicit saved-recipe `tare_scale` steps. The built-in current-sweep recipe already has a physical scale tare-at-start option that aborts cleanly if tare fails.
 3. Continue refining commercial-DMA-style guided workflow: Setup -> Program -> Run -> Review, with expert settings hidden unless needed.
 4. Add an isostress current-sweep recipe type using stress or load as the hold basis.
 5. Add a natural-language recipe preparation path that generates the same saved recipe JSON.

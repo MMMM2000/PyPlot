@@ -62,12 +62,16 @@ Current intended hardware stack:
 - `ticcmd` integration for Pololu Tic status and commands
 - automatic Tic path / serial detection for the connected controller
 - stale saved `ticcmd` paths are ignored in favor of a discovered local Pololu installation
+- motor moves energize the Tic, reset its command timeout, and exit safe-start before sending the position target
+- displacement recipes expose their own linear move speed, while iso-load, iso-stress, and iso-strain current sweeps are separate recipe choices with conservative correction nudge and correction move speed controls
+- clear stacked `Move up` / `Move down` buttons can be held for continuous manual jogging from the last commanded target, with held movement advancing by the configured linear `Manual move speed` in `mm/s`
+- current-sweep recipes expose `Tare scale at recipe/session start` inside the recipe settings, not hidden in specimen/logging settings
 - position zeroing
 - halt / stop support
 - jog control refuses sub-step moves that would round to the current motor step
 - displacement-driven automation recipes
 - controlled current-sweep recipe that can hold load or stress while stepping current
-- configurable soft position limits and safety cutoff behavior
+- configurable soft position limits and max-load safety behavior; when the load limit is already exceeded, tension-increasing moves are blocked but relaxing moves remain available so the rig is not trapped above the limit
 
 ### Scale
 
@@ -87,7 +91,9 @@ Current intended hardware stack:
 - automatic supply-port detection for supported SCPI supplies
 - live current / voltage / resistance / power channels
 - recipe support for heating-inclusive workflows
-- the separate heating program is hidden for controlled current-sweep recipes because those recipes own the current setpoints directly
+- the main tabs are organized as `Recipe`, `Specimen`, and lower-priority `Hardware`, so scale/motor/power-supply setup does not dominate routine use
+- iso-load, iso-stress, and iso-strain current sweeps own the current setpoints directly and are shown as separate recipe modes
+- closed-loop target seeking detects target overshoot, switches to fine reverse correction nudges, and can apply a measured backlash take-up distance on direction reversals
 - behavior patterned after the existing current annealing logger rather than as a separate app
 
 ### Shape-Memory Workflow
