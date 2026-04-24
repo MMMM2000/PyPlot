@@ -6,6 +6,8 @@ This note is the handoff for the `Mini DMA Logger` workflow so development can c
 
 `Mini DMA Logger` is a hardware-driven stress/strain and heating workflow for a small stepper-based tensile rig. The immediate target is shape-memory microwire work, with a second planned use case for automated `Hsw` distribution measurements under load.
 
+The measurement roadmap, copper-wire bring-up plan, and saved-recipe design notes live in `docs/mini_dma_measurement_plan.md`.
+
 The logger is intended to bring three subsystems into one session:
 
 - motion control through the Pololu `Tic T500`
@@ -44,12 +46,15 @@ Current intended hardware stack:
 
 - one combined Mini DMA session for motion, load, and heating
 - session naming helpers and run notes
+- settings-panel spin boxes and drop-downs ignore mouse-wheel value changes so scrolling the panel cannot silently alter recipe or hardware options
+- the settings panel disables horizontal scrolling, and note/log text wraps to the available width
 - output to `TXT`, `CSV`, and `JSON` metadata sidecar
 - shape-memory-friendly export columns for `Displacement`, `Load`, `Strain`, and `Stress`
 
 ### Motion
 
 - `ticcmd` integration for Pololu Tic status and commands
+- automatic Tic path / serial detection for the connected controller
 - position zeroing
 - halt / stop support
 - jog control
@@ -60,13 +65,16 @@ Current intended hardware stack:
 
 - serial port enumeration and selection
 - G&G-oriented serial settings
+- automatic scale-port detection based on a live G&G serial response
 - scale probe / diagnostics
 - software tare
+- hardware tare for G&G-compatible balances via the documented remote tare command
 - load logging into the same session stream as motion and heating
 
 ### Heating / Current Annealing
 
 - integrated heating subsystem in the same logger
+- automatic supply-port detection for supported SCPI supplies
 - live current / voltage / resistance / power channels
 - recipe support for heating-inclusive workflows
 - behavior patterned after the existing current annealing logger rather than as a separate app
@@ -166,6 +174,19 @@ The implementation was exercised with synthetic and smoke-level checks, includin
 
 This means the code structure and main workflows were developed beyond pure scaffolding, but some features remain hardware-unverified until the scale link is working.
 
+## What Was Verified On Real Hardware
+
+The latest bench session confirmed that the app-level assumptions now match the actual rig wiring:
+
+- Pololu Tic T500 reachable through `ticcmd` with serial `00501366`
+- G&G balance replying on `COM6` at `9600` baud with `ESC+p`
+- G&G remote tare working with `ESC+t`
+- HAMEG `HMP4030` replying on `COM3` at `115200` baud
+- HMP4030 channel `3` sourcing real current through the microwire path at about `15 mA`
+- closed-loop motion against live scale feedback successfully moved the effective load to roughly `-5 g` after tare and back near `0 g`
+
+This means the main remaining risk is not basic communications anymore, but day-to-day measurement workflow polish and safeguards for real sample runs.
+
 ## Recommended First Steps On Another Machine
 
 When resuming work elsewhere:
@@ -174,10 +195,11 @@ When resuming work elsewhere:
 2. Open this file first.
 3. Confirm the project `.venv` is healthy and use it for all Python commands.
 4. Verify `ticcmd` is installed and reachable on that machine.
-5. Reconnect the rig and test the motion side first with tiny jogs.
-6. Re-test the scale link with the correct RS232 adapter/cable chain.
-7. Use the built-in `Probe scale` action before trying full automated runs.
-8. Once the scale is live, run one simple shape-memory measurement before tuning Hsw automation further.
+5. Use the built-in auto-detect actions to classify the Tic, scale, and supply ports if the COM numbering changed.
+6. Reconnect the rig and test the motion side first with tiny jogs.
+7. Re-test the scale link with the correct RS232 adapter/cable chain.
+8. Use the built-in `Probe scale` action before trying full automated runs.
+9. Once the scale is live, run one simple shape-memory measurement before tuning Hsw automation further.
 
 ## Recommended First Live Validation Sequence
 

@@ -103,6 +103,8 @@ def test_video_overrides_tolerate_missing_composition_column() -> None:
     updated = section._apply_overrides_to_table(frame)
 
     assert "Composition" in updated.columns
+    assert VIDEO_END_LENGTH_COLUMN in updated.columns
+    assert VIDEO_MW_LENGTH_COLUMN in updated.columns
     assert updated.at[0, "Composition"] == ""
 
 

@@ -150,8 +150,12 @@ def _utc_timestamp() -> str:
 
 
 def _find_ticcmd() -> str:
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
     candidates = [
         shutil.which("ticcmd"),
+        str(Path(local_app_data) / "Programs" / "Pololu" / "Tic" / "bin" / "ticcmd.exe")
+        if local_app_data
+        else None,
         r"C:\Program Files (x86)\Pololu\Tic\bin\ticcmd.exe",
         r"C:\Program Files\Pololu\Tic\bin\ticcmd.exe",
     ]
@@ -235,6 +239,20 @@ def _extract_first_int(text: str) -> int | None:
         return int(match.group(0))
     except ValueError:
         return None
+
+
+def _parse_tic_list_output(text: str) -> list[tuple[str, str]]:
+    devices: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        candidate = line.strip()
+        if not candidate or "," not in candidate:
+            continue
+        serial_token, _, name_token = candidate.partition(",")
+        serial_number = serial_token.strip()
+        name = name_token.strip()
+        if serial_number:
+            devices.append((serial_number, name))
+    return devices
 
 
 def _read_serial_bytes(
@@ -342,6 +360,61 @@ class ProjectImportResult:
     diameter_mm: float | None
     current_mA: float | None
     matched_row: dict[str, Any]
+
+
+class MicrowireLineEdit(QtWidgets.QLineEdit):
+    """Microwire entry with slash display and filename-safe token conversion."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._normalizing = False
+        self.setPlaceholderText("e.g. 156/2")
+        self.textEdited.connect(self._normalize_on_edit)
+
+    @staticmethod
+    def _split_parts(value: object) -> tuple[str, str]:
+        text = str(value or "").strip().lower()
+        if not text:
+            return "", ""
+        text = text.replace("\\", "/").replace("_", "/")
+        text = re.sub(r"\s+", "", text)
+        if "/" in text:
+            left, right = text.split("/", 1)
+        else:
+            tokens = re.findall(r"\d+", text)
+            if len(tokens) >= 2:
+                left, right = tokens[0], tokens[1]
+            elif len(tokens) == 1:
+                left, right = tokens[0], ""
+            else:
+                left, right = "", ""
+        return re.sub(r"\D", "", left), re.sub(r"\D", "", right)
+
+    @classmethod
+    def to_display_text(cls, value: object) -> str:
+        left, right = cls._split_parts(value)
+        return f"{left}/{right}" if (left or right) else ""
+
+    @classmethod
+    def to_filename_token(cls, value: object) -> str:
+        left, right = cls._split_parts(value)
+        if left and right:
+            return f"{left}_{right}"
+        if left:
+            return left
+        if right:
+            return right
+        return ""
+
+    def _normalize_on_edit(self, _text: str) -> None:
+        if self._normalizing:
+            return
+        normalized = self.to_display_text(self.text())
+        self._normalizing = True
+        cursor = len(normalized)
+        self.setText(normalized)
+        self.setCursorPosition(cursor)
+        self._normalizing = False
 
 
 class PlotConfigDialog(QtWidgets.QDialog):
@@ -692,6 +765,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_points: list[MeasurementPoint] = []
         self._session_active = False
         self._session_start_monotonic = 0.0
+        self._session_created_utc: str | None = None
         self._session_txt_handle: Any = None
         self._session_csv_handle: Any = None
         self._session_csv_writer: csv.DictWriter[str] | None = None
@@ -727,6 +801,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recipe_origin_mm = 0.0
         self._recipe_estimated_points = 0
         self._plot_tiles: list[PlotTileWidgets] = []
+        self._control_scroll_area: QtWidgets.QScrollArea | None = None
         self._build_ui(log_dir or _default_download_dir())
         self._status_timer = QtCore.QTimer(self)
         self._status_timer.setInterval(1000)
@@ -754,7 +829,9 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addWidget(splitter, 1)
 
         control_scroll = QtWidgets.QScrollArea(splitter)
+        self._control_scroll_area = control_scroll
         control_scroll.setWidgetResizable(True)
+        control_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         control_scroll.setMinimumWidth(500)
         control_scroll.setMaximumWidth(620)
         control_panel = QtWidgets.QWidget(control_scroll)
@@ -824,9 +901,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_scale_port = QtWidgets.QComboBox(scale_box)
         refresh_ports_button = QtWidgets.QPushButton("Refresh ports", scale_box)
         refresh_ports_button.clicked.connect(self._refresh_scale_ports)
+        detect_scale_button = QtWidgets.QPushButton("Auto-detect", scale_box)
+        detect_scale_button.clicked.connect(self._auto_detect_scale_port)
         port_row = QtWidgets.QHBoxLayout()
         port_row.addWidget(self.combo_scale_port, stretch=1)
         port_row.addWidget(refresh_ports_button)
+        port_row.addWidget(detect_scale_button)
         scale_form.addRow("Port", port_row)
 
         self.combo_scale_baud = QtWidgets.QComboBox(scale_box)
@@ -856,6 +936,9 @@ class MainWindow(QtWidgets.QMainWindow):
         tare_button = QtWidgets.QPushButton("Software tare", scale_box)
         tare_button.clicked.connect(self._tare_scale)
         scale_buttons.addWidget(tare_button)
+        hardware_tare_button = QtWidgets.QPushButton("Remote tare", scale_box)
+        hardware_tare_button.clicked.connect(self._tare_scale_hardware)
+        scale_buttons.addWidget(hardware_tare_button)
         scale_form.addRow("", scale_buttons)
 
         self.label_scale_value = QtWidgets.QLabel("Latest load: 0.000 g")
@@ -903,6 +986,9 @@ class MainWindow(QtWidgets.QMainWindow):
         refresh_tic_button = QtWidgets.QPushButton("Check Tic", motion_box)
         refresh_tic_button.clicked.connect(self._refresh_tic_status)
         motion_buttons.addWidget(refresh_tic_button)
+        detect_tic_button = QtWidgets.QPushButton("Auto-detect Tic", motion_box)
+        detect_tic_button.clicked.connect(self._auto_detect_tic)
+        motion_buttons.addWidget(detect_tic_button)
         zero_tic_button = QtWidgets.QPushButton("Set position = 0", motion_box)
         zero_tic_button.clicked.connect(self._zero_tic_position)
         motion_buttons.addWidget(zero_tic_button)
@@ -984,9 +1070,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_supply_port = QtWidgets.QComboBox(supply_box)
         refresh_supply_button = QtWidgets.QPushButton("Refresh ports", supply_box)
         refresh_supply_button.clicked.connect(self._refresh_supply_ports)
+        detect_supply_button = QtWidgets.QPushButton("Auto-detect", supply_box)
+        detect_supply_button.clicked.connect(self._auto_detect_supply_port)
         supply_port_row = QtWidgets.QHBoxLayout()
         supply_port_row.addWidget(self.combo_supply_port, stretch=1)
         supply_port_row.addWidget(refresh_supply_button)
+        supply_port_row.addWidget(detect_supply_button)
         supply_form.addRow("Port", supply_port_row)
 
         self.combo_supply_baud = QtWidgets.QComboBox(supply_box)
@@ -1106,8 +1195,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_name_composition = QtWidgets.QLineEdit(naming_box)
         self.edit_name_composition.setPlaceholderText("e.g. Ni51Fe26Ga21")
         naming_form.addRow("Composition", self.edit_name_composition)
-        self.edit_name_wire = QtWidgets.QLineEdit(naming_box)
-        self.edit_name_wire.setPlaceholderText("e.g. 156_2")
+        self.edit_name_wire = MicrowireLineEdit(naming_box)
         naming_form.addRow("Microwire", self.edit_name_wire)
         self.edit_name_specimen = QtWidgets.QLineEdit(naming_box)
         self.edit_name_specimen.setPlaceholderText("e.g. s1")
@@ -1162,6 +1250,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "Optional notes saved into the session metadata, for example gauge length, fixture state, or operator notes."
         )
         self.edit_run_notes.setMaximumBlockCount(200)
+        self.edit_run_notes.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.edit_run_notes.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.edit_run_notes.setFixedHeight(80)
         sample_form.addRow("Run notes", self.edit_run_notes)
         specimen_layout.addWidget(sample_box)
@@ -1414,6 +1504,12 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_record = QtWidgets.QPushButton("Record point now", manual_box)
         manual_record.clicked.connect(self._record_current_point)
         manual_layout.addWidget(manual_record)
+        manual_hardware_tare = QtWidgets.QPushButton("Remote tare scale", manual_box)
+        manual_hardware_tare.clicked.connect(self._tare_scale_hardware)
+        manual_layout.addWidget(manual_hardware_tare)
+        manual_software_tare = QtWidgets.QPushButton("Software tare latest reading", manual_box)
+        manual_software_tare.clicked.connect(self._tare_scale)
+        manual_layout.addWidget(manual_software_tare)
         manual_refresh = QtWidgets.QPushButton("Refresh Tic status", manual_box)
         manual_refresh.clicked.connect(self._refresh_tic_status)
         manual_layout.addWidget(manual_refresh)
@@ -1537,6 +1633,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_output = QtWidgets.QPlainTextEdit(log_container)
         self.log_output.setReadOnly(True)
         self.log_output.setMaximumBlockCount(1000)
+        self.log_output.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.log_output.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.log_output.setPlaceholderText("Mini DMA log output")
         log_layout.addWidget(self.log_output, stretch=1)
         plot_splitter.setStretchFactor(0, 5)
@@ -1597,6 +1695,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_plot_preset("dma")
         self._update_recipe_mode_ui()
         self._refresh_plots()
+        self._install_settings_wheel_guard()
 
     def _group_box(self, title: str) -> QtWidgets.QGroupBox:
         box = QtWidgets.QGroupBox(title, self)
@@ -1605,6 +1704,46 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Maximum,
         )
         return box
+
+    def _install_settings_wheel_guard(self) -> None:
+        control_root = self._control_scroll_area.widget() if self._control_scroll_area is not None else None
+        if control_root is None:
+            return
+        for widget in control_root.findChildren((QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox)):
+            widget.setProperty("_mini_dma_wheel_guard", True)
+            widget.installEventFilter(self)
+            if isinstance(widget, QtWidgets.QAbstractSpinBox):
+                editor = widget.lineEdit()
+                editor.setProperty("_mini_dma_wheel_guard", True)
+                editor.installEventFilter(self)
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if (
+            event.type() == QtCore.QEvent.Type.Wheel
+            and isinstance(watched, (QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox, QtWidgets.QLineEdit))
+            and watched.property("_mini_dma_wheel_guard")
+        ):
+            if isinstance(watched, QtWidgets.QComboBox) and watched.view().isVisible():
+                return super().eventFilter(watched, event)
+            self._scroll_control_panel_from_wheel(event)
+            return True
+        return super().eventFilter(watched, event)
+
+    def _scroll_control_panel_from_wheel(self, event: QtCore.QEvent) -> None:
+        if not isinstance(event, QtGui.QWheelEvent):
+            event.ignore()
+            return
+        scroll_area = self._control_scroll_area
+        if scroll_area is None:
+            event.ignore()
+            return
+        scrollbar = scroll_area.verticalScrollBar()
+        delta = event.pixelDelta().y()
+        if delta == 0:
+            delta = int(event.angleDelta().y() / 120 * scrollbar.singleStep() * 3)
+        if delta != 0:
+            scrollbar.setValue(scrollbar.value() - delta)
+        event.accept()
 
     def _build_status_card(
         self,
@@ -1761,6 +1900,70 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_config_dialog.raise_()
         self.plot_config_dialog.activateWindow()
 
+    def _probe_supply_candidate(self, port_name: str) -> dict[str, Any] | None:
+        if serial is None:
+            return None
+        trials = (
+            (115200, b"*IDN?\r\n"),
+            (115200, b"*IDN?\n"),
+            (9600, b"*IDN?\r\n"),
+            (9600, b"*IDN?\n"),
+        )
+        for baudrate, payload in trials:
+            try:
+                with serial.Serial(port_name, baudrate=baudrate, timeout=0.5, write_timeout=0.5) as port:
+                    port.reset_input_buffer()
+                    port.reset_output_buffer()
+                    port.rts = False
+                    port.dtr = False
+                    time.sleep(0.08)
+                    port.write(payload)
+                    port.flush()
+                    time.sleep(0.12)
+                    raw = port.readline().decode("ascii", errors="ignore").strip()
+            except Exception:
+                continue
+            if not raw:
+                continue
+            upper_raw = raw.upper()
+            profile_id = None
+            if "HMP4030" in upper_raw or "HAMEG" in upper_raw:
+                profile_id = "hmp4030"
+            elif "OWON" in upper_raw or "SPE6102" in upper_raw:
+                profile_id = "owon_spe6102"
+            if profile_id:
+                return {
+                    "port": port_name,
+                    "baudrate": baudrate,
+                    "profile_id": profile_id,
+                    "idn_text": raw,
+                }
+        return None
+
+    def _auto_detect_supply_port(self) -> bool:
+        if list_ports is None:
+            self._log("Supply auto-detect unavailable because pyserial is missing.")
+            return False
+        for port in list_ports.comports():
+            match = self._probe_supply_candidate(port.device)
+            if match is None:
+                continue
+            index = self.combo_supply_port.findData(match["port"])
+            if index >= 0:
+                self.combo_supply_port.setCurrentIndex(index)
+            if self.combo_supply_baud.findText(str(match["baudrate"])) >= 0:
+                self.combo_supply_baud.setCurrentText(str(match["baudrate"]))
+            profile_index = self.combo_supply_profile.findData(str(match["profile_id"]))
+            if profile_index >= 0:
+                self.combo_supply_profile.setCurrentIndex(profile_index)
+            self._log(
+                f"Auto-detected supply on {match['port']} at {match['baudrate']} baud "
+                f"({match['idn_text']})."
+            )
+            return True
+        self._log("Automatic supply detection did not find a supported serial power supply.")
+        return False
+
     def _refresh_supply_ports(self) -> None:
         current = self.combo_supply_port.currentData() or self.settings.value("supply_port", "", type=str)
         self.combo_supply_port.clear()
@@ -1780,6 +1983,58 @@ class MainWindow(QtWidgets.QMainWindow):
         line = f"[{timestamp}] {message}"
         self.log_output.appendPlainText(line)
         self.statusBar().showMessage(message, 5000)
+
+    def _probe_scale_candidate(self, port_name: str) -> dict[str, Any] | None:
+        trials = (
+            (9600, "\\x1bp", ""),
+            (9600, "\\x1bp", "\\r\\n"),
+            (600, "\\x1bp", ""),
+            (600, "\\x1bp", "\\r\\n"),
+        )
+        for baudrate, request_command, terminator in trials:
+            try:
+                raw = _read_serial_bytes(
+                    port_name,
+                    baudrate=baudrate,
+                    payload=_decode_escape_text(request_command) + _decode_escape_text(terminator),
+                    total_wait_s=0.8,
+                )
+            except Exception:
+                continue
+            raw_text = raw.decode("utf-8", errors="ignore").strip()
+            if _parse_first_float(raw_text) is None:
+                continue
+            return {
+                "port": port_name,
+                "baudrate": baudrate,
+                "request_command": request_command,
+                "terminator": terminator,
+                "raw_text": raw_text,
+            }
+        return None
+
+    def _auto_detect_scale_port(self) -> bool:
+        if list_ports is None:
+            self._log("Scale auto-detect unavailable because pyserial is missing.")
+            return False
+        for port in list_ports.comports():
+            match = self._probe_scale_candidate(port.device)
+            if match is None:
+                continue
+            index = self.combo_scale_port.findData(match["port"])
+            if index >= 0:
+                self.combo_scale_port.setCurrentIndex(index)
+            if self.combo_scale_baud.findText(str(match["baudrate"])) >= 0:
+                self.combo_scale_baud.setCurrentText(str(match["baudrate"]))
+            self.edit_scale_request.setText(str(match["request_command"]))
+            self.edit_scale_terminator.setText(str(match["terminator"]))
+            self._log(
+                f"Auto-detected scale on {match['port']} at {match['baudrate']} baud "
+                f"(sample reply: {match['raw_text']})."
+            )
+            return True
+        self._log("Automatic scale detection did not find a responding serial balance.")
+        return False
 
     def _refresh_scale_ports(self) -> None:
         current = self.combo_scale_port.currentData() or self.settings.value("scale_port", "", type=str)
@@ -1807,6 +2062,35 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_scale_port.setCurrentIndex(preferred_index)
         elif self.combo_scale_port.count():
             self.combo_scale_port.setCurrentIndex(0)
+
+    def _auto_detect_tic(self) -> bool:
+        candidates: list[str] = []
+        saved = self.edit_ticcmd_path.text().strip()
+        discovered = _find_ticcmd()
+        for candidate in (saved, discovered):
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+        for candidate in candidates:
+            controller = TicController(command_path=candidate)
+            try:
+                devices = _parse_tic_list_output(controller.run("--list"))
+            except Exception:
+                continue
+            if not devices:
+                continue
+            self.edit_ticcmd_path.setText(candidate)
+            if len(devices) == 1 or not self.edit_tic_serial.text().strip():
+                self.edit_tic_serial.setText(devices[0][0])
+            if len(devices) == 1:
+                self._log(f"Auto-detected Tic controller {devices[0][0]} using {candidate}.")
+            else:
+                self._log(
+                    f"Detected {len(devices)} Tic controllers using {candidate}; "
+                    f"defaulting to {self.edit_tic_serial.text().strip() or devices[0][0]}."
+                )
+            return True
+        self._log("Automatic Tic detection did not find a reachable controller.")
+        return False
 
     def _build_tic_controller(self) -> TicController:
         return TicController(
@@ -2095,7 +2379,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_name_composition.setText(str(row.get("Composition")))
         microwire_value = _project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS)
         if microwire_value:
-            self.edit_name_wire.setText(str(microwire_value))
+            self.edit_name_wire.setText(MicrowireLineEdit.to_display_text(microwire_value) or str(microwire_value))
         specimen_value = _project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS)
         if specimen_value:
             self.edit_name_specimen.setText(str(specimen_value))
@@ -2184,10 +2468,76 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_scale_raw.setText(f"Raw line: {message}")
         self._refresh_live_labels()
 
+    def _query_scale_now(
+        self,
+        *,
+        port_name: str,
+        baudrate: int,
+        request_command: str | None = None,
+        terminator: str | None = None,
+    ) -> tuple[float | None, str]:
+        if serial is None:
+            raise RuntimeError("pyserial is not available.")
+        request_text = self.edit_scale_request.text() if request_command is None else request_command
+        terminator_text = self.edit_scale_terminator.text() if terminator is None else terminator
+        payload = _decode_escape_text(request_text) + _decode_escape_text(terminator_text)
+        with serial.Serial(port_name, baudrate=baudrate, timeout=0.4, write_timeout=0.4) as port:
+            port.reset_input_buffer()
+            port.reset_output_buffer()
+            port.rts = False
+            port.dtr = False
+            time.sleep(0.08)
+            if payload:
+                port.write(payload)
+                port.flush()
+            raw_text = port.readline().decode("utf-8", errors="ignore").strip()
+        return _parse_first_float(raw_text), raw_text
+
     def _tare_scale(self) -> None:
         self._load_offset_g = -self._latest_scale_value_g
         self._refresh_live_labels()
         self._log(f"Software tare set to {self._load_offset_g:+.5f} g.")
+
+    def _tare_scale_hardware(self) -> bool:
+        port_name = str(self.combo_scale_port.currentData() or "").strip()
+        if not port_name:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, "Select a scale serial port first.")
+            return False
+        if serial is None:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, "pyserial is not available.")
+            return False
+        was_connected = self._scale_thread is not None
+        baudrate = int(self.combo_scale_baud.currentText())
+        if was_connected:
+            self._disconnect_scale()
+        try:
+            with serial.Serial(port_name, baudrate=baudrate, timeout=0.4, write_timeout=0.4) as port:
+                port.reset_input_buffer()
+                port.reset_output_buffer()
+                port.rts = False
+                port.dtr = False
+                time.sleep(0.08)
+                port.write(b"\x1bt")
+                port.flush()
+                time.sleep(0.25)
+            value_g, raw_text = self._query_scale_now(port_name=port_name, baudrate=baudrate)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Hardware tare failed: {exc}")
+            return False
+        finally:
+            if was_connected:
+                self._connect_scale()
+        self._load_offset_g = 0.0
+        if value_g is not None:
+            self._latest_scale_value_g = value_g
+        self._latest_scale_text = raw_text or "tare command sent"
+        self._latest_scale_timestamp = time.time()
+        self._refresh_live_labels()
+        self._log(
+            "Hardware tare command sent to the scale."
+            + (f" Current reading: {raw_text}." if raw_text else "")
+        )
+        return True
 
     def _apply_gng_scale_preset(self) -> None:
         if self.combo_scale_baud.findText("600") >= 0:
@@ -2197,13 +2547,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Applied G&G E-series scale preset: 600 baud, ESC+p request, no extra terminator.")
 
     def _build_sample_name(self) -> str:
+        wire_display = MicrowireLineEdit.to_display_text(self.edit_name_wire.text()) or self.edit_name_wire.text().strip()
         parts = [
             self.edit_name_composition.text().strip(),
-            self.edit_name_wire.text().strip(),
+            wire_display,
             self.edit_name_specimen.text().strip(),
-            self.edit_name_condition.text().strip(),
+            " ".join(self.edit_name_condition.text().split()),
         ]
         return " ".join(part for part in parts if part)
+
+    def _build_log_name_label(self, sample_name: str) -> str:
+        condition = " ".join(self.edit_name_condition.text().split())
+        parts = [
+            self.edit_name_composition.text().strip(),
+            MicrowireLineEdit.to_filename_token(self.edit_name_wire.text()) or self.edit_name_wire.text().strip(),
+            self.edit_name_specimen.text().strip(),
+            condition,
+        ]
+        log_label = " ".join(part for part in parts if part) or sample_name
+        if str(self.combo_recipe_mode.currentData() or "") == "distribution":
+            log_label = f"{log_label} {self._distribution_log_suffix()}".strip()
+        return log_label
 
     def _distribution_log_suffix(self) -> str:
         basis = self._distribution_basis()
@@ -2221,9 +2585,7 @@ class MainWindow(QtWidgets.QMainWindow):
         built = self._build_sample_name()
         if built:
             self.edit_sample_name.setText(built)
-            log_label = built
-            if str(self.combo_recipe_mode.currentData() or "") == "distribution":
-                log_label = f"{built} {self._distribution_log_suffix()}".strip()
+            log_label = self._build_log_name_label(built)
             safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
             self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
             self._log(f"Applied naming fields: {built}")
@@ -2233,9 +2595,7 @@ class MainWindow(QtWidgets.QMainWindow):
             built = self._build_sample_name()
             if built:
                 self.edit_sample_name.setText(built)
-                log_label = built
-                if str(self.combo_recipe_mode.currentData() or "") == "distribution":
-                    log_label = f"{built} {self._distribution_log_suffix()}".strip()
+                log_label = self._build_log_name_label(built)
                 safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
                 self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
 
@@ -2293,6 +2653,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return targets
 
     def _current_distribution_value(self, basis: str) -> float | None:
+        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
+            return None
         effective_load = self._current_effective_load_g()
         if basis == HSW_BASIS_LOAD_G:
             return effective_load
@@ -2318,6 +2680,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         current_value = self._current_distribution_value(basis)
         if current_value is None:
+            if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+                raise RuntimeError(
+                    "Scale reading is stale or unavailable. Wait for a fresh balance reading before Hsw seeking."
+                )
             current_value = 0.0
         delta_value = target_value - current_value
         if abs(delta_value) <= tolerance:
@@ -2574,8 +2940,6 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to move Tic: {exc}")
             return False
         self._log(f"Move command sent to {position_mm:.4f} mm ({target_steps} steps).")
-        self._current_position_steps = target_steps
-        self._current_position_mm = position_mm
         self._last_move_target_mm = position_mm
         self._refresh_live_labels()
         return True
@@ -2590,7 +2954,11 @@ class MainWindow(QtWidgets.QMainWindow):
             directory / f"{basename}.json",
         )
 
-    def _prepare_session_files(self) -> tuple[Any, Any, csv.DictWriter[str], Path, Path]:
+    def _prepare_session_files(
+        self,
+        *,
+        created_utc: str,
+    ) -> tuple[Any, Any, csv.DictWriter[str], Path, Path]:
         txt_path, csv_path, json_path = self._session_base_paths()
         if txt_path.exists() or csv_path.exists() or json_path.exists():
             answer = QtWidgets.QMessageBox.question(
@@ -2607,7 +2975,7 @@ class MainWindow(QtWidgets.QMainWindow):
         csv_handle = csv_path.open("w", encoding="utf-8", newline="")
         txt_handle.write("\t".join(LONG_NAMES) + "\n")
         txt_handle.write("\t".join(UNITS) + "\n")
-        txt_handle.write(f"# Created UTC\t{_utc_timestamp()}\n")
+        txt_handle.write(f"# Created UTC\t{created_utc}\n")
         txt_handle.write(f"# Sample\t{self.edit_sample_name.text().strip()}\n")
         txt_handle.write(f"# Notes\t{self.edit_run_notes.toPlainText().strip()}\n")
         txt_handle.write(f"# Initial length mm\t{self.spin_initial_length.value():.6f}\n")
@@ -2648,7 +3016,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _session_metadata(self) -> dict[str, Any]:
         return {
-            "created_utc": _utc_timestamp(),
+            "created_utc": self._session_created_utc or _utc_timestamp(),
             "sample_name": self.edit_sample_name.text().strip(),
             "name_fields": {
                 "composition": self.edit_name_composition.text().strip(),
@@ -2744,13 +3112,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_session(self) -> None:
         if self._session_active:
             return
+        created_utc = _utc_timestamp()
         try:
-            txt_handle, csv_handle, csv_writer, txt_path, json_path = self._prepare_session_files()
+            txt_handle, csv_handle, csv_writer, txt_path, json_path = self._prepare_session_files(
+                created_utc=created_utc
+            )
         except Exception as exc:
             if str(exc):
                 self._log(str(exc))
             return
 
+        self._session_created_utc = created_utc
         if self.check_zero_position_on_start.isChecked():
             self._zero_tic_position()
         if self.check_tare_on_start.isChecked():
@@ -2800,6 +3172,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
         self._refresh_live_labels()
+
+    def _scale_reading_age_s(self) -> float | None:
+        if self._latest_scale_timestamp is None:
+            return None
+        return max(0.0, time.time() - self._latest_scale_timestamp)
+
+    def _has_fresh_scale_reading(self) -> bool:
+        age_s = self._scale_reading_age_s()
+        return age_s is not None and age_s <= STALE_SCALE_AFTER_S
 
     def _current_effective_load_g(self) -> float:
         return self._latest_scale_value_g + self._load_offset_g
@@ -3210,7 +3591,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._latest_scale_timestamp is None:
             scale_value = "No readings yet"
         else:
-            age_s = max(0.0, time.time() - self._latest_scale_timestamp)
+            age_s = self._scale_reading_age_s() or 0.0
             freshness = "stale" if age_s > STALE_SCALE_AFTER_S else "live"
             scale_value = f"{effective_load:.4f} g | {freshness} {age_s:.1f} s"
         self.label_card_scale.setText(scale_value)
@@ -3454,7 +3835,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_zero_on_preload.setChecked(bool(self.settings.value("preload_zeroing_enabled", True, type=bool)))
         self.spin_preload_threshold_g.setValue(float(self.settings.value("preload_threshold_g", 0.02)))
         self.edit_name_composition.setText(self.settings.value("name_composition", "", type=str))
-        self.edit_name_wire.setText(self.settings.value("name_wire", "", type=str))
+        saved_wire = self.settings.value("name_wire", "", type=str)
+        self.edit_name_wire.setText(MicrowireLineEdit.to_display_text(saved_wire) or saved_wire)
         self.edit_name_specimen.setText(self.settings.value("name_specimen", "", type=str))
         self.edit_name_condition.setText(self.settings.value("name_condition", "", type=str))
         self.check_auto_name.setChecked(bool(self.settings.value("auto_name", True, type=bool)))

@@ -99,6 +99,13 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Provide `requires_imported_data = True` if the plug-in needs imported worksheets before plotting, and give its Plot button a descriptive label such as “Plot Temperature Sensitivity” so users always know what the action will generate.
 Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph formatting`, `TXT export`, shared `Open in Origin`, and shared plot-workbooks) and only override per-plugin behavior when the workflow truly needs custom handling. Use `PyPlotPlugin.apply_shared_action_state(...)`, `PyPlotPlugin.clear_plot_tabs(...)`, and `PyPlotPlugin.run_origin_export(...)` to avoid repeating boilerplate per plugin. If a plugin already manages its own workbook lifecycle, set `uses_shared_plot_workbooks = False`.
 
+## Logger Notes
+
+- `Mini DMA Logger` is a launcher workflow rather than a PyPlot plug-in, but it now follows the same microwire-oriented naming flow as the other loggers: the displayed sample name keeps a human-readable microwire token such as `156/2`, while the base filename uses the file-safe form `156_2`.
+- On Windows, Mini DMA can actively auto-detect the connected G&G balance, HMP4030/Owon-style serial supply, and Pololu Tic controller instead of relying on fixed COM assignments. For G&G balances, the logger now also exposes the documented remote tare command in addition to the existing software tare offset.
+- Mini DMA's left settings panel guards spin boxes and drop-downs against mouse-wheel value changes, disables horizontal scrolling, and wraps longer notes/log text to the available width.
+- The Mini DMA measurement roadmap and saved-recipe design notes are tracked in `docs/mini_dma_measurement_plan.md`.
+
 ## Automation
 
 - **Machine-facing recipes**: `launcher.py --automation-recipe <job.json>` runs PyPlot in a Codex-oriented batch mode. The recipe can load an existing `.pypj`, activate a plug-in, import files/folders, generate plots, export artifacts, and save a project without going through the interactive launcher.
