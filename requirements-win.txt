@@ -3,5 +3,5 @@
 # hosts can ignore the Origin dependencies while reusing the file for linting
 # or packaging scripts.
 -r requirements.txt
-originpro==1.1.14; sys_platform == "win32"
+originpro==1.1.15; sys_platform == "win32"
 originext==1.2.5; sys_platform == "win32"
