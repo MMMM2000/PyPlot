@@ -223,6 +223,7 @@ class _AutomationRecipeError(Exception):
 
 
 SESSION_PROTOCOL_VERSION = 1
+DEFAULT_SESSION_COMMAND_TIMEOUT_S = 120.0
 
 
 @dataclass
@@ -1006,6 +1007,14 @@ def _get_session_record(session_id: str) -> dict[str, Any]:
     return payload
 
 
+def _coerce_session_timeout(value: object) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        timeout = DEFAULT_SESSION_COMMAND_TIMEOUT_S
+    return max(5.0, timeout)
+
+
 class _PyPlotSessionBridge(QtCore.QObject):
     _command_signal = QtCore.pyqtSignal(object, object)
 
@@ -1044,15 +1053,23 @@ class _PyPlotSessionBridge(QtCore.QObject):
         command = payload.get("command")
         if not isinstance(command, dict):
             raise RuntimeError("PyPlot session request must include an object 'command'.")
-        return self._dispatch_on_gui_thread(command)
+        return self._dispatch_on_gui_thread(
+            command,
+            timeout_s=_coerce_session_timeout(payload.get("timeout_s")),
+        )
 
-    def _dispatch_on_gui_thread(self, command: dict[str, Any]) -> dict[str, Any]:
+    def _dispatch_on_gui_thread(
+        self,
+        command: dict[str, Any],
+        *,
+        timeout_s: float = DEFAULT_SESSION_COMMAND_TIMEOUT_S,
+    ) -> dict[str, Any]:
         if QtCore.QThread.currentThread() is self.thread():
             return self.window.automation_execute_command(command)
         holder: dict[str, Any] = {}
         event = threading.Event()
         self._command_signal.emit(command, (holder, event))
-        if not event.wait(timeout=60.0):
+        if not event.wait(timeout=timeout_s):
             raise TimeoutError("Timed out waiting for PyPlot session command to finish.")
         error = holder.get("error")
         if isinstance(error, BaseException):
@@ -1120,7 +1137,7 @@ def _send_pyplot_session_command(
     session_id: str,
     command: dict[str, Any],
     *,
-    timeout_s: float = 120.0,
+    timeout_s: float = DEFAULT_SESSION_COMMAND_TIMEOUT_S,
 ) -> dict[str, Any]:
     record = _get_session_record(session_id)
     host = str(record.get("host") or "127.0.0.1")
@@ -1133,6 +1150,7 @@ def _send_pyplot_session_command(
     payload = {
         "token": token,
         "command": command,
+        "timeout_s": _coerce_session_timeout(timeout_s),
     }
     try:
         with socket.create_connection((host, port), timeout=max(5.0, float(timeout_s))) as sock:

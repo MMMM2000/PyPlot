@@ -170,6 +170,61 @@ def test_launcher_detects_pyplot_session_flags() -> None:
     assert launcher_module._is_pyplot_session_requested(args) is True  # noqa: SLF001
 
 
+def test_pyplot_session_command_payload_includes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent_payloads: list[dict[str, object]] = []
+    socket_timeouts: list[float] = []
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self._response_sent = False
+
+        def __enter__(self) -> "FakeSocket":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def settimeout(self, timeout: float) -> None:
+            socket_timeouts.append(timeout)
+
+        def sendall(self, raw: bytes) -> None:
+            sent_payloads.append(json.loads(raw.decode("utf-8")))
+
+        def recv(self, _size: int) -> bytes:
+            if self._response_sent:
+                return b""
+            self._response_sent = True
+            return b'{"status":"ok"}\n'
+
+    def fake_create_connection(address: tuple[str, int], timeout: float) -> FakeSocket:
+        assert address == ("127.0.0.1", 4567)
+        socket_timeouts.append(timeout)
+        return FakeSocket()
+
+    monkeypatch.setattr(
+        launcher_module,
+        "_get_session_record",
+        lambda _session_id: {"host": "127.0.0.1", "port": 4567, "token": "secret"},
+    )
+    monkeypatch.setattr(launcher_module.socket, "create_connection", fake_create_connection)
+
+    response = launcher_module._send_pyplot_session_command(  # noqa: SLF001
+        "session-id",
+        {"action": "open_origin"},
+        timeout_s=240.0,
+    )
+
+    assert response == {"status": "ok"}
+    assert sent_payloads == [
+        {
+            "token": "secret",
+            "command": {"action": "open_origin"},
+            "timeout_s": 240.0,
+        }
+    ]
+    assert socket_timeouts == [240.0, 240.0]
+
+
 def test_launcher_detects_microwire_eda_cli_flags() -> None:
     args, _qt_args = launcher_module._parse_launcher_args(
         [

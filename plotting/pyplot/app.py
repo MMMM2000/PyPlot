@@ -4799,7 +4799,12 @@ class PyPlotWorkbench(PyPlotWindow):
         plugin = getattr(self, "_current_plugin", None)
         if plugin is None:
             raise RuntimeError("No active PyPlot plugin selected for Origin export.")
-        plugin.open_origin()
+        previous = bool(getattr(self, "_automation_suppress_dialogs", False))
+        self._automation_suppress_dialogs = True
+        try:
+            plugin.open_origin()
+        finally:
+            self._automation_suppress_dialogs = previous
         self._automation_flush_events(rounds=6)
         return self.automation_get_state()
 

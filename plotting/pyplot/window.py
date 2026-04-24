@@ -5183,6 +5183,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         return results
 
     def _open_origin_shared(self) -> None:
+        suppress_dialogs = bool(getattr(self, "_automation_suppress_dialogs", False))
         plugin_name = getattr(self, "_current_plotter_name", None)
         plugin_token = plugin_name if isinstance(plugin_name, str) and plugin_name.strip() else None
         self._prune_shared_plot_workbooks()
@@ -5194,6 +5195,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 self._register_shared_plot_workbook_for_tab(tab, descriptor)
                 workbooks = self._shared_plot_workbooks_for_plugin(plugin_token)
         if not workbooks:
+            if suppress_dialogs:
+                raise RuntimeError("Plot at least one graph before exporting to Origin.")
             QtWidgets.QMessageBox.information(
                 self,
                 "Open in Origin",
@@ -5207,6 +5210,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 create_graphs=True,
             )
         except ModuleNotFoundError:
+            if suppress_dialogs:
+                raise
             QtWidgets.QMessageBox.warning(
                 self,
                 "Open in Origin",
@@ -5214,6 +5219,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             )
             return
         except Exception as exc:  # pragma: no cover - GUI error path
+            if suppress_dialogs:
+                raise
             QtWidgets.QMessageBox.critical(
                 self,
                 "Open in Origin",
@@ -5229,22 +5236,27 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 f"and created {plotted} graph{'s' if plotted != 1 else ''}."
             )
             self._append_log(message)
-            QtWidgets.QMessageBox.information(self, "Open in Origin", message)
+            if not suppress_dialogs:
+                QtWidgets.QMessageBox.information(self, "Open in Origin", message)
         else:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Open in Origin",
-                "No worksheet data was exported to Origin.",
-            )
+            if suppress_dialogs:
+                self._append_log("No worksheet data was exported to Origin.", level="error")
+            else:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Open in Origin",
+                    "No worksheet data was exported to Origin.",
+                )
 
         if errors:
             details = "\n".join(errors)
             self._append_log("Some Origin exports failed:\n" + details, level="error")
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Open in Origin",
-                "Some items could not be exported. Check the message log for details.",
-            )
+            if not suppress_dialogs:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Open in Origin",
+                    "Some items could not be exported. Check the message log for details.",
+                )
 
     def _open_origin_prompt(self) -> None:
         raise NotImplementedError
