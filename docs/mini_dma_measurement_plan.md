@@ -15,8 +15,8 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 
 ## Current UI Map
 
-- `Hardware`: routine scale/motor actions, jog, safety limits, plus collapsed advanced serial/motor driver settings.
-- `Heating`: supply connection, manual current, and live supply readout; the separate heating program is hidden when the selected recipe controls current directly.
+- `Setup`: routine scale/motor actions, jog, safety limits, plus collapsed advanced serial/motor driver settings.
+- `Power`: supply connection, manual current, and live supply readout; the separate heating program is hidden when the selected recipe controls current directly.
 - `Specimen`: naming, gauge length, diameter, preload zeroing, `.pydpj` import, output folder, session start/stop.
 - `Recipes`: simple recipe type selection, estimated points/duration, progress bar, auto-connect start button, and manual setup actions.
 - Right dashboard: live plot, run log, and plot presets. The duplicate status-bar echo is hidden so log lines only appear once.
@@ -108,6 +108,7 @@ The operator should always see:
 - only routine operator controls by default; low-level hardware details should stay in an advanced/config section
 - preflight should auto-detect/connect required hardware before making run files and should report all missing devices together
 - recipe estimates should be human-readable and paired with live progress
+- numeric summaries should use compact values such as `20 g` and `0.01 mm` instead of padded zero-only decimals
 
 ## Next Implementation Priorities
 

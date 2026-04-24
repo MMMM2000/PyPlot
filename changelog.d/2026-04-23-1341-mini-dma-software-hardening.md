@@ -10,6 +10,8 @@
 - Mini DMA recipe start now performs a hardware preflight that auto-detects/connects required scale and supply devices, reports missing hardware together, and avoids creating run files until preflight succeeds.
 - Mini DMA recipe estimates now switch to minutes/hours for longer runs and include a live progress bar, while the duplicate status-bar log echo is hidden.
 - Mini DMA hides the separate heating program for controlled current-sweep recipes because those recipes control current directly.
+- Mini DMA now restores stale saved `ticcmd` paths to a discovered local install, clamps tiny saved jog values to a usable minimum, and refuses motor moves that round to the current step.
+- Mini DMA recipe summaries and spin boxes now trim zero-only decimals, for example `20 g` instead of `20.0000 g`.
 - Mini DMA now includes a controlled current-sweep recipe for holding load or stress while stepping current, with copper-wire defaults of `0` to `20 g` in `5 g` steps and `0` to `25 mA` current sweeps.
 - Mini DMA can treat negative raw scale readings as positive tensile load, logs the main applied-load channel as positive values, and can tare the balance at session start before the first point is recorded.
 - Mini DMA now has an always-visible `EMERGENCY STOP` dashboard button that stops the active recipe/session, halts the Tic motor, and commands the power-supply output off.

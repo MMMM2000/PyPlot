@@ -52,6 +52,7 @@ Current intended hardware stack:
 - an always-visible `EMERGENCY STOP` button in the dashboard header stops the active recipe/session, halts the Tic motor, and turns the supply output off
 - recipe start runs a preflight that auto-detects/connects required scale and supply hardware before creating run files, and reports all missing devices together
 - long recipe estimates switch from seconds to minutes/hours and the recipe panel includes a live progress bar
+- numeric recipe summaries and spin boxes trim zero-only decimals, for example `20 g` instead of `20.0000 g`
 - log messages appear in the `Run log`; the duplicate status-bar echo is hidden
 - output to `TXT`, `CSV`, and `JSON` metadata sidecar
 - shape-memory-friendly export columns for `Displacement`, positive applied tensile `Load`, `Strain`, and `Stress`
@@ -60,9 +61,10 @@ Current intended hardware stack:
 
 - `ticcmd` integration for Pololu Tic status and commands
 - automatic Tic path / serial detection for the connected controller
+- stale saved `ticcmd` paths are ignored in favor of a discovered local Pololu installation
 - position zeroing
 - halt / stop support
-- jog control
+- jog control refuses sub-step moves that would round to the current motor step
 - displacement-driven automation recipes
 - controlled current-sweep recipe that can hold load or stress while stepping current
 - configurable soft position limits and safety cutoff behavior

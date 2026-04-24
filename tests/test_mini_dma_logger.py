@@ -78,6 +78,18 @@ def _wheel_event(delta_y: int = -120) -> QtGui.QWheelEvent:
     )
 
 
+def _set_copper_current_sweep_defaults(window: mini_dma_mod.MainWindow) -> None:
+    window.spin_current_sweep_target_start.setValue(0.0)
+    window.spin_current_sweep_target_end.setValue(20.0)
+    window.spin_current_sweep_target_step.setValue(5.0)
+    window.check_current_sweep_return_target.setChecked(True)
+    window.spin_current_sweep_start_mA.setValue(0.0)
+    window.spin_current_sweep_end_mA.setValue(25.0)
+    window.spin_current_sweep_step_mA.setValue(1.0)
+    window.check_current_sweep_reverse_current.setChecked(True)
+    window.spin_current_sweep_interval.setValue(250)
+
+
 def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -102,6 +114,32 @@ def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Pa
         assert window._current_position_mm == pytest.approx(1.25)
         assert window._current_position_steps == 125
         assert window._last_move_target_mm == pytest.approx(2.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_move_command_rejects_sub_step_targets(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.called = False
+
+        def set_target_position(self, position_steps: int) -> None:
+            self.called = True
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._current_position_steps = 0
+    window._current_position_mm = 0.0
+    window.spin_steps_per_mm.setValue(100.0)
+
+    try:
+        moved = window._move_to_position_mm(0.0001)
+
+        assert moved is False
+        assert controller.called is False
+        assert "rounds to the current motor step" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -158,12 +196,30 @@ def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtb
         index = window.combo_recipe_mode.findData("current_sweep")
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
         window._update_recipe_mode_ui()
 
         assert "Estimated duration: 5.3 min" in window.label_recipe_estimate.text()
+        assert "20 g" in window.label_recipe_summary.text()
+        assert "20.0000" not in window.label_recipe_summary.text()
         assert window.recipe_progress.maximum() > 100
         assert window.recipe_progress.value() == 0
         assert "idle" in window.recipe_progress.format()
+    finally:
+        _close_test_window(window)
+
+
+def test_double_spin_boxes_trim_zero_only_decimals(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_jog_mm.setValue(0.01)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_tolerance.setValue(0.25)
+
+        assert window.spin_jog_mm.text().startswith("0.01")
+        assert window.spin_current_sweep_target_end.text().startswith("20 ")
+        assert window.spin_current_sweep_tolerance.text().startswith("0.25")
     finally:
         _close_test_window(window)
 
@@ -217,6 +273,30 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         _close_test_window(window)
 
 
+def test_stale_saved_ticcmd_path_falls_back_to_discovered_install(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    discovered = tmp_path / "ticcmd.exe"
+    discovered.write_bytes(b"")
+    original_settings = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.setValue("ticcmd_path", str(tmp_path / "missing_ticcmd.exe"))
+    settings.setValue("jog_mm", 0.0001)
+    settings.sync()
+    monkeypatch.setattr(mini_dma_mod, "_find_ticcmd", lambda: str(discovered))
+
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert window.edit_ticcmd_path.text() == str(discovered)
+        assert window.spin_jog_mm.value() >= 0.01
+    finally:
+        _close_test_window(window)
+        _restore_settings(original_settings)
+
+
 def test_recipe_preflight_reports_scale_and_supply_together(
     tmp_path: Path,
     qtbot,
@@ -261,6 +341,7 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
         index = window.combo_recipe_mode.findData("current_sweep")
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
 
         steps, summary, interval_ms = window._build_automation_recipe()
 

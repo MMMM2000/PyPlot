@@ -185,6 +185,15 @@ def _format_duration(seconds: float) -> str:
     return f"{hours:d} h {remaining_minutes:.0f} min"
 
 
+def _format_compact_number(value: float, *, decimals: int = 4) -> str:
+    text = f"{float(value):.{decimals}f}".rstrip("0").rstrip(".")
+    return "0" if text in {"", "-0"} else text
+
+
+def _format_compact_unit(value: float, unit: str, *, decimals: int = 4) -> str:
+    return f"{_format_compact_number(value, decimals=decimals)} {unit}"
+
+
 def _parse_first_float(text: str) -> float | None:
     match = FLOAT_PATTERN.search(text)
     if not match:
@@ -427,6 +436,13 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
         self.setText(normalized)
         self.setCursorPosition(cursor)
         self._normalizing = False
+
+
+class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    """Double spin box that avoids padded zero-only decimals in the editor text."""
+
+    def textFromValue(self, value: float) -> str:  # type: ignore[override]
+        return _format_compact_number(value, decimals=self.decimals())
 
 
 class PlotConfigDialog(QtWidgets.QDialog):
@@ -960,10 +976,11 @@ class MainWindow(QtWidgets.QMainWindow):
         motion_buttons.addWidget(halt_tic_button)
         motion_form.addRow("", motion_buttons)
 
-        self.spin_jog_mm = QtWidgets.QDoubleSpinBox(motion_box)
+        self.spin_jog_mm = CompactDoubleSpinBox(motion_box)
         self.spin_jog_mm.setDecimals(4)
-        self.spin_jog_mm.setRange(0.0001, 10.0)
+        self.spin_jog_mm.setRange(0.01, 10.0)
         self.spin_jog_mm.setValue(0.1)
+        self.spin_jog_mm.setToolTip("Smallest visible jog is 0.01 mm so it always maps to at least one motor step with the default calibration.")
         motion_form.addRow("Jog step", self.spin_jog_mm)
 
         jog_buttons = QtWidgets.QHBoxLayout()
@@ -1074,7 +1091,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_tic_serial.setPlaceholderText("optional when only one Tic is connected")
         motion_advanced_form.addRow("Device serial", self.edit_tic_serial)
 
-        self.spin_steps_per_mm = QtWidgets.QDoubleSpinBox(motion_advanced_box)
+        self.spin_steps_per_mm = CompactDoubleSpinBox(motion_advanced_box)
         self.spin_steps_per_mm.setDecimals(3)
         self.spin_steps_per_mm.setRange(1.0, 100000.0)
         self.spin_steps_per_mm.setValue(100.0)
@@ -1094,12 +1111,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_soft_limits = QtWidgets.QCheckBox("Enable position soft limits", safety_box)
         safety_form.addRow("", self.check_soft_limits)
         soft_limit_row = QtWidgets.QHBoxLayout()
-        self.spin_soft_min_mm = QtWidgets.QDoubleSpinBox(safety_box)
+        self.spin_soft_min_mm = CompactDoubleSpinBox(safety_box)
         self.spin_soft_min_mm.setDecimals(4)
         self.spin_soft_min_mm.setRange(-100.0, 100.0)
         self.spin_soft_min_mm.setValue(-5.0)
         self.spin_soft_min_mm.setSuffix(" mm")
-        self.spin_soft_max_mm = QtWidgets.QDoubleSpinBox(safety_box)
+        self.spin_soft_max_mm = CompactDoubleSpinBox(safety_box)
         self.spin_soft_max_mm.setDecimals(4)
         self.spin_soft_max_mm.setRange(-100.0, 100.0)
         self.spin_soft_max_mm.setValue(5.0)
@@ -1112,7 +1129,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.check_max_load = QtWidgets.QCheckBox("Stop automation if effective load exceeds", safety_box)
         safety_form.addRow("", self.check_max_load)
-        self.spin_max_load_g = QtWidgets.QDoubleSpinBox(safety_box)
+        self.spin_max_load_g = CompactDoubleSpinBox(safety_box)
         self.spin_max_load_g.setDecimals(3)
         self.spin_max_load_g.setRange(0.001, 1000.0)
         self.spin_max_load_g.setValue(25.0)
@@ -1130,7 +1147,7 @@ class MainWindow(QtWidgets.QMainWindow):
         safety_form.addRow("", self.label_reference_status)
         hardware_layout.addWidget(safety_box)
         hardware_layout.addStretch(1)
-        tabs.addTab(hardware_tab, "Hardware")
+        tabs.addTab(hardware_tab, "Setup")
 
         heating_tab = QtWidgets.QWidget(tabs)
         heating_layout = QtWidgets.QVBoxLayout(heating_tab)
@@ -1162,14 +1179,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_supply_profile.currentIndexChanged.connect(self._apply_supply_profile_defaults)
         supply_form.addRow("Profile", self.combo_supply_profile)
 
-        self.spin_supply_voltage_limit = QtWidgets.QDoubleSpinBox(supply_box)
+        self.spin_supply_voltage_limit = CompactDoubleSpinBox(supply_box)
         self.spin_supply_voltage_limit.setDecimals(2)
         self.spin_supply_voltage_limit.setRange(0.0, 1000.0)
         self.spin_supply_voltage_limit.setValue(30.0)
         self.spin_supply_voltage_limit.setSuffix(" V")
         supply_form.addRow("Voltage limit", self.spin_supply_voltage_limit)
 
-        self.spin_supply_manual_current = QtWidgets.QDoubleSpinBox(supply_box)
+        self.spin_supply_manual_current = CompactDoubleSpinBox(supply_box)
         self.spin_supply_manual_current.setDecimals(2)
         self.spin_supply_manual_current.setRange(0.0, 5000.0)
         self.spin_supply_manual_current.setValue(1.0)
@@ -1224,28 +1241,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_heating_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
         heating_recipe_form.addRow("Program", self.combo_heating_mode)
 
-        self.spin_heat_constant_current = QtWidgets.QDoubleSpinBox(self.heating_recipe_box)
+        self.spin_heat_constant_current = CompactDoubleSpinBox(self.heating_recipe_box)
         self.spin_heat_constant_current.setDecimals(2)
         self.spin_heat_constant_current.setRange(0.0, 5000.0)
         self.spin_heat_constant_current.setValue(50.0)
         self.spin_heat_constant_current.setSuffix(" mA")
         heating_recipe_form.addRow("Constant current", self.spin_heat_constant_current)
 
-        self.spin_heat_start_current = QtWidgets.QDoubleSpinBox(self.heating_recipe_box)
+        self.spin_heat_start_current = CompactDoubleSpinBox(self.heating_recipe_box)
         self.spin_heat_start_current.setDecimals(2)
         self.spin_heat_start_current.setRange(0.0, 5000.0)
         self.spin_heat_start_current.setValue(10.0)
         self.spin_heat_start_current.setSuffix(" mA")
         heating_recipe_form.addRow("Ramp start", self.spin_heat_start_current)
 
-        self.spin_heat_max_current = QtWidgets.QDoubleSpinBox(self.heating_recipe_box)
+        self.spin_heat_max_current = CompactDoubleSpinBox(self.heating_recipe_box)
         self.spin_heat_max_current.setDecimals(2)
         self.spin_heat_max_current.setRange(0.0, 5000.0)
         self.spin_heat_max_current.setValue(100.0)
         self.spin_heat_max_current.setSuffix(" mA")
         heating_recipe_form.addRow("Ramp max", self.spin_heat_max_current)
 
-        self.spin_heat_step_current = QtWidgets.QDoubleSpinBox(self.heating_recipe_box)
+        self.spin_heat_step_current = CompactDoubleSpinBox(self.heating_recipe_box)
         self.spin_heat_step_current.setDecimals(2)
         self.spin_heat_step_current.setRange(0.01, 5000.0)
         self.spin_heat_step_current.setValue(5.0)
@@ -1262,7 +1279,7 @@ class MainWindow(QtWidgets.QMainWindow):
         heating_recipe_form.addRow("", self.check_output_off_on_stop)
         heating_layout.addWidget(self.heating_recipe_box)
         heating_layout.addStretch(1)
-        tabs.addTab(heating_tab, "Heating")
+        tabs.addTab(heating_tab, "Power")
 
         specimen_tab = QtWidgets.QWidget(tabs)
         specimen_layout = QtWidgets.QVBoxLayout(specimen_tab)
@@ -1292,14 +1309,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         sample_box = self._group_box("Sample")
         sample_form = QtWidgets.QFormLayout(sample_box)
-        self.spin_initial_length = QtWidgets.QDoubleSpinBox(sample_box)
+        self.spin_initial_length = CompactDoubleSpinBox(sample_box)
         self.spin_initial_length.setDecimals(3)
         self.spin_initial_length.setRange(0.0, 1000.0)
         self.spin_initial_length.setValue(30.0)
         self.spin_initial_length.setSuffix(" mm")
         sample_form.addRow("Gauge length l0", self.spin_initial_length)
 
-        self.spin_diameter = QtWidgets.QDoubleSpinBox(sample_box)
+        self.spin_diameter = CompactDoubleSpinBox(sample_box)
         self.spin_diameter.setDecimals(5)
         self.spin_diameter.setRange(0.0, 10.0)
         self.spin_diameter.setValue(0.03)
@@ -1312,7 +1329,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.check_zero_on_preload.setChecked(True)
         sample_form.addRow("", self.check_zero_on_preload)
-        self.spin_preload_threshold_g = QtWidgets.QDoubleSpinBox(sample_box)
+        self.spin_preload_threshold_g = CompactDoubleSpinBox(sample_box)
         self.spin_preload_threshold_g.setDecimals(4)
         self.spin_preload_threshold_g.setRange(0.0, 1000.0)
         self.spin_preload_threshold_g.setValue(0.02)
@@ -1426,14 +1443,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ramp_page = QtWidgets.QWidget(self.recipe_stack)
         ramp_form = QtWidgets.QFormLayout(ramp_page)
-        self.spin_ramp_distance = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_ramp_distance = CompactDoubleSpinBox(automation_box)
         self.spin_ramp_distance.setDecimals(4)
         self.spin_ramp_distance.setRange(-50.0, 50.0)
         self.spin_ramp_distance.setValue(1.0)
         self.spin_ramp_distance.setSuffix(" mm")
         ramp_form.addRow("Total distance", self.spin_ramp_distance)
 
-        self.spin_ramp_step = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_ramp_step = CompactDoubleSpinBox(automation_box)
         self.spin_ramp_step.setDecimals(4)
         self.spin_ramp_step.setRange(0.0001, 10.0)
         self.spin_ramp_step.setValue(0.1)
@@ -1449,13 +1466,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         cycle_page = QtWidgets.QWidget(self.recipe_stack)
         cycle_form = QtWidgets.QFormLayout(cycle_page)
-        self.spin_cycle_amplitude = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_cycle_amplitude = CompactDoubleSpinBox(automation_box)
         self.spin_cycle_amplitude.setDecimals(4)
         self.spin_cycle_amplitude.setRange(-50.0, 50.0)
         self.spin_cycle_amplitude.setValue(1.0)
         self.spin_cycle_amplitude.setSuffix(" mm")
         cycle_form.addRow("Amplitude", self.spin_cycle_amplitude)
-        self.spin_cycle_step = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_cycle_step = CompactDoubleSpinBox(automation_box)
         self.spin_cycle_step.setDecimals(4)
         self.spin_cycle_step.setRange(0.0001, 10.0)
         self.spin_cycle_step.setValue(0.1)
@@ -1474,13 +1491,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         hold_page = QtWidgets.QWidget(self.recipe_stack)
         hold_form = QtWidgets.QFormLayout(hold_page)
-        self.spin_hold_target = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_hold_target = CompactDoubleSpinBox(automation_box)
         self.spin_hold_target.setDecimals(4)
         self.spin_hold_target.setRange(-50.0, 50.0)
         self.spin_hold_target.setValue(0.5)
         self.spin_hold_target.setSuffix(" mm")
         hold_form.addRow("Target offset", self.spin_hold_target)
-        self.spin_hold_duration_s = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_hold_duration_s = CompactDoubleSpinBox(automation_box)
         self.spin_hold_duration_s.setDecimals(1)
         self.spin_hold_duration_s.setRange(0.1, 86400.0)
         self.spin_hold_duration_s.setValue(10.0)
@@ -1499,27 +1516,27 @@ class MainWindow(QtWidgets.QMainWindow):
         for basis_key, label in HSW_BASIS_LABELS.items():
             self.combo_distribution_basis.addItem(label, basis_key)
         distribution_form.addRow("Control basis", self.combo_distribution_basis)
-        self.spin_distribution_start = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_start = CompactDoubleSpinBox(automation_box)
         self.spin_distribution_start.setDecimals(3)
         self.spin_distribution_start.setRange(-100000.0, 100000.0)
         self.spin_distribution_start.setValue(10.0)
         distribution_form.addRow("Start", self.spin_distribution_start)
-        self.spin_distribution_end = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_end = CompactDoubleSpinBox(automation_box)
         self.spin_distribution_end.setDecimals(3)
         self.spin_distribution_end.setRange(-100000.0, 100000.0)
         self.spin_distribution_end.setValue(100.0)
         distribution_form.addRow("End", self.spin_distribution_end)
-        self.spin_distribution_step = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_step = CompactDoubleSpinBox(automation_box)
         self.spin_distribution_step.setDecimals(3)
         self.spin_distribution_step.setRange(0.001, 100000.0)
         self.spin_distribution_step.setValue(10.0)
         distribution_form.addRow("Step", self.spin_distribution_step)
-        self.spin_distribution_tolerance = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_tolerance = CompactDoubleSpinBox(automation_box)
         self.spin_distribution_tolerance.setDecimals(4)
         self.spin_distribution_tolerance.setRange(0.0001, 100000.0)
         self.spin_distribution_tolerance.setValue(0.5)
         distribution_form.addRow("Target tolerance", self.spin_distribution_tolerance)
-        self.spin_distribution_nudge_mm = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_nudge_mm = CompactDoubleSpinBox(automation_box)
         self.spin_distribution_nudge_mm.setDecimals(4)
         self.spin_distribution_nudge_mm.setRange(0.0001, 10.0)
         self.spin_distribution_nudge_mm.setValue(0.01)
@@ -1534,7 +1551,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_distribution_interval.setValue(100)
         self.spin_distribution_interval.setSuffix(" ms")
         distribution_form.addRow("Record interval", self.spin_distribution_interval)
-        self.spin_distribution_settle_s = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_distribution_settle_s = CompactDoubleSpinBox(automation_box)
         self.spin_distribution_settle_s.setDecimals(2)
         self.spin_distribution_settle_s.setRange(0.0, 3600.0)
         self.spin_distribution_settle_s.setValue(1.0)
@@ -1562,17 +1579,17 @@ class MainWindow(QtWidgets.QMainWindow):
         for basis_key in (HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA):
             self.combo_current_sweep_basis.addItem(HSW_BASIS_LABELS[basis_key], basis_key)
         current_sweep_form.addRow("Hold basis", self.combo_current_sweep_basis)
-        self.spin_current_sweep_target_start = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_target_start = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_start.setDecimals(3)
         self.spin_current_sweep_target_start.setRange(-100000.0, 100000.0)
         self.spin_current_sweep_target_start.setValue(0.0)
         current_sweep_form.addRow("Target start", self.spin_current_sweep_target_start)
-        self.spin_current_sweep_target_end = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_target_end = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_end.setDecimals(3)
         self.spin_current_sweep_target_end.setRange(-100000.0, 100000.0)
         self.spin_current_sweep_target_end.setValue(20.0)
         current_sweep_form.addRow("Target end", self.spin_current_sweep_target_end)
-        self.spin_current_sweep_target_step = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_target_step = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_step.setDecimals(3)
         self.spin_current_sweep_target_step.setRange(0.001, 100000.0)
         self.spin_current_sweep_target_step.setValue(5.0)
@@ -1580,19 +1597,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
         self.check_current_sweep_return_target.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_return_target)
-        self.spin_current_sweep_start_mA = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_start_mA = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_start_mA.setDecimals(2)
         self.spin_current_sweep_start_mA.setRange(0.0, 5000.0)
         self.spin_current_sweep_start_mA.setValue(0.0)
         self.spin_current_sweep_start_mA.setSuffix(" mA")
         current_sweep_form.addRow("Current start", self.spin_current_sweep_start_mA)
-        self.spin_current_sweep_end_mA = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_end_mA = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_end_mA.setDecimals(2)
         self.spin_current_sweep_end_mA.setRange(0.0, 5000.0)
         self.spin_current_sweep_end_mA.setValue(25.0)
         self.spin_current_sweep_end_mA.setSuffix(" mA")
         current_sweep_form.addRow("Current end", self.spin_current_sweep_end_mA)
-        self.spin_current_sweep_step_mA = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_step_mA = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_step_mA.setDecimals(2)
         self.spin_current_sweep_step_mA.setRange(0.01, 5000.0)
         self.spin_current_sweep_step_mA.setValue(1.0)
@@ -1601,12 +1618,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
         self.check_current_sweep_reverse_current.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_reverse_current)
-        self.spin_current_sweep_tolerance = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_tolerance = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_tolerance.setDecimals(4)
         self.spin_current_sweep_tolerance.setRange(0.0001, 100000.0)
         self.spin_current_sweep_tolerance.setValue(0.25)
         current_sweep_form.addRow("Hold tolerance", self.spin_current_sweep_tolerance)
-        self.spin_current_sweep_settle_s = QtWidgets.QDoubleSpinBox(automation_box)
+        self.spin_current_sweep_settle_s = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_settle_s.setDecimals(2)
         self.spin_current_sweep_settle_s.setRange(0.0, 3600.0)
         self.spin_current_sweep_settle_s.setValue(0.5)
@@ -3009,25 +3026,25 @@ class MainWindow(QtWidgets.QMainWindow):
             banner = "Cycle recipe"
         elif mode == "hold":
             summary = (
-                f"Recipe ready: move by {self.spin_hold_target.value():.4f} mm and hold for "
-                f"{self.spin_hold_duration_s.value():.1f} s."
+                f"Recipe ready: move by {_format_compact_unit(self.spin_hold_target.value(), 'mm')} and hold for "
+                f"{_format_compact_unit(self.spin_hold_duration_s.value(), 's', decimals=1)}."
             )
             banner = "Hold recipe"
         elif mode == "distribution":
             basis = self._distribution_basis()
             suffix, _ = self._distribution_units(basis)
             summary = (
-                f"Recipe ready: Hsw distribution from {self.spin_distribution_start.value():.4f}{suffix} "
-                f"to {self.spin_distribution_end.value():.4f}{suffix} in "
-                f"{self.spin_distribution_step.value():.4f}{suffix} steps, "
+                f"Recipe ready: Hsw distribution from {_format_compact_number(self.spin_distribution_start.value())}{suffix} "
+                f"to {_format_compact_number(self.spin_distribution_end.value())}{suffix} in "
+                f"{_format_compact_number(self.spin_distribution_step.value())}{suffix} steps, "
                 f"{self.spin_distribution_points.value()} point(s) per plateau."
             )
             if self.check_distribution_return_sweep.isChecked():
                 summary += " Includes a reverse sweep."
             summary += (
-                f" Target tolerance {self.spin_distribution_tolerance.value():.4f}{suffix} "
-                f"with {self.spin_distribution_nudge_mm.value():.4f} mm seek nudges and "
-                f"{self.spin_distribution_settle_s.value():.2f} s settling."
+                f" Target tolerance {_format_compact_number(self.spin_distribution_tolerance.value())}{suffix} "
+                f"with {_format_compact_unit(self.spin_distribution_nudge_mm.value(), 'mm')} seek nudges and "
+                f"{_format_compact_unit(self.spin_distribution_settle_s.value(), 's', decimals=2)} settling."
             )
             banner = "Hsw distribution"
         elif mode == "current_sweep":
@@ -3035,24 +3052,24 @@ class MainWindow(QtWidgets.QMainWindow):
             suffix, _ = self._distribution_units(basis)
             summary = (
                 f"Recipe ready: hold {HSW_BASIS_LABELS.get(basis, basis)} targets "
-                f"{self.spin_current_sweep_target_start.value():.4f}{suffix} to "
-                f"{self.spin_current_sweep_target_end.value():.4f}{suffix} in "
-                f"{self.spin_current_sweep_target_step.value():.4f}{suffix} steps while sweeping current "
-                f"{self.spin_current_sweep_start_mA.value():.2f} to "
-                f"{self.spin_current_sweep_end_mA.value():.2f} mA."
+                f"{_format_compact_number(self.spin_current_sweep_target_start.value())}{suffix} to "
+                f"{_format_compact_number(self.spin_current_sweep_target_end.value())}{suffix} in "
+                f"{_format_compact_number(self.spin_current_sweep_target_step.value())}{suffix} steps while sweeping current "
+                f"{_format_compact_number(self.spin_current_sweep_start_mA.value(), decimals=2)} to "
+                f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)}."
             )
             if self.check_current_sweep_reverse_current.isChecked():
                 summary += " Current sweeps back at each target."
             if self.check_current_sweep_return_target.isChecked():
                 summary += " Ends by returning to the start target."
             summary += (
-                f" Hold tolerance {self.spin_current_sweep_tolerance.value():.4f}{suffix}, "
-                f"settle {self.spin_current_sweep_settle_s.value():.2f} s."
+                f" Hold tolerance {_format_compact_number(self.spin_current_sweep_tolerance.value())}{suffix}, "
+                f"settle {_format_compact_unit(self.spin_current_sweep_settle_s.value(), 's', decimals=2)}."
             )
             banner = "Controlled current sweep"
         else:
             summary = (
-                f"Recipe ready: one-way ramp of {self.spin_ramp_distance.value():.4f} mm "
+                f"Recipe ready: one-way ramp of {_format_compact_unit(self.spin_ramp_distance.value(), 'mm')} "
                 f"from the current position."
             )
             banner = "Ramp recipe"
@@ -3074,7 +3091,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{self.spin_heat_max_current.value():.2f} mA."
             )
         preload_text = (
-            f" Strain zero waits for {self.spin_preload_threshold_g.value():.4f} g preload."
+            f" Strain zero waits for {_format_compact_unit(self.spin_preload_threshold_g.value(), 'g')} preload."
             if self.check_zero_on_preload.isChecked() and self.spin_preload_threshold_g.value() > 0
             else " Strain zero follows the current reference immediately."
         )
@@ -3267,6 +3284,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False
         steps_per_mm = float(self.spin_steps_per_mm.value())
         target_steps = int(round(position_mm * steps_per_mm))
+        if target_steps == self._current_position_steps:
+            min_step_mm = 1.0 / max(1.0, steps_per_mm)
+            self._log(
+                "Move skipped because the requested displacement rounds to the current motor step. "
+                f"Use at least {_format_compact_unit(min_step_mm, 'mm')} with the current calibration."
+            )
+            return False
         controller = self._build_tic_controller()
         try:
             controller.set_target_position(target_steps)
@@ -4383,12 +4407,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_supply_manual_current.setValue(float(self.settings.value("supply_manual_current_mA", 1.0)))
         saved_ticcmd = self.settings.value("ticcmd_path", "ticcmd", type=str)
         discovered_ticcmd = _find_ticcmd()
-        if saved_ticcmd.strip().lower() == "ticcmd" and discovered_ticcmd != "ticcmd":
+        saved_ticcmd_text = saved_ticcmd.strip()
+        saved_ticcmd_missing = (
+            saved_ticcmd_text
+            and saved_ticcmd_text.lower() != "ticcmd"
+            and not Path(saved_ticcmd_text).exists()
+        )
+        if (saved_ticcmd_text.lower() == "ticcmd" or saved_ticcmd_missing) and discovered_ticcmd != "ticcmd":
             saved_ticcmd = discovered_ticcmd
         self.edit_ticcmd_path.setText(saved_ticcmd)
         self.edit_tic_serial.setText(self.settings.value("tic_serial", "", type=str))
         self.spin_steps_per_mm.setValue(float(self.settings.value("steps_per_mm", 100.0)))
-        self.spin_jog_mm.setValue(float(self.settings.value("jog_mm", 0.1)))
+        self.spin_jog_mm.setValue(max(0.01, float(self.settings.value("jog_mm", 0.1))))
         self.check_soft_limits.setChecked(bool(self.settings.value("soft_limits_enabled", False, type=bool)))
         self.spin_soft_min_mm.setValue(float(self.settings.value("soft_limit_min_mm", -5.0)))
         self.spin_soft_max_mm.setValue(float(self.settings.value("soft_limit_max_mm", 5.0)))
