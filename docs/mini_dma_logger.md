@@ -93,12 +93,12 @@ Current intended hardware stack:
 - live current / voltage / resistance / power channels
 - recipe support for heating-inclusive workflows
 - HMP4030 users can optionally assign CH1 or CH2 as the motor-supply channel; recipe preflight turns that channel on before checking Tic VIN, while current annealing remains on the configured annealing channel
-- HMP4030 current commands are treated as 1 mA-resolution setpoints, so a `1 mA/s` ramp updates by about 1 mA once per second rather than pretending to command unsupported sub-mA steps
+- HMP4030 current commands are treated as 0.2 mA-resolution setpoints below 1 A, so a `1 mA/s` ramp can update in smaller timed increments while avoiding unsupported command precision
 - the main tabs are organized as `Recipe`, `Specimen`, and lower-priority `Hardware`, so scale/motor/power-supply setup does not dominate routine use
-- iso-load, iso-stress, and iso-strain current sweeps own the current ramp directly, advance current from elapsed time, and are shown as separate recipe modes
+- iso-load, iso-stress, and iso-strain current sweeps own the current ramp directly, advance current from elapsed time, and are shown as separate recipe modes; the progress bar estimates timed current-ramp ticks instead of only counting visible recipe rows
 - closed-loop target seeking logs feedback samples during each correction/settle/current step, adapts correction step and speed near the target, limits each commanded target by the correction speed and timer interval so moves cannot stack ahead of the real stage position, keeps correcting inside the broad hold tolerance toward a tighter near-target band, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
 - recipe completion stops the session log; recipe stop/fault turns current annealing output off, keeps a resume point, and can ask whether to move displacement or load back toward zero without appending recovery samples to the recipe CSV; paused recipes also turn current output off until resumed
-- resistance is left blank when the current setpoint/measured current is effectively zero, avoiding invalid zero-current resistance points
+- resistance is left blank when the current setpoint/measured current is effectively zero, avoiding invalid zero-current resistance points; supply readbacks are throttled during fast automation so current commands do not fight voltage/current queries on the same serial link
 - behavior patterned after the existing current annealing logger rather than as a separate app
 
 ### Shape-Memory Workflow

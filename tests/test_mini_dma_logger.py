@@ -319,10 +319,11 @@ def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtb
         window.spin_current_sweep_target_end.setValue(20.0)
         window.spin_current_sweep_target_step.setValue(5.0)
         window.spin_current_sweep_end_mA.setValue(5.0)
+        window.spin_current_sweep_step_mA.setValue(0.5)
         window.spin_current_sweep_interval.setValue(500)
         window._update_recipe_mode_ui()
 
-        assert "Estimated duration: 1.6 min" in window.label_recipe_estimate.text()
+        assert "Estimated duration: 1.5 min" in window.label_recipe_estimate.text()
         assert "20 g" in window.label_recipe_summary.text()
         assert "20.0000" not in window.label_recipe_summary.text()
         assert window.recipe_progress.maximum() > 100
@@ -708,6 +709,84 @@ def test_current_sweep_ramp_uses_elapsed_time_and_milliamp_resolution(
         _close_test_window(window)
 
 
+def test_hmp4030_initial_current_command_preserves_sub_milliamp_resolution() -> None:
+    written: list[bytes] = []
+
+    class _FakePort:
+        is_open = True
+
+        def reset_input_buffer(self) -> None:
+            return None
+
+        def write(self, payload: bytes) -> None:
+            written.append(payload)
+
+        def flush(self) -> None:
+            return None
+
+    controller = mini_dma_mod.PowerSupplyController(
+        port_name="COM3",
+        baudrate=115200,
+        profile_id="hmp4030",
+        max_voltage_v=5.0,
+    )
+    controller._serial = _FakePort()  # type: ignore[assignment]
+
+    controller.initialize_output(current_mA=0.2, reset_on_start=False)
+
+    assert b"CURR 0.0002\n" in written
+
+
+def test_supply_reads_are_throttled_during_fast_recipe_logging(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        def __init__(self) -> None:
+            self.measure_count = 0
+
+        def is_connected(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            return None
+
+        def measure(self) -> dict[str, float | None]:
+            self.measure_count += 1
+            return {
+                "voltage_V": 1.0,
+                "current_mA": 1.0,
+                "resistance_ohm": 1000.0,
+                "power_W": 0.001,
+            }
+
+    supply = _FakeSupply()
+    times = iter([10.0, 10.2, 11.0])
+
+    def _fake_monotonic() -> float:
+        try:
+            return next(times)
+        except StopIteration:
+            return 11.0
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    window._supply_controller = supply  # type: ignore[assignment]
+
+    try:
+        first = window._refresh_supply_snapshot()
+        second = window._refresh_supply_snapshot()
+        third = window._refresh_supply_snapshot()
+
+        assert supply.measure_count == 2
+        assert first == second
+        assert third == first
+    finally:
+        _close_test_window(window)
+
+
 def test_tic_target_position_energizes_and_exits_safe_start(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
@@ -952,7 +1031,7 @@ def test_tensile_load_seek_uses_motion_direction_independent_of_scale_sign(tmp_p
         )
 
         assert reached is False
-        assert targets == [pytest.approx(0.9)]
+        assert targets == [pytest.approx(0.95)]
     finally:
         _close_test_window(window)
 
@@ -994,7 +1073,7 @@ def test_recipe_seek_does_not_stack_corrections_ahead_of_confirmed_position(tmp_
             tolerance=0.25,
         )
 
-        assert controller.targets == [90, 90]
+        assert controller.targets == [95, 95]
     finally:
         _close_test_window(window)
 
@@ -1031,7 +1110,7 @@ def test_seek_overshoot_uses_fine_reverse_correction(tmp_path: Path, qtbot) -> N
             tolerance=0.25,
         ) is False
 
-        assert targets == [pytest.approx(0.9), pytest.approx(1.025)]
+        assert targets == [pytest.approx(0.95), pytest.approx(1.025)]
         assert "Overshoot detected" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -1076,7 +1155,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
             tolerance=0.25,
         )
 
-        assert controller.targets == [90, 106]
+        assert controller.targets == [95, 106]
         assert "backlash take-up" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)

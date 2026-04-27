@@ -45,7 +45,7 @@ Target experiment:
 - Repeat at `50 MPa`, `100 MPa`, `150 MPa`, and `200 MPa`.
 - During each current sweep, continuously adjust stage position to keep stress constant.
 - Log resistance, current, voltage, stress, strain, load, displacement, and phase/step labels.
-- For the HMP4030, treat current as 1 mA-resolution setpoints; the software should time the ramp from elapsed time rather than pretending to command sub-mA steps.
+- For the HMP4030, treat current as 0.2 mA-resolution setpoints below 1 A; the software should time the ramp from elapsed time and keep supply readbacks paced so reads do not slow current updates.
 
 The important control loop is "hold target stress, sweep current." The stage changes strain as needed while the supply changes current.
 

@@ -67,6 +67,7 @@ STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
 TIC_KEEPALIVE_INTERVAL_MS = 500
 MIN_RESISTANCE_CURRENT_MA = 0.05
+SUPPLY_READ_MIN_INTERVAL_S = 0.75
 RECOVERY_POSITION = "recovery_position"
 RECOVERY_LOAD = "recovery_load"
 PROJECT_EXTENSION = ".pydpj"
@@ -859,7 +860,7 @@ class PowerSupplyController:
             self.command(f"VOLT {limit_v:.1f}")
             self.command(f"CURR {current_a:.4f}")
         else:
-            self.command(f"CURR {current_a:.3f}")
+            self.command(f"CURR {current_a:.4f}")
             self.command(f"VOLT {limit_v:.1f}")
         self.command("OUTP ON")
 
@@ -943,6 +944,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "resistance_ohm": None,
             "power_W": None,
         }
+        self._supply_snapshot_monotonic = 0.0
         self._supply_output_enabled = False
         self._supply_last_setpoint_mA: float | None = None
         self._heating_program_current_mA: float | None = None
@@ -952,6 +954,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_index = 0
         self._automation_interval_ms = 1000
         self._automation_total_steps = 0
+        self._automation_completed_ticks = 0
         self._automation_name = ""
         self._automation_phase = "idle"
         self._automation_paused = False
@@ -1417,7 +1420,7 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form.addRow("", manual_supply_row)
 
         read_supply_button = QtWidgets.QPushButton("Read supply now", supply_box)
-        read_supply_button.clicked.connect(self._refresh_supply_snapshot)
+        read_supply_button.clicked.connect(lambda _checked=False: self._refresh_supply_snapshot(force=True))
         supply_form.addRow("", read_supply_button)
 
         self.label_supply_status = QtWidgets.QLabel("Supply disconnected.")
@@ -2752,7 +2755,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Supply connected on {controller.port_name} at {controller.baudrate} baud ({controller.profile['label']})."
         )
         self._log(self.label_supply_status.text())
-        self._refresh_supply_snapshot()
+        self._refresh_supply_snapshot(force=True)
         return True
 
     def _disconnect_supply(self) -> None:
@@ -2822,12 +2825,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(f"Motor supply CH{channel} disabled.")
         return True
 
-    def _refresh_supply_snapshot(self) -> dict[str, float | None]:
+    def _refresh_supply_snapshot(self, force: bool = False) -> dict[str, float | None]:
         if self._supply_controller is None or not self._supply_controller.is_connected():
             self._refresh_supply_live_label()
             return dict(self._supply_snapshot)
+        now_s = time.monotonic()
+        if (
+            not force
+            and self._supply_snapshot_monotonic > 0.0
+            and now_s - self._supply_snapshot_monotonic < SUPPLY_READ_MIN_INTERVAL_S
+        ):
+            self._refresh_supply_live_label()
+            self._handle_supply_limit_condition()
+            return dict(self._supply_snapshot)
         try:
             self._supply_snapshot = dict(self._supply_controller.measure())
+            self._supply_snapshot_monotonic = now_s
         except Exception as exc:
             self._log(f"Supply read failed: {exc}")
         self._refresh_supply_live_label()
@@ -2855,7 +2868,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to apply current: {exc}")
             return
         self.label_supply_status.setText("Supply output enabled from the manual current control.")
-        self._refresh_supply_snapshot()
+        self._refresh_supply_snapshot(force=True)
 
     def _enable_supply_output(self) -> None:
         if self._supply_controller is None or not self._supply_controller.is_connected():
@@ -2865,7 +2878,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._supply_controller.output_on()
             self._supply_output_enabled = True
             self.label_supply_status.setText("Supply output enabled.")
-            self._refresh_supply_snapshot()
+            self._refresh_supply_snapshot(force=True)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to enable output: {exc}")
 
@@ -2881,7 +2894,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._supply_output_enabled = False
         self._supply_last_setpoint_mA = 0.0
         self.label_supply_status.setText("Supply output disabled.")
-        self._refresh_supply_snapshot()
+        self._refresh_supply_snapshot(force=True)
 
     def _emergency_stop(self) -> None:
         messages: list[str] = []
@@ -2955,7 +2968,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._supply_last_setpoint_mA = current_mA
             self._heating_program_current_mA = current_mA
             if measure_after:
-                self._refresh_supply_snapshot()
+                self._refresh_supply_snapshot(force=True)
         except Exception as exc:
             self._log(f"Recipe current update failed: {exc}")
             return False
@@ -2998,7 +3011,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_supply_status.setText(
             f"Heating program armed in {HEATING_MODE_LABELS.get(mode, mode)} mode."
         )
-        self._refresh_supply_snapshot()
+        self._refresh_supply_snapshot(force=True)
 
     def _advance_heating_after_record(self) -> None:
         if self._is_current_sweep_mode(self._automation_name):
@@ -3797,8 +3810,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Estimated points: {record_points} | Estimated duration: {_format_duration(duration_s)}"
             )
             if not self._automation_active:
-                self._automation_total_steps = len(steps)
-                self.recipe_progress.setRange(0, max(1, len(steps)))
+                self._automation_total_steps = tick_count
+                self.recipe_progress.setRange(0, max(1, tick_count))
                 self.recipe_progress.setValue(0)
                 self.recipe_progress.setFormat("Recipe progress: idle")
         except Exception:
@@ -4724,14 +4737,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
         total = max(1, self._automation_total_steps or len(self._automation_steps))
-        value = total if complete else min(self._automation_index, total)
+        value = total if complete else min(self._automation_completed_ticks, total)
         self.recipe_progress.setRange(0, total)
         self.recipe_progress.setValue(value)
         percent = int(round((value / total) * 100.0))
         if complete:
             self.recipe_progress.setFormat(f"Recipe progress: complete ({total}/{total})")
         elif self._automation_active:
-            self.recipe_progress.setFormat(f"Recipe progress: {percent}% ({value}/{total} steps)")
+            self.recipe_progress.setFormat(f"Recipe progress: {percent}% ({value}/{total})")
         else:
             self.recipe_progress.setFormat("Recipe progress: idle")
 
@@ -4764,7 +4777,7 @@ class MainWindow(QtWidgets.QMainWindow):
         box.setIcon(QtWidgets.QMessageBox.Icon.Question)
         box.setText("A recipe was stopped before it finished.")
         box.setInformativeText(
-            f"Resume from step {state.index + 1} of {max(1, state.total_steps)}, or start the recipe from the beginning?"
+            f"Resume from saved recipe row {state.index + 1}, or start the recipe from the beginning?"
         )
         resume_button = box.addButton("Resume", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
         start_button = box.addButton("Start over", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
@@ -4790,6 +4803,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_steps = list(state.steps)
         self._automation_index = min(max(0, int(state.index)), len(self._automation_steps))
         self._automation_total_steps = int(state.total_steps)
+        self._automation_completed_ticks = min(self._automation_index, self._automation_total_steps)
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = int(state.interval_ms)
@@ -4804,7 +4818,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
         self._auto_ramp_timer.start(self._automation_interval_ms)
-        self._log(f"Recipe resumed at step {self._automation_index + 1} of {max(1, self._automation_total_steps)}.")
+        self._log(f"Recipe resumed at saved recipe row {self._automation_index + 1}.")
         self._update_recipe_progress()
         self._update_recipe_buttons()
         self._refresh_live_labels()
@@ -5008,7 +5022,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_recovery_plot_dialog(f"Mini DMA Recovery: {label}")
         self._automation_steps = steps
         self._automation_index = 0
-        self._automation_total_steps = len(steps)
+        _, tick_count = self._estimate_recipe_points_and_ticks(steps, interval_ms)
+        self._automation_total_steps = tick_count
+        self._automation_completed_ticks = 0
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = interval_ms
@@ -5042,10 +5058,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_recovery_plot_dialog("Mini DMA Recovery: load to zero")
         self._automation_steps = steps
         self._automation_index = 0
-        self._automation_total_steps = len(steps)
+        self._automation_interval_ms = int(self.spin_current_sweep_interval.value())
+        _, tick_count = self._estimate_recipe_points_and_ticks(steps, self._automation_interval_ms)
+        self._automation_total_steps = tick_count
+        self._automation_completed_ticks = 0
         self._automation_active = True
         self._automation_paused = False
-        self._automation_interval_ms = int(self.spin_current_sweep_interval.value())
         self._automation_name = RECOVERY_LOAD
         self._set_automation_context(phase="recover", basis=HSW_BASIS_LOAD_G, target_value=0.0, plateau_index=0)
         self._auto_ramp_timer.start(self._automation_interval_ms)
@@ -5071,6 +5089,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_paused = False
         self._automation_steps = []
         self._automation_index = 0
+        if not keep_progress:
+            self._automation_completed_ticks = 0
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
         self._seek_no_response_count_by_key.clear()
@@ -5504,6 +5524,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._record_recovery_point()
             elif not self._record_current_point():
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+        if self._automation_active:
+            self._automation_completed_ticks = min(
+                max(1, self._automation_total_steps or len(self._automation_steps)),
+                self._automation_completed_ticks + 1,
+            )
         self._update_recipe_progress()
         self._refresh_live_labels()
 
