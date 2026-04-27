@@ -57,6 +57,6 @@ platform = "darwin"
 name = "Run"
 icon = "run"
 command = '''
-cmd.exe /d /k ".venv\Scripts\python.exe launcher.py"
+C:\Windows\System32\cmd.exe /d /k call ".codex\run-pyplot.cmd"
 '''
 platform = "win32"

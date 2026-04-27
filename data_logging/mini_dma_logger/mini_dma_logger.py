@@ -379,6 +379,9 @@ class AutomationStep:
     action: str
     target_mm: float | None = None
     target_value: float | None = None
+    target_start_value: float | None = None
+    target_end_value: float | None = None
+    target_ramp_rate_value_s: float | None = None
     basis: str | None = None
     current_mA: float | None = None
     current_start_mA: float | None = None
@@ -970,6 +973,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_step_index: int | None = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA: float | None = None
+        self._active_target_ramp_step_index: int | None = None
+        self._active_target_ramp_started_s = 0.0
+        self._active_target_ramp_start_value: float | None = None
         self._plot_tiles: list[PlotTileWidgets] = []
         self._control_scroll_area: QtWidgets.QScrollArea | None = None
         self._manual_jog_direction = 0.0
@@ -1862,6 +1868,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_target_step.setRange(0.001, 100000.0)
         self.spin_current_sweep_target_step.setValue(3.0)
         current_sweep_form.addRow("Target step", self.spin_current_sweep_target_step)
+        self.spin_current_sweep_target_ramp_rate = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_target_ramp_rate.setDecimals(4)
+        self.spin_current_sweep_target_ramp_rate.setRange(0.0001, 100000.0)
+        self.spin_current_sweep_target_ramp_rate.setValue(0.1)
+        self.spin_current_sweep_target_ramp_rate.setToolTip(
+            "Target loading rate. For iso-load this is g/s; for iso-stress it is MPa/s; "
+            "for iso-strain it is %/s."
+        )
+        current_sweep_form.addRow("Target ramp rate", self.spin_current_sweep_target_ramp_rate)
+        self.spin_current_sweep_target_speed_mm_s = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_target_speed_mm_s.setDecimals(3)
+        self.spin_current_sweep_target_speed_mm_s.setRange(0.001, 50.0)
+        self.spin_current_sweep_target_speed_mm_s.setValue(1.0)
+        self.spin_current_sweep_target_speed_mm_s.setSuffix(" mm/s")
+        self.spin_current_sweep_target_speed_mm_s.setToolTip(
+            "Maximum linear stage speed while ramping to the next load, stress, or strain target. "
+            "Fine holding corrections still use Correction move speed."
+        )
+        current_sweep_form.addRow("Target ramp stage speed", self.spin_current_sweep_target_speed_mm_s)
         self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
         self.check_current_sweep_return_target.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_return_target)
@@ -2223,6 +2248,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_target_start,
             self.spin_current_sweep_target_end,
             self.spin_current_sweep_target_step,
+            self.spin_current_sweep_target_ramp_rate,
+            self.spin_current_sweep_target_speed_mm_s,
             self.spin_current_sweep_start_mA,
             self.spin_current_sweep_end_mA,
             self.spin_current_sweep_step_mA,
@@ -3429,6 +3456,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_cycle_speed_mm_s,
             self.spin_hold_speed_mm_s,
             self.spin_distribution_seek_speed_mm_s,
+            self.spin_current_sweep_target_speed_mm_s,
             self.spin_current_sweep_balance_speed_mm_s,
         ):
             control.blockSignals(True)
@@ -3492,6 +3520,10 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.setDecimals(decimals)
             widget.setSuffix(suffix)
             widget.blockSignals(False)
+        self.spin_current_sweep_target_ramp_rate.blockSignals(True)
+        self.spin_current_sweep_target_ramp_rate.setDecimals(decimals)
+        self.spin_current_sweep_target_ramp_rate.setSuffix(f"{suffix}/s")
+        self.spin_current_sweep_target_ramp_rate.blockSignals(False)
 
     def _build_distribution_targets(
         self,
@@ -3738,6 +3770,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         elif self._is_current_sweep_mode(mode):
             basis = self._current_sweep_basis()
+            self._update_current_sweep_basis_ui()
             suffix, _ = self._distribution_units(basis)
             summary = (
                 f"Plan: {HSW_BASIS_LABELS.get(basis, basis)} "
@@ -3764,7 +3797,8 @@ class MainWindow(QtWidgets.QMainWindow):
             summary = (
                 f"Plan: {banner}, {HSW_BASIS_LABELS.get(basis, basis)} "
                 f"{_format_compact_number(self.spin_current_sweep_target_start.value())}{suffix} to "
-                f"{_format_compact_number(self.spin_current_sweep_target_end.value())}{suffix}; current "
+                f"{_format_compact_number(self.spin_current_sweep_target_end.value())}{suffix} at "
+                f"{_format_compact_number(self.spin_current_sweep_target_ramp_rate.value())}{suffix}/s; current "
                 f"{_format_compact_number(self.spin_current_sweep_start_mA.value(), decimals=2)} to "
                 f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)} at "
                 f"{_format_compact_unit(self.spin_current_sweep_step_mA.value(), 'mA/s', decimals=2)}."
@@ -3827,6 +3861,31 @@ class MainWindow(QtWidgets.QMainWindow):
         ticks = 0
         interval_s = max(0.001, float(interval_ms) / 1000.0)
         for step in steps:
+            if step.action == "ramp_target":
+                start_value = float(
+                    step.target_start_value
+                    if step.target_start_value is not None
+                    else step.target_end_value
+                    if step.target_end_value is not None
+                    else step.target_value
+                    if step.target_value is not None
+                    else 0.0
+                )
+                end_value = float(
+                    step.target_end_value
+                    if step.target_end_value is not None
+                    else step.target_value
+                    if step.target_value is not None
+                    else start_value
+                )
+                ramp_rate = max(
+                    1e-9,
+                    abs(float(step.target_ramp_rate_value_s or self.spin_current_sweep_target_ramp_rate.value())),
+                )
+                ramp_ticks = max(1, int(math.ceil((abs(end_value - start_value) / ramp_rate) / interval_s)))
+                ticks += ramp_ticks
+                points += ramp_ticks
+                continue
             if step.action == "sweep_current" and step.current_start_mA is not None and step.current_end_mA is not None:
                 ramp_rate = max(1e-9, abs(float(step.current_ramp_rate_mA_s or self.spin_current_sweep_step_mA.value())))
                 duration_s = abs(
@@ -4090,6 +4149,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._is_recovery_mode(self._automation_name):
                 return max(self._minimum_held_speed_mm_s(), float(self.spin_motion_speed_mm_s.value()))
             if self._is_current_sweep_mode(self._automation_name):
+                if self._automation_phase == "target_ramp":
+                    return max(
+                        self._minimum_held_speed_mm_s(),
+                        float(self.spin_current_sweep_target_speed_mm_s.value()),
+                    )
                 return max(
                     self._minimum_held_speed_mm_s(),
                     float(self.spin_current_sweep_balance_speed_mm_s.value()),
@@ -4345,6 +4409,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "target_start": float(self.spin_current_sweep_target_start.value()),
                 "target_end": float(self.spin_current_sweep_target_end.value()),
                 "target_step": float(self.spin_current_sweep_target_step.value()),
+                "target_ramp_rate_value_s": float(self.spin_current_sweep_target_ramp_rate.value()),
+                "target_ramp_stage_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
                 "return_target": self.check_current_sweep_return_target.isChecked(),
                 "current_start_mA": float(self.spin_current_sweep_start_mA.value()),
                 "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
@@ -4670,13 +4736,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_csv_handle.flush()
 
     def _recipe_requires_tic(self, steps: Sequence[AutomationStep]) -> bool:
-        return any(step.action in {"move", "seek_target"} for step in steps)
+        return any(step.action in {"move", "seek_target", "ramp_target"} for step in steps)
 
     def _recipe_requires_scale(self, steps: Sequence[AutomationStep]) -> bool:
         if self.check_hardware_tare_on_start.isChecked():
             return True
         return any(
-            step.action == "seek_target" and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            step.action in {"seek_target", "ramp_target"} and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             for step in steps
         )
 
@@ -4737,7 +4803,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
         total = max(1, self._automation_total_steps or len(self._automation_steps))
-        value = total if complete else min(self._automation_completed_ticks, total)
+        if self._automation_active and not complete and self._automation_completed_ticks >= total:
+            total = self._automation_completed_ticks + 1
+            self._automation_total_steps = total
+        value = total if complete else min(self._automation_completed_ticks, max(0, total - 1))
         self.recipe_progress.setRange(0, total)
         self.recipe_progress.setValue(value)
         percent = int(round((value / total) * 100.0))
@@ -4817,6 +4886,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
+        self._active_target_ramp_step_index = None
+        self._active_target_ramp_started_s = 0.0
+        self._active_target_ramp_start_value = None
         self._auto_ramp_timer.start(self._automation_interval_ms)
         self._log(f"Recipe resumed at saved recipe row {self._automation_index + 1}.")
         self._update_recipe_progress()
@@ -4850,6 +4922,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
+        self._active_target_ramp_step_index = None
+        self._active_target_ramp_started_s = 0.0
+        self._active_target_ramp_start_value = None
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
         self._seek_no_response_count_by_key.clear()
@@ -4860,7 +4935,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
         self._automation_steps = steps
         self._automation_index = 0
-        self._automation_total_steps = len(steps)
+        self._recipe_estimated_points, self._automation_total_steps = self._estimate_recipe_points_and_ticks(
+            steps,
+            interval_ms,
+        )
+        self._automation_completed_ticks = 0
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = interval_ms
@@ -5098,6 +5177,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
+        self._active_target_ramp_step_index = None
+        self._active_target_ramp_started_s = 0.0
+        self._active_target_ramp_start_value = None
         self._auto_ramp_timer.stop()
         if not self._manual_jog_timer.isActive():
             self._stop_tic_keepalive()
@@ -5236,14 +5318,19 @@ class MainWindow(QtWidgets.QMainWindow):
             target_start = float(self.spin_current_sweep_target_start.value())
             target_end = float(self.spin_current_sweep_target_end.value())
             target_step = abs(float(self.spin_current_sweep_target_step.value()))
+            target_ramp_rate = abs(float(self.spin_current_sweep_target_ramp_rate.value()))
             current_start = float(self.spin_current_sweep_start_mA.value())
             current_end = float(self.spin_current_sweep_end_mA.value())
             current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
             interval_ms = int(self.spin_current_sweep_interval.value())
             settle_s = float(self.spin_current_sweep_settle_s.value())
+            if target_ramp_rate <= 0.0:
+                raise ValueError("Set a non-zero target ramp rate.")
             targets = self._build_numeric_targets(target_start, target_end, target_step)
             settle_steps = max(0, int(math.ceil((settle_s * 1000.0) / interval_ms)))
             steps = []
+            live_target = self._current_distribution_value(basis)
+            previous_target: float | None = live_target if live_target is not None else target_start
             for plateau_index, target in enumerate(targets, start=1):
                 steps.append(
                     AutomationStep(
@@ -5256,12 +5343,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 steps.append(
                     AutomationStep(
-                        "seek_target",
+                        "ramp_target",
                         target_value=target,
+                        target_start_value=previous_target,
+                        target_end_value=target,
+                        target_ramp_rate_value_s=target_ramp_rate,
                         basis=basis,
                         note=str(plateau_index),
                     )
                 )
+                previous_target = target
                 sweep_ranges = [(current_start, current_end)]
                 if self.check_current_sweep_reverse_current.isChecked() and abs(current_end - current_start) > 1e-12:
                     sweep_ranges.append((current_end, current_start))
@@ -5300,8 +5391,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 steps.append(
                     AutomationStep(
-                        "seek_target",
+                        "ramp_target",
                         target_value=targets[0],
+                        target_start_value=previous_target,
+                        target_end_value=targets[0],
+                        target_ramp_rate_value_s=target_ramp_rate,
                         basis=basis,
                         current_mA=current_start,
                         note=str(len(targets) + 1),
@@ -5325,7 +5419,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 recipe_name = "iso-strain current sweep"
             summary = (
                 f"Started {recipe_name}: {target_start:.4f}{suffix} to {target_end:.4f}{suffix}, "
-                f"target step {target_step:.4f}{suffix}, current {current_start:.2f} to {current_end:.2f} mA "
+                f"target step {target_step:.4f}{suffix} at {target_ramp_rate:.4f}{suffix}/s, "
+                f"current {current_start:.2f} to {current_end:.2f} mA "
                 f"at {current_ramp_rate:.2f} mA/s."
             )
             return steps, summary, interval_ms
@@ -5410,6 +5505,55 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         return False
 
+    def _handle_target_ramp_step(self, step: AutomationStep, step_index: int) -> bool:
+        if step.target_value is None or not step.basis:
+            self._log("Recipe stopped because the target ramp step is incomplete.")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        end_value = float(step.target_end_value if step.target_end_value is not None else step.target_value)
+        ramp_rate = max(1e-9, abs(float(step.target_ramp_rate_value_s or self.spin_current_sweep_target_ramp_rate.value())))
+        if self._active_target_ramp_step_index != step_index:
+            self._active_target_ramp_step_index = step_index
+            self._active_target_ramp_started_s = time.monotonic()
+            start_value = step.target_start_value
+            if start_value is None:
+                start_value = self._current_distribution_value(step.basis)
+            self._active_target_ramp_start_value = float(end_value if start_value is None else start_value)
+
+        start_value = float(
+            end_value if self._active_target_ramp_start_value is None else self._active_target_ramp_start_value
+        )
+        direction = 1.0 if end_value >= start_value else -1.0
+        elapsed_s = max(0.0, time.monotonic() - self._active_target_ramp_started_s)
+        duration_s = abs(end_value - start_value) / ramp_rate
+        desired_value = start_value + direction * ramp_rate * elapsed_s
+        if direction >= 0.0:
+            desired_value = min(end_value, desired_value)
+        else:
+            desired_value = max(end_value, desired_value)
+
+        plateau_index = int(step.note) if step.note.isdigit() else None
+        self._set_automation_context(
+            phase="target_ramp",
+            basis=step.basis,
+            target_value=desired_value,
+            plateau_index=plateau_index,
+        )
+        tolerance = abs(float(self.spin_current_sweep_tolerance.value()))
+        try:
+            reached = self._seek_distribution_target(step.basis, desired_value, tolerance)
+        except Exception as exc:
+            self._log(f"Recipe stopped: {exc}")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+
+        if elapsed_s >= duration_s and reached:
+            self._active_target_ramp_step_index = None
+            self._active_target_ramp_started_s = 0.0
+            self._active_target_ramp_start_value = None
+            return True
+        return False
+
     def _handle_auto_ramp_tick(self) -> None:
         if not self._automation_active or self._automation_paused:
             return
@@ -5427,6 +5571,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_automation_context(phase="move")
             if step.target_mm is None or not self._move_to_position_mm(step.target_mm):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+        elif step.action == "ramp_target":
+            finished = self._handle_target_ramp_step(step, self._automation_index - 1)
+            if not finished and self._automation_active:
+                self._automation_index -= 1
         elif step.action == "seek_target":
             if step.target_value is None or not step.basis:
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
@@ -5734,6 +5882,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("cycle_speed_mm_s", self.spin_cycle_speed_mm_s.value())
         self.settings.setValue("hold_speed_mm_s", self.spin_hold_speed_mm_s.value())
         self.settings.setValue("distribution_seek_speed_mm_s", self.spin_distribution_seek_speed_mm_s.value())
+        self.settings.setValue("current_sweep_target_speed_mm_s", self.spin_current_sweep_target_speed_mm_s.value())
         self.settings.setValue("soft_limits_enabled", self.check_soft_limits.isChecked())
         self.settings.setValue("soft_limit_min_mm", self.spin_soft_min_mm.value())
         self.settings.setValue("soft_limit_max_mm", self.spin_soft_max_mm.value())
@@ -5788,6 +5937,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("current_sweep_target_start", self.spin_current_sweep_target_start.value())
         self.settings.setValue("current_sweep_target_end", self.spin_current_sweep_target_end.value())
         self.settings.setValue("current_sweep_target_step", self.spin_current_sweep_target_step.value())
+        self.settings.setValue("current_sweep_target_ramp_rate", self.spin_current_sweep_target_ramp_rate.value())
+        self.settings.setValue("current_sweep_target_speed_mm_s", self.spin_current_sweep_target_speed_mm_s.value())
         self.settings.setValue("current_sweep_return_target", self.check_current_sweep_return_target.isChecked())
         self.settings.setValue("current_sweep_start_mA", self.spin_current_sweep_start_mA.value())
         self.settings.setValue("current_sweep_end_mA", self.spin_current_sweep_end_mA.value())
@@ -5969,6 +6120,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_target_start.setValue(float(self.settings.value("current_sweep_target_start", 0.0)))
         self.spin_current_sweep_target_end.setValue(float(self.settings.value("current_sweep_target_end", 9.0)))
         self.spin_current_sweep_target_step.setValue(float(self.settings.value("current_sweep_target_step", 3.0)))
+        self.spin_current_sweep_target_ramp_rate.setValue(
+            max(0.0001, float(self.settings.value("current_sweep_target_ramp_rate", 0.1)))
+        )
+        self.spin_current_sweep_target_speed_mm_s.setValue(
+            max(0.001, float(self.settings.value("current_sweep_target_speed_mm_s", 1.0)))
+        )
         self.check_current_sweep_return_target.setChecked(
             bool(self.settings.value("current_sweep_return_target", True, type=bool))
         )

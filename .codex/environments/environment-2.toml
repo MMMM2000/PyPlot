@@ -8,4 +8,4 @@ script = ""
 [[actions]]
 name = "Run"
 icon = "run"
-command = "C:\\Users\\Martin\\PyPlot\\.venv\\Scripts\\python.exe C:\\Users\\Martin\\.codex\\worktrees\\17cc\\PyPlot\\launcher.py"
+command = "C:\\Windows\\System32\\cmd.exe /d /k call \".codex\\run-pyplot.cmd\""

@@ -86,6 +86,8 @@ def _set_copper_current_sweep_defaults(window: mini_dma_mod.MainWindow) -> None:
     window.spin_current_sweep_start_mA.setValue(1.0)
     window.spin_current_sweep_end_mA.setValue(3.0)
     window.spin_current_sweep_step_mA.setValue(1.0)
+    window.spin_current_sweep_target_ramp_rate.setValue(0.1)
+    window.spin_current_sweep_target_speed_mm_s.setValue(1.0)
     window.check_current_sweep_reverse_current.setChecked(True)
     window.spin_current_sweep_interval.setValue(250)
 
@@ -323,12 +325,36 @@ def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtb
         window.spin_current_sweep_interval.setValue(500)
         window._update_recipe_mode_ui()
 
-        assert "Estimated duration: 1.5 min" in window.label_recipe_estimate.text()
+        assert "Estimated duration: 8.1 min" in window.label_recipe_estimate.text()
         assert "20 g" in window.label_recipe_summary.text()
         assert "20.0000" not in window.label_recipe_summary.text()
         assert window.recipe_progress.maximum() > 100
         assert window.recipe_progress.value() == 0
         assert "idle" in window.recipe_progress.format()
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_start_keeps_timed_progress_estimate(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
+        steps, _, interval_ms = window._build_automation_recipe()
+        _, expected_ticks = window._estimate_recipe_points_and_ticks(steps, interval_ms)
+        assert expected_ticks > len(steps)
+
+        window._preflight_recipe_hardware = lambda _steps: True  # type: ignore[method-assign]
+        window._start_session = lambda: setattr(window, "_session_active", True)  # type: ignore[method-assign]
+
+        window._start_auto_ramp()
+
+        assert window._automation_total_steps == expected_ticks
+        assert window.recipe_progress.maximum() == expected_ticks
+        assert window._automation_completed_ticks == 0
     finally:
         _close_test_window(window)
 
@@ -619,24 +645,24 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
         record_steps = [step for step in steps if step.action == "record"]
         current_steps = [step for step in steps if step.action == "set_current"]
         current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
-        seek_targets = [
-            step.target_value
-            for step in steps
-            if step.action == "seek_target" and step.target_value is not None
-        ]
+        target_ramps = [step for step in steps if step.action == "ramp_target"]
 
         assert interval_ms == 250
         assert len(current_sweep_steps) == 8
+        assert len(target_ramps) == 5
         assert current_sweep_steps[0].basis == mini_dma_mod.HSW_BASIS_LOAD_G
         assert current_sweep_steps[0].target_value == pytest.approx(0.0)
         assert current_sweep_steps[0].current_start_mA == pytest.approx(1.0)
         assert current_sweep_steps[0].current_end_mA == pytest.approx(3.0)
         assert current_sweep_steps[0].current_ramp_rate_mA_s == pytest.approx(1.0)
+        assert target_ramps[1].target_start_value == pytest.approx(0.0)
+        assert target_ramps[1].target_end_value == pytest.approx(3.0)
+        assert target_ramps[1].target_ramp_rate_value_s == pytest.approx(0.1)
         assert record_steps[-1].target_value == pytest.approx(0.0)
         assert {step.target_value for step in current_sweep_steps} == {0.0, 3.0, 6.0, 9.0}
         assert current_steps[0].current_mA == pytest.approx(1.0)
         assert max(step.current_end_mA for step in current_sweep_steps if step.current_end_mA is not None) == pytest.approx(3.0)
-        assert seek_targets[-1] == pytest.approx(0.0)
+        assert target_ramps[-1].target_end_value == pytest.approx(0.0)
         assert "iso-load current sweep" in summary.lower()
         assert "mA/s" in summary
     finally:
@@ -1200,6 +1226,50 @@ def test_current_sweep_seek_uses_recipe_balancing_speed(tmp_path: Path, qtbot) -
         assert reached is False
         assert controller.target_steps == 9980
         assert controller.max_speed == 5_000_000
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_target_ramp_uses_target_stage_speed(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.target_steps: int | None = None
+            self.max_speed: int | None = None
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.target_steps = position_steps
+            self.max_speed = max_speed
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 1.0
+    window._current_position_steps = 10000
+    window._last_move_target_mm = 1.0
+    window._manual_jog_uses_last_target = False
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._automation_phase = "target_ramp"
+    window.spin_steps_per_mm.setValue(10000.0)
+    window.spin_current_sweep_nudge_mm.setValue(0.1)
+    window.spin_current_sweep_balance_speed_mm_s.setValue(0.05)
+    window.spin_current_sweep_target_speed_mm_s.setValue(1.0)
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        )
+
+        assert reached is False
+        assert controller.target_steps == 9000
+        assert controller.max_speed == 100_000_000
     finally:
         _close_test_window(window)
 

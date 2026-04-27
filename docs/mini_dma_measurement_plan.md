@@ -30,7 +30,7 @@ Use copper wire first, with conservative settings.
 2. Connect scale and supply, then use `Probe scale` and `Read supply now`.
 3. Use `Tare scale`.
 4. Set a known copper-wire diameter and `l0` manually.
-5. Start with the `Iso-load current sweep` recipe. The copper setup currently uses quick bring-up targets `0, 3, 6, 9 g`, uses small correction steps with overshoot detection, sweeps current from `1 mA` to a conservative low-current maximum and back at each load, then returns toward `0 g`.
+5. Start with the `Iso-load current sweep` recipe. The copper setup currently uses quick bring-up targets `0, 3, 6, 9 g`, ramps between targets at a configurable load rate such as `0.1 g/s`, uses a faster target-ramp stage speed plus slower fine correction moves near the target, sweeps current from `1 mA` to a conservative low-current maximum and back at each load, then returns toward `0 g`.
 6. Use tiny jogs to verify the load sign and motion direction. On the current rig, negative raw scale readings are treated as positive tensile load, so users should still type positive load targets.
 7. Let `Start recipe (auto-connect)` preflight the scale and supply. For iso-load, iso-stress, and iso-strain current sweeps, the recipe controls current directly.
 8. Run the current sweep below the copper-wire safety limit.
@@ -43,7 +43,7 @@ Target experiment:
 
 - At `0 MPa`, ramp current from a measurable non-zero baseline such as `1 mA` to `80 mA` and back to the same baseline.
 - Repeat at `50 MPa`, `100 MPa`, `150 MPa`, and `200 MPa`.
-- During each current sweep, continuously adjust stage position to keep stress constant.
+- During each current sweep, continuously adjust stage position to keep stress constant; between stress levels, ramp the stress target at a controlled `MPa/s` rate instead of jumping directly to the next plateau.
 - Log resistance, current, voltage, stress, strain, load, displacement, and phase/step labels.
 - For the HMP4030, treat current as 0.2 mA-resolution setpoints below 1 A; the software should time the ramp from elapsed time and keep supply readbacks paced so reads do not slow current updates.
 

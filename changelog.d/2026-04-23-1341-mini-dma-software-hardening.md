@@ -30,7 +30,8 @@
 - Mini DMA now defaults this rig's motion convention to negative raw Tic travel as positive tensile displacement, keeps correcting toward a tighter near-target band inside the broad hold tolerance, stops the session log when a recipe completes, and keeps recovery-to-zero samples out of the recipe CSV.
 - Mini DMA load/stress correction now bases each correction on the latest confirmed Tic position and limits target distance by correction speed times recipe interval, preventing slow moves from stacking ahead of the real stage and causing overshoot/undershoot loops.
 - Mini DMA current sweeps now advance current from elapsed time, use HMP4030-style 0.2 mA setpoint resolution below 1 A, keep sub-mA precision on the first output-enable command, and throttle supply readbacks during fast automation so current commands do not fight voltage/current queries on the same serial link.
-- Mini DMA recipe progress now counts timed current-ramp ticks, so long elapsed-time sweeps do not appear as a short handful of recipe rows.
+- Mini DMA current-sweep recipes now ramp load/stress/strain targets at configurable g/s, MPa/s, or %/s rates, with a separate target-ramp stage speed so automatic return-to-target moves do not crawl at the fine correction speed.
+- Mini DMA recipe progress now counts timed target-ramp and current-ramp ticks, so long elapsed-time sweeps do not appear as a short handful of recipe rows or reach 100% before completion.
 - Mini DMA now has an always-visible `EMERGENCY STOP` dashboard button that stops the active recipe/session, halts the Tic motor, and commands the power-supply output off.
 - Added a Mini DMA measurement plan covering the copper-wire first test, the intended isostress current-sweep workflow, saved recipe files, and later dynamic recipes.
 - Microwire Data Builder video overrides now tolerate minimal video tables that are missing derived video-length columns.
