@@ -80,11 +80,11 @@ def _wheel_event(delta_y: int = -120) -> QtGui.QWheelEvent:
 
 def _set_copper_current_sweep_defaults(window: mini_dma_mod.MainWindow) -> None:
     window.spin_current_sweep_target_start.setValue(0.0)
-    window.spin_current_sweep_target_end.setValue(20.0)
-    window.spin_current_sweep_target_step.setValue(5.0)
+    window.spin_current_sweep_target_end.setValue(9.0)
+    window.spin_current_sweep_target_step.setValue(3.0)
     window.check_current_sweep_return_target.setChecked(True)
-    window.spin_current_sweep_start_mA.setValue(0.0)
-    window.spin_current_sweep_end_mA.setValue(5.0)
+    window.spin_current_sweep_start_mA.setValue(1.0)
+    window.spin_current_sweep_end_mA.setValue(3.0)
     window.spin_current_sweep_step_mA.setValue(1.0)
     window.check_current_sweep_reverse_current.setChecked(True)
     window.spin_current_sweep_interval.setValue(250)
@@ -279,9 +279,13 @@ def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtb
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
         _set_copper_current_sweep_defaults(window)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_target_step.setValue(5.0)
+        window.spin_current_sweep_end_mA.setValue(5.0)
+        window.spin_current_sweep_interval.setValue(500)
         window._update_recipe_mode_ui()
 
-        assert "Estimated duration: 1.2 min" in window.label_recipe_estimate.text()
+        assert "Estimated duration: 1.6 min" in window.label_recipe_estimate.text()
         assert "20 g" in window.label_recipe_summary.text()
         assert "20.0000" not in window.label_recipe_summary.text()
         assert window.recipe_progress.maximum() > 100
@@ -323,6 +327,23 @@ def test_current_sweep_hides_separate_heating_program(tmp_path: Path, qtbot) -> 
         window._update_recipe_mode_ui()
 
         assert window.heating_recipe_box.isHidden() is False
+    finally:
+        _close_test_window(window)
+
+
+def test_dma_plot_preset_keeps_standard_run_tiles(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._apply_plot_preset("dma")
+
+        assert window._plot_tiles[0].x_combo.currentData() == "elapsed_s"
+        assert window._plot_tiles[0].y_left_combo.currentData() == "load_g"
+        assert window._plot_tiles[0].y_right_combo.currentData() == ""
+        assert window._plot_tiles[1].y_left_combo.currentData() == "position_mm"
+        assert window._plot_tiles[1].y_right_combo.currentData() == ""
+        assert window._plot_tiles[2].y_left_combo.currentData() == "current_measured_mA"
+        assert window._plot_tiles[3].y_left_combo.currentData() == "resistance_ohm"
     finally:
         _close_test_window(window)
 
@@ -392,6 +413,34 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         _close_test_window(window)
 
 
+def test_motion_resolution_spinboxes_clamp_manual_edits_to_motor_step(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_steps_per_mm.setValue(100.0)
+        window._clamp_motion_resolution_controls()
+
+        editor = window.spin_current_sweep_nudge_mm.lineEdit()
+        editor.setText("0.002")
+        window.spin_current_sweep_nudge_mm.interpretText()
+
+        assert window.spin_current_sweep_nudge_mm.value() == pytest.approx(0.01)
+
+        editor.setText("0.02")
+        window.spin_current_sweep_nudge_mm.interpretText()
+
+        assert window.spin_current_sweep_nudge_mm.value() == pytest.approx(0.02)
+
+        speed_editor = window.spin_motion_speed_mm_s.lineEdit()
+        speed_editor.setText("0.002")
+        window.spin_motion_speed_mm_s.interpretText()
+
+        assert window.spin_motion_speed_mm_s.value() == pytest.approx(0.01)
+        assert window._motion_speed_for_current_context(manual_jog=True) == pytest.approx(0.01)
+    finally:
+        _close_test_window(window)
+
+
 def test_stale_saved_ticcmd_path_falls_back_to_discovered_install(
     tmp_path: Path,
     qtbot,
@@ -427,6 +476,7 @@ def test_recipe_preflight_reports_scale_and_supply_together(
     try:
         window._ensure_scale_ready_for_recipe = lambda: False  # type: ignore[method-assign]
         window._ensure_supply_ready_for_recipe = lambda: False  # type: ignore[method-assign]
+        window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
 
         monkeypatch.setattr(
             mini_dma_mod.QtWidgets.QMessageBox,
@@ -453,6 +503,70 @@ def test_recipe_preflight_reports_scale_and_supply_together(
         _close_test_window(window)
 
 
+def test_tic_status_warns_when_motor_power_vin_is_low(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def get_status(self) -> str:
+            return "\n".join(
+                [
+                    "VIN voltage: 0.32 V",
+                    "Operation state: Soft error",
+                    "Current position: 42",
+                    "Errors currently stopping the motor: Low VIN",
+                ]
+            )
+
+    window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+
+    try:
+        assert window._refresh_tic_status() is True
+
+        assert window._tic_motor_power_ok is False
+        assert window._last_tic_vin_v == pytest.approx(0.32)
+        assert "Motor power" in window.label_card_motion.text()
+        assert "0.32 V" in window.label_tic_summary.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_preflight_blocks_when_tic_motor_power_is_low(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    warnings: list[str] = []
+
+    class _FakeController:
+        def get_status(self) -> str:
+            return "\n".join(
+                [
+                    "VIN voltage: 0.10 V",
+                    "Operation state: Soft error",
+                    "Current position: 0",
+                    "Errors currently stopping the motor: Low VIN",
+                ]
+            )
+
+    window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message),
+    )
+
+    try:
+        ok = window._preflight_recipe_hardware([mini_dma_mod.AutomationStep("move", target_mm=1.0)])
+
+        assert ok is False
+        assert len(warnings) == 1
+        assert "Motor controller" in warnings[0]
+        assert "VIN 0.10 V" in warnings[0]
+    finally:
+        _close_test_window(window)
+
+
 def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -473,13 +587,13 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
         ]
 
         assert interval_ms == 250
-        assert len(record_steps) == 56
+        assert len(record_steps) == 21
         assert record_steps[0].basis == mini_dma_mod.HSW_BASIS_LOAD_G
         assert record_steps[0].target_value == pytest.approx(0.0)
         assert record_steps[-1].target_value == pytest.approx(0.0)
-        assert {step.target_value for step in record_steps[:-1]} == {0.0, 5.0, 10.0, 15.0, 20.0}
-        assert current_steps[0].current_mA == pytest.approx(0.0)
-        assert max(step.current_mA for step in current_steps if step.current_mA is not None) == pytest.approx(5.0)
+        assert {step.target_value for step in record_steps[:-1]} == {0.0, 3.0, 6.0, 9.0}
+        assert current_steps[0].current_mA == pytest.approx(1.0)
+        assert max(step.current_mA for step in current_steps if step.current_mA is not None) == pytest.approx(3.0)
         assert seek_targets[-1] == pytest.approx(0.0)
         assert "iso-load current sweep" in summary.lower()
     finally:
@@ -520,6 +634,36 @@ def test_tic_target_position_energizes_and_exits_safe_start(monkeypatch: pytest.
     ]
 
 
+def test_tic_keepalive_resets_command_timeout_during_active_recipe(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+            self.keepalive_count = 0
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+        def reset_command_timeout(self) -> None:
+            self.keepalive_count += 1
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._tic_motor_power_ok = True
+    window._automation_active = True
+    window.spin_steps_per_mm.setValue(100.0)
+
+    try:
+        assert window._move_to_position_mm(0.5) is True
+        window._handle_tic_keepalive_timer()
+
+        assert controller.targets == [50]
+        assert controller.keepalive_count == 1
+    finally:
+        _close_test_window(window)
+
+
 def test_negative_scale_reading_is_reported_as_positive_tensile_load(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -558,6 +702,36 @@ def test_logged_load_uses_positive_applied_tension(tmp_path: Path, qtbot) -> Non
         rows = list(csv.DictReader(csv_path.open(encoding="utf-8", newline="")))
         assert rows[0]["raw_load_g"] == "-5.000000"
         assert rows[0]["load_g"] == "5.000000"
+    finally:
+        _close_test_window(window)
+
+
+def test_logged_displacement_is_positive_for_tensile_pull_direction(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("positive_displacement_log")
+    window.check_tension_load_positive.setChecked(True)
+    window.check_zero_on_preload.setChecked(False)
+    window._latest_scale_value_g = -1.0
+    window._latest_scale_text = "-1.000 g"
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._current_position_mm = -0.5
+        window._current_position_steps = -50
+        window._record_current_point()
+
+        point = window._session_points[-1]
+        assert point.raw_position_mm == pytest.approx(-0.5)
+        assert point.position_mm == pytest.approx(0.5)
+        assert point.strain_pct == pytest.approx((0.5 / window.spin_initial_length.value()) * 100.0)
+
+        rows = list(csv.DictReader((tmp_path / "positive_displacement_log.csv").open(encoding="utf-8", newline="")))
+        assert rows[-1]["raw_position_mm"] == "-0.500000"
+        assert rows[-1]["position_mm"] == "0.500000"
     finally:
         _close_test_window(window)
 
@@ -680,6 +854,7 @@ def test_recipe_seek_repeats_from_last_commanded_target(tmp_path: Path, qtbot) -
             target_value=5.0,
             tolerance=0.25,
         )
+        window._latest_scale_timestamp = time.time()
         window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_LOAD_G,
             target_value=5.0,
@@ -759,6 +934,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
         )
 
         window._latest_scale_value_g = -6.0
+        window._latest_scale_timestamp = time.time()
         window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_LOAD_G,
             target_value=5.0,
@@ -809,6 +985,173 @@ def test_current_sweep_seek_uses_recipe_balancing_speed(tmp_path: Path, qtbot) -
         assert reached is False
         assert controller.target_steps == 9980
         assert controller.max_speed == 5_000_000
+    finally:
+        _close_test_window(window)
+
+
+def test_flat_seek_feedback_stops_only_after_max_correction_travel(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._automation_plateau_index = 1
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window.spin_current_sweep_nudge_mm.setValue(0.1)
+    window.spin_current_sweep_max_seek_mm.setValue(1.0)
+
+    moves: list[float] = []
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+
+    try:
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=3.0,
+            tolerance=0.25,
+        ) is False
+        assert moves
+
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 3.0)
+        window._seek_travel_by_key[seek_key] = 1.0
+
+        with pytest.raises(RuntimeError, match="maximum correction travel"):
+            window._seek_distribution_target(
+                mini_dma_mod.HSW_BASIS_LOAD_G,
+                target_value=3.0,
+                tolerance=0.25,
+            )
+    finally:
+        _close_test_window(window)
+
+
+def test_seek_target_logs_feedback_sample_before_next_move(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("seek_feedback_sample")
+    window.check_tension_load_positive.setChecked(True)
+    window._latest_scale_value_g = -1.0
+    window._latest_scale_text = "-1.000 g"
+    window._latest_scale_timestamp = time.time()
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._move_to_position_mm = lambda _target_mm, **_kwargs: True  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        initial_count = len(window._session_points)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+        window._set_automation_context(
+            phase="seek",
+            basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=3.0,
+            plateau_index=1,
+        )
+        window._last_motion_command_time_s = time.time() - 0.01
+        window._latest_scale_timestamp = time.time()
+
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=3.0,
+            tolerance=0.25,
+        )
+
+        assert reached is False
+        assert len(window._session_points) == initial_count + 1
+        assert window._session_points[-1].automation_phase == "seek"
+        assert window._session_points[-1].load_g == pytest.approx(1.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_recipe_stop_turns_current_off_and_keeps_resume_state(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        def __init__(self) -> None:
+            self.off_count = 0
+
+        def is_connected(self) -> bool:
+            return True
+
+        def output_off(self) -> None:
+            self.off_count += 1
+
+        def disconnect(self) -> None:
+            return None
+
+        def measure(self) -> dict[str, float | None]:
+            return {
+                "current_mA": 0.0,
+                "voltage_V": 0.0,
+                "resistance_ohm": None,
+                "power_W": 0.0,
+            }
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 2.0
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep("set_current", current_mA=1.0),
+        mini_dma_mod.AutomationStep("record"),
+    ]
+    window._automation_index = 1
+    window._automation_total_steps = 2
+    window._automation_interval_ms = 250
+    window._last_recipe_summary = "test recipe"
+    window._ask_recovery_after_manual_stop = lambda: None  # type: ignore[method-assign]
+
+    try:
+        window._stop_auto_ramp(user_initiated=True)
+
+        assert supply.off_count == 1
+        assert window._supply_output_enabled is False
+        assert window._resume_recipe_state is not None
+        assert window._resume_recipe_state.index == 1
+        assert window._resume_recipe_state.current_setpoint_mA == pytest.approx(2.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_motor_supply_channel_is_enabled_before_recipe_tic_preflight(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        def __init__(self) -> None:
+            self.configured: list[tuple[int, float, float, bool]] = []
+            self.selected_anneal = 0
+
+        def is_connected(self) -> bool:
+            return True
+
+        def configure_channel(self, *, channel: int, voltage_v: float, current_a: float, output_on: bool) -> None:
+            self.configured.append((channel, voltage_v, current_a, output_on))
+
+        def select_channel(self, channel: int | None = None) -> None:
+            if channel is None:
+                self.selected_anneal += 1
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window.check_motor_supply_power.setChecked(True)
+    window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(2))
+    window.spin_motor_supply_voltage.setValue(12.0)
+    window.spin_motor_supply_current_limit.setValue(1.5)
+    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+
+    try:
+        ok = window._preflight_recipe_hardware([mini_dma_mod.AutomationStep("move", target_mm=0.0)])
+
+        assert ok is True
+        assert supply.configured == [(2, 12.0, 1.5, True)]
+        assert supply.selected_anneal == 1
     finally:
         _close_test_window(window)
 

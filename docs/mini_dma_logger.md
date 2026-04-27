@@ -62,8 +62,9 @@ Current intended hardware stack:
 - `ticcmd` integration for Pololu Tic status and commands
 - automatic Tic path / serial detection for the connected controller
 - stale saved `ticcmd` paths are ignored in favor of a discovered local Pololu installation
-- motor moves energize the Tic, reset its command timeout, and exit safe-start before sending the position target
-- displacement recipes expose their own linear move speed, while iso-load, iso-stress, and iso-strain current sweeps are separate recipe choices with conservative correction nudge and correction move speed controls
+- motor moves energize the Tic, reset its command timeout, and exit safe-start before sending the position target; a short keepalive continues resetting the command timeout during active recipes/manual holds
+- Tic status shows VIN motor-supply voltage and warns/preflights when VIN is below the motor-power threshold
+- displacement recipes expose their own linear move speed, while iso-load, iso-stress, and iso-strain current sweeps are separate recipe choices with conservative correction step and correction move speed controls
 - clear stacked `Move up` / `Move down` buttons can be held for continuous manual jogging from the last commanded target, with held movement advancing by the configured linear `Manual move speed` in `mm/s`
 - current-sweep recipes expose `Tare scale at recipe/session start` inside the recipe settings, not hidden in specimen/logging settings
 - position zeroing
@@ -82,7 +83,7 @@ Current intended hardware stack:
 - one normal `Tare scale` action for G&G-compatible balances via the documented remote tare command
 - optional session-start scale tare before the first recorded point
 - negative raw scale readings can be treated as positive tensile load so recipe targets use intuitive positive values
-- applied tensile load is logged as positive `Load` / `load_g`; the signed raw balance reading remains available as `raw_load_g` for diagnostics
+- applied tensile load and displacement are logged as positive `Load` / `load_g` and `position_mm`; signed raw balance and raw Tic position remain available as `raw_load_g` and `raw_position_mm` for diagnostics
 - software tare is kept only in advanced hardware diagnostics because it offsets Mini DMA without changing the physical scale display
 
 ### Heating / Current Annealing
@@ -91,9 +92,11 @@ Current intended hardware stack:
 - automatic supply-port detection for supported SCPI supplies
 - live current / voltage / resistance / power channels
 - recipe support for heating-inclusive workflows
+- HMP4030 users can optionally assign CH1 or CH2 as the motor-supply channel; recipe preflight turns that channel on before checking Tic VIN, while current annealing remains on the configured annealing channel
 - the main tabs are organized as `Recipe`, `Specimen`, and lower-priority `Hardware`, so scale/motor/power-supply setup does not dominate routine use
 - iso-load, iso-stress, and iso-strain current sweeps own the current setpoints directly and are shown as separate recipe modes
-- closed-loop target seeking detects target overshoot, switches to fine reverse correction nudges, and can apply a measured backlash take-up distance on direction reversals
+- closed-loop target seeking logs feedback samples during each correction/settle/current step, adapts correction step and speed near the target, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
+- manual recipe stop turns current annealing output off, keeps a resume point, and asks whether to return displacement to the recipe start or relax load toward zero; paused recipes also turn current output off until resumed
 - behavior patterned after the existing current annealing logger rather than as a separate app
 
 ### Shape-Memory Workflow
@@ -110,6 +113,7 @@ Current intended hardware stack:
 - dark-theme-aware Matplotlib styling
 - configurable 4-tile dashboard instead of a fixed graph trio
 - selectable plot channels with left/right axis support
+- manual stop recovery opens a temporary dual-axis load/displacement vs time graph while returning load or displacement toward zero/start
 - plot configuration moved into a popup dialog instead of taking permanent dashboard space
 - collapsible `Overview` section with remembered expanded/collapsed state
 
@@ -125,7 +129,7 @@ There is already a first implementation scaffold for automated `Hsw` distributio
 - configurable:
   - start / end / step
   - tolerance
-  - stage seek nudge in `mm`
+  - stage correction step in `mm`
   - points per plateau
   - plateau settle time
   - optional reverse sweep

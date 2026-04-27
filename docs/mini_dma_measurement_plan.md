@@ -10,7 +10,7 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 - `.pydpj` import: the Specimen tab can load a Microwire Data Builder project and fill sample metadata, diameter, and current when a matching row is found.
 - Stress calculation: stress is calculated from effective load and wire diameter.
 - Strain calculation: strain is calculated from displacement and `l0`, and can be delayed until the preload threshold is reached so slack take-up does not pollute strain zero.
-- Logging: CSV includes elapsed time, position, signed raw balance reading, positive applied tensile load, preload state, strain, stress, current setpoint, measured current, voltage, resistance, power, and recipe context.
+- Logging: CSV includes elapsed time, raw Tic position, tensile-positive displacement, signed raw balance reading, positive applied tensile load, preload state, strain, stress, current setpoint, measured current, voltage, resistance, power, and recipe context.
 - Existing recipes: displacement ramp, cyclic displacement, displacement hold, Hsw plateau scan, and separate iso-load, iso-stress, and iso-strain current sweeps.
 
 ## Current UI Map
@@ -30,7 +30,7 @@ Use copper wire first, with conservative settings.
 2. Connect scale and supply, then use `Probe scale` and `Read supply now`.
 3. Use `Tare scale`.
 4. Set a known copper-wire diameter and `l0` manually.
-5. Start with the `Iso-load current sweep` recipe. The copper setup holds applied tensile-load targets `0, 5, 10, 15, 20 g`, uses small correction nudges with overshoot detection, sweeps current from `0` to a conservative low-current maximum and back at each load, then returns to `0 g`.
+5. Start with the `Iso-load current sweep` recipe. The copper setup currently uses quick bring-up targets `0, 3, 6, 9 g`, uses small correction steps with overshoot detection, sweeps current from `1 mA` to a conservative low-current maximum and back at each load, then returns toward `0 g`.
 6. Use tiny jogs to verify the load sign and motion direction. On the current rig, negative raw scale readings are treated as positive tensile load, so users should still type positive load targets.
 7. Let `Start recipe (auto-connect)` preflight the scale and supply. For iso-load, iso-stress, and iso-strain current sweeps, the recipe controls current directly.
 8. Run the current sweep below the copper-wire safety limit.
@@ -109,13 +109,14 @@ The operator should always see:
 - preflight should auto-detect/connect required hardware before making run files and should report all missing devices together
 - recipe estimates should be human-readable and paired with live progress
 - numeric summaries should use compact values such as `20 g` and `0.01 mm` instead of padded zero-only decimals
+- load/stress seeking should be sampled step-by-step: move one correction step, wait for fresh scale/Tic feedback, log the feedback point, then decide whether to move again
+- current annealing output should be off whenever a recipe is stopped or paused, while an optional HMP motor-supply channel can stay under explicit operator control for powering the Tic motor
 
 ## Next Implementation Priorities
 
 1. Add saved recipe files and a previewable step list.
-2. Add explicit saved-recipe `tare_scale` steps. The built-in current-sweep recipe already has a physical scale tare-at-start option that aborts cleanly if tare fails.
+2. Add explicit saved-recipe `tare_scale` and recovery steps. The built-in current-sweep recipe already has a physical scale tare-at-start option that aborts cleanly if tare fails, and manual stop now offers displacement/load recovery actions with a temporary dual-axis recovery plot.
 3. Continue refining commercial-DMA-style guided workflow: Setup -> Program -> Run -> Review, with expert settings hidden unless needed.
-4. Add an isostress current-sweep recipe type using stress or load as the hold basis.
-5. Add a natural-language recipe preparation path that generates the same saved recipe JSON.
-6. Add isostrain and constant-current stress/strain recipes.
-7. Add dynamic recipes such as increasing target stress until fracture, using load drop, rapid strain jump, or stale/invalid readings as stop conditions.
+4. Add a natural-language recipe preparation path that generates the same saved recipe JSON.
+5. Add constant-current stress/strain recipes.
+6. Add dynamic recipes such as increasing target stress until fracture, using load drop, rapid strain jump, or stale/invalid readings as stop conditions.
