@@ -57,7 +57,6 @@ platform = "darwin"
 name = "Run"
 icon = "run"
 command = '''
-.\.venv\Scripts\Activate.ps1
-python -m launcher
+cmd.exe /d /k ".venv\Scripts\python.exe launcher.py"
 '''
 platform = "win32"
