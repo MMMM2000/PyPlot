@@ -221,6 +221,43 @@ def test_held_manual_jog_advances_by_configured_linear_speed(
         _close_test_window(window)
 
 
+def test_recipe_stop_resets_manual_jog_base_to_confirmed_position(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._automation_active = True
+    window._automation_steps = [mini_dma_mod.AutomationStep("move", target_mm=5.0)]
+    window._automation_index = 0
+    window._automation_total_steps = 1
+    window._last_move_target_mm = 5.0
+    window._manual_jog_uses_last_target = True
+    window._current_position_mm = 1.2
+    window._current_position_steps = 120
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_jog_mm.setValue(0.1)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
+
+    try:
+        window._stop_auto_ramp(user_initiated=True)
+        window._jog_relative(-window._tension_motion_sign())
+
+        assert controller.targets == [110]
+        assert window._manual_jog_uses_last_target is True
+        assert window._last_move_target_mm == pytest.approx(1.1)
+    finally:
+        _close_test_window(window)
+
+
 def test_settings_wheel_guard_scrolls_panel_without_changing_values(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -706,10 +743,32 @@ def test_logged_load_uses_positive_applied_tension(tmp_path: Path, qtbot) -> Non
         _close_test_window(window)
 
 
+def test_logged_load_is_positive_even_if_scale_sign_setting_is_wrong(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("positive_tension_magnitude_log")
+    window.check_tension_load_positive.setChecked(False)
+    window.check_zero_on_preload.setChecked(False)
+    window._latest_scale_value_g = -2.5
+    window._latest_scale_text = "-2.500 g"
+    window._latest_scale_timestamp = time.time()
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._stop_session()
+
+        rows = list(csv.DictReader((tmp_path / "positive_tension_magnitude_log.csv").open(encoding="utf-8", newline="")))
+        assert rows[0]["raw_load_g"] == "-2.500000"
+        assert rows[0]["load_g"] == "2.500000"
+    finally:
+        _close_test_window(window)
+
+
 def test_logged_displacement_is_positive_for_tensile_pull_direction(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("positive_displacement_log")
     window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
     window.check_zero_on_preload.setChecked(False)
     window._latest_scale_value_g = -1.0
     window._latest_scale_text = "-1.000 g"
@@ -797,9 +856,10 @@ def test_emergency_stop_turns_off_current_halts_tic_and_stops_session(tmp_path: 
         _close_test_window(window)
 
 
-def test_tensile_load_seek_moves_negative_when_scale_tension_is_negative(tmp_path: Path, qtbot) -> None:
+def test_tensile_load_seek_uses_motion_direction_independent_of_scale_sign(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(True)
     window._latest_scale_value_g = 0.0
     window._latest_scale_timestamp = time.time()
     window._current_position_mm = 1.0
@@ -821,7 +881,7 @@ def test_tensile_load_seek_moves_negative_when_scale_tension_is_negative(tmp_pat
         )
 
         assert reached is False
-        assert targets == [pytest.approx(0.9)]
+        assert targets == [pytest.approx(1.1)]
     finally:
         _close_test_window(window)
 
@@ -839,6 +899,8 @@ def test_recipe_seek_repeats_from_last_commanded_target(tmp_path: Path, qtbot) -
     controller = _FakeController()
     window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(True)
     window._latest_scale_value_g = 0.0
     window._latest_scale_timestamp = time.time()
     window._current_position_mm = 1.0
@@ -861,7 +923,7 @@ def test_recipe_seek_repeats_from_last_commanded_target(tmp_path: Path, qtbot) -
             tolerance=0.25,
         )
 
-        assert controller.targets == [90, 80]
+        assert controller.targets == [110, 120]
     finally:
         _close_test_window(window)
 
@@ -877,6 +939,7 @@ def test_seek_overshoot_uses_fine_reverse_correction(tmp_path: Path, qtbot) -> N
 
     window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(True)
     window._latest_scale_timestamp = time.time()
     window._current_position_mm = 1.0
     window.spin_steps_per_mm.setValue(100.0)
@@ -897,7 +960,7 @@ def test_seek_overshoot_uses_fine_reverse_correction(tmp_path: Path, qtbot) -> N
             tolerance=0.25,
         ) is False
 
-        assert targets == [pytest.approx(0.9), pytest.approx(1.025)]
+        assert targets == [pytest.approx(1.1), pytest.approx(0.975)]
         assert "Overshoot detected" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -916,6 +979,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
     controller = _FakeController()
     window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(True)
     window._latest_scale_timestamp = time.time()
     window._current_position_mm = 1.0
     window._current_position_steps = 100
@@ -941,7 +1005,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
             tolerance=0.25,
         )
 
-        assert controller.targets == [90, 96]
+        assert controller.targets == [110, 105]
         assert "backlash take-up" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -983,15 +1047,16 @@ def test_current_sweep_seek_uses_recipe_balancing_speed(tmp_path: Path, qtbot) -
         )
 
         assert reached is False
-        assert controller.target_steps == 9980
+        assert controller.target_steps == 10020
         assert controller.max_speed == 5_000_000
     finally:
         _close_test_window(window)
 
 
-def test_flat_seek_feedback_stops_only_after_max_correction_travel(tmp_path: Path, qtbot) -> None:
+def test_flat_seek_feedback_continues_for_shape_memory_plateau(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(True)
     window._automation_active = True
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
     window._automation_plateau_index = 1
@@ -1000,28 +1065,20 @@ def test_flat_seek_feedback_stops_only_after_max_correction_travel(tmp_path: Pat
     window._current_position_mm = 0.0
     window._current_position_steps = 0
     window.spin_current_sweep_nudge_mm.setValue(0.1)
-    window.spin_current_sweep_max_seek_mm.setValue(1.0)
 
     moves: list[float] = []
     window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
 
     try:
-        assert window._seek_distribution_target(
-            mini_dma_mod.HSW_BASIS_LOAD_G,
-            target_value=3.0,
-            tolerance=0.25,
-        ) is False
-        assert moves
-
-        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 3.0)
-        window._seek_travel_by_key[seek_key] = 1.0
-
-        with pytest.raises(RuntimeError, match="maximum correction travel"):
-            window._seek_distribution_target(
+        for _ in range(6):
+            assert window._seek_distribution_target(
                 mini_dma_mod.HSW_BASIS_LOAD_G,
                 target_value=3.0,
                 tolerance=0.25,
-            )
+            ) is False
+
+        assert len(moves) == 6
+        assert "maximum correction travel" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -1102,7 +1159,7 @@ def test_manual_recipe_stop_turns_current_off_and_keeps_resume_state(tmp_path: P
     window._automation_total_steps = 2
     window._automation_interval_ms = 250
     window._last_recipe_summary = "test recipe"
-    window._ask_recovery_after_manual_stop = lambda: None  # type: ignore[method-assign]
+    window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
 
     try:
         window._stop_auto_ramp(user_initiated=True)
@@ -1169,6 +1226,7 @@ def test_max_load_limit_allows_relaxing_manual_move(tmp_path: Path, qtbot) -> No
     controller = _FakeController()
     window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(True)
     window.check_max_load.setChecked(True)
     window.spin_max_load_g.setValue(20.0)
     window._latest_scale_value_g = -20.03
@@ -1180,12 +1238,12 @@ def test_max_load_limit_allows_relaxing_manual_move(tmp_path: Path, qtbot) -> No
     window.spin_steps_per_mm.setValue(100.0)
 
     try:
-        tensioning_move = window._move_to_position_mm(-0.1, manual_jog=True)
-        relaxing_move = window._move_to_position_mm(0.1, manual_jog=True)
+        tensioning_move = window._move_to_position_mm(0.1, manual_jog=True)
+        relaxing_move = window._move_to_position_mm(-0.1, manual_jog=True)
 
         assert tensioning_move is False
         assert relaxing_move is True
-        assert controller.targets == [10]
+        assert controller.targets == [-10]
         assert "Relaxing moves are still allowed" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)

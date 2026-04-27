@@ -10,7 +10,7 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 - `.pydpj` import: the Specimen tab can load a Microwire Data Builder project and fill sample metadata, diameter, and current when a matching row is found.
 - Stress calculation: stress is calculated from effective load and wire diameter.
 - Strain calculation: strain is calculated from displacement and `l0`, and can be delayed until the preload threshold is reached so slack take-up does not pollute strain zero.
-- Logging: CSV includes elapsed time, raw Tic position, tensile-positive displacement, signed raw balance reading, positive applied tensile load, preload state, strain, stress, current setpoint, measured current, voltage, resistance, power, and recipe context.
+- Logging: CSV includes elapsed time, raw Tic position, tensile-positive displacement, signed raw balance reading, positive applied tensile-load magnitude, preload state, strain, stress, current setpoint, measured current, voltage, resistance, power, and recipe context.
 - Existing recipes: displacement ramp, cyclic displacement, displacement hold, Hsw plateau scan, and separate iso-load, iso-stress, and iso-strain current sweeps.
 
 ## Current UI Map
@@ -110,6 +110,7 @@ The operator should always see:
 - recipe estimates should be human-readable and paired with live progress
 - numeric summaries should use compact values such as `20 g` and `0.01 mm` instead of padded zero-only decimals
 - load/stress seeking should be sampled step-by-step: move one correction step, wait for fresh scale/Tic feedback, log the feedback point, then decide whether to move again
+- load/stress seeking must not stop just because load stays flat while displacement increases; shape-memory transformations can elongate with little load change
 - current annealing output should be off whenever a recipe is stopped or paused, while an optional HMP motor-supply channel can stay under explicit operator control for powering the Tic motor
 
 ## Next Implementation Priorities

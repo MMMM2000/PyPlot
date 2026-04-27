@@ -16,17 +16,17 @@
 - Mini DMA now warns when the Tic VIN motor-supply voltage is missing/too low and keeps resetting the Tic command timeout during active slow moves.
 - Mini DMA now shows `Tare scale at recipe/session start` inside the current-sweep recipe settings, and closed-loop recipe corrections chain from the last commanded target while using conservative recipe-specific correction step/speed values.
 - Mini DMA current-sweep seeking now detects target overshoot, switches to fine reverse correction steps, and can apply measured backlash take-up when reversing direction.
-- Mini DMA current-sweep seeking now records feedback samples while correcting load/stress/strain, uses smaller/slower correction moves near the target, and stops with a clear warning if scale feedback is flat or moving away from the target.
+- Mini DMA current-sweep seeking now records feedback samples while correcting load/stress/strain, uses smaller/slower correction moves near the target, and no longer stops merely because load is flat during displacement, which is expected during shape-memory transformation plateaus.
 - Mini DMA current-sweep defaults now use the faster copper bring-up recipe of `0` to `9 g` in `3 g` steps and `1` to `3 mA` current steps.
-- Mini DMA now has pause/resume recipe controls; pause/stop turn the current-annealing output off, manual stop can offer displacement/load recovery, and a stopped recipe can be resumed from its saved step or restarted.
+- Mini DMA now has pause/resume recipe controls; pause/stop turn the current-annealing output off, stopped recipes can be resumed from the saved step or restarted, and any recipe stop/fault can offer displacement/load recovery.
 - Mini DMA can optionally power the motor from HMP4030 CH1 or CH2 during recipe preflight while keeping current annealing on the configured annealing channel.
-- Mini DMA manual-stop recovery now opens a temporary dual-axis load/displacement vs time plot while returning displacement or load toward zero/start, without changing the normal run dashboard.
+- Mini DMA recovery now opens a temporary dual-axis load/displacement vs time plot while returning displacement or load toward zero/start, without changing the normal run dashboard; the same recovery actions are also available as manual buttons.
 - Mini DMA motion spin boxes now clamp manual edits to the physical motor resolution instead of reverting mysteriously, and load/stress seeking stops on truly stale scale feedback while still waiting for a fresh reading after each commanded move.
 - Mini DMA max-load safety now blocks only tension-increasing moves when the live load is already over the limit, so relaxing/downward manual moves remain available to recover the rig.
 - Mini DMA now puts `Recipe` first, merges scale/motor/power setup into a lower-priority `Hardware` tab, and splits current-sweep recipes into explicit DMA-style entries for iso-load, iso-stress, and iso-strain.
 - Mini DMA recipe summaries and spin boxes now trim zero-only decimals, for example `20 g` instead of `20.0000 g`.
 - Mini DMA now includes current-sweep recipes for holding load, stress, or strain while stepping current, with copper-wire bring-up defaults of `0` to `9 g` in `3 g` steps and a gentle `1` to `3 mA` current sweep.
-- Mini DMA can treat negative raw scale readings and matching pull-direction Tic positions as positive tensile load/displacement, preserving signed raw diagnostics while exporting the main `load_g` and `position_mm` channels as positive values.
+- Mini DMA now displays/logs applied tensile load as a positive magnitude even when the scale reports negative values, keeps raw scale/Tic diagnostics, and separates tensile displacement direction from scale sign so target seeking does not stop because of a sign mismatch.
 - Mini DMA now has an always-visible `EMERGENCY STOP` dashboard button that stops the active recipe/session, halts the Tic motor, and commands the power-supply output off.
 - Added a Mini DMA measurement plan covering the copper-wire first test, the intended isostress current-sweep workflow, saved recipe files, and later dynamic recipes.
 - Microwire Data Builder video overrides now tolerate minimal video tables that are missing derived video-length columns.

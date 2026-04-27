@@ -1143,13 +1143,13 @@ class MainWindow(QtWidgets.QMainWindow):
         jog_negative.setAutoRepeat(True)
         jog_negative.setAutoRepeatDelay(350)
         jog_negative.setAutoRepeatInterval(120)
-        jog_negative.clicked.connect(lambda: self._jog_relative(-1.0))
+        jog_negative.clicked.connect(lambda: self._jog_relative(self._tension_motion_sign()))
         jog_buttons.addWidget(jog_negative)
         jog_positive = QtWidgets.QPushButton("▼ Move down / relax", motion_box)
         jog_positive.setAutoRepeat(True)
         jog_positive.setAutoRepeatDelay(350)
         jog_positive.setAutoRepeatInterval(120)
-        jog_positive.clicked.connect(lambda: self._jog_relative(1.0))
+        jog_positive.clicked.connect(lambda: self._jog_relative(-self._tension_motion_sign()))
         jog_buttons.addWidget(jog_positive)
         motion_form.addRow("", jog_buttons)
 
@@ -1301,7 +1301,19 @@ class MainWindow(QtWidgets.QMainWindow):
             safety_box,
         )
         self.check_tension_load_positive.setChecked(True)
+        self.check_tension_load_positive.toggled.connect(lambda _checked: self._refresh_live_labels())
         safety_form.addRow("", self.check_tension_load_positive)
+        self.check_positive_motion_is_tension = QtWidgets.QCheckBox(
+            "Positive Tic movement increases tensile displacement",
+            safety_box,
+        )
+        self.check_positive_motion_is_tension.setChecked(True)
+        self.check_positive_motion_is_tension.setToolTip(
+            "Set this to match the stage direction: when checked, increasing raw Tic position is treated as "
+            "pulling the wire and increasing tensile displacement/load."
+        )
+        self.check_positive_motion_is_tension.toggled.connect(lambda _checked: self._refresh_live_labels())
+        safety_form.addRow("", self.check_positive_motion_is_tension)
 
         self.spin_backlash_mm = CompactDoubleSpinBox(safety_box)
         self.spin_backlash_mm.setDecimals(4)
@@ -1879,7 +1891,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_max_seek_mm.setToolTip(
             "Maximum tensile-stage travel allowed while seeking one target before stopping as no-response."
         )
-        current_sweep_form.addRow("Max correction travel", self.spin_current_sweep_max_seek_mm)
+        self.spin_current_sweep_max_seek_mm.setVisible(False)
         self.spin_current_sweep_settle_s = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_settle_s.setDecimals(2)
         self.spin_current_sweep_settle_s.setRange(0.0, 3600.0)
@@ -1953,7 +1965,7 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_up.setAutoRepeat(True)
         manual_up.setAutoRepeatDelay(350)
         manual_up.setAutoRepeatInterval(120)
-        manual_up.clicked.connect(lambda: self._jog_relative(-1.0))
+        manual_up.clicked.connect(lambda: self._jog_relative(self._tension_motion_sign()))
         manual_motion_row.addWidget(manual_up)
         manual_down = QtWidgets.QPushButton("▼ Move down", manual_box)
         manual_down.setToolTip("Move the stage in the relaxing direction by the jog step.")
@@ -1961,8 +1973,16 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_down.setAutoRepeat(True)
         manual_down.setAutoRepeatDelay(350)
         manual_down.setAutoRepeatInterval(120)
-        manual_down.clicked.connect(lambda: self._jog_relative(1.0))
+        manual_down.clicked.connect(lambda: self._jog_relative(-self._tension_motion_sign()))
         manual_motion_row.addWidget(manual_down)
+        recovery_buttons = QtWidgets.QHBoxLayout()
+        manual_zero_displacement = QtWidgets.QPushButton("Move displacement to 0", manual_box)
+        manual_zero_displacement.clicked.connect(self._start_recovery_displacement_zero)
+        recovery_buttons.addWidget(manual_zero_displacement)
+        manual_zero_load = QtWidgets.QPushButton("Move load to 0", manual_box)
+        manual_zero_load.clicked.connect(self._start_recovery_load_zero)
+        recovery_buttons.addWidget(manual_zero_load)
+        manual_motion_row.addLayout(recovery_buttons)
         manual_halt = QtWidgets.QPushButton("Halt motor", manual_box)
         manual_halt.clicked.connect(self._halt_tic)
         manual_motion_row.addWidget(manual_halt)
@@ -2984,7 +3004,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif action == HEATING_LIMIT_HOLD:
             return
         else:
-            self._stop_auto_ramp(log_completion=False)
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
 
     def _choose_builder_project(self) -> None:
         start_dir = str(self._builder_project_path.parent) if self._builder_project_path is not None else self.edit_log_dir.text().strip()
@@ -3308,11 +3328,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         self._log(f"Reference position set to the current stage position ({self._position_reference_mm:.4f} mm).")
 
+    def _tension_motion_sign(self) -> float:
+        return 1.0 if self.check_positive_motion_is_tension.isChecked() else -1.0
+
     def _tensile_position_mm(self, raw_position_mm: float) -> float:
-        return self._load_sign() * float(raw_position_mm)
+        return self._tension_motion_sign() * float(raw_position_mm)
 
     def _tensile_displacement_mm(self, raw_position_mm: float) -> float:
-        return self._load_sign() * (float(raw_position_mm) - self._position_reference_mm)
+        return self._tension_motion_sign() * (float(raw_position_mm) - self._position_reference_mm)
 
     def _strain_percent_for_position(self, raw_position_mm: float) -> float | None:
         return strain_percent(
@@ -3550,7 +3573,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if nudge_mm <= 0.0:
             raise ValueError("Set a non-zero correction step.")
         previous_error = self._seek_last_error_by_key.get(seek_key)
-        previous_value = self._seek_last_value_by_key.get(seek_key)
         overshot_target = previous_error is not None and previous_error * delta_value < 0.0
         if overshot_target:
             nudge_mm = max(self._motor_step_mm(), self._seek_nudge_mm() * 0.25)
@@ -3559,39 +3581,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Overshoot detected at target {_format_compact_number(target_value)}"
                 f"{self._distribution_units(basis)[0]}; switching to fine correction steps."
             )
-        elif previous_error is not None and previous_value is not None:
-            min_feedback_delta = max(abs(tolerance) * 0.05, 0.005 if basis == HSW_BASIS_LOAD_G else 0.0005)
-            value_delta = current_value - previous_value
+        elif previous_error is not None:
             error_worsened = abs(delta_value) > abs(previous_error) + max(abs(tolerance) * 0.2, 1e-9)
-            feedback_flat = abs(value_delta) < min_feedback_delta
-            if error_worsened or feedback_flat:
+            if error_worsened:
                 count = self._seek_no_response_count_by_key.get(seek_key, 0) + 1
                 self._seek_no_response_count_by_key[seek_key] = count
-                reason = "moved away from target" if error_worsened else "did not change after motor movement"
                 travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
-                max_travel_mm = self._seek_max_travel_mm()
                 self._log(
-                    f"Closed-loop feedback warning: {HSW_BASIS_LABELS.get(basis, basis)} {reason} "
-                    f"({count}; travel {_format_compact_unit(travel_mm, 'mm')} of "
-                    f"{_format_compact_unit(max_travel_mm, 'mm')})."
+                    f"Closed-loop feedback warning: {HSW_BASIS_LABELS.get(basis, basis)} moved away "
+                    f"from target ({count}; correction travel {_format_compact_unit(travel_mm, 'mm')})."
                 )
-                if error_worsened and count >= 3:
+                if count >= 3:
                     raise RuntimeError(
                         "Closed-loop load/stress correction is not improving. Check that the scale is "
                         "streaming live readings, that the tensile-load sign convention is correct, and "
                         "that the motor motion is mechanically coupled to the wire."
                     )
-                if feedback_flat and travel_mm >= max_travel_mm:
-                    raise RuntimeError(
-                        "Closed-loop load/stress correction used the maximum correction travel without "
-                        "a load response. Check that the wire is clamped/taut, the scale is streaming live "
-                        "readings, and the motor motion is mechanically coupled to the wire."
-                    )
             else:
                 self._seek_no_response_count_by_key[seek_key] = 0
         seek_direction = delta_value
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
-            seek_direction *= self._load_sign()
+            seek_direction *= self._tension_motion_sign()
         movement_direction = math.copysign(1.0, seek_direction)
         backlash_takeup_mm = self._seek_backlash_takeup_mm(movement_direction)
         target_mm = self._relative_motion_base_mm() + movement_direction * (nudge_mm + backlash_takeup_mm)
@@ -4015,7 +4025,7 @@ class MainWindow(QtWidgets.QMainWindow):
         delta_mm = position_mm - self._relative_motion_base_mm()
         if abs(delta_mm) < 1e-12:
             return False
-        return delta_mm * self._load_sign() > 0.0
+        return delta_mm * self._tension_motion_sign() > 0.0
 
     def _move_to_position_mm(
         self,
@@ -4040,7 +4050,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{self.spin_max_load_g.value():.5f} g. Relaxing moves are still allowed."
             )
             if self._automation_active and not chain_from_last_target:
-                self._stop_auto_ramp(log_completion=False)
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return False
         if self.check_soft_limits.isChecked():
             min_mm = min(float(self.spin_soft_min_mm.value()), float(self.spin_soft_max_mm.value()))
@@ -4051,7 +4061,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"[{min_mm:.4f}, {max_mm:.4f}] mm."
                 )
                 if self._automation_active:
-                    self._stop_auto_ramp(log_completion=False)
+                    self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return False
         steps_per_mm = float(self.spin_steps_per_mm.value())
         target_steps = int(round(position_mm * steps_per_mm))
@@ -4187,6 +4197,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "max_load_limit_enabled": self.check_max_load.isChecked(),
             "max_load_limit_g": float(self.spin_max_load_g.value()),
             "negative_scale_is_tension": self.check_tension_load_positive.isChecked(),
+            "positive_motion_is_tension": self.check_positive_motion_is_tension.isChecked(),
             "backlash_mm": float(self.spin_backlash_mm.value()),
             "return_to_origin": self.check_return_to_origin.isChecked(),
             "scale": {
@@ -4382,7 +4393,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return -1.0 if self.check_tension_load_positive.isChecked() else 1.0
 
     def _current_effective_load_g(self) -> float:
-        return self._load_sign() * (self._latest_scale_value_g + self._load_offset_g)
+        return abs(self._load_sign() * (self._latest_scale_value_g + self._load_offset_g))
 
     def _current_preload_state(self, load_g: float) -> str:
         if not self.check_zero_on_preload.isChecked() or self.spin_preload_threshold_g.value() <= 0:
@@ -4450,7 +4461,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Safety stop: applied load {self._current_effective_load_g():.5f} g exceeded "
                 f"the configured limit of {self.spin_max_load_g.value():.5f} g."
             )
-            self._stop_auto_ramp(log_completion=False)
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return False
         if self._session_active:
             self._refresh_tic_status()
@@ -4460,7 +4471,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading(after_s=after_s):
             self._log("Point not recorded because load/stress feedback is stale after the last move.")
             if self._automation_active:
-                self._stop_auto_ramp(log_completion=False)
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return False
         elapsed_s = time.monotonic() - self._session_start_monotonic
         position_mm = self._current_position_mm
@@ -4765,7 +4776,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def _stop_recipe_from_button(self) -> None:
         self._stop_auto_ramp(log_completion=True, user_initiated=True)
 
-    def _ask_recovery_after_manual_stop(self) -> None:
+    def _sync_manual_motion_base_from_current_position(self) -> None:
+        try:
+            self._refresh_tic_status()
+        except Exception:
+            pass
+        self._manual_jog_uses_last_target = False
+        self._manual_jog_direction = 0.0
+        self._manual_jog_last_tick_s = None
+        self._manual_jog_pending_mm = 0.0
+        self._last_move_target_mm = self._current_position_mm
+
+    def _ask_recovery_after_stop(self) -> None:
         if self._tic_motor_power_ok is False:
             return
         box = QtWidgets.QMessageBox(self)
@@ -4773,14 +4795,14 @@ class MainWindow(QtWidgets.QMainWindow):
         box.setIcon(QtWidgets.QMessageBox.Icon.Question)
         box.setText("Recipe stopped.")
         box.setInformativeText("Do you want to relax the rig now?")
-        return_position_button = box.addButton("Return displacement to start", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        return_position_button = box.addButton("Move displacement to 0", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
         zero_load_button = box.addButton("Return load to 0", QtWidgets.QMessageBox.ButtonRole.ActionRole)
         leave_button = box.addButton("Leave as is", QtWidgets.QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(leave_button)
         box.exec()
         clicked = box.clickedButton()
         if clicked == return_position_button:
-            self._start_recovery_position_origin()
+            self._start_recovery_displacement_zero()
         elif clicked == zero_load_button:
             self._start_recovery_load_zero()
 
@@ -4853,20 +4875,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_figure.tight_layout()
         self._recovery_canvas.draw_idle()
 
-    def _start_recovery_position_origin(self) -> None:
+    def _start_recovery_position_target(self, target_mm: float, label: str) -> None:
         if not self._session_active:
             self._log("Cannot run displacement recovery because there is no active session.")
             return
-        steps = [AutomationStep("move", target_mm=self._recipe_origin_mm, note="Recovery to origin")]
-        distance_mm = abs(self._recipe_origin_mm - self._current_position_mm)
+        self._sync_manual_motion_base_from_current_position()
+        steps = [AutomationStep("move", target_mm=target_mm, note=label)]
+        distance_mm = abs(target_mm - self._current_position_mm)
         speed_mm_s = max(self._minimum_held_speed_mm_s(), self._motion_speed_for_current_context(manual_jog=False))
         interval_ms = int(self.spin_current_sweep_interval.value())
         sample_count = max(3, int(math.ceil((distance_mm / max(speed_mm_s, 1e-9)) * 1000.0 / interval_ms)) + 2)
-        steps.extend(AutomationStep("settle", note="Recovery to origin") for _ in range(sample_count))
-        steps.append(AutomationStep("record", note="Recovery to origin"))
+        steps.extend(AutomationStep("settle", note=label) for _ in range(sample_count))
+        steps.append(AutomationStep("record", note=label))
         if not self._preflight_recipe_hardware(steps):
             return
-        self._show_recovery_plot_dialog("Mini DMA Recovery: displacement to start")
+        self._show_recovery_plot_dialog(f"Mini DMA Recovery: {label}")
         self._automation_steps = steps
         self._automation_index = 0
         self._automation_total_steps = len(steps)
@@ -4876,15 +4899,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_name = "recovery_position"
         self._set_automation_context(phase="recover")
         self._auto_ramp_timer.start(self._automation_interval_ms)
-        self._log("Started displacement recovery to the recipe start position.")
+        self._log(f"Started displacement recovery: {label}.")
         self._update_recipe_buttons()
         self._update_recipe_progress()
         self._refresh_live_labels()
+
+    def _start_recovery_position_origin(self) -> None:
+        self._start_recovery_position_target(self._recipe_origin_mm, "displacement to recipe start")
+
+    def _start_recovery_displacement_zero(self) -> None:
+        self._start_recovery_position_target(self._position_reference_mm, "displacement to 0")
 
     def _start_recovery_load_zero(self) -> None:
         if not self._session_active:
             self._log("Cannot run load-zero recovery because there is no active session.")
             return
+        self._sync_manual_motion_base_from_current_position()
         steps = [
             AutomationStep(
                 "seek_target",
@@ -4917,6 +4947,7 @@ class MainWindow(QtWidgets.QMainWindow):
         log_completion: bool = True,
         keep_progress: bool = False,
         user_initiated: bool = False,
+        offer_recovery: bool = False,
     ) -> None:
         if not self._automation_active:
             return
@@ -4934,6 +4965,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._auto_ramp_timer.stop()
         if not self._manual_jog_timer.isActive():
             self._stop_tic_keepalive()
+        self._sync_manual_motion_base_from_current_position()
         self._set_automation_context(phase="idle")
         if self._supply_output_enabled:
             self._disable_supply_output()
@@ -4943,8 +4975,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_recipe_progress()
         self._update_recipe_buttons()
         self._refresh_live_labels()
-        if user_initiated:
-            self._ask_recovery_after_manual_stop()
+        if user_initiated or offer_recovery:
+            self._ask_recovery_after_stop()
 
     def _build_segment_targets(
         self,
@@ -5197,10 +5229,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if step.action == "move":
             self._set_automation_context(phase="move")
             if step.target_mm is None or not self._move_to_position_mm(step.target_mm):
-                self._stop_auto_ramp(log_completion=False)
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
         elif step.action == "seek_target":
             if step.target_value is None or not step.basis:
-                self._stop_auto_ramp(log_completion=False)
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return
             plateau_index = int(step.note) if step.note.isdigit() else None
             self._set_automation_context(
@@ -5217,14 +5249,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             )
             if tolerance <= 0.0:
-                self._stop_auto_ramp(log_completion=False)
                 self._log("Recipe stopped because the target tolerance is zero.")
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return
             try:
                 reached = self._seek_distribution_target(step.basis, step.target_value, tolerance)
             except Exception as exc:
-                self._stop_auto_ramp(log_completion=False)
                 self._log(f"Recipe stopped: {exc}")
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return
             if reached:
                 current_value = self._current_distribution_value(step.basis)
@@ -5246,7 +5278,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 plateau_index=plateau_index,
             )
             if step.current_mA is None or not self._set_recipe_current_mA(float(step.current_mA)):
-                self._stop_auto_ramp(log_completion=False)
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             elif self._session_active:
                 self._record_current_point(quiet=True, advance_heating=False)
         elif step.action == "settle":
@@ -5268,7 +5300,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 plateau_index=plateau_index,
             )
             if not self._record_current_point():
-                self._stop_auto_ramp(log_completion=False)
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
         self._update_recipe_progress()
         self._refresh_live_labels()
 
@@ -5282,7 +5314,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Automation stopped because applied load {self._current_effective_load_g():.5f} g exceeded "
                 f"the limit of {self.spin_max_load_g.value():.5f} g."
             )
-            self._stop_auto_ramp(log_completion=False)
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
 
     def _refresh_live_labels(self) -> None:
         effective_load = self._current_effective_load_g()
@@ -5480,6 +5512,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("max_load_enabled", self.check_max_load.isChecked())
         self.settings.setValue("max_load_g", self.spin_max_load_g.value())
         self.settings.setValue("negative_scale_is_tension", self.check_tension_load_positive.isChecked())
+        self.settings.setValue("positive_motion_is_tension", self.check_positive_motion_is_tension.isChecked())
         self.settings.setValue("backlash_mm", self.spin_backlash_mm.value())
         self.settings.setValue("initial_length_mm", self.spin_initial_length.value())
         self.settings.setValue("diameter_mm", self.spin_diameter.value())
@@ -5626,6 +5659,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_max_load_g.setValue(float(self.settings.value("max_load_g", 25.0)))
         self.check_tension_load_positive.setChecked(
             bool(self.settings.value("negative_scale_is_tension", True, type=bool))
+        )
+        self.check_positive_motion_is_tension.setChecked(
+            bool(self.settings.value("positive_motion_is_tension", True, type=bool))
         )
         self.spin_backlash_mm.setValue(float(self.settings.value("backlash_mm", 0.0)))
         self.spin_initial_length.setValue(float(self.settings.value("initial_length_mm", 30.0)))
