@@ -20,6 +20,11 @@ class VSMHysteresisPlugin(PyPlotPlugin):
     _HOST_OWNED_METHODS = {
         "__init__",
         "_selected_paths",
+        "_choose_files",
+        "_choose_folder",
+        "_import_data_from_files",
+        "_import_data_from_folder",
+        "_handle_manual_path_entry",
         "_create_dock_widget",
         "_create_dock_switcher",
         # Keep shared PyPlot UX/state handlers from the host implementation.
@@ -203,19 +208,18 @@ class VSMHysteresisPlugin(PyPlotPlugin):
     def load_data(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
         host = self.host
-        paths = [path for path in host._selected_paths() if path.is_file()]
+        paths = [path for path in host._selected_paths() if isinstance(path, Path)]
         if not paths:
             imported = self._collect_imported_vsm_sources()
             if imported:
-                formatted = host._format_paths(imported)
-                host.path_edit.setText(formatted)
-                host._apply_path_text(formatted)
+                host._commit_selected_paths(imported)
                 host._update_action_states()
-                paths = [path for path in host._selected_paths() if path.is_file()]
+                paths = [path for path in host._selected_paths() if isinstance(path, Path)]
         if not paths:
             paths = host.ensure_data_selection(self)
             if not paths:
                 return
+            host._commit_selected_paths(paths)
         host._load_measurements()
 
     def generate(self) -> None:  # type: ignore[override]

@@ -65,40 +65,8 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         self._panel_widget = container
         return container
 
-    def settings_widget(self) -> QtWidgets.QWidget:  # type: ignore[override]
-        if self._settings_widget is not None:
-            return self._settings_widget
-        container = QtWidgets.QWidget(self.host)
-        layout = QtWidgets.QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-
-        window_module = window_api()
-        def _form_layout(parent: QtWidgets.QWidget) -> QtWidgets.QFormLayout:
-            form = QtWidgets.QFormLayout(parent)
-            form.setContentsMargins(0, 0, 0, 0)
-            form.setHorizontalSpacing(8)
-            form.setVerticalSpacing(4)
-            form.setFieldGrowthPolicy(
-                QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-            )
-            return form
-
-        origin_section, origin_layout = window_module.create_toolbar_section(
-            "Origin export",
-            parent=container,
-            layout_factory=_form_layout,
-        )
-        origin_note = QtWidgets.QLabel(
-            "Uses shared PyPlot Origin export (direction-separated traces, shared title placement).",
-            origin_section,
-        )
-        origin_note.setWordWrap(True)
-        origin_layout.addRow(origin_note)
-        layout.addWidget(origin_section)
-        layout.addStretch(1)
-        self._settings_widget = container
-        return container
+    def settings_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
+        return None
 
     def _apply_settings_to_core(self) -> None:
         anneal_core.SHOW_PLOTS = False
