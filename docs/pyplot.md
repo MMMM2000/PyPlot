@@ -71,6 +71,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 - For shared multi-axis exports (for example dual-axis overlays), group XY pairs by axis-title metadata and plot each group on its own linked Origin layer so displacement/load and strain/stress do not collapse onto one Y scale.
 - For shared dual-axis Origin exports, keep the graph title above the top-axis tick labels and center the mirrored `x2` caption over the top axis instead of pushing it into the legend area.
 - For shared dual-axis overlays with identical segment labels across groups (for example `Loading 1` in both load and stress groups), hide duplicate secondary-layer traces after axis scaling so the exported graph shows one visible curve set by default.
+- If a plug-in provides an explicit current graph-tab set for shared Origin export, honor that set instead of exporting older registered tabs from previous/restored layouts.
 - Use descriptive graph names/long names that match the Matplotlib title and include distinguishing metadata (field strength, temperature, or variant) when multiple graphs share a sample name.
 - Build worksheets with units and comments filled (including baselines/deltas/relative columns) and avoid terminal spam (disable tqdm/console progress); keep graph extents so nothing is cropped after export.
 

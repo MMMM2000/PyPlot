@@ -359,6 +359,14 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
             return
         super().open_origin()
 
+    def origin_export_tabs(self) -> list[QtWidgets.QWidget] | None:  # type: ignore[override]
+        active_tabs = [
+            tab
+            for tab in self._plot_tabs
+            if isinstance(tab, QtWidgets.QWidget) and self.host.tab_widget.indexOf(tab) >= 0
+        ]
+        return active_tabs or None
+
     def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
         layout_mode = self._plot_layout_mode()
         if layout_mode == LAYOUT_DUAL_AXIS:

@@ -4727,20 +4727,47 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             f"Exported {len(series)} data series to {path}",
         )
 
-    def _plugin_uses_shared_plot_workbooks(self, plugin_name: str | None) -> bool:
+    def _plugin_instance_for_name(self, plugin_name: str | None) -> PyPlotPlugin | None:
         if not plugin_name:
-            return True
-        plugin = None
+            return None
         current_name = getattr(self, "_current_plotter_name", None)
         if isinstance(current_name, str) and current_name == plugin_name:
             plugin = getattr(self, "_current_plugin", None)
-        if plugin is None:
-            instances = getattr(self, "_plugin_instances", None)
-            if isinstance(instances, dict):
-                plugin = instances.get(plugin_name)
+            if isinstance(plugin, PyPlotPlugin):
+                return plugin
+        instances = getattr(self, "_plugin_instances", None)
+        if isinstance(instances, dict):
+            plugin = instances.get(plugin_name)
+            if isinstance(plugin, PyPlotPlugin):
+                return plugin
+        return None
+
+    def _plugin_uses_shared_plot_workbooks(self, plugin_name: str | None) -> bool:
+        if not plugin_name:
+            return True
+        plugin = self._plugin_instance_for_name(plugin_name)
         if plugin is None:
             return True
         return bool(getattr(plugin, "uses_shared_plot_workbooks", True))
+
+    def _origin_export_tabs_for_plugin(
+        self,
+        plugin_name: str | None,
+    ) -> set[QtWidgets.QWidget] | None:
+        plugin = self._plugin_instance_for_name(plugin_name)
+        if plugin is None:
+            return None
+        tab_provider = getattr(plugin, "origin_export_tabs", None)
+        if not callable(tab_provider):
+            return None
+        try:
+            tabs = tab_provider()
+        except Exception:
+            LOGGER.warning("Failed to resolve Origin export tabs for %s", plugin_name, exc_info=True)
+            return None
+        if tabs is None:
+            return None
+        return {tab for tab in tabs if isinstance(tab, QtWidgets.QWidget)}
 
     @staticmethod
     def _safe_series_token(text: str, *, fallback: str) -> str:
@@ -5161,7 +5188,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
     def _shared_plot_workbooks_for_plugin(self, plugin_name: str | None) -> list[WorkbookData]:
         results: list[WorkbookData] = []
         seen: set[Hashable] = set()
+        export_tabs = self._origin_export_tabs_for_plugin(plugin_name)
         for tab, key in list(self._shared_plot_workbook_by_tab.items()):
+            if export_tabs is not None and tab not in export_tabs:
+                continue
             if self.tab_widget.indexOf(tab) < 0:
                 continue
             descriptor = self._tab_descriptors.get(tab)
@@ -18135,8 +18165,26 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         index = self.tab_widget.indexOf(tab)
         if index < 0:
             return
+        restore_maximized = bool(
+            getattr(self.tab_widget, "_global_maximized", False)
+            or getattr(self.tab_widget, "_fullscreen_lock", False)
+        )
         self._set_tab_visibility(tab, True)
         self.tab_widget.setCurrentIndex(index)
+        if restore_maximized or bool(
+            getattr(self.tab_widget, "_global_maximized", False)
+            or getattr(self.tab_widget, "_fullscreen_lock", False)
+        ):
+            subwindow_for = getattr(self.tab_widget, "_subwindow_for", None)
+            maximize_single = getattr(self.tab_widget, "_maximize_single", None)
+            maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
+            if callable(subwindow_for):
+                sub = subwindow_for(tab)
+                if sub is not None:
+                    if callable(maximize_single):
+                        maximize_single(sub)
+                    elif callable(maybe_maximize):
+                        maybe_maximize(sub)
         self._update_tab_buttons()
 
     def _tab_for_axes(self, axes: Any) -> QtWidgets.QWidget | None:
@@ -20295,6 +20343,14 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 else:
                     self._apply_global_window_state()
             else:
+                if (
+                    isinstance(source, _ManagedSubWindow)
+                    and self._is_live_subwindow(source)
+                    and not source_was_maximized
+                    and not self._fullscreen_lock
+                    and not self._global_maximized
+                ):
+                    return
                 if (
                     isinstance(source, _ManagedSubWindow)
                     and self._is_live_subwindow(source)
