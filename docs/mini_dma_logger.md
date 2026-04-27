@@ -71,7 +71,7 @@ Current intended hardware stack:
 - halt / stop support
 - jog control refuses sub-step moves that would round to the current motor step
 - displacement-driven automation recipes
-- controlled current-sweep recipe that can hold load or stress while stepping current
+- controlled current-sweep recipe that can hold load, stress, or strain while ramping current
 - configurable soft position limits and max-load safety behavior; when the load limit is already exceeded, tension-increasing moves are blocked but relaxing moves remain available so the rig is not trapped above the limit
 
 ### Scale
@@ -83,7 +83,7 @@ Current intended hardware stack:
 - one normal `Tare scale` action for G&G-compatible balances via the documented remote tare command
 - optional session-start scale tare before the first recorded point
 - applied tensile load is displayed and logged as the positive tensile magnitude in `Load` / `load_g`, even when the balance reports negative values while lifting the weight; signed raw balance remains available as `raw_load_g` for diagnostics
-- tensile displacement uses its own motion-direction setting, so the app can show/log positive `position_mm` while preserving raw Tic position as `raw_position_mm`
+- tensile displacement uses its own motion-direction setting; the current rig defaults to negative raw Tic travel as positive tensile displacement, so the app can show/log positive `position_mm` while preserving raw Tic position as `raw_position_mm`
 - software tare is kept only in advanced hardware diagnostics because it offsets Mini DMA without changing the physical scale display
 
 ### Heating / Current Annealing
@@ -93,10 +93,12 @@ Current intended hardware stack:
 - live current / voltage / resistance / power channels
 - recipe support for heating-inclusive workflows
 - HMP4030 users can optionally assign CH1 or CH2 as the motor-supply channel; recipe preflight turns that channel on before checking Tic VIN, while current annealing remains on the configured annealing channel
+- HMP4030 current commands are treated as 1 mA-resolution setpoints, so a `1 mA/s` ramp updates by about 1 mA once per second rather than pretending to command unsupported sub-mA steps
 - the main tabs are organized as `Recipe`, `Specimen`, and lower-priority `Hardware`, so scale/motor/power-supply setup does not dominate routine use
-- iso-load, iso-stress, and iso-strain current sweeps own the current setpoints directly and are shown as separate recipe modes
-- closed-loop target seeking logs feedback samples during each correction/settle/current step, adapts correction step and speed near the target, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
-- recipe stop/fault turns current annealing output off, keeps a resume point, and can ask whether to move displacement or load back toward zero; paused recipes also turn current output off until resumed
+- iso-load, iso-stress, and iso-strain current sweeps own the current ramp directly, advance current from elapsed time, and are shown as separate recipe modes
+- closed-loop target seeking logs feedback samples during each correction/settle/current step, adapts correction step and speed near the target, limits each commanded target by the correction speed and timer interval so moves cannot stack ahead of the real stage position, keeps correcting inside the broad hold tolerance toward a tighter near-target band, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
+- recipe completion stops the session log; recipe stop/fault turns current annealing output off, keeps a resume point, and can ask whether to move displacement or load back toward zero without appending recovery samples to the recipe CSV; paused recipes also turn current output off until resumed
+- resistance is left blank when the current setpoint/measured current is effectively zero, avoiding invalid zero-current resistance points
 - behavior patterned after the existing current annealing logger rather than as a separate app
 
 ### Shape-Memory Workflow

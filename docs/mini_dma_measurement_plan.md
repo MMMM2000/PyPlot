@@ -10,7 +10,7 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 - `.pydpj` import: the Specimen tab can load a Microwire Data Builder project and fill sample metadata, diameter, and current when a matching row is found.
 - Stress calculation: stress is calculated from effective load and wire diameter.
 - Strain calculation: strain is calculated from displacement and `l0`, and can be delayed until the preload threshold is reached so slack take-up does not pollute strain zero.
-- Logging: CSV includes elapsed time, raw Tic position, tensile-positive displacement, signed raw balance reading, positive applied tensile-load magnitude, preload state, strain, stress, current setpoint, measured current, voltage, resistance, power, and recipe context.
+- Logging: CSV includes elapsed time, raw Tic position, tensile-positive displacement, signed raw balance reading, positive applied tensile-load magnitude, preload state, strain, stress, current setpoint, measured current, voltage, resistance, power, and recipe context. Resistance is intentionally blank when the current is effectively zero.
 - Existing recipes: displacement ramp, cyclic displacement, displacement hold, Hsw plateau scan, and separate iso-load, iso-stress, and iso-strain current sweeps.
 
 ## Current UI Map
@@ -41,10 +41,11 @@ Use copper wire first, with conservative settings.
 
 Target experiment:
 
-- At `0 MPa`, sweep current from `0 mA` to `80 mA` and back to `0 mA`.
+- At `0 MPa`, ramp current from a measurable non-zero baseline such as `1 mA` to `80 mA` and back to the same baseline.
 - Repeat at `50 MPa`, `100 MPa`, `150 MPa`, and `200 MPa`.
 - During each current sweep, continuously adjust stage position to keep stress constant.
 - Log resistance, current, voltage, stress, strain, load, displacement, and phase/step labels.
+- For the HMP4030, treat current as 1 mA-resolution setpoints; the software should time the ramp from elapsed time rather than pretending to command sub-mA steps.
 
 The important control loop is "hold target stress, sweep current." The stage changes strain as needed while the supply changes current.
 
@@ -59,7 +60,7 @@ Suggested step types:
 - `set_gauge_zero`: set current motor position as the strain reference.
 - `wait_for_preload`: wait until effective load exceeds a threshold, then set gauge zero.
 - `set_current`: set a fixed current. The built-in `Controlled current sweep` recipe already uses this internally.
-- `sweep_current`: sweep current start/end/step while recording.
+- `sweep_current`: ramp current start/end/rate while recording.
 - `hold_control`: hold load, stress, strain, or position for duration/points.
 - `move_relative`: move by a relative displacement with safety checks.
 - `record`: record for duration or point count.
@@ -70,7 +71,7 @@ For the isostress experiment, the saved recipe could be represented as:
 
 ```json
 {
-  "name": "Isostress 0-200 MPa, 0-80-0 mA",
+  "name": "Isostress 0-200 MPa, 1-80-1 mA",
   "sample_basis": "stress_mpa",
   "steps": [
     {"type": "tare_scale", "mode": "remote"},
@@ -80,8 +81,8 @@ For the isostress experiment, the saved recipe could be represented as:
       "targets": [0, 50, 100, 150, 200],
       "body": [
         {"type": "hold_control", "basis": "stress_mpa", "target": "$target", "tolerance": 0.5, "settle_s": 1.0},
-        {"type": "sweep_current", "start_mA": 0, "end_mA": 80, "step_mA": 1, "record_interval_ms": 100, "hold_basis": "stress_mpa", "hold_target": "$target"},
-        {"type": "sweep_current", "start_mA": 80, "end_mA": 0, "step_mA": 1, "record_interval_ms": 100, "hold_basis": "stress_mpa", "hold_target": "$target"}
+        {"type": "sweep_current", "start_mA": 1, "end_mA": 80, "ramp_rate_mA_s": 1, "record_interval_ms": 100, "hold_basis": "stress_mpa", "hold_target": "$target"},
+        {"type": "sweep_current", "start_mA": 80, "end_mA": 1, "ramp_rate_mA_s": 1, "record_interval_ms": 100, "hold_basis": "stress_mpa", "hold_target": "$target"}
       ]
     }
   ]

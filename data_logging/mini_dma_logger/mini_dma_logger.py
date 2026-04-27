@@ -66,6 +66,9 @@ SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
 TIC_KEEPALIVE_INTERVAL_MS = 500
+MIN_RESISTANCE_CURRENT_MA = 0.05
+RECOVERY_POSITION = "recovery_position"
+RECOVERY_LOAD = "recovery_load"
 PROJECT_EXTENSION = ".pydpj"
 PRELOAD_PENDING = "pending"
 PRELOAD_ACTIVE = "active"
@@ -79,6 +82,7 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "channel_select": 3,
         "reset_on_start": True,
         "voltage_first": False,
+        "current_resolution_mA": 0.2,
     },
     "owon_spe6102": {
         "label": "Owon SPE6102",
@@ -88,6 +92,7 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "channel_select": 0,
         "reset_on_start": False,
         "voltage_first": True,
+        "current_resolution_mA": 1.0,
     },
 }
 HEATING_MODE_OFF = "off"
@@ -375,6 +380,9 @@ class AutomationStep:
     target_value: float | None = None
     basis: str | None = None
     current_mA: float | None = None
+    current_start_mA: float | None = None
+    current_end_mA: float | None = None
+    current_ramp_rate_mA_s: float | None = None
     note: str = ""
 
 
@@ -814,6 +822,13 @@ class PowerSupplyController:
         if target_channel > 0:
             self.command(f"INST:NSEL {target_channel}")
 
+    def current_resolution_mA(self) -> float:
+        return max(0.001, float(self.profile.get("current_resolution_mA", 1.0)))
+
+    def quantize_current_mA(self, current_mA: float) -> float:
+        resolution_mA = self.current_resolution_mA()
+        return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
+
     def configure_channel(
         self,
         *,
@@ -838,11 +853,11 @@ class PowerSupplyController:
             self.command("*RST", settle_s=1.2)
         self.select_channel()
         limit_v = max(0.0, float(self.max_voltage_v))
-        current_a = max(0.0, float(current_mA)) / 1000.0
+        current_a = self.quantize_current_mA(current_mA) / 1000.0
         voltage_first = bool(self.profile.get("voltage_first", False)) if force_voltage_first is None else bool(force_voltage_first)
         if voltage_first:
             self.command(f"VOLT {limit_v:.1f}")
-            self.command(f"CURR {current_a:.3f}")
+            self.command(f"CURR {current_a:.4f}")
         else:
             self.command(f"CURR {current_a:.3f}")
             self.command(f"VOLT {limit_v:.1f}")
@@ -850,7 +865,7 @@ class PowerSupplyController:
 
     def set_current_mA(self, current_mA: float) -> None:
         self.select_channel()
-        self.command(f"CURR {max(0.0, float(current_mA)) / 1000.0:.3f}")
+        self.command(f"CURR {self.quantize_current_mA(current_mA) / 1000.0:.4f}", settle_s=0.03)
 
     def output_on(self) -> None:
         self.select_channel()
@@ -868,7 +883,7 @@ class PowerSupplyController:
         resistance_ohm = None
         power_w = None
         if voltage_v is not None and current_a is not None:
-            if abs(current_a) > 1e-12:
+            if abs(current_a) >= MIN_RESISTANCE_CURRENT_MA / 1000.0:
                 resistance_ohm = voltage_v / current_a
             power_w = voltage_v * current_a
         return {
@@ -949,6 +964,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._paused_current_setpoint_mA: float | None = None
         self._recipe_origin_mm = 0.0
         self._recipe_estimated_points = 0
+        self._active_current_sweep_step_index: int | None = None
+        self._active_current_sweep_started_s = 0.0
+        self._active_current_sweep_last_setpoint_mA: float | None = None
         self._plot_tiles: list[PlotTileWidgets] = []
         self._control_scroll_area: QtWidgets.QScrollArea | None = None
         self._manual_jog_direction = 0.0
@@ -961,6 +979,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_figure: Figure | None = None
         self._recovery_canvas: Any = None
         self._recovery_start_elapsed_s: float | None = None
+        self._recovery_start_monotonic = 0.0
+        self._recovery_points: list[MeasurementPoint] = []
         self._manual_jog_timer = QtCore.QTimer(self)
         self._manual_jog_timer.setInterval(50)
         self._manual_jog_timer.timeout.connect(self._handle_manual_jog_timer)
@@ -1304,13 +1324,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_tension_load_positive.toggled.connect(lambda _checked: self._refresh_live_labels())
         safety_form.addRow("", self.check_tension_load_positive)
         self.check_positive_motion_is_tension = QtWidgets.QCheckBox(
-            "Positive Tic movement increases tensile displacement",
+            "Positive raw Tic motion pulls the wire",
             safety_box,
         )
-        self.check_positive_motion_is_tension.setChecked(True)
+        self.check_positive_motion_is_tension.setChecked(False)
         self.check_positive_motion_is_tension.setToolTip(
-            "Set this to match the stage direction: when checked, increasing raw Tic position is treated as "
-            "pulling the wire and increasing tensile displacement/load."
+            "Leave unchecked for the current Mini DMA rig: pulling up makes the raw Tic position negative, "
+            "while Mini DMA displays and logs that tensile displacement as positive."
         )
         self.check_positive_motion_is_tension.toggled.connect(lambda _checked: self._refresh_live_labels())
         safety_form.addRow("", self.check_positive_motion_is_tension)
@@ -1858,8 +1878,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_step_mA.setDecimals(2)
         self.spin_current_sweep_step_mA.setRange(0.01, 5000.0)
         self.spin_current_sweep_step_mA.setValue(1.0)
-        self.spin_current_sweep_step_mA.setSuffix(" mA")
-        current_sweep_form.addRow("Current step", self.spin_current_sweep_step_mA)
+        self.spin_current_sweep_step_mA.setSuffix(" mA/s")
+        self.spin_current_sweep_step_mA.setToolTip(
+            "Current ramp rate. Mini DMA converts this to smaller setpoint updates using the recipe interval."
+        )
+        current_sweep_form.addRow("Current ramp rate", self.spin_current_sweep_step_mA)
         self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
         self.check_current_sweep_reverse_current.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_reverse_current)
@@ -1904,7 +1927,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_interval.setSuffix(" ms")
         current_sweep_form.addRow("Recipe interval", self.spin_current_sweep_interval)
         current_sweep_hint = QtWidgets.QLabel(
-            "This recipe holds the selected target with backlash-aware correction steps while stepping current and recording each point.",
+            "This recipe holds the selected target with backlash-aware correction steps while ramping current and recording each point.",
             current_sweep_page,
         )
         current_sweep_hint.setWordWrap(True)
@@ -2894,10 +2917,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(summary)
         self.statusBar().showMessage(summary, 10000)
 
-    def _set_recipe_current_mA(self, current_mA: float) -> bool:
+    def _supply_current_resolution_mA(self) -> float:
+        if self._supply_controller is not None:
+            return self._supply_controller.current_resolution_mA()
+        profile = SUPPLY_PROFILES.get(str(self.combo_supply_profile.currentData() or "hmp4030"), {})
+        return max(0.001, float(profile.get("current_resolution_mA", 1.0)))
+
+    def _quantize_supply_current_mA(self, current_mA: float) -> float:
+        resolution_mA = self._supply_current_resolution_mA()
+        return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
+
+    def _quantize_ramp_current_mA(self, current_mA: float, direction: float, end_mA: float) -> float:
+        resolution_mA = self._supply_current_resolution_mA()
+        if direction >= 0.0:
+            quantized = math.floor((float(current_mA) + 1e-9) / resolution_mA) * resolution_mA
+            return min(float(end_mA), max(0.0, quantized))
+        quantized = math.ceil((float(current_mA) - 1e-9) / resolution_mA) * resolution_mA
+        return max(float(end_mA), max(0.0, quantized))
+
+    def _set_recipe_current_mA(self, current_mA: float, *, measure_after: bool = False) -> bool:
         if self._supply_controller is None or not self._supply_controller.is_connected():
             self._log("Recipe stopped because the power supply is not connected.")
             return False
+        current_mA = self._quantize_supply_current_mA(current_mA)
         try:
             if not self._supply_output_enabled:
                 self._supply_controller.initialize_output(
@@ -2912,9 +2954,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._supply_controller.set_current_mA(current_mA)
             self._supply_last_setpoint_mA = current_mA
             self._heating_program_current_mA = current_mA
-            self._refresh_supply_snapshot()
+            if measure_after:
+                self._refresh_supply_snapshot()
         except Exception as exc:
-            self._log(f"Recipe current step failed: {exc}")
+            self._log(f"Recipe current update failed: {exc}")
             return False
         return True
 
@@ -3388,6 +3431,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _is_current_sweep_mode(self, mode: str | None = None) -> bool:
         return str(mode if mode is not None else self.combo_recipe_mode.currentData() or "") in CURRENT_SWEEP_MODES
 
+    def _is_recovery_mode(self, mode: str | None = None) -> bool:
+        return str(mode if mode is not None else self._automation_name) in {RECOVERY_POSITION, RECOVERY_LOAD}
+
     def _current_sweep_basis(self) -> str:
         mode = str(self.combo_recipe_mode.currentData() or "")
         if mode in CURRENT_SWEEP_BASIS_BY_MODE:
@@ -3492,6 +3538,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return abs(target_value - current_value) <= tolerance
 
     def _seek_nudge_mm(self) -> float:
+        if self._automation_name == RECOVERY_LOAD:
+            return abs(float(self.spin_jog_mm.value()))
         if self._is_current_sweep_mode(self._automation_name):
             return abs(float(self.spin_current_sweep_nudge_mm.value()))
         return abs(float(self.spin_distribution_nudge_mm.value()))
@@ -3502,6 +3550,12 @@ class MainWindow(QtWidgets.QMainWindow):
         return max(self._motor_step_mm(), self._seek_nudge_mm() * 30.0)
 
     def _seek_step_mm(self, error_value: float, tolerance: float) -> float:
+        if self._automation_name == RECOVERY_LOAD:
+            interval_s = max(0.001, float(self._automation_interval_ms) / 1000.0)
+            return max(
+                self._motor_step_mm(),
+                float(self.spin_motion_speed_mm_s.value()) * interval_s,
+            )
         max_step_mm = max(self._motor_step_mm(), self._seek_nudge_mm())
         error_ratio = abs(error_value) / max(tolerance, 1e-12)
         if error_ratio <= 1.5:
@@ -3514,14 +3568,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _seek_speed_mm_s(self, error_value: float, tolerance: float) -> float:
         base_speed = self._motion_speed_for_current_context(manual_jog=False)
+        if self._automation_name == RECOVERY_LOAD:
+            return max(self._minimum_held_speed_mm_s(), base_speed)
         error_ratio = abs(error_value) / max(tolerance, 1e-12)
-        if error_ratio <= 1.5:
+        if error_ratio <= 1.0:
+            factor = 0.2
+        elif error_ratio <= 1.5:
             factor = 0.35
         elif error_ratio <= 3.0:
             factor = 0.6
         else:
             factor = 1.0
         return max(self._minimum_held_speed_mm_s(), base_speed * factor)
+
+    def _seek_command_step_mm(self, nudge_mm: float, speed_mm_s: float) -> float:
+        interval_s = max(0.001, float(self._automation_interval_ms) / 1000.0)
+        speed_limited_step = max(self._motor_step_mm(), abs(speed_mm_s) * interval_s)
+        return max(self._motor_step_mm(), min(abs(nudge_mm), speed_limited_step))
 
     def _seek_error_key(self, basis: str, target_value: float) -> tuple[str, int, float]:
         plateau = -1 if self._automation_plateau_index is None else int(self._automation_plateau_index)
@@ -3555,7 +3618,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log_waiting_for_feedback("Waiting for a fresh scale reading before the next load/stress correction.")
                 return False
             current_value = 0.0
-        if self._session_active and not self._record_current_point(
+        if self._is_recovery_mode():
+            self._record_recovery_point()
+        elif self._session_active and not self._record_current_point(
             quiet=True,
             advance_heating=False,
             require_fresh_after_move=basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA},
@@ -3563,7 +3628,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         delta_value = target_value - current_value
         seek_key = self._seek_error_key(basis, target_value)
-        if abs(delta_value) <= tolerance:
+        fine_tolerance = min(abs(tolerance), max(abs(tolerance) * 0.2, 0.05))
+        if abs(delta_value) <= fine_tolerance:
             self._seek_last_error_by_key.pop(seek_key, None)
             self._seek_last_value_by_key.pop(seek_key, None)
             self._seek_no_response_count_by_key.pop(seek_key, None)
@@ -3591,26 +3657,21 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"Closed-loop feedback warning: {HSW_BASIS_LABELS.get(basis, basis)} moved away "
                     f"from target ({count}; correction travel {_format_compact_unit(travel_mm, 'mm')})."
                 )
-                if count >= 3:
-                    raise RuntimeError(
-                        "Closed-loop load/stress correction is not improving. Check that the scale is "
-                        "streaming live readings, that the tensile-load sign convention is correct, and "
-                        "that the motor motion is mechanically coupled to the wire."
-                    )
             else:
                 self._seek_no_response_count_by_key[seek_key] = 0
         seek_direction = delta_value
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             seek_direction *= self._tension_motion_sign()
         movement_direction = math.copysign(1.0, seek_direction)
-        backlash_takeup_mm = self._seek_backlash_takeup_mm(movement_direction)
-        target_mm = self._relative_motion_base_mm() + movement_direction * (nudge_mm + backlash_takeup_mm)
         speed_mm_s = self._seek_speed_mm_s(delta_value, tolerance)
+        nudge_mm = self._seek_command_step_mm(nudge_mm, speed_mm_s)
+        backlash_takeup_mm = self._seek_backlash_takeup_mm(movement_direction)
+        target_mm = self._current_position_mm + movement_direction * (nudge_mm + backlash_takeup_mm)
         if backlash_takeup_mm > 0.0:
             self._log(
                 f"Direction reversal: adding {_format_compact_unit(backlash_takeup_mm, 'mm')} backlash take-up."
             )
-        if not self._move_to_position_mm(target_mm, chain_from_last_target=True, speed_mm_s=speed_mm_s):
+        if not self._move_to_position_mm(target_mm, chain_from_last_target=False, speed_mm_s=speed_mm_s):
             return False
         self._seek_last_error_by_key[seek_key] = delta_value
         self._seek_last_value_by_key[seek_key] = current_value
@@ -3692,7 +3753,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{_format_compact_number(self.spin_current_sweep_target_start.value())}{suffix} to "
                 f"{_format_compact_number(self.spin_current_sweep_target_end.value())}{suffix}; current "
                 f"{_format_compact_number(self.spin_current_sweep_start_mA.value(), decimals=2)} to "
-                f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)}."
+                f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)} at "
+                f"{_format_compact_unit(self.spin_current_sweep_step_mA.value(), 'mA/s', decimals=2)}."
             )
         else:
             summary = (
@@ -3728,8 +3790,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_recipe_banner.setText(banner)
         try:
             steps, _, interval_ms = self._build_automation_recipe()
-            record_points = sum(1 for step in steps if step.action == "record")
-            duration_s = (len(steps) * interval_ms) / 1000.0
+            record_points, tick_count = self._estimate_recipe_points_and_ticks(steps, interval_ms)
+            duration_s = (tick_count * interval_ms) / 1000.0
             self._recipe_estimated_points = record_points
             self.label_recipe_estimate.setText(
                 f"Estimated points: {record_points} | Estimated duration: {_format_duration(duration_s)}"
@@ -3746,6 +3808,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.recipe_progress.setRange(0, 100)
                 self.recipe_progress.setValue(0)
                 self.recipe_progress.setFormat("Recipe progress: unavailable")
+
+    def _estimate_recipe_points_and_ticks(self, steps: Sequence[AutomationStep], interval_ms: int) -> tuple[int, int]:
+        points = 0
+        ticks = 0
+        interval_s = max(0.001, float(interval_ms) / 1000.0)
+        for step in steps:
+            if step.action == "sweep_current" and step.current_start_mA is not None and step.current_end_mA is not None:
+                ramp_rate = max(1e-9, abs(float(step.current_ramp_rate_mA_s or self.spin_current_sweep_step_mA.value())))
+                duration_s = abs(
+                    self._quantize_supply_current_mA(float(step.current_end_mA))
+                    - self._quantize_supply_current_mA(float(step.current_start_mA))
+                ) / ramp_rate
+                sweep_ticks = max(1, int(math.ceil(duration_s / interval_s)))
+                ticks += sweep_ticks
+                points += sweep_ticks
+                continue
+            ticks += 1
+            if step.action in {"record", "set_current"}:
+                points += 1
+            elif step.action == "settle" and step.basis is not None:
+                points += 1
+            elif step.action == "seek_target":
+                points += 1
+        return points, ticks
 
     def _warn_if_scale_is_silent(self) -> None:
         if self._scale_thread is None or self._scale_no_data_hint_emitted:
@@ -3988,6 +4074,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if manual_jog:
             return max(self._minimum_held_speed_mm_s(), float(self.spin_motion_speed_mm_s.value()))
         if self._automation_active:
+            if self._is_recovery_mode(self._automation_name):
+                return max(self._minimum_held_speed_mm_s(), float(self.spin_motion_speed_mm_s.value()))
             if self._is_current_sweep_mode(self._automation_name):
                 return max(
                     self._minimum_held_speed_mm_s(),
@@ -4247,7 +4335,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "return_target": self.check_current_sweep_return_target.isChecked(),
                 "current_start_mA": float(self.spin_current_sweep_start_mA.value()),
                 "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
-                "current_step_mA": float(self.spin_current_sweep_step_mA.value()),
+                "current_ramp_rate_mA_s": float(self.spin_current_sweep_step_mA.value()),
                 "reverse_current": self.check_current_sweep_reverse_current.isChecked(),
                 "tolerance": float(self.spin_current_sweep_tolerance.value()),
                 "balancing_nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
@@ -4423,6 +4511,16 @@ class MainWindow(QtWidgets.QMainWindow):
             stress = stress_mpa_from_load_g(load_g, float(self.spin_diameter.value()))
         tensile_displacement_mm = self._tensile_displacement_mm(position_mm)
         snapshot = self._refresh_supply_snapshot()
+        current_set_mA = self._supply_last_setpoint_mA
+        current_measured_mA = snapshot.get("current_mA")
+        resistance_ohm = snapshot.get("resistance_ohm")
+        if (
+            current_set_mA is None
+            or abs(current_set_mA) < MIN_RESISTANCE_CURRENT_MA
+            or current_measured_mA is None
+            or abs(current_measured_mA) < MIN_RESISTANCE_CURRENT_MA
+        ):
+            resistance_ohm = None
         return MeasurementPoint(
             elapsed_s=elapsed_s,
             timestamp_utc=_utc_timestamp(),
@@ -4433,10 +4531,10 @@ class MainWindow(QtWidgets.QMainWindow):
             preload_state=preload_state,
             strain_pct=strain,
             stress_mpa=stress,
-            current_set_mA=self._supply_last_setpoint_mA,
-            current_measured_mA=snapshot.get("current_mA"),
+            current_set_mA=current_set_mA,
+            current_measured_mA=current_measured_mA,
             voltage_V=snapshot.get("voltage_V"),
-            resistance_ohm=snapshot.get("resistance_ohm"),
+            resistance_ohm=resistance_ohm,
             power_W=snapshot.get("power_W"),
             automation_phase=self._automation_phase,
             automation_basis=self._automation_basis,
@@ -4496,6 +4594,25 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         if advance_heating:
             self._advance_heating_after_record()
+        return True
+
+    def _record_recovery_point(self) -> bool:
+        try:
+            self._refresh_tic_status()
+        except Exception:
+            pass
+        elapsed_s = 0.0
+        if self._recovery_start_monotonic > 0.0:
+            elapsed_s = time.monotonic() - self._recovery_start_monotonic
+        point = self._capture_measurement_point(
+            elapsed_s=elapsed_s,
+            position_mm=self._current_position_mm,
+            raw_load_g=self._latest_scale_value_g,
+            load_g=self._current_effective_load_g(),
+        )
+        self._recovery_points.append(point)
+        self._refresh_recovery_plot()
+        self._refresh_live_labels()
         return True
 
     def _write_point(self, point: MeasurementPoint) -> None:
@@ -4683,6 +4800,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_automation_context(phase="resume")
         if state.current_setpoint_mA is not None and self._is_current_sweep_mode(self._automation_name):
             self._set_recipe_current_mA(float(state.current_setpoint_mA))
+        self._active_current_sweep_step_index = None
+        self._active_current_sweep_started_s = 0.0
+        self._active_current_sweep_last_setpoint_mA = None
         self._auto_ramp_timer.start(self._automation_interval_ms)
         self._log(f"Recipe resumed at step {self._automation_index + 1} of {max(1, self._automation_total_steps)}.")
         self._update_recipe_progress()
@@ -4713,6 +4833,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_uses_last_target = False
         self._last_move_target_mm = self._current_position_mm
         self._last_move_direction = 0.0
+        self._active_current_sweep_step_index = None
+        self._active_current_sweep_started_s = 0.0
+        self._active_current_sweep_last_setpoint_mA = None
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
         self._seek_no_response_count_by_key.clear()
@@ -4809,10 +4932,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _show_recovery_plot_dialog(self, title: str) -> None:
         if FigureCanvas is None:
             return
-        elapsed_s = 0.0
-        if self._session_active:
-            elapsed_s = time.monotonic() - self._session_start_monotonic
-        self._recovery_start_elapsed_s = elapsed_s
+        self._recovery_points = []
+        self._recovery_start_monotonic = time.monotonic()
+        self._recovery_start_elapsed_s = 0.0
         dialog = self._recovery_plot_dialog
         if dialog is None or dialog.isHidden():
             dialog = QtWidgets.QDialog(self)
@@ -4848,12 +4970,9 @@ class MainWindow(QtWidgets.QMainWindow):
             plot_axis.tick_params(colors=theme["text_rgb"])
             plot_axis.yaxis.label.set_color(theme["text_rgb"])
             plot_axis.xaxis.label.set_color(theme["text_rgb"])
-        start_s = self._recovery_start_elapsed_s
-        points = self._session_points if start_s is None else [
-            point for point in self._session_points if point.elapsed_s >= start_s
-        ]
+        points = self._recovery_points
         if points:
-            x_values = [point.elapsed_s - (start_s or 0.0) for point in points]
+            x_values = [point.elapsed_s for point in points]
             axis.plot(x_values, [point.load_g for point in points], color="#38bdf8", marker="o", markersize=3)
             twin.plot(x_values, [point.position_mm for point in points], color="#60a5fa", marker="s", markersize=3)
         else:
@@ -4876,13 +4995,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_canvas.draw_idle()
 
     def _start_recovery_position_target(self, target_mm: float, label: str) -> None:
-        if not self._session_active:
-            self._log("Cannot run displacement recovery because there is no active session.")
-            return
         self._sync_manual_motion_base_from_current_position()
         steps = [AutomationStep("move", target_mm=target_mm, note=label)]
         distance_mm = abs(target_mm - self._current_position_mm)
-        speed_mm_s = max(self._minimum_held_speed_mm_s(), self._motion_speed_for_current_context(manual_jog=False))
+        speed_mm_s = max(self._minimum_held_speed_mm_s(), self._motion_speed_for_current_context(manual_jog=True))
         interval_ms = int(self.spin_current_sweep_interval.value())
         sample_count = max(3, int(math.ceil((distance_mm / max(speed_mm_s, 1e-9)) * 1000.0 / interval_ms)) + 2)
         steps.extend(AutomationStep("settle", note=label) for _ in range(sample_count))
@@ -4896,7 +5012,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = interval_ms
-        self._automation_name = "recovery_position"
+        self._automation_name = RECOVERY_POSITION
         self._set_automation_context(phase="recover")
         self._auto_ramp_timer.start(self._automation_interval_ms)
         self._log(f"Started displacement recovery: {label}.")
@@ -4911,9 +5027,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._start_recovery_position_target(self._position_reference_mm, "displacement to 0")
 
     def _start_recovery_load_zero(self) -> None:
-        if not self._session_active:
-            self._log("Cannot run load-zero recovery because there is no active session.")
-            return
         self._sync_manual_motion_base_from_current_position()
         steps = [
             AutomationStep(
@@ -4933,7 +5046,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = int(self.spin_current_sweep_interval.value())
-        self._automation_name = CURRENT_SWEEP_LOAD
+        self._automation_name = RECOVERY_LOAD
         self._set_automation_context(phase="recover", basis=HSW_BASIS_LOAD_G, target_value=0.0, plateau_index=0)
         self._auto_ramp_timer.start(self._automation_interval_ms)
         self._log("Started load-zero recovery.")
@@ -4962,6 +5075,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_value_by_key.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
+        self._active_current_sweep_step_index = None
+        self._active_current_sweep_started_s = 0.0
+        self._active_current_sweep_last_setpoint_mA = None
         self._auto_ramp_timer.stop()
         if not self._manual_jog_timer.isActive():
             self._stop_tic_keepalive()
@@ -5102,16 +5218,22 @@ class MainWindow(QtWidgets.QMainWindow):
             target_step = abs(float(self.spin_current_sweep_target_step.value()))
             current_start = float(self.spin_current_sweep_start_mA.value())
             current_end = float(self.spin_current_sweep_end_mA.value())
-            current_step = abs(float(self.spin_current_sweep_step_mA.value()))
+            current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
             interval_ms = int(self.spin_current_sweep_interval.value())
             settle_s = float(self.spin_current_sweep_settle_s.value())
             targets = self._build_numeric_targets(target_start, target_end, target_step)
-            currents = self._build_numeric_targets(current_start, current_end, current_step)
-            if self.check_current_sweep_reverse_current.isChecked() and len(currents) > 1:
-                currents.extend(reversed(currents[:-1]))
             settle_steps = max(0, int(math.ceil((settle_s * 1000.0) / interval_ms)))
             steps = []
             for plateau_index, target in enumerate(targets, start=1):
+                steps.append(
+                    AutomationStep(
+                        "set_current",
+                        target_value=target,
+                        basis=basis,
+                        current_mA=current_start,
+                        note=str(plateau_index),
+                    )
+                )
                 steps.append(
                     AutomationStep(
                         "seek_target",
@@ -5120,43 +5242,31 @@ class MainWindow(QtWidgets.QMainWindow):
                         note=str(plateau_index),
                     )
                 )
-                for current in currents:
+                sweep_ranges = [(current_start, current_end)]
+                if self.check_current_sweep_reverse_current.isChecked() and abs(current_end - current_start) > 1e-12:
+                    sweep_ranges.append((current_end, current_start))
+                for sweep_start_mA, sweep_end_mA in sweep_ranges:
                     steps.append(
                         AutomationStep(
-                            "set_current",
+                            "sweep_current",
                             target_value=target,
                             basis=basis,
-                            current_mA=current,
+                            current_start_mA=sweep_start_mA,
+                            current_end_mA=sweep_end_mA,
+                            current_ramp_rate_mA_s=current_ramp_rate,
                             note=str(plateau_index),
                         )
                     )
+                if settle_steps > 0:
                     steps.extend(
                         AutomationStep(
                             "settle",
                             target_value=target,
                             basis=basis,
-                            current_mA=current,
+                            current_mA=current_start,
                             note=str(plateau_index),
                         )
                         for _ in range(settle_steps)
-                    )
-                    steps.append(
-                        AutomationStep(
-                            "seek_target",
-                            target_value=target,
-                            basis=basis,
-                            current_mA=current,
-                            note=str(plateau_index),
-                        )
-                    )
-                    steps.append(
-                        AutomationStep(
-                            "record",
-                            target_value=target,
-                            basis=basis,
-                            current_mA=current,
-                            note=str(plateau_index),
-                        )
                     )
             if self.check_current_sweep_return_target.isChecked() and targets:
                 steps.append(
@@ -5196,7 +5306,7 @@ class MainWindow(QtWidgets.QMainWindow):
             summary = (
                 f"Started {recipe_name}: {target_start:.4f}{suffix} to {target_end:.4f}{suffix}, "
                 f"target step {target_step:.4f}{suffix}, current {current_start:.2f} to {current_end:.2f} mA "
-                f"in {current_step:.2f} mA steps."
+                f"at {current_ramp_rate:.2f} mA/s."
             )
             return steps, summary, interval_ms
 
@@ -5216,13 +5326,80 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return steps, summary, interval_ms
 
+    def _handle_current_sweep_step(self, step: AutomationStep, step_index: int) -> bool:
+        if step.current_start_mA is None or step.current_end_mA is None or step.current_ramp_rate_mA_s is None:
+            self._log("Recipe stopped because the current ramp step is incomplete.")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        if step.target_value is None or not step.basis:
+            self._log("Recipe stopped because the current ramp has no control target.")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+
+        start_mA = self._quantize_supply_current_mA(float(step.current_start_mA))
+        end_mA = self._quantize_supply_current_mA(float(step.current_end_mA))
+        ramp_rate_mA_s = max(1e-9, abs(float(step.current_ramp_rate_mA_s)))
+        direction = 1.0 if end_mA >= start_mA else -1.0
+
+        if self._active_current_sweep_step_index != step_index:
+            self._active_current_sweep_step_index = step_index
+            self._active_current_sweep_started_s = time.monotonic()
+            self._active_current_sweep_last_setpoint_mA = None
+            if not self._set_recipe_current_mA(start_mA, measure_after=False):
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return True
+            self._active_current_sweep_last_setpoint_mA = start_mA
+
+        elapsed_s = max(0.0, time.monotonic() - self._active_current_sweep_started_s)
+        desired_mA = start_mA + direction * ramp_rate_mA_s * elapsed_s
+        if direction >= 0.0:
+            desired_mA = min(end_mA, desired_mA)
+        else:
+            desired_mA = max(end_mA, desired_mA)
+        setpoint_mA = self._quantize_ramp_current_mA(desired_mA, direction, end_mA)
+        if (
+            self._active_current_sweep_last_setpoint_mA is None
+            or abs(setpoint_mA - self._active_current_sweep_last_setpoint_mA) >= self._supply_current_resolution_mA() * 0.5
+        ):
+            if not self._set_recipe_current_mA(setpoint_mA, measure_after=False):
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return True
+            self._active_current_sweep_last_setpoint_mA = setpoint_mA
+
+        plateau_index = int(step.note) if step.note.isdigit() else None
+        self._set_automation_context(
+            phase="current",
+            basis=step.basis,
+            target_value=step.target_value,
+            plateau_index=plateau_index,
+        )
+        tolerance = abs(float(self.spin_current_sweep_tolerance.value()))
+        try:
+            self._seek_distribution_target(step.basis, step.target_value, tolerance)
+        except Exception as exc:
+            self._log(f"Recipe stopped: {exc}")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+
+        duration_s = abs(end_mA - start_mA) / ramp_rate_mA_s
+        finished = elapsed_s >= duration_s and abs((self._active_current_sweep_last_setpoint_mA or setpoint_mA) - end_mA) < 1e-9
+        if finished:
+            self._active_current_sweep_step_index = None
+            self._active_current_sweep_started_s = 0.0
+            self._active_current_sweep_last_setpoint_mA = None
+            return True
+        return False
+
     def _handle_auto_ramp_tick(self) -> None:
         if not self._automation_active or self._automation_paused:
             return
         if self._automation_index >= len(self._automation_steps):
+            is_recovery = self._is_recovery_mode()
             self._update_recipe_progress(complete=True)
             self._stop_auto_ramp(log_completion=False, keep_progress=True)
-            self._log("Recipe completed.")
+            self._log("Recovery completed." if is_recovery else "Recipe completed.")
+            if not is_recovery and self._session_active:
+                self._stop_session()
             return
         step = self._automation_steps[self._automation_index]
         self._automation_index += 1
@@ -5277,10 +5454,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_value=step.target_value,
                 plateau_index=plateau_index,
             )
-            if step.current_mA is None or not self._set_recipe_current_mA(float(step.current_mA)):
+            if step.current_mA is None or not self._set_recipe_current_mA(float(step.current_mA), measure_after=False):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             elif self._session_active:
                 self._record_current_point(quiet=True, advance_heating=False)
+        elif step.action == "sweep_current":
+            finished = self._handle_current_sweep_step(step, self._automation_index - 1)
+            if not finished and self._automation_active:
+                self._automation_index -= 1
         elif step.action == "settle":
             plateau_index = int(step.note) if step.note.isdigit() else None
             self._set_automation_context(
@@ -5289,7 +5470,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_value=step.target_value,
                 plateau_index=plateau_index,
             )
-            if self._session_active:
+            if (
+                step.basis
+                and step.target_value is not None
+                and not self._is_recovery_mode()
+            ):
+                tolerance = abs(
+                    float(
+                        self.spin_current_sweep_tolerance.value()
+                        if self._is_current_sweep_mode(self._automation_name)
+                        else self.spin_distribution_tolerance.value()
+                    )
+                )
+                try:
+                    self._seek_distribution_target(step.basis, step.target_value, tolerance)
+                except Exception as exc:
+                    self._log(f"Recipe stopped: {exc}")
+                    self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                    return
+            elif self._is_recovery_mode():
+                self._record_recovery_point()
+            elif self._session_active:
                 self._record_current_point(quiet=True, advance_heating=False)
         elif step.action == "record":
             plateau_index = int(step.note) if step.note.isdigit() else None
@@ -5299,7 +5500,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_value=step.target_value,
                 plateau_index=plateau_index,
             )
-            if not self._record_current_point():
+            if self._is_recovery_mode():
+                self._record_recovery_point()
+            elif not self._record_current_point():
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
         self._update_recipe_progress()
         self._refresh_live_labels()
@@ -5564,6 +5767,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("current_sweep_start_mA", self.spin_current_sweep_start_mA.value())
         self.settings.setValue("current_sweep_end_mA", self.spin_current_sweep_end_mA.value())
         self.settings.setValue("current_sweep_step_mA", self.spin_current_sweep_step_mA.value())
+        self.settings.setValue("current_sweep_ramp_rate_mA_s", self.spin_current_sweep_step_mA.value())
         self.settings.setValue("current_sweep_reverse_current", self.check_current_sweep_reverse_current.isChecked())
         self.settings.setValue("current_sweep_tolerance", self.spin_current_sweep_tolerance.value())
         self.settings.setValue("current_sweep_nudge_mm", self.spin_current_sweep_nudge_mm.value())
@@ -5660,9 +5864,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_tension_load_positive.setChecked(
             bool(self.settings.value("negative_scale_is_tension", True, type=bool))
         )
-        self.check_positive_motion_is_tension.setChecked(
-            bool(self.settings.value("positive_motion_is_tension", True, type=bool))
-        )
+        if not bool(self.settings.value("negative_tic_motion_default_applied", False, type=bool)):
+            motion_positive_is_tension = False
+            self.settings.setValue("positive_motion_is_tension", False)
+            self.settings.setValue("negative_tic_motion_default_applied", True)
+        else:
+            motion_positive_is_tension = bool(
+                self.settings.value("positive_motion_is_tension", False, type=bool)
+            )
+        self.check_positive_motion_is_tension.setChecked(motion_positive_is_tension)
         self.spin_backlash_mm.setValue(float(self.settings.value("backlash_mm", 0.0)))
         self.spin_initial_length.setValue(float(self.settings.value("initial_length_mm", 30.0)))
         self.spin_diameter.setValue(float(self.settings.value("diameter_mm", 0.03)))
@@ -5740,7 +5950,14 @@ class MainWindow(QtWidgets.QMainWindow):
         saved_current_start_mA = float(self.settings.value("current_sweep_start_mA", 1.0))
         self.spin_current_sweep_start_mA.setValue(max(1.0, saved_current_start_mA))
         self.spin_current_sweep_end_mA.setValue(float(self.settings.value("current_sweep_end_mA", 3.0)))
-        self.spin_current_sweep_step_mA.setValue(float(self.settings.value("current_sweep_step_mA", 1.0)))
+        self.spin_current_sweep_step_mA.setValue(
+            float(
+                self.settings.value(
+                    "current_sweep_ramp_rate_mA_s",
+                    self.settings.value("current_sweep_step_mA", 1.0),
+                )
+            )
+        )
         self.check_current_sweep_reverse_current.setChecked(
             bool(self.settings.value("current_sweep_reverse_current", True, type=bool))
         )
