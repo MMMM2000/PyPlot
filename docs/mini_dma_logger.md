@@ -6,7 +6,7 @@ This note is the handoff for the `Mini DMA Logger` workflow so development can c
 
 `Mini DMA Logger` is a hardware-driven stress/strain and heating workflow for a small stepper-based tensile rig. The immediate target is shape-memory microwire work, with a second planned use case for automated `Hsw` distribution measurements under load.
 
-The measurement roadmap, copper-wire bring-up plan, and saved-recipe design notes live in `docs/mini_dma_measurement_plan.md`.
+The measurement roadmap, copper-wire bring-up plan, and saved-recipe design notes live in `docs/mini_dma_measurement_plan.md`. The current balance, actuator, and Tic controller assumptions live in `docs/mini_dma_hardware.md`.
 
 The logger is intended to bring three subsystems into one session:
 
