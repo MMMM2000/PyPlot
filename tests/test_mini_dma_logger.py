@@ -54,6 +54,7 @@ def _build_window(tmp_path: Path, qtbot) -> mini_dma_mod.MainWindow:
     window.check_zero_position_on_start.setChecked(False)
     window.check_tare_on_start.setChecked(False)
     window.check_hardware_tare_on_start.setChecked(False)
+    window.check_pre_measurement_setup.setChecked(False)
     window.spin_zero_load_scale_g.setValue(0.0)
     return window
 
@@ -83,6 +84,70 @@ def test_zero_load_reference_defaults_to_measured_hanging_weight(tmp_path: Path,
         _close_test_window(window)
 
 
+def test_load_g_from_stress_mpa_inverts_stress_conversion() -> None:
+    load_g = mini_dma_mod.load_g_from_stress_mpa(10.0, 0.03)
+
+    assert load_g == pytest.approx(0.7208, rel=5e-4)
+    assert mini_dma_mod.stress_mpa_from_load_g(load_g, 0.03) == pytest.approx(10.0)
+
+
+def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert mode_index >= 0
+    window.combo_recipe_mode.setCurrentIndex(mode_index)
+    window.check_pre_measurement_setup.setChecked(True)
+    window.spin_setup_preload_stress_mpa.setValue(10.0)
+    window.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
+    window.spin_setup_zero_stable_s.setValue(1.0)
+    window.spin_current_sweep_target_start.setValue(0.0)
+    window.spin_current_sweep_target_end.setValue(10.0)
+    window.spin_current_sweep_target_step.setValue(10.0)
+    window.spin_current_sweep_interval.setValue(250)
+
+    try:
+        steps, summary, interval_ms = window._build_automation_recipe()
+
+        assert interval_ms == 250
+        assert "zero/preload length setup" in summary
+        assert steps[0].action == "seek_target"
+        assert steps[0].basis == mini_dma_mod.HSW_BASIS_LOAD_G
+        assert steps[0].target_value == pytest.approx(0.0)
+        actions = [step.action for step in steps]
+        assert "measure_length_prompt" in actions
+        assert "apply_length_setup" in actions
+        prompt_index = actions.index("measure_length_prompt")
+        apply_index = actions.index("apply_length_setup")
+        first_recipe_index = actions.index("set_current")
+        assert prompt_index < apply_index < first_recipe_index
+        preload_step = next(step for step in steps if step.note == "setup_preload")
+        assert preload_step.action == "ramp_target"
+        assert preload_step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA
+        assert preload_step.target_end_value == pytest.approx(10.0)
+        assert preload_step.target_ramp_rate_value_s == pytest.approx(1.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_preload_length_setup_calculates_l0_from_tensile_stage_delta(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_positive_motion_is_tension.setChecked(False)
+
+    try:
+        l0 = window._apply_preload_length_result(
+            measured_length_mm=30.5,
+            preload_position_mm=-1.5,
+            zero_position_mm=-1.0,
+        )
+
+        assert l0 == pytest.approx(30.0)
+        assert window.spin_initial_length.value() == pytest.approx(30.0)
+        assert window._position_reference_mm == pytest.approx(-1.0)
+        assert "Computed l0 = 30" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def _wheel_event(delta_y: int = -120) -> QtGui.QWheelEvent:
     return QtGui.QWheelEvent(
         QtCore.QPointF(10.0, 10.0),
@@ -108,6 +173,35 @@ def _set_copper_current_sweep_defaults(window: mini_dma_mod.MainWindow) -> None:
     window.spin_current_sweep_target_speed_mm_s.setValue(1.0)
     window.check_current_sweep_reverse_current.setChecked(True)
     window.spin_current_sweep_interval.setValue(250)
+    window.spin_current_sweep_log_interval.setValue(500)
+
+
+def test_scale_signal_buffer_summarizes_interval() -> None:
+    buffer = mini_dma_mod.ScaleSignalBuffer(window_s=5.0)
+    buffer.add_sample(timestamp_s=100.0, raw_g=21.2, applied_load_g=0.0, raw_text="21.200 g")
+    buffer.add_sample(timestamp_s=100.1, raw_g=21.0, applied_load_g=0.2, raw_text="21.000 g")
+    buffer.add_sample(timestamp_s=100.2, raw_g=20.9, applied_load_g=0.3, raw_text="20.900 g")
+
+    summary = buffer.interval_summary(since_s=100.0, until_s=100.2)
+
+    assert summary.raw_last_g == pytest.approx(20.9)
+    assert summary.applied_last_g == pytest.approx(0.3)
+    assert summary.load_mean_g == pytest.approx((0.0 + 0.2 + 0.3) / 3.0)
+    assert summary.load_min_g == pytest.approx(0.0)
+    assert summary.load_max_g == pytest.approx(0.3)
+    assert summary.sample_count == 3
+    assert summary.sample_rate_hz == pytest.approx(10.0)
+
+
+def test_scale_signal_buffer_trims_old_samples() -> None:
+    buffer = mini_dma_mod.ScaleSignalBuffer(window_s=1.0)
+    buffer.add_sample(timestamp_s=10.0, raw_g=1.0, applied_load_g=1.0, raw_text="1")
+    buffer.add_sample(timestamp_s=11.5, raw_g=2.0, applied_load_g=2.0, raw_text="2")
+
+    summary = buffer.interval_summary(since_s=None, until_s=None)
+
+    assert summary.sample_count == 1
+    assert summary.raw_last_g == pytest.approx(2.0)
 
 
 def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Path, qtbot) -> None:
@@ -969,6 +1063,94 @@ def test_logged_load_uses_positive_applied_tension(tmp_path: Path, qtbot) -> Non
         _close_test_window(window)
 
 
+def test_session_writes_raw_scale_sidecar_and_interval_summary(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(mini_dma_mod.time, "time", lambda: clock["t"])
+    window.edit_log_name.setText("scale_buffered_session")
+    window.check_tension_load_positive.setChecked(True)
+    window.check_zero_on_preload.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_current_sweep_log_interval.setValue(500)
+    window._latest_scale_value_g = 21.2
+    window._latest_scale_text = "21.200 g"
+    window._latest_scale_timestamp = 1000.0
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        assert len(window._session_points) == 1
+
+        clock["t"] = 1000.10
+        window._handle_scale_measurement(21.0, "21.000 g", clock["t"])
+        clock["t"] = 1000.15
+        window._handle_scale_measurement(20.8, "20.800 g", clock["t"])
+        clock["t"] = 1000.20
+        window._handle_scale_measurement(20.6, "20.600 g", clock["t"])
+
+        clock["t"] = 1000.25
+        assert window._maybe_record_scheduled_point() is True
+        assert len(window._session_points) == 1
+
+        clock["t"] = 1000.60
+        assert window._maybe_record_scheduled_point() is True
+        assert len(window._session_points) == 2
+
+        window._stop_session()
+
+        rows = list(csv.DictReader((tmp_path / "scale_buffered_session.csv").open(encoding="utf-8", newline="")))
+        assert len(rows) == 2
+        assert rows[-1]["raw_load_g"] == "20.600000"
+        assert rows[-1]["load_g"] == "0.400000"
+        assert rows[-1]["load_raw_last_g"] == "20.600000"
+        assert rows[-1]["load_mean_g"] == "0.400000"
+        assert rows[-1]["load_min_g"] == "0.200000"
+        assert rows[-1]["load_max_g"] == "0.600000"
+        assert rows[-1]["load_sample_count"] == "3"
+        assert rows[-1]["scale_sample_rate_hz"] == "20.000000"
+
+        raw_rows = list(
+            csv.DictReader((tmp_path / "scale_buffered_session.scale_raw.csv").open(encoding="utf-8", newline=""))
+        )
+        assert [row["raw_load_g"] for row in raw_rows] == ["21.000000", "20.800000", "20.600000"]
+        assert [row["applied_load_g"] for row in raw_rows] == ["0.200000", "0.400000", "0.600000"]
+
+        metadata = json.loads((tmp_path / "scale_buffered_session.json").read_text(encoding="utf-8"))
+        assert metadata["logging"]["log_interval_ms"] == 500
+        assert metadata["logging"]["raw_scale_sidecar"] == "scale_buffered_session.scale_raw.csv"
+        assert metadata["logging"]["raw_scale_sample_count"] == 3
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_control_and_log_intervals_restore_independently(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.setValue("current_sweep_interval_ms", 375)
+    settings.setValue("current_sweep_log_interval_ms", 875)
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+
+    try:
+        assert window.spin_current_sweep_interval.value() == 375
+        assert window.spin_current_sweep_log_interval.value() == 875
+        window.spin_current_sweep_interval.setValue(250)
+        window.spin_current_sweep_log_interval.setValue(500)
+        window._save_settings()
+        assert int(settings.value("current_sweep_interval_ms")) == 250
+        assert int(settings.value("current_sweep_log_interval_ms")) == 500
+    finally:
+        _close_test_window(window)
+
+
 def test_logged_load_clamps_non_tensile_side_of_reference_to_zero(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("positive_tension_magnitude_log")
@@ -1377,6 +1559,9 @@ def test_seek_target_logs_feedback_sample_before_next_move(tmp_path: Path, qtbot
         )
         window._last_motion_command_time_s = time.time() - 0.01
         window._latest_scale_timestamp = time.time()
+        window._last_session_log_timestamp_s = time.time() - (
+            window._current_sweep_log_interval_ms() / 1000.0
+        ) - 0.01
 
         reached = window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_LOAD_G,

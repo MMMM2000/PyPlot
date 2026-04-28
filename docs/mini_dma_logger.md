@@ -55,6 +55,8 @@ Current intended hardware stack:
 - numeric recipe summaries and spin boxes trim zero-only decimals, for example `20 g` instead of `20.0000 g`
 - log messages appear in the `Run log`; the duplicate status-bar echo is hidden
 - output to `TXT`, `CSV`, and `JSON` metadata sidecar
+- each active session also writes a high-rate raw scale sidecar named `<run>.scale_raw.csv`, while the main CSV remains a slower recipe/session log
+- the current-sweep `Control interval` is separate from the `Log interval`, so hardware feedback/correction can run faster than human-readable session rows
 - shape-memory-friendly export columns for `Displacement`, positive applied tensile `Load`, `Strain`, and `Stress`
 
 ### Motion
@@ -67,6 +69,7 @@ Current intended hardware stack:
 - displacement recipes expose their own linear move speed, while iso-load, iso-stress, and iso-strain current sweeps are separate recipe choices with target ramp rate, target ramp stage speed, conservative correction step, and correction move speed controls
 - clear stacked `Move up` / `Move down` buttons can be held for continuous manual jogging from the last commanded target, with held movement advancing by the configured linear `Manual move speed` in `mm/s`
 - current-sweep recipes use an editable zero-load scale reference instead of physically taring the balance; the default hanging-weight reference is `21.200 g`
+- current-sweep recipes can optionally run a zero/preload length setup before annealing: seek `0 g` applied load from the real scale reference, ramp to a small preload stress, prompt for the measured gauge length, return to `0 g`, and compute `l0` from the known tensile stage displacement
 - position zeroing
 - halt / stop support
 - jog control refuses sub-step moves that would round to the current motor step
@@ -83,6 +86,8 @@ Current intended hardware stack:
 - one normal `Capture zero-load` action that records the current real balance reading as the `0 g` applied-load reference without changing the scale display
 - optional session-start capture of the zero-load reference, for use only when the current raw balance reading is definitely unloaded
 - applied tensile load is displayed and logged as the positive tensile magnitude in `Load` / `load_g` using `zero-load scale reading - current scale reading` for the current hanging-weight rig; signed raw balance remains available as `raw_load_g` for diagnostics
+- scale polling defaults to 50 ms and feeds a rolling signal buffer; main CSV rows include interval load mean, standard deviation, min/max, sample count, and achieved scale sample rate
+- raw scale sidecars preserve every real balance reading during a session with both raw grams and applied wire load, so transition fluctuations can be inspected without forcing the main log to run at the hardware polling rate
 - tensile displacement uses its own motion-direction setting; the current rig defaults to negative raw Tic travel as positive tensile displacement, so the app can show/log positive `position_mm` while preserving raw Tic position as `raw_position_mm`
 - physical remote tare and software tare are kept only in advanced hardware diagnostics because the normal workflow should leave the balance showing real grams
 
@@ -96,7 +101,8 @@ Current intended hardware stack:
 - HMP4030 current commands are treated as 0.2 mA-resolution setpoints below 1 A, so a `1 mA/s` ramp can update in smaller timed increments while avoiding unsupported command precision
 - the main tabs are organized as `Recipe`, `Specimen`, and lower-priority `Hardware`, so scale/motor/power-supply setup does not dominate routine use
 - iso-load, iso-stress, and iso-strain current sweeps own both the target ramp and current ramp directly, advance current from elapsed time, and are shown as separate recipe modes; the progress bar estimates timed target/current-ramp ticks instead of only counting visible recipe rows
-- closed-loop target seeking logs feedback samples during each correction/settle/current step, adapts correction step and speed near the target, limits each commanded target by the correction speed and timer interval so moves cannot stack ahead of the real stage position, keeps correcting inside the broad hold tolerance toward a tighter near-target band, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
+- the optional setup workflow actively returns to the `21.200 g` zero-load reference rather than slackening below zero load, so a nominal `0 MPa` sweep remains an active zero-load/zero-stress measurement with strain still defined
+- closed-loop target seeking samples feedback during each correction/settle/current step, but scheduled main CSV rows are throttled by the separate log interval; target seeking still adapts correction step and speed near the target, limits each commanded target by the correction speed and timer interval so moves cannot stack ahead of the real stage position, keeps correcting inside the broad hold tolerance toward a tighter near-target band, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
 - recipe completion stops the session log; recipe stop/fault turns current annealing output off, keeps a resume point, and can ask whether to move displacement or load back toward zero without appending recovery samples to the recipe CSV; paused recipes also turn current output off until resumed
 - resistance is left blank when the current setpoint/measured current is effectively zero, avoiding invalid zero-current resistance points; supply readbacks are throttled during fast automation so current commands do not fight voltage/current queries on the same serial link
 - behavior patterned after the existing current annealing logger rather than as a separate app

@@ -33,6 +33,7 @@
 - Mini DMA current-sweep recipes now ramp load/stress/strain targets at configurable g/s, MPa/s, or %/s rates, with a separate target-ramp stage speed so automatic return-to-target moves do not crawl at the fine correction speed.
 - Mini DMA recipe progress now counts timed target-ramp and current-ramp ticks, so long elapsed-time sweeps do not appear as a short handful of recipe rows or reach 100% before completion.
 - Mini DMA load/stress control now defaults to a `21.200 g` zero-load scale reference for the hanging-weight rig and computes applied wire load from the live real balance reading instead of remotely taring the scale.
+- Mini DMA current-sweep recipes can now run an optional zero/preload length setup before annealing: actively seek `0 g` applied load, ramp to a configurable preload stress, prompt for the measured gauge length, return to `0 g`, compute `l0`, and then start the recipe without using a slack/free-transformation mode.
 - Mini DMA now has an always-visible `EMERGENCY STOP` dashboard button that stops the active recipe/session, halts the Tic motor, and commands the power-supply output off.
 - Added a Mini DMA measurement plan covering the copper-wire first test, the intended isostress current-sweep workflow, saved recipe files, and later dynamic recipes.
 - Microwire Data Builder video overrides now tolerate minimal video tables that are missing derived video-length columns.
