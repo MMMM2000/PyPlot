@@ -304,6 +304,43 @@ def test_copper_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtb
         _close_test_window(window)
 
 
+def test_copper_calibration_uses_fast_preload_seek_separate_from_micro_moves(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION_COPPER)
+    assert mode_index >= 0
+    window.combo_recipe_mode.setCurrentIndex(mode_index)
+    window.spin_calibration_preload_nudge_mm.setValue(0.1)
+    window.spin_calibration_preload_speed_mm_s.setValue(0.75)
+    window.spin_calibration_move_step_mm.setValue(0.01)
+    window.spin_calibration_speed_mm_s.setValue(0.2)
+
+    try:
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CALIBRATION_COPPER
+        window._automation_phase = "seek"
+
+        assert window._seek_nudge_mm() == pytest.approx(0.1)
+        assert window._motion_speed_for_current_context(manual_jog=False) == pytest.approx(0.75)
+
+        window._automation_phase = mini_dma_mod.CALIBRATION_FORWARD
+
+        assert window._motion_speed_for_current_context(manual_jog=False) == pytest.approx(0.2)
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_stack_sizes_to_visible_page(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION_COPPER)
+    assert mode_index >= 0
+    window.combo_recipe_mode.setCurrentIndex(mode_index)
+
+    try:
+        assert window.recipe_stack.sizeHint().height() == window.recipe_stack.currentWidget().sizeHint().height()
+    finally:
+        _close_test_window(window)
+
+
 def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -937,7 +974,7 @@ def test_current_sweep_ramp_uses_elapsed_time_and_milliamp_resolution(
         _close_test_window(window)
 
 
-def test_current_sweep_voltage_limit_reverses_current_to_zero_without_stopping_recipe(
+def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_recipe(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -964,10 +1001,10 @@ def test_current_sweep_voltage_limit_reverses_current_to_zero_without_stopping_r
 
         def measure(self) -> dict[str, float | None]:
             return {
-                "current_mA": 3.0,
+                "current_mA": 4.0,
                 "voltage_V": 5.02,
-                "resistance_ohm": 1.67,
-                "power_W": 0.015,
+                "resistance_ohm": 1.25,
+                "power_W": 0.020,
             }
 
         def disconnect(self) -> None:
@@ -976,15 +1013,15 @@ def test_current_sweep_voltage_limit_reverses_current_to_zero_without_stopping_r
     supply = _FakeSupply()
     window._supply_controller = supply  # type: ignore[assignment]
     window._supply_output_enabled = True
-    window._supply_last_setpoint_mA = 3.0
+    window._supply_last_setpoint_mA = 4.0
     window._active_current_sweep_step_index = 4
     window._active_current_sweep_started_s = 99.0
-    window._active_current_sweep_last_setpoint_mA = 3.0
+    window._active_current_sweep_last_setpoint_mA = 4.0
     window._automation_active = True
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
     window.spin_supply_voltage_limit.setValue(5.0)
     window._seek_distribution_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
-    ticks = iter([100.0, 100.6, 101.6])
+    ticks = iter([100.0, 100.6, 101.2])
 
     def _fake_monotonic() -> float:
         try:
@@ -997,8 +1034,8 @@ def test_current_sweep_voltage_limit_reverses_current_to_zero_without_stopping_r
         "sweep_current",
         target_value=3.0,
         basis=mini_dma_mod.HSW_BASIS_LOAD_G,
-        current_start_mA=1.0,
-        current_end_mA=5.0,
+        current_start_mA=2.0,
+        current_end_mA=6.0,
         current_ramp_rate_mA_s=2.0,
     )
 
@@ -1008,12 +1045,12 @@ def test_current_sweep_voltage_limit_reverses_current_to_zero_without_stopping_r
         assert window._automation_active is True
 
         assert window._handle_current_sweep_step(step, 4) is False
-        assert supply.commands == [2.0]
+        assert supply.commands == [3.0]
 
         assert window._handle_current_sweep_step(step, 4) is True
-        assert supply.commands == [2.0, 0.0]
-        assert window._supply_last_setpoint_mA == pytest.approx(0.0)
-        assert "reversing recipe current back to 0 mA" in window.log_output.toPlainText()
+        assert supply.commands == [3.0, 2.0]
+        assert window._supply_last_setpoint_mA == pytest.approx(2.0)
+        assert "reversing recipe current back to the sweep start current" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
