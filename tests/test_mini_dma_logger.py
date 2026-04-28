@@ -204,6 +204,106 @@ def test_scale_signal_buffer_trims_old_samples() -> None:
     assert summary.raw_last_g == pytest.approx(2.0)
 
 
+def _calibration_point(
+    *,
+    position_mm: float,
+    load_g: float,
+    phase: str,
+) -> mini_dma_mod.MeasurementPoint:
+    return mini_dma_mod.MeasurementPoint(
+        elapsed_s=0.0,
+        timestamp_utc="2026-04-28 00:00:00",
+        raw_position_mm=position_mm,
+        position_mm=position_mm,
+        raw_load_g=load_g,
+        load_g=load_g,
+        preload_state=mini_dma_mod.PRELOAD_DISABLED,
+        strain_pct=None,
+        stress_mpa=None,
+        current_set_mA=None,
+        current_measured_mA=None,
+        voltage_V=None,
+        resistance_ohm=None,
+        power_W=None,
+        automation_phase=phase,
+        automation_basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        automation_target_value=None,
+        plateau_index=None,
+        plateau_label=None,
+    )
+
+
+def test_calibration_report_estimates_stiffness_and_backlash() -> None:
+    points = [
+        _calibration_point(position_mm=0.0, load_g=0.000, phase="calibration_baseline"),
+        _calibration_point(position_mm=0.0, load_g=0.005, phase="calibration_baseline"),
+        _calibration_point(position_mm=0.0, load_g=0.010, phase="calibration_baseline"),
+        _calibration_point(position_mm=0.00, load_g=1.00, phase="calibration_forward"),
+        _calibration_point(position_mm=0.01, load_g=1.05, phase="calibration_forward"),
+        _calibration_point(position_mm=0.02, load_g=1.10, phase="calibration_forward"),
+        _calibration_point(position_mm=0.03, load_g=1.15, phase="calibration_forward"),
+        _calibration_point(position_mm=0.02, load_g=1.15, phase="calibration_reverse"),
+        _calibration_point(position_mm=0.01, load_g=1.10, phase="calibration_reverse"),
+        _calibration_point(position_mm=0.00, load_g=1.05, phase="calibration_reverse"),
+        _calibration_point(position_mm=-0.01, load_g=1.00, phase="calibration_reverse"),
+    ]
+
+    report = mini_dma_mod.calibration_report_from_points(points)
+
+    assert report["baseline"]["load_std_g"] == pytest.approx(0.005)
+    assert report["forward"]["stiffness_g_per_mm"] == pytest.approx(5.0)
+    assert report["reverse"]["stiffness_g_per_mm"] == pytest.approx(5.0)
+    assert report["average_stiffness_g_per_mm"] == pytest.approx(5.0)
+    assert report["backlash_mm"] == pytest.approx(0.01)
+    assert report["sample_counts"] == {
+        "baseline": 3,
+        "forward": 4,
+        "reverse": 4,
+    }
+
+
+def test_copper_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION_COPPER)
+    assert mode_index >= 0
+    window.combo_recipe_mode.setCurrentIndex(mode_index)
+    window.spin_calibration_baseline_s.setValue(1.0)
+    window.spin_calibration_start_load_g.setValue(1.0)
+    window.spin_calibration_end_load_g.setValue(2.0)
+    window.spin_calibration_load_step_g.setValue(1.0)
+    window.spin_calibration_move_step_mm.setValue(0.01)
+    window.spin_calibration_steps_per_direction.setValue(2)
+    window.spin_calibration_interval.setValue(250)
+    window.check_positive_motion_is_tension.setChecked(True)
+
+    try:
+        steps, summary, interval_ms = window._build_automation_recipe()
+
+        assert interval_ms == 250
+        assert "copper-wire calibration" in summary
+        assert steps[0].action == "calibration_record"
+        assert steps[0].note == "calibration_baseline"
+        assert any(
+            step.action == "seek_target"
+            and step.basis == mini_dma_mod.HSW_BASIS_LOAD_G
+            and step.target_value == pytest.approx(1.0)
+            for step in steps
+        )
+        forward_moves = [
+            step for step in steps if step.action == "calibration_move" and step.note == "calibration_forward"
+        ]
+        reverse_moves = [
+            step for step in steps if step.action == "calibration_move" and step.note == "calibration_reverse"
+        ]
+        assert [step.relative_mm for step in forward_moves] == [pytest.approx(0.01)] * 4
+        assert [step.relative_mm for step in reverse_moves] == [pytest.approx(-0.01)] * 4
+        assert steps[-2].action == "move"
+        assert steps[-2].target_mm == pytest.approx(window._recipe_origin_mm)
+        assert steps[-1].action == "record"
+    finally:
+        _close_test_window(window)
+
+
 def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -486,23 +586,13 @@ def test_double_spin_boxes_trim_zero_only_decimals(tmp_path: Path, qtbot) -> Non
         _close_test_window(window)
 
 
-def test_current_sweep_hides_separate_heating_program(tmp_path: Path, qtbot) -> None:
+def test_hardware_tab_has_no_separate_heating_program(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
-        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
-        assert index >= 0
-        window.combo_recipe_mode.setCurrentIndex(index)
-        window._update_recipe_mode_ui()
-
-        assert window.heating_recipe_box.isHidden() is True
-        assert "Recipe controls current" in window.label_recipe_summary.text()
-
-        ramp_index = window.combo_recipe_mode.findData("ramp")
-        window.combo_recipe_mode.setCurrentIndex(ramp_index)
-        window._update_recipe_mode_ui()
-
-        assert window.heating_recipe_box.isHidden() is False
+        assert not hasattr(window, "heating_recipe_box")
+        assert not hasattr(window, "combo_heating_mode")
+        assert not hasattr(window, "combo_heat_limit_action")
     finally:
         _close_test_window(window)
 
@@ -847,6 +937,87 @@ def test_current_sweep_ramp_uses_elapsed_time_and_milliamp_resolution(
         _close_test_window(window)
 
 
+def test_current_sweep_voltage_limit_reverses_current_to_zero_without_stopping_recipe(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 1.0}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 1.0
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def initialize_output(self, *, current_mA: float, reset_on_start: bool) -> None:
+            self.commands.append(current_mA)
+
+        def measure(self) -> dict[str, float | None]:
+            return {
+                "current_mA": 3.0,
+                "voltage_V": 5.02,
+                "resistance_ohm": 1.67,
+                "power_W": 0.015,
+            }
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 3.0
+    window._active_current_sweep_step_index = 4
+    window._active_current_sweep_started_s = 99.0
+    window._active_current_sweep_last_setpoint_mA = 3.0
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window.spin_supply_voltage_limit.setValue(5.0)
+    window._seek_distribution_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    ticks = iter([100.0, 100.6, 101.6])
+
+    def _fake_monotonic() -> float:
+        try:
+            return next(ticks)
+        except StopIteration:
+            return 101.6
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=3.0,
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        current_start_mA=1.0,
+        current_end_mA=5.0,
+        current_ramp_rate_mA_s=2.0,
+    )
+
+    try:
+        window._refresh_supply_snapshot(force=True)
+
+        assert window._automation_active is True
+
+        assert window._handle_current_sweep_step(step, 4) is False
+        assert supply.commands == [2.0]
+
+        assert window._handle_current_sweep_step(step, 4) is True
+        assert supply.commands == [2.0, 0.0]
+        assert window._supply_last_setpoint_mA == pytest.approx(0.0)
+        assert "reversing recipe current back to 0 mA" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_hmp4030_initial_current_command_preserves_sub_milliamp_resolution() -> None:
     written: list[bytes] = []
 
@@ -1020,6 +1191,29 @@ def test_zero_load_reference_maps_real_scale_weight_to_applied_load(tmp_path: Pa
 
         window._latest_scale_value_g = 21.25
         assert window._current_effective_load_g() == pytest.approx(0.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_zero_load_reference_is_default_max_applied_load_limit(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.check_tension_load_positive.setChecked(True)
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_max_load.setChecked(False)
+        window._latest_scale_timestamp = time.time()
+
+        window._latest_scale_value_g = 0.2
+        assert window._is_max_load_exceeded() is False
+
+        window._latest_scale_value_g = -0.2
+        assert window._is_max_load_exceeded() is True
+
+        window.check_max_load.setChecked(True)
+        window.spin_max_load_g.setValue(9.0)
+        window._latest_scale_value_g = 12.0
+        assert window._is_max_load_exceeded() is True
     finally:
         _close_test_window(window)
 
@@ -1867,6 +2061,90 @@ def test_session_metadata_keeps_original_created_timestamp(
 
         assert first_payload["created_utc"] == second_payload["created_utc"]
         window._stop_session()
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_sample_header_tracks_sample_name(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_sample_name.setText("Ni51Fe26Ga21 156/2 s1")
+
+        assert window.label_recipe_sample.text() == "Sample: Ni51Fe26Ga21 156/2 s1"
+
+        window.edit_sample_name.clear()
+
+        assert window.label_recipe_sample.text() == "Sample: (unnamed sample)"
+    finally:
+        _close_test_window(window)
+
+
+def test_prepare_session_files_can_save_as_next_run_without_replacing_existing(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("same_sample")
+    for suffix in (".txt", ".csv", ".json", ".scale_raw.csv"):
+        (tmp_path / f"same_sample{suffix}").write_text("old", encoding="utf-8")
+    (tmp_path / "same_sample_run02.csv").write_text("old run 2", encoding="utf-8")
+    window._ask_existing_output_action = (  # type: ignore[method-assign]
+        lambda _paths: mini_dma_mod.OUTPUT_COLLISION_NEXT
+    )
+
+    try:
+        (
+            txt_handle,
+            csv_handle,
+            _csv_writer,
+            raw_scale_handle,
+            _raw_scale_writer,
+            txt_path,
+            csv_path,
+            json_path,
+            raw_scale_path,
+        ) = window._prepare_session_files(created_utc="2026-04-28 12:00:00")
+        for handle in (txt_handle, csv_handle, raw_scale_handle):
+            handle.close()
+
+        assert txt_path.name == "same_sample_run03.txt"
+        assert csv_path.name == "same_sample_run03.csv"
+        assert json_path.name == "same_sample_run03.json"
+        assert raw_scale_path.name == "same_sample_run03.scale_raw.csv"
+        assert window.edit_log_name.text() == "same_sample_run03"
+        assert (tmp_path / "same_sample.txt").read_text(encoding="utf-8") == "old"
+        assert (tmp_path / "same_sample_run02.csv").read_text(encoding="utf-8") == "old run 2"
+    finally:
+        _close_test_window(window)
+
+
+def test_prepare_session_files_can_replace_existing_outputs(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_sample_name.setText("repeat sample")
+    window.edit_log_name.setText("replace_sample")
+    txt_path = tmp_path / "replace_sample.txt"
+    txt_path.write_text("old", encoding="utf-8")
+    window._ask_existing_output_action = (  # type: ignore[method-assign]
+        lambda _paths: mini_dma_mod.OUTPUT_COLLISION_REPLACE
+    )
+
+    try:
+        (
+            txt_handle,
+            csv_handle,
+            _csv_writer,
+            raw_scale_handle,
+            _raw_scale_writer,
+            returned_txt_path,
+            *_paths,
+        ) = window._prepare_session_files(created_utc="2026-04-28 12:05:00")
+        for handle in (txt_handle, csv_handle, raw_scale_handle):
+            handle.close()
+
+        assert returned_txt_path == txt_path
+        assert txt_path.read_text(encoding="utf-8").startswith("Displacement\t")
+        assert window.edit_log_name.text() == "replace_sample"
     finally:
         _close_test_window(window)
 

@@ -86,6 +86,10 @@ Recommended characterization:
 
 Until measured, do not assume the actuator has zero backlash. For software defaults, use `0 mm` only as "unknown/not compensated", not as a physical claim.
 
+Mini DMA includes a `Copper-wire calibration` recipe for this measurement. Use the 0.12 mm copper wire for the first calibration pass because it should not transform during the test. The routine is automatic after physical setup: it records still-load noise, seeks configured preloads, performs forward/reverse micro-move sweeps, and stores the resulting stiffness/backlash report in the session JSON metadata.
+
+The hanging-weight zero-load scale reference is also the physical applied-load ceiling for this rig: once the balance reading reaches about `0 g`, the weight is airborne and the wire cannot receive more load from that mass. Mini DMA therefore uses the zero-load reference as the default max applied load; the custom lower limit is only for stopping below the installed weight.
+
 ## Stress And Load Conversions
 
 For a round wire with diameter `d_um`, the tensile stress per gram of applied load is:
@@ -128,6 +132,8 @@ velocity_mm_s = estimated_correction_mm / response_time_s
 ```
 
 Clamp the commanded velocity and target travel by safe limits. Add integral correction and current-ramp feedforward only after the basic proportional controller is characterized on copper wire or a dummy spring.
+
+Current sweeps own their current program. If the supply reaches the configured voltage limit before the requested current, Mini DMA ramps current back down to `0 mA` at the recipe ramp rate and continues with the next recipe step instead of stopping the experiment.
 
 ## Characterization Checklist
 

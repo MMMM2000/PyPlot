@@ -44,13 +44,15 @@ Current intended hardware stack:
 
 ### Core Session Model
 
-- one combined Mini DMA session for motion, load, and heating
+- one combined Mini DMA session for motion, load, and recipe-owned current control
 - session naming helpers and run notes
 - settings-panel spin boxes and drop-downs ignore mouse-wheel value changes so scrolling the panel cannot silently alter recipe or hardware options
 - the settings panel disables horizontal scrolling, and note/log text wraps to the available width
 - hardware driver details such as baud rates, serial request commands, `ticcmd`, device serials, and steps-per-mm are hidden by default under `Advanced hardware settings`
 - an always-visible `EMERGENCY STOP` button in the dashboard header stops the active recipe/session, halts the Tic motor, and turns the supply output off
 - recipe start runs a preflight that auto-detects/connects required scale and supply hardware before creating run files, and reports all missing devices together
+- the Recipe tab shows the current sample name at the top so the operator can catch stale sample identity before starting a run
+- if output files already exist, session start can save the repeat measurement as the next `_run02`, `_run03`, ... filename instead of replacing the original files
 - long recipe estimates switch from seconds to minutes/hours and the recipe panel includes a live progress bar
 - numeric recipe summaries and spin boxes trim zero-only decimals, for example `20 g` instead of `20.0000 g`
 - log messages appear in the `Run log`; the duplicate status-bar echo is hidden
@@ -67,6 +69,7 @@ Current intended hardware stack:
 - motor moves energize the Tic, reset its command timeout, and exit safe-start before sending the position target; a short keepalive continues resetting the command timeout during active recipes/manual holds
 - Tic status shows VIN motor-supply voltage and warns/preflights when VIN is below the motor-power threshold
 - displacement recipes expose their own linear move speed, while iso-load, iso-stress, and iso-strain current sweeps are separate recipe choices with target ramp rate, target ramp stage speed, conservative correction step, and correction move speed controls
+- `Copper-wire calibration` is a dedicated automatic recipe for the 0.12 mm copper calibration wire: after the operator mounts the wire and confirms zero-load/safety settings, Mini DMA measures baseline scale noise, seeks configured load preloads, performs forward/reverse micro-move sweeps, records labeled calibration phases, and saves stiffness/backlash estimates into the JSON metadata
 - clear stacked `Move up` / `Move down` buttons can be held for continuous manual jogging from the last commanded target, with held movement advancing by the configured linear `Manual move speed` in `mm/s`
 - current-sweep recipes use an editable zero-load scale reference instead of physically taring the balance; the default hanging-weight reference is `21.200 g`
 - current-sweep recipes can optionally run a zero/preload length setup before annealing: seek `0 g` applied load from the real scale reference, ramp to a small preload stress, prompt for the measured gauge length, return to `0 g`, and compute `l0` from the known tensile stage displacement
@@ -75,7 +78,7 @@ Current intended hardware stack:
 - jog control refuses sub-step moves that would round to the current motor step
 - displacement-driven automation recipes
 - controlled current-sweep recipe that can hold load, stress, or strain while ramping current
-- configurable soft position limits and max-load safety behavior; when the load limit is already exceeded, tension-increasing moves are blocked but relaxing moves remain available so the rig is not trapped above the limit
+- configurable soft position limits and max-load safety behavior; the zero-load hanging-weight reference is the default applied-load ceiling, an optional lower custom limit can stop earlier, and relaxing moves remain available when the limit is already exceeded so the rig is not trapped above the limit
 
 ### Scale
 
@@ -91,16 +94,26 @@ Current intended hardware stack:
 - tensile displacement uses its own motion-direction setting; the current rig defaults to negative raw Tic travel as positive tensile displacement, so the app can show/log positive `position_mm` while preserving raw Tic position as `raw_position_mm`
 - physical remote tare and software tare are kept only in advanced hardware diagnostics because the normal workflow should leave the balance showing real grams
 
+### Calibration Workflow
+
+- The automatic copper-wire calibration recipe is intended for stable non-transforming wire, not for shape-memory microwires.
+- Physical setup is still operator-controlled: mount and align the copper wire, confirm the zero-load scale reference, soft limits, and max-load safety, then start the recipe.
+- The recipe records `calibration_baseline`, `calibration_preload`, `calibration_forward`, and `calibration_reverse` phases in the main CSV.
+- Completion computes a calibration report from the session points and stores it under `copper_calibration.report` in the JSON metadata.
+- The report includes baseline load noise, forward and reverse load-path stiffness in `g/mm`, average stiffness, estimated backlash in `mm`, and sample counts.
+- The measured backlash is reported for review; it is not silently applied to the live backlash setting.
+
 ### Heating / Current Annealing
 
 - integrated heating subsystem in the same logger
 - automatic supply-port detection for supported SCPI supplies
 - live current / voltage / resistance / power channels
-- recipe support for heating-inclusive workflows
+- recipe-owned current workflows instead of a separate hardware-tab heating program
 - HMP4030 users can optionally assign CH1 or CH2 as the motor-supply channel; recipe preflight turns that channel on before checking Tic VIN, while current annealing remains on the configured annealing channel
 - HMP4030 current commands are treated as 0.2 mA-resolution setpoints below 1 A, so a `1 mA/s` ramp can update in smaller timed increments while avoiding unsupported command precision
 - the main tabs are organized as `Recipe`, `Specimen`, and lower-priority `Hardware`, so scale/motor/power-supply setup does not dominate routine use
 - iso-load, iso-stress, and iso-strain current sweeps own both the target ramp and current ramp directly, advance current from elapsed time, and are shown as separate recipe modes; the progress bar estimates timed target/current-ramp ticks instead of only counting visible recipe rows
+- if a current sweep reaches the configured voltage limit before reaching the requested current, Mini DMA ramps the recipe current back to `0 mA`, records that unwind phase, and advances to the next recipe step instead of stopping the whole recipe
 - the optional setup workflow actively returns to the `21.200 g` zero-load reference rather than slackening below zero load, so a nominal `0 MPa` sweep remains an active zero-load/zero-stress measurement with strain still defined
 - closed-loop target seeking samples feedback during each correction/settle/current step, but scheduled main CSV rows are throttled by the separate log interval; target seeking still adapts correction step and speed near the target, limits each commanded target by the correction speed and timer interval so moves cannot stack ahead of the real stage position, keeps correcting inside the broad hold tolerance toward a tighter near-target band, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
 - recipe completion stops the session log; recipe stop/fault turns current annealing output off, keeps a resume point, and can ask whether to move displacement or load back toward zero without appending recovery samples to the recipe CSV; paused recipes also turn current output off until resumed
@@ -265,6 +278,6 @@ After live scale communication is working, the natural next priorities are:
 
 1. validate the full shape-memory workflow end-to-end on real hardware
 2. tune strain/stress zeroing and safety thresholds from real runs
-3. validate heating-inclusive runs
+3. validate recipe-owned current runs
 4. harden the Hsw automation loop against overshoot and noisy feedback
 5. add later analysis or plotting helpers for plateau-based Hsw results if needed

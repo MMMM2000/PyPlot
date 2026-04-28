@@ -3,6 +3,15 @@ setlocal
 
 cd /d "%~dp0.."
 
+echo %CMDCMDLINE% | findstr /I /C:"/k" >nul 2>nul
+if not errorlevel 1 (
+    echo %CMDCMDLINE% | findstr /I /C:"run-pyplot.cmd" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYPLOT_NO_PAUSE=1"
+        set "PYPLOT_CLOSE_CMD=1"
+    )
+)
+
 set "PYPLOT_RUN_LOG_DIR=%CD%\artifacts"
 if not exist "%PYPLOT_RUN_LOG_DIR%" mkdir "%PYPLOT_RUN_LOG_DIR%" >nul 2>nul
 set "PYPLOT_RUN_LOG=%PYPLOT_RUN_LOG_DIR%\run-pyplot-last.log"
@@ -37,6 +46,10 @@ echo PyPlot exited with code %PYPLOT_EXIT_CODE%.
 if not defined PYPLOT_NO_PAUSE (
     echo Press any key to close this window . . .
     pause >nul
+)
+
+if defined PYPLOT_CLOSE_CMD (
+    exit %PYPLOT_EXIT_CODE%
 )
 
 exit /b %PYPLOT_EXIT_CODE%

@@ -8,4 +8,4 @@ script = ""
 [[actions]]
 name = "Run"
 icon = "run"
-command = "C:\\Windows\\System32\\cmd.exe /d /k call \".codex\\run-pyplot.cmd\""
+command = "C:\\Windows\\System32\\cmd.exe /d /c \"set PYPLOT_NO_PAUSE=1&& call .codex\\run-pyplot.cmd\""

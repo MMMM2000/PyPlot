@@ -15,7 +15,7 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 
 ## Current UI Map
 
-- `Recipe`: normal bench operation, recipe selection, per-recipe speed controls, zero-load reference capture, estimated points/duration, progress bar, auto-connect start button, and manual move/record actions.
+- `Recipe`: normal bench operation, current sample reminder, recipe selection, per-recipe speed controls, zero-load reference capture, estimated points/duration, progress bar, auto-connect start button, and manual move/record actions.
 - `Specimen`: naming, gauge length, diameter, preload zeroing, `.pydpj` import, output folder, session start/stop.
 - `Hardware`: lower-priority scale, motor, power-supply, safety, and advanced serial/motor-driver settings for bring-up or troubleshooting.
 - Right dashboard: live plot, run log, and plot presets. The duplicate status-bar echo is hidden so log lines only appear once.
@@ -34,8 +34,9 @@ Use copper wire first, with conservative settings.
 6. Use tiny jogs to verify the load sign and motion direction. On the current rig, negative raw scale readings are treated as positive tensile load, so users should still type positive load targets.
 7. Let `Start recipe (auto-connect)` preflight the scale and supply. For iso-load, iso-stress, and iso-strain current sweeps, the recipe controls current directly.
 8. Run the current sweep below the copper-wire safety limit.
-9. If the max-load safety limit is exceeded during setup, only tension-increasing moves are blocked; use the relaxing manual arrow to back away from the limit.
-9. Stop the session and inspect CSV columns before using a microwire.
+9. If the same base filename already exists, use `Save as next run` to keep the prior files and write `_run02`, `_run03`, and later repeats.
+10. If the max-load safety limit is exceeded during setup, only tension-increasing moves are blocked; use the relaxing manual arrow to back away from the limit.
+11. Stop the session and inspect CSV columns before using a microwire.
 
 ## Microwire Isostress Goal
 
@@ -113,13 +114,14 @@ The operator should always see:
 - numeric summaries should use compact values such as `20 g` and `0.01 mm` instead of padded zero-only decimals
 - load/stress seeking should be sampled step-by-step: move one correction step, wait for fresh scale/Tic feedback, log the feedback point, then decide whether to move again
 - load/stress seeking must not stop just because load stays flat while displacement increases; shape-memory transformations can elongate with little load change
-- current annealing output should be off whenever a recipe is stopped or paused, while an optional HMP motor-supply channel can stay under explicit operator control for powering the Tic motor
+- recipe current output should be off whenever a recipe is stopped or paused, while an optional HMP motor-supply channel can stay under explicit operator control for powering the Tic motor
 
 ## Next Implementation Priorities
 
-1. Add saved recipe files and a previewable step list.
-2. Add explicit saved-recipe `capture_zero_load` and recovery steps. The built-in current-sweep recipe uses the zero-load scale reference for load control, and manual stop now offers displacement/load recovery actions with a temporary dual-axis recovery plot.
-3. Continue refining commercial-DMA-style guided workflow: Setup -> Program -> Run -> Review, with expert settings hidden unless needed.
-4. Add a natural-language recipe preparation path that generates the same saved recipe JSON.
-5. Add constant-current stress/strain recipes.
-6. Add dynamic recipes such as increasing target stress until fracture, using load drop, rapid strain jump, or stale/invalid readings as stop conditions.
+1. Use the new `Copper-wire calibration` recipe with the 0.12 mm copper wire to measure baseline scale noise, load-path stiffness, and backlash before tuning iso-stress servo behavior.
+2. Add saved recipe files and a previewable step list.
+3. Add explicit saved-recipe `capture_zero_load` and recovery steps. The built-in current-sweep recipe uses the zero-load scale reference for load control, and manual stop now offers displacement/load recovery actions with a temporary dual-axis recovery plot.
+4. Continue refining commercial-DMA-style guided workflow: Setup -> Program -> Run -> Review, with expert settings hidden unless needed.
+5. Add a natural-language recipe preparation path that generates the same saved recipe JSON.
+6. Add constant-current stress/strain recipes.
+7. Add dynamic recipes such as increasing target stress until fracture, using load drop, rapid strain jump, or stale/invalid readings as stop conditions.

@@ -99,23 +99,9 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 HEATING_MODE_OFF = "off"
-HEATING_MODE_CONSTANT = "constant"
-HEATING_MODE_RAMP = "ramp"
-HEATING_MODE_TRIANGLE = "triangle"
-HEATING_MODE_LABELS = {
-    HEATING_MODE_OFF: "Off",
-    HEATING_MODE_CONSTANT: "Constant current",
-    HEATING_MODE_RAMP: "Current ramp",
-    HEATING_MODE_TRIANGLE: "Current triangle",
-}
-HEATING_LIMIT_STOP = "stop"
-HEATING_LIMIT_HOLD = "hold"
-HEATING_LIMIT_DISABLE = "disable"
-HEATING_LIMIT_LABELS = {
-    HEATING_LIMIT_STOP: "Stop recipe",
-    HEATING_LIMIT_HOLD: "Hold current",
-    HEATING_LIMIT_DISABLE: "Turn output off",
-}
+OUTPUT_COLLISION_NEXT = "next"
+OUTPUT_COLLISION_REPLACE = "replace"
+OUTPUT_COLLISION_CANCEL = "cancel"
 HSW_BASIS_LOAD_G = "load_g"
 HSW_BASIS_STRESS_MPA = "stress_mpa"
 HSW_BASIS_STRAIN_PCT = "strain_pct"
@@ -128,6 +114,11 @@ CURRENT_SWEEP_LOAD = "current_sweep_load"
 CURRENT_SWEEP_STRESS = "current_sweep_stress"
 CURRENT_SWEEP_STRAIN = "current_sweep_strain"
 LEGACY_CURRENT_SWEEP = "current_sweep"
+CALIBRATION_COPPER = "calibration_copper"
+CALIBRATION_BASELINE = "calibration_baseline"
+CALIBRATION_PRELOAD = "calibration_preload"
+CALIBRATION_FORWARD = "calibration_forward"
+CALIBRATION_REVERSE = "calibration_reverse"
 CURRENT_SWEEP_BASIS_BY_MODE = {
     CURRENT_SWEEP_LOAD: HSW_BASIS_LOAD_G,
     CURRENT_SWEEP_STRESS: HSW_BASIS_STRESS_MPA,
@@ -163,6 +154,29 @@ def _default_download_dir() -> str:
     except Exception:
         pass
     return str(fallback)
+
+
+def _session_paths_for_basename(directory: Path, basename: str) -> tuple[Path, Path, Path, Path]:
+    return (
+        directory / f"{basename}.txt",
+        directory / f"{basename}.csv",
+        directory / f"{basename}.json",
+        directory / f"{basename}.scale_raw.csv",
+    )
+
+
+def _session_paths_exist(paths: Sequence[Path]) -> bool:
+    return any(path.exists() for path in paths)
+
+
+def _next_run_session_paths(directory: Path, basename: str) -> tuple[str, tuple[Path, Path, Path, Path]]:
+    clean_basename = basename.strip() or DEFAULT_LOG_BASENAME
+    for run_number in range(2, 10000):
+        candidate = f"{clean_basename}_run{run_number:02d}"
+        candidate_paths = _session_paths_for_basename(directory, candidate)
+        if not _session_paths_exist(candidate_paths):
+            return candidate, candidate_paths
+    raise RuntimeError(f"Could not find a free run filename for {clean_basename!r}.")
 
 
 def _utc_timestamp() -> str:
@@ -523,6 +537,7 @@ class MeasurementPoint:
 class AutomationStep:
     action: str
     target_mm: float | None = None
+    relative_mm: float | None = None
     target_value: float | None = None
     target_start_value: float | None = None
     target_end_value: float | None = None
@@ -545,6 +560,141 @@ class AutomationResumeState:
     origin_mm: float
     summary: str
     current_setpoint_mA: float | None = None
+
+
+def _numeric_values(values: Iterable[float | None]) -> list[float]:
+    return [float(value) for value in values if value is not None and math.isfinite(float(value))]
+
+
+def _summary_stats(values: Sequence[float]) -> dict[str, float | int | None]:
+    count = len(values)
+    if count == 0:
+        return {
+            "sample_count": 0,
+            "load_mean_g": None,
+            "load_std_g": None,
+            "load_min_g": None,
+            "load_max_g": None,
+        }
+    mean_value = sum(values) / count
+    if count > 1:
+        variance = sum((value - mean_value) ** 2 for value in values) / (count - 1)
+        std_value = math.sqrt(max(0.0, variance))
+    else:
+        std_value = 0.0
+    return {
+        "sample_count": count,
+        "load_mean_g": mean_value,
+        "load_std_g": std_value,
+        "load_min_g": min(values),
+        "load_max_g": max(values),
+    }
+
+
+def _linear_load_fit(points: Sequence[MeasurementPoint]) -> dict[str, float | int | None]:
+    pairs = [
+        (float(point.raw_position_mm), float(point.load_g))
+        for point in points
+        if math.isfinite(float(point.raw_position_mm)) and math.isfinite(float(point.load_g))
+    ]
+    count = len(pairs)
+    if count < 2:
+        return {
+            "sample_count": count,
+            "stiffness_g_per_mm": None,
+            "intercept_g": None,
+            "position_start_mm": pairs[0][0] if pairs else None,
+            "position_end_mm": pairs[-1][0] if pairs else None,
+            "load_start_g": pairs[0][1] if pairs else None,
+            "load_end_g": pairs[-1][1] if pairs else None,
+        }
+    x_values = [pair[0] for pair in pairs]
+    y_values = [pair[1] for pair in pairs]
+    x_mean = sum(x_values) / count
+    y_mean = sum(y_values) / count
+    denominator = sum((x_value - x_mean) ** 2 for x_value in x_values)
+    if denominator <= 0.0:
+        slope = None
+        intercept = None
+    else:
+        slope = sum((x_value - x_mean) * (y_value - y_mean) for x_value, y_value in pairs) / denominator
+        intercept = y_mean - slope * x_mean
+    return {
+        "sample_count": count,
+        "stiffness_g_per_mm": None if slope is None else abs(slope),
+        "signed_stiffness_g_per_mm": slope,
+        "intercept_g": intercept,
+        "position_start_mm": x_values[0],
+        "position_end_mm": x_values[-1],
+        "load_start_g": y_values[0],
+        "load_end_g": y_values[-1],
+        "load_min_g": min(y_values),
+        "load_max_g": max(y_values),
+    }
+
+
+def _fit_x_at_load(fit: Mapping[str, float | int | None], load_g: float) -> float | None:
+    slope = fit.get("signed_stiffness_g_per_mm")
+    intercept = fit.get("intercept_g")
+    if slope is None or intercept is None:
+        return None
+    slope_value = float(slope)
+    if abs(slope_value) <= 1e-12:
+        return None
+    return (float(load_g) - float(intercept)) / slope_value
+
+
+def _backlash_from_fits(
+    forward_fit: Mapping[str, float | int | None],
+    reverse_fit: Mapping[str, float | int | None],
+) -> float | None:
+    forward_min = forward_fit.get("load_min_g")
+    forward_max = forward_fit.get("load_max_g")
+    reverse_min = reverse_fit.get("load_min_g")
+    reverse_max = reverse_fit.get("load_max_g")
+    if None in {forward_min, forward_max, reverse_min, reverse_max}:
+        return None
+    low = max(float(forward_min), float(reverse_min))
+    high = min(float(forward_max), float(reverse_max))
+    if high < low:
+        return None
+    probe_load = (low + high) / 2.0
+    forward_x = _fit_x_at_load(forward_fit, probe_load)
+    reverse_x = _fit_x_at_load(reverse_fit, probe_load)
+    if forward_x is None or reverse_x is None:
+        return None
+    return abs(forward_x - reverse_x)
+
+
+def calibration_report_from_points(points: Sequence[MeasurementPoint]) -> dict[str, Any]:
+    baseline = [point for point in points if point.automation_phase == CALIBRATION_BASELINE]
+    forward = [point for point in points if point.automation_phase == CALIBRATION_FORWARD]
+    reverse = [point for point in points if point.automation_phase == CALIBRATION_REVERSE]
+    baseline_stats = _summary_stats(_numeric_values(point.load_g for point in baseline))
+    forward_fit = _linear_load_fit(forward)
+    reverse_fit = _linear_load_fit(reverse)
+    stiffness_values = _numeric_values(
+        [
+            forward_fit.get("stiffness_g_per_mm"),
+            reverse_fit.get("stiffness_g_per_mm"),
+        ]
+    )
+    average_stiffness = sum(stiffness_values) / len(stiffness_values) if stiffness_values else None
+    backlash_mm = _backlash_from_fits(forward_fit, reverse_fit)
+    status = "ok" if average_stiffness is not None and backlash_mm is not None else "insufficient_data"
+    return {
+        "status": status,
+        "baseline": baseline_stats,
+        "forward": forward_fit,
+        "reverse": reverse_fit,
+        "average_stiffness_g_per_mm": average_stiffness,
+        "backlash_mm": backlash_mm,
+        "sample_counts": {
+            "baseline": len(baseline),
+            "forward": len(forward),
+            "reverse": len(reverse),
+        },
+    }
 
 
 @dataclass
@@ -1125,11 +1275,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_step_index: int | None = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA: float | None = None
+        self._current_sweep_voltage_limit_step_index: int | None = None
+        self._current_sweep_voltage_limit_started_s: float | None = None
+        self._current_sweep_voltage_limit_start_mA = 0.0
+        self._supply_voltage_limit_logged = False
         self._active_target_ramp_step_index: int | None = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value: float | None = None
         self._setup_measured_length_mm: float | None = None
         self._setup_preload_position_mm: float | None = None
+        self._calibration_report: dict[str, Any] | None = None
         self._plot_tiles: list[PlotTileWidgets] = []
         self._control_scroll_area: QtWidgets.QScrollArea | None = None
         self._manual_jog_direction = 0.0
@@ -1478,14 +1633,18 @@ class MainWindow(QtWidgets.QMainWindow):
         soft_limit_row.addWidget(self.spin_soft_max_mm)
         safety_form.addRow("Soft limits", soft_limit_row)
 
-        self.check_max_load = QtWidgets.QCheckBox("Stop automation if effective load exceeds", safety_box)
+        self.check_max_load = QtWidgets.QCheckBox("Use lower applied-load limit", safety_box)
+        self.check_max_load.setToolTip(
+            "The hanging-weight zero-load reading is always used as the physical load ceiling. "
+            "Enable this only to stop below that weight."
+        )
         safety_form.addRow("", self.check_max_load)
         self.spin_max_load_g = CompactDoubleSpinBox(safety_box)
         self.spin_max_load_g.setDecimals(3)
         self.spin_max_load_g.setRange(0.001, 1000.0)
-        self.spin_max_load_g.setValue(25.0)
+        self.spin_max_load_g.setValue(DEFAULT_ZERO_LOAD_SCALE_G)
         self.spin_max_load_g.setSuffix(" g")
-        safety_form.addRow("Max applied load", self.spin_max_load_g)
+        safety_form.addRow("Lower load limit", self.spin_max_load_g)
         zero_load_row = QtWidgets.QHBoxLayout()
         self.spin_zero_load_scale_g = CompactDoubleSpinBox(safety_box)
         self.spin_zero_load_scale_g.setDecimals(4)
@@ -1651,58 +1810,6 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form.addRow("", motor_supply_buttons)
         hardware_layout.addWidget(supply_box)
 
-        self.heating_recipe_box = self._group_box("Separate Heating Program")
-        heating_recipe_form = QtWidgets.QFormLayout(self.heating_recipe_box)
-        self.label_heating_program_hint = QtWidgets.QLabel(
-            "Current-sweep recipes control current directly from the recipe. Use this separate program only for ramp/hold/cycle recipes that need independent heating.",
-            self.heating_recipe_box,
-        )
-        self.label_heating_program_hint.setWordWrap(True)
-        self.label_heating_program_hint.setStyleSheet("color: #a3a3a3;")
-        heating_recipe_form.addRow("", self.label_heating_program_hint)
-        self.combo_heating_mode = QtWidgets.QComboBox(self.heating_recipe_box)
-        for mode_key, label in HEATING_MODE_LABELS.items():
-            self.combo_heating_mode.addItem(label, mode_key)
-        self.combo_heating_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
-        heating_recipe_form.addRow("Program", self.combo_heating_mode)
-
-        self.spin_heat_constant_current = CompactDoubleSpinBox(self.heating_recipe_box)
-        self.spin_heat_constant_current.setDecimals(2)
-        self.spin_heat_constant_current.setRange(0.0, 5000.0)
-        self.spin_heat_constant_current.setValue(50.0)
-        self.spin_heat_constant_current.setSuffix(" mA")
-        heating_recipe_form.addRow("Constant current", self.spin_heat_constant_current)
-
-        self.spin_heat_start_current = CompactDoubleSpinBox(self.heating_recipe_box)
-        self.spin_heat_start_current.setDecimals(2)
-        self.spin_heat_start_current.setRange(0.0, 5000.0)
-        self.spin_heat_start_current.setValue(10.0)
-        self.spin_heat_start_current.setSuffix(" mA")
-        heating_recipe_form.addRow("Ramp start", self.spin_heat_start_current)
-
-        self.spin_heat_max_current = CompactDoubleSpinBox(self.heating_recipe_box)
-        self.spin_heat_max_current.setDecimals(2)
-        self.spin_heat_max_current.setRange(0.0, 5000.0)
-        self.spin_heat_max_current.setValue(100.0)
-        self.spin_heat_max_current.setSuffix(" mA")
-        heating_recipe_form.addRow("Ramp max", self.spin_heat_max_current)
-
-        self.spin_heat_step_current = CompactDoubleSpinBox(self.heating_recipe_box)
-        self.spin_heat_step_current.setDecimals(2)
-        self.spin_heat_step_current.setRange(0.01, 5000.0)
-        self.spin_heat_step_current.setValue(5.0)
-        self.spin_heat_step_current.setSuffix(" mA")
-        heating_recipe_form.addRow("Ramp step", self.spin_heat_step_current)
-
-        self.combo_heat_limit_action = QtWidgets.QComboBox(self.heating_recipe_box)
-        for action_key, label in HEATING_LIMIT_LABELS.items():
-            self.combo_heat_limit_action.addItem(label, action_key)
-        heating_recipe_form.addRow("Voltage-limit action", self.combo_heat_limit_action)
-
-        self.check_output_off_on_stop = QtWidgets.QCheckBox("Turn output off when the session stops", self.heating_recipe_box)
-        self.check_output_off_on_stop.setChecked(True)
-        heating_recipe_form.addRow("", self.check_output_off_on_stop)
-        hardware_layout.addWidget(self.heating_recipe_box)
         hardware_layout.addStretch(1)
 
         specimen_tab = QtWidgets.QWidget(tabs)
@@ -1855,11 +1962,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         automation_box = self._group_box("Experiment Recipe")
         automation_form = QtWidgets.QFormLayout(automation_box)
+        self.label_recipe_sample = QtWidgets.QLabel("Sample: (unnamed sample)", automation_box)
+        self.label_recipe_sample.setWordWrap(True)
+        sample_font = self.label_recipe_sample.font()
+        sample_font.setBold(True)
+        self.label_recipe_sample.setFont(sample_font)
+        automation_form.addRow("", self.label_recipe_sample)
         self.combo_recipe_mode = QtWidgets.QComboBox(automation_box)
         self.combo_recipe_mode.addItem("Displacement ramp", "ramp")
         self.combo_recipe_mode.addItem("Cyclic displacement", "cycle")
         self.combo_recipe_mode.addItem("Displacement hold", "hold")
         self.combo_recipe_mode.addItem("Hsw plateau scan", "distribution")
+        self.combo_recipe_mode.addItem("Copper-wire calibration", CALIBRATION_COPPER)
         self.combo_recipe_mode.addItem("Iso-load current sweep", CURRENT_SWEEP_LOAD)
         self.combo_recipe_mode.addItem("Iso-stress current sweep", CURRENT_SWEEP_STRESS)
         self.combo_recipe_mode.addItem("Iso-strain current sweep", CURRENT_SWEEP_STRAIN)
@@ -2026,6 +2140,75 @@ class MainWindow(QtWidgets.QMainWindow):
         distribution_hint.setStyleSheet("color: palette(mid);")
         distribution_form.addRow("", distribution_hint)
         self.recipe_stack.addWidget(distribution_page)
+
+        calibration_page = QtWidgets.QWidget(self.recipe_stack)
+        calibration_form = QtWidgets.QFormLayout(calibration_page)
+        self.spin_calibration_baseline_s = CompactDoubleSpinBox(automation_box)
+        self.spin_calibration_baseline_s.setDecimals(1)
+        self.spin_calibration_baseline_s.setRange(0.1, 3600.0)
+        self.spin_calibration_baseline_s.setValue(10.0)
+        self.spin_calibration_baseline_s.setSuffix(" s")
+        calibration_form.addRow("Baseline noise", self.spin_calibration_baseline_s)
+        self.spin_calibration_start_load_g = CompactDoubleSpinBox(automation_box)
+        self.spin_calibration_start_load_g.setDecimals(3)
+        self.spin_calibration_start_load_g.setRange(0.001, 150.0)
+        self.spin_calibration_start_load_g.setValue(1.0)
+        self.spin_calibration_start_load_g.setSuffix(" g")
+        calibration_form.addRow("Start preload", self.spin_calibration_start_load_g)
+        self.spin_calibration_end_load_g = CompactDoubleSpinBox(automation_box)
+        self.spin_calibration_end_load_g.setDecimals(3)
+        self.spin_calibration_end_load_g.setRange(0.001, 150.0)
+        self.spin_calibration_end_load_g.setValue(5.0)
+        self.spin_calibration_end_load_g.setSuffix(" g")
+        calibration_form.addRow("End preload", self.spin_calibration_end_load_g)
+        self.spin_calibration_load_step_g = CompactDoubleSpinBox(automation_box)
+        self.spin_calibration_load_step_g.setDecimals(3)
+        self.spin_calibration_load_step_g.setRange(0.001, 150.0)
+        self.spin_calibration_load_step_g.setValue(1.0)
+        self.spin_calibration_load_step_g.setSuffix(" g")
+        calibration_form.addRow("Preload step", self.spin_calibration_load_step_g)
+        self.spin_calibration_tolerance_g = CompactDoubleSpinBox(automation_box)
+        self.spin_calibration_tolerance_g.setDecimals(4)
+        self.spin_calibration_tolerance_g.setRange(0.0001, 10.0)
+        self.spin_calibration_tolerance_g.setValue(0.02)
+        self.spin_calibration_tolerance_g.setSuffix(" g")
+        calibration_form.addRow("Load tolerance", self.spin_calibration_tolerance_g)
+        self.spin_calibration_settle_s = CompactDoubleSpinBox(automation_box)
+        self.spin_calibration_settle_s.setDecimals(2)
+        self.spin_calibration_settle_s.setRange(0.0, 60.0)
+        self.spin_calibration_settle_s.setValue(0.5)
+        self.spin_calibration_settle_s.setSuffix(" s")
+        calibration_form.addRow("Settle at preload", self.spin_calibration_settle_s)
+        self.spin_calibration_move_step_mm = CompactDoubleSpinBox(automation_box)
+        self.spin_calibration_move_step_mm.setDecimals(4)
+        self.spin_calibration_move_step_mm.setRange(0.0001, 1.0)
+        self.spin_calibration_move_step_mm.setValue(0.01)
+        self.spin_calibration_move_step_mm.setSuffix(" mm")
+        calibration_form.addRow("Move step", self.spin_calibration_move_step_mm)
+        self.spin_calibration_steps_per_direction = QtWidgets.QSpinBox(automation_box)
+        self.spin_calibration_steps_per_direction.setRange(1, 1000)
+        self.spin_calibration_steps_per_direction.setValue(5)
+        calibration_form.addRow("Steps per direction", self.spin_calibration_steps_per_direction)
+        self.spin_calibration_speed_mm_s = CompactDoubleSpinBox(automation_box)
+        self.spin_calibration_speed_mm_s.setDecimals(3)
+        self.spin_calibration_speed_mm_s.setRange(0.001, 50.0)
+        self.spin_calibration_speed_mm_s.setValue(0.05)
+        self.spin_calibration_speed_mm_s.setSuffix(" mm/s")
+        calibration_form.addRow("Move speed", self.spin_calibration_speed_mm_s)
+        self.spin_calibration_interval = QtWidgets.QSpinBox(automation_box)
+        self.spin_calibration_interval.setRange(50, 60000)
+        self.spin_calibration_interval.setValue(250)
+        self.spin_calibration_interval.setSuffix(" ms")
+        calibration_form.addRow("Control interval", self.spin_calibration_interval)
+        calibration_hint = QtWidgets.QLabel(
+            "Automatic after setup: mount the copper wire, confirm zero-load/reference and safety limits, "
+            "then Mini DMA measures baseline noise, stiffness, and reversal backlash from load feedback.",
+            calibration_page,
+        )
+        calibration_hint.setWordWrap(True)
+        calibration_hint.setStyleSheet("color: palette(mid);")
+        calibration_form.addRow("", calibration_hint)
+        self.recipe_stack.addWidget(calibration_page)
 
         current_sweep_page = QtWidgets.QWidget(self.recipe_stack)
         current_sweep_form = QtWidgets.QFormLayout(current_sweep_page)
@@ -2447,6 +2630,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_name_condition,
         ):
             widget.textChanged.connect(self._sync_auto_name_fields)
+        self.edit_sample_name.textChanged.connect(self._refresh_recipe_sample_label)
         for widget in (
             self.spin_ramp_distance,
             self.spin_ramp_speed_mm_s,
@@ -2464,9 +2648,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_distribution_seek_speed_mm_s,
             self.spin_distribution_points,
             self.spin_distribution_settle_s,
-            self.spin_heat_constant_current,
-            self.spin_heat_start_current,
-            self.spin_heat_max_current,
         ):
             widget.valueChanged.connect(self._update_recipe_mode_ui)
         for widget in (
@@ -2476,7 +2657,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_cycle_interval,
             self.spin_hold_interval,
             self.spin_distribution_interval,
-            self.spin_heat_step_current,
             self.spin_setup_preload_stress_mpa,
             self.spin_setup_preload_ramp_rate_mpa_s,
             self.spin_setup_preload_tolerance_mpa,
@@ -2506,8 +2686,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_current_sweep_reverse_current.toggled.connect(self._update_recipe_mode_ui)
         self.check_zero_on_preload.toggled.connect(self._refresh_live_labels)
         self.spin_preload_threshold_g.valueChanged.connect(self._refresh_live_labels)
-        self.combo_heat_limit_action.currentIndexChanged.connect(self._update_recipe_mode_ui)
-        self.combo_heating_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
         self.combo_distribution_basis.currentIndexChanged.connect(self._update_distribution_basis_ui)
         self.combo_distribution_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
         self.combo_current_sweep_basis.currentIndexChanged.connect(self._update_current_sweep_basis_ui)
@@ -2523,6 +2701,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._clamp_motion_resolution_controls()
         self._apply_plot_preset("dma")
         self._update_recipe_mode_ui()
+        self._refresh_recipe_sample_label()
         self._update_recipe_buttons()
         self._refresh_plots()
         self._make_settings_panel_width_friendly()
@@ -3002,8 +3181,6 @@ class MainWindow(QtWidgets.QMainWindow):
         profile = SUPPLY_PROFILES.get(profile_id, SUPPLY_PROFILES["hmp4030"])
         self.spin_supply_voltage_limit.setValue(float(profile.get("max_voltage", 30.0)))
         self.spin_supply_manual_current.setValue(float(profile.get("start_current_mA", 1.0)))
-        self.spin_heat_start_current.setValue(float(profile.get("start_current_mA", 1.0)))
-        self.spin_heat_constant_current.setValue(max(float(profile.get("start_current_mA", 1.0)), 10.0))
 
     def _connect_supply(self, checked: bool = False, *, show_errors: bool = True) -> bool:
         self._disconnect_supply()
@@ -3248,85 +3425,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(f"Gauge zero moved to the current position ({self._current_position_mm:.4f} mm).")
 
     def _heating_mode(self) -> str:
-        return str(self.combo_heating_mode.currentData() or HEATING_MODE_OFF)
+        return HEATING_MODE_OFF
 
     def _prepare_heating_for_session(self) -> None:
-        if self._is_current_sweep_mode():
-            return
-        mode = self._heating_mode()
-        if mode == HEATING_MODE_OFF:
-            return
-        if self._supply_controller is None or not self._supply_controller.is_connected():
-            self._log("Heating program is enabled, but the power supply is not connected.")
-            return
-        if mode == HEATING_MODE_CONSTANT:
-            target = float(self.spin_heat_constant_current.value())
-        else:
-            target = float(self.spin_heat_start_current.value())
-        self._heating_program_current_mA = target
-        self._heating_program_direction = 1.0
-        self._supply_controller.initialize_output(
-            current_mA=target,
-            reset_on_start=(
-                bool(self._supply_controller.profile.get("reset_on_start", False))
-                and not self._motor_supply_enabled()
-            ),
-        )
-        self._supply_output_enabled = True
-        self._supply_last_setpoint_mA = target
-        self.label_supply_status.setText(
-            f"Heating program armed in {HEATING_MODE_LABELS.get(mode, mode)} mode."
-        )
-        self._refresh_supply_snapshot(force=True)
+        return
 
     def _advance_heating_after_record(self) -> None:
-        if self._is_current_sweep_mode(self._automation_name):
-            return
-        if self._supply_controller is None or not self._supply_controller.is_connected():
-            return
-        mode = self._heating_mode()
-        if mode in {HEATING_MODE_OFF, HEATING_MODE_CONSTANT}:
-            return
-        current = self._heating_program_current_mA
-        if current is None:
-            current = float(self.spin_heat_start_current.value())
-        step = abs(float(self.spin_heat_step_current.value()))
-        upper = max(float(self.spin_heat_start_current.value()), float(self.spin_heat_max_current.value()))
-        lower = min(float(self.spin_heat_start_current.value()), float(self.spin_heat_max_current.value()))
-        next_current = current + (self._heating_program_direction * step)
-        if mode == HEATING_MODE_RAMP:
-            next_current = min(upper, next_current)
-        else:
-            if next_current >= upper:
-                next_current = upper
-                self._heating_program_direction = -1.0
-            elif next_current <= lower:
-                next_current = lower
-                self._heating_program_direction = 1.0
-        if abs(next_current - current) < 1e-12:
-            return
-        try:
-            self._supply_controller.set_current_mA(next_current)
-            self._heating_program_current_mA = next_current
-            self._supply_last_setpoint_mA = next_current
-        except Exception as exc:
-            self._log(f"Heating step failed: {exc}")
+        return
 
     def _handle_supply_limit_condition(self) -> None:
         limit_v = float(self.spin_supply_voltage_limit.value())
         measured_v = self._supply_snapshot.get("voltage_V")
         if measured_v is None or limit_v <= 0:
+            self._supply_voltage_limit_logged = False
             return
         if measured_v < limit_v * 0.995:
+            self._supply_voltage_limit_logged = False
             return
-        action = str(self.combo_heat_limit_action.currentData() or HEATING_LIMIT_STOP)
-        self._log(f"Supply voltage reached the configured limit ({measured_v:.3f} V / {limit_v:.3f} V).")
-        if action == HEATING_LIMIT_DISABLE:
-            self._disable_supply_output()
-        elif action == HEATING_LIMIT_HOLD:
+
+        if self._automation_active and self._is_current_sweep_mode(self._automation_name):
+            self._mark_current_sweep_voltage_limit(
+                measured_v=measured_v,
+                limit_v=limit_v,
+                started_s=self._supply_snapshot_monotonic,
+            )
             return
-        else:
-            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+
+        if not self._supply_voltage_limit_logged:
+            self._log(
+                f"Supply voltage reached the configured limit ({measured_v:.3f} V / {limit_v:.3f} V); "
+                "setting current to 0 mA."
+            )
+            self._supply_voltage_limit_logged = True
+        if self._supply_output_enabled and (self._supply_last_setpoint_mA or 0.0) > 0.0:
+            self._set_recipe_current_mA(0.0, measure_after=False)
+
+    def _mark_current_sweep_voltage_limit(
+        self,
+        *,
+        measured_v: float,
+        limit_v: float,
+        started_s: float | None = None,
+    ) -> None:
+        step_index = self._active_current_sweep_step_index
+        if step_index is None:
+            return
+        if self._current_sweep_voltage_limit_step_index == step_index:
+            return
+        start_mA = self._active_current_sweep_last_setpoint_mA
+        if start_mA is None:
+            start_mA = self._supply_last_setpoint_mA
+        self._current_sweep_voltage_limit_step_index = step_index
+        self._current_sweep_voltage_limit_started_s = started_s if started_s is not None else time.monotonic()
+        self._current_sweep_voltage_limit_start_mA = self._quantize_supply_current_mA(start_mA or 0.0)
+        self._log(
+            f"Supply voltage reached the configured limit ({measured_v:.3f} V / {limit_v:.3f} V); "
+            "reversing recipe current back to 0 mA and continuing."
+        )
+
+    def _clear_current_sweep_voltage_limit(self) -> None:
+        self._current_sweep_voltage_limit_step_index = None
+        self._current_sweep_voltage_limit_started_s = None
+        self._current_sweep_voltage_limit_start_mA = 0.0
 
     def _choose_builder_project(self) -> None:
         start_dir = str(self._builder_project_path.parent) if self._builder_project_path is not None else self.edit_log_dir.text().strip()
@@ -3430,7 +3590,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if match.diameter_mm is not None:
             self.spin_diameter.setValue(match.diameter_mm)
         if match.current_mA is not None:
-            self.spin_heat_constant_current.setValue(match.current_mA)
+            self.spin_current_sweep_end_mA.setValue(match.current_mA)
         self.label_project_status.setText(
             f"Imported {path.name} -> section {match.section}, diameter "
             f"{'-' if match.diameter_mm is None else f'{match.diameter_mm:.5f} mm'}"
@@ -3676,6 +3836,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 log_label = self._build_log_name_label(built)
                 safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
                 self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
+        self._refresh_recipe_sample_label()
+
+    def _refresh_recipe_sample_label(self) -> None:
+        if not hasattr(self, "label_recipe_sample"):
+            return
+        sample_name = self.edit_sample_name.text().strip()
+        if not sample_name:
+            sample_name = "(unnamed sample)"
+        self.label_recipe_sample.setText(f"Sample: {sample_name}")
 
     def _set_position_reference_now(self) -> None:
         self._position_reference_mm = self._current_position_mm
@@ -3888,6 +4057,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_nudge_mm(self) -> float:
         if self._automation_name == RECOVERY_LOAD:
             return abs(float(self.spin_jog_mm.value()))
+        if self._automation_name == CALIBRATION_COPPER:
+            return abs(float(self.spin_calibration_move_step_mm.value()))
         if self._is_current_sweep_mode(self._automation_name):
             return abs(float(self.spin_current_sweep_nudge_mm.value()))
         return abs(float(self.spin_distribution_nudge_mm.value()))
@@ -3895,6 +4066,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_max_travel_mm(self) -> float:
         if self._is_current_sweep_mode(self._automation_name):
             return max(self._motor_step_mm(), float(self.spin_current_sweep_max_seek_mm.value()))
+        if self._automation_name == CALIBRATION_COPPER:
+            return max(self._motor_step_mm(), self._seek_nudge_mm() * 100.0)
         return max(self._motor_step_mm(), self._seek_nudge_mm() * 30.0)
 
     def _seek_step_mm(self, error_value: float, tolerance: float) -> float:
@@ -3943,6 +4116,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return abs(float(self.spin_setup_zero_tolerance_g.value()))
         if step.note == "setup_preload" and step.basis == HSW_BASIS_STRESS_MPA:
             return abs(float(self.spin_setup_preload_tolerance_mpa.value()))
+        if self._automation_name == CALIBRATION_COPPER and step.basis == HSW_BASIS_LOAD_G:
+            return abs(float(self.spin_calibration_tolerance_g.value()))
         return abs(
             float(
                 self.spin_current_sweep_tolerance.value()
@@ -4043,7 +4218,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_recipe_mode_ui(self) -> None:
         mode = str(self.combo_recipe_mode.currentData() or "ramp")
-        page_index = 4 if self._is_current_sweep_mode(mode) else {"ramp": 0, "cycle": 1, "hold": 2, "distribution": 3}.get(mode, 0)
+        page_index = 5 if self._is_current_sweep_mode(mode) else {
+            "ramp": 0,
+            "cycle": 1,
+            "hold": 2,
+            "distribution": 3,
+            CALIBRATION_COPPER: 4,
+        }.get(mode, 0)
         self.recipe_stack.setCurrentIndex(page_index)
         if mode == "cycle":
             summary = (
@@ -4084,6 +4265,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{_format_compact_number(self.spin_distribution_end.value())}{suffix}; "
                 f"{self.spin_distribution_points.value()} point(s)/plateau."
             )
+        elif mode == CALIBRATION_COPPER:
+            summary = (
+                "Plan: copper-wire calibration, load "
+                f"{_format_compact_unit(self.spin_calibration_start_load_g.value(), 'g', decimals=3)} to "
+                f"{_format_compact_unit(self.spin_calibration_end_load_g.value(), 'g', decimals=3)}; "
+                f"{self.spin_calibration_steps_per_direction.value()} forward/reverse step(s) per preload."
+            )
+            banner = "Copper-wire calibration"
         elif self._is_current_sweep_mode(mode):
             basis = self._current_sweep_basis()
             self._update_current_sweep_basis_ui()
@@ -4136,29 +4325,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"from the current position."
             )
             banner = "Displacement ramp"
-        heating_mode = self._heating_mode()
-        self.heating_recipe_box.setVisible(not self._is_current_sweep_mode(mode))
-        if self._is_current_sweep_mode(mode):
-            heating_mode = HEATING_MODE_OFF
-            summary += " Recipe controls current."
-        if heating_mode == HEATING_MODE_CONSTANT:
-            summary += f" Heating: hold {self.spin_heat_constant_current.value():.2f} mA."
-        elif heating_mode == HEATING_MODE_RAMP:
-            summary += (
-                f" Heating: ramp {self.spin_heat_start_current.value():.2f} → "
-                f"{self.spin_heat_max_current.value():.2f} mA in {self.spin_heat_step_current.value():.2f} mA steps."
-            )
-        elif heating_mode == HEATING_MODE_TRIANGLE:
-            summary += (
-                f" Heating: triangle between {self.spin_heat_start_current.value():.2f} and "
-                f"{self.spin_heat_max_current.value():.2f} mA."
-            )
+        if self._is_current_sweep_mode(mode) or mode == CALIBRATION_COPPER:
+            if self._is_current_sweep_mode(mode):
+                summary += " Recipe controls current."
+            else:
+                summary += " Recipe owns the hardware sequence."
         preload_text = (
             f" Strain zero waits for {_format_compact_unit(self.spin_preload_threshold_g.value(), 'g')} preload."
             if self.check_zero_on_preload.isChecked() and self.spin_preload_threshold_g.value() > 0
             else " Strain zero follows the current reference immediately."
         )
-        if not self._is_current_sweep_mode(mode):
+        if not self._is_current_sweep_mode(mode) and mode != CALIBRATION_COPPER:
             summary += preload_text
         self.label_recipe_summary.setText(summary)
         self.label_recipe_banner.setText(banner)
@@ -4234,7 +4411,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 continue
             ticks += 1
-            if step.action in {"record", "set_current"}:
+            if step.action in {"record", "set_current", "calibration_record"}:
                 points += 1
             elif step.action == "settle" and step.basis is not None:
                 points += 1
@@ -4474,10 +4651,20 @@ class MainWindow(QtWidgets.QMainWindow):
     def _relative_motion_base_mm(self) -> float:
         return self._last_move_target_mm if self._manual_jog_uses_last_target else self._current_position_mm
 
+    def _effective_max_load_limit_g(self) -> float | None:
+        zero_load_limit_g = abs(self._zero_load_scale_reference_g())
+        custom_limit_g = float(self.spin_max_load_g.value())
+        if self.check_max_load.isChecked():
+            return min(custom_limit_g, zero_load_limit_g) if zero_load_limit_g > 0.0 else custom_limit_g
+        if zero_load_limit_g > 0.0:
+            return zero_load_limit_g
+        return None
+
     def _is_max_load_exceeded(self) -> bool:
-        if not self.check_max_load.isChecked():
+        limit_g = self._effective_max_load_limit_g()
+        if limit_g is None:
             return False
-        return abs(self._current_effective_load_g()) > float(self.spin_max_load_g.value())
+        return abs(self._current_effective_load_g()) > limit_g
 
     def _motion_speed_for_current_context(self, *, manual_jog: bool) -> float:
         if manual_jog:
@@ -4495,6 +4682,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._minimum_held_speed_mm_s(),
                     float(self.spin_current_sweep_balance_speed_mm_s.value()),
                 )
+            if self._automation_name == CALIBRATION_COPPER:
+                return max(
+                    self._minimum_held_speed_mm_s(),
+                    float(self.spin_calibration_speed_mm_s.value()),
+                )
             if self._automation_name == "distribution":
                 return max(
                     self._minimum_held_speed_mm_s(),
@@ -4511,6 +4703,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return max(
                 self._minimum_held_speed_mm_s(),
                 float(self.spin_current_sweep_balance_speed_mm_s.value()),
+            )
+        if mode == CALIBRATION_COPPER:
+            return max(
+                self._minimum_held_speed_mm_s(),
+                float(self.spin_calibration_speed_mm_s.value()),
             )
         if mode == "distribution":
             return max(
@@ -4546,10 +4743,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if self._is_max_load_exceeded() and self._move_increases_tension(position_mm):
             load_g = abs(self._current_effective_load_g())
+            limit_g = self._effective_max_load_limit_g()
             self._log(
                 f"Move cancelled because it would increase applied load "
                 f"{load_g:.5f} g beyond the safety limit of "
-                f"{self.spin_max_load_g.value():.5f} g. Relaxing moves are still allowed."
+                f"{0.0 if limit_g is None else limit_g:.5f} g. Relaxing moves are still allowed."
             )
             if self._automation_active and not chain_from_last_target:
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
@@ -4607,29 +4805,54 @@ class MainWindow(QtWidgets.QMainWindow):
         directory = Path(self.edit_log_dir.text().strip() or _default_download_dir())
         directory.mkdir(parents=True, exist_ok=True)
         basename = self.edit_log_name.text().strip() or DEFAULT_LOG_BASENAME
-        return (
-            directory / f"{basename}.txt",
-            directory / f"{basename}.csv",
-            directory / f"{basename}.json",
-            directory / f"{basename}.scale_raw.csv",
+        return _session_paths_for_basename(directory, basename)
+
+    def _ask_existing_output_action(self, paths: Sequence[Path]) -> str:
+        existing_names = ", ".join(path.name for path in paths if path.exists())
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        box.setText("Output files already exist for this base filename.")
+        box.setInformativeText(
+            f"Existing file(s): {existing_names or paths[0].name}\n\n"
+            "Save as next run keeps the existing data and appends _run02, _run03, and so on."
         )
+        next_button = box.addButton("Save as next run", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        replace_button = box.addButton("Replace existing", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(next_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is next_button:
+            return OUTPUT_COLLISION_NEXT
+        if clicked is replace_button:
+            return OUTPUT_COLLISION_REPLACE
+        if clicked is cancel_button:
+            return OUTPUT_COLLISION_CANCEL
+        return OUTPUT_COLLISION_CANCEL
+
+    def _resolve_session_base_paths(self) -> tuple[Path, Path, Path, Path]:
+        paths = self._session_base_paths()
+        if not _session_paths_exist(paths):
+            return paths
+        action = self._ask_existing_output_action(paths)
+        if action == OUTPUT_COLLISION_REPLACE:
+            return paths
+        if action == OUTPUT_COLLISION_NEXT:
+            directory = paths[0].parent
+            basename = self.edit_log_name.text().strip() or DEFAULT_LOG_BASENAME
+            next_basename, next_paths = _next_run_session_paths(directory, basename)
+            self.edit_log_name.setText(next_basename)
+            self._log(f"Existing output preserved; using next run filename {next_basename}.")
+            return next_paths
+        raise RuntimeError("Session start cancelled because output files already exist.")
 
     def _prepare_session_files(
         self,
         *,
         created_utc: str,
     ) -> tuple[Any, Any, csv.DictWriter[str], Any, csv.DictWriter[str], Path, Path, Path, Path]:
-        txt_path, csv_path, json_path, raw_scale_path = self._session_base_paths()
-        if txt_path.exists() or csv_path.exists() or json_path.exists() or raw_scale_path.exists():
-            answer = QtWidgets.QMessageBox.question(
-                self,
-                APP_NAME,
-                f"{txt_path.name}, {csv_path.name}, {json_path.name}, or {raw_scale_path.name} already exists. Replace them?",
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                QtWidgets.QMessageBox.StandardButton.No,
-            )
-            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
-                raise RuntimeError("Session start cancelled because output files already exist.")
+        txt_path, csv_path, json_path, raw_scale_path = self._resolve_session_base_paths()
 
         txt_handle = txt_path.open("w", encoding="utf-8", newline="")
         csv_handle = csv_path.open("w", encoding="utf-8", newline="")
@@ -4735,7 +4958,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "soft_limit_min_mm": float(self.spin_soft_min_mm.value()),
             "soft_limit_max_mm": float(self.spin_soft_max_mm.value()),
             "max_load_limit_enabled": self.check_max_load.isChecked(),
-            "max_load_limit_g": float(self.spin_max_load_g.value()),
+            "max_load_limit_g": self._effective_max_load_limit_g(),
+            "custom_max_load_limit_g": float(self.spin_max_load_g.value()),
             "zero_load_scale_g": self._zero_load_scale_reference_g(),
             "diagnostic_load_offset_g": float(self._load_offset_g),
             "tension_decreases_scale_reading": self.check_tension_load_positive.isChecked(),
@@ -4763,13 +4987,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "baud": int(self.combo_supply_baud.currentText()),
                 "profile": str(self.combo_supply_profile.currentData() or "hmp4030"),
                 "voltage_limit_v": float(self.spin_supply_voltage_limit.value()),
-                "mode": self._heating_mode(),
-                "constant_current_mA": float(self.spin_heat_constant_current.value()),
-                "start_current_mA": float(self.spin_heat_start_current.value()),
-                "max_current_mA": float(self.spin_heat_max_current.value()),
-                "step_current_mA": float(self.spin_heat_step_current.value()),
-                "limit_action": str(self.combo_heat_limit_action.currentData() or HEATING_LIMIT_STOP),
-                "output_off_on_stop": self.check_output_off_on_stop.isChecked(),
+                "mode": HEATING_MODE_OFF,
+                "voltage_limit_behavior": "current_sweeps_unwind_to_zero",
+                "output_off_on_stop": True,
                 "motor_supply_enabled": self.check_motor_supply_power.isChecked(),
                 "motor_supply_channel": self._motor_supply_channel(),
                 "motor_supply_voltage_v": float(self.spin_motor_supply_voltage.value()),
@@ -4789,6 +5009,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 "points_per_plateau": int(self.spin_distribution_points.value()),
                 "interval_ms": int(self.spin_distribution_interval.value()),
                 "return_sweep": self.check_distribution_return_sweep.isChecked(),
+            },
+            "copper_calibration": {
+                "baseline_s": float(self.spin_calibration_baseline_s.value()),
+                "start_load_g": float(self.spin_calibration_start_load_g.value()),
+                "end_load_g": float(self.spin_calibration_end_load_g.value()),
+                "load_step_g": float(self.spin_calibration_load_step_g.value()),
+                "tolerance_g": float(self.spin_calibration_tolerance_g.value()),
+                "settle_s": float(self.spin_calibration_settle_s.value()),
+                "move_step_mm": float(self.spin_calibration_move_step_mm.value()),
+                "steps_per_direction": int(self.spin_calibration_steps_per_direction.value()),
+                "move_speed_mm_s": float(self.spin_calibration_speed_mm_s.value()),
+                "interval_ms": int(self.spin_calibration_interval.value()),
+                "report": self._calibration_report,
             },
             "controlled_current_sweep": {
                 "mode": str(self.combo_recipe_mode.currentData() or ""),
@@ -4953,7 +5186,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_session_status.setText(f"Session saved ({point_count} point(s))")
         if self._session_base_path is not None:
             self._log(f"Session stopped. Saved {point_count} point(s) to {self._session_base_path}.")
-        if self.check_output_off_on_stop.isChecked():
+        if self._supply_output_enabled:
             self._disable_supply_output()
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
@@ -5113,9 +5346,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.information(self, APP_NAME, "Start a session before recording points.")
             return False
         if self._is_max_load_exceeded():
+            limit_g = self._effective_max_load_limit_g()
             self._log(
                 f"Safety stop: applied load {self._current_effective_load_g():.5f} g exceeded "
-                f"the configured limit of {self.spin_max_load_g.value():.5f} g."
+                f"the configured limit of {0.0 if limit_g is None else limit_g:.5f} g."
             )
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return False
@@ -5257,10 +5491,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_csv_handle.flush()
 
     def _recipe_requires_tic(self, steps: Sequence[AutomationStep]) -> bool:
-        return any(step.action in {"move", "seek_target", "ramp_target"} for step in steps)
+        return any(step.action in {"move", "seek_target", "ramp_target", "calibration_move"} for step in steps)
 
     def _recipe_requires_scale(self, steps: Sequence[AutomationStep]) -> bool:
         if self.check_hardware_tare_on_start.isChecked():
+            return True
+        if any(step.action in {"calibration_record", "calibration_move"} for step in steps):
             return True
         return any(
             step.action in {"seek_target", "ramp_target"} and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
@@ -5272,6 +5508,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         if any(step.action == "set_current" for step in steps):
             return True
+        if str(self.combo_recipe_mode.currentData() or "") == CALIBRATION_COPPER or self._automation_name == CALIBRATION_COPPER:
+            return False
         return not self._is_current_sweep_mode() and self._heating_mode() != HEATING_MODE_OFF
 
     def _ensure_scale_ready_for_recipe(self) -> bool:
@@ -5451,6 +5689,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_start_value = None
         self._setup_measured_length_mm = None
         self._setup_preload_position_mm = None
+        self._calibration_report = None
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
         self._seek_no_response_count_by_key.clear()
@@ -5918,6 +6157,106 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return steps, summary, interval_ms
 
+        if mode == CALIBRATION_COPPER:
+            start_load_g = float(self.spin_calibration_start_load_g.value())
+            end_load_g = float(self.spin_calibration_end_load_g.value())
+            load_step_g = abs(float(self.spin_calibration_load_step_g.value()))
+            move_step_mm = abs(float(self.spin_calibration_move_step_mm.value()))
+            steps_per_direction = int(self.spin_calibration_steps_per_direction.value())
+            interval_ms = int(self.spin_calibration_interval.value())
+            baseline_s = float(self.spin_calibration_baseline_s.value())
+            settle_s = float(self.spin_calibration_settle_s.value())
+            if start_load_g <= 0.0 or end_load_g <= 0.0:
+                raise ValueError("Calibration preload targets must be greater than zero.")
+            if load_step_g <= 0.0:
+                raise ValueError("Set a non-zero calibration preload step.")
+            if move_step_mm <= 0.0:
+                raise ValueError("Set a non-zero calibration move step.")
+            if steps_per_direction <= 0:
+                raise ValueError("Set at least one calibration step per direction.")
+            preload_targets = self._build_numeric_targets(start_load_g, end_load_g, load_step_g)
+            baseline_count = max(1, int(math.ceil((baseline_s * 1000.0) / interval_ms)))
+            settle_count = max(0, int(math.ceil((settle_s * 1000.0) / interval_ms)))
+            steps = [
+                AutomationStep(
+                    "calibration_record",
+                    basis=HSW_BASIS_LOAD_G,
+                    target_value=0.0,
+                    note=CALIBRATION_BASELINE,
+                )
+                for _ in range(baseline_count)
+            ]
+            for plateau_index, preload_g in enumerate(preload_targets, start=1):
+                steps.append(
+                    AutomationStep(
+                        "seek_target",
+                        target_value=preload_g,
+                        basis=HSW_BASIS_LOAD_G,
+                        note=str(plateau_index),
+                    )
+                )
+                steps.extend(
+                    AutomationStep(
+                        "settle",
+                        target_value=preload_g,
+                        basis=HSW_BASIS_LOAD_G,
+                        note=str(plateau_index),
+                    )
+                    for _ in range(settle_count)
+                )
+                steps.append(
+                    AutomationStep(
+                        "calibration_record",
+                        target_value=preload_g,
+                        basis=HSW_BASIS_LOAD_G,
+                        note=CALIBRATION_PRELOAD,
+                    )
+                )
+                for _ in range(steps_per_direction):
+                    steps.append(
+                        AutomationStep(
+                            "calibration_move",
+                            relative_mm=move_step_mm * self._tension_motion_sign(),
+                            target_value=preload_g,
+                            basis=HSW_BASIS_LOAD_G,
+                            note=CALIBRATION_FORWARD,
+                        )
+                    )
+                    steps.append(
+                        AutomationStep(
+                            "calibration_record",
+                            target_value=preload_g,
+                            basis=HSW_BASIS_LOAD_G,
+                            note=CALIBRATION_FORWARD,
+                        )
+                    )
+                for _ in range(steps_per_direction):
+                    steps.append(
+                        AutomationStep(
+                            "calibration_move",
+                            relative_mm=-move_step_mm * self._tension_motion_sign(),
+                            target_value=preload_g,
+                            basis=HSW_BASIS_LOAD_G,
+                            note=CALIBRATION_REVERSE,
+                        )
+                    )
+                    steps.append(
+                        AutomationStep(
+                            "calibration_record",
+                            target_value=preload_g,
+                            basis=HSW_BASIS_LOAD_G,
+                            note=CALIBRATION_REVERSE,
+                        )
+                    )
+            steps = self._append_return_to_origin(steps)
+            summary = (
+                "Started copper-wire calibration: "
+                f"baseline {baseline_s:.1f} s, preload {start_load_g:.4f} to {end_load_g:.4f} g "
+                f"in {load_step_g:.4f} g steps, {steps_per_direction} forward/reverse "
+                f"{move_step_mm:.4f} mm move(s) per preload."
+            )
+            return steps, summary, interval_ms
+
         if self._is_current_sweep_mode(mode):
             basis = self._current_sweep_basis()
             target_start = float(self.spin_current_sweep_target_start.value())
@@ -6058,6 +6397,52 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return steps, summary, interval_ms
 
+    def _handle_current_sweep_voltage_unwind(
+        self,
+        step: AutomationStep,
+        step_index: int,
+        ramp_rate_mA_s: float,
+    ) -> bool:
+        start_mA = max(0.0, self._current_sweep_voltage_limit_start_mA)
+        if self._current_sweep_voltage_limit_started_s is None:
+            self._current_sweep_voltage_limit_started_s = time.monotonic()
+        elapsed_s = max(0.0, time.monotonic() - self._current_sweep_voltage_limit_started_s)
+        desired_mA = max(0.0, start_mA - ramp_rate_mA_s * elapsed_s)
+        setpoint_mA = self._quantize_ramp_current_mA(desired_mA, -1.0, 0.0)
+        if desired_mA <= 0.0:
+            setpoint_mA = 0.0
+        if (
+            self._active_current_sweep_last_setpoint_mA is None
+            or abs(setpoint_mA - self._active_current_sweep_last_setpoint_mA) >= self._supply_current_resolution_mA() * 0.5
+        ):
+            if not self._set_recipe_current_mA(setpoint_mA, measure_after=False):
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return True
+            self._active_current_sweep_last_setpoint_mA = setpoint_mA
+
+        plateau_index = int(step.note) if step.note.isdigit() else None
+        self._set_automation_context(
+            phase="current_limit_unwind",
+            basis=step.basis,
+            target_value=step.target_value,
+            plateau_index=plateau_index,
+        )
+        tolerance = self._automation_tolerance_for_step(step)
+        try:
+            self._seek_distribution_target(step.basis, step.target_value, tolerance)
+        except Exception as exc:
+            self._log(f"Recipe stopped: {exc}")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+
+        if setpoint_mA <= 0.0:
+            self._clear_current_sweep_voltage_limit()
+            self._active_current_sweep_step_index = None
+            self._active_current_sweep_started_s = 0.0
+            self._active_current_sweep_last_setpoint_mA = None
+            return True
+        return False
+
     def _handle_current_sweep_step(self, step: AutomationStep, step_index: int) -> bool:
         if step.current_start_mA is None or step.current_end_mA is None or step.current_ramp_rate_mA_s is None:
             self._log("Recipe stopped because the current ramp step is incomplete.")
@@ -6081,6 +6466,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return True
             self._active_current_sweep_last_setpoint_mA = start_mA
+
+        if self._current_sweep_voltage_limit_step_index == step_index:
+            return self._handle_current_sweep_voltage_unwind(step, step_index, ramp_rate_mA_s)
 
         elapsed_s = max(0.0, time.monotonic() - self._active_current_sweep_started_s)
         desired_mA = start_mA + direction * ramp_rate_mA_s * elapsed_s
@@ -6216,11 +6604,63 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         return True
 
+    def _handle_calibration_move_step(self, step: AutomationStep) -> bool:
+        if step.relative_mm is None:
+            self._log("Recipe stopped because the calibration move step is missing its distance.")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        target_mm = self._current_position_mm + float(step.relative_mm)
+        self._set_automation_context(
+            phase=step.note or CALIBRATION_FORWARD,
+            basis=step.basis or HSW_BASIS_LOAD_G,
+            target_value=step.target_value,
+        )
+        if not self._move_to_position_mm(
+            target_mm,
+            speed_mm_s=max(self._minimum_held_speed_mm_s(), float(self.spin_calibration_speed_mm_s.value())),
+        ):
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        return True
+
+    def _record_calibration_point(self, step: AutomationStep) -> bool:
+        self._set_automation_context(
+            phase=step.note or CALIBRATION_PRELOAD,
+            basis=step.basis or HSW_BASIS_LOAD_G,
+            target_value=step.target_value,
+        )
+        if not self._record_current_point(
+            quiet=True,
+            advance_heating=False,
+            require_fresh_after_move=step.note in {CALIBRATION_FORWARD, CALIBRATION_REVERSE},
+        ):
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return False
+        return True
+
+    def _finalize_calibration_report(self) -> None:
+        report = calibration_report_from_points(self._session_points)
+        self._calibration_report = report
+        if report.get("status") == "ok":
+            stiffness = report.get("average_stiffness_g_per_mm")
+            backlash = report.get("backlash_mm")
+            self._log(
+                "Calibration report ready: "
+                f"stiffness {_format_compact_unit(float(stiffness), 'g/mm', decimals=4) if stiffness is not None else '-'}, "
+                f"backlash {_format_compact_unit(float(backlash), 'mm', decimals=4) if backlash is not None else '-'}."
+            )
+        else:
+            self._log("Calibration report has insufficient data; inspect the session CSV and raw scale sidecar.")
+        self._write_session_metadata()
+
     def _handle_auto_ramp_tick(self) -> None:
         if not self._automation_active or self._automation_paused:
             return
         if self._automation_index >= len(self._automation_steps):
             is_recovery = self._is_recovery_mode()
+            is_calibration = self._automation_name == CALIBRATION_COPPER
+            if is_calibration and self._session_active:
+                self._finalize_calibration_report()
             self._update_recipe_progress(complete=True)
             self._stop_auto_ramp(log_completion=False, keep_progress=True)
             self._log("Recovery completed." if is_recovery else "Recipe completed.")
@@ -6296,6 +6736,10 @@ class MainWindow(QtWidgets.QMainWindow):
         elif step.action == "apply_length_setup":
             self._set_automation_context(phase="apply_l0")
             self._handle_apply_length_setup_step()
+        elif step.action == "calibration_move":
+            self._handle_calibration_move_step(step)
+        elif step.action == "calibration_record":
+            self._record_calibration_point(step)
         elif step.action == "settle":
             plateau_index = int(step.note) if step.note.isdigit() else None
             self._set_automation_context(
@@ -6346,9 +6790,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._supply_controller is not None and self._supply_controller.is_connected():
             self._refresh_supply_snapshot()
         if self._automation_active and self._is_max_load_exceeded():
+            limit_g = self._effective_max_load_limit_g()
             self._log(
                 f"Automation stopped because applied load {self._current_effective_load_g():.5f} g exceeded "
-                f"the limit of {self.spin_max_load_g.value():.5f} g."
+                f"the limit of {0.0 if limit_g is None else limit_g:.5f} g."
             )
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
 
@@ -6613,6 +7058,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("distribution_points", self.spin_distribution_points.value())
         self.settings.setValue("distribution_interval_ms", self.spin_distribution_interval.value())
         self.settings.setValue("distribution_return_sweep", self.check_distribution_return_sweep.isChecked())
+        self.settings.setValue("calibration_baseline_s", self.spin_calibration_baseline_s.value())
+        self.settings.setValue("calibration_start_load_g", self.spin_calibration_start_load_g.value())
+        self.settings.setValue("calibration_end_load_g", self.spin_calibration_end_load_g.value())
+        self.settings.setValue("calibration_load_step_g", self.spin_calibration_load_step_g.value())
+        self.settings.setValue("calibration_tolerance_g", self.spin_calibration_tolerance_g.value())
+        self.settings.setValue("calibration_settle_s", self.spin_calibration_settle_s.value())
+        self.settings.setValue("calibration_move_step_mm", self.spin_calibration_move_step_mm.value())
+        self.settings.setValue("calibration_steps_per_direction", self.spin_calibration_steps_per_direction.value())
+        self.settings.setValue("calibration_speed_mm_s", self.spin_calibration_speed_mm_s.value())
+        self.settings.setValue("calibration_interval_ms", self.spin_calibration_interval.value())
         self.settings.setValue("current_sweep_basis", self._current_sweep_basis())
         self.settings.setValue("pre_measurement_setup_enabled", self.check_pre_measurement_setup.isChecked())
         self.settings.setValue("setup_preload_stress_mpa", self.spin_setup_preload_stress_mpa.value())
@@ -6638,13 +7093,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("current_sweep_settle_s", self.spin_current_sweep_settle_s.value())
         self.settings.setValue("current_sweep_interval_ms", self.spin_current_sweep_interval.value())
         self.settings.setValue("current_sweep_log_interval_ms", self.spin_current_sweep_log_interval.value())
-        self.settings.setValue("heating_mode", self.combo_heating_mode.currentData() or HEATING_MODE_OFF)
-        self.settings.setValue("heat_constant_current_mA", self.spin_heat_constant_current.value())
-        self.settings.setValue("heat_start_current_mA", self.spin_heat_start_current.value())
-        self.settings.setValue("heat_max_current_mA", self.spin_heat_max_current.value())
-        self.settings.setValue("heat_step_current_mA", self.spin_heat_step_current.value())
-        self.settings.setValue("heat_limit_action", self.combo_heat_limit_action.currentData() or HEATING_LIMIT_STOP)
-        self.settings.setValue("output_off_on_stop", self.check_output_off_on_stop.isChecked())
         for index, tile in enumerate(self._plot_tiles):
             prefix = f"plot_tile_{index}"
             self.settings.setValue(f"{prefix}_visible", tile.visible.isChecked())
@@ -6723,7 +7171,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_soft_min_mm.setValue(float(self.settings.value("soft_limit_min_mm", -5.0)))
         self.spin_soft_max_mm.setValue(float(self.settings.value("soft_limit_max_mm", 5.0)))
         self.check_max_load.setChecked(bool(self.settings.value("max_load_enabled", False, type=bool)))
-        self.spin_max_load_g.setValue(float(self.settings.value("max_load_g", 25.0)))
+        self.spin_max_load_g.setValue(float(self.settings.value("max_load_g", DEFAULT_ZERO_LOAD_SCALE_G)))
         self.spin_zero_load_scale_g.setValue(
             float(self.settings.value("zero_load_scale_g", DEFAULT_ZERO_LOAD_SCALE_G))
         )
@@ -6803,6 +7251,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_distribution_return_sweep.setChecked(
             bool(self.settings.value("distribution_return_sweep", True, type=bool))
         )
+        self.spin_calibration_baseline_s.setValue(
+            max(0.1, float(self.settings.value("calibration_baseline_s", 10.0)))
+        )
+        self.spin_calibration_start_load_g.setValue(
+            max(0.001, float(self.settings.value("calibration_start_load_g", 1.0)))
+        )
+        self.spin_calibration_end_load_g.setValue(
+            max(0.001, float(self.settings.value("calibration_end_load_g", 5.0)))
+        )
+        self.spin_calibration_load_step_g.setValue(
+            max(0.001, float(self.settings.value("calibration_load_step_g", 1.0)))
+        )
+        self.spin_calibration_tolerance_g.setValue(
+            max(0.0001, float(self.settings.value("calibration_tolerance_g", 0.02)))
+        )
+        self.spin_calibration_settle_s.setValue(
+            max(0.0, float(self.settings.value("calibration_settle_s", 0.5)))
+        )
+        self.spin_calibration_move_step_mm.setValue(
+            max(0.0001, float(self.settings.value("calibration_move_step_mm", 0.01)))
+        )
+        self.spin_calibration_steps_per_direction.setValue(
+            max(1, int(self.settings.value("calibration_steps_per_direction", 5)))
+        )
+        self.spin_calibration_speed_mm_s.setValue(
+            max(0.001, float(self.settings.value("calibration_speed_mm_s", 0.05)))
+        )
+        self.spin_calibration_interval.setValue(int(self.settings.value("calibration_interval_ms", 250)))
         current_sweep_basis = self.settings.value("current_sweep_basis", HSW_BASIS_LOAD_G, type=str)
         current_sweep_basis_index = self.combo_current_sweep_basis.findData(current_sweep_basis)
         if current_sweep_basis_index >= 0:
@@ -6863,19 +7339,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_interval.setValue(int(self.settings.value("current_sweep_interval_ms", 250)))
         self.spin_current_sweep_log_interval.setValue(int(self.settings.value("current_sweep_log_interval_ms", 500)))
         self._update_current_sweep_basis_ui()
-        heating_mode = self.settings.value("heating_mode", HEATING_MODE_OFF, type=str)
-        heating_index = self.combo_heating_mode.findData(heating_mode)
-        if heating_index >= 0:
-            self.combo_heating_mode.setCurrentIndex(heating_index)
-        self.spin_heat_constant_current.setValue(float(self.settings.value("heat_constant_current_mA", 50.0)))
-        self.spin_heat_start_current.setValue(float(self.settings.value("heat_start_current_mA", 10.0)))
-        self.spin_heat_max_current.setValue(float(self.settings.value("heat_max_current_mA", 100.0)))
-        self.spin_heat_step_current.setValue(float(self.settings.value("heat_step_current_mA", 5.0)))
-        heat_limit_action = self.settings.value("heat_limit_action", HEATING_LIMIT_STOP, type=str)
-        heat_limit_index = self.combo_heat_limit_action.findData(heat_limit_action)
-        if heat_limit_index >= 0:
-            self.combo_heat_limit_action.setCurrentIndex(heat_limit_index)
-        self.check_output_off_on_stop.setChecked(bool(self.settings.value("output_off_on_stop", True, type=bool)))
         for index, tile in enumerate(self._plot_tiles):
             prefix = f"plot_tile_{index}"
             tile.visible.setChecked(bool(self.settings.value(f"{prefix}_visible", True, type=bool)))
