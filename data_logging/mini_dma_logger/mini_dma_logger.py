@@ -114,18 +114,20 @@ CURRENT_SWEEP_LOAD = "current_sweep_load"
 CURRENT_SWEEP_STRESS = "current_sweep_stress"
 CURRENT_SWEEP_STRAIN = "current_sweep_strain"
 LEGACY_CURRENT_SWEEP = "current_sweep"
+CALIBRATION = "calibration"
 CALIBRATION_COPPER = "calibration_copper"
 CALIBRATION_BASELINE = "calibration_baseline"
 CALIBRATION_PRELOAD = "calibration_preload"
 CALIBRATION_FORWARD = "calibration_forward"
 CALIBRATION_REVERSE = "calibration_reverse"
-CALIBRATION_DEFAULTS_VERSION = 2
+CALIBRATION_DEFAULTS_VERSION = 3
 CURRENT_SWEEP_BASIS_BY_MODE = {
     CURRENT_SWEEP_LOAD: HSW_BASIS_LOAD_G,
     CURRENT_SWEEP_STRESS: HSW_BASIS_STRESS_MPA,
     CURRENT_SWEEP_STRAIN: HSW_BASIS_STRAIN_PCT,
 }
 CURRENT_SWEEP_MODES = frozenset(CURRENT_SWEEP_BASIS_BY_MODE) | {LEGACY_CURRENT_SWEEP}
+CALIBRATION_MODES = frozenset({CALIBRATION, CALIBRATION_COPPER})
 PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d", "Diameter", "diameter_um")
 PROJECT_ROW_CURRENT_KEYS = (
     "Stress/strain current (mA)",
@@ -634,6 +636,57 @@ def _linear_load_fit(points: Sequence[MeasurementPoint]) -> dict[str, float | in
     }
 
 
+def _linear_stress_strain_fit(points: Sequence[MeasurementPoint]) -> dict[str, float | int | None]:
+    pairs: list[tuple[float, float]] = []
+    for point in points:
+        if point.strain_pct is None or point.stress_mpa is None:
+            continue
+        strain_pct = float(point.strain_pct)
+        stress_mpa = float(point.stress_mpa)
+        if math.isfinite(strain_pct) and math.isfinite(stress_mpa):
+            pairs.append((strain_pct / 100.0, stress_mpa))
+    count = len(pairs)
+    if count < 2:
+        return {
+            "sample_count": count,
+            "modulus_mpa": None,
+            "modulus_gpa": None,
+            "signed_modulus_mpa": None,
+            "intercept_mpa": None,
+            "strain_start_pct": pairs[0][0] * 100.0 if pairs else None,
+            "strain_end_pct": pairs[-1][0] * 100.0 if pairs else None,
+            "stress_start_mpa": pairs[0][1] if pairs else None,
+            "stress_end_mpa": pairs[-1][1] if pairs else None,
+        }
+    x_values = [pair[0] for pair in pairs]
+    y_values = [pair[1] for pair in pairs]
+    x_mean = sum(x_values) / count
+    y_mean = sum(y_values) / count
+    denominator = sum((x_value - x_mean) ** 2 for x_value in x_values)
+    if denominator <= 0.0:
+        slope = None
+        intercept = None
+    else:
+        slope = sum((x_value - x_mean) * (y_value - y_mean) for x_value, y_value in pairs) / denominator
+        intercept = y_mean - slope * x_mean
+    modulus_mpa = None if slope is None else abs(slope)
+    return {
+        "sample_count": count,
+        "modulus_mpa": modulus_mpa,
+        "modulus_gpa": None if modulus_mpa is None else modulus_mpa / 1000.0,
+        "signed_modulus_mpa": slope,
+        "intercept_mpa": intercept,
+        "strain_start_pct": x_values[0] * 100.0,
+        "strain_end_pct": x_values[-1] * 100.0,
+        "strain_min_pct": min(x_values) * 100.0,
+        "strain_max_pct": max(x_values) * 100.0,
+        "stress_start_mpa": y_values[0],
+        "stress_end_mpa": y_values[-1],
+        "stress_min_mpa": min(y_values),
+        "stress_max_mpa": max(y_values),
+    }
+
+
 def _fit_x_at_load(fit: Mapping[str, float | int | None], load_g: float) -> float | None:
     slope = fit.get("signed_stiffness_g_per_mm")
     intercept = fit.get("intercept_g")
@@ -674,6 +727,8 @@ def calibration_report_from_points(points: Sequence[MeasurementPoint]) -> dict[s
     baseline_stats = _summary_stats(_numeric_values(point.load_g for point in baseline))
     forward_fit = _linear_load_fit(forward)
     reverse_fit = _linear_load_fit(reverse)
+    forward_stress_strain = _linear_stress_strain_fit(forward)
+    reverse_stress_strain = _linear_stress_strain_fit(reverse)
     stiffness_values = _numeric_values(
         [
             forward_fit.get("stiffness_g_per_mm"),
@@ -681,6 +736,13 @@ def calibration_report_from_points(points: Sequence[MeasurementPoint]) -> dict[s
         ]
     )
     average_stiffness = sum(stiffness_values) / len(stiffness_values) if stiffness_values else None
+    modulus_values = _numeric_values(
+        [
+            forward_stress_strain.get("modulus_mpa"),
+            reverse_stress_strain.get("modulus_mpa"),
+        ]
+    )
+    average_modulus_mpa = sum(modulus_values) / len(modulus_values) if modulus_values else None
     backlash_mm = _backlash_from_fits(forward_fit, reverse_fit)
     status = "ok" if average_stiffness is not None and backlash_mm is not None else "insufficient_data"
     return {
@@ -690,6 +752,12 @@ def calibration_report_from_points(points: Sequence[MeasurementPoint]) -> dict[s
         "reverse": reverse_fit,
         "average_stiffness_g_per_mm": average_stiffness,
         "backlash_mm": backlash_mm,
+        "stress_strain": {
+            "forward": forward_stress_strain,
+            "reverse": reverse_stress_strain,
+            "average_modulus_mpa": average_modulus_mpa,
+            "average_modulus_gpa": None if average_modulus_mpa is None else average_modulus_mpa / 1000.0,
+        },
         "sample_counts": {
             "baseline": len(baseline),
             "forward": len(forward),
@@ -2000,12 +2068,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_recipe_mode.addItem("Cyclic displacement", "cycle")
         self.combo_recipe_mode.addItem("Displacement hold", "hold")
         self.combo_recipe_mode.addItem("Hsw plateau scan", "distribution")
-        self.combo_recipe_mode.addItem("Copper-wire calibration", CALIBRATION_COPPER)
+        self.combo_recipe_mode.addItem("Calibration", CALIBRATION)
         self.combo_recipe_mode.addItem("Iso-load current sweep", CURRENT_SWEEP_LOAD)
         self.combo_recipe_mode.addItem("Iso-stress current sweep", CURRENT_SWEEP_STRESS)
         self.combo_recipe_mode.addItem("Iso-strain current sweep", CURRENT_SWEEP_STRAIN)
         self.combo_recipe_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
         automation_form.addRow("Recipe type", self.combo_recipe_mode)
+
+        self.strain_setup_box = self._group_box("Zero-load and length setup")
+        strain_setup_form = QtWidgets.QFormLayout(self.strain_setup_box)
+        self.check_pre_measurement_setup = QtWidgets.QCheckBox(
+            "Run zero-load + length setup before recipe",
+            self.strain_setup_box,
+        )
+        self.check_pre_measurement_setup.setChecked(False)
+        self.check_pre_measurement_setup.setToolTip(
+            "Seek 0 g applied load, apply a small preload, ask for the measured length, "
+            "return to 0 g, and compute l0 from the stage movement."
+        )
+        strain_setup_form.addRow("", self.check_pre_measurement_setup)
+        self.spin_setup_preload_stress_mpa = CompactDoubleSpinBox(self.strain_setup_box)
+        self.spin_setup_preload_stress_mpa.setDecimals(3)
+        self.spin_setup_preload_stress_mpa.setRange(0.001, 10000.0)
+        self.spin_setup_preload_stress_mpa.setValue(10.0)
+        self.spin_setup_preload_stress_mpa.setSuffix(" MPa")
+        strain_setup_form.addRow("Setup preload stress", self.spin_setup_preload_stress_mpa)
+        self.spin_setup_preload_ramp_rate_mpa_s = CompactDoubleSpinBox(self.strain_setup_box)
+        self.spin_setup_preload_ramp_rate_mpa_s.setDecimals(3)
+        self.spin_setup_preload_ramp_rate_mpa_s.setRange(0.001, 10000.0)
+        self.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
+        self.spin_setup_preload_ramp_rate_mpa_s.setSuffix(" MPa/s")
+        strain_setup_form.addRow("Setup preload ramp rate", self.spin_setup_preload_ramp_rate_mpa_s)
+        self.spin_setup_preload_tolerance_mpa = CompactDoubleSpinBox(self.strain_setup_box)
+        self.spin_setup_preload_tolerance_mpa.setDecimals(4)
+        self.spin_setup_preload_tolerance_mpa.setRange(0.0001, 10000.0)
+        self.spin_setup_preload_tolerance_mpa.setValue(0.25)
+        self.spin_setup_preload_tolerance_mpa.setSuffix(" MPa")
+        strain_setup_form.addRow("Setup preload tolerance", self.spin_setup_preload_tolerance_mpa)
+        self.spin_setup_zero_tolerance_g = CompactDoubleSpinBox(self.strain_setup_box)
+        self.spin_setup_zero_tolerance_g.setDecimals(4)
+        self.spin_setup_zero_tolerance_g.setRange(0.0001, 1000.0)
+        self.spin_setup_zero_tolerance_g.setValue(0.02)
+        self.spin_setup_zero_tolerance_g.setSuffix(" g")
+        strain_setup_form.addRow("Setup zero-load tolerance", self.spin_setup_zero_tolerance_g)
+        self.spin_setup_zero_stable_s = CompactDoubleSpinBox(self.strain_setup_box)
+        self.spin_setup_zero_stable_s.setDecimals(2)
+        self.spin_setup_zero_stable_s.setRange(0.0, 60.0)
+        self.spin_setup_zero_stable_s.setValue(1.0)
+        self.spin_setup_zero_stable_s.setSuffix(" s")
+        strain_setup_form.addRow("Setup stable time", self.spin_setup_zero_stable_s)
+        automation_form.addRow("", self.strain_setup_box)
 
         self.recipe_stack = CurrentPageStackedWidget(automation_box)
         self.recipe_stack.setSizePolicy(
@@ -2183,25 +2295,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_calibration_start_load_g = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_start_load_g.setDecimals(3)
         self.spin_calibration_start_load_g.setRange(0.001, 150.0)
-        self.spin_calibration_start_load_g.setValue(5.0)
+        self.spin_calibration_start_load_g.setValue(0.25)
         self.spin_calibration_start_load_g.setSuffix(" g")
         calibration_form.addRow("Start preload", self.spin_calibration_start_load_g)
         self.spin_calibration_end_load_g = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_end_load_g.setDecimals(3)
         self.spin_calibration_end_load_g.setRange(0.001, 150.0)
-        self.spin_calibration_end_load_g.setValue(10.0)
+        self.spin_calibration_end_load_g.setValue(1.0)
         self.spin_calibration_end_load_g.setSuffix(" g")
         calibration_form.addRow("End preload", self.spin_calibration_end_load_g)
         self.spin_calibration_load_step_g = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_load_step_g.setDecimals(3)
         self.spin_calibration_load_step_g.setRange(0.001, 150.0)
-        self.spin_calibration_load_step_g.setValue(1.0)
+        self.spin_calibration_load_step_g.setValue(0.25)
         self.spin_calibration_load_step_g.setSuffix(" g")
         calibration_form.addRow("Preload step", self.spin_calibration_load_step_g)
         self.spin_calibration_tolerance_g = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_tolerance_g.setDecimals(4)
         self.spin_calibration_tolerance_g.setRange(0.0001, 10.0)
-        self.spin_calibration_tolerance_g.setValue(0.1)
+        self.spin_calibration_tolerance_g.setValue(0.02)
         self.spin_calibration_tolerance_g.setSuffix(" g")
         calibration_form.addRow("Load tolerance", self.spin_calibration_tolerance_g)
         self.spin_calibration_settle_s = CompactDoubleSpinBox(automation_box)
@@ -2213,13 +2325,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_calibration_preload_nudge_mm = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_preload_nudge_mm.setDecimals(4)
         self.spin_calibration_preload_nudge_mm.setRange(0.0001, 10.0)
-        self.spin_calibration_preload_nudge_mm.setValue(0.1)
+        self.spin_calibration_preload_nudge_mm.setValue(0.01)
         self.spin_calibration_preload_nudge_mm.setSuffix(" mm")
         calibration_form.addRow("Preload correction step", self.spin_calibration_preload_nudge_mm)
         self.spin_calibration_preload_speed_mm_s = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_preload_speed_mm_s.setDecimals(3)
         self.spin_calibration_preload_speed_mm_s.setRange(0.001, 50.0)
-        self.spin_calibration_preload_speed_mm_s.setValue(1.0)
+        self.spin_calibration_preload_speed_mm_s.setValue(0.2)
         self.spin_calibration_preload_speed_mm_s.setSuffix(" mm/s")
         calibration_form.addRow("Preload seek speed", self.spin_calibration_preload_speed_mm_s)
         self.spin_calibration_move_step_mm = CompactDoubleSpinBox(automation_box)
@@ -2235,7 +2347,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_calibration_speed_mm_s = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_speed_mm_s.setDecimals(3)
         self.spin_calibration_speed_mm_s.setRange(0.001, 50.0)
-        self.spin_calibration_speed_mm_s.setValue(0.2)
+        self.spin_calibration_speed_mm_s.setValue(0.05)
         self.spin_calibration_speed_mm_s.setSuffix(" mm/s")
         calibration_form.addRow("Micro-move speed", self.spin_calibration_speed_mm_s)
         self.spin_calibration_interval = QtWidgets.QSpinBox(automation_box)
@@ -2257,46 +2369,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_current_sweep_basis.setVisible(False)
         self.check_hardware_tare_on_start.setParent(current_sweep_page)
         current_sweep_form.addRow("", self.check_hardware_tare_on_start)
-        self.check_pre_measurement_setup = QtWidgets.QCheckBox(
-            "Zero-load + length setup before recipe",
-            automation_box,
-        )
-        self.check_pre_measurement_setup.setChecked(False)
-        self.check_pre_measurement_setup.setToolTip(
-            "Before the current sweep, seek 0 g applied load, apply a small preload, ask for the measured length, "
-            "return to 0 g, and compute l0 from the stage movement."
-        )
-        current_sweep_form.addRow("", self.check_pre_measurement_setup)
-        self.spin_setup_preload_stress_mpa = CompactDoubleSpinBox(automation_box)
-        self.spin_setup_preload_stress_mpa.setDecimals(3)
-        self.spin_setup_preload_stress_mpa.setRange(0.001, 10000.0)
-        self.spin_setup_preload_stress_mpa.setValue(10.0)
-        self.spin_setup_preload_stress_mpa.setSuffix(" MPa")
-        current_sweep_form.addRow("Setup preload stress", self.spin_setup_preload_stress_mpa)
-        self.spin_setup_preload_ramp_rate_mpa_s = CompactDoubleSpinBox(automation_box)
-        self.spin_setup_preload_ramp_rate_mpa_s.setDecimals(3)
-        self.spin_setup_preload_ramp_rate_mpa_s.setRange(0.001, 10000.0)
-        self.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
-        self.spin_setup_preload_ramp_rate_mpa_s.setSuffix(" MPa/s")
-        current_sweep_form.addRow("Setup preload ramp rate", self.spin_setup_preload_ramp_rate_mpa_s)
-        self.spin_setup_preload_tolerance_mpa = CompactDoubleSpinBox(automation_box)
-        self.spin_setup_preload_tolerance_mpa.setDecimals(4)
-        self.spin_setup_preload_tolerance_mpa.setRange(0.0001, 10000.0)
-        self.spin_setup_preload_tolerance_mpa.setValue(0.25)
-        self.spin_setup_preload_tolerance_mpa.setSuffix(" MPa")
-        current_sweep_form.addRow("Setup preload tolerance", self.spin_setup_preload_tolerance_mpa)
-        self.spin_setup_zero_tolerance_g = CompactDoubleSpinBox(automation_box)
-        self.spin_setup_zero_tolerance_g.setDecimals(4)
-        self.spin_setup_zero_tolerance_g.setRange(0.0001, 1000.0)
-        self.spin_setup_zero_tolerance_g.setValue(0.02)
-        self.spin_setup_zero_tolerance_g.setSuffix(" g")
-        current_sweep_form.addRow("Setup zero-load tolerance", self.spin_setup_zero_tolerance_g)
-        self.spin_setup_zero_stable_s = CompactDoubleSpinBox(automation_box)
-        self.spin_setup_zero_stable_s.setDecimals(2)
-        self.spin_setup_zero_stable_s.setRange(0.0, 60.0)
-        self.spin_setup_zero_stable_s.setValue(1.0)
-        self.spin_setup_zero_stable_s.setSuffix(" s")
-        current_sweep_form.addRow("Setup stable time", self.spin_setup_zero_stable_s)
         self.spin_current_sweep_target_start = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_start.setDecimals(3)
         self.spin_current_sweep_target_start.setRange(-100000.0, 100000.0)
@@ -3974,6 +4046,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _is_current_sweep_mode(self, mode: str | None = None) -> bool:
         return str(mode if mode is not None else self.combo_recipe_mode.currentData() or "") in CURRENT_SWEEP_MODES
 
+    def _is_calibration_mode(self, mode: str | None = None) -> bool:
+        default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
+        return str(mode if mode is not None else default_mode or "") in CALIBRATION_MODES
+
     def _is_recovery_mode(self, mode: str | None = None) -> bool:
         return str(mode if mode is not None else self._automation_name) in {RECOVERY_POSITION, RECOVERY_LOAD}
 
@@ -3992,7 +4068,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _pre_measurement_setup_enabled(self, mode: str | None = None) -> bool:
         if not hasattr(self, "check_pre_measurement_setup"):
             return False
-        return self._is_current_sweep_mode(mode) and self.check_pre_measurement_setup.isChecked()
+        return (self._is_current_sweep_mode(mode) or self._is_calibration_mode(mode)) and self.check_pre_measurement_setup.isChecked()
 
     def _distribution_units(self, basis: str | None = None) -> tuple[str, int]:
         basis = basis or self._distribution_basis()
@@ -4092,7 +4168,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_nudge_mm(self) -> float:
         if self._automation_name == RECOVERY_LOAD:
             return abs(float(self.spin_jog_mm.value()))
-        if self._automation_name == CALIBRATION_COPPER:
+        if self._is_calibration_mode(self._automation_name):
             return abs(float(self.spin_calibration_preload_nudge_mm.value()))
         if self._is_current_sweep_mode(self._automation_name):
             return abs(float(self.spin_current_sweep_nudge_mm.value()))
@@ -4101,7 +4177,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_max_travel_mm(self) -> float:
         if self._is_current_sweep_mode(self._automation_name):
             return max(self._motor_step_mm(), float(self.spin_current_sweep_max_seek_mm.value()))
-        if self._automation_name == CALIBRATION_COPPER:
+        if self._is_calibration_mode(self._automation_name):
             return max(self._motor_step_mm(), self._seek_nudge_mm() * 100.0)
         return max(self._motor_step_mm(), self._seek_nudge_mm() * 30.0)
 
@@ -4151,7 +4227,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return abs(float(self.spin_setup_zero_tolerance_g.value()))
         if step.note == "setup_preload" and step.basis == HSW_BASIS_STRESS_MPA:
             return abs(float(self.spin_setup_preload_tolerance_mpa.value()))
-        if self._automation_name == CALIBRATION_COPPER and step.basis == HSW_BASIS_LOAD_G:
+        if self._is_calibration_mode(self._automation_name) and step.basis == HSW_BASIS_LOAD_G:
             return abs(float(self.spin_calibration_tolerance_g.value()))
         return abs(
             float(
@@ -4258,10 +4334,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "cycle": 1,
             "hold": 2,
             "distribution": 3,
+            CALIBRATION: 4,
             CALIBRATION_COPPER: 4,
         }.get(mode, 0)
         self.recipe_stack.setCurrentIndex(page_index)
         self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
+        self.strain_setup_box.setVisible(self._is_current_sweep_mode(mode) or self._is_calibration_mode(mode))
         if mode == "cycle":
             summary = (
                 f"Plan: cyclic displacement, {self.spin_cycle_count.value()} cycle(s), "
@@ -4301,16 +4379,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{_format_compact_number(self.spin_distribution_end.value())}{suffix}; "
                 f"{self.spin_distribution_points.value()} point(s)/plateau."
             )
-        elif mode == CALIBRATION_COPPER:
+        elif self._is_calibration_mode(mode):
             summary = (
-                "Plan: copper-wire calibration, load "
+                "Plan: calibration, load "
                 f"{_format_compact_unit(self.spin_calibration_start_load_g.value(), 'g', decimals=3)} to "
                 f"{_format_compact_unit(self.spin_calibration_end_load_g.value(), 'g', decimals=3)}; "
                 f"seek with {_format_compact_unit(self.spin_calibration_preload_nudge_mm.value(), 'mm')} "
                 f"steps at {_format_compact_unit(self.spin_calibration_preload_speed_mm_s.value(), 'mm/s', decimals=3)}, "
                 f"then {self.spin_calibration_steps_per_direction.value()} forward/reverse micro-step(s) per preload."
             )
-            banner = "Copper-wire calibration"
+            if self._pre_measurement_setup_enabled(mode):
+                setup_load_g = load_g_from_stress_mpa(
+                    float(self.spin_setup_preload_stress_mpa.value()),
+                    float(self.spin_diameter.value()),
+                )
+                load_text = "" if setup_load_g is None else f" ({_format_compact_unit(setup_load_g, 'g', decimals=4)})"
+                summary += (
+                    " Setup: 0 g load, "
+                    f"{_format_compact_unit(self.spin_setup_preload_stress_mpa.value(), 'MPa', decimals=3)}"
+                    f"{load_text} preload for length entry, then back to 0 g."
+                )
+            banner = "Calibration"
         elif self._is_current_sweep_mode(mode):
             basis = self._current_sweep_basis()
             self._update_current_sweep_basis_ui()
@@ -4363,7 +4452,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"from the current position."
             )
             banner = "Displacement ramp"
-        if self._is_current_sweep_mode(mode) or mode == CALIBRATION_COPPER:
+        if self._is_current_sweep_mode(mode) or self._is_calibration_mode(mode):
             if self._is_current_sweep_mode(mode):
                 summary += " Recipe controls current."
             else:
@@ -4373,7 +4462,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.check_zero_on_preload.isChecked() and self.spin_preload_threshold_g.value() > 0
             else " Strain zero follows the current reference immediately."
         )
-        if not self._is_current_sweep_mode(mode) and mode != CALIBRATION_COPPER:
+        if not self._is_current_sweep_mode(mode) and not self._is_calibration_mode(mode):
             summary += preload_text
         self.label_recipe_summary.setText(summary)
         self.label_recipe_banner.setText(banner)
@@ -4720,7 +4809,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._minimum_held_speed_mm_s(),
                     float(self.spin_current_sweep_balance_speed_mm_s.value()),
                 )
-            if self._automation_name == CALIBRATION_COPPER:
+            if self._is_calibration_mode(self._automation_name):
                 if self._automation_phase == "seek":
                     return max(
                         self._minimum_held_speed_mm_s(),
@@ -4747,7 +4836,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._minimum_held_speed_mm_s(),
                 float(self.spin_current_sweep_balance_speed_mm_s.value()),
             )
-        if mode == CALIBRATION_COPPER:
+        if self._is_calibration_mode(mode):
             return max(
                 self._minimum_held_speed_mm_s(),
                 float(self.spin_calibration_preload_speed_mm_s.value()),
@@ -4979,6 +5068,22 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._session_raw_scale_count / elapsed_s
 
     def _session_metadata(self) -> dict[str, Any]:
+        calibration_metadata = {
+            "baseline_s": float(self.spin_calibration_baseline_s.value()),
+            "start_load_g": float(self.spin_calibration_start_load_g.value()),
+            "end_load_g": float(self.spin_calibration_end_load_g.value()),
+            "load_step_g": float(self.spin_calibration_load_step_g.value()),
+            "tolerance_g": float(self.spin_calibration_tolerance_g.value()),
+            "settle_s": float(self.spin_calibration_settle_s.value()),
+            "preload_nudge_mm": float(self.spin_calibration_preload_nudge_mm.value()),
+            "preload_speed_mm_s": float(self.spin_calibration_preload_speed_mm_s.value()),
+            "move_step_mm": float(self.spin_calibration_move_step_mm.value()),
+            "steps_per_direction": int(self.spin_calibration_steps_per_direction.value()),
+            "move_speed_mm_s": float(self.spin_calibration_speed_mm_s.value()),
+            "interval_ms": int(self.spin_calibration_interval.value()),
+            "pre_measurement_setup_enabled": self._pre_measurement_setup_enabled(CALIBRATION),
+            "report": self._calibration_report,
+        }
         return {
             "created_utc": self._session_created_utc or _utc_timestamp(),
             "sample_name": self.edit_sample_name.text().strip(),
@@ -5053,21 +5158,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "interval_ms": int(self.spin_distribution_interval.value()),
                 "return_sweep": self.check_distribution_return_sweep.isChecked(),
             },
-            "copper_calibration": {
-                "baseline_s": float(self.spin_calibration_baseline_s.value()),
-                "start_load_g": float(self.spin_calibration_start_load_g.value()),
-                "end_load_g": float(self.spin_calibration_end_load_g.value()),
-                "load_step_g": float(self.spin_calibration_load_step_g.value()),
-                "tolerance_g": float(self.spin_calibration_tolerance_g.value()),
-                "settle_s": float(self.spin_calibration_settle_s.value()),
-                "preload_nudge_mm": float(self.spin_calibration_preload_nudge_mm.value()),
-                "preload_speed_mm_s": float(self.spin_calibration_preload_speed_mm_s.value()),
-                "move_step_mm": float(self.spin_calibration_move_step_mm.value()),
-                "steps_per_direction": int(self.spin_calibration_steps_per_direction.value()),
-                "move_speed_mm_s": float(self.spin_calibration_speed_mm_s.value()),
-                "interval_ms": int(self.spin_calibration_interval.value()),
-                "report": self._calibration_report,
-            },
+            "calibration": calibration_metadata,
+            "copper_calibration": dict(calibration_metadata, legacy_name="copper_calibration"),
             "controlled_current_sweep": {
                 "mode": str(self.combo_recipe_mode.currentData() or ""),
                 "basis": self._current_sweep_basis(),
@@ -5553,7 +5645,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         if any(step.action == "set_current" for step in steps):
             return True
-        if str(self.combo_recipe_mode.currentData() or "") == CALIBRATION_COPPER or self._automation_name == CALIBRATION_COPPER:
+        mode = str(self.combo_recipe_mode.currentData() or "")
+        if self._is_calibration_mode(mode) or self._is_calibration_mode(self._automation_name):
             return False
         return not self._is_current_sweep_mode() and self._heating_mode() != HEATING_MODE_OFF
 
@@ -6202,7 +6295,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return steps, summary, interval_ms
 
-        if mode == CALIBRATION_COPPER:
+        if self._is_calibration_mode(mode):
             start_load_g = float(self.spin_calibration_start_load_g.value())
             end_load_g = float(self.spin_calibration_end_load_g.value())
             load_step_g = abs(float(self.spin_calibration_load_step_g.value()))
@@ -6222,7 +6315,9 @@ class MainWindow(QtWidgets.QMainWindow):
             preload_targets = self._build_numeric_targets(start_load_g, end_load_g, load_step_g)
             baseline_count = max(1, int(math.ceil((baseline_s * 1000.0) / interval_ms)))
             settle_count = max(0, int(math.ceil((settle_s * 1000.0) / interval_ms)))
-            steps = [
+            setup_enabled = self._pre_measurement_setup_enabled(mode)
+            steps = self._build_pre_measurement_setup_steps(interval_ms=interval_ms) if setup_enabled else []
+            steps.extend(
                 AutomationStep(
                     "calibration_record",
                     basis=HSW_BASIS_LOAD_G,
@@ -6230,7 +6325,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     note=CALIBRATION_BASELINE,
                 )
                 for _ in range(baseline_count)
-            ]
+            )
             for plateau_index, preload_g in enumerate(preload_targets, start=1):
                 steps.append(
                     AutomationStep(
@@ -6295,11 +6390,21 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
             steps = self._append_return_to_origin(steps)
             summary = (
-                "Started copper-wire calibration: "
+                "Started calibration: "
                 f"baseline {baseline_s:.1f} s, preload {start_load_g:.4f} to {end_load_g:.4f} g "
                 f"in {load_step_g:.4f} g steps, {steps_per_direction} forward/reverse "
                 f"{move_step_mm:.4f} mm move(s) per preload."
             )
+            if setup_enabled:
+                setup_load_g = load_g_from_stress_mpa(
+                    float(self.spin_setup_preload_stress_mpa.value()),
+                    float(self.spin_diameter.value()),
+                )
+                load_text = "-" if setup_load_g is None else f" (~{setup_load_g:.4f} g)"
+                summary += (
+                    " Includes zero/preload length setup: "
+                    f"0 g -> {self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
+                )
             return steps, summary, interval_ms
 
         if self._is_current_sweep_mode(mode):
@@ -6710,7 +6815,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._automation_index >= len(self._automation_steps):
             is_recovery = self._is_recovery_mode()
-            is_calibration = self._automation_name == CALIBRATION_COPPER
+            is_calibration = self._is_calibration_mode(self._automation_name)
             if is_calibration and self._session_active:
                 self._finalize_calibration_report()
             self._update_recipe_progress(complete=True)
@@ -7275,6 +7380,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if recipe_mode == LEGACY_CURRENT_SWEEP:
             saved_basis = self.settings.value("current_sweep_basis", HSW_BASIS_LOAD_G, type=str)
             recipe_mode = self._current_sweep_mode_for_basis(saved_basis)
+        elif recipe_mode == CALIBRATION_COPPER:
+            recipe_mode = CALIBRATION
         recipe_index = self.combo_recipe_mode.findData(recipe_mode)
         if recipe_index >= 0:
             self.combo_recipe_mode.setCurrentIndex(recipe_index)
@@ -7308,16 +7415,19 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         calibration_defaults_version = int(self.settings.value("calibration_defaults_version", 0) or 0)
 
-        def _calibration_setting_float(key: str, *, old_default: float, new_default: float) -> float:
+        def _calibration_setting_float(
+            key: str,
+            *,
+            old_default: float | Sequence[float],
+            new_default: float,
+        ) -> float:
             raw = self.settings.value(key, None)
             if raw is None:
                 return new_default
             value = float(raw)
-            if calibration_defaults_version < CALIBRATION_DEFAULTS_VERSION and math.isclose(
-                value,
-                old_default,
-                rel_tol=1e-9,
-                abs_tol=1e-9,
+            old_defaults = (old_default,) if isinstance(old_default, (int, float)) else tuple(old_default)
+            if calibration_defaults_version < CALIBRATION_DEFAULTS_VERSION and any(
+                math.isclose(value, float(default), rel_tol=1e-9, abs_tol=1e-9) for default in old_defaults
             ):
                 return new_default
             return value
@@ -7326,16 +7436,16 @@ class MainWindow(QtWidgets.QMainWindow):
             max(0.1, _calibration_setting_float("calibration_baseline_s", old_default=10.0, new_default=3.0))
         )
         self.spin_calibration_start_load_g.setValue(
-            max(0.001, _calibration_setting_float("calibration_start_load_g", old_default=1.0, new_default=5.0))
+            max(0.001, _calibration_setting_float("calibration_start_load_g", old_default=(1.0, 5.0), new_default=0.25))
         )
         self.spin_calibration_end_load_g.setValue(
-            max(0.001, _calibration_setting_float("calibration_end_load_g", old_default=5.0, new_default=10.0))
+            max(0.001, _calibration_setting_float("calibration_end_load_g", old_default=(5.0, 10.0), new_default=1.0))
         )
         self.spin_calibration_load_step_g.setValue(
-            max(0.001, float(self.settings.value("calibration_load_step_g", 1.0)))
+            max(0.001, _calibration_setting_float("calibration_load_step_g", old_default=1.0, new_default=0.25))
         )
         self.spin_calibration_tolerance_g.setValue(
-            max(0.0001, _calibration_setting_float("calibration_tolerance_g", old_default=0.02, new_default=0.1))
+            max(0.0001, _calibration_setting_float("calibration_tolerance_g", old_default=0.1, new_default=0.02))
         )
         self.spin_calibration_settle_s.setValue(
             max(0.0, _calibration_setting_float("calibration_settle_s", old_default=0.5, new_default=0.25))
@@ -7345,8 +7455,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 0.0001,
                 _calibration_setting_float(
                     "calibration_preload_nudge_mm",
-                    old_default=0.01,
-                    new_default=0.1,
+                    old_default=0.1,
+                    new_default=0.01,
                 ),
             )
         )
@@ -7355,8 +7465,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 0.001,
                 _calibration_setting_float(
                     "calibration_preload_speed_mm_s",
-                    old_default=0.05,
-                    new_default=1.0,
+                    old_default=1.0,
+                    new_default=0.2,
                 ),
             )
         )
@@ -7367,7 +7477,7 @@ class MainWindow(QtWidgets.QMainWindow):
             max(1, int(self.settings.value("calibration_steps_per_direction", 5)))
         )
         self.spin_calibration_speed_mm_s.setValue(
-            max(0.001, _calibration_setting_float("calibration_speed_mm_s", old_default=0.05, new_default=0.2))
+            max(0.001, _calibration_setting_float("calibration_speed_mm_s", old_default=0.2, new_default=0.05))
         )
         self.spin_calibration_interval.setValue(int(self.settings.value("calibration_interval_ms", 250)))
         current_sweep_basis = self.settings.value("current_sweep_basis", HSW_BASIS_LOAD_G, type=str)

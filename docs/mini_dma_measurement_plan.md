@@ -118,7 +118,7 @@ The operator should always see:
 
 ## Next Implementation Priorities
 
-1. Use the new `Copper-wire calibration` recipe with the 0.12 mm copper wire to measure baseline scale noise, load-path stiffness, and backlash before tuning iso-stress servo behavior.
+1. Use the `Calibration` recipe with the installed microwire or a stable non-transforming wire to measure baseline scale noise, load-path stiffness, stress-strain response, and backlash before tuning iso-stress servo behavior.
 2. Add saved recipe files and a previewable step list.
 3. Add explicit saved-recipe `capture_zero_load` and recovery steps. The built-in current-sweep recipe uses the zero-load scale reference for load control, and manual stop now offers displacement/load recovery actions with a temporary dual-axis recovery plot.
 4. Continue refining commercial-DMA-style guided workflow: Setup -> Program -> Run -> Review, with expert settings hidden unless needed.

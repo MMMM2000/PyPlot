@@ -209,6 +209,8 @@ def _calibration_point(
     position_mm: float,
     load_g: float,
     phase: str,
+    strain_pct: float | None = None,
+    stress_mpa: float | None = None,
 ) -> mini_dma_mod.MeasurementPoint:
     return mini_dma_mod.MeasurementPoint(
         elapsed_s=0.0,
@@ -218,8 +220,8 @@ def _calibration_point(
         raw_load_g=load_g,
         load_g=load_g,
         preload_state=mini_dma_mod.PRELOAD_DISABLED,
-        strain_pct=None,
-        stress_mpa=None,
+        strain_pct=strain_pct,
+        stress_mpa=stress_mpa,
         current_set_mA=None,
         current_measured_mA=None,
         voltage_V=None,
@@ -238,14 +240,62 @@ def test_calibration_report_estimates_stiffness_and_backlash() -> None:
         _calibration_point(position_mm=0.0, load_g=0.000, phase="calibration_baseline"),
         _calibration_point(position_mm=0.0, load_g=0.005, phase="calibration_baseline"),
         _calibration_point(position_mm=0.0, load_g=0.010, phase="calibration_baseline"),
-        _calibration_point(position_mm=0.00, load_g=1.00, phase="calibration_forward"),
-        _calibration_point(position_mm=0.01, load_g=1.05, phase="calibration_forward"),
-        _calibration_point(position_mm=0.02, load_g=1.10, phase="calibration_forward"),
-        _calibration_point(position_mm=0.03, load_g=1.15, phase="calibration_forward"),
-        _calibration_point(position_mm=0.02, load_g=1.15, phase="calibration_reverse"),
-        _calibration_point(position_mm=0.01, load_g=1.10, phase="calibration_reverse"),
-        _calibration_point(position_mm=0.00, load_g=1.05, phase="calibration_reverse"),
-        _calibration_point(position_mm=-0.01, load_g=1.00, phase="calibration_reverse"),
+        _calibration_point(
+            position_mm=0.00,
+            load_g=1.00,
+            strain_pct=0.00,
+            stress_mpa=100.0,
+            phase="calibration_forward",
+        ),
+        _calibration_point(
+            position_mm=0.01,
+            load_g=1.05,
+            strain_pct=0.10,
+            stress_mpa=105.0,
+            phase="calibration_forward",
+        ),
+        _calibration_point(
+            position_mm=0.02,
+            load_g=1.10,
+            strain_pct=0.20,
+            stress_mpa=110.0,
+            phase="calibration_forward",
+        ),
+        _calibration_point(
+            position_mm=0.03,
+            load_g=1.15,
+            strain_pct=0.30,
+            stress_mpa=115.0,
+            phase="calibration_forward",
+        ),
+        _calibration_point(
+            position_mm=0.02,
+            load_g=1.15,
+            strain_pct=0.30,
+            stress_mpa=115.0,
+            phase="calibration_reverse",
+        ),
+        _calibration_point(
+            position_mm=0.01,
+            load_g=1.10,
+            strain_pct=0.20,
+            stress_mpa=110.0,
+            phase="calibration_reverse",
+        ),
+        _calibration_point(
+            position_mm=0.00,
+            load_g=1.05,
+            strain_pct=0.10,
+            stress_mpa=105.0,
+            phase="calibration_reverse",
+        ),
+        _calibration_point(
+            position_mm=-0.01,
+            load_g=1.00,
+            strain_pct=0.00,
+            stress_mpa=100.0,
+            phase="calibration_reverse",
+        ),
     ]
 
     report = mini_dma_mod.calibration_report_from_points(points)
@@ -255,6 +305,10 @@ def test_calibration_report_estimates_stiffness_and_backlash() -> None:
     assert report["reverse"]["stiffness_g_per_mm"] == pytest.approx(5.0)
     assert report["average_stiffness_g_per_mm"] == pytest.approx(5.0)
     assert report["backlash_mm"] == pytest.approx(0.01)
+    assert report["stress_strain"]["forward"]["modulus_mpa"] == pytest.approx(5000.0)
+    assert report["stress_strain"]["reverse"]["modulus_mpa"] == pytest.approx(5000.0)
+    assert report["stress_strain"]["average_modulus_mpa"] == pytest.approx(5000.0)
+    assert report["stress_strain"]["average_modulus_gpa"] == pytest.approx(5.0)
     assert report["sample_counts"] == {
         "baseline": 3,
         "forward": 4,
@@ -262,9 +316,9 @@ def test_calibration_report_estimates_stiffness_and_backlash() -> None:
     }
 
 
-def test_copper_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> None:
+def test_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
-    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION_COPPER)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION)
     assert mode_index >= 0
     window.combo_recipe_mode.setCurrentIndex(mode_index)
     window.spin_calibration_baseline_s.setValue(1.0)
@@ -280,7 +334,8 @@ def test_copper_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtb
         steps, summary, interval_ms = window._build_automation_recipe()
 
         assert interval_ms == 250
-        assert "copper-wire calibration" in summary
+        assert "calibration" in summary
+        assert window.combo_recipe_mode.itemText(mode_index) == "Calibration"
         assert steps[0].action == "calibration_record"
         assert steps[0].note == "calibration_baseline"
         assert any(
@@ -304,9 +359,102 @@ def test_copper_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtb
         _close_test_window(window)
 
 
-def test_copper_calibration_uses_fast_preload_seek_separate_from_micro_moves(tmp_path: Path, qtbot) -> None:
+def test_calibration_recipe_can_prepend_length_setup(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
-    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION_COPPER)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION)
+    assert mode_index >= 0
+    window.combo_recipe_mode.setCurrentIndex(mode_index)
+    window.check_pre_measurement_setup.setChecked(True)
+    window.spin_setup_preload_stress_mpa.setValue(10.0)
+    window.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
+    window.spin_setup_zero_stable_s.setValue(1.0)
+    window.spin_calibration_baseline_s.setValue(1.0)
+    window.spin_calibration_start_load_g.setValue(0.25)
+    window.spin_calibration_end_load_g.setValue(0.5)
+    window.spin_calibration_load_step_g.setValue(0.25)
+    window.spin_calibration_interval.setValue(250)
+
+    try:
+        steps, summary, interval_ms = window._build_automation_recipe()
+
+        assert interval_ms == 250
+        assert "zero/preload length setup" in summary
+        actions = [step.action for step in steps]
+        assert steps[0].action == "seek_target"
+        assert "measure_length_prompt" in actions
+        assert "apply_length_setup" in actions
+        assert actions.index("measure_length_prompt") < actions.index("apply_length_setup")
+        assert actions.index("apply_length_setup") < actions.index("calibration_record")
+    finally:
+        _close_test_window(window)
+
+
+def test_calibration_defaults_are_safe_for_microwire_startup(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        assert window.spin_calibration_start_load_g.value() <= 0.25
+        assert window.spin_calibration_end_load_g.value() <= 1.0
+        assert window.spin_calibration_preload_speed_mm_s.value() <= 0.25
+    finally:
+        _close_test_window(window)
+
+
+def test_legacy_copper_calibration_setting_opens_generic_calibration(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.setValue("recipe_mode", mini_dma_mod.CALIBRATION_COPPER)
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+
+    try:
+        assert window.combo_recipe_mode.currentData() == mini_dma_mod.CALIBRATION
+        assert window.combo_recipe_mode.currentText() == "Calibration"
+    finally:
+        _close_test_window(window)
+
+
+def test_legacy_calibration_defaults_migrate_to_microwire_safe_values(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.setValue("calibration_defaults_version", 2)
+    settings.setValue("calibration_start_load_g", 1.0)
+    settings.setValue("calibration_end_load_g", 5.0)
+    settings.setValue("calibration_load_step_g", 1.0)
+    settings.setValue("calibration_preload_speed_mm_s", 1.0)
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+
+    try:
+        assert window.spin_calibration_start_load_g.value() == pytest.approx(0.25)
+        assert window.spin_calibration_end_load_g.value() == pytest.approx(1.0)
+        assert window.spin_calibration_load_step_g.value() == pytest.approx(0.25)
+        assert window.spin_calibration_preload_speed_mm_s.value() == pytest.approx(0.2)
+    finally:
+        _close_test_window(window)
+
+
+def test_calibration_uses_fast_preload_seek_separate_from_micro_moves(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION)
     assert mode_index >= 0
     window.combo_recipe_mode.setCurrentIndex(mode_index)
     window.spin_calibration_preload_nudge_mm.setValue(0.1)
@@ -316,7 +464,7 @@ def test_copper_calibration_uses_fast_preload_seek_separate_from_micro_moves(tmp
 
     try:
         window._automation_active = True
-        window._automation_name = mini_dma_mod.CALIBRATION_COPPER
+        window._automation_name = mini_dma_mod.CALIBRATION
         window._automation_phase = "seek"
 
         assert window._seek_nudge_mm() == pytest.approx(0.1)
@@ -331,7 +479,7 @@ def test_copper_calibration_uses_fast_preload_seek_separate_from_micro_moves(tmp
 
 def test_recipe_stack_sizes_to_visible_page(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
-    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION_COPPER)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION)
     assert mode_index >= 0
     window.combo_recipe_mode.setCurrentIndex(mode_index)
 

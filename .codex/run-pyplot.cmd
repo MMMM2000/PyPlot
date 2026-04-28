@@ -24,7 +24,7 @@ if not exist "%PYTHON_EXE%" (
     echo PyPlot virtual environment was not found:
     echo   %PYTHON_EXE%
     echo.
-    echo Re-run the Codex setup action or recreate .venv with Python 3.13.
+    echo Re-run the Codex setup action or recreate .venv with Python 3.14.
     set "PYPLOT_EXIT_CODE=1"
     >> "%PYPLOT_RUN_LOG%" echo Missing interpreter: %PYTHON_EXE%
     goto finish

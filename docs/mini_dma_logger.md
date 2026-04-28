@@ -69,10 +69,10 @@ Current intended hardware stack:
 - motor moves energize the Tic, reset its command timeout, and exit safe-start before sending the position target; a short keepalive continues resetting the command timeout during active recipes/manual holds
 - Tic status shows VIN motor-supply voltage and warns/preflights when VIN is below the motor-power threshold
 - displacement recipes expose their own linear move speed, while iso-load, iso-stress, and iso-strain current sweeps are separate recipe choices with target ramp rate, target ramp stage speed, conservative correction step, and correction move speed controls
-- `Copper-wire calibration` is a dedicated automatic recipe for a stable copper calibration wire: after the operator mounts the wire and confirms zero-load/safety settings, Mini DMA measures baseline scale noise, seeks configured load preloads, performs forward/reverse micro-move sweeps, records labeled calibration phases, and saves stiffness/backlash estimates into the JSON metadata
+- `Calibration` is a dedicated automatic recipe for mechanical characterization: after the operator mounts the wire and confirms zero-load/safety settings, Mini DMA can run the same zero-load/length setup used by current sweeps, measures baseline scale noise, seeks configured load preloads, performs forward/reverse micro-move sweeps, records labeled calibration phases, and saves stiffness/backlash plus stress-strain estimates into the JSON metadata
 - clear stacked `Move up` / `Move down` buttons can be held for continuous manual jogging from the last commanded target, with held movement advancing by the configured linear `Manual move speed` in `mm/s`
 - current-sweep recipes use an editable zero-load scale reference instead of physically taring the balance; the default hanging-weight reference is `21.200 g`
-- current-sweep recipes can optionally run a zero/preload length setup before annealing: seek `0 g` applied load from the real scale reference, ramp to a small preload stress, prompt for the measured gauge length, return to `0 g`, and compute `l0` from the known tensile stage displacement
+- current-sweep and calibration recipes can optionally run a zero/preload length setup before the recipe body: seek `0 g` applied load from the real scale reference, ramp to a small preload stress, prompt for the measured gauge length, return to `0 g`, and compute `l0` from the known tensile stage displacement
 - position zeroing
 - halt / stop support
 - jog control refuses sub-step moves that would round to the current motor step
@@ -96,13 +96,13 @@ Current intended hardware stack:
 
 ### Calibration Workflow
 
-- The automatic copper-wire calibration recipe is intended for stable non-transforming wire, not for shape-memory microwires.
-- Physical setup is still operator-controlled: mount and align the copper wire, confirm the zero-load scale reference, soft limits, and max-load safety, then start the recipe.
-- The recipe uses separate preload-seek and micro-move settings. The preload seek can be much faster and coarser so a bent/slack copper wire is straightened quickly; the forward/reverse micro-move step stays small for stiffness and backlash characterization.
-- For the stiff 0.12 mm copper wire, start around 5 g preload and adjust upward only if the wire is still visibly bent. If a thinner copper wire is available, prefer one closer to the microwire stiffness and reduce the preload range accordingly.
+- The automatic `Calibration` recipe can be used with a stable non-transforming wire or, when needed, the installed microwire. Non-transforming wire is still better for pure backlash/stiffness checks because phase transitions do not add real material fluctuations.
+- Physical setup is still operator-controlled: mount and align the wire, confirm the zero-load scale reference, soft limits, max-load safety, and optional zero-load/length setup, then start the recipe.
+- The recipe uses separate preload-seek and micro-move settings. The preload seek can be faster/coarser for a bent or slack calibration wire; the forward/reverse micro-move step stays small for stiffness and backlash characterization.
+- The default preload range is conservative for a short microwire. For a stiff 0.12 mm copper wire, raise the preload range and seek speed only as needed to make the wire visibly straight.
 - The recipe records `calibration_baseline`, `calibration_preload`, `calibration_forward`, and `calibration_reverse` phases in the main CSV.
-- Completion computes a calibration report from the session points and stores it under `copper_calibration.report` in the JSON metadata.
-- The report includes baseline load noise, forward and reverse load-path stiffness in `g/mm`, average stiffness, estimated backlash in `mm`, and sample counts.
+- Completion computes a calibration report from the session points and stores it under `calibration.report` in the JSON metadata; `copper_calibration` is retained as a legacy alias for old output readers.
+- The report includes baseline load noise, forward and reverse load-path stiffness in `g/mm`, average stiffness, estimated backlash in `mm`, optional stress-strain modulus in MPa/GPa when length/diameter are available, and sample counts.
 - The measured backlash is reported for review; it is not silently applied to the live backlash setting.
 
 ### Heating / Current Annealing

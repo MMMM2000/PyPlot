@@ -9,16 +9,16 @@ script = ""
 script = '''
 set -e
 if [ -d .venv ]; then
-  .venv/bin/python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)" || {
-    echo "Existing .venv is not Python 3.13. Remove .venv and rerun worktree setup." >&2
+  .venv/bin/python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)" || {
+    echo "Existing .venv is not Python 3.14. Remove .venv and rerun worktree setup." >&2
     exit 1
   }
 else
-  command -v python3.13 >/dev/null 2>&1 || {
-    echo "python3.13 is required for this project. Install it and retry." >&2
+  command -v python3.14 >/dev/null 2>&1 || {
+    echo "python3.14 is required for this project. Install it and retry." >&2
     exit 1
   }
-  python3.13 -m venv .venv
+  python3.14 -m venv .venv
 fi
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -33,13 +33,29 @@ $ErrorActionPreference = "Stop"
 $venvPython = Join-Path $PWD ".venv\Scripts\python.exe"
 
 if (Test-Path $venvPython) {
-    & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)"
+    & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)"
     if ($LASTEXITCODE -ne 0) {
-        throw "Existing .venv is not Python 3.13. Remove .venv and rerun worktree setup."
+        throw "Existing .venv is not Python 3.14. Remove .venv and rerun worktree setup."
     }
 } else {
-    py -3.13 -m venv .venv
+    $localPython314 = Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"
+    $createdVenv = $false
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        py -3.14 -m venv .venv
+        $createdVenv = ($LASTEXITCODE -eq 0)
+    }
+    if (-not $createdVenv -and (Test-Path $localPython314)) {
+        & $localPython314 -m venv .venv
+        $createdVenv = ($LASTEXITCODE -eq 0)
+    }
+    if (-not $createdVenv) {
+        throw "Python 3.14 is required for this project. Install it and retry."
+    }
     $venvPython = Join-Path $PWD ".venv\Scripts\python.exe"
+    & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Created .venv is not Python 3.14."
+    }
 }
 
 & $venvPython -m pip install --upgrade pip
