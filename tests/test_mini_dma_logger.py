@@ -54,6 +54,7 @@ def _build_window(tmp_path: Path, qtbot) -> mini_dma_mod.MainWindow:
     window.check_zero_position_on_start.setChecked(False)
     window.check_tare_on_start.setChecked(False)
     window.check_hardware_tare_on_start.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(0.0)
     return window
 
 
@@ -63,6 +64,23 @@ def _close_test_window(window: mini_dma_mod.MainWindow) -> None:
     _ensure_app().processEvents()
     if isinstance(snapshot, dict):
         _restore_settings(snapshot)
+
+
+def test_zero_load_reference_defaults_to_measured_hanging_weight(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+
+    try:
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert window.check_hardware_tare_on_start.isChecked() is False
+    finally:
+        _close_test_window(window)
 
 
 def _wheel_event(delta_y: int = -120) -> QtGui.QWheelEvent:
@@ -471,7 +489,7 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.spin_current_sweep_balance_speed_mm_s.isHidden() is False
         assert window.check_hardware_tare_on_start.isHidden() is False
         assert window.button_scale_connect.text() in {"Connect scale", "Disconnect scale"}
-        assert window.button_scale_tare.text() == "Tare scale"
+        assert window.button_scale_tare.text() == "Capture zero-load"
         assert window.button_advanced_software_tare.isVisible() is False
     finally:
         _close_test_window(window)
@@ -883,6 +901,7 @@ def test_negative_scale_reading_is_reported_as_positive_tensile_load(tmp_path: P
     try:
         window.check_tension_load_positive.setChecked(True)
         window._latest_scale_value_g = -5.0
+        window._latest_scale_timestamp = time.time()
         window._load_offset_g = 0.0
 
         assert window._current_effective_load_g() == pytest.approx(5.0)
@@ -890,6 +909,37 @@ def test_negative_scale_reading_is_reported_as_positive_tensile_load(tmp_path: P
             window._current_effective_load_g(),
             0.03,
         ) > 0
+    finally:
+        _close_test_window(window)
+
+
+def test_zero_load_reference_maps_real_scale_weight_to_applied_load(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.check_tension_load_positive.setChecked(True)
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window._latest_scale_value_g = 17.2
+        window._latest_scale_timestamp = time.time()
+
+        assert window._current_effective_load_g() == pytest.approx(4.0)
+
+        window._latest_scale_value_g = 21.25
+        assert window._current_effective_load_g() == pytest.approx(0.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_zero_load_reference_can_handle_scale_reading_increasing_under_tension(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.check_tension_load_positive.setChecked(False)
+        window.spin_zero_load_scale_g.setValue(0.0)
+        window._latest_scale_value_g = 3.0
+        window._latest_scale_timestamp = time.time()
+
+        assert window._current_effective_load_g() == pytest.approx(3.0)
     finally:
         _close_test_window(window)
 
@@ -919,7 +969,7 @@ def test_logged_load_uses_positive_applied_tension(tmp_path: Path, qtbot) -> Non
         _close_test_window(window)
 
 
-def test_logged_load_is_positive_even_if_scale_sign_setting_is_wrong(tmp_path: Path, qtbot) -> None:
+def test_logged_load_clamps_non_tensile_side_of_reference_to_zero(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("positive_tension_magnitude_log")
     window.check_tension_load_positive.setChecked(False)
@@ -935,7 +985,7 @@ def test_logged_load_is_positive_even_if_scale_sign_setting_is_wrong(tmp_path: P
 
         rows = list(csv.DictReader((tmp_path / "positive_tension_magnitude_log.csv").open(encoding="utf-8", newline="")))
         assert rows[0]["raw_load_g"] == "-2.500000"
-        assert rows[0]["load_g"] == "2.500000"
+        assert rows[0]["load_g"] == "0.000000"
     finally:
         _close_test_window(window)
 
@@ -1057,7 +1107,7 @@ def test_tensile_load_seek_uses_motion_direction_independent_of_scale_sign(tmp_p
         )
 
         assert reached is False
-        assert targets == [pytest.approx(0.95)]
+        assert targets == [pytest.approx(0.9)]
     finally:
         _close_test_window(window)
 
@@ -1099,7 +1149,7 @@ def test_recipe_seek_does_not_stack_corrections_ahead_of_confirmed_position(tmp_
             tolerance=0.25,
         )
 
-        assert controller.targets == [95, 95]
+        assert controller.targets == [90, 90]
     finally:
         _close_test_window(window)
 
@@ -1136,7 +1186,7 @@ def test_seek_overshoot_uses_fine_reverse_correction(tmp_path: Path, qtbot) -> N
             tolerance=0.25,
         ) is False
 
-        assert targets == [pytest.approx(0.95), pytest.approx(1.025)]
+        assert targets == [pytest.approx(0.9), pytest.approx(1.025)]
         assert "Overshoot detected" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -1181,7 +1231,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
             tolerance=0.25,
         )
 
-        assert controller.targets == [95, 106]
+        assert controller.targets == [90, 106]
         assert "backlash take-up" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -1636,29 +1686,31 @@ def test_session_metadata_keeps_original_created_timestamp(
         _close_test_window(window)
 
 
-def test_session_start_aborts_when_requested_scale_tare_fails(tmp_path: Path, qtbot) -> None:
+def test_session_start_can_capture_zero_load_reference_without_remote_tare(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
-    window.edit_log_name.setText("tare_failure")
+    window.edit_log_name.setText("capture_zero_load")
     window.check_hardware_tare_on_start.setChecked(True)
-    window._tare_scale_hardware = lambda: False  # type: ignore[method-assign]
+    window._latest_scale_value_g = 21.2
+    window._latest_scale_text = "21.200 g"
+    window._latest_scale_timestamp = time.time()
 
-    recorded = False
+    remote_tare_called = False
 
-    def _record_should_not_run() -> None:
-        nonlocal recorded
-        recorded = True
+    def _remote_tare_should_not_run() -> bool:
+        nonlocal remote_tare_called
+        remote_tare_called = True
+        return False
 
-    window._record_current_point = _record_should_not_run  # type: ignore[method-assign]
+    window._tare_scale_hardware = _remote_tare_should_not_run  # type: ignore[method-assign]
 
     try:
         window._start_session()
 
-        assert window._session_active is False
-        assert recorded is False
-        assert not (tmp_path / "tare_failure.txt").exists()
-        assert not (tmp_path / "tare_failure.csv").exists()
-        assert not (tmp_path / "tare_failure.json").exists()
-        assert "scale tare failed" in window.log_output.toPlainText()
+        assert window._session_active is True
+        assert remote_tare_called is False
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert "Zero-load scale reference set to 21.20000 g" in window.log_output.toPlainText()
+        window._stop_session()
     finally:
         _close_test_window(window)
 

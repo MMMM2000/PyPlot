@@ -56,6 +56,7 @@ from matplotlib.figure import Figure
 
 APP_NAME = "Mini DMA Logger"
 DEFAULT_LOG_BASENAME = "mini_dma"
+DEFAULT_ZERO_LOAD_SCALE_G = 21.2
 GRAVITY_MS2 = 9.80665
 LONG_NAMES = ("Displacement", "Load", "Strain", "Stress")
 UNITS = ("mm", "g", "%", "MPa")
@@ -1115,8 +1116,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_scale_connect = QtWidgets.QPushButton("Connect scale", scale_box)
         self.button_scale_connect.clicked.connect(self._toggle_scale_connection)
         scale_action_row.addWidget(self.button_scale_connect)
-        self.button_scale_tare = QtWidgets.QPushButton("Tare scale", scale_box)
-        self.button_scale_tare.clicked.connect(self._tare_scale_hardware)
+        self.button_scale_tare = QtWidgets.QPushButton("Capture zero-load", scale_box)
+        self.button_scale_tare.setToolTip("Use the current real scale reading as the 0 g applied-load reference.")
+        self.button_scale_tare.clicked.connect(self._capture_zero_load_scale_reference)
         scale_action_row.addWidget(self.button_scale_tare)
         scale_form.addRow("", scale_action_row)
 
@@ -1124,7 +1126,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_scale_value.setWordWrap(True)
         scale_form.addRow("", self.label_scale_value)
         scale_help = QtWidgets.QLabel(
-            "Use Auto-detect after reconnecting USB devices. Use Tare scale before a run; the raw serial details are in Advanced hardware settings.",
+            "Use Auto-detect after reconnecting USB devices. Leave the balance showing real grams; Mini DMA converts the zero-load reference to applied wire load.",
             scale_box,
         )
         scale_help.setWordWrap(True)
@@ -1253,6 +1255,11 @@ class MainWindow(QtWidgets.QMainWindow):
         gng_button.clicked.connect(self._apply_gng_scale_preset)
         probe_button = QtWidgets.QPushButton("Probe scale", scale_advanced_box)
         probe_button.clicked.connect(self._probe_scale_port)
+        remote_tare_button = QtWidgets.QPushButton("Diagnostic remote tare scale", scale_advanced_box)
+        remote_tare_button.setToolTip(
+            "Advanced only. Sends the physical scale tare command and resets the zero-load reference to 0 g."
+        )
+        remote_tare_button.clicked.connect(self._tare_scale_hardware)
         self.button_advanced_software_tare = QtWidgets.QPushButton(
             "Diagnostic software tare (app only)",
             scale_advanced_box,
@@ -1267,6 +1274,7 @@ class MainWindow(QtWidgets.QMainWindow):
         preset_row.addWidget(gng_button)
         preset_row.addWidget(probe_button)
         scale_advanced_form.addRow("", preset_row)
+        scale_advanced_form.addRow("", remote_tare_button)
         scale_advanced_form.addRow("", self.button_advanced_software_tare)
         advanced_layout.addWidget(scale_advanced_box)
 
@@ -1325,11 +1333,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_max_load_g.setValue(25.0)
         self.spin_max_load_g.setSuffix(" g")
         safety_form.addRow("Max applied load", self.spin_max_load_g)
+        zero_load_row = QtWidgets.QHBoxLayout()
+        self.spin_zero_load_scale_g = CompactDoubleSpinBox(safety_box)
+        self.spin_zero_load_scale_g.setDecimals(4)
+        self.spin_zero_load_scale_g.setRange(-100000.0, 100000.0)
+        self.spin_zero_load_scale_g.setValue(DEFAULT_ZERO_LOAD_SCALE_G)
+        self.spin_zero_load_scale_g.setSuffix(" g")
+        self.spin_zero_load_scale_g.setToolTip(
+            "Real scale reading when the hanging weight applies 0 g to the wire. "
+            "For the current 21.200 g weight, a raw scale reading of 18.200 g means 3.000 g applied load."
+        )
+        self.spin_zero_load_scale_g.valueChanged.connect(lambda _value: self._refresh_live_labels())
+        zero_load_row.addWidget(self.spin_zero_load_scale_g, stretch=1)
+        capture_zero_button = QtWidgets.QPushButton("Use live", safety_box)
+        capture_zero_button.setToolTip("Set the zero-load reference from the current raw scale reading.")
+        capture_zero_button.clicked.connect(self._capture_zero_load_scale_reference)
+        zero_load_row.addWidget(capture_zero_button)
+        safety_form.addRow("Zero-load scale reading", zero_load_row)
         self.check_tension_load_positive = QtWidgets.QCheckBox(
-            "Treat negative scale readings as positive tensile load",
+            "Tension makes the scale reading decrease",
             safety_box,
         )
         self.check_tension_load_positive.setChecked(True)
+        self.check_tension_load_positive.setToolTip(
+            "Leave checked for the hanging-weight setup: pulling up unloads the balance, "
+            "so applied wire load is zero-load reading minus current scale reading."
+        )
         self.check_tension_load_positive.toggled.connect(lambda _checked: self._refresh_live_labels())
         safety_form.addRow("", self.check_tension_load_positive)
         self.check_positive_motion_is_tension = QtWidgets.QCheckBox(
@@ -1642,10 +1671,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_tare_on_start.setChecked(False)
         self.check_tare_on_start.setVisible(False)
         self.check_hardware_tare_on_start = QtWidgets.QCheckBox(
-            "Tare scale at recipe/session start",
+            "Capture zero-load reference at recipe/session start",
             logging_box,
         )
-        self.check_hardware_tare_on_start.setChecked(True)
+        self.check_hardware_tare_on_start.setChecked(False)
+        self.check_hardware_tare_on_start.setToolTip(
+            "Normally leave this off and type the known hanging-weight reading. "
+            "Turn it on only when the current raw scale reading is definitely 0 g applied load."
+        )
 
         session_buttons = QtWidgets.QHBoxLayout()
         self.button_start_session = QtWidgets.QPushButton("Start session", logging_box)
@@ -2041,8 +2074,9 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_record = QtWidgets.QPushButton("Record point now", manual_box)
         manual_record.clicked.connect(self._record_current_point)
         manual_layout.addWidget(manual_record)
-        manual_hardware_tare = QtWidgets.QPushButton("Tare scale", manual_box)
-        manual_hardware_tare.clicked.connect(self._tare_scale_hardware)
+        manual_hardware_tare = QtWidgets.QPushButton("Capture zero-load", manual_box)
+        manual_hardware_tare.setToolTip("Use the current real scale reading as the 0 g applied-load reference.")
+        manual_hardware_tare.clicked.connect(self._capture_zero_load_scale_reference)
         manual_layout.addWidget(manual_hardware_tare)
         manual_refresh = QtWidgets.QPushButton("Refresh Tic status", manual_box)
         manual_refresh.clicked.connect(self._refresh_tic_status)
@@ -3300,10 +3334,34 @@ class MainWindow(QtWidgets.QMainWindow):
             raw_text = port.readline().decode("utf-8", errors="ignore").strip()
         return _parse_first_float(raw_text), raw_text
 
-    def _tare_scale(self) -> None:
-        self._load_offset_g = -self._latest_scale_value_g
+    def _zero_load_scale_reference_g(self) -> float:
+        if hasattr(self, "spin_zero_load_scale_g"):
+            return float(self.spin_zero_load_scale_g.value())
+        return DEFAULT_ZERO_LOAD_SCALE_G
+
+    def _capture_zero_load_scale_reference(self) -> bool:
+        if not self._has_fresh_scale_reading():
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "No fresh scale reading is available for the zero-load reference.",
+            )
+            self._log("Zero-load reference capture failed because scale feedback is stale.")
+            return False
+        self.spin_zero_load_scale_g.setValue(float(self._latest_scale_value_g))
+        self._load_offset_g = 0.0
         self._refresh_live_labels()
-        self._log(f"Software tare set to {self._load_offset_g:+.5f} g.")
+        self._log(
+            f"Zero-load scale reference set to {self.spin_zero_load_scale_g.value():.5f} g "
+            "from the current raw scale reading."
+        )
+        return True
+
+    def _tare_scale(self) -> None:
+        signed_load = self._load_sign() * (self._latest_scale_value_g - self._zero_load_scale_reference_g())
+        self._load_offset_g = -signed_load
+        self._refresh_live_labels()
+        self._log(f"Diagnostic software load offset set to {self._load_offset_g:+.5f} g.")
 
     def _tare_scale_hardware(self) -> bool:
         port_name = str(self.combo_scale_port.currentData() or "").strip()
@@ -3335,13 +3393,14 @@ class MainWindow(QtWidgets.QMainWindow):
             if was_connected:
                 self._connect_scale()
         self._load_offset_g = 0.0
+        self.spin_zero_load_scale_g.setValue(0.0)
         if value_g is not None:
             self._latest_scale_value_g = value_g
         self._latest_scale_text = raw_text or "tare command sent"
         self._latest_scale_timestamp = time.time()
         self._refresh_live_labels()
         self._log(
-            "Hardware tare command sent to the scale."
+            "Diagnostic hardware tare command sent to the scale; zero-load reference reset to 0 g."
             + (f" Current raw reading: {raw_text}." if raw_text else "")
         )
         return True
@@ -4302,6 +4361,8 @@ class MainWindow(QtWidgets.QMainWindow):
         txt_handle.write(f"# Notes\t{self.edit_run_notes.toPlainText().strip()}\n")
         txt_handle.write(f"# Initial length mm\t{self.spin_initial_length.value():.6f}\n")
         txt_handle.write(f"# Wire diameter mm\t{self.spin_diameter.value():.6f}\n")
+        txt_handle.write(f"# Zero-load scale reading g\t{self._zero_load_scale_reference_g():.6f}\n")
+        txt_handle.write(f"# Diagnostic software load offset g\t{self._load_offset_g:.6f}\n")
         txt_handle.write(f"# Preload zeroing\t{self.check_zero_on_preload.isChecked()}\n")
         txt_handle.write(f"# Preload threshold g\t{self.spin_preload_threshold_g.value():.6f}\n")
         txt_handle.write(f"# Recipe mode\t{self.combo_recipe_mode.currentText()}\n")
@@ -4361,7 +4422,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "soft_limit_max_mm": float(self.spin_soft_max_mm.value()),
             "max_load_limit_enabled": self.check_max_load.isChecked(),
             "max_load_limit_g": float(self.spin_max_load_g.value()),
-            "negative_scale_is_tension": self.check_tension_load_positive.isChecked(),
+            "zero_load_scale_g": self._zero_load_scale_reference_g(),
+            "diagnostic_load_offset_g": float(self._load_offset_g),
+            "tension_decreases_scale_reading": self.check_tension_load_positive.isChecked(),
             "positive_motion_is_tension": self.check_positive_motion_is_tension.isChecked(),
             "backlash_mm": float(self.spin_backlash_mm.value()),
             "return_to_origin": self.check_return_to_origin.isChecked(),
@@ -4476,10 +4539,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.check_zero_position_on_start.isChecked():
             self._zero_tic_position()
         try:
-            if self.check_hardware_tare_on_start.isChecked() and not self._tare_scale_hardware():
-                raise RuntimeError("Session start cancelled because scale tare failed.")
+            if self.check_hardware_tare_on_start.isChecked() and not self._capture_zero_load_scale_reference():
+                raise RuntimeError("Session start cancelled because zero-load reference capture failed.")
             if self.check_tare_on_start.isChecked():
-                self._load_offset_g = -self._latest_scale_value_g
+                signed_load = self._load_sign() * (
+                    self._latest_scale_value_g - self._zero_load_scale_reference_g()
+                )
+                self._load_offset_g = -signed_load
         except Exception as exc:
             for handle in (txt_handle, csv_handle):
                 try:
@@ -4560,7 +4626,12 @@ class MainWindow(QtWidgets.QMainWindow):
         return -1.0 if self.check_tension_load_positive.isChecked() else 1.0
 
     def _current_effective_load_g(self) -> float:
-        return abs(self._load_sign() * (self._latest_scale_value_g + self._load_offset_g))
+        if self._latest_scale_timestamp is None:
+            return 0.0
+        signed_load_g = self._load_sign() * (
+            self._latest_scale_value_g - self._zero_load_scale_reference_g()
+        )
+        return max(0.0, signed_load_g + self._load_offset_g)
 
     def _current_preload_state(self, load_g: float) -> str:
         if not self.check_zero_on_preload.isChecked() or self.spin_preload_threshold_g.value() <= 0:
@@ -4793,7 +4864,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Turn on the motor supply, or enable the HMP motor-supply channel option and run Check motor again."
             )
         if self._recipe_requires_scale(steps) and not self._ensure_scale_ready_for_recipe():
-            issues.append("Scale is not connected. Use Auto-detect scale, then Tare scale, and fix the serial link if it still fails.")
+            issues.append(
+                "Scale is not connected. Use Auto-detect scale, then verify the zero-load reference, "
+                "and fix the serial link if it still fails."
+            )
         if not issues:
             return True
         message = "Recipe preflight failed:\n\n" + "\n".join(f"- {issue}" for issue in issues)
@@ -5694,9 +5768,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_live_labels(self) -> None:
         effective_load = self._current_effective_load_g()
-        self.label_scale_value.setText(
-            f"Raw scale: {self._latest_scale_value_g:.5f} g | Applied tensile load: {effective_load:.5f} g"
-        )
+        if self._latest_scale_timestamp is None:
+            self.label_scale_value.setText("Raw scale: no readings yet | Applied tensile load: -")
+        else:
+            self.label_scale_value.setText(
+                f"Raw scale: {self._latest_scale_value_g:.5f} g | Applied tensile load: {effective_load:.5f} g"
+            )
         self.label_scale_raw.setText(f"Raw line: {self._latest_scale_text or '-'}")
         self.label_tic_position.setText(
             f"Raw position: {self._current_position_mm:.4f} mm ({self._current_position_steps} steps) | "
@@ -5888,6 +5965,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("soft_limit_max_mm", self.spin_soft_max_mm.value())
         self.settings.setValue("max_load_enabled", self.check_max_load.isChecked())
         self.settings.setValue("max_load_g", self.spin_max_load_g.value())
+        self.settings.setValue("zero_load_scale_g", self.spin_zero_load_scale_g.value())
         self.settings.setValue("negative_scale_is_tension", self.check_tension_load_positive.isChecked())
         self.settings.setValue("positive_motion_is_tension", self.check_positive_motion_is_tension.isChecked())
         self.settings.setValue("backlash_mm", self.spin_backlash_mm.value())
@@ -5910,7 +5988,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.check_zero_position_on_start.isChecked(),
         )
         self.settings.setValue("tare_on_start", self.check_tare_on_start.isChecked())
-        self.settings.setValue("hardware_tare_on_start", self.check_hardware_tare_on_start.isChecked())
+        self.settings.setValue("capture_zero_load_reference_on_start", self.check_hardware_tare_on_start.isChecked())
         self.settings.setValue("recipe_mode", self.combo_recipe_mode.currentData())
         self.settings.setValue("return_to_origin", self.check_return_to_origin.isChecked())
         self.settings.setValue("ramp_distance_mm", self.spin_ramp_distance.value())
@@ -6037,6 +6115,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_soft_max_mm.setValue(float(self.settings.value("soft_limit_max_mm", 5.0)))
         self.check_max_load.setChecked(bool(self.settings.value("max_load_enabled", False, type=bool)))
         self.spin_max_load_g.setValue(float(self.settings.value("max_load_g", 25.0)))
+        self.spin_zero_load_scale_g.setValue(
+            float(self.settings.value("zero_load_scale_g", DEFAULT_ZERO_LOAD_SCALE_G))
+        )
         self.check_tension_load_positive.setChecked(
             bool(self.settings.value("negative_scale_is_tension", True, type=bool))
         )
@@ -6073,10 +6154,10 @@ class MainWindow(QtWidgets.QMainWindow):
             bool(self.settings.value("zero_position_on_start", True, type=bool))
         )
         self.check_tare_on_start.setChecked(
-            bool(self.settings.value("tare_on_start", True, type=bool))
+            bool(self.settings.value("tare_on_start", False, type=bool))
         )
         self.check_hardware_tare_on_start.setChecked(
-            bool(self.settings.value("hardware_tare_on_start", True, type=bool))
+            bool(self.settings.value("capture_zero_load_reference_on_start", False, type=bool))
         )
         recipe_mode = self.settings.value("recipe_mode", "ramp", type=str)
         if recipe_mode == LEGACY_CURRENT_SWEEP:

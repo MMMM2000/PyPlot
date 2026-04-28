@@ -66,7 +66,7 @@ Current intended hardware stack:
 - Tic status shows VIN motor-supply voltage and warns/preflights when VIN is below the motor-power threshold
 - displacement recipes expose their own linear move speed, while iso-load, iso-stress, and iso-strain current sweeps are separate recipe choices with target ramp rate, target ramp stage speed, conservative correction step, and correction move speed controls
 - clear stacked `Move up` / `Move down` buttons can be held for continuous manual jogging from the last commanded target, with held movement advancing by the configured linear `Manual move speed` in `mm/s`
-- current-sweep recipes expose `Tare scale at recipe/session start` inside the recipe settings, not hidden in specimen/logging settings
+- current-sweep recipes use an editable zero-load scale reference instead of physically taring the balance; the default hanging-weight reference is `21.200 g`
 - position zeroing
 - halt / stop support
 - jog control refuses sub-step moves that would round to the current motor step
@@ -80,11 +80,11 @@ Current intended hardware stack:
 - G&G-oriented serial settings
 - automatic scale-port detection based on a live G&G serial response
 - scale probe / diagnostics
-- one normal `Tare scale` action for G&G-compatible balances via the documented remote tare command
-- optional session-start scale tare before the first recorded point
-- applied tensile load is displayed and logged as the positive tensile magnitude in `Load` / `load_g`, even when the balance reports negative values while lifting the weight; signed raw balance remains available as `raw_load_g` for diagnostics
+- one normal `Capture zero-load` action that records the current real balance reading as the `0 g` applied-load reference without changing the scale display
+- optional session-start capture of the zero-load reference, for use only when the current raw balance reading is definitely unloaded
+- applied tensile load is displayed and logged as the positive tensile magnitude in `Load` / `load_g` using `zero-load scale reading - current scale reading` for the current hanging-weight rig; signed raw balance remains available as `raw_load_g` for diagnostics
 - tensile displacement uses its own motion-direction setting; the current rig defaults to negative raw Tic travel as positive tensile displacement, so the app can show/log positive `position_mm` while preserving raw Tic position as `raw_position_mm`
-- software tare is kept only in advanced hardware diagnostics because it offsets Mini DMA without changing the physical scale display
+- physical remote tare and software tare are kept only in advanced hardware diagnostics because the normal workflow should leave the balance showing real grams
 
 ### Heating / Current Annealing
 
@@ -203,10 +203,10 @@ The latest bench session confirmed that the app-level assumptions now match the 
 
 - Pololu Tic T500 reachable through `ticcmd` with serial `00501366`
 - G&G balance replying on `COM6` at `9600` baud with `ESC+p`
-- G&G remote tare working with `ESC+t`
+- G&G live readout working while the balance remains in real grams
 - HAMEG `HMP4030` replying on `COM3` at `115200` baud
 - HMP4030 channel `3` sourcing real current through the microwire path at about `15 mA`
-- closed-loop motion against live scale feedback successfully moved the raw scale to roughly `-5 g`, reported/logged as about `+5 g` applied tensile load, after tare and then back near `0 g`
+- closed-loop motion against live scale feedback uses the zero-load scale reference so, for example, a `21.200 g` zero-load reading and `18.200 g` live reading is reported/logged as about `+3 g` applied tensile load
 
 This means the main remaining risk is not basic communications anymore, but day-to-day measurement workflow polish and safeguards for real sample runs.
 
@@ -232,7 +232,7 @@ After the correct scale adapter/cable is available:
 2. Keep `Pololu Tic Control Center` closed while Mini DMA is using the controller.
 3. Use `Check Tic` and a tiny jog to confirm motion.
 4. Use `Probe scale` and confirm live readings arrive from the balance.
-5. Verify `Tare scale`.
+5. Verify `Capture zero-load` or type the known zero-load balance reading.
 6. Run a minimal preload-only shape-memory test.
 7. Run a short displacement recipe with logging.
 8. Only after that, try the `Hsw distribution` recipe with very conservative settings.

@@ -3,7 +3,7 @@
 - Mini DMA Logger now keeps the last confirmed stage position separate from the commanded target so strain, stress, and recorded points do not jump ahead of real motion after a move command.
 - Hsw distribution seeking now refuses to act on stale or missing balance readings for load- and stress-based control instead of nudging the stage on old force data.
 - Mini DMA session metadata now preserves the original creation timestamp across JSON sidecar rewrites during a run.
-- Mini DMA now supports active hardware auto-detection for the G&G scale, the serial supply, and the Pololu Tic controller, plus a single normal `Tare scale` action that uses the physical G&G remote tare command while keeping software tare as an advanced diagnostic only.
+- Mini DMA now supports active hardware auto-detection for the G&G scale, the serial supply, and the Pololu Tic controller, plus a normal zero-load scale reference workflow that leaves the balance showing real grams while keeping physical/software tare actions as advanced diagnostics only.
 - Mini DMA naming now mirrors the other microwire loggers more closely by keeping human-readable microwire tokens like `156/2` in the sample name while using file-safe tokens like `156_2` in the output filename.
 - Mini DMA's settings panel now prevents mouse-wheel scrolling from silently changing spin-box and drop-down values, removes horizontal scrolling, and exposes tare actions in the manual setup controls.
 - Mini DMA now hides low-level scale and motor driver settings behind a collapsed advanced hardware panel so routine bench controls are easier to understand.
@@ -14,7 +14,7 @@
 - Mini DMA now exposes per-recipe displacement or correction move speed for Tic moves, applies it through `ticcmd --max-speed`, and labels manual motion as stacked arrow `Move up` / `Move down` controls that repeat while held and chain from the last commanded target.
 - Mini DMA held manual movement now advances the commanded linear position by elapsed time times the configured `Manual move speed`, so a held `1 mm/s` move no longer crawls at the button repeat rate.
 - Mini DMA now warns when the Tic VIN motor-supply voltage is missing/too low and keeps resetting the Tic command timeout during active slow moves.
-- Mini DMA now shows `Tare scale at recipe/session start` inside the current-sweep recipe settings, and closed-loop recipe corrections chain from the last commanded target while using conservative recipe-specific correction step/speed values.
+- Mini DMA now shows optional zero-load reference capture inside the current-sweep recipe settings, and closed-loop recipe corrections chain from the last commanded target while using conservative recipe-specific correction step/speed values.
 - Mini DMA current-sweep seeking now detects target overshoot, switches to fine reverse correction steps, and can apply measured backlash take-up when reversing direction.
 - Mini DMA current-sweep seeking now records feedback samples while correcting load/stress/strain, uses smaller/slower correction moves near the target, and no longer stops merely because load is flat during displacement, which is expected during shape-memory transformation plateaus.
 - Mini DMA current-sweep defaults now use the faster copper bring-up recipe of `0` to `9 g` in `3 g` steps and a `1` to `3 mA` current ramp.
@@ -32,8 +32,9 @@
 - Mini DMA current sweeps now advance current from elapsed time, use HMP4030-style 0.2 mA setpoint resolution below 1 A, keep sub-mA precision on the first output-enable command, and throttle supply readbacks during fast automation so current commands do not fight voltage/current queries on the same serial link.
 - Mini DMA current-sweep recipes now ramp load/stress/strain targets at configurable g/s, MPa/s, or %/s rates, with a separate target-ramp stage speed so automatic return-to-target moves do not crawl at the fine correction speed.
 - Mini DMA recipe progress now counts timed target-ramp and current-ramp ticks, so long elapsed-time sweeps do not appear as a short handful of recipe rows or reach 100% before completion.
+- Mini DMA load/stress control now defaults to a `21.200 g` zero-load scale reference for the hanging-weight rig and computes applied wire load from the live real balance reading instead of remotely taring the scale.
 - Mini DMA now has an always-visible `EMERGENCY STOP` dashboard button that stops the active recipe/session, halts the Tic motor, and commands the power-supply output off.
 - Added a Mini DMA measurement plan covering the copper-wire first test, the intended isostress current-sweep workflow, saved recipe files, and later dynamic recipes.
 - Microwire Data Builder video overrides now tolerate minimal video tables that are missing derived video-length columns.
-- Added dedicated Mini DMA regression tests for confirmed-position tracking, stale-scale safety, session metadata stability, hardware auto-detection, scale tare wiring, and naming behavior, and expanded import coverage to include the Mini DMA module.
+- Added dedicated Mini DMA regression tests for confirmed-position tracking, stale-scale safety, session metadata stability, hardware auto-detection, zero-load reference wiring, and naming behavior, and expanded import coverage to include the Mini DMA module.
 - Added `scipy==1.17.1` as a runtime dependency so `microwire_eda` imports and the related launcher test path work in a fresh project environment.

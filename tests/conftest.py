@@ -27,7 +27,12 @@ def pytest_configure() -> None:
     if veusz_path.exists() and str(veusz_path) not in sys.path:
         sys.path.insert(0, str(veusz_path))
     try:
-        tmp_root = Path("/tmp/pyplot-tests")
+        tmp_root = Path(
+            os.environ.get("TMPDIR")
+            or os.environ.get("TEMP")
+            or os.environ.get("TMP")
+            or "/tmp/pyplot-tests"
+        )
         tmp_root.mkdir(parents=True, exist_ok=True)
         os.environ.setdefault("TMPDIR", str(tmp_root))
         os.environ.setdefault("TEMP", str(tmp_root))

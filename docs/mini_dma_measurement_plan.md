@@ -4,7 +4,7 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 
 ## What Already Works
 
-- Scale communication: G&G balance on serial, including live reads and the normal `Tare scale` action (`ESC+t`).
+- Scale communication: G&G balance on serial, including live real-gram reads and zero-load reference capture.
 - Motion communication: Pololu Tic T500 through `ticcmd`, including position zero, jog, halt, and recipe-driven position moves.
 - Supply communication: HMP4030/Owon-style SCPI supply, including current setpoint, output control, and measured voltage/current.
 - `.pydpj` import: the Specimen tab can load a Microwire Data Builder project and fill sample metadata, diameter, and current when a matching row is found.
@@ -15,7 +15,7 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 
 ## Current UI Map
 
-- `Recipe`: normal bench operation, recipe selection, per-recipe speed controls, current-sweep tare-at-start, estimated points/duration, progress bar, auto-connect start button, and manual move/tare/record actions.
+- `Recipe`: normal bench operation, recipe selection, per-recipe speed controls, zero-load reference capture, estimated points/duration, progress bar, auto-connect start button, and manual move/record actions.
 - `Specimen`: naming, gauge length, diameter, preload zeroing, `.pydpj` import, output folder, session start/stop.
 - `Hardware`: lower-priority scale, motor, power-supply, safety, and advanced serial/motor-driver settings for bring-up or troubleshooting.
 - Right dashboard: live plot, run log, and plot presets. The duplicate status-bar echo is hidden so log lines only appear once.
@@ -28,7 +28,7 @@ Use copper wire first, with conservative settings.
 
 1. Confirm scale, Tic, and supply auto-detection.
 2. Connect scale and supply, then use `Probe scale` and `Read supply now`.
-3. Use `Tare scale`.
+3. Leave the balance showing real grams and set `Zero-load scale reading` to the unloaded hanging-weight reading, currently `21.200 g`, or use `Capture zero-load` only when the wire is at known `0 g` applied load.
 4. Set a known copper-wire diameter and `l0` manually.
 5. Start with the `Iso-load current sweep` recipe. The copper setup currently uses quick bring-up targets `0, 3, 6, 9 g`, ramps between targets at a configurable load rate such as `0.1 g/s`, uses a faster target-ramp stage speed plus slower fine correction moves near the target, sweeps current from `1 mA` to a conservative low-current maximum and back at each load, then returns toward `0 g`.
 6. Use tiny jogs to verify the load sign and motion direction. On the current rig, negative raw scale readings are treated as positive tensile load, so users should still type positive load targets.
@@ -56,7 +56,7 @@ The current UI has parameterized built-in recipes. The next layer should be save
 Suggested step types:
 
 - `connect`: verify expected scale/supply/Tic are reachable.
-- `tare_scale`: send the physical scale tare command. Do not silently fall back to software tare; if tare fails, stop and fix the scale/serial problem.
+- `capture_zero_load`: record the current real balance reading as the `0 g` applied-load reference without changing the physical scale display.
 - `set_gauge_zero`: set current motor position as the strain reference.
 - `wait_for_preload`: wait until effective load exceeds a threshold, then set gauge zero.
 - `set_current`: set a fixed current. The built-in `Controlled current sweep` recipe already uses this internally.
@@ -93,7 +93,7 @@ For the isostress experiment, the saved recipe could be represented as:
 
 The most intuitive shape is a guided workflow rather than one long settings page:
 
-- `Hardware`: hardware status, auto-detect, scale tare, gauge zero, diameter/project import, safety limits, with driver-level serial/motor details hidden under advanced settings.
+- `Hardware`: hardware status, auto-detect, zero-load scale reference, gauge zero, diameter/project import, safety limits, with driver-level serial/motor details hidden under advanced settings.
 - `Sample`: naming, `.pydpj` row match, diameter, `l0`, notes.
 - `Program`: saved recipes, recipe preview, natural-language recipe preparation, and explicit step list.
 - `Run`: large live controls, start/pause/stop, current target, stress/load/strain target, live plots, run log.
@@ -117,7 +117,7 @@ The operator should always see:
 ## Next Implementation Priorities
 
 1. Add saved recipe files and a previewable step list.
-2. Add explicit saved-recipe `tare_scale` and recovery steps. The built-in current-sweep recipe already has a physical scale tare-at-start option that aborts cleanly if tare fails, and manual stop now offers displacement/load recovery actions with a temporary dual-axis recovery plot.
+2. Add explicit saved-recipe `capture_zero_load` and recovery steps. The built-in current-sweep recipe uses the zero-load scale reference for load control, and manual stop now offers displacement/load recovery actions with a temporary dual-axis recovery plot.
 3. Continue refining commercial-DMA-style guided workflow: Setup -> Program -> Run -> Review, with expert settings hidden unless needed.
 4. Add a natural-language recipe preparation path that generates the same saved recipe JSON.
 5. Add constant-current stress/strain recipes.
