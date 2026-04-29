@@ -51,11 +51,11 @@ Current intended hardware stack:
 - hardware driver details such as baud rates, serial request commands, `ticcmd`, device serials, and steps-per-mm are hidden by default under `Advanced hardware settings`
 - an always-visible `EMERGENCY STOP` button in the dashboard header stops the active recipe/session, halts the Tic motor, and turns the supply output off
 - recipe start runs a preflight that auto-detects/connects required scale and supply hardware before creating run files, and reports all missing devices together
-- the Recipe tab shows the current sample name at the top so the operator can catch stale sample identity before starting a run
+- the Recipe tab shows the current sample name and wire diameter at the top so the operator can catch stale sample identity or geometry before starting a run
 - if output files already exist, session start can save the repeat measurement as the next `_run02`, `_run03`, ... filename instead of replacing the original files
 - long recipe estimates switch from seconds to minutes/hours and the recipe panel includes a live progress bar
 - numeric recipe summaries and spin boxes trim zero-only decimals, for example `20 g` instead of `20.0000 g`
-- log messages appear in the `Run log`; the duplicate status-bar echo is hidden
+- log messages appear in the `Run log`; the duplicate status-bar echo is hidden, and a Developer-menu mirror can write the run log to a rotating text file for debugging
 - output to `TXT`, `CSV`, and `JSON` metadata sidecar
 - each active session also writes a high-rate raw scale sidecar named `<run>.scale_raw.csv`, while the main CSV remains a slower recipe/session log
 - the current-sweep `Control interval` is separate from the `Log interval`, so hardware feedback/correction can run faster than human-readable session rows
@@ -69,10 +69,11 @@ Current intended hardware stack:
 - motor moves energize the Tic, reset its command timeout, and exit safe-start before sending the position target; a short keepalive continues resetting the command timeout during active recipes/manual holds
 - Tic status shows VIN motor-supply voltage and warns/preflights when VIN is below the motor-power threshold
 - displacement recipes expose their own linear move speed, while iso-load, iso-stress, and iso-strain current sweeps are separate recipe choices with target ramp rate, target ramp stage speed, conservative correction step, and correction move speed controls
-- `Calibration` is a dedicated automatic recipe for mechanical characterization: after the operator mounts the wire and confirms zero-load/safety settings, Mini DMA can run the same zero-load/length setup used by current sweeps, measures baseline scale noise, seeks configured load preloads, performs forward/reverse micro-move sweeps, records labeled calibration phases, and saves stiffness/backlash plus stress-strain estimates into the JSON metadata
+- `Calibration` is a dedicated automatic recipe for mechanical characterization: after the operator mounts the wire and confirms zero-load/safety settings, Mini DMA runs the same mandatory length setup used by other recipes, measures baseline scale noise, seeks configured load preloads, performs forward/reverse micro-move sweeps, records labeled calibration phases, and saves stiffness/backlash plus stress-strain estimates into the JSON metadata
 - clear stacked `Move up` / `Move down` buttons can be held for continuous manual jogging from the last commanded target, with held movement advancing by the configured linear `Manual move speed` in `mm/s`
 - current-sweep recipes use an editable zero-load scale reference instead of physically taring the balance; the default hanging-weight reference is `21.200 g`
-- current-sweep and calibration recipes can optionally run a zero/preload length setup before the recipe body: seek `0 g` applied load from the real scale reference, ramp to a small preload stress, prompt for the measured gauge length, return to `0 g`, and compute `l0` from the known tensile stage displacement
+- every recipe now runs the length setup before normal recipe logging: ramp directly to the configured setup preload stress, prompt for the measured wire length at preload, return to `0 g` applied load, compute unloaded `l0` from the known tensile stage displacement, then start the normal recipe CSV/graph log
+- the length-setup popup shows live load, stress, and tensile displacement versus setup time while it is chasing preload and returning to zero load; the setup has its own stage-speed ceiling so the stress ramp is not limited by fine calibration micro-move speed
 - position zeroing
 - halt / stop support
 - jog control refuses sub-step moves that would round to the current motor step
@@ -97,7 +98,7 @@ Current intended hardware stack:
 ### Calibration Workflow
 
 - The automatic `Calibration` recipe can be used with a stable non-transforming wire or, when needed, the installed microwire. Non-transforming wire is still better for pure backlash/stiffness checks because phase transitions do not add real material fluctuations.
-- Physical setup is still operator-controlled: mount and align the wire, confirm the zero-load scale reference, soft limits, max-load safety, and optional zero-load/length setup, then start the recipe.
+- Physical setup is still operator-controlled: mount and align the wire, confirm the zero-load scale reference, soft limits, max-load safety, and mandatory length setup settings, then start the recipe.
 - The recipe uses separate preload-seek and micro-move settings. The preload seek can be faster/coarser for a bent or slack calibration wire; the forward/reverse micro-move step stays small for stiffness and backlash characterization.
 - The default preload range is conservative for a short microwire. For a stiff 0.12 mm copper wire, raise the preload range and seek speed only as needed to make the wire visibly straight.
 - The recipe records `calibration_baseline`, `calibration_preload`, `calibration_forward`, and `calibration_reverse` phases in the main CSV.
@@ -113,22 +114,21 @@ Current intended hardware stack:
 - recipe-owned current workflows instead of a separate hardware-tab heating program
 - HMP4030 users can optionally assign CH1 or CH2 as the motor-supply channel; recipe preflight turns that channel on before checking Tic VIN, while current annealing remains on the configured annealing channel
 - HMP4030 current commands are treated as 0.2 mA-resolution setpoints below 1 A, so a `1 mA/s` ramp can update in smaller timed increments while avoiding unsupported command precision
-- the main tabs are organized as `Recipe`, `Specimen`, and lower-priority `Hardware`, so scale/motor/power-supply setup does not dominate routine use
+- the main tabs are organized as `Recipe`, `Sample`, and lower-priority `Hardware`, so scale/motor/power-supply setup does not dominate routine use
 - iso-load, iso-stress, and iso-strain current sweeps own both the target ramp and current ramp directly, advance current from elapsed time, and are shown as separate recipe modes; the progress bar estimates timed target/current-ramp ticks instead of only counting visible recipe rows
 - if a current sweep reaches the configured voltage limit before reaching the requested current, Mini DMA ramps the recipe current back to that sweep's start current, records that unwind phase, and advances to the next recipe step instead of stopping the whole recipe
-- the optional setup workflow actively returns to the `21.200 g` zero-load reference rather than slackening below zero load, so a nominal `0 MPa` sweep remains an active zero-load/zero-stress measurement with strain still defined
+- the mandatory length setup actively returns to the `21.200 g` zero-load reference after the setup preload, so a nominal `0 MPa` sweep remains an active zero-load/zero-stress measurement with strain still defined
+- stress-based recipe fields show their corresponding load values next to the controls, and load-based recipe fields show their corresponding stress values using the current diameter
 - closed-loop target seeking samples feedback during each correction/settle/current step, but scheduled main CSV rows are throttled by the separate log interval; target seeking still adapts correction step and speed near the target, limits each commanded target by the correction speed and timer interval so moves cannot stack ahead of the real stage position, keeps correcting inside the broad hold tolerance toward a tighter near-target band, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
-- recipe completion stops the session log; recipe stop/fault turns current annealing output off, keeps a resume point, and can ask whether to move displacement or load back toward zero without appending recovery samples to the recipe CSV; paused recipes also turn current output off until resumed
+- recipe completion stops the session log before running the return-to-start recovery popup; recipe stop/fault turns current annealing output off, keeps a resume point, and can ask whether to move displacement or load back toward zero without appending recovery samples to the recipe CSV; paused recipes also turn current output off until resumed
 - resistance is left blank when the current setpoint/measured current is effectively zero, avoiding invalid zero-current resistance points; supply readbacks are throttled during fast automation so current commands do not fight voltage/current queries on the same serial link
 - behavior patterned after the existing current annealing logger rather than as a separate app
 
 ### Shape-Memory Workflow
 
-- explicit gauge length `l0`
-- preload-aware start logic
-- mechanical zero is established only after a load threshold is reached
-- pre-contact / straightening phase is handled before strain is treated as meaningful
-- `.pydpj` import support for sample naming and diameter
+- unloaded gauge length `l0` is computed by the mandatory recipe-start preload/return setup instead of being typed in the Sample tab
+- pre-contact / straightening phase is handled before normal recipe logging starts
+- `.pydpj` import support for sample naming and diameter; the last project path and naming fields are restored, matching rows auto-import the wire diameter, and the diameter control is marked red until the value has been imported from the Builder project
 - stress calculation from imported diameter when available
 
 ### Plotting / UI
@@ -171,7 +171,7 @@ There is already a first implementation scaffold for automated `Hsw` distributio
 These were intentional product decisions, not random implementation details:
 
 - keep shape-memory and heating in one combined logger rather than launching separate tools
-- use preload-aware zeroing instead of blindly treating the initial stage position as strain zero
+- compute strain zero from the mandatory preload/return length setup instead of blindly treating the initial stage position as strain zero
 - keep graph setup configurable, but move the controls into a popup so the run dashboard stays clean
 - make `Overview` collapsible because it is useful context but should not dominate the working layout
 - support both shape-memory and Hsw workflows in one app, with recipes deciding behavior
@@ -213,7 +213,7 @@ The implementation was exercised with synthetic and smoke-level checks, includin
 - recipe-loop smoke tests for displacement workflows
 - synthetic Hsw recipe runs
 - `.pydpj` import path
-- preload-aware zeroing logic
+- mandatory preload/return length setup logic
 - plot/dashboard visual review iterations
 
 This means the code structure and main workflows were developed beyond pure scaffolding, but some features remain hardware-unverified until the scale link is working.

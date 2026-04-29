@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from plotting.shared.logfiles import append_text_with_rotation
 from plotting.shared.utils import ensure_app_theme, install_standard_menu
 
 try:
@@ -57,6 +58,7 @@ from matplotlib.figure import Figure
 
 APP_NAME = "Mini DMA Logger"
 DEFAULT_LOG_BASENAME = "mini_dma"
+DEFAULT_RUN_LOG_MIRROR_PATH = Path("logs") / "mini_dma_run_log.txt"
 DEFAULT_ZERO_LOAD_SCALE_G = 21.2
 GRAVITY_MS2 = 9.80665
 LONG_NAMES = ("Displacement", "Load", "Strain", "Stress")
@@ -1327,6 +1329,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_start_wall_s = 0.0
         self._last_session_log_timestamp_s: float | None = None
         self._session_raw_scale_count = 0
+        self._session_logging_enabled = True
         self._load_offset_g = 0.0
         self._position_reference_mm = 0.0
         self._preload_reference_armed = False
@@ -1353,6 +1356,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_completed_ticks = 0
         self._automation_name = ""
         self._automation_phase = "idle"
+        self._automation_step_note: str | None = None
         self._automation_paused = False
         self._automation_basis: str | None = None
         self._automation_target_value: float | None = None
@@ -1375,7 +1379,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_start_value: float | None = None
         self._setup_measured_length_mm: float | None = None
         self._setup_preload_position_mm: float | None = None
+        self._length_setup_dialog: QtWidgets.QDialog | None = None
+        self._length_setup_status_label: QtWidgets.QLabel | None = None
+        self._length_setup_figure: Figure | None = None
+        self._length_setup_canvas: Any = None
+        self._length_setup_start_monotonic = 0.0
+        self._length_setup_points: list[MeasurementPoint] = []
         self._calibration_report: dict[str, Any] | None = None
+        self._run_log_mirror_enabled = False
+        self._run_log_mirror_path = DEFAULT_RUN_LOG_MIRROR_PATH
+        self._diameter_imported = False
+        self._builder_import_in_progress = False
         self._plot_tiles: list[PlotTileWidgets] = []
         self._control_scroll_area: QtWidgets.QScrollArea | None = None
         self._manual_jog_direction = 0.0
@@ -1409,8 +1423,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_scale_ports()
         self._refresh_live_labels()
 
+    def _install_mini_dma_developer_menu(self) -> None:
+        menu_bar = self.menuBar()
+        developer_menu: QtWidgets.QMenu | None = None
+        for action in menu_bar.actions():
+            candidate = action.menu()
+            if candidate is not None and candidate.objectName() == "mw_shared_developer":
+                developer_menu = candidate
+                break
+        if developer_menu is None:
+            developer_menu = menu_bar.addMenu("&Developer")
+            if developer_menu is None:
+                return
+            developer_menu.setObjectName("mw_shared_developer")
+        developer_menu.addSeparator()
+        self.action_mirror_run_log = developer_menu.addAction("Mirror Mini DMA Run Log to File")
+        if self.action_mirror_run_log is not None:
+            self.action_mirror_run_log.setCheckable(True)
+            self.action_mirror_run_log.toggled.connect(self._set_run_log_mirror_enabled)
+        choose_action = developer_menu.addAction("Choose Mini DMA Run Log File...")
+        if choose_action is not None:
+            choose_action.triggered.connect(self._choose_run_log_mirror_file)
+
+    def _set_run_log_mirror_enabled(self, enabled: bool) -> None:
+        self._run_log_mirror_enabled = bool(enabled)
+        if hasattr(self, "action_mirror_run_log") and self.action_mirror_run_log is not None:
+            self.action_mirror_run_log.blockSignals(True)
+            self.action_mirror_run_log.setChecked(self._run_log_mirror_enabled)
+            self.action_mirror_run_log.blockSignals(False)
+        state = "enabled" if self._run_log_mirror_enabled else "disabled"
+        self._log(f"Run-log file mirror {state}: {self._run_log_mirror_path}")
+
+    def _choose_run_log_mirror_file(self) -> None:
+        path, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Select Mini DMA run-log mirror file",
+            str(self._run_log_mirror_path),
+            "Text files (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+        self._run_log_mirror_path = Path(path)
+        self._set_run_log_mirror_enabled(True)
+
+    def _spin_with_equivalent_label(
+        self,
+        parent: QtWidgets.QWidget,
+        spinbox: QtWidgets.QWidget,
+    ) -> tuple[QtWidgets.QWidget, QtWidgets.QLabel]:
+        row = QtWidgets.QWidget(parent)
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(spinbox, stretch=1)
+        label = QtWidgets.QLabel("-", row)
+        label.setMinimumWidth(135)
+        label.setStyleSheet("color: palette(text);")
+        layout.addWidget(label)
+        return row, label
+
     def _build_ui(self, log_dir: str) -> None:
         install_standard_menu(self, open_folder=self._choose_log_dir)
+        self._install_mini_dma_developer_menu()
 
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
@@ -1917,16 +1991,10 @@ class MainWindow(QtWidgets.QMainWindow):
         naming_form.addRow("Microwire", self.edit_name_wire)
         self.edit_name_specimen = QtWidgets.QLineEdit(naming_box)
         self.edit_name_specimen.setPlaceholderText("e.g. s1")
-        naming_form.addRow("Specimen", self.edit_name_specimen)
+        naming_form.addRow("Sample ID", self.edit_name_specimen)
         self.edit_name_condition = QtWidgets.QLineEdit(naming_box)
         self.edit_name_condition.setPlaceholderText("e.g. preload test")
         naming_form.addRow("Condition / notes", self.edit_name_condition)
-        self.check_auto_name = QtWidgets.QCheckBox("Auto-fill sample name and base filename from the fields above", naming_box)
-        self.check_auto_name.setChecked(True)
-        naming_form.addRow("", self.check_auto_name)
-        apply_name_button = QtWidgets.QPushButton("Apply naming fields now", naming_box)
-        apply_name_button.clicked.connect(self._apply_name_fields)
-        naming_form.addRow("", apply_name_button)
         specimen_layout.addWidget(naming_box)
 
         sample_box = self._group_box("Sample")
@@ -1936,7 +2004,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_initial_length.setRange(0.0, 1000.0)
         self.spin_initial_length.setValue(30.0)
         self.spin_initial_length.setSuffix(" mm")
-        sample_form.addRow("Gauge length l0", self.spin_initial_length)
+        self.spin_initial_length.setVisible(False)
 
         self.spin_diameter = CompactDoubleSpinBox(sample_box)
         self.spin_diameter.setDecimals(5)
@@ -1949,17 +2017,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "Zero strain/stress only after preload is reached",
             sample_box,
         )
-        self.check_zero_on_preload.setChecked(True)
-        sample_form.addRow("", self.check_zero_on_preload)
+        self.check_zero_on_preload.setChecked(False)
+        self.check_zero_on_preload.setVisible(False)
         self.spin_preload_threshold_g = CompactDoubleSpinBox(sample_box)
         self.spin_preload_threshold_g.setDecimals(4)
         self.spin_preload_threshold_g.setRange(0.0, 1000.0)
         self.spin_preload_threshold_g.setValue(0.02)
         self.spin_preload_threshold_g.setSuffix(" g")
-        sample_form.addRow("Preload threshold", self.spin_preload_threshold_g)
-        preload_button = QtWidgets.QPushButton("Set current position as gauge zero", sample_box)
-        preload_button.clicked.connect(self._set_reference_from_current_position)
-        sample_form.addRow("", preload_button)
+        self.spin_preload_threshold_g.setVisible(False)
 
         self.edit_sample_name = QtWidgets.QLineEdit(sample_box)
         sample_form.addRow("Sample name", self.edit_sample_name)
@@ -2012,8 +2077,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "Set current Tic position to 0 when the session starts",
             logging_box,
         )
-        self.check_zero_position_on_start.setChecked(True)
-        logging_form.addRow("", self.check_zero_position_on_start)
+        self.check_zero_position_on_start.setChecked(False)
+        self.check_zero_position_on_start.setVisible(False)
 
         self.check_tare_on_start = QtWidgets.QCheckBox(
             "Diagnostic: software tare the latest scale value when the session starts",
@@ -2031,19 +2096,13 @@ class MainWindow(QtWidgets.QMainWindow):
             "Turn it on only when the current raw scale reading is definitely 0 g applied load."
         )
 
-        session_buttons = QtWidgets.QHBoxLayout()
         self.button_start_session = QtWidgets.QPushButton("Start session", logging_box)
         self.button_start_session.clicked.connect(self._start_session)
-        session_buttons.addWidget(self.button_start_session)
+        self.button_start_session.setVisible(False)
         self.button_stop_session = QtWidgets.QPushButton("Stop session", logging_box)
         self.button_stop_session.clicked.connect(self._stop_session)
         self.button_stop_session.setEnabled(False)
-        session_buttons.addWidget(self.button_stop_session)
-        logging_form.addRow("", session_buttons)
-
-        record_button = QtWidgets.QPushButton("Record point now", logging_box)
-        record_button.clicked.connect(self._record_current_point)
-        logging_form.addRow("", record_button)
+        self.button_stop_session.setVisible(False)
         specimen_layout.addWidget(logging_box)
         specimen_layout.addStretch(1)
         experiment_tab = QtWidgets.QWidget(tabs)
@@ -2077,34 +2136,45 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.strain_setup_box = self._group_box("Zero-load and length setup")
         strain_setup_form = QtWidgets.QFormLayout(self.strain_setup_box)
-        self.check_pre_measurement_setup = QtWidgets.QCheckBox(
-            "Run zero-load + length setup before recipe",
-            self.strain_setup_box,
-        )
-        self.check_pre_measurement_setup.setChecked(False)
-        self.check_pre_measurement_setup.setToolTip(
-            "Seek 0 g applied load, apply a small preload, ask for the measured length, "
-            "return to 0 g, and compute l0 from the stage movement."
-        )
-        strain_setup_form.addRow("", self.check_pre_measurement_setup)
         self.spin_setup_preload_stress_mpa = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_preload_stress_mpa.setDecimals(3)
         self.spin_setup_preload_stress_mpa.setRange(0.001, 10000.0)
         self.spin_setup_preload_stress_mpa.setValue(10.0)
         self.spin_setup_preload_stress_mpa.setSuffix(" MPa")
-        strain_setup_form.addRow("Setup preload stress", self.spin_setup_preload_stress_mpa)
+        setup_stress_row, self.label_setup_preload_stress_equiv = self._spin_with_equivalent_label(
+            self.strain_setup_box,
+            self.spin_setup_preload_stress_mpa,
+        )
+        strain_setup_form.addRow("Setup preload stress", setup_stress_row)
         self.spin_setup_preload_ramp_rate_mpa_s = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_preload_ramp_rate_mpa_s.setDecimals(3)
         self.spin_setup_preload_ramp_rate_mpa_s.setRange(0.001, 10000.0)
         self.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
         self.spin_setup_preload_ramp_rate_mpa_s.setSuffix(" MPa/s")
-        strain_setup_form.addRow("Setup preload ramp rate", self.spin_setup_preload_ramp_rate_mpa_s)
+        setup_ramp_row, self.label_setup_preload_ramp_equiv = self._spin_with_equivalent_label(
+            self.strain_setup_box,
+            self.spin_setup_preload_ramp_rate_mpa_s,
+        )
+        strain_setup_form.addRow("Setup preload ramp rate", setup_ramp_row)
+        self.spin_setup_stage_speed_mm_s = CompactDoubleSpinBox(self.strain_setup_box)
+        self.spin_setup_stage_speed_mm_s.setDecimals(3)
+        self.spin_setup_stage_speed_mm_s.setRange(0.001, 50.0)
+        self.spin_setup_stage_speed_mm_s.setValue(1.0)
+        self.spin_setup_stage_speed_mm_s.setSuffix(" mm/s")
+        self.spin_setup_stage_speed_mm_s.setToolTip(
+            "Maximum linear stage speed while the mandatory setup chases the preload stress ramp."
+        )
+        strain_setup_form.addRow("Setup stage speed", self.spin_setup_stage_speed_mm_s)
         self.spin_setup_preload_tolerance_mpa = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_preload_tolerance_mpa.setDecimals(4)
         self.spin_setup_preload_tolerance_mpa.setRange(0.0001, 10000.0)
         self.spin_setup_preload_tolerance_mpa.setValue(0.25)
         self.spin_setup_preload_tolerance_mpa.setSuffix(" MPa")
-        strain_setup_form.addRow("Setup preload tolerance", self.spin_setup_preload_tolerance_mpa)
+        setup_tolerance_row, self.label_setup_preload_tolerance_equiv = self._spin_with_equivalent_label(
+            self.strain_setup_box,
+            self.spin_setup_preload_tolerance_mpa,
+        )
+        strain_setup_form.addRow("Setup preload tolerance", setup_tolerance_row)
         self.spin_setup_zero_tolerance_g = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_zero_tolerance_g.setDecimals(4)
         self.spin_setup_zero_tolerance_g.setRange(0.0001, 1000.0)
@@ -2222,22 +2292,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_distribution_start.setDecimals(3)
         self.spin_distribution_start.setRange(-100000.0, 100000.0)
         self.spin_distribution_start.setValue(10.0)
-        distribution_form.addRow("Start", self.spin_distribution_start)
+        distribution_start_row, self.label_distribution_start_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_distribution_start,
+        )
+        distribution_form.addRow("Start", distribution_start_row)
         self.spin_distribution_end = CompactDoubleSpinBox(automation_box)
         self.spin_distribution_end.setDecimals(3)
         self.spin_distribution_end.setRange(-100000.0, 100000.0)
         self.spin_distribution_end.setValue(100.0)
-        distribution_form.addRow("End", self.spin_distribution_end)
+        distribution_end_row, self.label_distribution_end_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_distribution_end,
+        )
+        distribution_form.addRow("End", distribution_end_row)
         self.spin_distribution_step = CompactDoubleSpinBox(automation_box)
         self.spin_distribution_step.setDecimals(3)
         self.spin_distribution_step.setRange(0.001, 100000.0)
         self.spin_distribution_step.setValue(10.0)
-        distribution_form.addRow("Step", self.spin_distribution_step)
+        distribution_step_row, self.label_distribution_step_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_distribution_step,
+        )
+        distribution_form.addRow("Step", distribution_step_row)
         self.spin_distribution_tolerance = CompactDoubleSpinBox(automation_box)
         self.spin_distribution_tolerance.setDecimals(4)
         self.spin_distribution_tolerance.setRange(0.0001, 100000.0)
         self.spin_distribution_tolerance.setValue(0.5)
-        distribution_form.addRow("Target tolerance", self.spin_distribution_tolerance)
+        distribution_tolerance_row, self.label_distribution_tolerance_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_distribution_tolerance,
+        )
+        distribution_form.addRow("Target tolerance", distribution_tolerance_row)
         self.spin_distribution_nudge_mm = CompactDoubleSpinBox(automation_box)
         self.spin_distribution_nudge_mm.setDecimals(4)
         self.spin_distribution_nudge_mm.setRange(0.0001, 10.0)
@@ -2297,25 +2383,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_calibration_start_load_g.setRange(0.001, 150.0)
         self.spin_calibration_start_load_g.setValue(0.25)
         self.spin_calibration_start_load_g.setSuffix(" g")
-        calibration_form.addRow("Start preload", self.spin_calibration_start_load_g)
+        calibration_start_row, self.label_calibration_start_load_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_calibration_start_load_g,
+        )
+        calibration_form.addRow("Start preload", calibration_start_row)
         self.spin_calibration_end_load_g = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_end_load_g.setDecimals(3)
         self.spin_calibration_end_load_g.setRange(0.001, 150.0)
         self.spin_calibration_end_load_g.setValue(1.0)
         self.spin_calibration_end_load_g.setSuffix(" g")
-        calibration_form.addRow("End preload", self.spin_calibration_end_load_g)
+        calibration_end_row, self.label_calibration_end_load_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_calibration_end_load_g,
+        )
+        calibration_form.addRow("End preload", calibration_end_row)
         self.spin_calibration_load_step_g = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_load_step_g.setDecimals(3)
         self.spin_calibration_load_step_g.setRange(0.001, 150.0)
         self.spin_calibration_load_step_g.setValue(0.25)
         self.spin_calibration_load_step_g.setSuffix(" g")
-        calibration_form.addRow("Preload step", self.spin_calibration_load_step_g)
+        calibration_step_row, self.label_calibration_load_step_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_calibration_load_step_g,
+        )
+        calibration_form.addRow("Preload step", calibration_step_row)
         self.spin_calibration_tolerance_g = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_tolerance_g.setDecimals(4)
         self.spin_calibration_tolerance_g.setRange(0.0001, 10.0)
         self.spin_calibration_tolerance_g.setValue(0.02)
         self.spin_calibration_tolerance_g.setSuffix(" g")
-        calibration_form.addRow("Load tolerance", self.spin_calibration_tolerance_g)
+        calibration_tolerance_row, self.label_calibration_tolerance_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_calibration_tolerance_g,
+        )
+        calibration_form.addRow("Load tolerance", calibration_tolerance_row)
         self.spin_calibration_settle_s = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_settle_s.setDecimals(2)
         self.spin_calibration_settle_s.setRange(0.0, 60.0)
@@ -2373,17 +2475,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_target_start.setDecimals(3)
         self.spin_current_sweep_target_start.setRange(-100000.0, 100000.0)
         self.spin_current_sweep_target_start.setValue(0.0)
-        current_sweep_form.addRow("Target start", self.spin_current_sweep_target_start)
+        current_start_row, self.label_current_target_start_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_current_sweep_target_start,
+        )
+        current_sweep_form.addRow("Target start", current_start_row)
         self.spin_current_sweep_target_end = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_end.setDecimals(3)
         self.spin_current_sweep_target_end.setRange(-100000.0, 100000.0)
         self.spin_current_sweep_target_end.setValue(9.0)
-        current_sweep_form.addRow("Target end", self.spin_current_sweep_target_end)
+        current_end_row, self.label_current_target_end_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_current_sweep_target_end,
+        )
+        current_sweep_form.addRow("Target end", current_end_row)
         self.spin_current_sweep_target_step = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_step.setDecimals(3)
         self.spin_current_sweep_target_step.setRange(0.001, 100000.0)
         self.spin_current_sweep_target_step.setValue(3.0)
-        current_sweep_form.addRow("Target step", self.spin_current_sweep_target_step)
+        current_step_row, self.label_current_target_step_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_current_sweep_target_step,
+        )
+        current_sweep_form.addRow("Target step", current_step_row)
         self.spin_current_sweep_target_ramp_rate = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_ramp_rate.setDecimals(4)
         self.spin_current_sweep_target_ramp_rate.setRange(0.0001, 100000.0)
@@ -2392,7 +2506,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "Target loading rate. For iso-load this is g/s; for iso-stress it is MPa/s; "
             "for iso-strain it is %/s."
         )
-        current_sweep_form.addRow("Target ramp rate", self.spin_current_sweep_target_ramp_rate)
+        current_ramp_row, self.label_current_target_ramp_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_current_sweep_target_ramp_rate,
+        )
+        current_sweep_form.addRow("Target ramp rate", current_ramp_row)
         self.spin_current_sweep_target_speed_mm_s = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_speed_mm_s.setDecimals(3)
         self.spin_current_sweep_target_speed_mm_s.setRange(0.001, 50.0)
@@ -2434,7 +2552,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_tolerance.setDecimals(4)
         self.spin_current_sweep_tolerance.setRange(0.0001, 100000.0)
         self.spin_current_sweep_tolerance.setValue(0.25)
-        current_sweep_form.addRow("Hold tolerance", self.spin_current_sweep_tolerance)
+        current_tolerance_row, self.label_current_tolerance_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_current_sweep_tolerance,
+        )
+        current_sweep_form.addRow("Hold tolerance", current_tolerance_row)
         self.spin_current_sweep_nudge_mm = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_nudge_mm.setDecimals(4)
         self.spin_current_sweep_nudge_mm.setRange(0.0001, 10.0)
@@ -2490,10 +2612,9 @@ class MainWindow(QtWidgets.QMainWindow):
             automation_box,
         )
         self.check_return_to_origin.setChecked(True)
-        automation_form.addRow("", self.check_return_to_origin)
-        self.label_recipe_summary = QtWidgets.QLabel("Plan: displacement ramp from the current position.")
-        self.label_recipe_summary.setWordWrap(True)
-        automation_form.addRow("", self.label_recipe_summary)
+        self.check_return_to_origin.setVisible(False)
+        self.label_recipe_summary = QtWidgets.QLabel("")
+        self.label_recipe_summary.setVisible(False)
         self.label_recipe_estimate = QtWidgets.QLabel("Estimated points: - | Estimated duration: -")
         self.label_recipe_estimate.setWordWrap(True)
         automation_form.addRow("", self.label_recipe_estimate)
@@ -2572,7 +2693,7 @@ class MainWindow(QtWidgets.QMainWindow):
         experiment_layout.addWidget(manual_box)
         experiment_layout.addStretch(1)
         tabs.addTab(experiment_tab, "Recipe")
-        tabs.addTab(specimen_tab, "Specimen")
+        tabs.addTab(specimen_tab, "Sample")
         tabs.addTab(hardware_tab, "Hardware")
         tabs.setCurrentWidget(experiment_tab)
 
@@ -2738,6 +2859,12 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             widget.textChanged.connect(self._sync_auto_name_fields)
         self.edit_sample_name.textChanged.connect(self._refresh_recipe_sample_label)
+        self.edit_project_path.editingFinished.connect(
+            lambda: self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+        )
+        self.spin_diameter.valueChanged.connect(self._refresh_recipe_sample_label)
+        self.spin_diameter.valueChanged.connect(self._refresh_equivalent_labels)
+        self.spin_diameter.valueChanged.connect(self._refresh_diameter_import_state)
         for widget in (
             self.spin_ramp_distance,
             self.spin_ramp_speed_mm_s,
@@ -2755,6 +2882,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_distribution_seek_speed_mm_s,
             self.spin_distribution_points,
             self.spin_distribution_settle_s,
+            self.spin_calibration_start_load_g,
+            self.spin_calibration_end_load_g,
+            self.spin_calibration_load_step_g,
+            self.spin_calibration_tolerance_g,
         ):
             widget.valueChanged.connect(self._update_recipe_mode_ui)
         for widget in (
@@ -2766,6 +2897,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_distribution_interval,
             self.spin_setup_preload_stress_mpa,
             self.spin_setup_preload_ramp_rate_mpa_s,
+            self.spin_setup_stage_speed_mm_s,
             self.spin_setup_preload_tolerance_mpa,
             self.spin_setup_zero_tolerance_g,
             self.spin_setup_zero_stable_s,
@@ -2788,7 +2920,6 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.valueChanged.connect(self._update_recipe_mode_ui)
         self.check_return_to_origin.toggled.connect(self._update_recipe_mode_ui)
         self.check_distribution_return_sweep.toggled.connect(self._update_recipe_mode_ui)
-        self.check_pre_measurement_setup.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_return_target.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_reverse_current.toggled.connect(self._update_recipe_mode_ui)
         self.check_zero_on_preload.toggled.connect(self._refresh_live_labels)
@@ -3157,6 +3288,18 @@ class MainWindow(QtWidgets.QMainWindow):
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
         self.log_output.appendPlainText(line)
+        if self._run_log_mirror_enabled:
+            try:
+                append_text_with_rotation(self._run_log_mirror_path, line + "\n")
+            except Exception:
+                self._run_log_mirror_enabled = False
+                if hasattr(self, "action_mirror_run_log") and self.action_mirror_run_log is not None:
+                    self.action_mirror_run_log.blockSignals(True)
+                    self.action_mirror_run_log.setChecked(False)
+                    self.action_mirror_run_log.blockSignals(False)
+                self.log_output.appendPlainText(
+                    f"[{timestamp}] Run-log file mirror disabled because writing {self._run_log_mirror_path} failed."
+                )
 
     def _set_run_status(self, message: str) -> None:
         self.label_recipe_banner.setText(message)
@@ -3605,6 +3748,27 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if path_str:
             self.edit_project_path.setText(path_str)
+            self._builder_project_path = Path(path_str)
+            self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+
+    def _refresh_diameter_import_state(self) -> None:
+        self._mark_diameter_imported(self._diameter_imported)
+
+    def _mark_diameter_imported(self, imported: bool) -> None:
+        self._diameter_imported = bool(imported)
+        if not hasattr(self, "spin_diameter"):
+            return
+        if self._diameter_imported:
+            self.spin_diameter.setStyleSheet("")
+            self.spin_diameter.setToolTip("Wire diameter imported from the Microwire Data Builder project; manual edits are allowed.")
+        else:
+            self.spin_diameter.setStyleSheet(
+                "QDoubleSpinBox { border: 1px solid #dc2626; background-color: rgba(220, 38, 38, 0.10); }"
+            )
+            self.spin_diameter.setToolTip("Wire diameter has not been imported from the Builder project; manual edits are allowed.")
+
+    def _read_builder_project_payload(self, path: Path) -> Any:
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def _project_match_score(self, row: Mapping[str, Any]) -> int:
         score = 0
@@ -3625,7 +3789,26 @@ class MainWindow(QtWidgets.QMainWindow):
             score += 2
         return score
 
-    def _find_project_sample(self, payload: Any, path: Path) -> ProjectImportResult | None:
+    def _project_row_matches_current_sample(self, row: Mapping[str, Any]) -> bool:
+        composition = _normalized_token(self.edit_name_composition.text())
+        microwire = _normalized_microwire_token(self.edit_name_wire.text())
+        specimen = _normalized_token(self.edit_name_specimen.text())
+        row_composition = _normalized_token(row.get("Composition"))
+        row_microwire = _normalized_microwire_token(_project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS))
+        row_specimen = _normalized_token(_project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS))
+        if microwire:
+            return row_microwire == microwire and (not composition or row_composition == composition)
+        if composition and specimen:
+            return row_composition == composition and row_specimen == specimen
+        return False
+
+    def _find_project_sample(
+        self,
+        payload: Any,
+        path: Path,
+        *,
+        require_current_sample_match: bool = False,
+    ) -> ProjectImportResult | None:
         rows_by_section: list[tuple[str, list[Any]]] = []
         if isinstance(payload, Mapping):
             sections = payload.get("sections", {})
@@ -3651,6 +3834,8 @@ class MainWindow(QtWidgets.QMainWindow):
             for row in rows:
                 if not isinstance(row, Mapping):
                     continue
+                if require_current_sample_match and not self._project_row_matches_current_sample(row):
+                    continue
                 score = self._project_match_score(row)
                 if score < 0:
                     continue
@@ -3667,13 +3852,82 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
         return best_match if best_score >= 0 else None
 
+    def _apply_project_match(
+        self,
+        match: ProjectImportResult,
+        *,
+        update_identity: bool,
+        quiet: bool = False,
+    ) -> None:
+        self._builder_project_path = match.path
+        self._builder_project_match = match
+        row = match.matched_row
+        self._builder_import_in_progress = True
+        try:
+            if update_identity and row.get("Composition"):
+                self.edit_name_composition.setText(str(row.get("Composition")))
+            microwire_value = _project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS)
+            if update_identity and microwire_value:
+                self.edit_name_wire.setText(MicrowireLineEdit.to_display_text(microwire_value) or str(microwire_value))
+            specimen_value = _project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS)
+            if update_identity and specimen_value:
+                self.edit_name_specimen.setText(str(specimen_value))
+            if match.diameter_mm is not None:
+                self.spin_diameter.setValue(match.diameter_mm)
+                self._mark_diameter_imported(True)
+            else:
+                self._mark_diameter_imported(False)
+            if match.current_mA is not None:
+                self.spin_current_sweep_end_mA.setValue(match.current_mA)
+        finally:
+            self._builder_import_in_progress = False
+        self.label_project_status.setText(
+            f"Imported {match.path.name} -> section {match.section}, diameter "
+            f"{'-' if match.diameter_mm is None else f'{match.diameter_mm:.5f} mm'}"
+            f"{'' if match.current_mA is None else f', current {match.current_mA:.2f} mA'}."
+        )
+        if not quiet:
+            self._sync_auto_name_fields()
+        else:
+            self._refresh_recipe_sample_label()
+            self._refresh_equivalent_labels()
+
+    def _auto_import_builder_project_if_possible(self, *, update_identity: bool = False, quiet: bool = True) -> bool:
+        if self._builder_import_in_progress:
+            return False
+        path_text = self.edit_project_path.text().strip()
+        if not path_text:
+            self._mark_diameter_imported(False)
+            return False
+        path = Path(path_text)
+        self._builder_project_path = path
+        if not path.exists():
+            self._mark_diameter_imported(False)
+            self.label_project_status.setText("Builder project path is saved, but the file was not found.")
+            return False
+        try:
+            payload = self._read_builder_project_payload(path)
+        except Exception as exc:
+            self._mark_diameter_imported(False)
+            self.label_project_status.setText(f"Failed to read saved project file: {exc}")
+            return False
+        match = self._find_project_sample(payload, path, require_current_sample_match=True)
+        if match is None:
+            self._mark_diameter_imported(False)
+            self.label_project_status.setText(
+                "Project loaded, but no matching sample row was found from the current naming fields."
+            )
+            return False
+        self._apply_project_match(match, update_identity=update_identity, quiet=quiet)
+        return True
+
     def _import_builder_project(self) -> None:
         path = Path(self.edit_project_path.text().strip())
         if not path.exists():
             QtWidgets.QMessageBox.warning(self, APP_NAME, "Choose a valid .pydpj file first.")
             return
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = self._read_builder_project_payload(path)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to read project file: {exc}")
             return
@@ -3682,28 +3936,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_project_status.setText(
                 "Project loaded, but no matching sample row was found from the current naming fields."
             )
+            self._mark_diameter_imported(False)
             return
-        self._builder_project_path = path
-        self._builder_project_match = match
-        row = match.matched_row
-        if row.get("Composition"):
-            self.edit_name_composition.setText(str(row.get("Composition")))
-        microwire_value = _project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS)
-        if microwire_value:
-            self.edit_name_wire.setText(MicrowireLineEdit.to_display_text(microwire_value) or str(microwire_value))
-        specimen_value = _project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS)
-        if specimen_value:
-            self.edit_name_specimen.setText(str(specimen_value))
-        if match.diameter_mm is not None:
-            self.spin_diameter.setValue(match.diameter_mm)
-        if match.current_mA is not None:
-            self.spin_current_sweep_end_mA.setValue(match.current_mA)
-        self.label_project_status.setText(
-            f"Imported {path.name} -> section {match.section}, diameter "
-            f"{'-' if match.diameter_mm is None else f'{match.diameter_mm:.5f} mm'}"
-            f"{'' if match.current_mA is None else f', current {match.current_mA:.2f} mA'}."
-        )
-        self._sync_auto_name_fields()
+        self._apply_project_match(match, update_identity=True)
 
     def _toggle_scale_connection(self) -> None:
         if self._scale_thread is not None:
@@ -3936,14 +4171,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(f"Applied naming fields: {built}")
 
     def _sync_auto_name_fields(self) -> None:
-        if self.check_auto_name.isChecked():
-            built = self._build_sample_name()
-            if built:
-                self.edit_sample_name.setText(built)
-                log_label = self._build_log_name_label(built)
-                safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
-                self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
+        built = self._build_sample_name()
+        if built:
+            self.edit_sample_name.setText(built)
+            log_label = self._build_log_name_label(built)
+            safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
+            self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
         self._refresh_recipe_sample_label()
+        self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
 
     def _refresh_recipe_sample_label(self) -> None:
         if not hasattr(self, "label_recipe_sample"):
@@ -3951,7 +4186,79 @@ class MainWindow(QtWidgets.QMainWindow):
         sample_name = self.edit_sample_name.text().strip()
         if not sample_name:
             sample_name = "(unnamed sample)"
-        self.label_recipe_sample.setText(f"Sample: {sample_name}")
+        diameter_mm = float(self.spin_diameter.value()) if hasattr(self, "spin_diameter") else 0.0
+        diameter_text = (
+            f" | diameter {_format_compact_unit(diameter_mm, 'mm', decimals=5)}"
+            if diameter_mm > 0.0
+            else " | diameter -"
+        )
+        self.label_recipe_sample.setText(f"Sample: {sample_name}{diameter_text}")
+
+    def _load_equivalent_text(self, value_mpa: float, *, per_second: bool = False) -> str:
+        load_g = load_g_from_stress_mpa(float(value_mpa), float(self.spin_diameter.value()))
+        if load_g is None:
+            return "-"
+        unit = "g/s" if per_second else "g"
+        return _format_compact_unit(load_g, unit, decimals=5 if per_second else 4)
+
+    def _stress_equivalent_text(self, value_g: float, *, per_second: bool = False) -> str:
+        stress_mpa = stress_mpa_from_load_g(float(value_g), float(self.spin_diameter.value()))
+        if stress_mpa is None:
+            return "-"
+        unit = "MPa/s" if per_second else "MPa"
+        return _format_compact_unit(stress_mpa, unit, decimals=4)
+
+    def _target_equivalent_text(self, basis: str, value: float, *, per_second: bool = False) -> str:
+        if basis == HSW_BASIS_STRESS_MPA:
+            return self._load_equivalent_text(value, per_second=per_second)
+        if basis == HSW_BASIS_LOAD_G:
+            return self._stress_equivalent_text(value, per_second=per_second)
+        return "-"
+
+    def _refresh_equivalent_labels(self) -> None:
+        if not hasattr(self, "label_setup_preload_stress_equiv"):
+            return
+        self.label_setup_preload_stress_equiv.setText(
+            self._load_equivalent_text(float(self.spin_setup_preload_stress_mpa.value()))
+        )
+        self.label_setup_preload_ramp_equiv.setText(
+            self._load_equivalent_text(float(self.spin_setup_preload_ramp_rate_mpa_s.value()), per_second=True)
+        )
+        self.label_setup_preload_tolerance_equiv.setText(
+            self._load_equivalent_text(float(self.spin_setup_preload_tolerance_mpa.value()))
+        )
+        for label, spinbox in (
+            (self.label_calibration_start_load_equiv, self.spin_calibration_start_load_g),
+            (self.label_calibration_end_load_equiv, self.spin_calibration_end_load_g),
+            (self.label_calibration_load_step_equiv, self.spin_calibration_load_step_g),
+            (self.label_calibration_tolerance_equiv, self.spin_calibration_tolerance_g),
+        ):
+            label.setText(self._stress_equivalent_text(float(spinbox.value())))
+
+        distribution_basis = self._distribution_basis()
+        for label, spinbox in (
+            (self.label_distribution_start_equiv, self.spin_distribution_start),
+            (self.label_distribution_end_equiv, self.spin_distribution_end),
+            (self.label_distribution_step_equiv, self.spin_distribution_step),
+            (self.label_distribution_tolerance_equiv, self.spin_distribution_tolerance),
+        ):
+            label.setText(self._target_equivalent_text(distribution_basis, float(spinbox.value())))
+
+        current_basis = self._current_sweep_basis()
+        for label, spinbox in (
+            (self.label_current_target_start_equiv, self.spin_current_sweep_target_start),
+            (self.label_current_target_end_equiv, self.spin_current_sweep_target_end),
+            (self.label_current_target_step_equiv, self.spin_current_sweep_target_step),
+            (self.label_current_tolerance_equiv, self.spin_current_sweep_tolerance),
+        ):
+            label.setText(self._target_equivalent_text(current_basis, float(spinbox.value())))
+        self.label_current_target_ramp_equiv.setText(
+            self._target_equivalent_text(
+                current_basis,
+                float(self.spin_current_sweep_target_ramp_rate.value()),
+                per_second=True,
+            )
+        )
 
     def _set_position_reference_now(self) -> None:
         self._position_reference_mm = self._current_position_mm
@@ -4030,6 +4337,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_cycle_speed_mm_s,
             self.spin_hold_speed_mm_s,
             self.spin_distribution_seek_speed_mm_s,
+            self.spin_setup_stage_speed_mm_s,
+            self.spin_calibration_preload_speed_mm_s,
+            self.spin_calibration_speed_mm_s,
             self.spin_current_sweep_target_speed_mm_s,
             self.spin_current_sweep_balance_speed_mm_s,
         ):
@@ -4066,9 +4376,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return CURRENT_SWEEP_LOAD
 
     def _pre_measurement_setup_enabled(self, mode: str | None = None) -> bool:
-        if not hasattr(self, "check_pre_measurement_setup"):
-            return False
-        return (self._is_current_sweep_mode(mode) or self._is_calibration_mode(mode)) and self.check_pre_measurement_setup.isChecked()
+        _ = mode
+        return True
 
     def _distribution_units(self, basis: str | None = None) -> tuple[str, int]:
         basis = basis or self._distribution_basis()
@@ -4267,6 +4576,8 @@ class MainWindow(QtWidgets.QMainWindow):
             current_value = 0.0
         if self._is_recovery_mode():
             self._record_recovery_point()
+        elif self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+            self._record_length_setup_point()
         elif self._session_active and not self._maybe_record_scheduled_point(
             quiet=True,
             advance_heating=False,
@@ -4339,7 +4650,8 @@ class MainWindow(QtWidgets.QMainWindow):
         }.get(mode, 0)
         self.recipe_stack.setCurrentIndex(page_index)
         self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
-        self.strain_setup_box.setVisible(self._is_current_sweep_mode(mode) or self._is_calibration_mode(mode))
+        self.strain_setup_box.setVisible(True)
+        self._refresh_equivalent_labels()
         if mode == "cycle":
             summary = (
                 f"Plan: cyclic displacement, {self.spin_cycle_count.value()} cycle(s), "
@@ -4495,7 +4807,12 @@ class MainWindow(QtWidgets.QMainWindow):
         points = 0
         ticks = 0
         interval_s = max(0.001, float(interval_ms) / 1000.0)
+        logging_enabled = not any(step.action == "start_session" for step in steps)
         for step in steps:
+            if step.action == "start_session":
+                ticks += 1
+                logging_enabled = True
+                continue
             if step.action == "ramp_target":
                 start_value = float(
                     step.target_start_value
@@ -4519,10 +4836,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 ramp_ticks = max(1, int(math.ceil((abs(end_value - start_value) / ramp_rate) / interval_s)))
                 ticks += ramp_ticks
-                points += self._scheduled_log_point_count(
-                    duration_s=abs(end_value - start_value) / ramp_rate,
-                    control_interval_s=interval_s,
-                )
+                if logging_enabled:
+                    points += self._scheduled_log_point_count(
+                        duration_s=abs(end_value - start_value) / ramp_rate,
+                        control_interval_s=interval_s,
+                    )
                 continue
             if step.action == "sweep_current" and step.current_start_mA is not None and step.current_end_mA is not None:
                 ramp_rate = max(1e-9, abs(float(step.current_ramp_rate_mA_s or self.spin_current_sweep_step_mA.value())))
@@ -4532,12 +4850,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 ) / ramp_rate
                 sweep_ticks = max(1, int(math.ceil(duration_s / interval_s)))
                 ticks += sweep_ticks
-                points += self._scheduled_log_point_count(
-                    duration_s=duration_s,
-                    control_interval_s=interval_s,
-                )
+                if logging_enabled:
+                    points += self._scheduled_log_point_count(
+                        duration_s=duration_s,
+                        control_interval_s=interval_s,
+                    )
                 continue
             ticks += 1
+            if not logging_enabled:
+                continue
             if step.action in {"record", "set_current", "calibration_record"}:
                 points += 1
             elif step.action == "settle" and step.basis is not None:
@@ -4616,18 +4937,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _append_return_to_origin(self, steps: list[AutomationStep]) -> list[AutomationStep]:
-        if not self.check_return_to_origin.isChecked():
-            return steps
-        final_target = self._recipe_origin_mm
-        if steps and steps[-1].action == "move" and steps[-1].target_mm == final_target:
-            return steps
-        steps = list(steps)
-        steps.extend(
-            (
-                AutomationStep("move", target_mm=final_target, note="Return to origin"),
-                AutomationStep("record", note="Origin checkpoint"),
-            )
-        )
         return steps
 
     def _tic_motor_power_warning(self, vin_v: float | None) -> str | None:
@@ -4799,6 +5108,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_active:
             if self._is_recovery_mode(self._automation_name):
                 return max(self._minimum_held_speed_mm_s(), float(self.spin_motion_speed_mm_s.value()))
+            if self._automation_step_note in {"setup_preload", "setup_return_zero"} or (
+                self._automation_phase == "target_ramp"
+                and self._is_calibration_mode(self._automation_name)
+                and self._automation_basis == HSW_BASIS_STRESS_MPA
+            ):
+                return max(
+                    self._minimum_held_speed_mm_s(),
+                    float(self.spin_setup_stage_speed_mm_s.value()),
+                )
             if self._is_current_sweep_mode(self._automation_name):
                 if self._automation_phase == "target_ramp":
                     return max(
@@ -4998,12 +5316,9 @@ class MainWindow(QtWidgets.QMainWindow):
         txt_handle.write(f"# Wire diameter mm\t{self.spin_diameter.value():.6f}\n")
         txt_handle.write(f"# Zero-load scale reading g\t{self._zero_load_scale_reference_g():.6f}\n")
         txt_handle.write(f"# Diagnostic software load offset g\t{self._load_offset_g:.6f}\n")
-        txt_handle.write(f"# Pre-measurement setup\t{self.check_pre_measurement_setup.isChecked()}\n")
+        txt_handle.write("# Mandatory length setup\tTrue\n")
         txt_handle.write(f"# Setup preload stress MPa\t{self.spin_setup_preload_stress_mpa.value():.6f}\n")
-        txt_handle.write(f"# Preload zeroing\t{self.check_zero_on_preload.isChecked()}\n")
-        txt_handle.write(f"# Preload threshold g\t{self.spin_preload_threshold_g.value():.6f}\n")
         txt_handle.write(f"# Recipe mode\t{self.combo_recipe_mode.currentText()}\n")
-        txt_handle.write(f"# Recipe summary\t{self.label_recipe_summary.text()}\n")
         txt_handle.flush()
 
         writer = csv.DictWriter(
@@ -5096,8 +5411,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "notes": self.edit_run_notes.toPlainText().strip(),
             "initial_length_mm": float(self.spin_initial_length.value()),
             "wire_diameter_mm": float(self.spin_diameter.value()),
-            "preload_zeroing_enabled": self.check_zero_on_preload.isChecked(),
-            "preload_threshold_g": float(self.spin_preload_threshold_g.value()),
+            "mandatory_length_setup": True,
             "steps_per_mm": float(self.spin_steps_per_mm.value()),
             "position_reference_mm": float(self._position_reference_mm),
             "preload_reference_armed": self._preload_reference_armed,
@@ -5144,7 +5458,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "motor_supply_current_limit_a": float(self.spin_motor_supply_current_limit.value()),
             },
             "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
-            "recipe_summary": self.label_recipe_summary.text(),
+            "recipe_summary": self._last_recipe_summary,
             "recipe_estimated_points": int(self._recipe_estimated_points),
             "hsw_distribution": {
                 "basis": self._distribution_basis(),
@@ -5163,7 +5477,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "controlled_current_sweep": {
                 "mode": str(self.combo_recipe_mode.currentData() or ""),
                 "basis": self._current_sweep_basis(),
-                "pre_measurement_setup_enabled": self.check_pre_measurement_setup.isChecked(),
+                "pre_measurement_setup_enabled": self._pre_measurement_setup_enabled(),
                 "setup_preload_stress_mpa": float(self.spin_setup_preload_stress_mpa.value()),
                 "setup_preload_ramp_rate_mpa_s": float(self.spin_setup_preload_ramp_rate_mpa_s.value()),
                 "setup_preload_tolerance_mpa": float(self.spin_setup_preload_tolerance_mpa.value()),
@@ -5214,8 +5528,10 @@ class MainWindow(QtWidgets.QMainWindow):
         basis: str | None = None,
         target_value: float | None = None,
         plateau_index: int | None = None,
+        note: str | None = None,
     ) -> None:
         self._automation_phase = phase
+        self._automation_step_note = note
         self._automation_basis = basis
         self._automation_target_value = target_value
         self._automation_plateau_index = plateau_index
@@ -5226,7 +5542,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._automation_plateau_label = None
 
-    def _start_session(self) -> None:
+    def _start_session(self, *, enable_logging: bool = True, record_initial_point: bool = True) -> None:
         if self._session_active:
             return
         created_utc = _utc_timestamp()
@@ -5280,6 +5596,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preload_trigger_elapsed_s = None
         self._session_points = []
         self._session_active = True
+        self._session_logging_enabled = bool(enable_logging)
         self._session_start_monotonic = time.monotonic()
         self._session_start_wall_s = time.time()
         self._last_session_log_timestamp_s = self._session_start_wall_s
@@ -5299,6 +5616,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._prepare_heating_for_session()
         self._write_session_metadata()
         self._refresh_live_labels()
+        if self._session_logging_enabled and record_initial_point:
+            self._record_current_point()
+
+    def _begin_recipe_logging(self) -> None:
+        if not self._session_active:
+            self._start_session(enable_logging=True, record_initial_point=False)
+            if not self._session_active:
+                return
+        self._recipe_origin_mm = self._current_position_mm
+        self._position_reference_mm = self._current_position_mm
+        self._preload_reference_armed = False
+        self._preload_trigger_elapsed_s = None
+        self._session_points = []
+        self._session_logging_enabled = True
+        self._session_start_monotonic = time.monotonic()
+        self._session_start_wall_s = time.time()
+        self._last_session_log_timestamp_s = self._session_start_wall_s
+        self._session_raw_scale_count = 0
+        self._set_automation_context(phase="start")
+        self._write_session_metadata()
+        self._refresh_plots()
+        self._refresh_live_labels()
         self._record_current_point()
 
     def _stop_session(self) -> None:
@@ -5306,6 +5645,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._stop_auto_ramp(log_completion=False)
         self._session_active = False
+        self._session_logging_enabled = False
         if self._session_txt_handle is not None:
             self._session_txt_handle.close()
             self._session_txt_handle = None
@@ -5332,6 +5672,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _write_raw_scale_sample(self, sample: ScaleSample) -> None:
         if (
             not self._session_active
+            or not self._session_logging_enabled
             or self._session_raw_scale_writer is None
             or self._session_raw_scale_handle is None
             or self._session_start_wall_s <= 0.0
@@ -5482,6 +5823,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if not quiet:
                 QtWidgets.QMessageBox.information(self, APP_NAME, "Start a session before recording points.")
             return False
+        if not self._session_logging_enabled:
+            if not quiet and not self._automation_active:
+                QtWidgets.QMessageBox.information(self, APP_NAME, "Recipe setup is running; normal logging has not started.")
+            return True
         if self._is_max_load_exceeded():
             limit_g = self._effective_max_load_limit_g()
             self._log(
@@ -5546,6 +5891,8 @@ class MainWindow(QtWidgets.QMainWindow):
         force: bool = False,
     ) -> bool:
         if not self._session_active:
+            return True
+        if not self._session_logging_enabled:
             return True
         now_s = time.time()
         last_s = self._last_session_log_timestamp_s
@@ -5833,7 +6180,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         if not self._session_active:
-            self._start_session()
+            self._start_session(enable_logging=False, record_initial_point=False)
             if not self._session_active:
                 return
         self._automation_steps = steps
@@ -5850,6 +6197,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
         self._last_recipe_summary = summary
         self._set_automation_context(phase="start")
+        if steps and steps[0].note == "setup_preload":
+            self._show_length_setup_dialog()
         self._auto_ramp_timer.start(interval_ms)
         self._log(summary)
         self._update_recipe_progress()
@@ -5947,6 +6296,118 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
         self._refresh_recovery_plot()
+
+    def _show_length_setup_dialog(self) -> None:
+        dialog = self._length_setup_dialog
+        if dialog is None or dialog.isHidden():
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle("Mini DMA Length Setup")
+            dialog.resize(760, 520)
+            layout = QtWidgets.QVBoxLayout(dialog)
+            label = QtWidgets.QLabel("Preparing mandatory zero-load and length setup...", dialog)
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            if FigureCanvas is not None:
+                self._length_setup_figure = Figure(figsize=(7.0, 3.8))
+                self._length_setup_canvas = FigureCanvas(self._length_setup_figure)
+                layout.addWidget(self._length_setup_canvas, stretch=1)
+            close_note = QtWidgets.QLabel("This window closes automatically when the recipe start point is ready.", dialog)
+            close_note.setWordWrap(True)
+            close_note.setStyleSheet("color: palette(mid);")
+            layout.addWidget(close_note)
+            self._length_setup_status_label = label
+            self._length_setup_dialog = dialog
+        self._length_setup_points.clear()
+        self._length_setup_start_monotonic = time.monotonic()
+        self._update_length_setup_dialog("Moving to setup preload.")
+        self._refresh_length_setup_plot()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _update_length_setup_dialog(self, message: str) -> None:
+        if self._length_setup_status_label is not None:
+            self._length_setup_status_label.setText(message)
+
+    def _close_length_setup_dialog(self) -> None:
+        if self._length_setup_dialog is not None:
+            self._length_setup_dialog.close()
+
+    def _record_length_setup_point(self) -> bool:
+        if self._length_setup_start_monotonic <= 0.0:
+            self._length_setup_start_monotonic = time.monotonic()
+        elapsed_s = time.monotonic() - self._length_setup_start_monotonic
+        load_g = self._current_effective_load_g()
+        point = self._capture_measurement_point(
+            elapsed_s=elapsed_s,
+            position_mm=self._current_position_mm,
+            raw_load_g=self._latest_scale_value_g,
+            load_g=load_g,
+        )
+        self._length_setup_points.append(point)
+        if len(self._length_setup_points) > 1000:
+            self._length_setup_points = self._length_setup_points[-1000:]
+        self._refresh_length_setup_plot()
+        return True
+
+    def _style_plot_axis(self, axis: Any, theme: Mapping[str, Any]) -> None:
+        axis.set_facecolor(theme["axes_rgb"])
+        for spine in axis.spines.values():
+            spine.set_color(theme["text_rgb"])
+        axis.tick_params(colors=theme["text_rgb"])
+        axis.yaxis.label.set_color(theme["text_rgb"])
+        axis.xaxis.label.set_color(theme["text_rgb"])
+        axis.title.set_color(theme["text_rgb"])
+        axis.grid(True, color=theme["grid_rgba"], alpha=0.6)
+
+    def _refresh_length_setup_plot(self) -> None:
+        if self._length_setup_figure is None or self._length_setup_canvas is None:
+            return
+        theme = self._plot_theme()
+        figure = self._length_setup_figure
+        figure.clear()
+        figure.set_facecolor(theme["figure_rgb"])
+        stress_axis = figure.add_subplot(211)
+        load_axis = stress_axis.twinx()
+        displacement_axis = figure.add_subplot(212, sharex=stress_axis)
+        for axis in (stress_axis, displacement_axis):
+            self._style_plot_axis(axis, theme)
+        load_axis.set_facecolor((0, 0, 0, 0))
+        for spine in load_axis.spines.values():
+            spine.set_color(theme["text_rgb"])
+        load_axis.tick_params(colors=theme["text_rgb"])
+        load_axis.yaxis.label.set_color(theme["text_rgb"])
+        points = self._length_setup_points
+        if points:
+            x_values = [point.elapsed_s for point in points]
+            stress_values = [float("nan") if point.stress_mpa is None else point.stress_mpa for point in points]
+            stress_axis.plot(x_values, stress_values, color="#f87171", marker="o", markersize=2, label="stress")
+            load_axis.plot(x_values, [point.load_g for point in points], color="#38bdf8", marker=".", markersize=3, label="load")
+            displacement_axis.plot(
+                x_values,
+                [point.position_mm for point in points],
+                color="#a78bfa",
+                marker="s",
+                markersize=2,
+                label="displacement",
+            )
+        else:
+            stress_axis.text(
+                0.5,
+                0.5,
+                "Waiting for setup samples",
+                ha="center",
+                va="center",
+                color=theme["text_rgb"],
+                transform=stress_axis.transAxes,
+            )
+        stress_axis.set_ylabel("Stress (MPa)")
+        load_axis.set_ylabel("Load (g)")
+        displacement_axis.set_ylabel("Displacement (mm)")
+        displacement_axis.set_xlabel("Setup time (s)")
+        stress_axis.set_title("Length setup load, stress, and displacement")
+        figure.tight_layout()
+        self._length_setup_canvas.draw_idle()
 
     def _refresh_recovery_plot(self) -> None:
         if self._recovery_plot_dialog is None or self._recovery_plot_dialog.isHidden():
@@ -6092,6 +6553,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._disable_supply_output()
         if log_completion:
             self._log("Recipe stopped.")
+        self._close_length_setup_dialog()
+        if user_initiated and self._session_active:
+            self._stop_session()
         if not keep_progress:
             self._update_recipe_progress()
         self._update_recipe_buttons()
@@ -6119,6 +6583,24 @@ class MainWindow(QtWidgets.QMainWindow):
             for index in range(1, count + 1)
         ]
 
+    def _build_segment_offsets(
+        self,
+        start_offset_mm: float,
+        end_offset_mm: float,
+        step_mm: float,
+    ) -> list[float]:
+        if step_mm <= 0.0:
+            raise ValueError("Step size must be greater than zero.")
+        delta_mm = end_offset_mm - start_offset_mm
+        if delta_mm == 0.0:
+            return []
+        sign = 1.0 if delta_mm >= 0.0 else -1.0
+        count = max(1, int(math.ceil(abs(delta_mm) / step_mm)))
+        return [
+            start_offset_mm + sign * min(index * step_mm, abs(delta_mm))
+            for index in range(1, count + 1)
+        ]
+
     def _build_pre_measurement_setup_steps(self, *, interval_ms: int) -> list[AutomationStep]:
         preload_stress_mpa = float(self.spin_setup_preload_stress_mpa.value())
         preload_ramp_rate_mpa_s = float(self.spin_setup_preload_ramp_rate_mpa_s.value())
@@ -6135,23 +6617,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         steps: list[AutomationStep] = [
             AutomationStep(
-                "seek_target",
-                target_value=0.0,
-                basis=HSW_BASIS_LOAD_G,
-                note="setup_zero",
-            )
-        ]
-        steps.extend(
-            AutomationStep(
-                "settle",
-                target_value=0.0,
-                basis=HSW_BASIS_LOAD_G,
-                note="setup_zero",
-            )
-            for _ in range(stable_steps)
-        )
-        steps.append(
-            AutomationStep(
                 "ramp_target",
                 target_value=preload_stress_mpa,
                 target_start_value=0.0,
@@ -6160,7 +6625,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 basis=HSW_BASIS_STRESS_MPA,
                 note="setup_preload",
             )
-        )
+        ]
         steps.extend(
             AutomationStep(
                 "settle",
@@ -6196,7 +6661,16 @@ class MainWindow(QtWidgets.QMainWindow):
             for _ in range(stable_steps)
         )
         steps.append(AutomationStep("apply_length_setup", note="setup_apply_l0"))
+        steps.append(AutomationStep("start_session", note="recipe_start"))
         return steps
+
+    def _prepend_length_setup_steps(
+        self,
+        steps: list[AutomationStep],
+        *,
+        interval_ms: int,
+    ) -> list[AutomationStep]:
+        return self._build_pre_measurement_setup_steps(interval_ms=interval_ms) + list(steps)
 
     def _build_automation_recipe(self) -> tuple[list[AutomationStep], str, int]:
         mode = str(self.combo_recipe_mode.currentData() or "ramp")
@@ -6209,18 +6683,19 @@ class MainWindow(QtWidgets.QMainWindow):
             interval_ms = int(self.spin_cycle_interval.value())
             if amplitude == 0.0:
                 raise ValueError("Set a non-zero cycle amplitude.")
-            up_targets = self._build_segment_targets(0.0, amplitude, step_mm)
-            down_targets = self._build_segment_targets(amplitude, 0.0, step_mm)
+            up_targets = self._build_segment_offsets(0.0, amplitude, step_mm)
+            down_targets = self._build_segment_offsets(amplitude, 0.0, step_mm)
             steps: list[AutomationStep] = []
             for _ in range(cycles):
                 for target in up_targets:
-                    steps.extend((AutomationStep("move", target), AutomationStep("record")))
+                    steps.extend((AutomationStep("move", relative_mm=target), AutomationStep("record")))
                 for target in down_targets:
-                    steps.extend((AutomationStep("move", target), AutomationStep("record")))
+                    steps.extend((AutomationStep("move", relative_mm=target), AutomationStep("record")))
             steps = self._append_return_to_origin(steps)
+            steps = self._prepend_length_setup_steps(steps, interval_ms=interval_ms)
             summary = (
                 f"Started cyclic displacement recipe: {cycles} cycle(s), amplitude {amplitude:.4f} mm, "
-                f"step {step_mm:.4f} mm, settle {interval_ms} ms."
+                f"step {step_mm:.4f} mm, settle {interval_ms} ms. Includes mandatory length setup."
             )
             return steps, summary, interval_ms
 
@@ -6231,13 +6706,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if duration_s <= 0.0:
                 raise ValueError("Hold duration must be greater than zero.")
             sample_count = max(1, int(math.ceil((duration_s * 1000.0) / interval_ms)))
-            target_mm = self._recipe_origin_mm + target_offset
-            steps = [AutomationStep("move", target_mm), AutomationStep("record")]
+            steps = [AutomationStep("move", relative_mm=target_offset), AutomationStep("record")]
             steps.extend(AutomationStep("record") for _ in range(max(0, sample_count - 1)))
             steps = self._append_return_to_origin(steps)
+            steps = self._prepend_length_setup_steps(steps, interval_ms=interval_ms)
             summary = (
                 f"Started displacement-hold recipe: target offset {target_offset:.4f} mm for "
-                f"{duration_s:.1f} s, record every {interval_ms} ms."
+                f"{duration_s:.1f} s, record every {interval_ms} ms. Includes mandatory length setup."
             )
             return steps, summary, interval_ms
 
@@ -6287,11 +6762,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     for _ in range(points_per_plateau)
                 )
             steps = self._append_return_to_origin(steps)
+            steps = self._prepend_length_setup_steps(steps, interval_ms=interval_ms)
             suffix, _ = self._distribution_units(basis)
             summary = (
                 f"Started Hsw plateau scan: {start_value:.4f}{suffix} to {end_value:.4f}{suffix}, "
                 f"step {step_value:.4f}{suffix}, {points_per_plateau} point(s) per plateau, "
-                f"interval {interval_ms} ms, settle {settle_s:.2f} s."
+                f"interval {interval_ms} ms, settle {settle_s:.2f} s. Includes mandatory length setup."
             )
             return steps, summary, interval_ms
 
@@ -6315,8 +6791,7 @@ class MainWindow(QtWidgets.QMainWindow):
             preload_targets = self._build_numeric_targets(start_load_g, end_load_g, load_step_g)
             baseline_count = max(1, int(math.ceil((baseline_s * 1000.0) / interval_ms)))
             settle_count = max(0, int(math.ceil((settle_s * 1000.0) / interval_ms)))
-            setup_enabled = self._pre_measurement_setup_enabled(mode)
-            steps = self._build_pre_measurement_setup_steps(interval_ms=interval_ms) if setup_enabled else []
+            steps = self._build_pre_measurement_setup_steps(interval_ms=interval_ms)
             steps.extend(
                 AutomationStep(
                     "calibration_record",
@@ -6395,16 +6870,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"in {load_step_g:.4f} g steps, {steps_per_direction} forward/reverse "
                 f"{move_step_mm:.4f} mm move(s) per preload."
             )
-            if setup_enabled:
-                setup_load_g = load_g_from_stress_mpa(
-                    float(self.spin_setup_preload_stress_mpa.value()),
-                    float(self.spin_diameter.value()),
-                )
-                load_text = "-" if setup_load_g is None else f" (~{setup_load_g:.4f} g)"
-                summary += (
-                    " Includes zero/preload length setup: "
-                    f"0 g -> {self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
-                )
+            setup_load_g = load_g_from_stress_mpa(
+                float(self.spin_setup_preload_stress_mpa.value()),
+                float(self.spin_diameter.value()),
+            )
+            load_text = "-" if setup_load_g is None else f" (~{setup_load_g:.4f} g)"
+            summary += (
+                " Includes mandatory length setup: "
+                f"{self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
+            )
             return steps, summary, interval_ms
 
         if self._is_current_sweep_mode(mode):
@@ -6422,10 +6896,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise ValueError("Set a non-zero target ramp rate.")
             targets = self._build_numeric_targets(target_start, target_end, target_step)
             settle_steps = max(0, int(math.ceil((settle_s * 1000.0) / interval_ms)))
-            setup_enabled = self._pre_measurement_setup_enabled(mode)
-            steps = self._build_pre_measurement_setup_steps(interval_ms=interval_ms) if setup_enabled else []
-            live_target = self._current_distribution_value(basis)
-            previous_target: float | None = 0.0 if setup_enabled else live_target if live_target is not None else target_start
+            steps = self._build_pre_measurement_setup_steps(interval_ms=interval_ms)
+            previous_target: float | None = 0.0
             for plateau_index, target in enumerate(targets, start=1):
                 steps.append(
                     AutomationStep(
@@ -6519,16 +6991,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"at {current_ramp_rate:.2f} mA/s; control every {interval_ms} ms, "
                 f"log every {self._current_sweep_log_interval_ms()} ms."
             )
-            if setup_enabled:
-                setup_load_g = load_g_from_stress_mpa(
-                    float(self.spin_setup_preload_stress_mpa.value()),
-                    float(self.spin_diameter.value()),
-                )
-                load_text = "-" if setup_load_g is None else f" (~{setup_load_g:.4f} g)"
-                summary += (
-                    " Includes zero/preload length setup: "
-                    f"0 g -> {self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
-                )
+            setup_load_g = load_g_from_stress_mpa(
+                float(self.spin_setup_preload_stress_mpa.value()),
+                float(self.spin_diameter.value()),
+            )
+            load_text = "-" if setup_load_g is None else f" (~{setup_load_g:.4f} g)"
+            summary += (
+                " Includes mandatory length setup: "
+                f"{self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
+            )
             return steps, summary, interval_ms
 
         total_distance_mm = float(self.spin_ramp_distance.value())
@@ -6536,14 +7007,15 @@ class MainWindow(QtWidgets.QMainWindow):
         interval_ms = int(self.spin_ramp_interval.value())
         if total_distance_mm == 0.0:
             raise ValueError("Set a non-zero ramp distance.")
-        targets = self._build_segment_targets(0.0, total_distance_mm, step_mm)
+        targets = self._build_segment_offsets(0.0, total_distance_mm, step_mm)
         steps = []
         for target in targets:
-            steps.extend((AutomationStep("move", target), AutomationStep("record")))
+            steps.extend((AutomationStep("move", relative_mm=target), AutomationStep("record")))
         steps = self._append_return_to_origin(steps)
+        steps = self._prepend_length_setup_steps(steps, interval_ms=interval_ms)
         summary = (
             f"Started displacement-ramp recipe: distance {total_distance_mm:.4f} mm, "
-            f"step {step_mm:.4f} mm, settle {interval_ms} ms."
+            f"step {step_mm:.4f} mm, settle {interval_ms} ms. Includes mandatory length setup."
         )
         return steps, summary, interval_ms
 
@@ -6700,8 +7172,9 @@ class MainWindow(QtWidgets.QMainWindow):
             basis=step.basis,
             target_value=desired_value,
             plateau_index=plateau_index,
+            note=step.note,
         )
-        tolerance = abs(float(self.spin_current_sweep_tolerance.value()))
+        tolerance = self._automation_tolerance_for_step(step)
         try:
             reached = self._seek_distribution_target(step.basis, desired_value, tolerance)
         except Exception as exc:
@@ -6722,6 +7195,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self._setup_preload_position_mm = float(self._current_position_mm)
+        self._record_length_setup_point()
+        self._update_length_setup_dialog("Setup preload reached. Enter the measured wire length at preload.")
         default_length_mm = max(0.001, float(self.spin_initial_length.value()))
         measured_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
             self,
@@ -6737,6 +7212,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
         self._setup_measured_length_mm = float(measured_length_mm)
+        self._update_length_setup_dialog("Measured length saved. Returning load to 0 g to compute l0.")
         self._log(
             "Measured preload length accepted: "
             f"{_format_compact_unit(self._setup_measured_length_mm, 'mm', decimals=4)}."
@@ -6755,6 +7231,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 preload_position_mm=self._setup_preload_position_mm,
                 zero_position_mm=float(self._current_position_mm),
             )
+            self._record_length_setup_point()
+            self._update_length_setup_dialog("Length setup finished. Starting the recipe log.")
         except Exception as exc:
             self._log(f"Recipe stopped: {exc}")
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
@@ -6823,12 +7301,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log("Recovery completed." if is_recovery else "Recipe completed.")
             if not is_recovery and self._session_active:
                 self._stop_session()
+            if not is_recovery and self.check_return_to_origin.isChecked():
+                self._start_recovery_position_origin()
             return
         step = self._automation_steps[self._automation_index]
         self._automation_index += 1
         if step.action == "move":
             self._set_automation_context(phase="move")
-            if step.target_mm is None or not self._move_to_position_mm(step.target_mm):
+            target_mm = step.target_mm
+            if target_mm is None and step.relative_mm is not None:
+                target_mm = self._recipe_origin_mm + float(step.relative_mm)
+            if target_mm is None or not self._move_to_position_mm(target_mm):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
         elif step.action == "ramp_target":
             finished = self._handle_target_ramp_step(step, self._automation_index - 1)
@@ -6844,6 +7327,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 basis=step.basis,
                 target_value=step.target_value,
                 plateau_index=plateau_index,
+                note=step.note,
             )
             tolerance = self._automation_tolerance_for_step(step)
             if tolerance <= 0.0:
@@ -6888,11 +7372,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 phase="length_prompt",
                 basis=step.basis,
                 target_value=step.target_value,
+                note=step.note,
             )
             self._handle_measure_length_prompt_step()
         elif step.action == "apply_length_setup":
-            self._set_automation_context(phase="apply_l0")
+            self._set_automation_context(phase="apply_l0", note=step.note)
             self._handle_apply_length_setup_step()
+        elif step.action == "start_session":
+            self._begin_recipe_logging()
+            self._close_length_setup_dialog()
         elif step.action == "calibration_move":
             self._handle_calibration_move_step(step)
         elif step.action == "calibration_record":
@@ -6904,6 +7392,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 basis=step.basis,
                 target_value=step.target_value,
                 plateau_index=plateau_index,
+                note=step.note,
             )
             if (
                 step.basis
@@ -7175,24 +7664,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("backlash_mm", self.spin_backlash_mm.value())
         self.settings.setValue("initial_length_mm", self.spin_initial_length.value())
         self.settings.setValue("diameter_mm", self.spin_diameter.value())
-        self.settings.setValue("preload_zeroing_enabled", self.check_zero_on_preload.isChecked())
-        self.settings.setValue("preload_threshold_g", self.spin_preload_threshold_g.value())
         self.settings.setValue("name_composition", self.edit_name_composition.text())
         self.settings.setValue("name_wire", self.edit_name_wire.text())
         self.settings.setValue("name_specimen", self.edit_name_specimen.text())
         self.settings.setValue("name_condition", self.edit_name_condition.text())
-        self.settings.setValue("auto_name", self.check_auto_name.isChecked())
         self.settings.setValue("sample_name", self.edit_sample_name.text())
         self.settings.setValue("run_notes", self.edit_run_notes.toPlainText())
         self.settings.setValue("builder_project_path", self.edit_project_path.text())
         self.settings.setValue("log_dir", self.edit_log_dir.text())
         self.settings.setValue("log_name", self.edit_log_name.text())
-        self.settings.setValue(
-            "zero_position_on_start",
-            self.check_zero_position_on_start.isChecked(),
-        )
         self.settings.setValue("tare_on_start", self.check_tare_on_start.isChecked())
         self.settings.setValue("capture_zero_load_reference_on_start", self.check_hardware_tare_on_start.isChecked())
+        self.settings.setValue("developer_run_log_mirror_enabled", self._run_log_mirror_enabled)
+        self.settings.setValue("developer_run_log_mirror_path", str(self._run_log_mirror_path))
         self.settings.setValue("recipe_mode", self.combo_recipe_mode.currentData())
         self.settings.setValue("return_to_origin", self.check_return_to_origin.isChecked())
         self.settings.setValue("ramp_distance_mm", self.spin_ramp_distance.value())
@@ -7229,9 +7713,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("calibration_interval_ms", self.spin_calibration_interval.value())
         self.settings.setValue("calibration_defaults_version", CALIBRATION_DEFAULTS_VERSION)
         self.settings.setValue("current_sweep_basis", self._current_sweep_basis())
-        self.settings.setValue("pre_measurement_setup_enabled", self.check_pre_measurement_setup.isChecked())
         self.settings.setValue("setup_preload_stress_mpa", self.spin_setup_preload_stress_mpa.value())
         self.settings.setValue("setup_preload_ramp_rate_mpa_s", self.spin_setup_preload_ramp_rate_mpa_s.value())
+        self.settings.setValue("setup_stage_speed_mm_s", self.spin_setup_stage_speed_mm_s.value())
         self.settings.setValue("setup_preload_tolerance_mpa", self.spin_setup_preload_tolerance_mpa.value())
         self.settings.setValue("setup_zero_tolerance_g", self.spin_setup_zero_tolerance_g.value())
         self.settings.setValue("setup_zero_stable_s", self.spin_setup_zero_stable_s.value())
@@ -7350,26 +7834,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_backlash_mm.setValue(float(self.settings.value("backlash_mm", 0.0)))
         self.spin_initial_length.setValue(float(self.settings.value("initial_length_mm", 30.0)))
         self.spin_diameter.setValue(float(self.settings.value("diameter_mm", 0.03)))
-        self.check_zero_on_preload.setChecked(bool(self.settings.value("preload_zeroing_enabled", True, type=bool)))
-        self.spin_preload_threshold_g.setValue(float(self.settings.value("preload_threshold_g", 0.02)))
+        self._mark_diameter_imported(False)
+        self.check_zero_on_preload.setChecked(False)
+        self.spin_preload_threshold_g.setValue(0.0)
         self.edit_name_composition.setText(self.settings.value("name_composition", "", type=str))
         saved_wire = self.settings.value("name_wire", "", type=str)
         self.edit_name_wire.setText(MicrowireLineEdit.to_display_text(saved_wire) or saved_wire)
         self.edit_name_specimen.setText(self.settings.value("name_specimen", "", type=str))
         self.edit_name_condition.setText(self.settings.value("name_condition", "", type=str))
-        self.check_auto_name.setChecked(bool(self.settings.value("auto_name", True, type=bool)))
         self.edit_sample_name.setText(self.settings.value("sample_name", "", type=str))
         self.edit_run_notes.setPlainText(self.settings.value("run_notes", "", type=str))
-        self.edit_project_path.setText(self.settings.value("builder_project_path", "", type=str))
+        builder_project_path = self.settings.value("builder_project_path", "", type=str)
+        self.edit_project_path.setText(builder_project_path)
+        self._builder_project_path = Path(builder_project_path) if builder_project_path else None
         restored_log_dir = self.settings.value("log_dir", self.edit_log_dir.text(), type=str)
         if self._provided_log_dir:
             self.edit_log_dir.setText(self._provided_log_dir)
         else:
             self.edit_log_dir.setText(restored_log_dir)
         self.edit_log_name.setText(self.settings.value("log_name", DEFAULT_LOG_BASENAME, type=str))
-        self.check_zero_position_on_start.setChecked(
-            bool(self.settings.value("zero_position_on_start", True, type=bool))
-        )
+        self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+        self.check_zero_position_on_start.setChecked(False)
         self.check_tare_on_start.setChecked(
             bool(self.settings.value("tare_on_start", False, type=bool))
         )
@@ -7388,6 +7873,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_return_to_origin.setChecked(
             bool(self.settings.value("return_to_origin", True, type=bool))
         )
+        self._run_log_mirror_path = Path(
+            self.settings.value("developer_run_log_mirror_path", str(DEFAULT_RUN_LOG_MIRROR_PATH), type=str)
+        )
+        self._run_log_mirror_enabled = bool(
+            self.settings.value("developer_run_log_mirror_enabled", False, type=bool)
+        )
+        if hasattr(self, "action_mirror_run_log") and self.action_mirror_run_log is not None:
+            self.action_mirror_run_log.blockSignals(True)
+            self.action_mirror_run_log.setChecked(self._run_log_mirror_enabled)
+            self.action_mirror_run_log.blockSignals(False)
         self.spin_ramp_distance.setValue(float(self.settings.value("ramp_distance_mm", 1.0)))
         self.spin_ramp_step.setValue(float(self.settings.value("ramp_step_mm", 0.1)))
         self.spin_ramp_interval.setValue(int(self.settings.value("ramp_interval_ms", 1000)))
@@ -7484,14 +7979,14 @@ class MainWindow(QtWidgets.QMainWindow):
         current_sweep_basis_index = self.combo_current_sweep_basis.findData(current_sweep_basis)
         if current_sweep_basis_index >= 0:
             self.combo_current_sweep_basis.setCurrentIndex(current_sweep_basis_index)
-        self.check_pre_measurement_setup.setChecked(
-            bool(self.settings.value("pre_measurement_setup_enabled", False, type=bool))
-        )
         self.spin_setup_preload_stress_mpa.setValue(
             max(0.001, float(self.settings.value("setup_preload_stress_mpa", 10.0)))
         )
         self.spin_setup_preload_ramp_rate_mpa_s.setValue(
             max(0.001, float(self.settings.value("setup_preload_ramp_rate_mpa_s", 1.0)))
+        )
+        self.spin_setup_stage_speed_mm_s.setValue(
+            max(0.001, float(self.settings.value("setup_stage_speed_mm_s", 1.0)))
         )
         self.spin_setup_preload_tolerance_mpa.setValue(
             max(0.0001, float(self.settings.value("setup_preload_tolerance_mpa", 0.25)))

@@ -7,7 +7,7 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 - Scale communication: G&G balance on serial, including live real-gram reads and zero-load reference capture.
 - Motion communication: Pololu Tic T500 through `ticcmd`, including position zero, jog, halt, and recipe-driven position moves.
 - Supply communication: HMP4030/Owon-style SCPI supply, including current setpoint, output control, and measured voltage/current.
-- `.pydpj` import: the Specimen tab can load a Microwire Data Builder project and fill sample metadata, diameter, and current when a matching row is found.
+- `.pydpj` import: the Sample tab remembers the last Microwire Data Builder project, auto-imports diameter/current when the current naming fields match a row, and marks the diameter control red until the diameter came from the project. Manual diameter edits remain possible.
 - Stress calculation: stress is calculated from effective load and wire diameter.
 - Strain calculation: strain is calculated from displacement and `l0`, and can be delayed until the preload threshold is reached so slack take-up does not pollute strain zero.
 - Logging: CSV includes elapsed time, raw Tic position, tensile-positive displacement, signed raw balance reading, positive applied tensile-load magnitude, preload state, strain, stress, current setpoint, measured current, voltage, resistance, power, and recipe context. Resistance is intentionally blank when the current is effectively zero.
@@ -16,7 +16,7 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 ## Current UI Map
 
 - `Recipe`: normal bench operation, current sample reminder, recipe selection, per-recipe speed controls, zero-load reference capture, estimated points/duration, progress bar, auto-connect start button, and manual move/record actions.
-- `Specimen`: naming, gauge length, diameter, preload zeroing, `.pydpj` import, output folder, session start/stop.
+- `Sample`: naming, diameter, `.pydpj` import, output folder, and base filename. The recipe-start setup measures the preloaded length and computes unloaded `l0`.
 - `Hardware`: lower-priority scale, motor, power-supply, safety, and advanced serial/motor-driver settings for bring-up or troubleshooting.
 - Right dashboard: live plot, run log, and plot presets. The duplicate status-bar echo is hidden so log lines only appear once.
 
@@ -29,7 +29,7 @@ Use copper wire first, with conservative settings.
 1. Confirm scale, Tic, and supply auto-detection.
 2. Connect scale and supply, then use `Probe scale` and `Read supply now`.
 3. Leave the balance showing real grams and set `Zero-load scale reading` to the unloaded hanging-weight reading, currently `21.200 g`, or use `Capture zero-load` only when the wire is at known `0 g` applied load.
-4. For real microwire runs, enable the zero/preload length setup: Mini DMA first seeks `0 g` applied load at the real `21.200 g` scale reading, ramps to a small preload such as `10 MPa`, prompts for the measured gauge length, returns to `0 g`, and computes `l0` from the measured length minus the tensile stage movement.
+4. For real microwire runs, the mandatory length setup ramps to a small preload such as `10 MPa`, shows live load/stress/displacement traces in the setup popup, prompts for the measured gauge length, returns to `0 g`, and computes `l0` from the measured length minus the tensile stage movement.
 5. Start with the `Iso-load current sweep` recipe. The copper setup currently uses quick bring-up targets `0, 3, 6, 9 g`, ramps between targets at a configurable load rate such as `0.1 g/s`, uses a faster target-ramp stage speed plus slower fine correction moves near the target, sweeps current from `1 mA` to a conservative low-current maximum and back at each load, then returns toward `0 g`.
 6. Use tiny jogs to verify the load sign and motion direction. On the current rig, negative raw scale readings are treated as positive tensile load, so users should still type positive load targets.
 7. Let `Start recipe (auto-connect)` preflight the scale and supply. For iso-load, iso-stress, and iso-strain current sweeps, the recipe controls current directly.

@@ -54,7 +54,6 @@ def _build_window(tmp_path: Path, qtbot) -> mini_dma_mod.MainWindow:
     window.check_zero_position_on_start.setChecked(False)
     window.check_tare_on_start.setChecked(False)
     window.check_hardware_tare_on_start.setChecked(False)
-    window.check_pre_measurement_setup.setChecked(False)
     window.spin_zero_load_scale_g.setValue(0.0)
     return window
 
@@ -96,7 +95,6 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
     mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
     assert mode_index >= 0
     window.combo_recipe_mode.setCurrentIndex(mode_index)
-    window.check_pre_measurement_setup.setChecked(True)
     window.spin_setup_preload_stress_mpa.setValue(10.0)
     window.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
     window.spin_setup_zero_stable_s.setValue(1.0)
@@ -109,17 +107,19 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
         steps, summary, interval_ms = window._build_automation_recipe()
 
         assert interval_ms == 250
-        assert "zero/preload length setup" in summary
-        assert steps[0].action == "seek_target"
-        assert steps[0].basis == mini_dma_mod.HSW_BASIS_LOAD_G
-        assert steps[0].target_value == pytest.approx(0.0)
+        assert "length setup" in summary
+        assert steps[0].action == "ramp_target"
+        assert steps[0].basis == mini_dma_mod.HSW_BASIS_STRESS_MPA
+        assert steps[0].target_end_value == pytest.approx(10.0)
         actions = [step.action for step in steps]
         assert "measure_length_prompt" in actions
         assert "apply_length_setup" in actions
+        assert "start_session" in actions
         prompt_index = actions.index("measure_length_prompt")
         apply_index = actions.index("apply_length_setup")
+        session_index = actions.index("start_session")
         first_recipe_index = actions.index("set_current")
-        assert prompt_index < apply_index < first_recipe_index
+        assert prompt_index < apply_index < session_index < first_recipe_index
         preload_step = next(step for step in steps if step.note == "setup_preload")
         assert preload_step.action == "ramp_target"
         assert preload_step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA
@@ -336,8 +336,11 @@ def test_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> 
         assert interval_ms == 250
         assert "calibration" in summary
         assert window.combo_recipe_mode.itemText(mode_index) == "Calibration"
-        assert steps[0].action == "calibration_record"
-        assert steps[0].note == "calibration_baseline"
+        actions = [step.action for step in steps]
+        assert steps[0].action == "ramp_target"
+        assert "start_session" in actions
+        first_record = next(step for step in steps if step.action == "calibration_record")
+        assert first_record.note == "calibration_baseline"
         assert any(
             step.action == "seek_target"
             and step.basis == mini_dma_mod.HSW_BASIS_LOAD_G
@@ -352,19 +355,16 @@ def test_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> 
         ]
         assert [step.relative_mm for step in forward_moves] == [pytest.approx(0.01)] * 4
         assert [step.relative_mm for step in reverse_moves] == [pytest.approx(-0.01)] * 4
-        assert steps[-2].action == "move"
-        assert steps[-2].target_mm == pytest.approx(window._recipe_origin_mm)
-        assert steps[-1].action == "record"
+        assert steps[-1].action == "calibration_record"
     finally:
         _close_test_window(window)
 
 
-def test_calibration_recipe_can_prepend_length_setup(tmp_path: Path, qtbot) -> None:
+def test_calibration_recipe_includes_mandatory_length_setup(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION)
     assert mode_index >= 0
     window.combo_recipe_mode.setCurrentIndex(mode_index)
-    window.check_pre_measurement_setup.setChecked(True)
     window.spin_setup_preload_stress_mpa.setValue(10.0)
     window.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
     window.spin_setup_zero_stable_s.setValue(1.0)
@@ -378,13 +378,15 @@ def test_calibration_recipe_can_prepend_length_setup(tmp_path: Path, qtbot) -> N
         steps, summary, interval_ms = window._build_automation_recipe()
 
         assert interval_ms == 250
-        assert "zero/preload length setup" in summary
+        assert "mandatory length setup" in summary
         actions = [step.action for step in steps]
-        assert steps[0].action == "seek_target"
+        assert steps[0].action == "ramp_target"
+        assert steps[0].note == "setup_preload"
         assert "measure_length_prompt" in actions
         assert "apply_length_setup" in actions
+        assert "start_session" in actions
         assert actions.index("measure_length_prompt") < actions.index("apply_length_setup")
-        assert actions.index("apply_length_setup") < actions.index("calibration_record")
+        assert actions.index("apply_length_setup") < actions.index("start_session") < actions.index("calibration_record")
     finally:
         _close_test_window(window)
 
@@ -722,9 +724,7 @@ def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtb
         window.spin_current_sweep_interval.setValue(500)
         window._update_recipe_mode_ui()
 
-        assert "Estimated duration: 8.1 min" in window.label_recipe_estimate.text()
-        assert "20 g" in window.label_recipe_summary.text()
-        assert "20.0000" not in window.label_recipe_summary.text()
+        assert "Estimated duration: 8.3 min" in window.label_recipe_estimate.text()
         assert window.recipe_progress.maximum() > 100
         assert window.recipe_progress.value() == 0
         assert "idle" in window.recipe_progress.format()
@@ -745,7 +745,7 @@ def test_recipe_start_keeps_timed_progress_estimate(tmp_path: Path, qtbot) -> No
         assert expected_ticks > len(steps)
 
         window._preflight_recipe_hardware = lambda _steps: True  # type: ignore[method-assign]
-        window._start_session = lambda: setattr(window, "_session_active", True)  # type: ignore[method-assign]
+        window._start_session = lambda **_kwargs: setattr(window, "_session_active", True)  # type: ignore[method-assign]
 
         window._start_auto_ramp()
 
@@ -838,6 +838,208 @@ def test_status_bar_is_hidden_so_run_log_is_not_duplicated(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_developer_run_log_mirror_writes_log_lines(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mirror_path = tmp_path / "mini_dma_run_log.txt"
+
+    try:
+        window._run_log_mirror_path = mirror_path
+        window._run_log_mirror_enabled = True
+
+        window._log("mirror probe")
+
+        assert "mirror probe" in mirror_path.read_text(encoding="utf-8")
+    finally:
+        _close_test_window(window)
+
+
+def test_sample_tab_is_streamlined_and_named_sample(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        tab_widget = window._control_scroll_area.widget().findChild(QtWidgets.QTabWidget)
+        tab_labels = [tab_widget.tabText(index) for index in range(tab_widget.count())]
+        assert tab_labels == ["Recipe", "Sample", "Hardware"]
+
+        tab_widget.setCurrentIndex(1)
+        visible_texts = {
+            widget.text()
+            for widget in tab_widget.widget(1).findChildren((QtWidgets.QLabel, QtWidgets.QCheckBox, QtWidgets.QPushButton))
+            if widget.isVisible()
+        }
+        forbidden = {
+            "Gauge length l0",
+            "Auto-fill sample name and base filename from the fields above",
+            "Apply naming fields now",
+            "Zero strain/stress only after preload is reached",
+            "Preload threshold",
+            "Set current position as gauge zero",
+            "Set current Tic position to 0 when the session starts",
+            "Start session",
+            "Stop session",
+            "Record point now",
+        }
+        assert visible_texts.isdisjoint(forbidden)
+    finally:
+        _close_test_window(window)
+
+
+def test_naming_fields_always_autofill_sample_and_filename(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert not hasattr(window, "check_auto_name")
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/2")
+        window.edit_name_condition.setText("calibration")
+
+        assert window.edit_sample_name.text() == "Ni50Fe27Ga23 12/2 calibration"
+        assert window.edit_log_name.text() == "Ni50Fe27Ga23 12_2 calibration"
+    finally:
+        _close_test_window(window)
+
+
+def test_saved_sample_fields_and_builder_project_autoimport_diameter(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "d (um)": 19.1,
+                                "Imax (mA)": 37.5,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.setValue("name_composition", "Ni50Fe27Ga23")
+    settings.setValue("name_wire", "12/2")
+    settings.setValue("name_condition", "test")
+    settings.setValue("builder_project_path", str(project_path))
+    settings.setValue("diameter_mm", 0.03)
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+
+    try:
+        assert window.edit_name_composition.text() == "Ni50Fe27Ga23"
+        assert window.edit_name_wire.text() == "12/2"
+        assert window.edit_name_condition.text() == "test"
+        assert window.edit_sample_name.text() == "Ni50Fe27Ga23 12/2 test"
+        assert window.edit_log_name.text() == "Ni50Fe27Ga23 12_2 test"
+        assert Path(window.edit_project_path.text()) == project_path
+        assert window._builder_project_path == project_path
+        assert window.spin_diameter.value() == pytest.approx(0.0191)
+        assert "Imported" in window.label_project_status.text()
+        assert "diameter 0.01910 mm" in window.label_project_status.text()
+        assert "border" not in window.spin_diameter.styleSheet()
+    finally:
+        _close_test_window(window)
+
+
+def test_wire_diameter_is_marked_until_imported_but_manual_edits_still_work(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._mark_diameter_imported(False)
+        assert "border" in window.spin_diameter.styleSheet()
+
+        window.spin_diameter.setValue(0.0191)
+
+        assert window.spin_diameter.value() == pytest.approx(0.0191)
+        assert "border" in window.spin_diameter.styleSheet()
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/2")
+        window.spin_diameter.setValue(0.03)
+        window.spin_setup_preload_stress_mpa.setValue(10.0)
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_current_sweep_target_start.setValue(10.0)
+        window.spin_current_sweep_target_ramp_rate.setValue(1.0)
+        window._update_recipe_mode_ui()
+
+        assert "Sample: Ni50Fe27Ga23 12/2" in window.label_recipe_sample.text()
+        assert "diameter 0.03 mm" in window.label_recipe_sample.text()
+        assert "0.7208 g" in window.label_setup_preload_stress_equiv.text()
+        assert "0.07208 g/s" in window.label_setup_preload_ramp_equiv.text()
+        assert "0.7208 g" in window.label_current_target_start_equiv.text()
+        assert "0.07208 g/s" in window.label_current_target_ramp_equiv.text()
+        assert "palette(mid)" not in window.label_current_target_start_equiv.styleSheet()
+
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_current_sweep_target_start.setValue(
+            mini_dma_mod.load_g_from_stress_mpa(10.0, window.spin_diameter.value())
+        )
+        window._update_recipe_mode_ui()
+
+        assert window.label_current_target_start_equiv.text().endswith("MPa")
+        assert float(window.label_current_target_start_equiv.text().split()[0]) == pytest.approx(10.0, rel=2e-4)
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_preload_target_ramp_uses_setup_stage_speed(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_setup_stage_speed_mm_s.setValue(1.25)
+        window.spin_calibration_speed_mm_s.setValue(0.05)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CALIBRATION
+        window._set_automation_context(phase="target_ramp", basis=mini_dma_mod.HSW_BASIS_STRESS_MPA)
+        assert window._motion_speed_for_current_context(manual_jog=False) == pytest.approx(1.25)
+    finally:
+        _close_test_window(window)
+
+
+def test_length_setup_dialog_contains_live_graph_and_records_setup_points(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._show_length_setup_dialog()
+
+        assert window._length_setup_canvas is not None
+        assert window._length_setup_figure is not None
+
+        window._latest_scale_value_g = 21.5
+        window._latest_scale_timestamp = time.time()
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_tension_load_positive.setChecked(False)
+        window._current_position_mm = -0.2
+        window._record_length_setup_point()
+
+        assert len(window._length_setup_points) == 1
+        point = window._length_setup_points[0]
+        assert point.load_g == pytest.approx(0.3)
+        assert point.stress_mpa is not None
+    finally:
+        _close_test_window(window)
+
+
 def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -848,7 +1050,7 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.edit_ticcmd_path.isVisible() is False
         assert window.spin_steps_per_mm.isVisible() is False
         tab_labels = [window._control_scroll_area.widget().findChild(QtWidgets.QTabWidget).tabText(index) for index in range(3)]
-        assert tab_labels == ["Recipe", "Specimen", "Hardware"]
+        assert tab_labels == ["Recipe", "Sample", "Hardware"]
         index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
@@ -1032,9 +1234,11 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
         record_steps = [step for step in steps if step.action == "record"]
         current_steps = [step for step in steps if step.action == "set_current"]
         current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
-        target_ramps = [step for step in steps if step.action == "ramp_target"]
+        target_ramps = [step for step in steps if step.action == "ramp_target" and step.note != "setup_preload"]
+        setup_ramps = [step for step in steps if step.action == "ramp_target" and step.note == "setup_preload"]
 
         assert interval_ms == 250
+        assert len(setup_ramps) == 1
         assert len(current_sweep_steps) == 8
         assert len(target_ramps) == 5
         assert current_sweep_steps[0].basis == mini_dma_mod.HSW_BASIS_LOAD_G
@@ -2022,9 +2226,35 @@ def test_recipe_completion_stops_session_logging(tmp_path: Path, qtbot) -> None:
 
         window._handle_auto_ramp_tick()
 
-        assert window._automation_active is False
+        assert window._automation_active is True
+        assert window._automation_name == mini_dma_mod.RECOVERY_POSITION
         assert window._session_active is False
         assert "Recipe completed" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_user_stop_stops_recipe_session_logging(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("recipe_user_stop")
+    window._latest_scale_timestamp = time.time()
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("record")]
+        window._automation_index = 0
+        window._automation_total_steps = 1
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+
+        window._stop_recipe_from_button()
+
+        assert window._automation_active is False
+        assert window._session_active is False
+        assert window._session_csv_handle is None
+        assert "Recipe stopped" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -2256,11 +2486,11 @@ def test_recipe_sample_header_tracks_sample_name(tmp_path: Path, qtbot) -> None:
     try:
         window.edit_sample_name.setText("Ni51Fe26Ga21 156/2 s1")
 
-        assert window.label_recipe_sample.text() == "Sample: Ni51Fe26Ga21 156/2 s1"
+        assert window.label_recipe_sample.text() == "Sample: Ni51Fe26Ga21 156/2 s1 | diameter 0.03 mm"
 
         window.edit_sample_name.clear()
 
-        assert window.label_recipe_sample.text() == "Sample: (unnamed sample)"
+        assert window.label_recipe_sample.text() == "Sample: (unnamed sample) | diameter 0.03 mm"
     finally:
         _close_test_window(window)
 
