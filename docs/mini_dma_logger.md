@@ -58,7 +58,10 @@ Current intended hardware stack:
 - log messages appear in the `Run log`; the duplicate status-bar echo is hidden, and a Developer-menu mirror can write the run log to a rotating text file for debugging
 - output to `TXT`, `CSV`, and `JSON` metadata sidecar
 - each active session also writes a high-rate raw scale sidecar named `<run>.scale_raw.csv`, while the main CSV remains a slower recipe/session log
-- the current-sweep `Control interval` is separate from the `Log interval`, so hardware feedback/correction can run faster than human-readable session rows
+- recipe timing is split into a global control interval, global log interval, and UI refresh interval; individual recipes no longer own their own scheduler frequency
+- the global timing controls live under `Settings -> Timing...` instead of taking space in the normal Recipe panel
+- hardware communication keeps its own cadence: request-mode scale acquisition uses the scale request interval, Tic keepalive/status use their own timers, and power-supply readbacks stay throttled so they do not block fast current commands
+- the current G&G scale does not stream passively at `9600`; its measured `ESC+p` reply cadence is about 5 Hz, so Mini DMA defaults G&G request-mode acquisition to a 250 ms interval with a 300 ms read timeout and records every actual reply in the raw sidecar
 - shape-memory-friendly export columns for `Displacement`, positive applied tensile `Load`, `Strain`, and `Stress`
 
 ### Motion
@@ -68,7 +71,8 @@ Current intended hardware stack:
 - stale saved `ticcmd` paths are ignored in favor of a discovered local Pololu installation
 - motor moves energize the Tic, reset its command timeout, and exit safe-start before sending the position target; a short keepalive continues resetting the command timeout during active recipes/manual holds
 - Tic status shows VIN motor-supply voltage and warns/preflights when VIN is below the motor-power threshold
-- displacement recipes expose their own linear move speed, while iso-load, iso-stress, and iso-strain current sweeps are separate recipe choices with target ramp rate, target ramp stage speed, conservative correction step, and correction move speed controls
+- displacement recipes expose their own linear move speed; the app schedules successive target positions from move distance and speed while the faster control loop stays available for logging, safety checks, and closed-loop decisions
+- iso-load, iso-stress, and iso-strain current sweeps are separate recipe choices with target ramp rate, target ramp stage speed, conservative correction step, and correction move speed controls
 - `Calibration` is a dedicated automatic recipe for mechanical characterization: after the operator mounts the wire and confirms zero-load/safety settings, Mini DMA runs the same mandatory length setup used by other recipes, measures baseline scale noise, seeks configured load preloads, performs forward/reverse micro-move sweeps, records labeled calibration phases, and saves stiffness/backlash plus stress-strain estimates into the JSON metadata
 - clear stacked `Move up` / `Move down` buttons can be held for continuous manual jogging from the last commanded target, with held movement advancing by the configured linear `Manual move speed` in `mm/s`
 - current-sweep recipes use an editable zero-load scale reference instead of physically taring the balance; the default hanging-weight reference is `21.200 g`
@@ -91,7 +95,8 @@ Current intended hardware stack:
 - one normal `Capture zero-load` action that records the current real balance reading as the `0 g` applied-load reference without changing the scale display
 - optional session-start capture of the zero-load reference, for use only when the current raw balance reading is definitely unloaded
 - applied tensile load is displayed and logged as the positive tensile magnitude in `Load` / `load_g` using `zero-load scale reading - current scale reading` for the current hanging-weight rig; signed raw balance remains available as `raw_load_g` for diagnostics
-- scale polling defaults to 50 ms and feeds a rolling signal buffer; main CSV rows include interval load mean, standard deviation, min/max, sample count, and achieved scale sample rate
+- the current G&G request/response scale on `COM6` at `9600` baud does not stream passively; it replies to `ESC+p` at about 5 Hz, so request-mode scale polling defaults to 250 ms and feeds a rolling signal buffer
+- main CSV rows include interval load mean, standard deviation, min/max, sample count, and achieved scale sample rate
 - raw scale sidecars preserve every real balance reading during a session with both raw grams and applied wire load, so transition fluctuations can be inspected without forcing the main log to run at the hardware polling rate
 - tensile displacement uses its own motion-direction setting; the current rig defaults to negative raw Tic travel as positive tensile displacement, so the app can show/log positive `position_mm` while preserving raw Tic position as `raw_position_mm`
 - physical remote tare and software tare are kept only in advanced hardware diagnostics because the normal workflow should leave the balance showing real grams
@@ -120,7 +125,7 @@ Current intended hardware stack:
 - if a current sweep reaches the configured voltage limit before reaching the requested current, Mini DMA ramps the recipe current back to that sweep's start current, records that unwind phase, and advances to the next recipe step instead of stopping the whole recipe
 - the mandatory length setup actively returns to the `21.200 g` zero-load reference after the setup preload, so a nominal `0 MPa` sweep remains an active zero-load/zero-stress measurement with strain still defined
 - stress-based recipe fields show their corresponding load values next to the controls, and load-based recipe fields show their corresponding stress values using the current diameter
-- closed-loop target seeking samples feedback during each correction/settle/current step, but scheduled main CSV rows are throttled by the separate log interval; target seeking still adapts correction step and speed near the target, limits each commanded target by the correction speed and timer interval so moves cannot stack ahead of the real stage position, keeps correcting inside the broad hold tolerance toward a tighter near-target band, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
+- closed-loop target seeking samples feedback during each correction/settle/current step, but scheduled main CSV rows are throttled by the separate log interval; static seeking still avoids stacking commands ahead of confirmed position, while target ramps such as setup preload can advance the planned motion target between scale updates for smoother movement. Target seeking adapts correction step and speed near the target, keeps correcting inside the broad hold tolerance toward a tighter near-target band, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
 - recipe completion stops the session log before running the return-to-start recovery popup; recipe stop/fault turns current annealing output off, keeps a resume point, and can ask whether to move displacement or load back toward zero without appending recovery samples to the recipe CSV; paused recipes also turn current output off until resumed
 - resistance is left blank when the current setpoint/measured current is effectively zero, avoiding invalid zero-current resistance points; supply readbacks are throttled during fast automation so current commands do not fight voltage/current queries on the same serial link
 - behavior patterned after the existing current annealing logger rather than as a separate app

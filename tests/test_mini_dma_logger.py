@@ -101,7 +101,7 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
     window.spin_current_sweep_target_start.setValue(0.0)
     window.spin_current_sweep_target_end.setValue(10.0)
     window.spin_current_sweep_target_step.setValue(10.0)
-    window.spin_current_sweep_interval.setValue(250)
+    window.spin_control_interval.setValue(250)
 
     try:
         steps, summary, interval_ms = window._build_automation_recipe()
@@ -172,8 +172,8 @@ def _set_copper_current_sweep_defaults(window: mini_dma_mod.MainWindow) -> None:
     window.spin_current_sweep_target_ramp_rate.setValue(0.1)
     window.spin_current_sweep_target_speed_mm_s.setValue(1.0)
     window.check_current_sweep_reverse_current.setChecked(True)
-    window.spin_current_sweep_interval.setValue(250)
-    window.spin_current_sweep_log_interval.setValue(500)
+    window.spin_control_interval.setValue(250)
+    window.spin_log_interval.setValue(500)
 
 
 def test_scale_signal_buffer_summarizes_interval() -> None:
@@ -327,7 +327,7 @@ def test_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> 
     window.spin_calibration_load_step_g.setValue(1.0)
     window.spin_calibration_move_step_mm.setValue(0.01)
     window.spin_calibration_steps_per_direction.setValue(2)
-    window.spin_calibration_interval.setValue(250)
+    window.spin_control_interval.setValue(250)
     window.check_positive_motion_is_tension.setChecked(True)
 
     try:
@@ -372,7 +372,7 @@ def test_calibration_recipe_includes_mandatory_length_setup(tmp_path: Path, qtbo
     window.spin_calibration_start_load_g.setValue(0.25)
     window.spin_calibration_end_load_g.setValue(0.5)
     window.spin_calibration_load_step_g.setValue(0.25)
-    window.spin_calibration_interval.setValue(250)
+    window.spin_control_interval.setValue(250)
 
     try:
         steps, summary, interval_ms = window._build_automation_recipe()
@@ -1037,6 +1037,123 @@ def test_setup_preload_correction_step_uses_setup_speed_interval(tmp_path: Path,
         _close_test_window(window)
 
 
+def test_displacement_ramp_uses_global_control_and_log_clocks(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_control_interval.setValue(50)
+        window.spin_log_interval.setValue(200)
+        window.spin_ramp_distance.setValue(1.0)
+        window.spin_ramp_step.setValue(0.1)
+        window.spin_ramp_interval.setValue(1000)
+
+        steps, summary, interval_ms = window._build_automation_recipe()
+        recipe_start = next(index for index, step in enumerate(steps) if step.action == "start_session")
+        recipe_steps = steps[recipe_start + 1 :]
+
+        assert interval_ms == 50
+        assert all(step.action != "record" for step in recipe_steps)
+        assert any(step.action == "move" for step in recipe_steps)
+        assert "control every 50 ms" in summary
+        assert "log every 200 ms" in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_timing_controls_are_opened_from_settings_menu(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        menu_titles = [action.text().replace("&", "") for action in window.menuBar().actions()]
+        assert "Settings" in menu_titles
+        assert window.action_timing_settings is not None
+        assert window.action_timing_settings.text() == "Timing..."
+        assert window.spin_control_interval.isHidden()
+        assert window.spin_log_interval.isHidden()
+        assert window.spin_ui_interval.isHidden()
+        assert window.spin_scale_interval.isHidden()
+    finally:
+        _close_test_window(window)
+
+
+def test_scale_request_poll_interval_migrates_to_response_time(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.setValue("scale_baud", "9600")
+    settings.setValue("scale_request", "\\x1bp")
+    settings.setValue("scale_interval_ms", 50)
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+
+    try:
+        assert window.spin_scale_interval.value() == mini_dma_mod.DEFAULT_SCALE_REQUEST_INTERVAL_MS
+    finally:
+        _close_test_window(window)
+
+
+def test_scale_worker_request_mode_uses_response_timeout() -> None:
+    worker = mini_dma_mod.ScaleWorker(
+        port_name="COM6",
+        baudrate=9600,
+        poll_interval_ms=50,
+        request_command="\\x1bp",
+        request_terminator="",
+    )
+
+    assert worker._read_timeout_s() == pytest.approx(mini_dma_mod.SCALE_REQUEST_TIMEOUT_MIN_S)
+    assert worker._request_poll_delay_s(started_s=10.0, finished_s=10.02) == pytest.approx(0.03)
+    assert worker._request_poll_delay_s(started_s=10.0, finished_s=10.06) == pytest.approx(0.0)
+
+
+def test_target_ramp_chains_planned_motion_between_scale_updates(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CALIBRATION
+    window._automation_phase = "target_ramp"
+    window._automation_step_note = "setup_preload"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+    window._automation_interval_ms = 50
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_setup_stage_speed_mm_s.setValue(1.0)
+    window.spin_setup_preload_tolerance_mpa.setValue(0.25)
+    window.spin_diameter.setValue(0.03)
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window._last_move_target_mm = 0.0
+    window._last_motion_command_time_s = time.time()
+    window._latest_scale_value_g = window.spin_zero_load_scale_g.value()
+    window._latest_scale_timestamp = window._last_motion_command_time_s - 0.1
+    targets: list[tuple[float, bool]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        chain = bool(kwargs.get("chain_from_last_target", False))
+        targets.append((target_mm, chain))
+        window._last_move_target_mm = target_mm
+        window._manual_jog_uses_last_target = chain
+        window._last_motion_command_time_s = time.time()
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+
+    try:
+        for _ in range(2):
+            assert window._seek_distribution_target(
+                mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                target_value=10.0,
+                tolerance=0.25,
+            ) is False
+
+        assert targets == [(pytest.approx(-0.05), True), (pytest.approx(-0.10), True)]
+    finally:
+        _close_test_window(window)
+
+
 def test_length_setup_dialog_contains_live_graph_and_records_setup_points(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -1306,7 +1423,6 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
 
         steps, summary, interval_ms = window._build_automation_recipe()
 
-        record_steps = [step for step in steps if step.action == "record"]
         current_steps = [step for step in steps if step.action == "set_current"]
         current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
         target_ramps = [step for step in steps if step.action == "ramp_target" and step.note != "setup_preload"]
@@ -1324,12 +1440,14 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
         assert target_ramps[1].target_start_value == pytest.approx(0.0)
         assert target_ramps[1].target_end_value == pytest.approx(3.0)
         assert target_ramps[1].target_ramp_rate_value_s == pytest.approx(0.1)
-        assert record_steps[-1].target_value == pytest.approx(0.0)
+        assert all(step.action != "record" for step in steps)
         assert {step.target_value for step in current_sweep_steps} == {0.0, 3.0, 6.0, 9.0}
         assert current_steps[0].current_mA == pytest.approx(1.0)
         assert max(step.current_end_mA for step in current_sweep_steps if step.current_end_mA is not None) == pytest.approx(3.0)
         assert target_ramps[-1].target_end_value == pytest.approx(0.0)
         assert "iso-load current sweep" in summary.lower()
+        assert "control every 250 ms" in summary
+        assert "log every 500 ms" in summary
         assert "mA/s" in summary
     finally:
         _close_test_window(window)
@@ -1785,7 +1903,7 @@ def test_session_writes_raw_scale_sidecar_and_interval_summary(
         _close_test_window(window)
 
 
-def test_current_sweep_control_and_log_intervals_restore_independently(tmp_path: Path, qtbot) -> None:
+def test_global_control_and_log_intervals_migrate_from_current_sweep_settings(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
     settings = QtCore.QSettings("microwire", "mini_dma_logger")
@@ -1798,11 +1916,15 @@ def test_current_sweep_control_and_log_intervals_restore_independently(tmp_path:
     qtbot.addWidget(window)
 
     try:
+        assert window.spin_control_interval.value() == 375
+        assert window.spin_log_interval.value() == 875
         assert window.spin_current_sweep_interval.value() == 375
         assert window.spin_current_sweep_log_interval.value() == 875
-        window.spin_current_sweep_interval.setValue(250)
-        window.spin_current_sweep_log_interval.setValue(500)
+        window.spin_control_interval.setValue(250)
+        window.spin_log_interval.setValue(500)
         window._save_settings()
+        assert int(settings.value("control_interval_ms")) == 250
+        assert int(settings.value("log_interval_ms")) == 500
         assert int(settings.value("current_sweep_interval_ms")) == 250
         assert int(settings.value("current_sweep_log_interval_ms")) == 500
     finally:
@@ -1947,7 +2069,7 @@ def test_tensile_load_seek_uses_motion_direction_independent_of_scale_sign(tmp_p
         )
 
         assert reached is False
-        assert targets == [pytest.approx(0.9)]
+        assert targets == [pytest.approx(0.95)]
     finally:
         _close_test_window(window)
 
@@ -1989,7 +2111,7 @@ def test_recipe_seek_does_not_stack_corrections_ahead_of_confirmed_position(tmp_
             tolerance=0.25,
         )
 
-        assert controller.targets == [90, 90]
+        assert controller.targets == [95, 95]
     finally:
         _close_test_window(window)
 
@@ -2026,7 +2148,7 @@ def test_seek_overshoot_uses_fine_reverse_correction(tmp_path: Path, qtbot) -> N
             tolerance=0.25,
         ) is False
 
-        assert targets == [pytest.approx(0.9), pytest.approx(1.025)]
+        assert targets == [pytest.approx(0.95), pytest.approx(1.025)]
         assert "Overshoot detected" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -2071,7 +2193,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
             tolerance=0.25,
         )
 
-        assert controller.targets == [90, 106]
+        assert controller.targets == [95, 106]
         assert "backlash take-up" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -2158,7 +2280,7 @@ def test_current_sweep_target_ramp_uses_target_stage_speed(tmp_path: Path, qtbot
         )
 
         assert reached is False
-        assert controller.target_steps == 9000
+        assert controller.target_steps == 9500
         assert controller.max_speed == 100_000_000
     finally:
         _close_test_window(window)
