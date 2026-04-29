@@ -4,3 +4,5 @@
 - Updated displacement, hold, calibration, Hsw, and current-sweep recipes to use timed steps and the global log cadence while keeping hardware polling/readback timers separate.
 - Moved global timing controls into `Settings -> Timing...` and let target-ramp seeking advance planned motion between scale updates for smoother setup preload/current target ramps.
 - Defaulted G&G request-mode scale acquisition to a 250 ms interval with a longer read timeout so the measured roughly 5 Hz balance response is treated as the hardware limit instead of a fast timeout.
+- Documented the verified G&G balance cadence in the Mini DMA hardware profile and refreshed stale scale-communication bring-up notes.
+- Added explicit timing settings for Tic status, Tic command-timeout keepalive, and power-supply readbacks as the first Phase 3 hardware-cadence step.

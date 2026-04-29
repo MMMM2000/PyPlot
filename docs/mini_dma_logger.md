@@ -60,7 +60,7 @@ Current intended hardware stack:
 - each active session also writes a high-rate raw scale sidecar named `<run>.scale_raw.csv`, while the main CSV remains a slower recipe/session log
 - recipe timing is split into a global control interval, global log interval, and UI refresh interval; individual recipes no longer own their own scheduler frequency
 - the global timing controls live under `Settings -> Timing...` instead of taking space in the normal Recipe panel
-- hardware communication keeps its own cadence: request-mode scale acquisition uses the scale request interval, Tic keepalive/status use their own timers, and power-supply readbacks stay throttled so they do not block fast current commands
+- hardware communication keeps its own cadence: request-mode scale acquisition, Tic status, Tic command-timeout keepalive, and power-supply readbacks all have explicit timing settings, with supply readbacks still throttled so they do not block fast current commands
 - the current G&G scale does not stream passively at `9600`; its measured `ESC+p` reply cadence is about 5 Hz, so Mini DMA defaults G&G request-mode acquisition to a 250 ms interval with a 300 ms read timeout and records every actual reply in the raw sidecar
 - shape-memory-friendly export columns for `Displacement`, positive applied tensile `Load`, `Strain`, and `Stress`
 
@@ -182,29 +182,10 @@ These were intentional product decisions, not random implementation details:
 - make `Overview` collapsible because it is useful context but should not dominate the working layout
 - support both shape-memory and Hsw workflows in one app, with recipes deciding behavior
 
-## Current Blockers
-
-### Scale Communication
-
-The software side is prepared, but live scale communication is still blocked by the physical RS232 link.
-
-Observed status during development:
-
-- Windows detected the USB serial adapter successfully
-- the balance appeared on `COM4` in one setup and `COM3` after a cable change
-- the application could open the serial port
-- the balance still returned no serial data during direct probes
-
-Best current interpretation:
-
-- the balance communication path still needs the correct RS232 null-modem / crossover wiring
-- once the correct adapter or cable chain is in place, the code should already be ready to probe and read the scale
-
-### Hardware Validation
+## Current Risks And Validation Gaps
 
 The following are still pending live validation on the real rig:
 
-- actual balance readings entering the logger
 - real end-to-end motion + load + heating runs
 - validation of Hsw plateau-seeking on live force feedback
 - final tuning of safety thresholds against the real mechanics
@@ -222,20 +203,20 @@ The implementation was exercised with synthetic and smoke-level checks, includin
 - mandatory preload/return length setup logic
 - plot/dashboard visual review iterations
 
-This means the code structure and main workflows were developed beyond pure scaffolding, but some features remain hardware-unverified until the scale link is working.
+This means the code structure and main workflows were developed beyond pure scaffolding, but full recipe behavior still needs hardware validation with real motion, load, and heating together.
 
 ## What Was Verified On Real Hardware
 
 The latest bench session confirmed that the app-level assumptions now match the actual rig wiring:
 
 - Pololu Tic T500 reachable through `ticcmd` with serial `00501366`
-- G&G balance replying on `COM6` at `9600` baud with `ESC+p`
+- G&G balance replying on `COM6` at `9600` baud with `ESC+p`; a 12 s request/response benchmark measured 60 samples, 4.94 Hz, about 202 ms/sample, and 0 timeouts
 - G&G live readout working while the balance remains in real grams
 - HAMEG `HMP4030` replying on `COM3` at `115200` baud
 - HMP4030 channel `3` sourcing real current through the microwire path at about `15 mA`
 - closed-loop motion against live scale feedback uses the zero-load scale reference so, for example, a `21.200 g` zero-load reading and `18.200 g` live reading is reported/logged as about `+3 g` applied tensile load
 
-This means the main remaining risk is not basic communications anymore, but day-to-day measurement workflow polish and safeguards for real sample runs.
+This means the main remaining risk is not basic communications anymore, but day-to-day measurement workflow polish, safeguards for real sample runs, and the low-bandwidth nature of the balance feedback.
 
 ## Recommended First Steps On Another Machine
 
@@ -247,18 +228,18 @@ When resuming work elsewhere:
 4. Verify `ticcmd` is installed and reachable on that machine.
 5. Use the built-in auto-detect actions to classify the Tic, scale, and supply ports if the COM numbering changed.
 6. Reconnect the rig and test the motion side first with tiny jogs.
-7. Re-test the scale link with the correct RS232 adapter/cable chain.
+7. Re-test the scale link and expect the current G&G request/response path to be about 5 Hz, not 20 Hz.
 8. Use the built-in `Probe scale` action before trying full automated runs.
 9. Once the scale is live, run one simple shape-memory measurement before tuning Hsw automation further.
 
 ## Recommended First Live Validation Sequence
 
-After the correct scale adapter/cable is available:
+For the current bench rig:
 
 1. Open `Mini DMA Logger`.
 2. Keep `Pololu Tic Control Center` closed while Mini DMA is using the controller.
 3. Use `Check Tic` and a tiny jog to confirm motion.
-4. Use `Probe scale` and confirm live readings arrive from the balance.
+4. Use `Probe scale` and confirm live readings arrive from the balance at the expected roughly 5 Hz request/response cadence.
 5. Verify `Capture zero-load` or type the known zero-load balance reading.
 6. Run a minimal preload-only shape-memory test.
 7. Run a short displacement recipe with logging.
@@ -282,7 +263,7 @@ That is why this file exists: it captures the important product and implementati
 
 ## Suggested Next Development Priorities
 
-After live scale communication is working, the natural next priorities are:
+After basic live communication, the natural next priorities are:
 
 1. validate the full shape-memory workflow end-to-end on real hardware
 2. tune strain/stress zeroing and safety thresholds from real runs

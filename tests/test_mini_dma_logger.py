@@ -1072,6 +1072,9 @@ def test_timing_controls_are_opened_from_settings_menu(tmp_path: Path, qtbot) ->
         assert window.spin_log_interval.isHidden()
         assert window.spin_ui_interval.isHidden()
         assert window.spin_scale_interval.isHidden()
+        assert window.spin_tic_status_interval.isHidden()
+        assert window.spin_tic_keepalive_interval.isHidden()
+        assert window.spin_supply_read_interval.isHidden()
     finally:
         _close_test_window(window)
 
@@ -1107,6 +1110,37 @@ def test_scale_worker_request_mode_uses_response_timeout() -> None:
     assert worker._read_timeout_s() == pytest.approx(mini_dma_mod.SCALE_REQUEST_TIMEOUT_MIN_S)
     assert worker._request_poll_delay_s(started_s=10.0, finished_s=10.02) == pytest.approx(0.03)
     assert worker._request_poll_delay_s(started_s=10.0, finished_s=10.06) == pytest.approx(0.0)
+
+
+def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.setValue("tic_status_interval_ms", 1500)
+    settings.setValue("tic_keepalive_interval_ms", 350)
+    settings.setValue("supply_read_interval_ms", 1250)
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+
+    try:
+        assert window.spin_tic_status_interval.value() == 1500
+        assert window.spin_tic_keepalive_interval.value() == 350
+        assert window.spin_supply_read_interval.value() == 1250
+        assert window._status_timer.interval() == 1500
+        assert window._tic_keepalive_timer.interval() == 350
+
+        window.spin_tic_keepalive_interval.setValue(450)
+        assert window._tic_keepalive_timer.interval() == 450
+
+        window._save_settings()
+        assert int(settings.value("tic_status_interval_ms")) == 1500
+        assert int(settings.value("tic_keepalive_interval_ms")) == 450
+        assert int(settings.value("supply_read_interval_ms")) == 1250
+    finally:
+        _close_test_window(window)
 
 
 def test_target_ramp_chains_planned_motion_between_scale_updates(tmp_path: Path, qtbot) -> None:

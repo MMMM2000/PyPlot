@@ -108,11 +108,11 @@ The operator should always see:
 - whether current is actually flowing
 - the active recipe step and stop condition
 - a single obvious emergency stop/halt path that remains visible even while scrolling settings
-- only routine operator controls by default; low-level hardware details should stay in an advanced/config section
+- only routine operator controls by default; low-level hardware details and hardware cadence settings should stay in an advanced/config section
 - preflight should auto-detect/connect required hardware before making run files and should report all missing devices together
 - recipe estimates should be human-readable and paired with live progress
 - numeric summaries should use compact values such as `20 g` and `0.01 mm` instead of padded zero-only decimals
-- load/stress seeking should be sampled step-by-step: move one correction step, wait for fresh scale/Tic feedback, log the feedback point, then decide whether to move again
+- load/stress seeking should be sampled step-by-step: move one correction step, wait for fresh scale/Tic feedback, log the feedback point, then decide whether to move again. On the current G&G request/response scale, fresh force feedback is about 5 Hz, even if motor-side control runs faster.
 - load/stress seeking must not stop just because load stays flat while displacement increases; shape-memory transformations can elongate with little load change
 - recipe current output should be off whenever a recipe is stopped or paused, while an optional HMP motor-supply channel can stay under explicit operator control for powering the Tic motor
 

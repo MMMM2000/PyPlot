@@ -70,13 +70,15 @@ SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
 TIC_KEEPALIVE_INTERVAL_MS = 500
+DEFAULT_TIC_STATUS_INTERVAL_MS = 1000
+DEFAULT_SUPPLY_READ_INTERVAL_MS = 750
 DEFAULT_CONTROL_INTERVAL_MS = 50
 DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 MIN_RESISTANCE_CURRENT_MA = 0.05
-SUPPLY_READ_MIN_INTERVAL_S = 0.75
+SUPPLY_READ_MIN_INTERVAL_S = DEFAULT_SUPPLY_READ_INTERVAL_MS / 1000.0
 RECOVERY_POSITION = "recovery_position"
 RECOVERY_LOAD = "recovery_load"
 PROJECT_EXTENSION = ".pydpj"
@@ -1527,6 +1529,21 @@ class MainWindow(QtWidgets.QMainWindow):
         scale_interval.setValue(int(self.spin_scale_interval.value()))
         scale_interval.setSuffix(" ms")
         form.addRow("Scale acquisition interval", scale_interval)
+        tic_status_interval = QtWidgets.QSpinBox(dialog)
+        tic_status_interval.setRange(100, 60000)
+        tic_status_interval.setValue(self._tic_status_interval_ms())
+        tic_status_interval.setSuffix(" ms")
+        form.addRow("Tic status interval", tic_status_interval)
+        tic_keepalive_interval = QtWidgets.QSpinBox(dialog)
+        tic_keepalive_interval.setRange(100, 5000)
+        tic_keepalive_interval.setValue(self._tic_keepalive_interval_ms())
+        tic_keepalive_interval.setSuffix(" ms")
+        form.addRow("Tic keepalive interval", tic_keepalive_interval)
+        supply_read_interval = QtWidgets.QSpinBox(dialog)
+        supply_read_interval.setRange(100, 60000)
+        supply_read_interval.setValue(self._supply_read_interval_ms())
+        supply_read_interval.setSuffix(" ms")
+        form.addRow("Supply readback interval", supply_read_interval)
         layout.addLayout(form)
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
@@ -1541,7 +1558,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_log_interval.setValue(log_interval.value())
         self.spin_ui_interval.setValue(ui_interval.value())
         self.spin_scale_interval.setValue(scale_interval.value())
+        self.spin_tic_status_interval.setValue(tic_status_interval.value())
+        self.spin_tic_keepalive_interval.setValue(tic_keepalive_interval.value())
+        self.spin_supply_read_interval.setValue(supply_read_interval.value())
         self._apply_ui_refresh_interval()
+        self._apply_hardware_timer_intervals()
         self._update_recipe_mode_ui()
 
     def _set_run_log_mirror_enabled(self, enabled: bool) -> None:
@@ -1866,6 +1887,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_tic_serial.setPlaceholderText("optional when only one Tic is connected")
         motion_advanced_form.addRow("Device serial", self.edit_tic_serial)
 
+        self.spin_tic_status_interval = QtWidgets.QSpinBox(motion_advanced_box)
+        self.spin_tic_status_interval.setRange(100, 60000)
+        self.spin_tic_status_interval.setSuffix(" ms")
+        self.spin_tic_status_interval.setValue(DEFAULT_TIC_STATUS_INTERVAL_MS)
+        motion_advanced_form.addRow("Status interval", self.spin_tic_status_interval)
+        self.spin_tic_status_interval.setVisible(False)
+        tic_status_label = motion_advanced_form.labelForField(self.spin_tic_status_interval)
+        if tic_status_label is not None:
+            tic_status_label.setVisible(False)
+
+        self.spin_tic_keepalive_interval = QtWidgets.QSpinBox(motion_advanced_box)
+        self.spin_tic_keepalive_interval.setRange(100, 5000)
+        self.spin_tic_keepalive_interval.setSuffix(" ms")
+        self.spin_tic_keepalive_interval.setValue(TIC_KEEPALIVE_INTERVAL_MS)
+        motion_advanced_form.addRow("Keepalive interval", self.spin_tic_keepalive_interval)
+        self.spin_tic_keepalive_interval.setVisible(False)
+        tic_keepalive_label = motion_advanced_form.labelForField(self.spin_tic_keepalive_interval)
+        if tic_keepalive_label is not None:
+            tic_keepalive_label.setVisible(False)
+
         self.spin_steps_per_mm = CompactDoubleSpinBox(motion_advanced_box)
         self.spin_steps_per_mm.setDecimals(3)
         self.spin_steps_per_mm.setRange(1.0, 100000.0)
@@ -2038,6 +2079,16 @@ class MainWindow(QtWidgets.QMainWindow):
         read_supply_button = QtWidgets.QPushButton("Read supply now", supply_box)
         read_supply_button.clicked.connect(lambda _checked=False: self._refresh_supply_snapshot(force=True))
         supply_form.addRow("", read_supply_button)
+
+        self.spin_supply_read_interval = QtWidgets.QSpinBox(supply_box)
+        self.spin_supply_read_interval.setRange(100, 60000)
+        self.spin_supply_read_interval.setSuffix(" ms")
+        self.spin_supply_read_interval.setValue(DEFAULT_SUPPLY_READ_INTERVAL_MS)
+        supply_form.addRow("Readback interval", self.spin_supply_read_interval)
+        self.spin_supply_read_interval.setVisible(False)
+        supply_read_label = supply_form.labelForField(self.spin_supply_read_interval)
+        if supply_read_label is not None:
+            supply_read_label.setVisible(False)
 
         self.label_supply_status = QtWidgets.QLabel("Supply disconnected.")
         self.label_supply_status.setWordWrap(True)
@@ -3087,6 +3138,8 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             widget.valueChanged.connect(self._update_recipe_mode_ui)
         self.spin_ui_interval.valueChanged.connect(self._apply_ui_refresh_interval)
+        self.spin_tic_status_interval.valueChanged.connect(self._apply_hardware_timer_intervals)
+        self.spin_tic_keepalive_interval.valueChanged.connect(self._apply_hardware_timer_intervals)
         self.check_return_to_origin.toggled.connect(self._update_recipe_mode_ui)
         self.check_distribution_return_sweep.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_return_target.toggled.connect(self._update_recipe_mode_ui)
@@ -3695,7 +3748,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if (
             not force
             and self._supply_snapshot_monotonic > 0.0
-            and now_s - self._supply_snapshot_monotonic < SUPPLY_READ_MIN_INTERVAL_S
+            and now_s - self._supply_snapshot_monotonic < (self._supply_read_interval_ms() / 1000.0)
         ):
             self._refresh_supply_live_label()
             self._handle_supply_limit_condition()
@@ -5235,7 +5288,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         self.label_tic_summary.setText(summary)
         self._refresh_live_labels()
-        self._status_timer.start()
+        self._status_timer.start(self._tic_status_interval_ms())
         return True
 
     def _zero_tic_position(self) -> None:
@@ -5307,6 +5360,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_tic_keepalive(self) -> None:
         self._tic_keepalive_warning_active = False
+        self._tic_keepalive_timer.setInterval(self._tic_keepalive_interval_ms())
         if not self._tic_keepalive_timer.isActive():
             self._tic_keepalive_timer.start()
 
@@ -5630,12 +5684,33 @@ class MainWindow(QtWidgets.QMainWindow):
             return int(self.spin_ui_interval.value())
         return DEFAULT_UI_REFRESH_INTERVAL_MS
 
+    def _tic_status_interval_ms(self) -> int:
+        if hasattr(self, "spin_tic_status_interval"):
+            return int(self.spin_tic_status_interval.value())
+        return DEFAULT_TIC_STATUS_INTERVAL_MS
+
+    def _tic_keepalive_interval_ms(self) -> int:
+        if hasattr(self, "spin_tic_keepalive_interval"):
+            return int(self.spin_tic_keepalive_interval.value())
+        return TIC_KEEPALIVE_INTERVAL_MS
+
+    def _supply_read_interval_ms(self) -> int:
+        if hasattr(self, "spin_supply_read_interval"):
+            return int(self.spin_supply_read_interval.value())
+        return DEFAULT_SUPPLY_READ_INTERVAL_MS
+
     def _current_sweep_log_interval_ms(self) -> int:
         return self._log_interval_ms()
 
     def _apply_ui_refresh_interval(self) -> None:
         if hasattr(self, "_ui_refresh_timer"):
             self._ui_refresh_timer.setInterval(self._ui_refresh_interval_ms())
+
+    def _apply_hardware_timer_intervals(self) -> None:
+        if hasattr(self, "_status_timer"):
+            self._status_timer.setInterval(self._tic_status_interval_ms())
+        if hasattr(self, "_tic_keepalive_timer"):
+            self._tic_keepalive_timer.setInterval(self._tic_keepalive_interval_ms())
 
     def _session_raw_scale_rate_hz(self) -> float | None:
         if self._session_start_wall_s <= 0.0:
@@ -5711,11 +5786,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "control": {
                 "control_interval_ms": self._control_interval_ms(),
                 "ui_refresh_interval_ms": self._ui_refresh_interval_ms(),
-                "tic_keepalive_interval_ms": TIC_KEEPALIVE_INTERVAL_MS,
-                "tic_status_interval_ms": int(self._status_timer.interval())
-                if hasattr(self, "_status_timer")
-                else 1000,
-                "supply_read_min_interval_s": SUPPLY_READ_MIN_INTERVAL_S,
+                "tic_keepalive_interval_ms": self._tic_keepalive_interval_ms(),
+                "tic_status_interval_ms": self._tic_status_interval_ms(),
+                "supply_read_interval_ms": self._supply_read_interval_ms(),
             },
             "heating": {
                 "port": str(self.combo_supply_port.currentData() or ""),
@@ -8049,6 +8122,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("motor_supply_current_limit_a", self.spin_motor_supply_current_limit.value())
         self.settings.setValue("ticcmd_path", self.edit_ticcmd_path.text())
         self.settings.setValue("tic_serial", self.edit_tic_serial.text())
+        self.settings.setValue("tic_status_interval_ms", self._tic_status_interval_ms())
+        self.settings.setValue("tic_keepalive_interval_ms", self._tic_keepalive_interval_ms())
         self.settings.setValue("steps_per_mm", self.spin_steps_per_mm.value())
         self.settings.setValue("jog_mm", self.spin_jog_mm.value())
         self.settings.setValue("manual_motion_speed_mm_s", self.spin_motion_speed_mm_s.value())
@@ -8086,6 +8161,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("control_interval_ms", self._control_interval_ms())
         self.settings.setValue("log_interval_ms", self._log_interval_ms())
         self.settings.setValue("ui_refresh_interval_ms", self._ui_refresh_interval_ms())
+        self.settings.setValue("supply_read_interval_ms", self._supply_read_interval_ms())
         self.settings.setValue("ramp_distance_mm", self.spin_ramp_distance.value())
         self.settings.setValue("ramp_step_mm", self.spin_ramp_step.value())
         self.settings.setValue("ramp_interval_ms", self.spin_ramp_interval.value())
@@ -8202,6 +8278,13 @@ class MainWindow(QtWidgets.QMainWindow):
             saved_ticcmd = discovered_ticcmd
         self.edit_ticcmd_path.setText(saved_ticcmd)
         self.edit_tic_serial.setText(self.settings.value("tic_serial", "", type=str))
+        self.spin_tic_status_interval.setValue(
+            int(self.settings.value("tic_status_interval_ms", DEFAULT_TIC_STATUS_INTERVAL_MS))
+        )
+        self.spin_tic_keepalive_interval.setValue(
+            int(self.settings.value("tic_keepalive_interval_ms", TIC_KEEPALIVE_INTERVAL_MS))
+        )
+        self._apply_hardware_timer_intervals()
         self.spin_steps_per_mm.setValue(float(self.settings.value("steps_per_mm", 100.0)))
         self.spin_jog_mm.setValue(max(0.01, float(self.settings.value("jog_mm", 0.1))))
         self.spin_motion_speed_mm_s.setValue(
@@ -8301,6 +8384,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.spin_ui_interval.setValue(int(self.settings.value("ui_refresh_interval_ms", DEFAULT_UI_REFRESH_INTERVAL_MS)))
         self._apply_ui_refresh_interval()
+        self.spin_supply_read_interval.setValue(
+            int(self.settings.value("supply_read_interval_ms", DEFAULT_SUPPLY_READ_INTERVAL_MS))
+        )
+        self._apply_hardware_timer_intervals()
         self._run_log_mirror_path = Path(
             self.settings.value("developer_run_log_mirror_path", str(DEFAULT_RUN_LOG_MIRROR_PATH), type=str)
         )

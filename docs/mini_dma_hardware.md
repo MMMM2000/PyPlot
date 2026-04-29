@@ -26,10 +26,17 @@ Known specifications:
 - Supported baud rates: 600, 1200, 2400, 4800, and 9600 bit/s.
 - Remote command prefix default: `0x1B` (`ESC`), with `ESC p` for print/read and `ESC t` for tare.
 - C1 sensitivity and C2 filtering both use lower values for faster, more sensitive response. `0` is the dispensing-style setting for each.
+- The manual does not publish a maximum measuring/update frequency or maximum `ESC p` request rate.
+- Current bench link: the balance was verified on `COM6` at `9600` bit/s using the `ESC+p` request. Passive streaming was not observed in this mode.
+- Measured request/response cadence on 2026-04-29: 60 samples in a 12 s benchmark, 4.94 Hz achieved rate, mean/median period about 202 ms/sample, 0 timeouts, and a stable raw line of `21.125 g`.
+- Mini DMA default for this request-mode balance: 250 ms scale acquisition interval with a 300 ms serial read timeout.
 
 Important control implication:
 
 - The manual explicitly warns against dynamic weighing because internal stability compensation can distort results while load is changing. Mini DMA should therefore treat the balance as a high-resolution, low-bandwidth force signal rather than a fast load cell.
+- Fresh force feedback from the current request/response balance is only about 5 Hz. The motor/control loop can run faster, but load/stress decisions must not assume 20 Hz balance data.
+- Raising the serial baud rate alone is unlikely to improve the measured 202 ms response, because the transmitted payload is small compared with the balance's internal response time.
+- Faster force feedback would require a supported scale-side fast/streaming mode, lower filtering/stability averaging, or a different load sensor.
 - Keep the physical balance display in real grams. Mini DMA should continue using the zero-load scale reference to calculate applied wire load.
 - Log raw balance readings alongside applied load so dynamic behavior can be audited after each run.
 
@@ -115,7 +122,7 @@ The closest practical DMA-like behavior with this hardware is quasi-static iso-s
 
 Recommended software direction:
 
-1. Use fast balance acquisition and preserve raw scale sidecar data.
+1. Use the fastest honest balance acquisition for the installed scale and preserve raw scale sidecar data. For the current G&G request/response link, that means planning around about 5 Hz.
 2. Keep a slower main session log with load/stress summary statistics.
 3. Use target seeking to move between stress levels.
 4. Use a continuous servo-hold controller during current sweeps.
@@ -140,8 +147,8 @@ Current sweeps own their current program. If the supply reaches the configured v
 Before claiming DMA-like precision, measure and save:
 
 - static scale noise at 0, 1, 2, 5, 10, and 20 g
-- achieved scale sample rate and request/response latency
-- balance response while C1=0 and C2=0
+- achieved scale sample rate and request/response latency; current `COM6`/`9600`/`ESC+p` result is about 4.94 Hz with about 202 ms period
+- balance response while C1=0 and C2=0, if the scale menu allows those settings on the bench unit
 - load change per full step and per configured microstep
 - load-path stiffness in g/mm at representative stress levels
 - backlash on direction reversal
