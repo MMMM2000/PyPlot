@@ -61,6 +61,7 @@ Current intended hardware stack:
 - recipe timing is split into a global control interval, global log interval, and UI refresh interval; individual recipes no longer own their own scheduler frequency
 - the global timing controls live under `Settings -> Timing...` instead of taking space in the normal Recipe panel
 - hardware communication keeps its own cadence: request-mode scale acquisition, Tic status, Tic command-timeout keepalive, and power-supply readbacks all have explicit timing settings, with supply readbacks still throttled so they do not block fast current commands
+- Tic command state is tracked separately from slower Tic status polling: recipes and calibration micro-moves chain from the last commanded target, while scheduled data-log rows use cached/commanded position instead of forcing a blocking Tic status subprocess
 - the current G&G scale does not stream passively at `9600`; its measured `ESC+p` reply cadence is about 5 Hz, so Mini DMA defaults G&G request-mode acquisition to a 250 ms interval with a 300 ms read timeout and records every actual reply in the raw sidecar
 - shape-memory-friendly export columns for `Displacement`, positive applied tensile `Load`, `Strain`, and `Stress`
 
@@ -108,7 +109,8 @@ Current intended hardware stack:
 - The recipe uses separate preload-seek and micro-move settings. The preload seek can be faster/coarser for a bent or slack calibration wire; the forward/reverse micro-move step stays small for stiffness and backlash characterization.
 - The default preload range is conservative for a short microwire. For a stiff 0.12 mm copper wire, raise the preload range and seek speed only as needed to make the wire visibly straight.
 - The recipe records `calibration_baseline`, `calibration_preload`, `calibration_forward`, and `calibration_reverse` phases in the main CSV.
-- Completion computes a calibration report from the session points and stores it under `calibration.report` in the JSON metadata; `copper_calibration` is retained as a legacy alias for old output readers.
+- Forward/reverse calibration records wait for a fresh scale sample after each micro-move, so 5 Hz request/response balances are allowed to catch up before stiffness/backlash points are stored.
+- Completion computes a calibration report from the session points and stores it under `calibration.report` in the JSON metadata; interrupted calibration sessions with labeled calibration points write an `insufficient_data` report instead of leaving the report null. `copper_calibration` is retained as a legacy alias for old output readers.
 - The report includes baseline load noise, forward and reverse load-path stiffness in `g/mm`, average stiffness, estimated backlash in `mm`, optional stress-strain modulus in MPa/GPa when length/diameter are available, and sample counts.
 - The measured backlash is reported for review; it is not silently applied to the live backlash setting.
 
@@ -125,7 +127,7 @@ Current intended hardware stack:
 - if a current sweep reaches the configured voltage limit before reaching the requested current, Mini DMA ramps the recipe current back to that sweep's start current, records that unwind phase, and advances to the next recipe step instead of stopping the whole recipe
 - the mandatory length setup actively returns to the `21.200 g` zero-load reference after the setup preload, so a nominal `0 MPa` sweep remains an active zero-load/zero-stress measurement with strain still defined
 - stress-based recipe fields show their corresponding load values next to the controls, and load-based recipe fields show their corresponding stress values using the current diameter
-- closed-loop target seeking samples feedback during each correction/settle/current step, but scheduled main CSV rows are throttled by the separate log interval; static seeking still avoids stacking commands ahead of confirmed position, while target ramps such as setup preload can advance the planned motion target between scale updates for smoother movement. Target seeking adapts correction step and speed near the target, keeps correcting inside the broad hold tolerance toward a tighter near-target band, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
+- closed-loop target seeking samples feedback during each correction/settle/current step, but scheduled main CSV rows are throttled by the separate log interval; load/stress seeking, including setup preload target ramps, waits for a fresh post-move scale sample before issuing another motor correction, while position-like target ramps may still use planned motion. Target seeking adapts correction step and speed near the target, honors the configured tolerance for completion, detects target overshoot, switches to fine reverse correction steps, and can apply a measured backlash take-up distance on direction reversals
 - recipe completion stops the session log before running the return-to-start recovery popup; recipe stop/fault turns current annealing output off, keeps a resume point, and can ask whether to move displacement or load back toward zero without appending recovery samples to the recipe CSV; paused recipes also turn current output off until resumed
 - resistance is left blank when the current setpoint/measured current is effectively zero, avoiding invalid zero-current resistance points; supply readbacks are throttled during fast automation so current commands do not fight voltage/current queries on the same serial link
 - behavior patterned after the existing current annealing logger rather than as a separate app
@@ -144,6 +146,7 @@ Current intended hardware stack:
 - selectable plot channels with left/right axis support
 - recovery actions open a temporary dual-axis load/displacement vs time graph while returning load or displacement toward zero/start, and the same actions are available from `Manual Actions`
 - plot configuration moved into a popup dialog instead of taking permanent dashboard space
+- sample/project/output fields and dashboard plot selections are persisted as they change and when a session starts, so a crash or interrupted test window is less likely to wipe the operator's saved run identity
 - collapsible `Overview` section with remembered expanded/collapsed state
 
 ### Hsw Distribution Workflow

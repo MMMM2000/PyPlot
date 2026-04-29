@@ -1316,9 +1316,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.settings = QtCore.QSettings("microwire", "mini_dma_logger")
         self._persist_settings = persist_settings
+        self._settings_restore_in_progress = False
+        self._settings_persistence_ready = False
         self._provided_log_dir = log_dir
         self._scale_thread: QtCore.QThread | None = None
         self._scale_worker: ScaleWorker | None = None
+        self._tic_controller: TicController | None = None
+        self._tic_controller_key: tuple[str, str] | None = None
         self._tic_status_text = ""
         self._latest_scale_value_g = 0.0
         self._latest_scale_text = ""
@@ -1329,11 +1333,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_position_steps = 0
         self._current_position_mm = 0.0
         self._last_move_target_mm = 0.0
+        self._last_commanded_position_steps: int | None = 0
         self._last_tic_vin_v: float | None = None
         self._tic_motor_power_ok: bool | None = None
         self._tic_motor_power_warning_active = False
         self._tic_keepalive_warning_active = False
         self._manual_jog_uses_last_target = False
+        self._last_auto_sample_name = ""
+        self._last_auto_log_name = ""
         self._last_move_direction = 0.0
         self._seek_last_error_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_value_by_key: dict[tuple[str, int, float], float] = {}
@@ -3014,7 +3021,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     if isinstance(widget, QtWidgets.QCheckBox)
                     else widget.currentIndexChanged
                 )
-                signal.connect(self._refresh_plots)
+                signal.connect(self._handle_plot_config_changed)
             plot_config_layout.addWidget(QtWidgets.QLabel(f"Plot {tile_index + 1}", plot_config_box), tile_index + 2, 0)
             plot_config_layout.addWidget(visible, tile_index + 2, 1)
             plot_config_layout.addWidget(x_combo, tile_index + 2, 2)
@@ -3077,12 +3084,17 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             widget.textChanged.connect(self._sync_auto_name_fields)
         self.edit_sample_name.textChanged.connect(self._refresh_recipe_sample_label)
+        self.edit_sample_name.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
+        self.edit_log_name.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
+        self.edit_log_dir.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.edit_project_path.editingFinished.connect(
             lambda: self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
         )
+        self.edit_project_path.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.spin_diameter.valueChanged.connect(self._refresh_recipe_sample_label)
         self.spin_diameter.valueChanged.connect(self._refresh_equivalent_labels)
         self.spin_diameter.valueChanged.connect(self._refresh_diameter_import_state)
+        self.spin_diameter.valueChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         for widget in (
             self.spin_control_interval,
             self.spin_log_interval,
@@ -3368,6 +3380,18 @@ class MainWindow(QtWidgets.QMainWindow):
         right_label = self._compact_plot_label(y_right_channel.label)
         return f"{left_label} + {right_label} vs {x_label}"
 
+    def _persist_settings_if_enabled(self) -> None:
+        if (
+            self._persist_settings
+            and self._settings_persistence_ready
+            and not self._settings_restore_in_progress
+        ):
+            self._save_settings()
+
+    def _handle_plot_config_changed(self, *_args: object) -> None:
+        self._refresh_plots()
+        self._persist_settings_if_enabled()
+
     def _apply_plot_preset(self, preset: str) -> None:
         presets = {
             "dma": [
@@ -3403,6 +3427,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if y_right_index >= 0:
                 tile.y_right_combo.setCurrentIndex(y_right_index)
         self._refresh_plots()
+        self._persist_settings_if_enabled()
 
     def _plot_theme(self) -> dict[str, Any]:
         palette = self.palette()
@@ -3636,10 +3661,14 @@ class MainWindow(QtWidgets.QMainWindow):
         return False
 
     def _build_tic_controller(self) -> TicController:
-        return TicController(
-            command_path=self.edit_ticcmd_path.text(),
-            device_serial=self.edit_tic_serial.text(),
-        )
+        key = (self.edit_ticcmd_path.text().strip(), self.edit_tic_serial.text().strip())
+        if self._tic_controller is None or self._tic_controller_key != key:
+            self._tic_controller = TicController(
+                command_path=key[0],
+                device_serial=key[1],
+            )
+            self._tic_controller_key = key
+        return self._tic_controller
 
     def _build_supply_controller(self) -> PowerSupplyController:
         return PowerSupplyController(
@@ -4396,12 +4425,26 @@ class MainWindow(QtWidgets.QMainWindow):
     def _sync_auto_name_fields(self) -> None:
         built = self._build_sample_name()
         if built:
-            self.edit_sample_name.setText(built)
             log_label = self._build_log_name_label(built)
             safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
-            self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
+            safe_name = safe_name or DEFAULT_LOG_BASENAME
+            current_sample_name = self.edit_sample_name.text().strip()
+            current_log_name = self.edit_log_name.text().strip()
+            if not current_sample_name or current_sample_name == self._last_auto_sample_name:
+                self.edit_sample_name.setText(built)
+                current_sample_name = built
+            if (
+                not current_log_name
+                or current_log_name == DEFAULT_LOG_BASENAME
+                or current_log_name == self._last_auto_log_name
+            ):
+                self.edit_log_name.setText(safe_name)
+                current_log_name = safe_name
+            self._last_auto_sample_name = built
+            self._last_auto_log_name = safe_name
         self._refresh_recipe_sample_label()
         self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+        self._persist_settings_if_enabled()
 
     def _refresh_recipe_sample_label(self) -> None:
         if not hasattr(self, "label_recipe_sample"):
@@ -4792,12 +4835,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_requires_fresh_after_last_move(self, basis: str) -> bool:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
-        if self._automation_phase == "target_ramp":
-            return False
         return True
 
-    def _seek_uses_planned_motion_base(self) -> bool:
-        return self._automation_phase == "target_ramp"
+    def _seek_uses_planned_motion_base(self, basis: str) -> bool:
+        if self._automation_phase != "target_ramp":
+            return False
+        return basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
 
     def _seek_distribution_target(self, basis: str, target_value: float, tolerance: float) -> bool:
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
@@ -4826,8 +4869,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         delta_value = target_value - current_value
         seek_key = self._seek_error_key(basis, target_value)
-        fine_tolerance = min(abs(tolerance), max(abs(tolerance) * 0.2, 0.05))
-        if abs(delta_value) <= fine_tolerance:
+        if abs(delta_value) <= abs(tolerance):
             self._seek_last_error_by_key.pop(seek_key, None)
             self._seek_last_value_by_key.pop(seek_key, None)
             self._seek_no_response_count_by_key.pop(seek_key, None)
@@ -4864,7 +4906,7 @@ class MainWindow(QtWidgets.QMainWindow):
         speed_mm_s = self._seek_speed_mm_s(delta_value, tolerance)
         nudge_mm = self._seek_command_step_mm(nudge_mm, speed_mm_s)
         backlash_takeup_mm = self._seek_backlash_takeup_mm(movement_direction)
-        chain_from_last_target = self._seek_uses_planned_motion_base()
+        chain_from_last_target = self._seek_uses_planned_motion_base(basis)
         base_position_mm = self._last_move_target_mm if chain_from_last_target else self._current_position_mm
         target_mm = base_position_mm + movement_direction * (nudge_mm + backlash_takeup_mm)
         if backlash_takeup_mm > 0.0:
@@ -5276,6 +5318,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_position_steps = current_position
                 self._current_position_mm = current_position / float(self.spin_steps_per_mm.value())
                 self._last_tic_status_time_s = time.time()
+                self._last_commanded_position_steps = current_position
         operation_state = _extract_status_value(status_text, "Operation state") or "unknown"
         errors = _extract_status_value(status_text, "Errors currently stopping the motor") or "none"
         vin_text = "-" if vin_v is None else f"{vin_v:.2f} V"
@@ -5301,6 +5344,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._current_position_steps = 0
         self._current_position_mm = 0.0
+        self._last_commanded_position_steps = 0
         self._position_reference_mm = 0.0
         self._last_move_target_mm = 0.0
         self._manual_jog_uses_last_target = False
@@ -5383,8 +5427,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log(f"Tic command-timeout keepalive failed: {exc}")
                 self._tic_keepalive_warning_active = True
 
+    def _has_unconfirmed_motion_command(self) -> bool:
+        return (
+            self._last_motion_command_time_s is not None
+            and (
+                self._last_tic_status_time_s is None
+                or self._last_tic_status_time_s < self._last_motion_command_time_s
+            )
+        )
+
+    def _commanded_motion_base_mm(self) -> float:
+        if self._has_unconfirmed_motion_command():
+            return self._last_move_target_mm
+        return self._current_position_mm
+
+    def _commanded_position_steps(self) -> int:
+        if self._has_unconfirmed_motion_command() and self._last_commanded_position_steps is not None:
+            return self._last_commanded_position_steps
+        return self._current_position_steps
+
+    def _measurement_position_mm(self) -> float:
+        return self._commanded_motion_base_mm()
+
     def _relative_motion_base_mm(self) -> float:
-        return self._last_move_target_mm if self._manual_jog_uses_last_target else self._current_position_mm
+        return self._last_move_target_mm if self._manual_jog_uses_last_target else self._commanded_motion_base_mm()
 
     def _effective_max_load_limit_g(self) -> float | None:
         zero_load_limit_g = abs(self._zero_load_scale_reference_g())
@@ -5514,7 +5580,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False
         steps_per_mm = float(self.spin_steps_per_mm.value())
         target_steps = int(round(position_mm * steps_per_mm))
-        if target_steps == self._current_position_steps:
+        if target_steps == self._commanded_position_steps():
             min_step_mm = 1.0 / max(1.0, steps_per_mm)
             self._log(
                 "Move skipped because the requested displacement rounds to the current motor step. "
@@ -5538,6 +5604,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"({target_steps} steps) at {_format_compact_unit(selected_speed_mm_s, 'mm/s', decimals=3)}."
         )
         self._last_motion_command_time_s = time.time()
+        self._last_commanded_position_steps = target_steps
         self._start_tic_keepalive()
         delta_mm = position_mm - self._relative_motion_base_mm()
         if abs(delta_mm) >= 1e-12:
@@ -5892,6 +5959,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_session(self, *, enable_logging: bool = True, record_initial_point: bool = True) -> None:
         if self._session_active:
             return
+        self._persist_settings_if_enabled()
         created_utc = _utc_timestamp()
         try:
             (
@@ -5992,6 +6060,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _stop_session(self) -> None:
         if not self._session_active:
             return
+        self._finalize_calibration_report_if_needed()
         self._stop_auto_ramp(log_completion=False)
         self._session_active = False
         self._session_logging_enabled = False
@@ -6185,8 +6254,6 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return False
-        if self._session_active:
-            self._refresh_tic_status()
         if require_fresh_after_move is None:
             require_fresh_after_move = self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
         after_s = self._last_motion_command_time_s if require_fresh_after_move else None
@@ -6198,7 +6265,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elapsed_s = time.monotonic() - self._session_start_monotonic
         record_wall_s = time.time()
         load_summary = self._scale_summary_for_record(now_s=record_wall_s)
-        position_mm = self._current_position_mm
+        position_mm = self._measurement_position_mm()
         raw_load_g = (
             self._latest_scale_value_g
             if load_summary.raw_last_g is None
@@ -7700,9 +7767,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._timed_step_elapsed_s(step_index)
         if not self._active_timed_move_sent:
-            target_mm = self._current_position_mm + float(step.relative_mm)
+            target_mm = self._commanded_motion_base_mm() + float(step.relative_mm)
             if not self._move_to_position_mm(
                 target_mm,
+                chain_from_last_target=True,
                 speed_mm_s=max(self._minimum_held_speed_mm_s(), float(self.spin_calibration_speed_mm_s.value())),
             ):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
@@ -7716,10 +7784,17 @@ class MainWindow(QtWidgets.QMainWindow):
             basis=step.basis or HSW_BASIS_LOAD_G,
             target_value=step.target_value,
         )
+        requires_post_move_feedback = step.note in {CALIBRATION_FORWARD, CALIBRATION_REVERSE}
+        if (
+            requires_post_move_feedback
+            and not self._has_fresh_scale_reading(after_s=self._last_motion_command_time_s)
+        ):
+            self._log_waiting_for_feedback("Waiting for a fresh scale reading before recording calibration point.")
+            return False
         if not self._record_current_point(
             quiet=True,
             advance_heating=False,
-            require_fresh_after_move=step.note in {CALIBRATION_FORWARD, CALIBRATION_REVERSE},
+            require_fresh_after_move=requires_post_move_feedback,
         ):
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return False
@@ -7730,7 +7805,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._active_timed_move_sent:
             if calibration:
                 if not self._record_calibration_point(step):
-                    return True
+                    return False
             else:
                 plateau_index = int(step.note) if step.note.isdigit() else None
                 self._set_automation_context(
@@ -7761,6 +7836,19 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._log("Calibration report has insufficient data; inspect the session CSV and raw scale sidecar.")
         self._write_session_metadata()
+
+    def _has_calibration_points(self) -> bool:
+        calibration_phases = {
+            CALIBRATION_BASELINE,
+            CALIBRATION_PRELOAD,
+            CALIBRATION_FORWARD,
+            CALIBRATION_REVERSE,
+        }
+        return any(point.automation_phase in calibration_phases for point in self._session_points)
+
+    def _finalize_calibration_report_if_needed(self) -> None:
+        if self._calibration_report is None and self._has_calibration_points():
+            self._finalize_calibration_report()
 
     def _handle_auto_ramp_tick(self) -> None:
         if not self._automation_active or self._automation_paused:
@@ -8230,6 +8318,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.sync()
 
     def _restore_settings(self) -> None:
+        self._settings_restore_in_progress = True
         baud = self.settings.value("scale_baud", "600", type=str)
         if self.combo_scale_baud.findText(baud) >= 0:
             self.combo_scale_baud.setCurrentText(baud)
@@ -8565,6 +8654,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 tile.y_right_combo.setCurrentIndex(y_right_index)
         self._sync_auto_name_fields()
         self._update_recipe_mode_ui()
+        self._settings_restore_in_progress = False
+        self._settings_persistence_ready = True
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         if self._persist_settings:

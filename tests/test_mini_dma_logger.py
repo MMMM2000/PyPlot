@@ -245,6 +245,88 @@ def test_main_window_persists_dashboard_plots_by_default(tmp_path: Path, qtbot) 
         _restore_settings(snapshot)
 
 
+def test_dashboard_plot_choices_persist_immediately(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.sync()
+
+    try:
+        window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+        qtbot.addWidget(window)
+
+        _set_plot_tile(window, 0, "elapsed_s", "position_mm", "strain_pct")
+        _ensure_app().processEvents()
+
+        assert _saved_plot_tile_values(0) == {
+            "visible": True,
+            "x": "elapsed_s",
+            "y_left": "position_mm",
+            "y_right": "strain_pct",
+        }
+    finally:
+        window.close()
+        _ensure_app().processEvents()
+        _restore_settings(snapshot)
+
+
+def test_restore_keeps_custom_sample_and_log_names(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.setValue("name_composition", "Ni50Fe27Ga23")
+    settings.setValue("name_wire", "12/2")
+    settings.setValue("name_specimen", "")
+    settings.setValue("name_condition", "test")
+    settings.setValue("sample_name", "custom saved sample")
+    settings.setValue("log_name", "custom_saved_log")
+    settings.sync()
+
+    try:
+        window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+        window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+        qtbot.addWidget(window)
+
+        assert window.edit_sample_name.text() == "custom saved sample"
+        assert window.edit_log_name.text() == "custom_saved_log"
+    finally:
+        _close_test_window(window)
+
+
+def test_session_start_persists_sample_fields_without_close(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.sync()
+
+    try:
+        window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+        qtbot.addWidget(window)
+        window.check_zero_position_on_start.setChecked(False)
+        window.check_tare_on_start.setChecked(False)
+        window.check_hardware_tare_on_start.setChecked(False)
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/2")
+        window.edit_name_condition.setText("test")
+        window.edit_sample_name.setText("saved before close")
+        window.edit_project_path.setText("G:/My Drive/1 Projects/Praha/microwire_project.pydpj")
+
+        window._start_session(record_initial_point=False)
+
+        assert settings.value("name_composition") == "Ni50Fe27Ga23"
+        assert settings.value("name_wire") == "12/2"
+        assert settings.value("name_condition") == "test"
+        assert settings.value("sample_name") == "saved before close"
+        assert settings.value("builder_project_path") == "G:/My Drive/1 Projects/Praha/microwire_project.pydpj"
+    finally:
+        window.close()
+        _ensure_app().processEvents()
+        _restore_settings(snapshot)
+
+
 def test_zero_load_reference_defaults_to_measured_hanging_weight(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
@@ -495,6 +577,36 @@ def test_calibration_report_estimates_stiffness_and_backlash() -> None:
     }
 
 
+def test_stop_session_finalizes_partial_calibration_report(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("partial_calibration")
+    window.check_zero_position_on_start.setChecked(False)
+    window.check_tare_on_start.setChecked(False)
+    window.check_hardware_tare_on_start.setChecked(False)
+
+    try:
+        window._start_session(record_initial_point=False)
+        window._automation_name = mini_dma_mod.CALIBRATION
+        window._session_points = [
+            _calibration_point(
+                position_mm=0.0,
+                load_g=0.25,
+                phase=mini_dma_mod.CALIBRATION_FORWARD,
+            )
+        ]
+        json_path = window._session_json_path
+        assert json_path is not None
+
+        window._stop_session()
+
+        metadata = json.loads(json_path.read_text(encoding="utf-8"))
+        assert metadata["session_state"] == "finished"
+        assert metadata["calibration"]["report"]["status"] == "insufficient_data"
+        assert metadata["calibration"]["report"]["sample_counts"]["forward"] == 1
+    finally:
+        _close_test_window(window)
+
+
 def test_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION)
@@ -699,6 +811,118 @@ def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Pa
         assert window._current_position_mm == pytest.approx(1.25)
         assert window._current_position_steps == 125
         assert window._last_move_target_mm == pytest.approx(2.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_calibration_relative_moves_chain_from_commanded_targets(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    times = iter([10.0, 10.0, 10.1, 10.1, 10.2, 10.2])
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(times))
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CALIBRATION
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window._last_move_target_mm = 0.0
+    window._last_tic_status_time_s = time.time()
+    window.spin_steps_per_mm.setValue(100.0)
+    step = mini_dma_mod.AutomationStep(
+        "calibration_move",
+        relative_mm=0.01,
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        note=mini_dma_mod.CALIBRATION_FORWARD,
+    )
+
+    try:
+        assert window._handle_calibration_move_step(step, 1) is True
+        assert window._handle_calibration_move_step(step, 2) is True
+
+        assert controller.targets == [1, 2]
+        assert window._current_position_steps == 0
+        assert window._last_move_target_mm == pytest.approx(0.02)
+    finally:
+        _close_test_window(window)
+
+
+def test_record_current_point_uses_commanded_position_without_tic_status_refresh(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("cached_tic_position")
+    window.check_zero_position_on_start.setChecked(False)
+    window.check_tare_on_start.setChecked(False)
+    window.check_hardware_tare_on_start.setChecked(False)
+    window._latest_scale_value_g = window.spin_zero_load_scale_g.value()
+    window._latest_scale_timestamp = time.time()
+    window._refresh_tic_status = lambda: (_ for _ in ()).throw(AssertionError("status should be cached"))  # type: ignore[method-assign]
+
+    try:
+        window._start_session(record_initial_point=False)
+        window._current_position_mm = 0.0
+        window._current_position_steps = 0
+        window._last_tic_status_time_s = time.time()
+        window._last_move_target_mm = 0.5
+        window._last_commanded_position_steps = 50
+        window._last_motion_command_time_s = time.time() + 0.1
+
+        assert window._record_current_point(quiet=True) is True
+        assert window._session_points[-1].raw_position_mm == pytest.approx(0.5)
+    finally:
+        _close_test_window(window)
+
+
+def test_calibration_record_waits_for_fresh_scale_after_move(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("calibration_feedback_wait")
+    window.check_zero_position_on_start.setChecked(False)
+    window.check_tare_on_start.setChecked(False)
+    window.check_hardware_tare_on_start.setChecked(False)
+    window._latest_scale_value_g = window.spin_zero_load_scale_g.value()
+    stale_s = time.time()
+    window._latest_scale_timestamp = stale_s
+
+    stop_calls = 0
+
+    def _count_stop(**_kwargs: object) -> None:
+        nonlocal stop_calls
+        stop_calls += 1
+
+    try:
+        window._start_session(record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CALIBRATION
+        window._stop_auto_ramp = _count_stop  # type: ignore[method-assign]
+        window._last_motion_command_time_s = stale_s + 0.1
+        step = mini_dma_mod.AutomationStep(
+            "calibration_record",
+            target_value=0.25,
+            basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+            note=mini_dma_mod.CALIBRATION_FORWARD,
+        )
+
+        assert window._handle_timed_record_step(step, 5, calibration=True) is False
+        assert stop_calls == 0
+        assert window._session_points == []
+
+        window._latest_scale_timestamp = time.time() + 0.2
+        assert window._handle_timed_record_step(step, 5, calibration=True) is True
+        assert len(window._session_points) == 1
+        assert window._session_points[0].automation_phase == mini_dma_mod.CALIBRATION_FORWARD
     finally:
         _close_test_window(window)
 
@@ -1216,6 +1440,90 @@ def test_setup_preload_correction_step_uses_setup_speed_interval(tmp_path: Path,
         _close_test_window(window)
 
 
+def test_setup_preload_target_ramp_uses_elapsed_mpa_rate(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [100.0]
+    captured_targets: list[float] = []
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+
+    def _capture_seek(_basis: str, target_value: float, _tolerance: float) -> bool:
+        captured_targets.append(target_value)
+        return False
+
+    window._seek_distribution_target = _capture_seek  # type: ignore[method-assign]
+    step = mini_dma_mod.AutomationStep(
+        "ramp_target",
+        target_value=10.0,
+        target_start_value=0.0,
+        target_end_value=10.0,
+        target_ramp_rate_value_s=0.5,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        note="setup_preload",
+    )
+
+    try:
+        assert window._handle_target_ramp_step(step, 4) is False
+
+        now_s[0] = 102.5
+
+        assert window._handle_target_ramp_step(step, 4) is False
+        assert captured_targets == [pytest.approx(0.0), pytest.approx(1.25)]
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_preload_target_ramp_finishes_inside_configured_tolerance(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [111.0]
+    moves: list[float] = []
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
+        moves.append(target_mm)
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CALIBRATION
+    window._active_target_ramp_step_index = 7
+    window._active_target_ramp_started_s = 100.0
+    window._active_target_ramp_start_value = 0.0
+    window.check_tension_load_positive.setChecked(False)
+    window.spin_diameter.setValue(0.03)
+    window.spin_setup_preload_tolerance_mpa.setValue(0.25)
+    load_g = mini_dma_mod.load_g_from_stress_mpa(10.2, window.spin_diameter.value())
+    assert load_g is not None
+    window._latest_scale_value_g = load_g
+    window._latest_scale_timestamp = time.time()
+
+    step = mini_dma_mod.AutomationStep(
+        "ramp_target",
+        target_value=10.0,
+        target_start_value=0.0,
+        target_end_value=10.0,
+        target_ramp_rate_value_s=1.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        note="setup_preload",
+    )
+
+    try:
+        assert window._handle_target_ramp_step(step, 7) is True
+        assert moves == []
+        assert window._active_target_ramp_step_index is None
+    finally:
+        _close_test_window(window)
+
+
 def test_displacement_ramp_uses_global_control_and_log_clocks(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -1322,7 +1630,7 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
         _close_test_window(window)
 
 
-def test_target_ramp_chains_planned_motion_between_scale_updates(tmp_path: Path, qtbot) -> None:
+def test_load_target_ramp_waits_for_feedback_between_moves(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window._automation_active = True
     window._automation_name = mini_dma_mod.CALIBRATION
@@ -1339,9 +1647,10 @@ def test_target_ramp_chains_planned_motion_between_scale_updates(tmp_path: Path,
     window._current_position_mm = 0.0
     window._current_position_steps = 0
     window._last_move_target_mm = 0.0
-    window._last_motion_command_time_s = time.time()
+    feedback_s = time.time()
+    window._last_motion_command_time_s = feedback_s - 0.1
     window._latest_scale_value_g = window.spin_zero_load_scale_g.value()
-    window._latest_scale_timestamp = window._last_motion_command_time_s - 0.1
+    window._latest_scale_timestamp = feedback_s
     targets: list[tuple[float, bool]] = []
 
     def _capture_move(target_mm: float, **kwargs: object) -> bool:
@@ -1362,7 +1671,8 @@ def test_target_ramp_chains_planned_motion_between_scale_updates(tmp_path: Path,
                 tolerance=0.25,
             ) is False
 
-        assert targets == [(pytest.approx(-0.05), True), (pytest.approx(-0.10), True)]
+        assert len(targets) == 1
+        assert targets[0] == (pytest.approx(-0.05), False)
     finally:
         _close_test_window(window)
 
@@ -1925,6 +2235,35 @@ def test_tic_target_position_energizes_and_exits_safe_start(monkeypatch: pytest.
     ]
 
 
+def test_tic_controller_is_reused_until_connection_settings_change(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    created: list[tuple[str, str]] = []
+
+    class _FakeController:
+        def __init__(self, command_path: str, device_serial: str) -> None:
+            created.append((command_path, device_serial))
+
+    monkeypatch.setattr(mini_dma_mod, "TicController", _FakeController)
+    window.edit_ticcmd_path.setText("ticcmd-a")
+    window.edit_tic_serial.setText("serial-a")
+
+    try:
+        first = window._build_tic_controller()
+        second = window._build_tic_controller()
+        window.edit_tic_serial.setText("serial-b")
+        third = window._build_tic_controller()
+
+        assert first is second
+        assert third is not first
+        assert created == [("ticcmd-a", "serial-a"), ("ticcmd-a", "serial-b")]
+    finally:
+        _close_test_window(window)
+
+
 def test_tic_keepalive_resets_command_timeout_during_active_recipe(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -2324,7 +2663,7 @@ def test_recipe_seek_does_not_stack_corrections_ahead_of_confirmed_position(tmp_
             tolerance=0.25,
         )
 
-        assert controller.targets == [95, 95]
+        assert controller.targets == [95]
     finally:
         _close_test_window(window)
 
