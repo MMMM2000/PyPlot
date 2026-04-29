@@ -1381,6 +1381,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_preload_position_mm: float | None = None
         self._length_setup_dialog: QtWidgets.QDialog | None = None
         self._length_setup_status_label: QtWidgets.QLabel | None = None
+        self._length_setup_progress: QtWidgets.QProgressBar | None = None
+        self._button_length_setup_pause: QtWidgets.QPushButton | None = None
+        self._button_length_setup_stop: QtWidgets.QPushButton | None = None
         self._length_setup_figure: Figure | None = None
         self._length_setup_canvas: Any = None
         self._length_setup_start_monotonic = 0.0
@@ -4497,6 +4500,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._motor_step_mm(),
                 float(self.spin_motion_speed_mm_s.value()) * interval_s,
             )
+        if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+            interval_s = max(0.001, float(self._automation_interval_ms) / 1000.0)
+            return max(
+                self._motor_step_mm(),
+                float(self.spin_setup_stage_speed_mm_s.value()) * interval_s,
+            )
         max_step_mm = max(self._motor_step_mm(), self._seek_nudge_mm())
         error_ratio = abs(error_value) / max(tolerance, 1e-12)
         if error_ratio <= 1.5:
@@ -6063,12 +6072,46 @@ class MainWindow(QtWidgets.QMainWindow):
             self.recipe_progress.setFormat(f"Recipe progress: {percent}% ({value}/{total})")
         else:
             self.recipe_progress.setFormat("Recipe progress: idle")
+        self._update_length_setup_progress(value=value, total=total, complete=complete, percent=percent)
+
+    def _update_length_setup_progress(
+        self,
+        *,
+        value: int | None = None,
+        total: int | None = None,
+        complete: bool = False,
+        percent: int | None = None,
+    ) -> None:
+        if self._length_setup_progress is None:
+            return
+        if total is None:
+            total = max(1, self._automation_total_steps or len(self._automation_steps))
+        if value is None:
+            value = total if complete else min(self._automation_completed_ticks, max(0, total - 1))
+        if percent is None:
+            percent = int(round((value / max(1, total)) * 100.0))
+        self._length_setup_progress.setRange(0, max(1, total))
+        self._length_setup_progress.setValue(max(0, min(value, max(1, total))))
+        if complete:
+            self._length_setup_progress.setFormat(f"Setup progress: complete ({total}/{total})")
+        elif self._automation_active:
+            self._length_setup_progress.setFormat(f"Setup progress: {percent}% ({value}/{total})")
+        else:
+            self._length_setup_progress.setFormat("Setup progress: idle")
 
     def _update_recipe_buttons(self) -> None:
         self.button_start_recipe.setEnabled(not self._automation_active or self._automation_paused)
         self.button_pause_recipe.setEnabled(self._automation_active)
         self.button_pause_recipe.setText("Resume recipe" if self._automation_paused else "Pause recipe")
         self.button_stop_recipe.setEnabled(self._automation_active)
+        self._update_length_setup_controls()
+
+    def _update_length_setup_controls(self) -> None:
+        if self._button_length_setup_pause is not None:
+            self._button_length_setup_pause.setEnabled(self._automation_active)
+            self._button_length_setup_pause.setText("Resume setup" if self._automation_paused else "Pause setup")
+        if self._button_length_setup_stop is not None:
+            self._button_length_setup_stop.setEnabled(self._automation_active)
 
     def _store_resume_state(self, *, summary: str | None = None) -> None:
         if not self._automation_steps:
@@ -6307,19 +6350,40 @@ class MainWindow(QtWidgets.QMainWindow):
             label = QtWidgets.QLabel("Preparing mandatory zero-load and length setup...", dialog)
             label.setWordWrap(True)
             layout.addWidget(label)
+            progress = QtWidgets.QProgressBar(dialog)
+            progress.setRange(0, 100)
+            progress.setValue(0)
+            progress.setTextVisible(True)
+            progress.setFormat("Setup progress: idle")
+            layout.addWidget(progress)
             if FigureCanvas is not None:
                 self._length_setup_figure = Figure(figsize=(7.0, 3.8))
                 self._length_setup_canvas = FigureCanvas(self._length_setup_figure)
                 layout.addWidget(self._length_setup_canvas, stretch=1)
+            control_row = QtWidgets.QHBoxLayout()
+            pause_button = QtWidgets.QPushButton("Pause setup", dialog)
+            pause_button.clicked.connect(self._toggle_recipe_pause)
+            pause_button.setEnabled(False)
+            control_row.addWidget(pause_button)
+            stop_button = QtWidgets.QPushButton("Stop setup", dialog)
+            stop_button.clicked.connect(self._stop_recipe_from_button)
+            stop_button.setEnabled(False)
+            control_row.addWidget(stop_button)
+            layout.addLayout(control_row)
             close_note = QtWidgets.QLabel("This window closes automatically when the recipe start point is ready.", dialog)
             close_note.setWordWrap(True)
             close_note.setStyleSheet("color: palette(mid);")
             layout.addWidget(close_note)
             self._length_setup_status_label = label
+            self._length_setup_progress = progress
+            self._button_length_setup_pause = pause_button
+            self._button_length_setup_stop = stop_button
             self._length_setup_dialog = dialog
         self._length_setup_points.clear()
         self._length_setup_start_monotonic = time.monotonic()
         self._update_length_setup_dialog("Moving to setup preload.")
+        self._update_length_setup_progress()
+        self._update_length_setup_controls()
         self._refresh_length_setup_plot()
         dialog.show()
         dialog.raise_()
@@ -6332,6 +6396,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _close_length_setup_dialog(self) -> None:
         if self._length_setup_dialog is not None:
             self._length_setup_dialog.close()
+        self._length_setup_progress = None
+        self._button_length_setup_pause = None
+        self._button_length_setup_stop = None
 
     def _record_length_setup_point(self) -> bool:
         if self._length_setup_start_monotonic <= 0.0:

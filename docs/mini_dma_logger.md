@@ -73,7 +73,8 @@ Current intended hardware stack:
 - clear stacked `Move up` / `Move down` buttons can be held for continuous manual jogging from the last commanded target, with held movement advancing by the configured linear `Manual move speed` in `mm/s`
 - current-sweep recipes use an editable zero-load scale reference instead of physically taring the balance; the default hanging-weight reference is `21.200 g`
 - every recipe now runs the length setup before normal recipe logging: ramp directly to the configured setup preload stress, prompt for the measured wire length at preload, return to `0 g` applied load, compute unloaded `l0` from the known tensile stage displacement, then start the normal recipe CSV/graph log
-- the length-setup popup shows live load, stress, and tensile displacement versus setup time while it is chasing preload and returning to zero load; the setup has its own stage-speed ceiling so the stress ramp is not limited by fine calibration micro-move speed
+- the length-setup popup shows live load, stress, and tensile displacement versus setup time while it is chasing preload and returning to zero load; the popup has its own pause, stop, and progress controls
+- setup has its own stage-speed ceiling and uses that speed together with the control interval to choose the net correction distance, so it is not limited by the fine calibration micro-move correction step
 - position zeroing
 - halt / stop support
 - jog control refuses sub-step moves that would round to the current motor step

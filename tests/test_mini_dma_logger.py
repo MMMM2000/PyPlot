@@ -1016,6 +1016,27 @@ def test_setup_preload_target_ramp_uses_setup_stage_speed(tmp_path: Path, qtbot)
         _close_test_window(window)
 
 
+def test_setup_preload_correction_step_uses_setup_speed_interval(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_steps_per_mm.setValue(10000.0)
+        window.spin_setup_stage_speed_mm_s.setValue(1.0)
+        window.spin_calibration_preload_nudge_mm.setValue(0.01)
+        window._automation_interval_ms = 250
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CALIBRATION
+        window._set_automation_context(
+            phase="target_ramp",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            note="setup_preload",
+        )
+
+        assert window._seek_step_mm(error_value=5.0, tolerance=0.25) == pytest.approx(0.25)
+    finally:
+        _close_test_window(window)
+
+
 def test_length_setup_dialog_contains_live_graph_and_records_setup_points(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -1036,6 +1057,60 @@ def test_length_setup_dialog_contains_live_graph_and_records_setup_points(tmp_pa
         point = window._length_setup_points[0]
         assert point.load_g == pytest.approx(0.3)
         assert point.stress_mpa is not None
+    finally:
+        _close_test_window(window)
+
+
+def test_length_setup_dialog_has_local_pause_stop_and_progress(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.halt_count = 0
+
+        def halt_and_hold(self) -> None:
+            self.halt_count += 1
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._disable_supply_output = lambda: None  # type: ignore[method-assign]
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
+
+    try:
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep("ramp_target", note="setup_preload"),
+            mini_dma_mod.AutomationStep("start_session", note="recipe_start"),
+            mini_dma_mod.AutomationStep("record"),
+        ]
+        window._automation_index = 0
+        window._automation_total_steps = 12
+        window._automation_completed_ticks = 3
+        window._automation_interval_ms = 250
+        window._show_length_setup_dialog()
+        window._update_recipe_progress()
+        window._update_recipe_buttons()
+
+        assert window._length_setup_progress is not None
+        assert window._length_setup_progress.value() == 3
+        assert "Setup progress" in window._length_setup_progress.format()
+        assert window._button_length_setup_pause is not None
+        assert window._button_length_setup_pause.text() == "Pause setup"
+        assert window._button_length_setup_stop is not None
+        assert window._button_length_setup_stop.isEnabled()
+
+        window._button_length_setup_pause.click()
+
+        assert window._automation_paused is True
+        assert controller.halt_count == 1
+        assert window._button_length_setup_pause.text() == "Resume setup"
+
+        window._button_length_setup_stop.click()
+
+        assert window._automation_active is False
+        assert window._length_setup_dialog is None or not window._length_setup_dialog.isVisible()
     finally:
         _close_test_window(window)
 
