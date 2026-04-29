@@ -1311,10 +1311,11 @@ class PowerSupplyController:
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, log_dir: str | None = None) -> None:
+    def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.settings = QtCore.QSettings("microwire", "mini_dma_logger")
+        self._persist_settings = persist_settings
         self._provided_log_dir = log_dir
         self._scale_thread: QtCore.QThread | None = None
         self._scale_worker: ScaleWorker | None = None
@@ -8566,7 +8567,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_recipe_mode_ui()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
-        self._save_settings()
+        if self._persist_settings:
+            self._save_settings()
         self._stop_tic_keepalive()
         self._stop_auto_ramp(log_completion=False)
         self._disconnect_scale()
@@ -8575,7 +8577,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
 
-def main(log_dir: str | None = None) -> QtWidgets.QWidget:
+def main(log_dir: str | None = None, *, persist_settings: bool = True) -> QtWidgets.QWidget:
     app = QtWidgets.QApplication.instance()
     owns_app = False
     if not isinstance(app, QtWidgets.QApplication):
@@ -8583,7 +8585,7 @@ def main(log_dir: str | None = None) -> QtWidgets.QWidget:
         owns_app = True
 
     ensure_app_theme(app)
-    window = MainWindow(log_dir)
+    window = MainWindow(log_dir, persist_settings=persist_settings)
     window.showMaximized()
     WINDOWS.append(window)
 

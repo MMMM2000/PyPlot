@@ -48,7 +48,7 @@ def _restore_settings(snapshot: dict[str, object]) -> None:
 def _build_window(tmp_path: Path, qtbot) -> mini_dma_mod.MainWindow:
     _ensure_app()
     snapshot = _snapshot_settings()
-    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
     window.check_zero_position_on_start.setChecked(False)
@@ -66,13 +66,192 @@ def _close_test_window(window: mini_dma_mod.MainWindow) -> None:
         _restore_settings(snapshot)
 
 
+def _set_plot_tile(
+    window: mini_dma_mod.MainWindow,
+    index: int,
+    x_key: str,
+    y_left_key: str,
+    y_right_key: str,
+    *,
+    visible: bool = True,
+) -> None:
+    tile = window._plot_tiles[index]
+    tile.visible.setChecked(visible)
+    for combo, key in (
+        (tile.x_combo, x_key),
+        (tile.y_left_combo, y_left_key),
+        (tile.y_right_combo, y_right_key),
+    ):
+        combo_index = combo.findData(key)
+        assert combo_index >= 0, key
+        combo.setCurrentIndex(combo_index)
+
+
+def _saved_plot_tile_values(index: int) -> dict[str, object]:
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    prefix = f"plot_tile_{index}"
+    return {
+        "visible": settings.value(f"{prefix}_visible", type=bool),
+        "x": settings.value(f"{prefix}_x", type=str),
+        "y_left": settings.value(f"{prefix}_y_left", type=str),
+        "y_right": settings.value(f"{prefix}_y_right", type=str),
+    }
+
+
+USER_DASHBOARD_PLOTS = [
+    ("elapsed_s", "load_g", "stress_mpa"),
+    ("elapsed_s", "position_mm", "strain_pct"),
+    ("elapsed_s", "current_set_mA", "current_measured_mA"),
+    ("elapsed_s", "resistance_ohm", "voltage_V"),
+]
+
+
+def test_review_window_can_skip_settings_persistence(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    expected_values = {
+        "name_composition": "Ni50Fe27Ga23",
+        "name_wire": "12/2",
+        "name_specimen": "",
+        "name_condition": "test",
+        "diameter_mm": 0.0191,
+        "builder_project_path": "G:/My Drive/1 Projects/Praha/microwire_project.pydpj",
+        "log_dir": "C:/Users/Martin Eliáš/Downloads",
+        "log_name": "Ni50Fe27Ga23 12_2 test",
+        "sample_name": "Ni50Fe27Ga23 12/2 test",
+    }
+    settings.clear()
+    for key, value in expected_values.items():
+        settings.setValue(key, value)
+    settings.sync()
+
+    try:
+        window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+        qtbot.addWidget(window)
+
+        window.edit_name_composition.setText("temporary")
+        window.edit_name_wire.setText("99/9")
+        window.edit_name_condition.setText("review")
+        window.spin_diameter.setValue(0.12345)
+        window.edit_project_path.setText("")
+        window.edit_log_dir.setText(str(tmp_path / "artifacts"))
+        window.edit_log_name.setText("temporary_review")
+        window.edit_sample_name.setText("temporary sample")
+        window.close()
+        _ensure_app().processEvents()
+
+        preserved = {key: settings.value(key) for key in expected_values}
+        assert float(preserved.pop("diameter_mm")) == pytest.approx(expected_values["diameter_mm"])
+        expected_without_diameter = dict(expected_values)
+        expected_without_diameter.pop("diameter_mm")
+        assert preserved == expected_without_diameter
+    finally:
+        _restore_settings(snapshot)
+
+
+def test_review_window_can_skip_dashboard_plot_persistence(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    for index, (x_key, y_left_key, y_right_key) in enumerate(USER_DASHBOARD_PLOTS):
+        prefix = f"plot_tile_{index}"
+        settings.setValue(f"{prefix}_visible", True)
+        settings.setValue(f"{prefix}_x", x_key)
+        settings.setValue(f"{prefix}_y_left", y_left_key)
+        settings.setValue(f"{prefix}_y_right", y_right_key)
+    settings.sync()
+
+    try:
+        window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+        qtbot.addWidget(window)
+
+        window._apply_plot_preset("dma")
+        window._plot_tiles[3].visible.setChecked(False)
+        window.close()
+        _ensure_app().processEvents()
+
+        for index, (x_key, y_left_key, y_right_key) in enumerate(USER_DASHBOARD_PLOTS):
+            assert _saved_plot_tile_values(index) == {
+                "visible": True,
+                "x": x_key,
+                "y_left": y_left_key,
+                "y_right": y_right_key,
+            }
+    finally:
+        _restore_settings(snapshot)
+
+
+def test_main_window_persists_sample_fields_by_default(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.sync()
+
+    try:
+        window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+        qtbot.addWidget(window)
+
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/2")
+        window.edit_name_specimen.setText("")
+        window.edit_name_condition.setText("test")
+        window.spin_diameter.setValue(0.0191)
+        window.edit_project_path.setText("G:/My Drive/1 Projects/Praha/microwire_project.pydpj")
+        window.edit_log_dir.setText("C:/Users/Martin Eliáš/Downloads")
+        window.edit_log_name.setText("Ni50Fe27Ga23 12_2 test")
+        window.edit_sample_name.setText("Ni50Fe27Ga23 12/2 test")
+        window.close()
+        _ensure_app().processEvents()
+
+        assert settings.value("name_composition") == "Ni50Fe27Ga23"
+        assert settings.value("name_wire") == "12/2"
+        assert settings.value("name_condition") == "test"
+        assert float(settings.value("diameter_mm")) == pytest.approx(0.0191)
+        assert settings.value("builder_project_path") == "G:/My Drive/1 Projects/Praha/microwire_project.pydpj"
+        assert settings.value("log_dir") == "C:/Users/Martin Eliáš/Downloads"
+        assert settings.value("log_name") == "Ni50Fe27Ga23 12_2 test"
+        assert settings.value("sample_name") == "Ni50Fe27Ga23 12/2 test"
+    finally:
+        _restore_settings(snapshot)
+
+
+def test_main_window_persists_dashboard_plots_by_default(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.clear()
+    settings.sync()
+
+    try:
+        window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+        qtbot.addWidget(window)
+
+        for index, (x_key, y_left_key, y_right_key) in enumerate(USER_DASHBOARD_PLOTS):
+            _set_plot_tile(window, index, x_key, y_left_key, y_right_key)
+        window.close()
+        _ensure_app().processEvents()
+
+        for index, (x_key, y_left_key, y_right_key) in enumerate(USER_DASHBOARD_PLOTS):
+            assert _saved_plot_tile_values(index) == {
+                "visible": True,
+                "x": x_key,
+                "y_left": y_left_key,
+                "y_right": y_right_key,
+            }
+    finally:
+        _restore_settings(snapshot)
+
+
 def test_zero_load_reference_defaults_to_measured_hanging_weight(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
     settings = QtCore.QSettings("microwire", "mini_dma_logger")
     settings.clear()
     settings.sync()
-    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
 
@@ -397,7 +576,7 @@ def test_calibration_defaults_are_safe_for_microwire_startup(tmp_path: Path, qtb
     settings = QtCore.QSettings("microwire", "mini_dma_logger")
     settings.clear()
     settings.sync()
-    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
 
@@ -419,7 +598,7 @@ def test_legacy_copper_calibration_setting_opens_generic_calibration(tmp_path: P
     settings.clear()
     settings.setValue("recipe_mode", mini_dma_mod.CALIBRATION_COPPER)
     settings.sync()
-    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
 
@@ -441,7 +620,7 @@ def test_legacy_calibration_defaults_migrate_to_microwire_safe_values(tmp_path: 
     settings.setValue("calibration_load_step_g", 1.0)
     settings.setValue("calibration_preload_speed_mm_s", 1.0)
     settings.sync()
-    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
 
@@ -930,7 +1109,7 @@ def test_saved_sample_fields_and_builder_project_autoimport_diameter(tmp_path: P
     settings.setValue("builder_project_path", str(project_path))
     settings.setValue("diameter_mm", 0.03)
     settings.sync()
-    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
 
@@ -1088,7 +1267,7 @@ def test_scale_request_poll_interval_migrates_to_response_time(tmp_path: Path, q
     settings.setValue("scale_request", "\\x1bp")
     settings.setValue("scale_interval_ms", 50)
     settings.sync()
-    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
 
@@ -1121,7 +1300,7 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
     settings.setValue("tic_keepalive_interval_ms", 350)
     settings.setValue("supply_read_interval_ms", 1250)
     settings.sync()
-    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
 
@@ -1945,7 +2124,7 @@ def test_global_control_and_log_intervals_migrate_from_current_sweep_settings(tm
     settings.setValue("current_sweep_interval_ms", 375)
     settings.setValue("current_sweep_log_interval_ms", 875)
     settings.sync()
-    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
 
