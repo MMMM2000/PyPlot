@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
+import time
 from typing import Iterable, Sequence
 
 try:  # pragma: no cover - exercised only when pyserial is installed
@@ -338,10 +339,20 @@ class Lcr6000Serial:
         self._serial.write(command.encode("ascii"))
         self._serial.flush()
 
-    def query(self, command: str) -> str:
-        self.write(command)
-        data = self._serial.readline()
-        return data.decode("ascii", errors="replace").strip()
+    def query(self, command: str, *, attempts: int = 2) -> str:
+        for attempt in range(max(1, int(attempts))):
+            try:
+                self._serial.reset_input_buffer()
+            except Exception:
+                pass
+            self.write(command)
+            data = self._serial.readline()
+            text = data.decode("ascii", errors="replace").strip()
+            if text:
+                return text
+            if attempt + 1 < attempts:
+                time.sleep(0.2)
+        return ""
 
     def identify(self) -> str:
         return self.query("*IDN?")
@@ -349,6 +360,7 @@ class Lcr6000Serial:
     def configure(self, settings: Lcr6000Settings) -> None:
         for command in commands_for_settings(settings):
             self.write(command)
+            time.sleep(0.15)
 
     def fetch_impedance(self) -> Lcr6000Reading:
         return parse_fetch_impedance(self.query("FETC:IMP?"))
