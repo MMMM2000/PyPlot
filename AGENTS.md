@@ -2,6 +2,8 @@
 
 ## Environment
 - Use the project virtual environment for Python commands.
+- Match the interpreter to `pyproject.toml` before creating or reusing `.venv`. This repo currently requires Python 3.14 (`>=3.14,<3.15`); on Windows prefer `py -3.14 -m venv .venv` when recreating the environment, and do not fall back to Python 3.13.
+- If `py -0p` does not list a Python 3.14 interpreter on Windows, stop environment setup and report that Python 3.14 must be installed/registered before installing the project.
 - Prefer the project `.venv`; on Windows use `.\.venv\Scripts\python.exe` explicitly and state which interpreter was used in the final summary.
 - If `.venv` is missing, broken, or tied to the wrong Python minor version for the project, recreate it before running project Python commands.
 - Treat `.venv` as disposable generated state. If the project now requires a newer Python version, replace the old `.venv` instead of asking the user to clean it up.

@@ -1105,7 +1105,6 @@ def _load_rvst_word_report_frame(source_path: Path, sample_override: object, out
         "Microwire": microwire,
         "Production datetime": first_timestamp,
         "Data source": "R vs T CSV",
-        "Notes": f"Generated from R vs T CSV file {source_path.name}.",
         RVT_FILE_COLUMN: str(source_path),
         RVT_POINT_COUNT_COLUMN: int(len(frame)),
         RVT_TEMPERATURE_RANGE_COLUMN: _format_numeric_range(frame["pv_c"]),
@@ -1127,6 +1126,290 @@ def _load_rvst_word_report_frame(source_path: Path, sample_override: object, out
             row[RVT_ORIGIN_COLUMN] = artifact.descriptor
             origin_artifacts[artifact.descriptor] = artifact
     return pd.DataFrame([row]), origin_artifacts
+
+
+def _project_section_rows(section: object) -> list[dict[str, Any]]:
+    if not isinstance(section, dict):
+        return []
+    rows = section.get("rows")
+    columns = section.get("columns")
+    if not isinstance(rows, list):
+        return []
+    if rows and isinstance(rows[0], dict):
+        return [dict(row) for row in rows if isinstance(row, dict)]
+    if isinstance(columns, list):
+        column_names = [str(column) for column in columns]
+        converted: list[dict[str, Any]] = []
+        for row in rows:
+            if isinstance(row, list):
+                converted.append(dict(zip(column_names, row)))
+        return converted
+    return []
+
+
+def _word_project_row_sample(row: dict[str, Any]) -> tuple[str, str]:
+    composition = str(row.get("Composition") or "").strip()
+    microwire = str(row.get("Microwire") or "").strip()
+    if not microwire:
+        draw = row.get("Draw")
+        piece = row.get("Piece")
+        try:
+            draw_text = str(int(float(draw)))
+            piece_text = str(int(float(piece)))
+        except (TypeError, ValueError):
+            draw_text = str(draw or "").strip()
+            piece_text = str(piece or "").strip()
+        if draw_text and piece_text:
+            microwire = f"{draw_text}/{piece_text}"
+    return composition, microwire
+
+
+def _word_project_value_items(value: object) -> list[object]:
+    if value is None:
+        return []
+    if isinstance(value, float) and value != value:
+        return []
+    if isinstance(value, list):
+        return [item for item in value if item not in (None, "", [], {})]
+    if isinstance(value, tuple):
+        return [item for item in value if item not in (None, "", [], {})]
+    if value in ("", [], {}):
+        return []
+    return [value]
+
+
+def _word_project_merge_value(existing: object, incoming: object) -> object:
+    incoming_items = _word_project_value_items(incoming)
+    if not incoming_items:
+        return existing
+    existing_items = _word_project_value_items(existing)
+    if not existing_items:
+        return incoming_items if len(incoming_items) > 1 else incoming_items[0]
+    merged: list[object] = []
+    seen: set[str] = set()
+    for item in [*existing_items, *incoming_items]:
+        try:
+            marker = f"{float(item):.12g}"
+        except (TypeError, ValueError):
+            marker = str(item)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        merged.append(item)
+    return merged if len(merged) > 1 else merged[0]
+
+
+def _word_project_public_source_name(source: object) -> str:
+    text = str(source or "").strip()
+    if not text:
+        return ""
+    return Path(text).name
+
+
+def _word_project_add_current_annealing_sources(target: dict[str, Any], sources: object) -> None:
+    from microwire_data_builder.core import FIGURE_COLUMNS
+
+    high_sources: list[str] = []
+    other_sources: list[str] = []
+    for item in _word_project_value_items(sources):
+        text = str(item)
+        filename = Path(text).name
+        if "1000ma" in filename.replace(" ", "").casefold():
+            high_sources.append(text)
+        else:
+            other_sources.append(text)
+    if high_sources:
+        target["_word_annealing_1000_sources"] = _word_project_merge_value(
+            target.get("_word_annealing_1000_sources"),
+            high_sources,
+        )
+        target[FIGURE_COLUMNS[0]] = _word_project_merge_value(
+            target.get(FIGURE_COLUMNS[0]),
+            [_word_project_public_source_name(source) for source in high_sources],
+        )
+    if other_sources:
+        target["_word_annealing_other_sources"] = _word_project_merge_value(
+            target.get("_word_annealing_other_sources"),
+            other_sources,
+        )
+        target[FIGURE_COLUMNS[1]] = _word_project_merge_value(
+            target.get(FIGURE_COLUMNS[1]),
+            [_word_project_public_source_name(source) for source in other_sources],
+        )
+
+
+def _load_project_word_report_frame(
+    source_path: Path,
+    sample: object,
+    output_dir: Path,
+    *,
+    include_origin: bool,
+):
+    import pandas as pd
+
+    from microwire_data_builder.core import (
+        FIGURE_COLUMNS,
+        DIAMETER_COLUMN,
+        DIAMETER_RATIO_COLUMN,
+        GLASS_DIAMETER_COLUMN,
+        MICROSCOPE_IMAGE_COLUMNS,
+        RVT_FILE_COLUMN,
+        RVT_GRAPH_COLUMN,
+        RVT_ORIGIN_COLUMN,
+        RVT_POINT_COUNT_COLUMN,
+        RVT_RESISTANCE_RANGE_COLUMN,
+        RVT_TEMPERATURE_RANGE_COLUMN,
+        _load_annealing,
+        _plot_measurement_origin,
+    )
+    from plotting.plugins.r_vs_t.core import load_file
+
+    payload = json.loads(source_path.read_text(encoding="utf-8"))
+    sections = payload.get("sections") if isinstance(payload, dict) else {}
+    if not isinstance(sections, dict):
+        raise ValueError("Project file does not contain Builder sections.")
+
+    rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    microscope_dimension_columns = {DIAMETER_COLUMN, GLASS_DIAMETER_COLUMN, DIAMETER_RATIO_COLUMN}
+    for section_name, section in sections.items():
+        if section_name in {"assemble", "compare"}:
+            continue
+        for source_row in _project_section_rows(section):
+            composition, microwire = _word_project_row_sample(source_row)
+            if not composition or not microwire:
+                continue
+            key = (
+                _normalise_microwire_word_part(composition),
+                _normalise_microwire_word_key(microwire),
+            )
+            target = rows_by_key.setdefault(
+                key,
+                {
+                    "Composition": composition,
+                    "Microwire": microwire,
+                },
+            )
+            for column, value in source_row.items():
+                if column in {"_key", "_group_key", "_shape_memory_group_key", "_shape_memory_group_order"}:
+                    continue
+                if column == "Graph — 1000 mA":
+                    column = FIGURE_COLUMNS[0]
+                elif column == "Graph — other annealing":
+                    column = FIGURE_COLUMNS[1]
+                elif column == "_core_image":
+                    column = MICROSCOPE_IMAGE_COLUMNS[0]
+                elif column == "_glass_image":
+                    column = MICROSCOPE_IMAGE_COLUMNS[1]
+                elif column == "_sources" and section_name == "annealing":
+                    _word_project_add_current_annealing_sources(target, value)
+                    continue
+                elif column.startswith("_"):
+                    continue
+                if column in microscope_dimension_columns and section_name != "microscope":
+                    continue
+                target[column] = _word_project_merge_value(target.get(column), value)
+
+    frame = pd.DataFrame(list(rows_by_key.values()))
+    frame = _filter_microwire_word_report_frame(frame, sample)
+    origin_artifacts: dict[str, Any] = {}
+    for column in (
+        f"{FIGURE_COLUMNS[0]} (Origin)",
+        f"{FIGURE_COLUMNS[1]} (Origin)",
+        RVT_FILE_COLUMN,
+        RVT_GRAPH_COLUMN,
+        RVT_ORIGIN_COLUMN,
+        RVT_POINT_COUNT_COLUMN,
+        RVT_TEMPERATURE_RANGE_COLUMN,
+        RVT_RESISTANCE_RANGE_COLUMN,
+    ):
+        if column not in frame.columns:
+            frame[column] = pd.Series([None] * len(frame), dtype=object)
+
+    if include_origin:
+        origin_dir = output_dir / "_origin_objects"
+        for index, row in frame.iterrows():
+            for source_column, origin_column in (
+                ("_word_annealing_1000_sources", f"{FIGURE_COLUMNS[0]} (Origin)"),
+                ("_word_annealing_other_sources", f"{FIGURE_COLUMNS[1]} (Origin)"),
+            ):
+                descriptors: list[str] = []
+                for source in _word_project_value_items(row.get(source_column)):
+                    path = Path(str(source))
+                    if not path.exists():
+                        continue
+                    try:
+                        annealing_frame = _load_annealing(path)
+                        artifact = _plot_measurement_origin(
+                            annealing_frame,
+                            path,
+                            origin_dir,
+                            LOGGER,
+                        )
+                    except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
+                        LOGGER.warning("Current annealing Origin object generation skipped for %s: %s", path, exc)
+                        artifact = None
+                    if artifact is None:
+                        continue
+                    descriptors.append(artifact.descriptor)
+                    origin_artifacts[artifact.descriptor] = artifact
+                if descriptors:
+                    frame.at[index, origin_column] = descriptors if len(descriptors) > 1 else descriptors[0]
+
+    rvt_root = source_path.parent / "RvsT"
+    if rvt_root.exists():
+        rvt_paths = [
+            path
+            for path in rvt_root.rglob("*.csv")
+            if path.is_file() and _looks_like_rvst_csv(path)
+        ]
+    else:
+        rvt_paths = []
+
+    for index, row in frame.iterrows():
+        composition = row.get("Composition")
+        microwire = row.get("Microwire")
+        matching_rvt = []
+        for path in rvt_paths:
+            inferred_composition, inferred_microwire = _infer_rvst_word_sample(path, None)
+            if (
+                _normalise_microwire_word_part(inferred_composition)
+                == _normalise_microwire_word_part(composition)
+                and _normalise_microwire_word_key(inferred_microwire)
+                == _normalise_microwire_word_key(microwire)
+            ):
+                matching_rvt.append(path)
+        if matching_rvt:
+            frame.at[index, RVT_FILE_COLUMN] = [str(path) for path in matching_rvt]
+            frame.at[index, RVT_GRAPH_COLUMN] = [path.name for path in matching_rvt]
+
+        rvt_origin_descriptors: list[str] = []
+        for path in matching_rvt:
+            rvt_frame = load_file(path)
+            frame.at[index, RVT_POINT_COUNT_COLUMN] = int(len(rvt_frame))
+            frame.at[index, RVT_TEMPERATURE_RANGE_COLUMN] = _format_numeric_range(rvt_frame["pv_c"])
+            frame.at[index, RVT_RESISTANCE_RANGE_COLUMN] = _format_numeric_range(rvt_frame["resistance_ohm"])
+            if include_origin:
+                title = " ".join(part for part in (str(composition or ""), str(microwire or "")) if part).strip()
+                try:
+                    artifact = _export_rvst_origin_artifact(
+                        rvt_frame,
+                        title=title or path.stem,
+                        source_path=path,
+                        output_dir=output_dir,
+                    )
+                except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
+                    LOGGER.warning("R vs T Origin object generation skipped for %s: %s", path, exc)
+                    artifact = None
+                if artifact is not None:
+                    rvt_origin_descriptors.append(artifact.descriptor)
+                    origin_artifacts[artifact.descriptor] = artifact
+                    frame.at[index, RVT_GRAPH_COLUMN] = artifact.display_text or artifact.descriptor
+        if rvt_origin_descriptors:
+            frame.at[index, RVT_ORIGIN_COLUMN] = (
+                rvt_origin_descriptors if len(rvt_origin_descriptors) > 1 else rvt_origin_descriptors[0]
+            )
+
+    return frame.reset_index(drop=True), origin_artifacts
 
 
 def _filter_microwire_word_report_frame(frame, sample: object):
@@ -1157,6 +1440,13 @@ def _filter_microwire_word_report_frame(frame, sample: object):
 def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespace, output_dir: Path):
     if _looks_like_rvst_csv(source_path):
         return _load_rvst_word_report_frame(
+            source_path,
+            getattr(args, "microwire_word_sample", None),
+            output_dir,
+            include_origin=bool(getattr(args, "microwire_word_origin", True)),
+        )
+    if source_path.suffix.lower() == ".pydpj":
+        return _load_project_word_report_frame(
             source_path,
             getattr(args, "microwire_word_sample", None),
             output_dir,

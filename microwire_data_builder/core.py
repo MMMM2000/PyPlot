@@ -649,6 +649,15 @@ class WordOleInsertion:
     clipboard_fallback: bool = False
 
 
+@dataclass(frozen=True)
+class WordPictureInsertion:
+    """Image insertion request for a generated Word report."""
+
+    bookmark_name: str
+    image_path: Path
+    label: str
+
+
 @dataclass
 class BuildResult:
     """Return value from :func:`build_database`."""
@@ -4212,16 +4221,17 @@ _WORD_REPORT_LABELS: Dict[str, str] = {
     "Figure â€” other annealing (Origin)": "Figure - other annealing (Origin)",
 }
 
-_WORD_SAMPLE_SUMMARY_COLUMNS: Tuple[str, ...] = (
+_WORD_IDENTITY_COLUMNS: Tuple[str, ...] = (
     "Composition",
     "Microwire",
     "e/a",
     ESTIMATED_TRANSITION_COLUMN,
+)
+
+_WORD_DIMENSION_COLUMNS: Tuple[str, ...] = (
     DIAMETER_COLUMN,
     GLASS_DIAMETER_COLUMN,
     DIAMETER_RATIO_COLUMN,
-    BRITTLE_COLUMN,
-    STRAIN_COLUMN,
 )
 
 _WORD_FABRICATION_COLUMNS: Tuple[str, ...] = (
@@ -4237,38 +4247,60 @@ _WORD_FABRICATION_COLUMNS: Tuple[str, ...] = (
     GLASS_PULL_COLUMN,
     VIDEO_END_LENGTH_COLUMN,
     VIDEO_MW_LENGTH_COLUMN,
-    "Notes",
-    "Data source",
 )
 
-_WORD_TRANSITION_COLUMNS: Tuple[str, ...] = (
+_WORD_FUNCTIONAL_COLUMNS: Tuple[str, ...] = (
+    BRITTLE_COLUMN,
+    STRAIN_COLUMN,
     "As (mA)",
     "Ms (mA)",
     *CURRENT_DENSITY_EXTRA_COLUMNS,
     *TRANSITION_TEMP_COLUMNS,
-)
-
-_WORD_MECHANICAL_COLUMNS: Tuple[str, ...] = (
     *STRAIN_EXTRA_COLUMNS,
     *SHAPE_MEMORY_VALUE_COLUMNS,
     *SHAPE_MEMORY_FRACTURE_COLUMNS,
 )
 
-_WORD_GRAPH_REFERENCE_COLUMNS: Tuple[str, ...] = (
+_WORD_PROVENANCE_COLUMNS: Tuple[str, ...] = (
     "File 1000 mA",
     "Other annealing files",
-    *FIGURE_COLUMNS,
+    "Data source",
     RVT_FILE_COLUMN,
-    RVT_GRAPH_COLUMN,
-    RVT_ORIGIN_COLUMN,
     RVT_POINT_COUNT_COLUMN,
     RVT_TEMPERATURE_RANGE_COLUMN,
     RVT_RESISTANCE_RANGE_COLUMN,
+)
+
+_WORD_GRAPH_COLUMNS: Tuple[str, ...] = (
+    *FIGURE_COLUMNS,
+    RVT_GRAPH_COLUMN,
+    RVT_ORIGIN_COLUMN,
     VSM_HYSTERESIS_COLUMN,
     VSM_TEMPERATURE_SCAN_COLUMN,
     DMA_ISOSTRESS_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
     FMR_COLUMN,
+)
+
+_CURRENT_ANNEALING_ORIGIN_COLUMNS = tuple(f"{column} (Origin)" for column in FIGURE_COLUMNS)
+
+_WORD_GRAPH_SECTIONS: Tuple[
+    Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    ...,
+] = (
+    ("Current annealing", _CURRENT_ANNEALING_ORIGIN_COLUMNS, FIGURE_COLUMNS),
+    ("R vs T", (RVT_ORIGIN_COLUMN,), (RVT_GRAPH_COLUMN,)),
+    ("VSM temperature scan", (), (VSM_TEMPERATURE_SCAN_COLUMN,)),
+    ("VSM hysteresis loops", (), (VSM_HYSTERESIS_COLUMN,)),
+    ("DMA iso-stress", (), (DMA_ISOSTRESS_COLUMN,)),
+    ("Shape memory stress/strain", (), (SHAPE_MEMORY_STRESS_STRAIN_COLUMN,)),
+    ("FMR", (), (FMR_COLUMN,)),
+)
+
+_WORD_ALWAYS_OMIT_COLUMNS: Tuple[str, ...] = (
+    *_WORD_PROVENANCE_COLUMNS,
+    *_WORD_GRAPH_COLUMNS,
+    *MICROSCOPE_IMAGE_COLUMNS,
 )
 
 
@@ -4420,13 +4452,100 @@ def _word_table(rows: Sequence[Tuple[str, str]]) -> str:
     )
 
 
-def _word_section(title: str, rows: Sequence[Tuple[str, str]]) -> str:
-    if not rows:
-        return ""
-    return _word_paragraph(title, bold=True, size=28, spacing_after=120) + _word_table(rows)
+def _word_section(
+    title: str,
+    rows: Sequence[Tuple[str, str]],
+    *,
+    empty_text: str = "",
+) -> str:
+    parts = [_word_paragraph(title, bold=True, size=28, spacing_after=120)]
+    if rows:
+        parts.append(_word_table(rows))
+    elif empty_text:
+        parts.append(_word_paragraph(empty_text))
+    return "".join(parts)
 
 
-def _word_origin_sections(
+def _word_resolve_picture_path(
+    value: Any,
+    microscope_crops: Mapping[str, Path],
+) -> Optional[Path]:
+    for descriptor in _asset_references(value):
+        crop = microscope_crops.get(descriptor)
+        if crop is not None and Path(crop).exists():
+            return Path(crop)
+        candidate = Path(descriptor)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _word_microscope_section(
+    row: pd.Series,
+    microscope_crops: Mapping[str, Path],
+    bookmark_start: int,
+) -> Tuple[str, List[WordPictureInsertion], int]:
+    parts = [_word_paragraph("Microscope and dimensions", bold=True, size=28, spacing_after=120)]
+    picture_insertions: List[WordPictureInsertion] = []
+    rows = _word_key_values(row, _WORD_DIMENSION_COLUMNS)
+    if rows:
+        parts.append(_word_table(rows))
+    bookmark_id = bookmark_start
+    image_labels = {
+        MICROSCOPE_IMAGE_COLUMNS[0]: "Core diameter image",
+        MICROSCOPE_IMAGE_COLUMNS[1]: "Glass diameter image",
+    }
+    added_image = False
+    for column, label in image_labels.items():
+        if column not in row.index:
+            continue
+        image_path = _word_resolve_picture_path(row.get(column), microscope_crops)
+        if image_path is None:
+            continue
+        added_image = True
+        parts.append(_word_paragraph(label, bold=True, spacing_after=60))
+        bookmark_name = f"MicroscopeImage{bookmark_id}"
+        parts.append(
+            _word_paragraph(
+                f"[Microscope image placeholder: {label}]",
+                spacing_after=220,
+                bookmark_name=bookmark_name,
+                bookmark_id=bookmark_id,
+            )
+        )
+        picture_insertions.append(
+            WordPictureInsertion(
+                bookmark_name=bookmark_name,
+                image_path=image_path,
+                label=label,
+            )
+        )
+        bookmark_id += 1
+    if not rows and not added_image:
+        parts.append(_word_paragraph("Not measured yet."))
+    return "".join(parts), picture_insertions, bookmark_id
+
+
+def _word_additional_values(row: pd.Series, used_columns: Sequence[str]) -> List[Tuple[str, str]]:
+    used = set(used_columns) | set(_WORD_ALWAYS_OMIT_COLUMNS)
+    values: List[Tuple[str, str]] = []
+    for column in row.index:
+        column_text = str(column)
+        lowered = column_text.casefold()
+        if column_text in used or column_text.startswith("_"):
+            continue
+        if "file" in lowered or "path" in lowered or "image" in lowered:
+            continue
+        value = row.get(column)
+        if not _word_has_value(value):
+            continue
+        formatted = _word_format_value(value)
+        if formatted:
+            values.append((_word_label(column_text), formatted))
+    return values
+
+
+def _word_graph_sections(
     row: pd.Series,
     origin_artifacts: Mapping[str, OriginArtifact],
     bookmark_start: int,
@@ -4434,35 +4553,67 @@ def _word_origin_sections(
     parts: List[str] = []
     insertions: List[WordOleInsertion] = []
     bookmark_id = bookmark_start
-    for column in ORIGIN_FIGURE_COLUMNS:
-        if column not in row.index:
-            continue
-        for descriptor in _asset_references(row.get(column)):
-            artifact = origin_artifacts.get(descriptor)
-            label = _word_label(column)
-            display = artifact.display_text if artifact and artifact.display_text else descriptor
-            parts.append(_word_paragraph(f"{label}: {display}", bold=True, spacing_after=60))
-            bookmark_name = f"OriginGraph{bookmark_id}"
-            parts.append(
-                _word_paragraph(
-                    f"[Origin object placeholder: {descriptor}]",
-                    spacing_after=220,
-                    bookmark_name=bookmark_name,
-                    bookmark_id=bookmark_id,
-                )
-            )
-            if artifact is not None and artifact.object_path is not None:
-                insertions.append(
-                    WordOleInsertion(
+    for title, origin_columns, reference_columns in _WORD_GRAPH_SECTIONS:
+        parts.append(_word_paragraph(title, bold=True, size=28, spacing_after=120))
+        section_has_content = False
+        section_has_origin_descriptors = False
+        missing_origin_object = False
+        for column in origin_columns:
+            if column not in row.index:
+                continue
+            for descriptor in _asset_references(row.get(column)):
+                artifact = origin_artifacts.get(descriptor)
+                display = artifact.display_text if artifact and artifact.display_text else descriptor
+                parts.append(_word_paragraph(str(display), bold=True, spacing_after=60))
+                section_has_origin_descriptors = True
+                bookmark_name = f"OriginGraph{bookmark_id}"
+                parts.append(
+                    _word_paragraph(
+                        f"[Origin object placeholder: {descriptor}]",
+                        spacing_after=220,
                         bookmark_name=bookmark_name,
-                        object_path=Path(artifact.object_path),
-                        label=display or descriptor,
-                        clipboard_fallback=bool(getattr(artifact, "clipboard_fallback", False)),
+                        bookmark_id=bookmark_id,
                     )
                 )
-            bookmark_id += 1
-    if not parts:
-        parts.append(_word_paragraph("No Origin graph objects were generated for this sample."))
+                if artifact is not None and artifact.object_path is not None:
+                    insertions.append(
+                        WordOleInsertion(
+                            bookmark_name=bookmark_name,
+                            object_path=Path(artifact.object_path),
+                            label=str(display or descriptor),
+                            clipboard_fallback=bool(
+                                getattr(artifact, "clipboard_fallback", False)
+                            ),
+                        )
+                    )
+                else:
+                    missing_origin_object = True
+                bookmark_id += 1
+                section_has_content = True
+        reference_values: List[str] = []
+        for column in reference_columns:
+            if column not in row.index:
+                continue
+            for descriptor in _asset_references(row.get(column)):
+                if descriptor not in reference_values:
+                    reference_values.append(descriptor)
+        if reference_values and not section_has_origin_descriptors:
+            section_has_content = True
+            parts.append(_word_table([("Graphs in Assemble", ", ".join(reference_values))]))
+            if not origin_columns:
+                parts.append(
+                    _word_paragraph(
+                        "Editable Origin object export is not available for this graph type yet."
+                    )
+                )
+        if missing_origin_object:
+            parts.append(
+                _word_paragraph(
+                    "Editable Origin object export is not available for this graph type yet."
+                )
+            )
+        if not section_has_content:
+            parts.append(_word_paragraph("Not measured yet."))
     return "".join(parts), insertions, bookmark_id
 
 
@@ -4470,18 +4621,43 @@ def _word_document_xml(
     row: pd.Series,
     fallback_index: int,
     origin_artifacts: Mapping[str, OriginArtifact],
-) -> Tuple[str, List[WordOleInsertion]]:
+    microscope_crops: Mapping[str, Path],
+) -> Tuple[str, List[WordOleInsertion], List[WordPictureInsertion]]:
     title = _word_sample_title(row, fallback_index)
+    used_value_columns = (
+        *_WORD_IDENTITY_COLUMNS,
+        *_WORD_DIMENSION_COLUMNS,
+        *_WORD_FABRICATION_COLUMNS,
+        *_WORD_FUNCTIONAL_COLUMNS,
+    )
     body: List[str] = [
         _word_paragraph(title, bold=True, size=40, spacing_after=220),
-        _word_section("Sample summary", _word_key_values(row, _WORD_SAMPLE_SUMMARY_COLUMNS)),
-        _word_section("Fabrication and dimensions", _word_key_values(row, _WORD_FABRICATION_COLUMNS)),
-        _word_section("Transition and current-density values", _word_key_values(row, _WORD_TRANSITION_COLUMNS)),
-        _word_section("Mechanical values", _word_key_values(row, _WORD_MECHANICAL_COLUMNS)),
-        _word_section("Measurement references", _word_key_values(row, _WORD_GRAPH_REFERENCE_COLUMNS)),
-        _word_paragraph("Origin graph objects", bold=True, size=28, spacing_after=120),
+        _word_section(
+            "Sample summary",
+            _word_key_values(row, _WORD_IDENTITY_COLUMNS),
+            empty_text="No sample metadata available.",
+        ),
+        _word_section(
+            "Fabrication",
+            _word_key_values(row, _WORD_FABRICATION_COLUMNS),
+            empty_text="No fabrication values available.",
+        ),
+        _word_section(
+            "Functional summary",
+            _word_key_values(row, _WORD_FUNCTIONAL_COLUMNS),
+            empty_text="No functional values available.",
+        ),
     ]
-    origin_xml, insertions, _ = _word_origin_sections(row, origin_artifacts, 1)
+    microscope_xml, picture_insertions, bookmark_id = _word_microscope_section(
+        row,
+        microscope_crops,
+        1,
+    )
+    body.append(microscope_xml)
+    additional_rows = _word_additional_values(row, used_value_columns)
+    if additional_rows:
+        body.append(_word_section("Other assembled values", additional_rows))
+    origin_xml, origin_insertions, _ = _word_graph_sections(row, origin_artifacts, bookmark_id)
     body.append(origin_xml)
     body.append(
         '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
@@ -4493,7 +4669,7 @@ def _word_document_xml(
         '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
         f"<w:body>{''.join(body)}</w:body></w:document>"
     )
-    return xml, insertions
+    return xml, origin_insertions, picture_insertions
 
 
 def _write_word_docx(path: Path, document_xml: str) -> None:
@@ -4646,10 +4822,20 @@ try {
         }
         if ($shape -eq $null) {
             if ($item.clipboard_fallback) {
-                $range.Paste() | Out-Null
-                $shape = $range.InlineShapes.Item(1)
+                try {
+                    $range.Paste() | Out-Null
+                    $shape = $range.InlineShapes.Item(1)
+                } catch {
+                    Write-Warning ("Failed to paste Origin object from clipboard for " + $item.path + ": " + $_.Exception.Message)
+                    continue
+                }
             } else {
-                throw $lastError
+                $message = "unknown error"
+                if ($lastError -ne $null -and $lastError.Exception -ne $null) {
+                    $message = $lastError.Exception.Message
+                }
+                Write-Warning ("Failed to insert Origin object for " + $item.path + ": " + $message)
+                continue
             }
         }
         try {
@@ -4699,11 +4885,109 @@ try {
         log.warning("Failed to embed Origin objects into %s: %s", docx_path, detail or completed.returncode)
 
 
+def _embed_pictures_with_word(
+    docx_path: Path,
+    insertions: Sequence[WordPictureInsertion],
+    log: logging.Logger,
+) -> None:
+    if not insertions:
+        return
+    docx_path = docx_path.resolve()
+    if os.name != "nt":
+        log.warning("Word image embedding is only available on Windows; left placeholders in %s", docx_path)
+        return
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        log.warning("PowerShell is unavailable; left microscope image placeholders in %s", docx_path)
+        return
+    payload = [
+        {
+            "bookmark": insertion.bookmark_name,
+            "path": str(insertion.image_path),
+            "label": insertion.label,
+        }
+        for insertion in insertions
+        if insertion.image_path.exists()
+    ]
+    if not payload:
+        return
+    script = r"""
+param(
+    [Parameter(Mandatory=$true)][string]$DocxPath,
+    [Parameter(Mandatory=$true)][string]$PayloadPath
+)
+$ErrorActionPreference = 'Stop'
+$items = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$word = $null
+$doc = $null
+try {
+    $word = New-Object -ComObject Word.Application
+    $word.Visible = $false
+    $doc = $word.Documents.Open($DocxPath)
+    foreach ($item in @($items)) {
+        if (-not (Test-Path -LiteralPath $item.path)) {
+            continue
+        }
+        if (-not $doc.Bookmarks.Exists($item.bookmark)) {
+            continue
+        }
+        $bookmark = $doc.Bookmarks.Item($item.bookmark)
+        $range = $bookmark.Range
+        $range.Text = ""
+        $shape = $doc.InlineShapes.AddPicture([string]$item.path, $false, $true, $range)
+        try {
+            $shape.LockAspectRatio = $true
+            if ($shape.Width -gt 260) {
+                $shape.Width = 260
+            }
+        } catch {
+        }
+    }
+    $doc.Save()
+} finally {
+    if ($doc -ne $null) {
+        $doc.Close($true) | Out-Null
+    }
+    if ($word -ne $null) {
+        $word.Quit() | Out-Null
+    }
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="pyplot-word-images-") as tmp:
+        tmp_path = Path(tmp)
+        payload_path = tmp_path / "pictures.json"
+        script_path = tmp_path / "embed_pictures.ps1"
+        payload_path.write_text(json.dumps(payload), encoding="utf-8")
+        script_path.write_text(script, encoding="utf-8")
+        completed = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_path),
+                "-DocxPath",
+                str(docx_path),
+                "-PayloadPath",
+                str(payload_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        log.warning("Failed to embed microscope images into %s: %s", docx_path, detail or completed.returncode)
+
+
 def _export_word_reports(
     dataframe: pd.DataFrame,
     output_dir: Path,
     origin_artifacts: Mapping[str, OriginArtifact],
     log: logging.Logger,
+    microscope_crops: Mapping[str, Path] | None = None,
 ) -> List[Path]:
     if dataframe.empty:
         return []
@@ -4721,10 +5005,19 @@ def _export_word_reports(
             duplicate_index += 1
         used_names.add(candidate.lower())
         report_path = output_dir / candidate
-        document_xml, insertions = _word_document_xml(row, index, origin_artifacts)
+        document_xml, origin_insertions, picture_insertions = _word_document_xml(
+            row,
+            index,
+            origin_artifacts,
+            microscope_crops or {},
+        )
         _write_word_docx(report_path, document_xml)
         try:
-            _embed_origin_objects_with_word(report_path, insertions, log)
+            _embed_pictures_with_word(report_path, picture_insertions, log)
+        except Exception:
+            log.exception("Failed to run Word image embedding for %s", report_path)
+        try:
+            _embed_origin_objects_with_word(report_path, origin_insertions, log)
         except Exception:
             log.exception("Failed to run Word OLE embedding for %s", report_path)
         reports.append(report_path)
@@ -4736,6 +5029,7 @@ def export_word_reports(
     output_dir: Path | str,
     *,
     origin_artifacts: Mapping[str, OriginArtifact] | None = None,
+    microscope_crops: Mapping[str, Path] | None = None,
     logger: logging.Logger | None = None,
 ) -> List[Path]:
     """Write one Word sample report per row without requiring the Builder UI."""
@@ -4746,6 +5040,7 @@ def export_word_reports(
         Path(output_dir),
         origin_artifacts or {},
         log,
+        microscope_crops=microscope_crops,
     )
 
 
@@ -6423,6 +6718,7 @@ def build_database(
                 report_dir,
                 origin_artifacts,
                 log,
+                microscope_crops=microscope_crop_map if include_crops else None,
             )
             if word_reports:
                 exports["word"] = report_dir
@@ -6463,6 +6759,7 @@ __all__ = [
     "BuildStats",
     "OriginArtifact",
     "WordOleInsertion",
+    "WordPictureInsertion",
     "FabricationIndex",
     "StrainRecord",
     "VsmHysteresisRecord",

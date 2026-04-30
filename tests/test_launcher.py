@@ -297,6 +297,104 @@ def test_run_microwire_word_report_cli_accepts_rvst_csv(
     assert str(report_path) in output
 
 
+def test_microwire_word_report_project_merges_section_rows_and_rvst(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    annealing_path = tmp_path / "current annealing" / "Ni50Fe27Ga23 12_2 s1 1000mA.txt"
+    annealing_path.parent.mkdir()
+    annealing_path.write_text("0.1 40 1\n0.2 41 1\n", encoding="utf-8")
+    rvt_path = tmp_path / "RvsT" / "RvsT" / "Ni50Fe27Ga23_12_2.csv"
+    rvt_path.parent.mkdir(parents=True)
+    rvt_path.write_text(
+        "\n".join(
+            [
+                "iso_time;t_elapsed_s;sp_c;pv_c;resistance_ohm",
+                "2026-02-06T08:22:38;0.1;-100;-40.5;43.2903",
+                "2026-02-06T08:22:48;10.1;-90;-39.0;43.2882",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 1,
+                "sections": {
+                    "assemble": {"rows": [], "columns": []},
+                    "annealing": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "_sources": [str(annealing_path)],
+                            }
+                        ]
+                    },
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "d (µm)": 19.1,
+                                "D (µm)": 58.6,
+                                "d/D": 0.326,
+                                "_core_image": str(tmp_path / "core.jpg"),
+                            }
+                        ]
+                    },
+                    "vsm_temperature_scan": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "VSM temperature scan graphs": ["scan-a", "scan-b"],
+                            }
+                        ]
+                    },
+                    "strain": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Legacy strain": 1.37,
+                            }
+                        ]
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_origin=False,
+    )
+
+    frame, origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        args,
+        tmp_path / "reports",
+    )
+
+    assert origin_artifacts == {}
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert row["Composition"] == "Ni50Fe27Ga23"
+    assert row["Microwire"] == "12/2"
+    assert row["d (µm)"] == 19.1
+    assert row["D (µm)"] == 58.6
+    assert row["d/D"] == 0.326
+    assert row["Legacy strain"] == 1.37
+    assert row["Figure — 1000 mA"] == annealing_path.name
+    assert row["VSM temperature scan graphs"] == ["scan-a", "scan-b"]
+    assert row["R vs T graphs"] == [rvt_path.name]
+    assert row["R vs T points"] == 2
+    assert row["R vs T temperature range (deg C)"] == "-40.5 to -39"
+
+
 def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

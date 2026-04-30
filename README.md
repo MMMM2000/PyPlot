@@ -6,9 +6,12 @@ loggers, plotters, emulators, and builders without starting individual scripts.
 
 ## Quick Start
 
-1. Install Python 3.13.x (we pin dependencies with Python 3.13; 3.13.9 is the current reference build).
+1. Install Python 3.14.x. The project currently declares
+   `requires-python = ">=3.14,<3.15"` in `pyproject.toml`.
 2. Create a virtual environment with that interpreter:
-   `python3.13 -m venv .venv` (macOS/Linux) or `py -3.13 -m venv .venv` (Windows)
+   `python3.14 -m venv .venv` (macOS/Linux) or `py -3.14 -m venv .venv` (Windows).
+   On Windows, run `py -0p` first if setup fails; Python 3.14 must be listed there before
+   a Codex/worktree setup can install the project.
 3. Activate it (`source .venv/bin/activate` on macOS/Linux or
    `.\.venv\Scripts\Activate.ps1` on Windows PowerShell)
 4. Upgrade pip: `python -m pip install --upgrade pip`
@@ -22,7 +25,7 @@ loggers, plotters, emulators, and builders without starting individual scripts.
 7. Launch the hub: `python -m launcher`
 
 > **Tip:** If `.venv` was created with the wrong Python minor version or has stale
-> dependencies, delete it and recreate it with Python 3.13 before reinstalling
+> dependencies, delete it and recreate it with Python 3.14 before reinstalling
 > the requirements.
 
 > **Tip:** The `pip install -r requirements.txt` command pulls in every

@@ -3876,8 +3876,67 @@ def test_word_report_export_embeds_available_origin_objects(
 
     assert "Ni55Fe18Ga27 1/1" in document_xml
     assert "Sample summary" in document_xml
-    assert "Origin graph objects" in document_xml
+    assert "Fabrication" in document_xml
+    assert "Functional summary" in document_xml
+    assert "Microscope and dimensions" in document_xml
+    assert "Current annealing" in document_xml
+    assert "VSM temperature scan" in document_xml
+    assert "DMA iso-stress" in document_xml
+    assert "Measurement references" not in document_xml
     assert "Origin object placeholder" in document_xml
+
+
+def test_word_report_export_embeds_microscope_images(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = tmp_path / "core-crop.png"
+    image_path.write_bytes(b"fake png")
+    captured_insertions: list[tuple[Path, list[core.WordPictureInsertion]]] = []
+
+    def fake_embed_pictures(
+        docx_path: Path,
+        insertions: list[core.WordPictureInsertion],
+        log: logging.Logger,
+    ) -> None:
+        captured_insertions.append((docx_path, list(insertions)))
+
+    monkeypatch.setattr(core, "_embed_pictures_with_word", fake_embed_pictures)
+    monkeypatch.setattr(core, "_embed_origin_objects_with_word", lambda *args, **kwargs: None)
+
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                core.DIAMETER_COLUMN: 13.2,
+                core.GLASS_DIAMETER_COLUMN: 26.4,
+                core.DIAMETER_RATIO_COLUMN: 0.5,
+                core.MICROSCOPE_IMAGE_COLUMNS[0]: "core-crop",
+            }
+        ]
+    )
+
+    reports = core.export_word_reports(
+        frame,
+        tmp_path / "reports",
+        microscope_crops={"core-crop": image_path},
+    )
+
+    assert len(reports) == 1
+    assert len(captured_insertions) == 1
+    assert captured_insertions[0][0] == reports[0]
+    assert [item.image_path for item in captured_insertions[0][1]] == [image_path]
+    assert captured_insertions[0][1][0].label == "Core diameter image"
+
+    from zipfile import ZipFile
+
+    with ZipFile(reports[0], "r") as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+
+    assert "Microscope and dimensions" in document_xml
+    assert "Core diameter image" in document_xml
+    assert "d/D" in document_xml
 
 
 def test_assembly_export_dialog_word_reports_enable_origin(qtbot) -> None:
