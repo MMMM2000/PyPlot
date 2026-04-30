@@ -88,6 +88,47 @@ def _close_test_window(window: mini_dma_mod.MainWindow) -> None:
         _restore_settings(snapshot)
 
 
+def _wait_for_tic_commands(window: mini_dma_mod.MainWindow) -> None:
+    dispatcher = getattr(window, "_tic_command_dispatcher", None)
+    if dispatcher is not None:
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+
+
+class _ImmediateTicDispatcher:
+    def __init__(self, controller: object) -> None:
+        self.controller = controller
+
+    def set_target_position(self, position_steps: int, max_speed: int | None = None) -> int:
+        self.controller.set_target_position(position_steps, max_speed=max_speed)
+        return 1
+
+    def reset_command_timeout(self) -> None:
+        if hasattr(self.controller, "reset_command_timeout"):
+            self.controller.reset_command_timeout()
+
+    def halt_and_hold(self) -> None:
+        if hasattr(self.controller, "halt_and_hold"):
+            self.controller.halt_and_hold()
+
+    def set_current_position(self, position_steps: int) -> None:
+        if hasattr(self.controller, "set_current_position"):
+            self.controller.set_current_position(position_steps)
+
+    def wait_until_idle(self, *, timeout_s: float = 2.0) -> bool:
+        return True
+
+    def stop(self, *, timeout_s: float = 2.0) -> None:
+        return None
+
+
+def _use_immediate_tic_dispatcher(window: mini_dma_mod.MainWindow, controller: object) -> None:
+    window._tic_command_dispatcher = _ImmediateTicDispatcher(controller)  # type: ignore[assignment]
+    window._tic_command_dispatcher_key = (
+        window.edit_ticcmd_path.text().strip(),
+        window.edit_tic_serial.text().strip(),
+    )
+
+
 def _set_plot_tile(
     window: mini_dma_mod.MainWindow,
     index: int,
@@ -929,6 +970,7 @@ def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Pa
 
     try:
         moved = window._move_to_position_mm(2.0)
+        _wait_for_tic_commands(window)
 
         assert moved is True
         assert controller.target_steps == 200
@@ -958,6 +1000,7 @@ def test_calibration_relative_moves_chain_from_commanded_targets(
 
     controller = _FakeController()
     window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
     window._automation_active = True
     window._automation_name = mini_dma_mod.CALIBRATION
     window._current_position_mm = 0.0
@@ -974,7 +1017,9 @@ def test_calibration_relative_moves_chain_from_commanded_targets(
 
     try:
         assert window._handle_calibration_move_step(step, 1) is True
+        _wait_for_tic_commands(window)
         assert window._handle_calibration_move_step(step, 2) is True
+        _wait_for_tic_commands(window)
 
         assert controller.targets == [1, 2]
         assert window._current_position_steps == 0
@@ -1064,6 +1109,7 @@ def test_move_command_rejects_sub_step_targets(tmp_path: Path, qtbot) -> None:
 
     controller = _FakeController()
     window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
     window._current_position_steps = 0
     window._current_position_mm = 0.0
     window.spin_steps_per_mm.setValue(100.0)
@@ -1096,6 +1142,7 @@ def test_manual_jog_repeats_from_last_commanded_target(
 
     controller = _FakeController()
     window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
     window._current_position_steps = 0
     window._current_position_mm = 0.0
     window._last_move_target_mm = 0.0
@@ -1105,8 +1152,11 @@ def test_manual_jog_repeats_from_last_commanded_target(
 
     try:
         window._jog_relative(-1.0)
+        _wait_for_tic_commands(window)
         window._jog_relative(-1.0)
+        _wait_for_tic_commands(window)
         window._jog_relative(1.0)
+        _wait_for_tic_commands(window)
 
         assert controller.targets == [-10, -20, -10]
         assert window._last_move_target_mm == pytest.approx(-0.1)
@@ -1132,6 +1182,7 @@ def test_held_manual_jog_advances_by_configured_linear_speed(
 
     controller = _FakeController()
     window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
     window._current_position_steps = 0
     window._current_position_mm = 0.0
     window._last_move_target_mm = 0.0
@@ -1142,8 +1193,11 @@ def test_held_manual_jog_advances_by_configured_linear_speed(
 
     try:
         window._jog_relative(-1.0)
+        _wait_for_tic_commands(window)
         window._jog_relative(-1.0)
+        _wait_for_tic_commands(window)
         window._jog_relative(-1.0)
+        _wait_for_tic_commands(window)
 
         assert controller.targets == [-1, -13, -25]
     finally:
@@ -1176,6 +1230,7 @@ def test_held_manual_jog_keeps_speed_when_timer_tick_is_delayed(
         window._start_manual_jog(-1.0)
         clock["now"] = 10.8
         window._handle_manual_jog_timer()
+        _wait_for_tic_commands(window)
 
         assert controller.targets == [-80]
     finally:
@@ -1274,6 +1329,7 @@ def test_recipe_stop_resets_manual_jog_base_to_confirmed_position(tmp_path: Path
     try:
         window._stop_auto_ramp(user_initiated=True)
         window._jog_relative(-window._tension_motion_sign())
+        _wait_for_tic_commands(window)
 
         assert controller.targets == [130]
         assert window._manual_jog_uses_last_target is True
@@ -1704,6 +1760,7 @@ def test_setup_preload_slack_takeup_uses_scale_feedback_speed_budget(tmp_path: P
             target_value=10.0,
             tolerance=0.25,
         )
+        _wait_for_tic_commands(window)
 
         assert reached is False
         assert controller.target_steps == 7500
@@ -2536,6 +2593,149 @@ def test_tic_controller_is_reused_until_connection_settings_change(
         _close_test_window(window)
 
 
+def test_tic_command_dispatcher_coalesces_pending_target_moves() -> None:
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[tuple[int, int | None]] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append((position_steps, max_speed))
+
+    controller = _FakeController()
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: controller, autostart=False)
+
+    try:
+        dispatcher.set_target_position(10, max_speed=100)
+        dispatcher.set_target_position(20, max_speed=200)
+        dispatcher.set_target_position(30, max_speed=300)
+        dispatcher.start()
+
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+        assert controller.targets == [(30, 300)]
+    finally:
+        dispatcher.stop()
+
+
+def test_tic_command_dispatcher_clears_previous_error_after_success() -> None:
+    class _FakeController:
+        def __init__(self) -> None:
+            self.fail_next = True
+
+        def reset_command_timeout(self) -> None:
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("temporary tic failure")
+
+    controller = _FakeController()
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: controller, autostart=False)
+
+    try:
+        dispatcher.start()
+        dispatcher.reset_command_timeout()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+        assert isinstance(dispatcher.last_error(), RuntimeError)
+
+        dispatcher.reset_command_timeout()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+        assert dispatcher.last_error() is None
+    finally:
+        dispatcher.stop()
+
+
+def test_move_to_position_uses_persistent_tic_dispatcher(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeDispatcher:
+        def __init__(self) -> None:
+            self.targets: list[tuple[int, int | None]] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append((position_steps, max_speed))
+
+    dispatcher = _FakeDispatcher()
+    window._tic_command_dispatcher = dispatcher  # type: ignore[assignment]
+    window._tic_command_dispatcher_key = (
+        window.edit_ticcmd_path.text().strip(),
+        window.edit_tic_serial.text().strip(),
+    )
+    window.spin_steps_per_mm.setValue(100.0)
+    window._current_position_steps = 0
+    window._last_commanded_position_steps = 0
+
+    try:
+        assert window._move_to_position_mm(0.5, speed_mm_s=1.0) is True
+
+        assert dispatcher.targets == [(50, 1_000_000)]
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_halt_waits_for_persistent_tic_dispatcher(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeDispatcher:
+        def __init__(self) -> None:
+            self.halted = False
+            self.waited = False
+
+        def halt_and_hold(self) -> None:
+            self.halted = True
+
+        def wait_until_idle(self, *, timeout_s: float = 2.0) -> bool:
+            self.waited = True
+            return True
+
+        def last_error(self) -> Exception | None:
+            return None
+
+    dispatcher = _FakeDispatcher()
+    window._build_tic_dispatcher = lambda: dispatcher  # type: ignore[method-assign]
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+
+    try:
+        window._halt_tic()
+
+        assert dispatcher.halted is True
+        assert dispatcher.waited is True
+    finally:
+        _close_test_window(window)
+
+
+def test_zero_position_waits_for_persistent_tic_dispatcher_before_reset(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeDispatcher:
+        def __init__(self) -> None:
+            self.zero_steps: int | None = None
+            self.waited = False
+
+        def set_current_position(self, position_steps: int) -> None:
+            self.zero_steps = position_steps
+
+        def wait_until_idle(self, *, timeout_s: float = 2.0) -> bool:
+            self.waited = True
+            return True
+
+        def last_error(self) -> Exception | None:
+            return None
+
+    dispatcher = _FakeDispatcher()
+    window._build_tic_dispatcher = lambda: dispatcher  # type: ignore[method-assign]
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+
+    try:
+        window._current_position_steps = 123
+        window._current_position_mm = 1.23
+        window._zero_tic_position()
+
+        assert dispatcher.zero_steps == 0
+        assert dispatcher.waited is True
+        assert window._current_position_steps == 0
+        assert window._current_position_mm == pytest.approx(0.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_tic_keepalive_resets_command_timeout_during_active_recipe(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -2559,6 +2759,7 @@ def test_tic_keepalive_resets_command_timeout_during_active_recipe(tmp_path: Pat
     try:
         assert window._move_to_position_mm(0.5) is True
         window._handle_tic_keepalive_timer()
+        _wait_for_tic_commands(window)
 
         assert controller.targets == [50]
         assert controller.keepalive_count == 1
@@ -2928,14 +3129,63 @@ def test_recipe_seek_does_not_stack_corrections_ahead_of_confirmed_position(tmp_
             target_value=5.0,
             tolerance=0.25,
         )
+        _wait_for_tic_commands(window)
+        window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        )
+        _wait_for_tic_commands(window)
+
+        assert controller.targets == [90]
+    finally:
+        _close_test_window(window)
+
+
+def test_load_seek_continues_from_commanded_target_after_fresh_feedback_without_tic_status(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window._last_move_target_mm = 0.0
+    window._last_tic_status_time_s = time.time() - 10.0
+    window._manual_jog_uses_last_target = False
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_distribution_nudge_mm.setValue(0.1)
+
+    try:
+        window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        )
+        assert window._build_tic_dispatcher().wait_until_idle(timeout_s=2.0)
         window._latest_scale_timestamp = time.time()
         window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_LOAD_G,
             target_value=5.0,
             tolerance=0.25,
         )
+        assert window._build_tic_dispatcher().wait_until_idle(timeout_s=2.0)
 
-        assert controller.targets == [90]
+        assert controller.targets == [-10, -20]
+        assert "Move skipped" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -3008,6 +3258,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
             target_value=5.0,
             tolerance=0.25,
         )
+        _wait_for_tic_commands(window)
 
         window._latest_scale_value_g = -6.0
         window._latest_scale_timestamp = time.time()
@@ -3016,10 +3267,11 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
             target_value=5.0,
             tolerance=0.25,
         )
+        _wait_for_tic_commands(window)
 
         assert len(controller.targets) == 2
         assert controller.targets[0] == 90
-        assert controller.targets[1] > 100
+        assert controller.targets[1] == 96
         assert "backlash take-up" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -3064,6 +3316,7 @@ def test_backlash_takeup_is_not_logged_as_tensile_displacement(tmp_path: Path, q
             target_value=5.0,
             tolerance=0.02,
         )
+        _wait_for_tic_commands(window)
         point = window._capture_measurement_point(
             elapsed_s=1.0,
             position_mm=window._measurement_position_mm(),
@@ -3114,6 +3367,7 @@ def test_seek_uses_calibrated_length_scaled_sensitivity_for_correction_distance(
             target_value=1.0,
             tolerance=0.01,
         )
+        _wait_for_tic_commands(window)
 
         assert reached is False
         assert controller.target_steps == 150
@@ -3215,6 +3469,7 @@ def test_current_sweep_seek_uses_recipe_balancing_speed(tmp_path: Path, qtbot) -
             target_value=5.0,
             tolerance=0.25,
         )
+        _wait_for_tic_commands(window)
 
         assert reached is False
         assert controller.target_steps == 9980
@@ -3260,6 +3515,7 @@ def test_current_sweep_target_ramp_uses_target_stage_speed(tmp_path: Path, qtbot
             target_value=5.0,
             tolerance=0.25,
         )
+        _wait_for_tic_commands(window)
 
         assert reached is False
         assert controller.target_steps == 9000
@@ -3582,6 +3838,7 @@ def test_max_load_limit_allows_relaxing_manual_move(tmp_path: Path, qtbot) -> No
     try:
         tensioning_move = window._move_to_position_mm(-0.1, manual_jog=True)
         relaxing_move = window._move_to_position_mm(0.1, manual_jog=True)
+        _wait_for_tic_commands(window)
 
         assert tensioning_move is False
         assert relaxing_move is True

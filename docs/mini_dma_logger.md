@@ -62,6 +62,7 @@ Current intended hardware stack:
 - the global timing controls live under `Settings -> Timing...` instead of taking space in the normal Recipe panel
 - hardware communication keeps its own cadence: request-mode scale acquisition, Tic status, Tic command-timeout keepalive, and power-supply readbacks all have explicit timing settings, with supply readbacks still throttled so they do not block fast current commands
 - Tic command state is tracked separately from slower Tic status polling: recipes and calibration micro-moves chain from the last commanded target, while scheduled data-log rows use cached/commanded position instead of forcing a blocking Tic status subprocess
+- Tic move, halt, zero-position, and keepalive commands go through a persistent in-app command dispatcher that coalesces superseded target-position commands and drains halt/zero requests before the UI reports them complete; `ticcmd` remains the command transport, so this removes UI/control-loop blocking without adding a native USB driver dependency
 - the current G&G scale does not stream passively at `9600`; its measured `ESC+p` reply cadence is about 5 Hz, so Mini DMA defaults G&G request-mode acquisition to a 250 ms interval with a 300 ms read timeout and records every actual reply in the raw sidecar
 - shape-memory-friendly export columns for `Displacement`, positive applied tensile `Load`, `Strain`, and `Stress`
 
@@ -81,6 +82,7 @@ Current intended hardware stack:
 - every recipe now runs the length setup before normal recipe logging: ramp directly to the configured setup preload stress, prompt for the measured wire length at preload, return to `0 g` applied load, compute unloaded `l0` from the known tensile stage displacement, then start the normal recipe CSV/graph log
 - the length-setup popup shows live load, stress, and tensile displacement versus setup time while it is chasing preload and returning to zero load; the popup has its own pause, stop, and progress controls
 - setup has its own stage-speed ceiling and, for load/stress feedback moves, uses the scale feedback interval to choose the net correction distance, so it is not limited by the 50 ms control tick or the fine calibration micro-move correction step
+- load/stress setup continues correction moves from the last commanded target after each fresh post-move scale sample, even if Tic status polling has not caught up yet, preventing slow status refreshes from turning valid correction steps into repeated `Move skipped` messages
 - position zeroing
 - halt / stop support
 - jog control refuses sub-step moves that would round to the current motor step

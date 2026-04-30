@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
-from threading import Event
+from threading import Condition, Event, Thread
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -1162,6 +1162,160 @@ class TicController:
         )
 
 
+@dataclass
+class TicCommand:
+    action: str
+    position_steps: int | None = None
+    max_speed: int | None = None
+    sequence: int = 0
+
+
+class TicCommandDispatcher:
+    def __init__(
+        self,
+        controller_factory: Callable[[], TicController],
+        *,
+        autostart: bool = True,
+    ) -> None:
+        self._controller_factory = controller_factory
+        self._condition = Condition()
+        self._pending_target: TicCommand | None = None
+        self._pending_commands: list[TicCommand] = []
+        self._stop_requested = False
+        self._busy = False
+        self._sequence = 0
+        self._last_error: Exception | None = None
+        self._thread: Thread | None = None
+        if autostart:
+            self.start()
+
+    def start(self) -> None:
+        with self._condition:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_requested = False
+            self._thread = Thread(target=self._run, name="MiniDMATicCommandDispatcher", daemon=True)
+            self._thread.start()
+            self._condition.notify_all()
+
+    def stop(self, *, timeout_s: float = 2.0) -> None:
+        thread: Thread | None
+        with self._condition:
+            self._stop_requested = True
+            self._pending_target = None
+            self._pending_commands.clear()
+            self._condition.notify_all()
+            thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=max(0.0, float(timeout_s)))
+
+    def set_target_position(self, position_steps: int, max_speed: int | None = None) -> int:
+        with self._condition:
+            self._sequence += 1
+            self._pending_target = TicCommand(
+                action="target",
+                position_steps=int(position_steps),
+                max_speed=max_speed,
+                sequence=self._sequence,
+            )
+            self._condition.notify_all()
+            return self._sequence
+
+    def reset_command_timeout(self) -> None:
+        self._enqueue_priority(TicCommand(action="keepalive"))
+
+    def halt_and_hold(self) -> None:
+        self._enqueue_priority(TicCommand(action="halt"))
+
+    def set_current_position(self, position_steps: int) -> None:
+        self._enqueue_priority(TicCommand(action="zero", position_steps=int(position_steps)))
+
+    def wait_until_target_dispatched(self, sequence: int, *, timeout_s: float = 2.0) -> bool:
+        deadline_s = time.monotonic() + max(0.0, float(timeout_s))
+        with self._condition:
+            while (
+                self._busy
+                or (
+                    self._pending_target is not None
+                    and self._pending_target.sequence <= sequence
+                )
+                or any(command.sequence <= sequence for command in self._pending_commands)
+            ):
+                remaining_s = deadline_s - time.monotonic()
+                if remaining_s <= 0.0:
+                    return False
+                self._condition.wait(remaining_s)
+            return True
+
+    def _enqueue_priority(self, command: TicCommand) -> None:
+        with self._condition:
+            self._sequence += 1
+            command.sequence = self._sequence
+            if command.action == "halt":
+                self._pending_target = None
+                self._pending_commands.insert(0, command)
+            else:
+                self._pending_commands.append(command)
+            self._condition.notify_all()
+
+    def wait_until_idle(self, *, timeout_s: float = 2.0) -> bool:
+        deadline_s = time.monotonic() + max(0.0, float(timeout_s))
+        with self._condition:
+            while self._busy or self._pending_target is not None or self._pending_commands:
+                remaining_s = deadline_s - time.monotonic()
+                if remaining_s <= 0.0:
+                    return False
+                self._condition.wait(remaining_s)
+            return True
+
+    def last_error(self) -> Exception | None:
+        with self._condition:
+            return self._last_error
+
+    def _next_command(self) -> TicCommand | None:
+        if self._pending_commands:
+            return self._pending_commands.pop(0)
+        command = self._pending_target
+        self._pending_target = None
+        return command
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while (
+                    not self._stop_requested
+                    and self._pending_target is None
+                    and not self._pending_commands
+                ):
+                    self._condition.wait()
+                if self._stop_requested:
+                    self._busy = False
+                    self._condition.notify_all()
+                    return
+                command = self._next_command()
+                self._busy = command is not None
+            if command is not None:
+                try:
+                    with self._condition:
+                        self._last_error = None
+                    controller = self._controller_factory()
+                    if command.action == "target" and command.position_steps is not None:
+                        controller.set_target_position(command.position_steps, max_speed=command.max_speed)
+                    elif command.action == "keepalive":
+                        controller.reset_command_timeout()
+                    elif command.action == "halt":
+                        controller.halt_and_hold()
+                    elif command.action == "zero" and command.position_steps is not None:
+                        controller.set_current_position(command.position_steps)
+                except Exception as exc:
+                    with self._condition:
+                        self._last_error = exc
+                finally:
+                    with self._condition:
+                        self._busy = False
+                        self._condition.notify_all()
+
+
 class PowerSupplyController:
     def __init__(
         self,
@@ -1336,6 +1490,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_worker: ScaleWorker | None = None
         self._tic_controller: TicController | None = None
         self._tic_controller_key: tuple[str, str] | None = None
+        self._tic_command_dispatcher: TicCommandDispatcher | None = None
+        self._tic_command_dispatcher_key: tuple[str, str] | None = None
         self._tic_status_text = ""
         self._latest_scale_value_g = 0.0
         self._latest_scale_text = ""
@@ -3689,6 +3845,42 @@ class MainWindow(QtWidgets.QMainWindow):
             self._tic_controller_key = key
         return self._tic_controller
 
+    def _build_tic_dispatcher(self) -> TicCommandDispatcher:
+        key = (self.edit_ticcmd_path.text().strip(), self.edit_tic_serial.text().strip())
+        if self._tic_command_dispatcher is not None and self._tic_command_dispatcher_key != key:
+            self._tic_command_dispatcher.stop()
+            self._tic_command_dispatcher = None
+        if self._tic_command_dispatcher is None:
+            self._tic_command_dispatcher = TicCommandDispatcher(self._build_tic_controller)
+            self._tic_command_dispatcher_key = key
+        return self._tic_command_dispatcher
+
+    def _stop_tic_dispatcher(self) -> None:
+        dispatcher = self._tic_command_dispatcher
+        self._tic_command_dispatcher = None
+        self._tic_command_dispatcher_key = None
+        if dispatcher is not None and hasattr(dispatcher, "stop"):
+            dispatcher.stop()
+
+    def _wait_for_tic_dispatcher(
+        self,
+        dispatcher: object,
+        action: str,
+        *,
+        timeout_s: float = 2.0,
+    ) -> bool:
+        wait_until_idle = getattr(dispatcher, "wait_until_idle", None)
+        if callable(wait_until_idle) and not wait_until_idle(timeout_s=timeout_s):
+            self._log(f"Tic {action} command is still pending after {timeout_s:.1f} s.")
+            return False
+        last_error = getattr(dispatcher, "last_error", None)
+        if callable(last_error):
+            error = last_error()
+            if error is not None:
+                self._log(f"Tic {action} command failed: {error}")
+                return False
+        return True
+
     def _build_supply_controller(self) -> PowerSupplyController:
         return PowerSupplyController(
             port_name=str(self.combo_supply_port.currentData() or "").strip(),
@@ -3877,9 +4069,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._supply_last_setpoint_mA = 0.0
 
         try:
-            self._build_tic_controller().halt_and_hold()
+            dispatcher = self._build_tic_dispatcher()
+            dispatcher.halt_and_hold()
+            tic_halted = self._wait_for_tic_dispatcher(dispatcher, "halt", timeout_s=2.0)
             self._stop_tic_keepalive()
-            messages.append("Tic halted")
+            messages.append("Tic halted" if tic_halted else "Tic halt pending/failed")
         except Exception as exc:
             messages.append(f"Tic halt failed: {exc}")
             self._log(f"Emergency stop could not halt Tic: {exc}")
@@ -5039,6 +5233,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
 
+    def _seek_motion_base_mm(self, basis: str) -> float:
+        if self._seek_uses_planned_motion_base(basis):
+            return self._last_move_target_mm
+        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and self._last_motion_command_time_s is not None:
+            return self._last_move_target_mm
+        return self._current_position_mm
+
     def _seek_distribution_target(self, basis: str, target_value: float, tolerance: float) -> bool:
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
             raise RuntimeError(
@@ -5138,7 +5339,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return False
         chain_from_last_target = self._seek_uses_planned_motion_base(basis)
-        base_position_mm = self._last_move_target_mm if chain_from_last_target else self._current_position_mm
+        base_position_mm = self._seek_motion_base_mm(basis)
         effective_base_position_mm = self._measurement_effective_position_mm()
         target_mm = base_position_mm + movement_direction * (nudge_mm + backlash_takeup_mm)
         effective_target_mm = effective_base_position_mm + movement_direction * nudge_mm
@@ -5576,9 +5777,12 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _zero_tic_position(self) -> None:
-        controller = self._build_tic_controller()
         try:
-            controller.set_current_position(0)
+            dispatcher = self._build_tic_dispatcher()
+            dispatcher.set_current_position(0)
+            if not self._wait_for_tic_dispatcher(dispatcher, "zero-position", timeout_s=2.0):
+                QtWidgets.QMessageBox.warning(self, APP_NAME, "Tic zero-position command did not finish cleanly.")
+                return
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to set Tic position: {exc}")
             return
@@ -5598,9 +5802,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _halt_tic(self) -> None:
         self._stop_manual_jog()
         self._stop_tic_keepalive()
-        controller = self._build_tic_controller()
         try:
-            controller.halt_and_hold()
+            dispatcher = self._build_tic_dispatcher()
+            dispatcher.halt_and_hold()
+            if not self._wait_for_tic_dispatcher(dispatcher, "halt", timeout_s=2.0):
+                QtWidgets.QMessageBox.warning(self, APP_NAME, "Tic halt command did not finish cleanly.")
+                return
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to halt Tic: {exc}")
             return
@@ -5716,7 +5923,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._tic_motor_power_ok is False:
             return
         try:
-            self._build_tic_controller().reset_command_timeout()
+            self._build_tic_dispatcher().reset_command_timeout()
             self._tic_keepalive_warning_active = False
         except Exception as exc:
             if not self._tic_keepalive_warning_active:
@@ -5898,9 +6105,8 @@ class MainWindow(QtWidgets.QMainWindow):
             else max(self._minimum_held_speed_mm_s(), float(speed_mm_s))
         )
         max_speed_units = max(1, int(round(selected_speed_mm_s * steps_per_mm * 10000.0)))
-        controller = self._build_tic_controller()
         try:
-            controller.set_target_position(target_steps, max_speed=max_speed_units)
+            self._build_tic_dispatcher().set_target_position(target_steps, max_speed=max_speed_units)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to move Tic: {exc}")
             return False
@@ -6987,7 +7193,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._auto_ramp_timer.stop()
         self._stop_tic_keepalive()
         try:
-            self._build_tic_controller().halt_and_hold()
+            dispatcher = self._build_tic_dispatcher()
+            dispatcher.halt_and_hold()
+            if not self._wait_for_tic_dispatcher(dispatcher, "halt", timeout_s=2.0):
+                self._log("Pause requested a Tic halt, but the command did not finish cleanly.")
         except Exception as exc:
             self._log(f"Pause could not halt Tic: {exc}")
         self._disable_supply_output()
@@ -9024,6 +9233,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._save_settings()
         self._stop_tic_keepalive()
         self._stop_auto_ramp(log_completion=False)
+        self._stop_tic_dispatcher()
         self._disconnect_scale()
         self._stop_session()
         self._disconnect_supply()
