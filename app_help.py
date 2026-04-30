@@ -454,6 +454,30 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             """
         ).strip(),
     },
+    "logger_ac_susceptibility": {
+        "title": "AC susceptibility logger",
+        "body": dedent(
+            """
+            ### Connect and prepare
+            1. Connect the annealing power supply as usual, then connect the LCR-6200 virtual
+               COM port in the LCR panel. The LCR-6200 needs the GW Instek USB VCP driver before
+               Windows exposes the COM port.
+            2. Enter the LCR frequency list and AC level list. The logger builds the full
+               frequency by level matrix and can run one current sweep per AC setting.
+            3. Choose the LCR function and monitor channels. For coil-based susceptibility scans,
+               `Ls-Q` with monitor `Z`/`IAC` is a useful starting point.
+
+            ### Running the process
+            * The current ramp, hold, reverse, voltage-limit handling, and contact-loss logic are
+              reused from the current annealing logger.
+            * When one sweep per AC setting is enabled, the logger uses reverse-to-zero so each
+              frequency/level pair gets a complete current sweep before the next pair starts.
+            * Log rows keep the first three current-annealing columns, then append LCR setting
+              metadata and the latest `FETC:IMP?` values so existing annealing plots can still
+              read the file.
+            """
+        ).strip(),
+    },
     "logger_serial_data": {
         "title": "Generic serial data logger",
         "body": dedent(
