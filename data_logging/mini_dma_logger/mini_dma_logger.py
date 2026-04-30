@@ -152,6 +152,9 @@ CALIBRATION_DEFAULTS_VERSION = 3
 SERVO_CORRECTION_GAIN = 0.75
 SERVO_LIVE_STIFFNESS_ALPHA = 0.35
 SERVO_NOISE_SIGMA = 3.0
+WIRE_BREAK_MIN_SETPOINT_MA = 5.0
+WIRE_BREAK_MAX_MEASURED_MA = 0.5
+WIRE_BREAK_VOLTAGE_LIMIT_FRACTION = 0.95
 CURRENT_SWEEP_BASIS_BY_MODE = {
     CURRENT_SWEEP_LOAD: HSW_BASIS_LOAD_G,
     CURRENT_SWEEP_STRESS: HSW_BASIS_STRESS_MPA,
@@ -1866,9 +1869,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_voltage_limit_started_s: float | None = None
         self._current_sweep_voltage_limit_start_mA = 0.0
         self._supply_voltage_limit_logged = False
+        self._wire_break_stop_in_progress = False
         self._active_target_ramp_step_index: int | None = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value: float | None = None
+        self._active_target_ramp_rate_value_s: float | None = None
         self._active_timed_step_index: int | None = None
         self._active_timed_step_started_s = 0.0
         self._active_timed_move_sent = False
@@ -1878,6 +1883,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_return_zero_start_point_index = 0
         self._setup_zero_fallback_return_position_mm: float | None = None
         self._setup_zero_fallback_raw_g: float | None = None
+        self._end_zero_fallback_armed = False
+        self._end_zero_fallback_start_point_index = 0
+        self._end_zero_fallback_return_position_mm: float | None = None
+        self._end_zero_fallback_raw_g: float | None = None
         self._length_setup_dialog: QtWidgets.QDialog | None = None
         self._length_setup_status_label: QtWidgets.QLabel | None = None
         self._length_setup_progress: QtWidgets.QProgressBar | None = None
@@ -2855,7 +2864,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_setup_zero_tolerance_g.setRange(0.0001, 1000.0)
         self.spin_setup_zero_tolerance_g.setValue(0.02)
         self.spin_setup_zero_tolerance_g.setSuffix(" g")
-        strain_setup_form.addRow("Setup zero-load tolerance", self.spin_setup_zero_tolerance_g)
+        setup_zero_tolerance_row, self.label_setup_zero_tolerance_equiv = self._spin_with_equivalent_label(
+            self.strain_setup_box,
+            self.spin_setup_zero_tolerance_g,
+        )
+        strain_setup_form.addRow("Setup zero-load tolerance", setup_zero_tolerance_row)
         self.spin_setup_zero_stable_s = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_zero_stable_s.setDecimals(2)
         self.spin_setup_zero_stable_s.setRange(0.0, 60.0)
@@ -4487,6 +4500,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return
 
     def _handle_supply_limit_condition(self) -> None:
+        if self._current_sweep_wire_break_detected():
+            self._stop_for_wire_break()
+            return
         limit_v = float(self.spin_supply_voltage_limit.value())
         measured_v = self._supply_snapshot.get("voltage_V")
         if measured_v is None or limit_v <= 0:
@@ -4512,6 +4528,85 @@ class MainWindow(QtWidgets.QMainWindow):
             self._supply_voltage_limit_logged = True
         if self._supply_output_enabled and (self._supply_last_setpoint_mA or 0.0) > 0.0:
             self._set_recipe_current_mA(0.0, measure_after=False)
+
+    def _current_sweep_wire_break_detected(self) -> bool:
+        if self._wire_break_stop_in_progress:
+            return False
+        if not self._automation_active or not self._is_current_sweep_mode(self._automation_name):
+            return False
+        if not self._supply_output_enabled:
+            return False
+        setpoint_mA = self._active_current_sweep_last_setpoint_mA
+        if setpoint_mA is None:
+            setpoint_mA = self._supply_last_setpoint_mA
+        if setpoint_mA is None or abs(float(setpoint_mA)) < WIRE_BREAK_MIN_SETPOINT_MA:
+            return False
+        measured_current_mA = self._supply_snapshot.get("current_mA")
+        measured_voltage_v = self._supply_snapshot.get("voltage_V")
+        limit_v = float(self.spin_supply_voltage_limit.value())
+        if measured_current_mA is None or measured_voltage_v is None or limit_v <= 0.0:
+            return False
+        current_threshold_mA = max(WIRE_BREAK_MAX_MEASURED_MA, self._supply_current_resolution_mA())
+        if abs(float(measured_current_mA)) > current_threshold_mA:
+            return False
+        return float(measured_voltage_v) >= limit_v * WIRE_BREAK_VOLTAGE_LIMIT_FRACTION
+
+    def _wire_break_stop_message(self) -> str:
+        setpoint_mA = self._active_current_sweep_last_setpoint_mA
+        if setpoint_mA is None:
+            setpoint_mA = self._supply_last_setpoint_mA
+        measured_current_mA = self._supply_snapshot.get("current_mA")
+        measured_voltage_v = self._supply_snapshot.get("voltage_V")
+        setpoint_text = "-" if setpoint_mA is None else _format_compact_unit(float(setpoint_mA), "mA", decimals=3)
+        current_text = (
+            "-"
+            if measured_current_mA is None
+            else _format_compact_unit(float(measured_current_mA), "mA", decimals=3)
+        )
+        voltage_text = (
+            "-"
+            if measured_voltage_v is None
+            else _format_compact_unit(float(measured_voltage_v), "V", decimals=3)
+        )
+        return (
+            "Wire break detected: "
+            f"set current {setpoint_text}, measured current {current_text}, voltage {voltage_text}. "
+            "Current output was disabled and the measurement was stopped."
+        )
+
+    def _stop_for_wire_break(self) -> None:
+        if self._wire_break_stop_in_progress:
+            return
+        self._wire_break_stop_in_progress = True
+        try:
+            message = self._wire_break_stop_message()
+            self._log(message)
+            self._clear_current_sweep_voltage_limit()
+            self._stop_auto_ramp(log_completion=False, offer_recovery=False)
+            if self._session_active:
+                self._stop_session()
+            self.statusBar().showMessage(message, 15000)
+            self._ask_wire_break_recovery_after_stop(message)
+        finally:
+            self._wire_break_stop_in_progress = False
+
+    def _ask_wire_break_recovery_after_stop(self, message: str) -> None:
+        if self._tic_motor_power_ok is False:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, message)
+            return
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setText("Wire break detected.")
+        box.setInformativeText(
+            f"{message}\n\nDo you want to move the tensile displacement back to 0 now?"
+        )
+        return_position_button = box.addButton("Move displacement to 0", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        leave_button = box.addButton("Leave as is", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(leave_button)
+        box.exec()
+        if box.clickedButton() == return_position_button:
+            self._start_recovery_displacement_zero()
 
     def _mark_current_sweep_voltage_limit(
         self,
@@ -5044,6 +5139,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_setup_preload_tolerance_equiv.setText(
             self._load_equivalent_text(float(self.spin_setup_preload_tolerance_mpa.value()))
         )
+        self.label_setup_zero_tolerance_equiv.setText(
+            self._stress_equivalent_text(float(self.spin_setup_zero_tolerance_g.value()))
+        )
         for label, spinbox in (
             (self.label_calibration_start_load_equiv, self.spin_calibration_start_load_g),
             (self.label_calibration_end_load_equiv, self.spin_calibration_end_load_g),
@@ -5290,6 +5388,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return self._strain_percent_for_position(self._measurement_effective_position_mm())
 
+    def _basis_value_as_load_g(self, basis: str, value: float) -> float | None:
+        if basis == HSW_BASIS_LOAD_G:
+            return abs(float(value))
+        if basis == HSW_BASIS_STRESS_MPA:
+            return load_g_from_stress_mpa(abs(float(value)), float(self.spin_diameter.value()))
+        return None
+
     def _distribution_target_reached(self, basis: str, target_value: float, tolerance: float) -> bool:
         current_value = self._current_distribution_value(basis)
         if current_value is None:
@@ -5524,6 +5629,37 @@ class MainWindow(QtWidgets.QMainWindow):
             factor = 0.2 + 0.8 * smooth
         return max(self._minimum_held_speed_mm_s(), base_speed * factor)
 
+    def _target_ramp_rate_value_s_for_context(self, basis: str) -> float | None:
+        if self._automation_phase != "target_ramp":
+            return None
+        if self._active_target_ramp_rate_value_s is not None:
+            return abs(float(self._active_target_ramp_rate_value_s))
+        if self._automation_step_note == "setup_preload" and basis == HSW_BASIS_STRESS_MPA:
+            return abs(float(self.spin_setup_preload_ramp_rate_mpa_s.value()))
+        if self._is_current_sweep_mode(self._automation_name) and basis in {
+            HSW_BASIS_LOAD_G,
+            HSW_BASIS_STRESS_MPA,
+            HSW_BASIS_STRAIN_PCT,
+        }:
+            return abs(float(self.spin_current_sweep_target_ramp_rate.value()))
+        return None
+
+    def _target_ramp_speed_cap_mm_s(
+        self,
+        basis: str,
+        *,
+        seek_key: tuple[str, int, float],
+    ) -> float | None:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
+            return None
+        ramp_rate = self._target_ramp_rate_value_s_for_context(basis)
+        if ramp_rate is None or ramp_rate <= 0.0:
+            return None
+        sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        if sensitivity is None or not math.isfinite(float(sensitivity)) or abs(float(sensitivity)) <= 0.0:
+            return None
+        return max(self._minimum_held_speed_mm_s(), abs(float(ramp_rate)) / abs(float(sensitivity)))
+
     def _seek_command_step_mm(self, nudge_mm: float, speed_mm_s: float, *, basis: str | None = None) -> float:
         speed_limited_step = self._seek_speed_limited_step_mm(basis, speed_mm_s)
         return max(self._motor_step_mm(), min(abs(nudge_mm), speed_limited_step))
@@ -5665,6 +5801,104 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return True
 
+    def _end_zero_fallback_is_pending(self) -> bool:
+        return self._end_zero_fallback_return_position_mm is not None
+
+    def _handle_pending_end_zero_fallback(self) -> bool:
+        target_mm = self._end_zero_fallback_return_position_mm
+        if target_mm is None:
+            return True
+        if self._automation_name == RECOVERY_LOAD:
+            self._record_recovery_point()
+        try:
+            self._refresh_tic_status()
+        except Exception:
+            pass
+        if abs(float(self._current_position_mm) - float(target_mm)) <= self._motor_step_mm():
+            self._end_zero_fallback_return_position_mm = None
+            self._end_zero_fallback_armed = False
+            self._log("Returned to zero-load plateau position; zero-load return accepted.")
+            return True
+        self._log_waiting_for_feedback("Returning to zero-load plateau position before finishing zero-load recovery.")
+        return False
+
+    def _end_zero_fallback_points(self) -> list[MeasurementPoint]:
+        start_index = max(0, int(self._end_zero_fallback_start_point_index))
+        if self._automation_name == RECOVERY_LOAD:
+            return self._recovery_points[start_index:]
+        return self._session_points[start_index:]
+
+    def _maybe_start_end_zero_plateau_fallback(
+        self,
+        basis: str,
+        target_value: float,
+        tolerance: float,
+    ) -> bool:
+        if not self._end_zero_fallback_armed or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        if self._end_zero_fallback_return_position_mm is not None:
+            return True
+        target_load_g = self._basis_value_as_load_g(basis, target_value)
+        tolerance_load_g = self._basis_value_as_load_g(basis, tolerance)
+        if target_load_g is None or tolerance_load_g is None:
+            return False
+        if target_load_g > max(tolerance_load_g, SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G):
+            return False
+        residual_load_g = abs(self._current_effective_load_g())
+        if residual_load_g <= max(tolerance_load_g, SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G):
+            return False
+        if residual_load_g > max(SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G, tolerance_load_g * 5.0):
+            return False
+        return_points = self._end_zero_fallback_points()
+        if len(return_points) < SETUP_ZERO_FALLBACK_MIN_POINTS:
+            return False
+        recent_points = return_points[-SETUP_ZERO_FALLBACK_MIN_POINTS:]
+        recent_raw_values = [point.raw_load_g for point in recent_points]
+        raw_span_g = max(recent_raw_values) - min(recent_raw_values)
+        raw_tolerance_g = max(SETUP_ZERO_FALLBACK_RAW_SPAN_G, tolerance_load_g * 0.25)
+        if raw_span_g > raw_tolerance_g:
+            return False
+        recent_positions = [point.raw_position_mm for point in recent_points]
+        travel_mm = max(recent_positions) - min(recent_positions)
+        min_travel_mm = max(SETUP_ZERO_FALLBACK_MIN_TRAVEL_MM, self._motor_step_mm() * 5.0)
+        if abs(travel_mm) < min_travel_mm:
+            return False
+        plateau_raw_g = _median(recent_raw_values)
+        if plateau_raw_g is None:
+            return False
+        plateau_residual_g = abs(self._effective_load_from_raw_g(plateau_raw_g))
+        if plateau_residual_g <= max(tolerance_load_g, SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G):
+            return False
+        plateau_first_position_mm: float | None = None
+        for point in return_points:
+            if abs(point.raw_load_g - plateau_raw_g) <= raw_tolerance_g:
+                plateau_first_position_mm = float(point.raw_position_mm)
+                break
+        if plateau_first_position_mm is None:
+            return False
+
+        self.spin_zero_load_scale_g.setValue(float(plateau_raw_g))
+        self._load_offset_g = 0.0
+        self._end_zero_fallback_raw_g = float(plateau_raw_g)
+        self._end_zero_fallback_return_position_mm = plateau_first_position_mm
+        self._log(
+            "Detected zero-load plateau at "
+            f"{float(plateau_raw_g):.5f} g after "
+            f"{_format_compact_unit(abs(travel_mm), 'mm')} of return travel; "
+            "using it as the corrected zero-load reference and returning to "
+            f"{_format_compact_unit(plateau_first_position_mm, 'mm')}."
+        )
+        if not self._move_to_position_mm(
+            plateau_first_position_mm,
+            speed_mm_s=self._motion_speed_for_current_context(manual_jog=False),
+        ):
+            if abs(float(self._current_position_mm) - plateau_first_position_mm) <= self._motor_step_mm():
+                self._end_zero_fallback_return_position_mm = None
+                self._end_zero_fallback_armed = False
+                return True
+            return False
+        return True
+
     def _seek_distribution_target(self, basis: str, target_value: float, tolerance: float) -> bool:
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
             raise RuntimeError(
@@ -5672,6 +5906,8 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         if self._setup_zero_fallback_is_pending():
             return self._handle_pending_setup_zero_fallback()
+        if self._end_zero_fallback_is_pending():
+            return self._handle_pending_end_zero_fallback()
         require_after_last_move = self._seek_requires_fresh_after_last_move(basis)
         current_value = self._current_distribution_value(
             basis,
@@ -5709,6 +5945,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._seek_travel_by_key.pop(seek_key, None)
             return True
         if self._maybe_start_setup_zero_plateau_fallback(basis, current_value, effective_tolerance):
+            return False
+        if self._maybe_start_end_zero_plateau_fallback(basis, target_value, effective_tolerance):
             return False
         if self._setup_preload_takeup_active(basis, current_value, delta_value, effective_tolerance):
             nudge_mm = self._seek_speed_limited_step_mm(
@@ -5750,6 +5988,9 @@ class MainWindow(QtWidgets.QMainWindow):
             seek_direction *= self._tension_motion_sign()
         movement_direction = math.copysign(1.0, seek_direction)
         speed_mm_s = self._seek_speed_mm_s(delta_value, effective_tolerance)
+        ramp_speed_cap_mm_s = self._target_ramp_speed_cap_mm_s(basis, seek_key=seek_key)
+        if ramp_speed_cap_mm_s is not None:
+            speed_mm_s = min(speed_mm_s, ramp_speed_cap_mm_s)
         nudge_mm = self._seek_command_step_mm(nudge_mm, speed_mm_s, basis=basis)
         backlash_takeup_mm = self._seek_backlash_takeup_mm(movement_direction)
         if not self._reverse_correction_is_worthwhile(
@@ -7242,6 +7483,8 @@ class MainWindow(QtWidgets.QMainWindow):
             load_g=load_g,
             load_summary=load_summary,
         )
+        if not self._session_active:
+            return False
         self._session_points.append(point)
         self._write_point(point)
         self._last_session_log_timestamp_s = record_wall_s
@@ -7555,7 +7798,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
+        self._active_target_ramp_rate_value_s = None
         self._setup_zero_fallback_return_position_mm = None
+        self._end_zero_fallback_armed = False
+        self._end_zero_fallback_start_point_index = 0
+        self._end_zero_fallback_return_position_mm = None
+        self._end_zero_fallback_raw_g = None
         self._reset_timed_step_state()
         self._auto_ramp_timer.start(self._automation_interval_ms)
         self._log(f"Recipe resumed at saved recipe row {self._automation_index + 1}.")
@@ -7595,6 +7843,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
+        self._active_target_ramp_rate_value_s = None
         self._reset_timed_step_state()
         self._setup_measured_length_mm = None
         self._setup_preload_position_mm = None
@@ -7602,6 +7851,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_return_zero_start_point_index = 0
         self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_raw_g = None
+        self._end_zero_fallback_armed = False
+        self._end_zero_fallback_start_point_index = 0
+        self._end_zero_fallback_return_position_mm = None
+        self._end_zero_fallback_raw_g = None
         self._calibration_report = None
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
@@ -7972,6 +8225,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_active = True
         self._automation_paused = False
         self._automation_name = RECOVERY_LOAD
+        self._end_zero_fallback_armed = True
+        self._end_zero_fallback_start_point_index = len(self._recovery_points)
+        self._end_zero_fallback_return_position_mm = None
+        self._end_zero_fallback_raw_g = None
         self._set_automation_context(phase="recover", basis=HSW_BASIS_LOAD_G, target_value=0.0, plateau_index=0)
         self._auto_ramp_timer.start(self._automation_interval_ms)
         self._log("Started load-zero recovery.")
@@ -8008,6 +8265,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
+        self._active_target_ramp_rate_value_s = None
         self._reset_timed_step_state()
         self._auto_ramp_timer.stop()
         if not self._manual_jog_timer.isActive():
@@ -8630,6 +8888,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         end_value = float(step.target_end_value if step.target_end_value is not None else step.target_value)
         ramp_rate = max(1e-9, abs(float(step.target_ramp_rate_value_s or self.spin_current_sweep_target_ramp_rate.value())))
+        self._active_target_ramp_rate_value_s = ramp_rate
         if self._active_target_ramp_step_index != step_index:
             self._active_target_ramp_step_index = step_index
             self._active_target_ramp_started_s = time.monotonic()
@@ -8637,6 +8896,26 @@ class MainWindow(QtWidgets.QMainWindow):
             if start_value is None:
                 start_value = self._current_distribution_value(step.basis)
             self._active_target_ramp_start_value = float(end_value if start_value is None else start_value)
+            self._end_zero_fallback_armed = False
+            self._end_zero_fallback_return_position_mm = None
+            self._end_zero_fallback_raw_g = None
+            if self._is_current_sweep_mode(self._automation_name) and step.basis in {
+                HSW_BASIS_LOAD_G,
+                HSW_BASIS_STRESS_MPA,
+            }:
+                ramp_start_load_g = self._basis_value_as_load_g(
+                    step.basis,
+                    self._active_target_ramp_start_value,
+                )
+                ramp_end_load_g = self._basis_value_as_load_g(step.basis, end_value)
+                if (
+                    ramp_start_load_g is not None
+                    and ramp_end_load_g is not None
+                    and ramp_end_load_g <= SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G
+                    and ramp_start_load_g > ramp_end_load_g + SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G
+                ):
+                    self._end_zero_fallback_armed = True
+                    self._end_zero_fallback_start_point_index = len(self._session_points)
 
         start_value = float(
             end_value if self._active_target_ramp_start_value is None else self._active_target_ramp_start_value
@@ -8670,6 +8949,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_target_ramp_step_index = None
             self._active_target_ramp_started_s = 0.0
             self._active_target_ramp_start_value = None
+            self._active_target_ramp_rate_value_s = None
             return True
         return False
 

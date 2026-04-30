@@ -11,10 +11,14 @@
 - Mini DMA completed calibrations now seed backlash, stiffness, and noise for closed-loop load/stress seeking; stiffness is rescaled for the current gauge length, target corrections use the estimated load-path sensitivity, and too-small tolerances are raised to the motor/noise resolution floor.
 - Mini DMA backlash take-up is tracked separately from specimen displacement, so raw motor travel remains in `raw_position_mm` while logged tensile displacement and strain exclude reversal take-up.
 - Mini DMA load/stress seek speed limits now use the scale feedback interval instead of the faster control-timer interval, and setup preload slack take-up can use the configured setup stage speed instead of being capped by the fine preload correction step.
+- Mini DMA setup preload ramps now convert the configured `MPa/s` rate through the stiffness estimate into a motor-speed cap, so setup stage speed stays a maximum ceiling instead of becoming the normal slack take-up correction speed.
+- Mini DMA setup zero-load tolerance now shows the equivalent stress in MPa next to the gram tolerance.
 - Mini DMA length setup now detects a stable near-zero raw-balance plateau during the post-preload return, uses it as the run's corrected zero-load reference, and returns to the first plateau position before computing unloaded `l0`.
+- Mini DMA final current-sweep zero return and manual load-zero recovery now use the same stable near-zero plateau fallback, updating the run zero-load reference and returning to the first plateau position instead of relaxing indefinitely when the balance stops changing.
 - Mini DMA scheduled CSV logging now defers while load/stress control is waiting for fresh post-move scale feedback instead of stopping a current-sweep recipe on a delayed log row.
 - Mini DMA current-sweep settle steps now keep correcting until the requested load/stress/strain target is reached before advancing to the next plateau.
 - Mini DMA load/stress target-ramp corrections in current-sweep recipes are now capped by the slower hold/balance speed as well as the target-ramp stage speed to reduce large sample-to-sample overshoot.
+- Mini DMA current sweeps now detect open-circuit wire breaks when measured current collapses near zero while voltage is at the configured limit, then disable current, stop/save the measurement, and offer displacement recovery instead of continuing the voltage-limit unwind.
 - Mini DMA sample/project/output and dashboard plot selections are saved when they change or when a session starts, and restored custom sample/base filenames are no longer overwritten by auto-naming during startup.
 - Mini DMA manual move buttons now use true press-and-hold jog control instead of Qt auto-repeat clicks, so held motion follows the configured manual `mm/s` speed more closely even when a jog tick is delayed.
 - Mini DMA Manual Actions now include an auto-connect hardware button for setup moves before starting a recipe.

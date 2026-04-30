@@ -624,6 +624,123 @@ def test_setup_zero_plateau_fallback_waits_until_return_position_is_reached(
         _close_test_window(window)
 
 
+def test_current_sweep_final_zero_plateau_fallback_accepts_near_zero_load(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    targets: list[float] = []
+
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
+        targets.append(target_mm)
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_diameter.setValue(0.0191)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_phase = "target_ramp"
+    window._automation_step_note = "5"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+    window._session_active = True
+    window._session_logging_enabled = False
+    window._end_zero_fallback_armed = True
+    window._end_zero_fallback_start_point_index = 0
+    window._session_start_monotonic = time.monotonic()
+
+    for index, position_mm in enumerate([-1.0, -1.2, -1.4, -1.6, -1.8, -2.0]):
+        raw_g = 21.170 + (0.0005 if index % 2 else 0.0)
+        window._latest_scale_value_g = raw_g
+        window._latest_scale_timestamp = time.time()
+        window._current_position_mm = position_mm
+        window._effective_position_mm = position_mm
+        point = window._capture_measurement_point(
+            elapsed_s=float(index),
+            position_mm=position_mm,
+            effective_position_mm=position_mm,
+            raw_load_g=raw_g,
+            load_g=window._current_effective_load_g(),
+        )
+        window._session_points.append(point)
+
+    window._latest_scale_value_g = 21.17
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = -2.2
+    window._effective_position_mm = -2.2
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=0.0,
+            tolerance=0.25,
+        )
+
+        assert reached is False
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.17, abs=0.001)
+        assert targets == [pytest.approx(-1.0)]
+        assert window._end_zero_fallback_return_position_mm == pytest.approx(-1.0)
+        assert "zero-load plateau" in window.log_output.toPlainText()
+    finally:
+        window._session_active = False
+        _close_test_window(window)
+
+
+def test_recovery_load_zero_plateau_fallback_accepts_near_zero_load(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    targets: list[float] = []
+
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
+        targets.append(target_mm)
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_steps_per_mm.setValue(100.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.RECOVERY_LOAD
+    window._automation_phase = "recover"
+    window._automation_step_note = "0"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
+    window._end_zero_fallback_armed = True
+    window._end_zero_fallback_start_point_index = 0
+    window._recovery_start_monotonic = time.monotonic()
+
+    for index, position_mm in enumerate([-1.0, -1.2, -1.4, -1.6, -1.8, -2.0]):
+        window._latest_scale_value_g = 21.170 + (0.0005 if index % 2 else 0.0)
+        window._latest_scale_timestamp = time.time()
+        window._current_position_mm = position_mm
+        window._effective_position_mm = position_mm
+        window._record_recovery_point()
+
+    window._latest_scale_value_g = 21.17
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = -2.2
+    window._effective_position_mm = -2.2
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=0.02,
+        )
+
+        assert reached is False
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.17, abs=0.001)
+        assert targets == [pytest.approx(-1.0)]
+        assert window._end_zero_fallback_return_position_mm == pytest.approx(-1.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_apply_length_setup_uses_plateau_zero_position_after_return_fallback(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_positive_motion_is_tension.setChecked(False)
@@ -1766,6 +1883,7 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
         assert "diameter 0.03 mm" in window.label_recipe_sample.text()
         assert "0.7208 g" in window.label_setup_preload_stress_equiv.text()
         assert "0.07208 g/s" in window.label_setup_preload_ramp_equiv.text()
+        assert "0.2775 MPa" in window.label_setup_zero_tolerance_equiv.text()
         assert "0.7208 g" in window.label_current_target_start_equiv.text()
         assert "0.07208 g/s" in window.label_current_target_ramp_equiv.text()
         assert "palette(mid)" not in window.label_current_target_start_equiv.styleSheet()
@@ -1819,7 +1937,7 @@ def test_setup_preload_correction_step_uses_setup_speed_interval(tmp_path: Path,
         _close_test_window(window)
 
 
-def test_setup_preload_slack_takeup_uses_scale_feedback_speed_budget(tmp_path: Path, qtbot) -> None:
+def test_setup_preload_slack_takeup_uses_stress_ramp_rate_speed_budget(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
@@ -1839,6 +1957,7 @@ def test_setup_preload_slack_takeup_uses_scale_feedback_speed_budget(tmp_path: P
     window.spin_diameter.setValue(0.03)
     window.spin_scale_interval.setValue(250)
     window.spin_setup_stage_speed_mm_s.setValue(1.0)
+    window.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
     window.spin_calibration_preload_nudge_mm.setValue(0.01)
     window.spin_setup_preload_tolerance_mpa.setValue(0.25)
     window._automation_interval_ms = 50
@@ -1849,7 +1968,9 @@ def test_setup_preload_slack_takeup_uses_scale_feedback_speed_budget(tmp_path: P
         basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
         note="setup_preload",
     )
-    window._calibrated_stiffness_g_per_mm = 0.1
+    calibrated_stiffness = mini_dma_mod.load_g_from_stress_mpa(10.0, window.spin_diameter.value())
+    assert calibrated_stiffness is not None
+    window._calibrated_stiffness_g_per_mm = calibrated_stiffness
     window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
     window._current_position_mm = 1.0
     window._current_position_steps = 10000
@@ -1866,8 +1987,8 @@ def test_setup_preload_slack_takeup_uses_scale_feedback_speed_budget(tmp_path: P
         _wait_for_tic_commands(window)
 
         assert reached is False
-        assert controller.target_steps == 7500
-        assert controller.max_speed == 100_000_000
+        assert controller.target_steps == 9750
+        assert controller.max_speed == 10_000_000
     finally:
         _close_test_window(window)
 
@@ -2629,6 +2750,77 @@ def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_
         assert window._supply_last_setpoint_mA == pytest.approx(2.0)
         assert "reversing recipe current back to the sweep start current" in window.log_output.toPlainText()
     finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_open_circuit_zero_current_stops_recipe_and_offers_recovery(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.output_off_calls = 0
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def measure(self) -> dict[str, float | None]:
+            return {
+                "current_mA": 0.0,
+                "voltage_V": 30.0,
+                "resistance_ohm": None,
+                "power_W": 0.0,
+            }
+
+        def output_off(self) -> None:
+            self.output_off_calls += 1
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    recovery_prompts: list[str] = []
+    window._ask_wire_break_recovery_after_stop = recovery_prompts.append  # type: ignore[method-assign]
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 55.0
+    window._active_current_sweep_step_index = 4
+    window._active_current_sweep_last_setpoint_mA = 55.0
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_phase = "current"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+    window._session_active = True
+    window._session_logging_enabled = True
+    window._latest_scale_value_g = window.spin_zero_load_scale_g.value()
+    window._latest_scale_timestamp = time.time()
+    window.spin_supply_voltage_limit.setValue(30.0)
+
+    try:
+        recorded = window._record_current_point(quiet=True, require_fresh_after_move=False)
+
+        assert recorded is False
+        assert window._automation_active is False
+        assert window._session_active is False
+        assert window._session_points == []
+        assert window._current_sweep_voltage_limit_step_index is None
+        assert supply.output_off_calls >= 1
+        assert len(recovery_prompts) == 1
+        assert "Wire break detected" in recovery_prompts[0]
+        assert "measured current 0 mA" in recovery_prompts[0]
+        log_text = window.log_output.toPlainText()
+        assert "Wire break detected" in log_text
+        assert "reversing recipe current" not in log_text
+    finally:
+        window._automation_active = False
+        window._session_active = False
         _close_test_window(window)
 
 
