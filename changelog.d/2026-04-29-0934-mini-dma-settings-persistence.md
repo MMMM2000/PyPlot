@@ -11,6 +11,10 @@
 - Mini DMA completed calibrations now seed backlash, stiffness, and noise for closed-loop load/stress seeking; stiffness is rescaled for the current gauge length, target corrections use the estimated load-path sensitivity, and too-small tolerances are raised to the motor/noise resolution floor.
 - Mini DMA backlash take-up is tracked separately from specimen displacement, so raw motor travel remains in `raw_position_mm` while logged tensile displacement and strain exclude reversal take-up.
 - Mini DMA load/stress seek speed limits now use the scale feedback interval instead of the faster control-timer interval, and setup preload slack take-up can use the configured setup stage speed instead of being capped by the fine preload correction step.
+- Mini DMA length setup now detects a stable near-zero raw-balance plateau during the post-preload return, uses it as the run's corrected zero-load reference, and returns to the first plateau position before computing unloaded `l0`.
+- Mini DMA scheduled CSV logging now defers while load/stress control is waiting for fresh post-move scale feedback instead of stopping a current-sweep recipe on a delayed log row.
+- Mini DMA current-sweep settle steps now keep correcting until the requested load/stress/strain target is reached before advancing to the next plateau.
+- Mini DMA load/stress target-ramp corrections in current-sweep recipes are now capped by the slower hold/balance speed as well as the target-ramp stage speed to reduce large sample-to-sample overshoot.
 - Mini DMA sample/project/output and dashboard plot selections are saved when they change or when a session starts, and restored custom sample/base filenames are no longer overwritten by auto-naming during startup.
 - Mini DMA manual move buttons now use true press-and-hold jog control instead of Qt auto-repeat clicks, so held motion follows the configured manual `mm/s` speed more closely even when a jog tick is delayed.
 - Mini DMA Manual Actions now include an auto-connect hardware button for setup moves before starting a recipe.

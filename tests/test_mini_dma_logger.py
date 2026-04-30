@@ -540,6 +540,108 @@ def test_preload_length_setup_calculates_l0_from_tensile_stage_delta(tmp_path: P
         _close_test_window(window)
 
 
+def test_setup_zero_plateau_fallback_updates_reference_and_returns_to_first_plateau_position(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    targets: list[float] = []
+
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
+        targets.append(target_mm)
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_setup_zero_tolerance_g.setValue(0.02)
+    window.spin_steps_per_mm.setValue(100.0)
+    window._automation_step_note = "setup_return_zero"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
+    window._automation_phase = "seek"
+    window._latest_scale_timestamp = time.time()
+    window._setup_return_zero_start_point_index = 0
+    window._length_setup_start_monotonic = time.monotonic()
+
+    for index, position_mm in enumerate([-1.0, -1.2, -1.4, -1.6, -1.8, -2.0]):
+        window._latest_scale_value_g = 21.170 + (0.0005 if index % 2 else 0.0)
+        window._current_position_mm = position_mm
+        window._effective_position_mm = position_mm
+        window._record_length_setup_point()
+
+    window._latest_scale_value_g = 21.17
+    window._current_position_mm = -2.2
+    window._effective_position_mm = -2.2
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=0.02,
+        )
+
+        assert reached is False
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.17, abs=0.001)
+        assert targets == [pytest.approx(-1.0)]
+        assert window._setup_zero_fallback_return_position_mm == pytest.approx(-1.0)
+        assert window._setup_zero_position_mm == pytest.approx(-1.0)
+        assert "zero-load plateau" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_zero_plateau_fallback_waits_until_return_position_is_reached(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_step_note = "setup_return_zero"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
+    window._automation_phase = "seek"
+    window._setup_zero_fallback_return_position_mm = -1.0
+    window.spin_steps_per_mm.setValue(100.0)
+    window._latest_scale_value_g = 21.17
+    window._latest_scale_timestamp = time.time()
+    window.spin_zero_load_scale_g.setValue(21.17)
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+
+    try:
+        window._current_position_mm = -1.2
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=0.02,
+        ) is False
+
+        window._current_position_mm = -1.0
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=0.02,
+        ) is True
+        assert window._setup_zero_fallback_return_position_mm is None
+    finally:
+        _close_test_window(window)
+
+
+def test_apply_length_setup_uses_plateau_zero_position_after_return_fallback(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window._setup_measured_length_mm = 30.5
+    window._setup_preload_position_mm = -1.5
+    window._setup_zero_position_mm = -1.0
+    window._current_position_mm = -10.0
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+
+    try:
+        assert window._handle_apply_length_setup_step() is True
+
+        assert window.spin_initial_length.value() == pytest.approx(30.0)
+        assert window._position_reference_mm == pytest.approx(-1.0)
+    finally:
+        _close_test_window(window)
+
+
 def _wheel_event(delta_y: int = -120) -> QtGui.QWheelEvent:
     return QtGui.QWheelEvent(
         QtCore.QPointF(10.0, 10.0),
@@ -2372,6 +2474,83 @@ def test_current_sweep_ramp_uses_elapsed_time_and_milliamp_resolution(
         _close_test_window(window)
 
 
+def test_current_sweep_scheduled_log_waits_for_fresh_scale_without_stopping(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._session_active = True
+    window._session_logging_enabled = True
+    window._session_start_monotonic = time.monotonic() - 10.0
+    window._last_session_log_timestamp_s = time.time() - 10.0
+    window._last_motion_command_time_s = time.time()
+    window._latest_scale_timestamp = window._last_motion_command_time_s - 0.1
+    window._latest_scale_value_g = 21.0
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=200.0,
+        plateau_index=3,
+    )
+    step = mini_dma_mod.AutomationStep(
+        "set_current",
+        target_value=200.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_mA=1.0,
+        note="3",
+    )
+
+    try:
+        assert window._record_scheduled_recipe_point(step) is True
+        assert window._automation_active is True
+        assert len(window._session_points) == 0
+        assert "Point not recorded because load/stress feedback is stale" not in window.log_output.toPlainText()
+        assert "Waiting for a fresh scale reading" in window.log_output.toPlainText()
+    finally:
+        window._session_active = False
+        _close_test_window(window)
+
+
+def test_current_sweep_settle_waits_until_target_is_reached(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    attempts = {"count": 0}
+
+    def _fake_seek(*_args: object, **_kwargs: object) -> bool:
+        attempts["count"] += 1
+        return attempts["count"] >= 2
+
+    window._seek_distribution_target = _fake_seek  # type: ignore[method-assign]
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "settle",
+            target_value=100.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            duration_s=0.0,
+            note="2",
+        )
+    ]
+    window._automation_total_steps = 1
+    window._automation_index = 0
+
+    try:
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_active is True
+        assert window._automation_index == 0
+
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_active is True
+        assert window._automation_index == 1
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_recipe(
     tmp_path: Path,
     qtbot,
@@ -3659,7 +3838,7 @@ def test_current_sweep_seek_uses_recipe_balancing_speed(tmp_path: Path, qtbot) -
         _close_test_window(window)
 
 
-def test_current_sweep_target_ramp_uses_target_stage_speed(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_load_target_ramp_is_limited_by_balance_speed(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
@@ -3684,6 +3863,7 @@ def test_current_sweep_target_ramp_uses_target_stage_speed(tmp_path: Path, qtbot
     window._automation_active = True
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
     window._automation_phase = "target_ramp"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
     window.spin_steps_per_mm.setValue(10000.0)
     window.spin_scale_interval.setValue(250)
     window.spin_current_sweep_nudge_mm.setValue(0.1)
@@ -3699,8 +3879,8 @@ def test_current_sweep_target_ramp_uses_target_stage_speed(tmp_path: Path, qtbot
         _wait_for_tic_commands(window)
 
         assert reached is False
-        assert controller.target_steps == 9000
-        assert controller.max_speed == 100_000_000
+        assert controller.target_steps == 9875
+        assert controller.max_speed == 5_000_000
     finally:
         _close_test_window(window)
 

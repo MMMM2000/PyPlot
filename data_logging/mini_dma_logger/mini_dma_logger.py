@@ -91,6 +91,11 @@ DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
+SETUP_ZERO_FALLBACK_MIN_POINTS = 6
+SETUP_ZERO_FALLBACK_MIN_TRAVEL_MM = 0.5
+SETUP_ZERO_FALLBACK_RAW_SPAN_G = 0.005
+SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
+SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
 MIN_RESISTANCE_CURRENT_MA = 0.05
 SUPPLY_READ_MIN_INTERVAL_S = DEFAULT_SUPPLY_READ_INTERVAL_MS / 1000.0
 RECOVERY_POSITION = "recovery_position"
@@ -1869,6 +1874,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_timed_move_sent = False
         self._setup_measured_length_mm: float | None = None
         self._setup_preload_position_mm: float | None = None
+        self._setup_zero_position_mm: float | None = None
+        self._setup_return_zero_start_point_index = 0
+        self._setup_zero_fallback_return_position_mm: float | None = None
+        self._setup_zero_fallback_raw_g: float | None = None
         self._length_setup_dialog: QtWidgets.QDialog | None = None
         self._length_setup_status_label: QtWidgets.QLabel | None = None
         self._length_setup_progress: QtWidgets.QProgressBar | None = None
@@ -5569,11 +5578,100 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._last_move_target_mm
         return self._current_position_mm
 
+    def _setup_zero_fallback_is_pending(self) -> bool:
+        return (
+            self._automation_step_note == "setup_return_zero"
+            and self._setup_zero_fallback_return_position_mm is not None
+        )
+
+    def _handle_pending_setup_zero_fallback(self) -> bool:
+        target_mm = self._setup_zero_fallback_return_position_mm
+        if target_mm is None:
+            return True
+        self._record_length_setup_point()
+        try:
+            self._refresh_tic_status()
+        except Exception:
+            pass
+        if abs(float(self._current_position_mm) - float(target_mm)) <= self._motor_step_mm():
+            self._setup_zero_fallback_return_position_mm = None
+            self._log("Returned to zero-load plateau position for l0.")
+            return True
+        self._log_waiting_for_feedback("Returning to zero-load plateau position before computing l0.")
+        return False
+
+    def _maybe_start_setup_zero_plateau_fallback(
+        self,
+        basis: str,
+        current_value: float,
+        tolerance: float,
+    ) -> bool:
+        if self._automation_step_note != "setup_return_zero" or basis != HSW_BASIS_LOAD_G:
+            return False
+        if self._setup_zero_fallback_return_position_mm is not None:
+            return True
+        residual_load_g = abs(float(current_value))
+        if residual_load_g <= max(float(tolerance), SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G):
+            return False
+        if residual_load_g > max(SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G, float(tolerance) * 5.0):
+            return False
+        return_points = self._length_setup_points[self._setup_return_zero_start_point_index :]
+        if len(return_points) < SETUP_ZERO_FALLBACK_MIN_POINTS:
+            return False
+        recent_points = return_points[-SETUP_ZERO_FALLBACK_MIN_POINTS:]
+        recent_raw_values = [point.raw_load_g for point in recent_points]
+        raw_span_g = max(recent_raw_values) - min(recent_raw_values)
+        raw_tolerance_g = max(SETUP_ZERO_FALLBACK_RAW_SPAN_G, float(tolerance) * 0.25)
+        if raw_span_g > raw_tolerance_g:
+            return False
+        recent_positions = [point.raw_position_mm for point in recent_points]
+        travel_mm = max(recent_positions) - min(recent_positions)
+        min_travel_mm = max(SETUP_ZERO_FALLBACK_MIN_TRAVEL_MM, self._motor_step_mm() * 5.0)
+        if abs(travel_mm) < min_travel_mm:
+            return False
+        plateau_raw_g = _median(recent_raw_values)
+        if plateau_raw_g is None:
+            return False
+        plateau_residual_g = abs(self._effective_load_from_raw_g(plateau_raw_g))
+        if plateau_residual_g <= max(float(tolerance), SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G):
+            return False
+        plateau_first_position_mm: float | None = None
+        for point in return_points:
+            if abs(point.raw_load_g - plateau_raw_g) <= raw_tolerance_g:
+                plateau_first_position_mm = float(point.raw_position_mm)
+                break
+        if plateau_first_position_mm is None:
+            return False
+
+        self.spin_zero_load_scale_g.setValue(float(plateau_raw_g))
+        self._load_offset_g = 0.0
+        self._setup_zero_position_mm = plateau_first_position_mm
+        self._setup_zero_fallback_raw_g = float(plateau_raw_g)
+        self._setup_zero_fallback_return_position_mm = plateau_first_position_mm
+        self._log(
+            "Detected zero-load plateau at "
+            f"{float(plateau_raw_g):.5f} g after "
+            f"{_format_compact_unit(abs(travel_mm), 'mm')} of return travel; "
+            "using it as this run's zero-load reference and returning to "
+            f"{_format_compact_unit(plateau_first_position_mm, 'mm')} for l0."
+        )
+        if not self._move_to_position_mm(
+            plateau_first_position_mm,
+            speed_mm_s=self._motion_speed_for_current_context(manual_jog=False),
+        ):
+            if abs(float(self._current_position_mm) - plateau_first_position_mm) <= self._motor_step_mm():
+                self._setup_zero_fallback_return_position_mm = None
+                return True
+            return False
+        return True
+
     def _seek_distribution_target(self, basis: str, target_value: float, tolerance: float) -> bool:
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
             raise RuntimeError(
                 "Scale feedback is stale; fix the scale connection before closed-loop load/stress control."
             )
+        if self._setup_zero_fallback_is_pending():
+            return self._handle_pending_setup_zero_fallback()
         require_after_last_move = self._seek_requires_fresh_after_last_move(basis)
         current_value = self._current_distribution_value(
             basis,
@@ -5610,6 +5708,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._seek_no_response_count_by_key.pop(seek_key, None)
             self._seek_travel_by_key.pop(seek_key, None)
             return True
+        if self._maybe_start_setup_zero_plateau_fallback(basis, current_value, effective_tolerance):
+            return False
         if self._setup_preload_takeup_active(basis, current_value, delta_value, effective_tolerance):
             nudge_mm = self._seek_speed_limited_step_mm(
                 basis,
@@ -6326,9 +6426,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             if self._is_current_sweep_mode(self._automation_name):
                 if self._automation_phase == "target_ramp":
+                    target_speed_mm_s = float(self.spin_current_sweep_target_speed_mm_s.value())
+                    if self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+                        target_speed_mm_s = min(
+                            target_speed_mm_s,
+                            float(self.spin_current_sweep_balance_speed_mm_s.value()),
+                        )
                     return max(
                         self._minimum_held_speed_mm_s(),
-                        float(self.spin_current_sweep_target_speed_mm_s.value()),
+                        target_speed_mm_s,
                     )
                 return max(
                     self._minimum_held_speed_mm_s(),
@@ -7169,6 +7275,14 @@ class MainWindow(QtWidgets.QMainWindow):
         interval_s = self._current_sweep_log_interval_ms() / 1000.0
         if not force and last_s is not None and now_s - last_s < interval_s:
             return True
+        if (
+            not force
+            and require_fresh_after_move
+            and self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and not self._has_fresh_scale_reading(after_s=self._last_motion_command_time_s)
+        ):
+            self._log_waiting_for_feedback("Waiting for a fresh scale reading before logging the next load/stress point.")
+            return True
         return self._record_current_point(
             quiet=quiet,
             advance_heating=advance_heating,
@@ -7441,6 +7555,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
+        self._setup_zero_fallback_return_position_mm = None
         self._reset_timed_step_state()
         self._auto_ramp_timer.start(self._automation_interval_ms)
         self._log(f"Recipe resumed at saved recipe row {self._automation_index + 1}.")
@@ -7483,6 +7598,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reset_timed_step_state()
         self._setup_measured_length_mm = None
         self._setup_preload_position_mm = None
+        self._setup_zero_position_mm = None
+        self._setup_return_zero_start_point_index = 0
+        self._setup_zero_fallback_return_position_mm = None
+        self._setup_zero_fallback_raw_g = None
         self._calibration_report = None
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
@@ -7653,6 +7772,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._button_length_setup_stop = stop_button
             self._length_setup_dialog = dialog
         self._length_setup_points.clear()
+        self._setup_return_zero_start_point_index = 0
+        self._setup_zero_position_mm = None
+        self._setup_zero_fallback_return_position_mm = None
+        self._setup_zero_fallback_raw_g = None
         self._length_setup_start_monotonic = time.monotonic()
         self._update_length_setup_dialog("Moving to setup preload.")
         self._update_length_setup_progress()
@@ -8573,6 +8696,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
         self._setup_measured_length_mm = float(measured_length_mm)
+        self._setup_return_zero_start_point_index = len(self._length_setup_points)
+        self._setup_zero_position_mm = None
+        self._setup_zero_fallback_return_position_mm = None
+        self._setup_zero_fallback_raw_g = None
         self._update_length_setup_dialog("Measured length saved. Returning load to 0 g to compute l0.")
         self._log(
             "Measured preload length accepted: "
@@ -8587,10 +8714,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         try:
             self._refresh_tic_status()
+            zero_position_mm = (
+                float(self._setup_zero_position_mm)
+                if self._setup_zero_position_mm is not None
+                else float(self._current_position_mm)
+            )
             self._apply_preload_length_result(
                 measured_length_mm=self._setup_measured_length_mm,
                 preload_position_mm=self._setup_preload_position_mm,
-                zero_position_mm=float(self._current_position_mm),
+                zero_position_mm=zero_position_mm,
             )
             self._record_length_setup_point()
             self._update_length_setup_dialog("Length setup finished. Starting the recipe log.")
@@ -8842,6 +8974,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 plateau_index=plateau_index,
                 note=step.note,
             )
+            settle_target_reached = True
             if (
                 step.basis
                 and step.target_value is not None
@@ -8849,7 +8982,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ):
                 tolerance = self._automation_tolerance_for_step(step)
                 try:
-                    self._seek_distribution_target(step.basis, step.target_value, tolerance)
+                    settle_target_reached = self._seek_distribution_target(step.basis, step.target_value, tolerance)
                 except Exception as exc:
                     self._log(f"Recipe stopped: {exc}")
                     self._stop_auto_ramp(log_completion=False, offer_recovery=True)
@@ -8859,7 +8992,12 @@ class MainWindow(QtWidgets.QMainWindow):
             elif not self._record_scheduled_recipe_point(step):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return
-            if not self._timed_step_finished(step, step_index) and self._automation_active:
+            if not settle_target_reached:
+                self._reset_timed_step_state()
+            if (
+                (not settle_target_reached or not self._timed_step_finished(step, step_index))
+                and self._automation_active
+            ):
                 self._automation_index -= 1
         elif step.action == "record":
             finished = self._handle_timed_record_step(step, step_index)
