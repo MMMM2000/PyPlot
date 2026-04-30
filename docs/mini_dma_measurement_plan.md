@@ -5,7 +5,7 @@ This note is the working plan for turning Mini DMA from a manual bring-up logger
 ## What Already Works
 
 - Scale communication: G&G balance on serial, including live real-gram reads and zero-load reference capture.
-- Motion communication: Pololu Tic T500 through `ticcmd`, including position zero, jog, halt, and recipe-driven position moves. Tic commands are routed through a persistent in-app dispatcher that coalesces stale target moves and lets closed-loop load/stress seeking continue from the last commanded target without waiting for a slower status poll.
+- Motion communication: Pololu Tic T500 through native PyUSB/libusb control transfers when available, with `ticcmd` as fallback. Position zero, jog, halt, keepalive, and recipe-driven position moves are routed through a persistent in-app dispatcher that coalesces stale target moves and lets closed-loop load/stress seeking continue from the last commanded target without waiting for a slower status poll.
 - Supply communication: HMP4030/Owon-style SCPI supply, including current setpoint, output control, and measured voltage/current.
 - `.pydpj` import: the Sample tab remembers the last Microwire Data Builder project, auto-imports diameter/current when the current naming fields match a row, and marks the diameter control red until the diameter came from the project. Manual diameter edits remain possible.
 - Stress calculation: stress is calculated from effective load and wire diameter.

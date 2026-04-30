@@ -69,6 +69,20 @@ GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
+TIC_USB_VENDOR_ID = 0x1FFB
+TIC_USB_TRANSPORT_NATIVE = "native-usb"
+TIC_USB_TRANSPORT_ALIASES = {TIC_USB_TRANSPORT_NATIVE, "usb", "pyusb"}
+TIC_USB_REQUEST_OUT = 0x40
+TIC_USB_REQUEST_IN = 0xC0
+TIC_CMD_EXIT_SAFE_START = 0x83
+TIC_CMD_ENERGIZE = 0x85
+TIC_CMD_HALT_AND_HOLD = 0x89
+TIC_CMD_RESET_COMMAND_TIMEOUT = 0x8C
+TIC_CMD_GET_VARIABLES = 0xA1
+TIC_CMD_SET_TARGET_POSITION = 0xE0
+TIC_CMD_SET_TARGET_VELOCITY = 0xE3
+TIC_CMD_SET_MAX_SPEED = 0xE6
+TIC_CMD_HALT_AND_SET_POSITION = 0xEC
 TIC_KEEPALIVE_INTERVAL_MS = 500
 DEFAULT_TIC_STATUS_INTERVAL_MS = 1000
 DEFAULT_SUPPLY_READ_INTERVAL_MS = 750
@@ -1093,12 +1107,202 @@ class ScaleWorker(QtCore.QObject):
         self._stop_event.set()
 
 
+def _load_pyusb_backend() -> tuple[Any, Any, Any | None]:
+    try:
+        import usb.core as usb_core  # type: ignore[import-not-found]
+        import usb.util as usb_util  # type: ignore[import-not-found]
+        import usb.backend.libusb1 as usb_libusb1  # type: ignore[import-not-found]
+    except Exception as exc:  # pragma: no cover - optional dependency guard
+        raise RuntimeError("PyUSB is not installed; install pyusb and libusb-package.") from exc
+    backend = None
+    try:
+        import libusb_package  # type: ignore[import-not-found]
+
+        backend = usb_libusb1.get_backend(find_library=libusb_package.find_library)
+    except Exception:
+        backend = usb_libusb1.get_backend()
+    return usb_core, usb_util, backend
+
+
+def _tic_usb_command_argument(value: int) -> tuple[int, int]:
+    unsigned = int(value) & 0xFFFFFFFF
+    return unsigned & 0xFFFF, (unsigned >> 16) & 0xFFFF
+
+
+def _median(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+class NativeTicUsbController:
+    def __init__(self, *, device_serial: str = "", timeout_ms: int = 1000) -> None:
+        self.device_serial = device_serial.strip()
+        self.timeout_ms = max(100, int(timeout_ms))
+        self._usb_core, self._usb_util, self._usb_backend = _load_pyusb_backend()
+        self._device = self._find_device()
+
+    def _device_string(self, device: Any, index: int | None) -> str:
+        if not index:
+            return ""
+        try:
+            return str(self._usb_util.get_string(device, index) or "")
+        except Exception:
+            return ""
+
+    def _find_device(self) -> Any:
+        try:
+            devices = list(
+                self._usb_core.find(
+                    find_all=True,
+                    idVendor=TIC_USB_VENDOR_ID,
+                    backend=self._usb_backend,
+                )
+                or []
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Native Tic USB scan failed: {exc}") from exc
+        for device in devices:
+            product = self._device_string(device, getattr(device, "iProduct", None))
+            serial = self._device_string(device, getattr(device, "iSerialNumber", None))
+            if product and "tic" not in product.lower():
+                continue
+            if self.device_serial and serial and serial != self.device_serial:
+                continue
+            if self.device_serial and not serial:
+                continue
+            return device
+        serial_text = f" with serial {self.device_serial}" if self.device_serial else ""
+        raise RuntimeError(f"No Pololu Tic USB device{serial_text} was found.")
+
+    def _quick_command(self, command: int) -> None:
+        self._device.ctrl_transfer(
+            TIC_USB_REQUEST_OUT,
+            command,
+            0,
+            0,
+            None,
+            timeout=self.timeout_ms,
+        )
+
+    def _command_u32(self, command: int, value: int) -> None:
+        value_low, value_high = _tic_usb_command_argument(value)
+        self._device.ctrl_transfer(
+            TIC_USB_REQUEST_OUT,
+            command,
+            value_low,
+            value_high,
+            None,
+            timeout=self.timeout_ms,
+        )
+
+    def _block_read(self, offset: int, length: int) -> bytes:
+        response = self._device.ctrl_transfer(
+            TIC_USB_REQUEST_IN,
+            TIC_CMD_GET_VARIABLES,
+            0,
+            int(offset),
+            int(length),
+            timeout=self.timeout_ms,
+        )
+        return bytes(response)
+
+    def halt_and_hold(self) -> None:
+        self._quick_command(TIC_CMD_HALT_AND_HOLD)
+
+    def reset_command_timeout(self) -> None:
+        self._quick_command(TIC_CMD_RESET_COMMAND_TIMEOUT)
+
+    def set_current_position(self, position_steps: int) -> None:
+        self._command_u32(TIC_CMD_HALT_AND_SET_POSITION, int(position_steps))
+
+    def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
+        self._quick_command(TIC_CMD_ENERGIZE)
+        self._quick_command(TIC_CMD_RESET_COMMAND_TIMEOUT)
+        self._quick_command(TIC_CMD_EXIT_SAFE_START)
+        self._command_u32(TIC_CMD_SET_TARGET_VELOCITY, int(velocity_steps_per_10k_s))
+
+    def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+        self._quick_command(TIC_CMD_ENERGIZE)
+        self._quick_command(TIC_CMD_RESET_COMMAND_TIMEOUT)
+        self._quick_command(TIC_CMD_EXIT_SAFE_START)
+        if max_speed is not None and max_speed > 0:
+            self._command_u32(TIC_CMD_SET_MAX_SPEED, int(max_speed))
+        self._command_u32(TIC_CMD_SET_TARGET_POSITION, int(position_steps))
+
+    def get_status(self) -> str:
+        variables = self._block_read(0x00, 0x35)
+        operation_state = variables[0x00] if len(variables) > 0x00 else 0
+        errors = int.from_bytes(variables[0x02:0x04], "little") if len(variables) >= 0x04 else 0
+        current_position = (
+            int.from_bytes(variables[0x22:0x26], "little", signed=True)
+            if len(variables) >= 0x26
+            else 0
+        )
+        vin_mv = int.from_bytes(variables[0x33:0x35], "little") if len(variables) >= 0x35 else 0
+        operation_text = {
+            0: "Reset",
+            2: "De-energized",
+            4: "Soft error",
+            6: "Waiting for ERR line",
+            8: "Starting up",
+            10: "Normal",
+        }.get(operation_state, f"Unknown ({operation_state})")
+        error_text = "None" if errors == 0 else f"0x{errors:04X}"
+        return "\n".join(
+            [
+                f"VIN voltage: {vin_mv / 1000.0:.2f} V",
+                f"Operation state: {operation_text}",
+                f"Current position: {current_position}",
+                f"Errors currently stopping the motor: {error_text}",
+                "Transport: native USB",
+            ]
+        )
+
+
 class TicController:
-    def __init__(self, command_path: str = "ticcmd", device_serial: str = "") -> None:
+    def __init__(
+        self,
+        command_path: str = "ticcmd",
+        device_serial: str = "",
+        *,
+        prefer_native_usb: bool = False,
+    ) -> None:
         self.command_path = command_path.strip() or "ticcmd"
         self.device_serial = device_serial.strip()
+        self.prefer_native_usb = bool(prefer_native_usb)
+        self._native_backend: NativeTicUsbController | None = None
+        self._native_attempted = False
+        self._native_error: Exception | None = None
+
+    def _native_only(self) -> bool:
+        return self.command_path.strip().lower() in TIC_USB_TRANSPORT_ALIASES
+
+    def _native_allowed(self) -> bool:
+        return self.prefer_native_usb or self._native_only() or self.command_path.strip().lower() == "auto"
+
+    def _native_controller(self) -> NativeTicUsbController | None:
+        if not self._native_allowed():
+            return None
+        if self._native_attempted:
+            return self._native_backend
+        self._native_attempted = True
+        try:
+            self._native_backend = NativeTicUsbController(device_serial=self.device_serial)
+        except Exception as exc:
+            self._native_error = exc
+            if self._native_only():
+                raise RuntimeError(f"Native Tic USB transport is unavailable: {exc}") from exc
+            self._native_backend = None
+        return self._native_backend
 
     def executable(self) -> str | None:
+        if self._native_only():
+            return None
         if os.path.sep in self.command_path or "/" in self.command_path:
             return self.command_path if Path(self.command_path).exists() else None
         return shutil.which(self.command_path)
@@ -1115,6 +1319,10 @@ class TicController:
         return args
 
     def run(self, *extra_args: str, timeout_s: float = 5.0) -> str:
+        if self._native_only():
+            native = self._native_controller()
+            if native is not None:
+                raise RuntimeError("Raw ticcmd arguments are unavailable for the native USB transport.")
         args = self._base_args()
         args.extend(extra_args)
         completed = subprocess.run(
@@ -1132,6 +1340,9 @@ class TicController:
         return stdout
 
     def get_status(self) -> str:
+        native = self._native_controller()
+        if native is not None:
+            return native.get_status()
         for args in (("--status", "--full"), ("--status",), ("--full",)):
             try:
                 return self.run(*args)
@@ -1140,15 +1351,44 @@ class TicController:
         return self.run("--list")
 
     def halt_and_hold(self) -> None:
+        native = self._native_controller()
+        if native is not None:
+            native.halt_and_hold()
+            return
         self.run("--halt-and-hold")
 
     def reset_command_timeout(self) -> None:
+        native = self._native_controller()
+        if native is not None:
+            native.reset_command_timeout()
+            return
         self.run("--reset-command-timeout", timeout_s=2.0)
 
     def set_current_position(self, position_steps: int) -> None:
+        native = self._native_controller()
+        if native is not None:
+            native.set_current_position(position_steps)
+            return
         self.run("--halt-and-set-position", str(int(position_steps)))
 
+    def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
+        native = self._native_controller()
+        if native is not None:
+            native.set_target_velocity(velocity_steps_per_10k_s)
+            return
+        self.run(
+            "--energize",
+            "--reset-command-timeout",
+            "--exit-safe-start",
+            "--velocity",
+            str(int(velocity_steps_per_10k_s)),
+        )
+
     def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+        native = self._native_controller()
+        if native is not None:
+            native.set_target_position(position_steps, max_speed=max_speed)
+            return
         args = [
             "--energize",
             "--reset-command-timeout",
@@ -1160,6 +1400,48 @@ class TicController:
         self.run(
             *args,
         )
+
+
+def benchmark_tic_transport_latency(
+    *,
+    command_path: str,
+    device_serial: str = "",
+    iterations: int = 5,
+) -> dict[str, dict[str, Any]]:
+    results: dict[str, dict[str, Any]] = {}
+    transports = {
+        "native_usb": TicController(
+            command_path=TIC_USB_TRANSPORT_NATIVE,
+            device_serial=device_serial,
+        ),
+        "ticcmd": TicController(
+            command_path=command_path,
+            device_serial=device_serial,
+            prefer_native_usb=False,
+        ),
+    }
+    for label, controller in transports.items():
+        reset_times: list[float] = []
+        status_times: list[float] = []
+        error: str | None = None
+        try:
+            controller.get_status()
+            for _ in range(max(1, int(iterations))):
+                started = time.perf_counter()
+                controller.reset_command_timeout()
+                reset_times.append(time.perf_counter() - started)
+                started = time.perf_counter()
+                controller.get_status()
+                status_times.append(time.perf_counter() - started)
+        except Exception as exc:
+            error = str(exc)
+        results[label] = {
+            "reset_median_ms": None if error else (_median(reset_times) or 0.0) * 1000.0,
+            "status_median_ms": None if error else (_median(status_times) or 0.0) * 1000.0,
+            "iterations": len(reset_times),
+            "error": error,
+        }
+    return results
 
 
 @dataclass
@@ -1489,9 +1771,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_thread: QtCore.QThread | None = None
         self._scale_worker: ScaleWorker | None = None
         self._tic_controller: TicController | None = None
-        self._tic_controller_key: tuple[str, str] | None = None
+        self._tic_controller_key: tuple[str, str, bool] | None = None
         self._tic_command_dispatcher: TicCommandDispatcher | None = None
-        self._tic_command_dispatcher_key: tuple[str, str] | None = None
+        self._tic_command_dispatcher_key: tuple[str, str, bool] | None = None
         self._tic_status_text = ""
         self._latest_scale_value_g = 0.0
         self._latest_scale_text = ""
@@ -1689,6 +1971,9 @@ class MainWindow(QtWidgets.QMainWindow):
         choose_action = developer_menu.addAction("Choose Mini DMA Run Log File...")
         if choose_action is not None:
             choose_action.triggered.connect(self._choose_run_log_mirror_file)
+        benchmark_action = developer_menu.addAction("Benchmark Tic Transports")
+        if benchmark_action is not None:
+            benchmark_action.triggered.connect(self._benchmark_tic_transports)
 
     def _show_timing_settings_dialog(self) -> None:
         dialog = QtWidgets.QDialog(self)
@@ -2064,6 +2349,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_ticcmd_path = QtWidgets.QLineEdit(motion_advanced_box)
         self.edit_ticcmd_path.setText(_find_ticcmd())
         motion_advanced_form.addRow("ticcmd path", self.edit_ticcmd_path)
+
+        self.check_tic_native_usb = QtWidgets.QCheckBox(
+            "Prefer native USB commands when available",
+            motion_advanced_box,
+        )
+        self.check_tic_native_usb.setToolTip(
+            "Uses PyUSB/libusb for Tic commands and falls back to ticcmd if native USB is unavailable."
+        )
+        self.check_tic_native_usb.setChecked(True)
+        motion_advanced_form.addRow("", self.check_tic_native_usb)
 
         self.edit_tic_serial = QtWidgets.QLineEdit(motion_advanced_box)
         self.edit_tic_serial.setPlaceholderText("optional when only one Tic is connected")
@@ -3835,18 +4130,52 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Automatic Tic detection did not find a reachable controller.")
         return False
 
+    def _benchmark_tic_transports(self) -> None:
+        command_path = self.edit_ticcmd_path.text().strip() or _find_ticcmd()
+        if command_path.strip().lower() in TIC_USB_TRANSPORT_ALIASES:
+            command_path = _find_ticcmd()
+        serial = self.edit_tic_serial.text().strip()
+        self._log("Benchmarking Tic transports with status reads and command-timeout resets...")
+        try:
+            results = benchmark_tic_transport_latency(
+                command_path=command_path,
+                device_serial=serial,
+                iterations=5,
+            )
+        except Exception as exc:
+            self._log(f"Tic transport benchmark failed: {exc}")
+            return
+        for label, result in results.items():
+            error = result.get("error")
+            if error:
+                self._log(f"Tic transport {label}: unavailable ({error}).")
+                continue
+            self._log(
+                f"Tic transport {label}: reset median {result['reset_median_ms']:.1f} ms, "
+                f"status median {result['status_median_ms']:.1f} ms over {result['iterations']} trials."
+            )
+
     def _build_tic_controller(self) -> TicController:
-        key = (self.edit_ticcmd_path.text().strip(), self.edit_tic_serial.text().strip())
+        key = (
+            self.edit_ticcmd_path.text().strip(),
+            self.edit_tic_serial.text().strip(),
+            bool(self.check_tic_native_usb.isChecked()),
+        )
         if self._tic_controller is None or self._tic_controller_key != key:
             self._tic_controller = TicController(
                 command_path=key[0],
                 device_serial=key[1],
+                prefer_native_usb=key[2],
             )
             self._tic_controller_key = key
         return self._tic_controller
 
     def _build_tic_dispatcher(self) -> TicCommandDispatcher:
-        key = (self.edit_ticcmd_path.text().strip(), self.edit_tic_serial.text().strip())
+        key = (
+            self.edit_ticcmd_path.text().strip(),
+            self.edit_tic_serial.text().strip(),
+            bool(self.check_tic_native_usb.isChecked()),
+        )
         if self._tic_command_dispatcher is not None and self._tic_command_dispatcher_key != key:
             self._tic_command_dispatcher.stop()
             self._tic_command_dispatcher = None
@@ -5330,14 +5659,16 @@ class MainWindow(QtWidgets.QMainWindow):
             backlash_takeup_mm,
             seek_key=seek_key,
         ):
-            self._seek_last_error_by_key[seek_key] = delta_value
-            self._seek_last_value_by_key[seek_key] = current_value
-            self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
+            self._seek_last_error_by_key.pop(seek_key, None)
+            self._seek_last_value_by_key.pop(seek_key, None)
+            self._seek_last_effective_position_by_key.pop(seek_key, None)
+            self._seek_no_response_count_by_key.pop(seek_key, None)
+            self._seek_travel_by_key.pop(seek_key, None)
             self._log(
-                "Load/stress reversal skipped because backlash take-up would be larger "
-                "than the predicted improvement."
+                "Load/stress target accepted within backlash-limited tolerance; "
+                "reversal skipped because take-up would be larger than the predicted improvement."
             )
-            return False
+            return True
         chain_from_last_target = self._seek_uses_planned_motion_base(basis)
         base_position_mm = self._seek_motion_base_mm(basis)
         effective_base_position_mm = self._measurement_effective_position_mm()
@@ -8762,6 +9093,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("motor_supply_voltage_v", self.spin_motor_supply_voltage.value())
         self.settings.setValue("motor_supply_current_limit_a", self.spin_motor_supply_current_limit.value())
         self.settings.setValue("ticcmd_path", self.edit_ticcmd_path.text())
+        self.settings.setValue("tic_native_usb_preferred", self.check_tic_native_usb.isChecked())
         self.settings.setValue("tic_serial", self.edit_tic_serial.text())
         self.settings.setValue("tic_status_interval_ms", self._tic_status_interval_ms())
         self.settings.setValue("tic_keepalive_interval_ms", self._tic_keepalive_interval_ms())
@@ -8920,14 +9252,22 @@ class MainWindow(QtWidgets.QMainWindow):
         saved_ticcmd = self.settings.value("ticcmd_path", "ticcmd", type=str)
         discovered_ticcmd = _find_ticcmd()
         saved_ticcmd_text = saved_ticcmd.strip()
+        saved_ticcmd_native = (
+            saved_ticcmd_text.lower() in TIC_USB_TRANSPORT_ALIASES
+            or saved_ticcmd_text.lower() == "auto"
+        )
         saved_ticcmd_missing = (
             saved_ticcmd_text
             and saved_ticcmd_text.lower() != "ticcmd"
+            and not saved_ticcmd_native
             and not Path(saved_ticcmd_text).exists()
         )
         if (saved_ticcmd_text.lower() == "ticcmd" or saved_ticcmd_missing) and discovered_ticcmd != "ticcmd":
             saved_ticcmd = discovered_ticcmd
         self.edit_ticcmd_path.setText(saved_ticcmd)
+        self.check_tic_native_usb.setChecked(
+            bool(self.settings.value("tic_native_usb_preferred", True, type=bool))
+        )
         self.edit_tic_serial.setText(self.settings.value("tic_serial", "", type=str))
         self.spin_tic_status_interval.setValue(
             int(self.settings.value("tic_status_interval_ms", DEFAULT_TIC_STATUS_INTERVAL_MS))

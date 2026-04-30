@@ -35,7 +35,7 @@ Related workflows reused as reference:
 
 Current intended hardware stack:
 
-- `Pololu Tic T500` stepper controller over USB, driven by `ticcmd`
+- `Pololu Tic T500` stepper controller over USB, preferably driven by the native PyUSB/libusb backend with `ticcmd` kept as fallback
 - StepperOnline captive linear stepper actuator
 - G&G balance over RS232 via USB serial adapter
 - current annealing supply path, modeled after the existing current annealing logger
@@ -62,15 +62,15 @@ Current intended hardware stack:
 - the global timing controls live under `Settings -> Timing...` instead of taking space in the normal Recipe panel
 - hardware communication keeps its own cadence: request-mode scale acquisition, Tic status, Tic command-timeout keepalive, and power-supply readbacks all have explicit timing settings, with supply readbacks still throttled so they do not block fast current commands
 - Tic command state is tracked separately from slower Tic status polling: recipes and calibration micro-moves chain from the last commanded target, while scheduled data-log rows use cached/commanded position instead of forcing a blocking Tic status subprocess
-- Tic move, halt, zero-position, and keepalive commands go through a persistent in-app command dispatcher that coalesces superseded target-position commands and drains halt/zero requests before the UI reports them complete; `ticcmd` remains the command transport, so this removes UI/control-loop blocking without adding a native USB driver dependency
+- Tic move, halt, zero-position, and keepalive commands go through a persistent in-app command dispatcher that coalesces superseded target-position commands and drains halt/zero requests before the UI reports them complete; when PyUSB/libusb can open the Tic, the dispatcher uses native USB control transfers and otherwise falls back to `ticcmd`
 - the current G&G scale does not stream passively at `9600`; its measured `ESC+p` reply cadence is about 5 Hz, so Mini DMA defaults G&G request-mode acquisition to a 250 ms interval with a 300 ms read timeout and records every actual reply in the raw sidecar
 - shape-memory-friendly export columns for `Displacement`, positive applied tensile `Load`, `Strain`, and `Stress`
 
 ### Motion
 
-- `ticcmd` integration for Pololu Tic status and commands
+- native PyUSB/libusb integration for Pololu Tic status and commands, with `ticcmd` fallback
 - automatic Tic path / serial detection for the connected controller
-- stale saved `ticcmd` paths are ignored in favor of a discovered local Pololu installation
+- stale saved `ticcmd` paths are ignored in favor of a discovered local Pololu installation; the advanced motor settings also include a native-USB preference checkbox
 - motor moves energize the Tic, reset its command timeout, and exit safe-start before sending the position target; a short keepalive continues resetting the command timeout during active recipes/manual holds
 - Tic status shows VIN motor-supply voltage and warns/preflights when VIN is below the motor-power threshold
 - displacement recipes expose their own linear move speed; the app schedules successive target positions from move distance and speed while the faster control loop stays available for logging, safety checks, and closed-loop decisions
@@ -86,6 +86,7 @@ Current intended hardware stack:
 - position zeroing
 - halt / stop support
 - jog control refuses sub-step moves that would round to the current motor step
+- Developer -> Benchmark Tic Transports compares native USB and `ticcmd` status/keepalive latency without moving the motor
 - displacement-driven automation recipes
 - controlled current-sweep recipe that can hold load, stress, or strain while ramping current
 - configurable soft position limits and max-load safety behavior; the zero-load hanging-weight reference is the default applied-load ceiling, an optional lower custom limit can stop earlier, and relaxing moves remain available when the limit is already exceeded so the rig is not trapped above the limit

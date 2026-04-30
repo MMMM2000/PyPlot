@@ -126,6 +126,7 @@ def _use_immediate_tic_dispatcher(window: mini_dma_mod.MainWindow, controller: o
     window._tic_command_dispatcher_key = (
         window.edit_ticcmd_path.text().strip(),
         window.edit_tic_serial.text().strip(),
+        bool(window.check_tic_native_usb.isChecked()),
     )
 
 
@@ -2564,6 +2565,179 @@ def test_tic_target_position_energizes_and_exits_safe_start(monkeypatch: pytest.
     ]
 
 
+def test_native_tic_usb_controller_sends_control_transfers(monkeypatch: pytest.MonkeyPatch) -> None:
+    transfers: list[tuple[int, int, int, int, object]] = []
+
+    class _FakeDevice:
+        idVendor = mini_dma_mod.TIC_USB_VENDOR_ID
+        iProduct = 1
+        iSerialNumber = 2
+
+        def ctrl_transfer(
+            self,
+            request_type: int,
+            request: int,
+            value: int = 0,
+            index: int = 0,
+            data_or_wLength: object = None,
+            *,
+            timeout: int | None = None,
+        ) -> bytes:
+            transfers.append((request_type, request, value, index, data_or_wLength))
+            return b""
+
+    device = _FakeDevice()
+
+    class _FakeCore:
+        @staticmethod
+        def find(*, find_all: bool, idVendor: int, backend: object | None = None) -> list[_FakeDevice]:
+            assert find_all is True
+            assert idVendor == mini_dma_mod.TIC_USB_VENDOR_ID
+            return [device]
+
+    class _FakeUtil:
+        @staticmethod
+        def get_string(_device: _FakeDevice, index: int) -> str:
+            return {1: "Pololu Tic T500", 2: "00501366"}[index]
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "_load_pyusb_backend",
+        lambda: (_FakeCore, _FakeUtil, object()),
+    )
+
+    controller = mini_dma_mod.NativeTicUsbController(device_serial="00501366")
+    controller.set_target_position(-42, max_speed=12345)
+    controller.set_target_velocity(250)
+    controller.set_current_position(0)
+    controller.halt_and_hold()
+
+    assert transfers == [
+        (0x40, 0x85, 0, 0, None),
+        (0x40, 0x8C, 0, 0, None),
+        (0x40, 0x83, 0, 0, None),
+        (0x40, 0xE6, 12345, 0, None),
+        (0x40, 0xE0, 0xFFD6, 0xFFFF, None),
+        (0x40, 0x85, 0, 0, None),
+        (0x40, 0x8C, 0, 0, None),
+        (0x40, 0x83, 0, 0, None),
+        (0x40, 0xE3, 250, 0, None),
+        (0x40, 0xEC, 0, 0, None),
+        (0x40, 0x89, 0, 0, None),
+    ]
+
+
+def test_native_tic_usb_controller_formats_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeDevice:
+        idVendor = mini_dma_mod.TIC_USB_VENDOR_ID
+        iProduct = 1
+        iSerialNumber = 2
+
+        def ctrl_transfer(
+            self,
+            request_type: int,
+            request: int,
+            value: int = 0,
+            index: int = 0,
+            data_or_wLength: object = None,
+            *,
+            timeout: int | None = None,
+        ) -> bytes:
+            assert (request_type, request, value, index, data_or_wLength) == (0xC0, 0xA1, 0, 0, 0x35)
+            data = bytearray(0x35)
+            data[0x00] = 10
+            data[0x02:0x04] = (0).to_bytes(2, "little")
+            data[0x22:0x26] = (-42).to_bytes(4, "little", signed=True)
+            data[0x33:0x35] = (12345).to_bytes(2, "little")
+            return bytes(data)
+
+    device = _FakeDevice()
+
+    class _FakeCore:
+        @staticmethod
+        def find(*, find_all: bool, idVendor: int, backend: object | None = None) -> list[_FakeDevice]:
+            return [device]
+
+    class _FakeUtil:
+        @staticmethod
+        def get_string(_device: _FakeDevice, index: int) -> str:
+            return {1: "Pololu Tic T500", 2: "00501366"}[index]
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "_load_pyusb_backend",
+        lambda: (_FakeCore, _FakeUtil, object()),
+    )
+
+    status = mini_dma_mod.NativeTicUsbController(device_serial="00501366").get_status()
+
+    assert "Operation state: Normal" in status
+    assert "Current position: -42" in status
+    assert "VIN voltage: 12.35 V" in status
+    assert "Errors currently stopping the motor: None" in status
+
+
+def test_tic_controller_prefers_native_usb_when_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeNative:
+        def __init__(self, *, device_serial: str = "") -> None:
+            self.device_serial = device_serial
+            self.targets: list[tuple[int, int | None]] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append((position_steps, max_speed))
+
+    created: list[_FakeNative] = []
+
+    def _make_native(*, device_serial: str = "") -> _FakeNative:
+        native = _FakeNative(device_serial=device_serial)
+        created.append(native)
+        return native
+
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _make_native)
+
+    controller = mini_dma_mod.TicController(
+        command_path="ticcmd",
+        device_serial="00501366",
+        prefer_native_usb=True,
+    )
+    controller.set_target_position(42, max_speed=123)
+
+    assert len(created) == 1
+    assert created[0].device_serial == "00501366"
+    assert created[0].targets == [(42, 123)]
+
+
+def test_tic_controller_auto_falls_back_to_ticcmd_when_native_usb_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    def _fail_native(*, device_serial: str = "") -> object:
+        raise RuntimeError("no native USB access")
+
+    controller = mini_dma_mod.TicController(
+        command_path="ticcmd",
+        device_serial="00501366",
+        prefer_native_usb=True,
+    )
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _fail_native)
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    controller.reset_command_timeout()
+
+    assert calls == [["ticcmd.exe", "-d", "00501366", "--reset-command-timeout"]]
+
+
 def test_tic_controller_is_reused_until_connection_settings_change(
     tmp_path: Path,
     qtbot,
@@ -2573,7 +2747,13 @@ def test_tic_controller_is_reused_until_connection_settings_change(
     created: list[tuple[str, str]] = []
 
     class _FakeController:
-        def __init__(self, command_path: str, device_serial: str) -> None:
+        def __init__(
+            self,
+            command_path: str,
+            device_serial: str,
+            *,
+            prefer_native_usb: bool = False,
+        ) -> None:
             created.append((command_path, device_serial))
 
     monkeypatch.setattr(mini_dma_mod, "TicController", _FakeController)
@@ -2657,6 +2837,7 @@ def test_move_to_position_uses_persistent_tic_dispatcher(tmp_path: Path, qtbot) 
     window._tic_command_dispatcher_key = (
         window.edit_ticcmd_path.text().strip(),
         window.edit_tic_serial.text().strip(),
+        bool(window.check_tic_native_usb.isChecked()),
     )
     window.spin_steps_per_mm.setValue(100.0)
     window._current_position_steps = 0
@@ -3391,7 +3572,7 @@ def test_seek_tolerance_floor_uses_stiffness_and_motor_step(tmp_path: Path, qtbo
         _close_test_window(window)
 
 
-def test_reverse_correction_requires_predicted_gain_over_reversal_cost(tmp_path: Path, qtbot) -> None:
+def test_backlash_limited_reverse_correction_counts_as_practical_target(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
@@ -3427,9 +3608,9 @@ def test_reverse_correction_requires_predicted_gain_over_reversal_cost(tmp_path:
             tolerance=0.02,
         )
 
-        assert reached is False
+        assert reached is True
         assert controller.targets == []
-        assert "reversal skipped" in window.log_output.toPlainText()
+        assert "within backlash-limited tolerance" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
