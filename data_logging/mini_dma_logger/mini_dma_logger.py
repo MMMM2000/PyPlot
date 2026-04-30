@@ -171,6 +171,15 @@ def _default_download_dir() -> str:
     return str(fallback)
 
 
+def _mini_dma_settings() -> QtCore.QSettings:
+    ini_dir = os.environ.get("MINI_DMA_QSETTINGS_INI_DIR", "").strip()
+    if ini_dir:
+        settings_path = Path(ini_dir) / "mini_dma_logger.ini"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        return QtCore.QSettings(str(settings_path), QtCore.QSettings.Format.IniFormat)
+    return QtCore.QSettings("microwire", "mini_dma_logger")
+
+
 def _session_paths_for_basename(directory: Path, basename: str) -> tuple[Path, Path, Path, Path]:
     return (
         directory / f"{basename}.txt",
@@ -1317,11 +1326,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.settings = QtCore.QSettings("microwire", "mini_dma_logger")
+        self.settings = _mini_dma_settings()
         self._persist_settings = persist_settings
         self._settings_restore_in_progress = False
         self._settings_persistence_ready = False
         self._provided_log_dir = log_dir
+        self._restored_log_dir = ""
         self._scale_thread: QtCore.QThread | None = None
         self._scale_worker: ScaleWorker | None = None
         self._tic_controller: TicController | None = None
@@ -1443,6 +1453,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_direction = 0.0
         self._manual_jog_last_tick_s: float | None = None
         self._manual_jog_pending_mm = 0.0
+        self._manual_jog_timer_moves = 0
+        self._manual_jog_click_suppressed = False
         self._last_motion_command_time_s: float | None = None
         self._last_tic_status_time_s: float | None = None
         self._last_feedback_wait_log_s = 0.0
@@ -1783,16 +1795,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         jog_buttons = QtWidgets.QHBoxLayout()
         jog_negative = QtWidgets.QPushButton("▲ Move up / increase tension", motion_box)
-        jog_negative.setAutoRepeat(True)
-        jog_negative.setAutoRepeatDelay(350)
-        jog_negative.setAutoRepeatInterval(120)
-        jog_negative.clicked.connect(lambda: self._jog_relative(self._tension_motion_sign()))
+        jog_negative.setObjectName("hardware_jog_tension_button")
+        self._configure_manual_jog_button(jog_negative, lambda: self._tension_motion_sign())
         jog_buttons.addWidget(jog_negative)
         jog_positive = QtWidgets.QPushButton("▼ Move down / relax", motion_box)
-        jog_positive.setAutoRepeat(True)
-        jog_positive.setAutoRepeatDelay(350)
-        jog_positive.setAutoRepeatInterval(120)
-        jog_positive.clicked.connect(lambda: self._jog_relative(-self._tension_motion_sign()))
+        jog_positive.setObjectName("hardware_jog_relax_button")
+        self._configure_manual_jog_button(jog_positive, lambda: -self._tension_motion_sign())
         jog_buttons.addWidget(jog_positive)
         motion_form.addRow("", jog_buttons)
 
@@ -2887,21 +2895,22 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_layout.addLayout(manual_form)
         manual_motion_row = QtWidgets.QVBoxLayout()
         manual_motion_row.setSpacing(6)
+        manual_connect = QtWidgets.QPushButton("Auto-connect hardware", manual_box)
+        manual_connect.setObjectName("manual_auto_connect_button")
+        manual_connect.setToolTip("Auto-detect/connect the motor and scale for manual setup.")
+        manual_connect.clicked.connect(self._auto_connect_manual_hardware)
+        manual_motion_row.addWidget(manual_connect)
         manual_up = QtWidgets.QPushButton("▲ Move up", manual_box)
+        manual_up.setObjectName("manual_jog_tension_button")
         manual_up.setToolTip("Move the stage in the tension-increasing direction by the jog step.")
         manual_up.setMinimumHeight(42)
-        manual_up.setAutoRepeat(True)
-        manual_up.setAutoRepeatDelay(350)
-        manual_up.setAutoRepeatInterval(120)
-        manual_up.clicked.connect(lambda: self._jog_relative(self._tension_motion_sign()))
+        self._configure_manual_jog_button(manual_up, lambda: self._tension_motion_sign())
         manual_motion_row.addWidget(manual_up)
         manual_down = QtWidgets.QPushButton("▼ Move down", manual_box)
+        manual_down.setObjectName("manual_jog_relax_button")
         manual_down.setToolTip("Move the stage in the relaxing direction by the jog step.")
         manual_down.setMinimumHeight(42)
-        manual_down.setAutoRepeat(True)
-        manual_down.setAutoRepeatDelay(350)
-        manual_down.setAutoRepeatInterval(120)
-        manual_down.clicked.connect(lambda: self._jog_relative(-self._tension_motion_sign()))
+        self._configure_manual_jog_button(manual_down, lambda: -self._tension_motion_sign())
         manual_motion_row.addWidget(manual_down)
         recovery_buttons = QtWidgets.QHBoxLayout()
         manual_zero_displacement = QtWidgets.QPushButton("Move displacement to 0", manual_box)
@@ -4764,6 +4773,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return abs(float(self.spin_current_sweep_nudge_mm.value()))
         return abs(float(self.spin_distribution_nudge_mm.value()))
 
+    def _seek_decision_interval_s(self, basis: str | None = None) -> float:
+        interval_ms = max(1, int(self._automation_interval_ms))
+        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and hasattr(self, "spin_scale_interval"):
+            interval_ms = max(interval_ms, int(self.spin_scale_interval.value()))
+        return max(0.001, interval_ms / 1000.0)
+
+    def _seek_speed_limited_step_mm(self, basis: str | None, speed_mm_s: float) -> float:
+        return max(
+            self._motor_step_mm(),
+            abs(float(speed_mm_s)) * self._seek_decision_interval_s(basis),
+        )
+
     def _seek_max_travel_mm(self) -> float:
         if self._is_current_sweep_mode(self._automation_name):
             return max(self._motor_step_mm(), float(self.spin_current_sweep_max_seek_mm.value()))
@@ -4817,6 +4838,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_STRESS_MPA:
             return stress_mpa_from_load_g(float(stiffness), float(self.spin_diameter.value()))
         return None
+
+    def _setup_preload_takeup_active(
+        self,
+        basis: str,
+        current_value: float,
+        delta_value: float,
+        effective_tolerance: float,
+    ) -> bool:
+        return (
+            self._automation_phase == "target_ramp"
+            and self._automation_step_note == "setup_preload"
+            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and delta_value > 0.0
+            and abs(float(current_value)) <= abs(float(effective_tolerance))
+        )
 
     def _basis_noise_floor(
         self,
@@ -4891,9 +4927,15 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> float:
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or sensitivity <= 0.0:
-            return self._seek_step_mm(error_value, tolerance)
+            return self._seek_step_mm(error_value, tolerance, basis=basis)
         predicted_mm = (abs(float(error_value)) / abs(float(sensitivity))) * SERVO_CORRECTION_GAIN
-        return max(self._motor_step_mm(), min(self._seek_nudge_mm(), predicted_mm))
+        max_step_mm = self._seek_nudge_mm()
+        if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+            max_step_mm = self._seek_speed_limited_step_mm(
+                basis,
+                self._motion_speed_for_current_context(manual_jog=False),
+            )
+        return max(self._motor_step_mm(), min(max_step_mm, predicted_mm))
 
     def _reverse_correction_is_worthwhile(
         self,
@@ -4914,15 +4956,15 @@ class MainWindow(QtWidgets.QMainWindow):
         reversal_cost = abs(float(sensitivity)) * abs(float(backlash_takeup_mm))
         return abs(float(error_value)) > abs(float(tolerance)) + reversal_cost
 
-    def _seek_step_mm(self, error_value: float, tolerance: float) -> float:
+    def _seek_step_mm(self, error_value: float, tolerance: float, *, basis: str | None = None) -> float:
         if self._automation_name == RECOVERY_LOAD:
-            interval_s = max(0.001, float(self._automation_interval_ms) / 1000.0)
+            interval_s = self._seek_decision_interval_s(basis)
             return max(
                 self._motor_step_mm(),
                 float(self.spin_motion_speed_mm_s.value()) * interval_s,
             )
         if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
-            interval_s = max(0.001, float(self._automation_interval_ms) / 1000.0)
+            interval_s = self._seek_decision_interval_s(basis)
             return max(
                 self._motor_step_mm(),
                 float(self.spin_setup_stage_speed_mm_s.value()) * interval_s,
@@ -4950,9 +4992,8 @@ class MainWindow(QtWidgets.QMainWindow):
             factor = 0.2 + 0.8 * smooth
         return max(self._minimum_held_speed_mm_s(), base_speed * factor)
 
-    def _seek_command_step_mm(self, nudge_mm: float, speed_mm_s: float) -> float:
-        interval_s = max(0.001, float(self._automation_interval_ms) / 1000.0)
-        speed_limited_step = max(self._motor_step_mm(), abs(speed_mm_s) * interval_s)
+    def _seek_command_step_mm(self, nudge_mm: float, speed_mm_s: float, *, basis: str | None = None) -> float:
+        speed_limited_step = self._seek_speed_limited_step_mm(basis, speed_mm_s)
         return max(self._motor_step_mm(), min(abs(nudge_mm), speed_limited_step))
 
     def _seek_error_key(self, basis: str, target_value: float) -> tuple[str, int, float]:
@@ -5039,12 +5080,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self._seek_no_response_count_by_key.pop(seek_key, None)
             self._seek_travel_by_key.pop(seek_key, None)
             return True
-        nudge_mm = self._predictive_seek_step_mm(
-            basis,
-            delta_value,
-            effective_tolerance,
-            seek_key=seek_key,
-        )
+        if self._setup_preload_takeup_active(basis, current_value, delta_value, effective_tolerance):
+            nudge_mm = self._seek_speed_limited_step_mm(
+                basis,
+                self._motion_speed_for_current_context(manual_jog=False),
+            )
+        else:
+            nudge_mm = self._predictive_seek_step_mm(
+                basis,
+                delta_value,
+                effective_tolerance,
+                seek_key=seek_key,
+            )
         if nudge_mm <= 0.0:
             raise ValueError("Set a non-zero correction step.")
         previous_error = self._seek_last_error_by_key.get(seek_key)
@@ -5073,7 +5120,7 @@ class MainWindow(QtWidgets.QMainWindow):
             seek_direction *= self._tension_motion_sign()
         movement_direction = math.copysign(1.0, seek_direction)
         speed_mm_s = self._seek_speed_mm_s(delta_value, effective_tolerance)
-        nudge_mm = self._seek_command_step_mm(nudge_mm, speed_mm_s)
+        nudge_mm = self._seek_command_step_mm(nudge_mm, speed_mm_s, basis=basis)
         backlash_takeup_mm = self._seek_backlash_takeup_mm(movement_direction)
         if not self._reverse_correction_is_worthwhile(
             basis,
@@ -5562,41 +5609,95 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Sent halt-and-hold to Tic.")
         self._refresh_tic_status()
 
-    def _jog_relative(self, direction: float) -> None:
+    def _configure_manual_jog_button(
+        self,
+        button: QtWidgets.QPushButton,
+        direction_getter: Callable[[], float],
+    ) -> None:
+        button.setAutoRepeat(False)
+        button.pressed.connect(lambda: self._start_manual_jog(direction_getter()))
+        button.released.connect(lambda: self._stop_manual_jog())
+        button.clicked.connect(lambda: self._handle_manual_jog_button_clicked(direction_getter()))
+
+    def _jog_relative(self, direction: float, *, force_step: bool = False) -> bool:
         direction = -1.0 if direction < 0.0 else 1.0
         now_s = time.monotonic()
         elapsed_s = None if self._manual_jog_last_tick_s is None else now_s - self._manual_jog_last_tick_s
         same_direction = self._manual_jog_direction == direction
-        if elapsed_s is not None and same_direction and 0.0 < elapsed_s < 0.5:
-            distance_mm = max(
-                1.0 / max(1.0, float(self.spin_steps_per_mm.value())),
-                float(self.spin_motion_speed_mm_s.value()) * elapsed_s,
-            )
+        continuous_hold = self._manual_jog_timer.isActive()
+        if (
+            not force_step
+            and elapsed_s is not None
+            and same_direction
+            and 0.0 < elapsed_s
+            and (continuous_hold or elapsed_s < 0.5)
+        ):
+            self._manual_jog_pending_mm += abs(float(self.spin_motion_speed_mm_s.value()) * elapsed_s)
+            min_step_mm = 1.0 / max(1.0, float(self.spin_steps_per_mm.value()))
+            if self._manual_jog_pending_mm < min_step_mm:
+                self._manual_jog_last_tick_s = now_s
+                return False
+            whole_steps = max(1, int(math.floor(self._manual_jog_pending_mm / min_step_mm + 1e-9)))
+            distance_mm = whole_steps * min_step_mm
+            self._manual_jog_pending_mm -= distance_mm
         else:
             distance_mm = abs(float(self.spin_jog_mm.value()))
+            self._manual_jog_pending_mm = 0.0
         self._manual_jog_direction = direction
         self._manual_jog_last_tick_s = now_s
         distance_mm *= direction
         base_mm = self._relative_motion_base_mm()
-        self._move_to_position_mm(base_mm + distance_mm, manual_jog=True)
+        return self._move_to_position_mm(base_mm + distance_mm, manual_jog=True)
 
     def _start_manual_jog(self, direction: float) -> None:
         self._manual_jog_direction = -1.0 if direction < 0.0 else 1.0
         self._manual_jog_last_tick_s = time.monotonic()
+        self._manual_jog_pending_mm = 0.0
+        self._manual_jog_timer_moves = 0
+        self._manual_jog_click_suppressed = False
         self._start_tic_keepalive()
         self._manual_jog_timer.start()
 
     def _stop_manual_jog(self) -> None:
         self._manual_jog_timer.stop()
+        if self._manual_jog_timer_moves > 0:
+            self._manual_jog_click_suppressed = True
         self._manual_jog_last_tick_s = None
         self._manual_jog_direction = 0.0
+        self._manual_jog_pending_mm = 0.0
+        self._manual_jog_timer_moves = 0
         if not self._automation_active:
             self._stop_tic_keepalive()
 
     def _handle_manual_jog_timer(self) -> None:
         if self._manual_jog_direction == 0.0:
             return
-        self._jog_relative(self._manual_jog_direction)
+        if self._jog_relative(self._manual_jog_direction):
+            self._manual_jog_timer_moves += 1
+
+    def _handle_manual_jog_button_clicked(self, direction: float) -> None:
+        if self._manual_jog_click_suppressed:
+            self._manual_jog_click_suppressed = False
+            return
+        self._jog_relative(direction, force_step=True)
+
+    def _auto_connect_manual_hardware(self) -> bool:
+        connected = True
+        if not self._ensure_tic_ready_for_recipe():
+            connected = False
+        if self._scale_thread is None:
+            connected = self._ensure_scale_ready_for_recipe() and connected
+        if self._motor_supply_enabled():
+            if not self._ensure_supply_ready_for_recipe():
+                connected = False
+            elif not self._enable_motor_supply_output():
+                connected = False
+        if connected:
+            self._log("Manual hardware auto-connect completed.")
+        else:
+            self._log("Manual hardware auto-connect did not complete; check the hardware status cards.")
+        self._refresh_live_labels()
+        return connected
 
     def _start_tic_keepalive(self) -> None:
         self._tic_keepalive_warning_active = False
@@ -8487,7 +8588,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("sample_name", self.edit_sample_name.text())
         self.settings.setValue("run_notes", self.edit_run_notes.toPlainText())
         self.settings.setValue("builder_project_path", self.edit_project_path.text())
-        self.settings.setValue("log_dir", self.edit_log_dir.text())
+        log_dir_to_save = self.edit_log_dir.text()
+        if self._provided_log_dir and log_dir_to_save == self._provided_log_dir:
+            log_dir_to_save = self._restored_log_dir or log_dir_to_save
+        self.settings.setValue("log_dir", log_dir_to_save)
         self.settings.setValue("log_name", self.edit_log_name.text())
         self.settings.setValue("tare_on_start", self.check_tare_on_start.isChecked())
         self.settings.setValue("capture_zero_load_reference_on_start", self.check_hardware_tare_on_start.isChecked())
@@ -8688,6 +8792,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_project_path.setText(builder_project_path)
         self._builder_project_path = Path(builder_project_path) if builder_project_path else None
         restored_log_dir = self.settings.value("log_dir", self.edit_log_dir.text(), type=str)
+        self._restored_log_dir = restored_log_dir
         if self._provided_log_dir:
             self.edit_log_dir.setText(self._provided_log_dir)
         else:

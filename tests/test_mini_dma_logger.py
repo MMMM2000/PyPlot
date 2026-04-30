@@ -20,9 +20,22 @@ pytest.importorskip(
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+TEST_QSETTINGS_ROOT = Path(
+    os.environ.get("PYTEST_QSETTINGS_ROOT", "artifacts/test-qsettings")
+)
+TEST_QSETTINGS_ROOT.mkdir(parents=True, exist_ok=True)
+os.environ["MINI_DMA_QSETTINGS_INI_DIR"] = str(TEST_QSETTINGS_ROOT)
+
 mini_dma_mod = importlib.import_module(
     "data_logging.mini_dma_logger.mini_dma_logger"
 )
+
+
+def _test_settings() -> QtCore.QSettings:
+    return QtCore.QSettings(
+        str(TEST_QSETTINGS_ROOT / "mini_dma_logger.ini"),
+        QtCore.QSettings.Format.IniFormat,
+    )
 
 
 def _ensure_app() -> QtWidgets.QApplication:
@@ -33,21 +46,30 @@ def _ensure_app() -> QtWidgets.QApplication:
 
 
 def _snapshot_settings() -> dict[str, object]:
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     return {key: settings.value(key) for key in settings.allKeys()}
 
 
 def _restore_settings(snapshot: dict[str, object]) -> None:
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     for key, value in snapshot.items():
         settings.setValue(key, value)
     settings.sync()
 
 
-def _build_window(tmp_path: Path, qtbot) -> mini_dma_mod.MainWindow:
+def _build_window(
+    tmp_path: Path,
+    qtbot,
+    *,
+    preserve_settings: bool = False,
+) -> mini_dma_mod.MainWindow:
     _ensure_app()
-    snapshot = _snapshot_settings()
+    snapshot = _snapshot_settings() if preserve_settings else {}
+    if not preserve_settings:
+        settings = _test_settings()
+        settings.clear()
+        settings.sync()
     window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
@@ -88,7 +110,7 @@ def _set_plot_tile(
 
 
 def _saved_plot_tile_values(index: int) -> dict[str, object]:
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     prefix = f"plot_tile_{index}"
     return {
         "visible": settings.value(f"{prefix}_visible", type=bool),
@@ -109,7 +131,7 @@ USER_DASHBOARD_PLOTS = [
 def test_review_window_can_skip_settings_persistence(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     expected_values = {
         "name_composition": "Ni50Fe27Ga23",
         "name_wire": "12/2",
@@ -117,7 +139,7 @@ def test_review_window_can_skip_settings_persistence(tmp_path: Path, qtbot) -> N
         "name_condition": "test",
         "diameter_mm": 0.0191,
         "builder_project_path": "G:/My Drive/1 Projects/Praha/microwire_project.pydpj",
-        "log_dir": "C:/Users/Martin Eliáš/Downloads",
+        "log_dir": "C:/Users/Martin/Downloads",
         "log_name": "Ni50Fe27Ga23 12_2 test",
         "sample_name": "Ni50Fe27Ga23 12/2 test",
     }
@@ -153,7 +175,7 @@ def test_review_window_can_skip_settings_persistence(tmp_path: Path, qtbot) -> N
 def test_review_window_can_skip_dashboard_plot_persistence(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     for index, (x_key, y_left_key, y_right_key) in enumerate(USER_DASHBOARD_PLOTS):
         prefix = f"plot_tile_{index}"
@@ -186,7 +208,7 @@ def test_review_window_can_skip_dashboard_plot_persistence(tmp_path: Path, qtbot
 def test_main_window_persists_sample_fields_by_default(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.sync()
 
@@ -200,7 +222,7 @@ def test_main_window_persists_sample_fields_by_default(tmp_path: Path, qtbot) ->
         window.edit_name_condition.setText("test")
         window.spin_diameter.setValue(0.0191)
         window.edit_project_path.setText("G:/My Drive/1 Projects/Praha/microwire_project.pydpj")
-        window.edit_log_dir.setText("C:/Users/Martin Eliáš/Downloads")
+        window.edit_log_dir.setText("C:/Users/Martin/Downloads")
         window.edit_log_name.setText("Ni50Fe27Ga23 12_2 test")
         window.edit_sample_name.setText("Ni50Fe27Ga23 12/2 test")
         window.close()
@@ -211,7 +233,7 @@ def test_main_window_persists_sample_fields_by_default(tmp_path: Path, qtbot) ->
         assert settings.value("name_condition") == "test"
         assert float(settings.value("diameter_mm")) == pytest.approx(0.0191)
         assert settings.value("builder_project_path") == "G:/My Drive/1 Projects/Praha/microwire_project.pydpj"
-        assert settings.value("log_dir") == "C:/Users/Martin Eliáš/Downloads"
+        assert settings.value("log_dir") == "C:/Users/Martin/Downloads"
         assert settings.value("log_name") == "Ni50Fe27Ga23 12_2 test"
         assert settings.value("sample_name") == "Ni50Fe27Ga23 12/2 test"
     finally:
@@ -221,7 +243,7 @@ def test_main_window_persists_sample_fields_by_default(tmp_path: Path, qtbot) ->
 def test_main_window_persists_dashboard_plots_by_default(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.sync()
 
@@ -248,7 +270,7 @@ def test_main_window_persists_dashboard_plots_by_default(tmp_path: Path, qtbot) 
 def test_dashboard_plot_choices_persist_immediately(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.sync()
 
@@ -271,10 +293,77 @@ def test_dashboard_plot_choices_persist_immediately(tmp_path: Path, qtbot) -> No
         _restore_settings(snapshot)
 
 
+def test_normal_open_close_preserves_saved_sample_and_dashboard_settings(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = _test_settings()
+    expected_values = {
+        "name_composition": "Ni50Fe27Ga23",
+        "name_wire": "12/2",
+        "name_specimen": "",
+        "name_condition": "test",
+        "diameter_mm": 0.0191,
+        "builder_project_path": "G:/My Drive/1 Projects/Praha/microwire_project.pydpj",
+        "log_dir": "C:/Users/Martin/Downloads",
+        "log_name": "custom_saved_log",
+        "sample_name": "custom saved sample",
+    }
+    settings.clear()
+    for key, value in expected_values.items():
+        settings.setValue(key, value)
+    for index, (x_key, y_left_key, y_right_key) in enumerate(USER_DASHBOARD_PLOTS):
+        prefix = f"plot_tile_{index}"
+        settings.setValue(f"{prefix}_visible", True)
+        settings.setValue(f"{prefix}_x", x_key)
+        settings.setValue(f"{prefix}_y_left", y_left_key)
+        settings.setValue(f"{prefix}_y_right", y_right_key)
+    settings.sync()
+
+    try:
+        window = mini_dma_mod.MainWindow()
+        qtbot.addWidget(window)
+        window.close()
+        _ensure_app().processEvents()
+
+        preserved = {key: settings.value(key) for key in expected_values}
+        assert float(preserved.pop("diameter_mm")) == pytest.approx(expected_values["diameter_mm"])
+        expected_without_diameter = dict(expected_values)
+        expected_without_diameter.pop("diameter_mm")
+        assert preserved == expected_without_diameter
+        for index, (x_key, y_left_key, y_right_key) in enumerate(USER_DASHBOARD_PLOTS):
+            assert _saved_plot_tile_values(index) == {
+                "visible": True,
+                "x": x_key,
+                "y_left": y_left_key,
+                "y_right": y_right_key,
+            }
+    finally:
+        _restore_settings(snapshot)
+
+
+def test_test_log_dir_override_does_not_replace_saved_output_dir(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("log_dir", "C:/Users/Martin/Downloads")
+    settings.sync()
+
+    try:
+        window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
+        qtbot.addWidget(window)
+        window.close()
+        _ensure_app().processEvents()
+
+        assert settings.value("log_dir") == "C:/Users/Martin/Downloads"
+    finally:
+        _restore_settings(snapshot)
+
+
 def test_restore_keeps_custom_sample_and_log_names(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.setValue("name_composition", "Ni50Fe27Ga23")
     settings.setValue("name_wire", "12/2")
@@ -298,7 +387,7 @@ def test_restore_keeps_custom_sample_and_log_names(tmp_path: Path, qtbot) -> Non
 def test_session_start_persists_sample_fields_without_close(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.sync()
 
@@ -330,7 +419,7 @@ def test_session_start_persists_sample_fields_without_close(tmp_path: Path, qtbo
 def test_zero_load_reference_defaults_to_measured_hanging_weight(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.sync()
     window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
@@ -610,7 +699,7 @@ def test_stop_session_finalizes_partial_calibration_report(tmp_path: Path, qtbot
 def test_nonpersistent_calibration_does_not_overwrite_saved_servo_settings(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.setValue("backlash_mm", 0.456)
     settings.setValue("calibration_stiffness_g_per_mm", 123.0)
     settings.setValue("calibration_stiffness_length_mm", 45.0)
@@ -721,7 +810,7 @@ def test_calibration_recipe_includes_mandatory_length_setup(tmp_path: Path, qtbo
 def test_calibration_defaults_are_safe_for_microwire_startup(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.sync()
     window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
@@ -742,7 +831,7 @@ def test_calibration_defaults_are_safe_for_microwire_startup(tmp_path: Path, qtb
 def test_legacy_copper_calibration_setting_opens_generic_calibration(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.setValue("recipe_mode", mini_dma_mod.CALIBRATION_COPPER)
     settings.sync()
@@ -760,7 +849,7 @@ def test_legacy_copper_calibration_setting_opens_generic_calibration(tmp_path: P
 def test_legacy_calibration_defaults_migrate_to_microwire_safe_values(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.setValue("calibration_defaults_version", 2)
     settings.setValue("calibration_start_load_g", 1.0)
@@ -1057,6 +1146,101 @@ def test_held_manual_jog_advances_by_configured_linear_speed(
         window._jog_relative(-1.0)
 
         assert controller.targets == [-1, -13, -25]
+    finally:
+        _close_test_window(window)
+
+
+def test_held_manual_jog_keeps_speed_when_timer_tick_is_delayed(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    clock = {"now": 10.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_jog_mm.setValue(0.01)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+
+    try:
+        window._start_manual_jog(-1.0)
+        clock["now"] = 10.8
+        window._handle_manual_jog_timer()
+
+        assert controller.targets == [-80]
+    finally:
+        window._manual_jog_timer.stop()
+        _close_test_window(window)
+
+
+def test_manual_jog_buttons_use_press_hold_motion(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    started: list[float] = []
+    stopped: list[bool] = []
+    single_steps: list[float] = []
+    window._start_manual_jog = lambda direction: started.append(direction)  # type: ignore[method-assign]
+    window._stop_manual_jog = lambda: stopped.append(True)  # type: ignore[method-assign]
+    window._jog_relative = lambda direction, *, force_step=False: single_steps.append(direction)  # type: ignore[method-assign]
+
+    try:
+        tension_button = window.findChild(QtWidgets.QPushButton, "manual_jog_tension_button")
+        relax_button = window.findChild(QtWidgets.QPushButton, "manual_jog_relax_button")
+
+        assert tension_button is not None
+        assert relax_button is not None
+        assert tension_button.autoRepeat() is False
+        assert relax_button.autoRepeat() is False
+
+        tension_button.pressed.emit()
+        tension_button.released.emit()
+        tension_button.clicked.emit()
+
+        assert started == [window._tension_motion_sign()]
+        assert stopped == [True]
+        assert single_steps == [window._tension_motion_sign()]
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_jog_release_suppresses_click_after_continuous_hold(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    single_steps: list[float] = []
+    window._jog_relative = lambda direction, *, force_step=False: single_steps.append(direction)  # type: ignore[method-assign]
+    window._manual_jog_click_suppressed = True
+
+    try:
+        window._handle_manual_jog_button_clicked(1.0)
+
+        assert single_steps == []
+        assert window._manual_jog_click_suppressed is False
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_auto_connect_button_runs_manual_preflight(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+
+    try:
+        button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
+
+        assert button is not None
+
+        button.clicked.emit()
+
+        assert called == ["tic", "scale"]
     finally:
         _close_test_window(window)
 
@@ -1361,7 +1545,7 @@ def test_saved_sample_fields_and_builder_project_autoimport_diameter(tmp_path: P
         ),
         encoding="utf-8",
     )
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.setValue("name_composition", "Ni50Fe27Ga23")
     settings.setValue("name_wire", "12/2")
@@ -1472,6 +1656,58 @@ def test_setup_preload_correction_step_uses_setup_speed_interval(tmp_path: Path,
         )
 
         assert window._seek_step_mm(error_value=5.0, tolerance=0.25) == pytest.approx(0.25)
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_preload_slack_takeup_uses_scale_feedback_speed_budget(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.target_steps: int | None = None
+            self.max_speed: int | None = None
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.target_steps = position_steps
+            self.max_speed = max_speed
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_steps_per_mm.setValue(10000.0)
+    window.spin_diameter.setValue(0.03)
+    window.spin_scale_interval.setValue(250)
+    window.spin_setup_stage_speed_mm_s.setValue(1.0)
+    window.spin_calibration_preload_nudge_mm.setValue(0.01)
+    window.spin_setup_preload_tolerance_mpa.setValue(0.25)
+    window._automation_interval_ms = 50
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CALIBRATION
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        note="setup_preload",
+    )
+    window._calibrated_stiffness_g_per_mm = 0.1
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._current_position_mm = 1.0
+    window._current_position_steps = 10000
+    window._last_move_target_mm = 1.0
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=10.0,
+            tolerance=0.25,
+        )
+
+        assert reached is False
+        assert controller.target_steps == 7500
+        assert controller.max_speed == 100_000_000
     finally:
         _close_test_window(window)
 
@@ -1605,7 +1841,7 @@ def test_timing_controls_are_opened_from_settings_menu(tmp_path: Path, qtbot) ->
 def test_scale_request_poll_interval_migrates_to_response_time(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.setValue("scale_baud", "9600")
     settings.setValue("scale_request", "\\x1bp")
@@ -1638,7 +1874,7 @@ def test_scale_worker_request_mode_uses_response_timeout() -> None:
 def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.setValue("tic_status_interval_ms", 1500)
     settings.setValue("tic_keepalive_interval_ms", 350)
@@ -1708,7 +1944,7 @@ def test_load_target_ramp_waits_for_feedback_between_moves(tmp_path: Path, qtbot
             ) is False
 
         assert len(targets) == 1
-        assert targets[0] == (pytest.approx(-0.05), False)
+        assert targets[0] == (pytest.approx(-0.25), False)
     finally:
         _close_test_window(window)
 
@@ -1853,13 +2089,13 @@ def test_stale_saved_ticcmd_path_falls_back_to_discovered_install(
     discovered = tmp_path / "ticcmd.exe"
     discovered.write_bytes(b"")
     original_settings = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.setValue("ticcmd_path", str(tmp_path / "missing_ticcmd.exe"))
     settings.setValue("jog_mm", 0.0001)
     settings.sync()
     monkeypatch.setattr(mini_dma_mod, "_find_ticcmd", lambda: str(discovered))
 
-    window = _build_window(tmp_path, qtbot)
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
 
     try:
         assert window.edit_ticcmd_path.text() == str(discovered)
@@ -2494,7 +2730,7 @@ def test_session_writes_raw_scale_sidecar_and_interval_summary(
 def test_global_control_and_log_intervals_migrate_from_current_sweep_settings(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
-    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings = _test_settings()
     settings.clear()
     settings.setValue("current_sweep_interval_ms", 375)
     settings.setValue("current_sweep_log_interval_ms", 875)
@@ -2657,7 +2893,7 @@ def test_tensile_load_seek_uses_motion_direction_independent_of_scale_sign(tmp_p
         )
 
         assert reached is False
-        assert targets == [pytest.approx(0.95)]
+        assert targets == [pytest.approx(0.9)]
     finally:
         _close_test_window(window)
 
@@ -2699,7 +2935,7 @@ def test_recipe_seek_does_not_stack_corrections_ahead_of_confirmed_position(tmp_
             tolerance=0.25,
         )
 
-        assert controller.targets == [95]
+        assert controller.targets == [90]
     finally:
         _close_test_window(window)
 
@@ -2736,7 +2972,7 @@ def test_seek_overshoot_uses_fine_reverse_correction(tmp_path: Path, qtbot) -> N
             tolerance=0.25,
         ) is False
 
-        assert targets == [pytest.approx(0.95), pytest.approx(1.025)]
+        assert targets == [pytest.approx(0.9), pytest.approx(1.025)]
         assert "Overshoot detected" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -2782,7 +3018,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
         )
 
         assert len(controller.targets) == 2
-        assert controller.targets[0] == 95
+        assert controller.targets[0] == 90
         assert controller.targets[1] > 100
         assert "backlash take-up" in window.log_output.toPlainText()
     finally:
@@ -3013,6 +3249,7 @@ def test_current_sweep_target_ramp_uses_target_stage_speed(tmp_path: Path, qtbot
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
     window._automation_phase = "target_ramp"
     window.spin_steps_per_mm.setValue(10000.0)
+    window.spin_scale_interval.setValue(250)
     window.spin_current_sweep_nudge_mm.setValue(0.1)
     window.spin_current_sweep_balance_speed_mm_s.setValue(0.05)
     window.spin_current_sweep_target_speed_mm_s.setValue(1.0)
@@ -3025,7 +3262,7 @@ def test_current_sweep_target_ramp_uses_target_stage_speed(tmp_path: Path, qtbot
         )
 
         assert reached is False
-        assert controller.target_steps == 9500
+        assert controller.target_steps == 9000
         assert controller.max_speed == 100_000_000
     finally:
         _close_test_window(window)
