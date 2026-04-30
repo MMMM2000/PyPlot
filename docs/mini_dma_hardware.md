@@ -138,7 +138,9 @@ estimated_correction_mm = error_g / stiffness_g_per_mm
 velocity_mm_s = estimated_correction_mm / response_time_s
 ```
 
-Clamp the commanded velocity and target travel by safe limits. Add integral correction and current-ramp feedforward only after the basic proportional controller is characterized on copper wire or a dummy spring.
+Mini DMA now uses this as a first-pass proportional seeking law: calibration supplies the initial stiffness/noise/backlash prior, stiffness is rescaled by the ratio between the calibrated length and the current unloaded gauge length, live load response can refine the estimate during a run, and commanded correction is clamped by motor resolution, user speed/step ceilings, and safety limits. Backlash take-up is kept out of specimen displacement/strain, and small reversals can be skipped when the backlash cost is larger than the predicted target improvement.
+
+Add integral correction and current-ramp feedforward only after the basic proportional controller is characterized on copper wire, a dummy spring, or several representative microwire lengths.
 
 Current sweeps own their current program. If the supply reaches the configured voltage limit before the requested current, Mini DMA ramps current back down to that sweep's start current at the recipe ramp rate and continues with the next recipe step instead of stopping the experiment.
 

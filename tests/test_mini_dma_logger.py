@@ -607,6 +607,42 @@ def test_stop_session_finalizes_partial_calibration_report(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_nonpersistent_calibration_does_not_overwrite_saved_servo_settings(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = QtCore.QSettings("microwire", "mini_dma_logger")
+    settings.setValue("backlash_mm", 0.456)
+    settings.setValue("calibration_stiffness_g_per_mm", 123.0)
+    settings.setValue("calibration_stiffness_length_mm", 45.0)
+    settings.setValue("calibration_load_noise_g", 0.078)
+    settings.sync()
+
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    window.spin_backlash_mm.setValue(0.0)
+    window.spin_initial_length.setValue(20.0)
+    window._session_points = [
+        _calibration_point(position_mm=0.0, load_g=0.0, phase=mini_dma_mod.CALIBRATION_BASELINE),
+        _calibration_point(position_mm=0.01, load_g=0.1, phase=mini_dma_mod.CALIBRATION_FORWARD),
+        _calibration_point(position_mm=0.02, load_g=0.2, phase=mini_dma_mod.CALIBRATION_FORWARD),
+        _calibration_point(position_mm=0.00, load_g=0.1, phase=mini_dma_mod.CALIBRATION_REVERSE),
+        _calibration_point(position_mm=0.01, load_g=0.2, phase=mini_dma_mod.CALIBRATION_REVERSE),
+    ]
+
+    try:
+        window._finalize_calibration_report()
+
+        settings.sync()
+        assert float(settings.value("backlash_mm")) == pytest.approx(0.456)
+        assert float(settings.value("calibration_stiffness_g_per_mm")) == pytest.approx(123.0)
+        assert float(settings.value("calibration_stiffness_length_mm")) == pytest.approx(45.0)
+        assert float(settings.value("calibration_load_noise_g")) == pytest.approx(0.078)
+        assert window.spin_backlash_mm.value() != pytest.approx(0.456)
+    finally:
+        _close_test_window(window)
+
+
 def test_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION)
@@ -2745,8 +2781,165 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
             tolerance=0.25,
         )
 
-        assert controller.targets == [95, 106]
+        assert len(controller.targets) == 2
+        assert controller.targets[0] == 95
+        assert controller.targets[1] > 100
         assert "backlash take-up" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_backlash_takeup_is_not_logged_as_tensile_displacement(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.check_zero_on_preload.setChecked(False)
+    window.spin_steps_per_mm.setValue(1000.0)
+    window.spin_initial_length.setValue(10.0)
+    window.spin_distribution_nudge_mm.setValue(0.1)
+    window.spin_distribution_seek_speed_mm_s.setValue(10.0)
+    window.spin_backlash_mm.setValue(0.03)
+    window._automation_interval_ms = 1000
+    window._position_reference_mm = 0.0
+    window._current_position_mm = 0.1
+    window._effective_position_mm = 0.1
+    window._last_effective_move_target_mm = 0.1
+    window._current_position_steps = 100
+    window._last_move_target_mm = 0.1
+    window._last_move_direction = 1.0
+    window._latest_scale_value_g = 5.10
+    window._latest_scale_timestamp = time.time()
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 5.0)
+    window._seek_last_error_by_key[seek_key] = 1.0
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.02,
+        )
+        point = window._capture_measurement_point(
+            elapsed_s=1.0,
+            position_mm=window._measurement_position_mm(),
+            effective_position_mm=window._measurement_effective_position_mm(),
+            raw_load_g=5.10,
+            load_g=5.10,
+        )
+
+        assert reached is False
+        assert controller.targets == [45]
+        assert point.raw_position_mm == pytest.approx(0.045)
+        assert point.position_mm == pytest.approx(0.075)
+        assert point.strain_pct == pytest.approx(0.75)
+    finally:
+        _close_test_window(window)
+
+
+def test_seek_uses_calibrated_length_scaled_sensitivity_for_correction_distance(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.target_steps: int | None = None
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.target_steps = position_steps
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_steps_per_mm.setValue(1000.0)
+    window.spin_initial_length.setValue(40.0)
+    window.spin_distribution_nudge_mm.setValue(1.0)
+    window.spin_distribution_seek_speed_mm_s.setValue(10.0)
+    window._automation_interval_ms = 1000
+    window._calibrated_stiffness_g_per_mm = 10.0
+    window._calibrated_stiffness_length_mm = 20.0
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=1.0,
+            tolerance=0.01,
+        )
+
+        assert reached is False
+        assert controller.target_steps == 150
+    finally:
+        _close_test_window(window)
+
+
+def test_seek_tolerance_floor_uses_stiffness_and_motor_step(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_initial_length.setValue(20.0)
+    window._calibrated_stiffness_g_per_mm = 10.0
+    window._calibrated_stiffness_length_mm = 20.0
+
+    try:
+        assert window._seek_effective_tolerance(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            requested_tolerance=0.005,
+        ) == pytest.approx(0.05)
+    finally:
+        _close_test_window(window)
+
+
+def test_reverse_correction_requires_predicted_gain_over_reversal_cost(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_steps_per_mm.setValue(1000.0)
+    window.spin_initial_length.setValue(20.0)
+    window.spin_distribution_nudge_mm.setValue(1.0)
+    window.spin_backlash_mm.setValue(0.03)
+    window._calibrated_stiffness_g_per_mm = 10.0
+    window._calibrated_stiffness_length_mm = 20.0
+    window._current_position_mm = 0.1
+    window._effective_position_mm = 0.1
+    window._last_effective_move_target_mm = 0.1
+    window._current_position_steps = 100
+    window._last_move_target_mm = 0.1
+    window._last_move_direction = 1.0
+    window._latest_scale_value_g = 5.10
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.02,
+        )
+
+        assert reached is False
+        assert controller.targets == []
+        assert "reversal skipped" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 

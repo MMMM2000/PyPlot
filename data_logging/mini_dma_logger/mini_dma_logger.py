@@ -130,6 +130,9 @@ CALIBRATION_PRELOAD = "calibration_preload"
 CALIBRATION_FORWARD = "calibration_forward"
 CALIBRATION_REVERSE = "calibration_reverse"
 CALIBRATION_DEFAULTS_VERSION = 3
+SERVO_CORRECTION_GAIN = 0.75
+SERVO_LIVE_STIFFNESS_ALPHA = 0.35
+SERVO_NOISE_SIGMA = 3.0
 CURRENT_SWEEP_BASIS_BY_MODE = {
     CURRENT_SWEEP_LOAD: HSW_BASIS_LOAD_G,
     CURRENT_SWEEP_STRESS: HSW_BASIS_STRESS_MPA,
@@ -1333,6 +1336,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_position_steps = 0
         self._current_position_mm = 0.0
         self._last_move_target_mm = 0.0
+        self._effective_position_mm = 0.0
+        self._last_effective_move_target_mm = 0.0
         self._last_commanded_position_steps: int | None = 0
         self._last_tic_vin_v: float | None = None
         self._tic_motor_power_ok: bool | None = None
@@ -1344,6 +1349,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_move_direction = 0.0
         self._seek_last_error_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_value_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_last_effective_position_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_live_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._seek_travel_by_key: dict[tuple[str, int, float], float] = {}
         self._session_points: list[MeasurementPoint] = []
@@ -1424,6 +1431,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_start_monotonic = 0.0
         self._length_setup_points: list[MeasurementPoint] = []
         self._calibration_report: dict[str, Any] | None = None
+        self._calibrated_stiffness_g_per_mm: float | None = None
+        self._calibrated_stiffness_length_mm: float | None = None
+        self._calibrated_load_noise_g: float | None = None
         self._run_log_mirror_enabled = False
         self._run_log_mirror_path = DEFAULT_RUN_LOG_MIRROR_PATH
         self._diameter_imported = False
@@ -3920,11 +3930,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _set_reference_from_current_position(self) -> None:
-        self._position_reference_mm = self._current_position_mm
+        self._position_reference_mm = self._effective_position_mm
         self._preload_reference_armed = False
         self._preload_trigger_elapsed_s = 0.0 if self._session_active else None
         self._refresh_live_labels()
-        self._log(f"Gauge zero moved to the current position ({self._current_position_mm:.4f} mm).")
+        self._log(f"Gauge zero moved to the current position ({self._effective_position_mm:.4f} mm).")
 
     def _heating_mode(self) -> str:
         return HEATING_MODE_OFF
@@ -4527,9 +4537,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _set_position_reference_now(self) -> None:
-        self._position_reference_mm = self._current_position_mm
+        self._position_reference_mm = self._effective_position_mm
         self._refresh_live_labels()
-        self._log(f"Reference position set to the current stage position ({self._position_reference_mm:.4f} mm).")
+        self._log(f"Reference position set to the current specimen position ({self._position_reference_mm:.4f} mm).")
 
     def _apply_preload_length_result(
         self,
@@ -4547,6 +4557,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Computed l0 is not positive. Check the measured length and motion direction convention."
             )
         self.spin_initial_length.setValue(l0_mm)
+        self._effective_position_mm = float(zero_position_mm)
+        self._last_effective_move_target_mm = self._effective_position_mm
         self._position_reference_mm = float(zero_position_mm)
         self._preload_reference_armed = False
         self._preload_trigger_elapsed_s = None
@@ -4576,6 +4588,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _motor_step_mm(self) -> float:
         return 1.0 / max(1.0, float(self.spin_steps_per_mm.value()))
+
+    def _current_effective_tensile_position_mm(self) -> float:
+        return self._tensile_position_mm(self._measurement_effective_position_mm())
 
     def _minimum_held_speed_mm_s(self) -> float:
         return self._motor_step_mm()
@@ -4732,7 +4747,7 @@ class MainWindow(QtWidgets.QMainWindow):
         preload_state = self._current_preload_state(effective_load)
         if preload_state == PRELOAD_PENDING:
             return None
-        return self._strain_percent_for_position(self._current_position_mm)
+        return self._strain_percent_for_position(self._measurement_effective_position_mm())
 
     def _distribution_target_reached(self, basis: str, target_value: float, tolerance: float) -> bool:
         current_value = self._current_distribution_value(basis)
@@ -4755,6 +4770,149 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._is_calibration_mode(self._automation_name):
             return max(self._motor_step_mm(), self._seek_nudge_mm() * 100.0)
         return max(self._motor_step_mm(), self._seek_nudge_mm() * 30.0)
+
+    def _stored_calibration_stiffness_g_per_mm(self) -> float | None:
+        stiffness = self._calibrated_stiffness_g_per_mm
+        if stiffness is None or not math.isfinite(float(stiffness)) or float(stiffness) <= 0.0:
+            return None
+        calibrated_length = self._calibrated_stiffness_length_mm
+        if (
+            calibrated_length is None
+            or not math.isfinite(float(calibrated_length))
+            or float(calibrated_length) <= 0.0
+        ):
+            return float(stiffness)
+        current_length = max(0.001, float(self.spin_initial_length.value()))
+        return float(stiffness) * (float(calibrated_length) / current_length)
+
+    def _load_stiffness_from_basis_sensitivity(self, basis: str, sensitivity_per_mm: float) -> float | None:
+        sensitivity = abs(float(sensitivity_per_mm))
+        if not math.isfinite(sensitivity) or sensitivity <= 0.0:
+            return None
+        if basis == HSW_BASIS_LOAD_G:
+            return sensitivity
+        if basis == HSW_BASIS_STRESS_MPA:
+            load_per_mm = load_g_from_stress_mpa(sensitivity, float(self.spin_diameter.value()))
+            return None if load_per_mm is None else abs(float(load_per_mm))
+        return None
+
+    def _basis_sensitivity_per_mm(
+        self,
+        basis: str,
+        *,
+        seek_key: tuple[str, int, float] | None = None,
+    ) -> float | None:
+        if basis == HSW_BASIS_STRAIN_PCT:
+            length_mm = float(self.spin_initial_length.value())
+            return None if length_mm <= 0.0 else 100.0 / length_mm
+        stiffness = None
+        if seek_key is not None:
+            stiffness = self._seek_live_stiffness_by_key.get(seek_key)
+        if stiffness is None:
+            stiffness = self._stored_calibration_stiffness_g_per_mm()
+        if stiffness is None or not math.isfinite(float(stiffness)) or float(stiffness) <= 0.0:
+            return None
+        if basis == HSW_BASIS_LOAD_G:
+            return float(stiffness)
+        if basis == HSW_BASIS_STRESS_MPA:
+            return stress_mpa_from_load_g(float(stiffness), float(self.spin_diameter.value()))
+        return None
+
+    def _basis_noise_floor(
+        self,
+        basis: str,
+        *,
+        sensitivity_per_mm: float | None,
+    ) -> float:
+        load_noise_g = self._calibrated_load_noise_g
+        if load_noise_g is None or not math.isfinite(float(load_noise_g)) or float(load_noise_g) <= 0.0:
+            return 0.0
+        noise_g = abs(float(load_noise_g)) * SERVO_NOISE_SIGMA
+        if basis == HSW_BASIS_LOAD_G:
+            return noise_g
+        if basis == HSW_BASIS_STRESS_MPA:
+            stress_noise = stress_mpa_from_load_g(noise_g, float(self.spin_diameter.value()))
+            return 0.0 if stress_noise is None else abs(float(stress_noise))
+        if basis == HSW_BASIS_STRAIN_PCT and sensitivity_per_mm is not None:
+            return 0.0
+        return 0.0
+
+    def _seek_effective_tolerance(
+        self,
+        basis: str,
+        requested_tolerance: float,
+        *,
+        seek_key: tuple[str, int, float] | None = None,
+    ) -> float:
+        tolerance = abs(float(requested_tolerance))
+        sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        if sensitivity is None or sensitivity <= 0.0:
+            return tolerance
+        step_floor = abs(float(sensitivity)) * self._motor_step_mm() * 0.5
+        noise_floor = self._basis_noise_floor(basis, sensitivity_per_mm=sensitivity)
+        return max(tolerance, step_floor, noise_floor)
+
+    def _update_live_seek_stiffness(
+        self,
+        seek_key: tuple[str, int, float],
+        basis: str,
+        current_value: float,
+    ) -> None:
+        previous_value = self._seek_last_value_by_key.get(seek_key)
+        previous_position = self._seek_last_effective_position_by_key.get(seek_key)
+        if previous_value is None or previous_position is None:
+            return
+        current_position = self._current_effective_tensile_position_mm()
+        delta_position = abs(current_position - previous_position)
+        if delta_position < self._motor_step_mm() * 0.5:
+            return
+        delta_value = abs(float(current_value) - float(previous_value))
+        if delta_value <= 0.0 or not math.isfinite(delta_value):
+            return
+        load_stiffness = self._load_stiffness_from_basis_sensitivity(basis, delta_value / delta_position)
+        if load_stiffness is None:
+            return
+        old = self._seek_live_stiffness_by_key.get(seek_key)
+        if old is None or old <= 0.0 or not math.isfinite(float(old)):
+            self._seek_live_stiffness_by_key[seek_key] = load_stiffness
+            return
+        self._seek_live_stiffness_by_key[seek_key] = (
+            (1.0 - SERVO_LIVE_STIFFNESS_ALPHA) * float(old)
+            + SERVO_LIVE_STIFFNESS_ALPHA * load_stiffness
+        )
+
+    def _predictive_seek_step_mm(
+        self,
+        basis: str,
+        error_value: float,
+        tolerance: float,
+        *,
+        seek_key: tuple[str, int, float],
+    ) -> float:
+        sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        if sensitivity is None or sensitivity <= 0.0:
+            return self._seek_step_mm(error_value, tolerance)
+        predicted_mm = (abs(float(error_value)) / abs(float(sensitivity))) * SERVO_CORRECTION_GAIN
+        return max(self._motor_step_mm(), min(self._seek_nudge_mm(), predicted_mm))
+
+    def _reverse_correction_is_worthwhile(
+        self,
+        basis: str,
+        error_value: float,
+        tolerance: float,
+        backlash_takeup_mm: float,
+        *,
+        seek_key: tuple[str, int, float],
+    ) -> bool:
+        if backlash_takeup_mm <= 0.0:
+            return True
+        if self._stored_calibration_stiffness_g_per_mm() is None:
+            return True
+        sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        if sensitivity is None or sensitivity <= 0.0:
+            return True
+        reversal_cost = abs(float(sensitivity)) * abs(float(backlash_takeup_mm))
+        return abs(float(error_value)) > abs(float(tolerance)) + reversal_cost
 
     def _seek_step_mm(self, error_value: float, tolerance: float) -> float:
         if self._automation_name == RECOVERY_LOAD:
@@ -4784,14 +4942,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_name == RECOVERY_LOAD:
             return max(self._minimum_held_speed_mm_s(), base_speed)
         error_ratio = abs(error_value) / max(tolerance, 1e-12)
-        if error_ratio <= 1.0:
-            factor = 0.2
-        elif error_ratio <= 1.5:
-            factor = 0.35
-        elif error_ratio <= 3.0:
-            factor = 0.6
-        else:
+        if error_ratio >= 3.0:
             factor = 1.0
+        else:
+            scaled = max(0.0, min(1.0, (error_ratio - 1.0) / 2.0))
+            smooth = scaled * scaled * (3.0 - 2.0 * scaled)
+            factor = 0.2 + 0.8 * smooth
         return max(self._minimum_held_speed_mm_s(), base_speed * factor)
 
     def _seek_command_step_mm(self, nudge_mm: float, speed_mm_s: float) -> float:
@@ -4869,13 +5025,26 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         delta_value = target_value - current_value
         seek_key = self._seek_error_key(basis, target_value)
-        if abs(delta_value) <= abs(tolerance):
+        current_effective_tensile_position_mm = self._current_effective_tensile_position_mm()
+        self._update_live_seek_stiffness(seek_key, basis, current_value)
+        effective_tolerance = self._seek_effective_tolerance(
+            basis,
+            tolerance,
+            seek_key=seek_key,
+        )
+        if abs(delta_value) <= effective_tolerance:
             self._seek_last_error_by_key.pop(seek_key, None)
             self._seek_last_value_by_key.pop(seek_key, None)
+            self._seek_last_effective_position_by_key.pop(seek_key, None)
             self._seek_no_response_count_by_key.pop(seek_key, None)
             self._seek_travel_by_key.pop(seek_key, None)
             return True
-        nudge_mm = self._seek_step_mm(delta_value, tolerance)
+        nudge_mm = self._predictive_seek_step_mm(
+            basis,
+            delta_value,
+            effective_tolerance,
+            seek_key=seek_key,
+        )
         if nudge_mm <= 0.0:
             raise ValueError("Set a non-zero correction step.")
         previous_error = self._seek_last_error_by_key.get(seek_key)
@@ -4888,7 +5057,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{self._distribution_units(basis)[0]}; switching to fine correction steps."
             )
         elif previous_error is not None:
-            error_worsened = abs(delta_value) > abs(previous_error) + max(abs(tolerance) * 0.2, 1e-9)
+            error_worsened = abs(delta_value) > abs(previous_error) + max(effective_tolerance * 0.2, 1e-9)
             if error_worsened:
                 count = self._seek_no_response_count_by_key.get(seek_key, 0) + 1
                 self._seek_no_response_count_by_key[seek_key] = count
@@ -4903,12 +5072,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             seek_direction *= self._tension_motion_sign()
         movement_direction = math.copysign(1.0, seek_direction)
-        speed_mm_s = self._seek_speed_mm_s(delta_value, tolerance)
+        speed_mm_s = self._seek_speed_mm_s(delta_value, effective_tolerance)
         nudge_mm = self._seek_command_step_mm(nudge_mm, speed_mm_s)
         backlash_takeup_mm = self._seek_backlash_takeup_mm(movement_direction)
+        if not self._reverse_correction_is_worthwhile(
+            basis,
+            delta_value,
+            effective_tolerance,
+            backlash_takeup_mm,
+            seek_key=seek_key,
+        ):
+            self._seek_last_error_by_key[seek_key] = delta_value
+            self._seek_last_value_by_key[seek_key] = current_value
+            self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
+            self._log(
+                "Load/stress reversal skipped because backlash take-up would be larger "
+                "than the predicted improvement."
+            )
+            return False
         chain_from_last_target = self._seek_uses_planned_motion_base(basis)
         base_position_mm = self._last_move_target_mm if chain_from_last_target else self._current_position_mm
+        effective_base_position_mm = self._measurement_effective_position_mm()
         target_mm = base_position_mm + movement_direction * (nudge_mm + backlash_takeup_mm)
+        effective_target_mm = effective_base_position_mm + movement_direction * nudge_mm
         if backlash_takeup_mm > 0.0:
             self._log(
                 f"Direction reversal: adding {_format_compact_unit(backlash_takeup_mm, 'mm')} backlash take-up."
@@ -4916,11 +5102,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._move_to_position_mm(
             target_mm,
             chain_from_last_target=chain_from_last_target,
+            effective_position_mm=effective_target_mm,
             speed_mm_s=speed_mm_s,
         ):
             return False
         self._seek_last_error_by_key[seek_key] = delta_value
         self._seek_last_value_by_key[seek_key] = current_value
+        self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
         self._seek_travel_by_key[seek_key] = (
             self._seek_travel_by_key.get(seek_key, 0.0) + abs(nudge_mm + backlash_takeup_mm)
         )
@@ -5315,9 +5503,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if current_position_text is not None:
             current_position = _extract_first_int(current_position_text)
             if current_position is not None:
+                previous_commanded_steps = self._last_commanded_position_steps
                 self._current_position_steps = current_position
                 self._current_position_mm = current_position / float(self.spin_steps_per_mm.value())
                 self._last_tic_status_time_s = time.time()
+                if previous_commanded_steps is not None and current_position == previous_commanded_steps:
+                    self._effective_position_mm = self._last_effective_move_target_mm
+                elif not self._has_unconfirmed_motion_command():
+                    self._effective_position_mm = self._current_position_mm
                 self._last_commanded_position_steps = current_position
         operation_state = _extract_status_value(status_text, "Operation state") or "unknown"
         errors = _extract_status_value(status_text, "Errors currently stopping the motor") or "none"
@@ -5328,7 +5521,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_card_motion.setText(f"Motor power low/off | {vin_text}")
         else:
             self.label_card_motion.setText(
-                f"{operation_state} | {self._tensile_displacement_mm(self._current_position_mm):.4f} mm tensile | VIN {vin_text}"
+                f"{operation_state} | {self._tensile_displacement_mm(self._effective_position_mm):.4f} mm tensile | VIN {vin_text}"
             )
         self.label_tic_summary.setText(summary)
         self._refresh_live_labels()
@@ -5345,6 +5538,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_position_steps = 0
         self._current_position_mm = 0.0
         self._last_commanded_position_steps = 0
+        self._effective_position_mm = 0.0
+        self._last_effective_move_target_mm = 0.0
         self._position_reference_mm = 0.0
         self._last_move_target_mm = 0.0
         self._manual_jog_uses_last_target = False
@@ -5449,6 +5644,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _measurement_position_mm(self) -> float:
         return self._commanded_motion_base_mm()
 
+    def _measurement_effective_position_mm(self) -> float:
+        if self._has_unconfirmed_motion_command():
+            return self._last_effective_move_target_mm
+        if abs(self._last_effective_move_target_mm - self._last_move_target_mm) <= 1e-12:
+            self._effective_position_mm = self._current_position_mm
+            self._last_effective_move_target_mm = self._effective_position_mm
+        return self._effective_position_mm
+
     def _relative_motion_base_mm(self) -> float:
         return self._last_move_target_mm if self._manual_jog_uses_last_target else self._commanded_motion_base_mm()
 
@@ -5547,6 +5750,7 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         manual_jog: bool = False,
         chain_from_last_target: bool = False,
+        effective_position_mm: float | None = None,
         speed_mm_s: float | None = None,
     ) -> bool:
         if self._tic_motor_power_ok is False:
@@ -5606,6 +5810,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_motion_command_time_s = time.time()
         self._last_commanded_position_steps = target_steps
         self._start_tic_keepalive()
+        self._last_effective_move_target_mm = (
+            float(position_mm) if effective_position_mm is None else float(effective_position_mm)
+        )
         delta_mm = position_mm - self._relative_motion_base_mm()
         if abs(delta_mm) >= 1e-12:
             self._last_move_direction = math.copysign(1.0, delta_mm)
@@ -6004,7 +6211,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(str(exc))
             self._refresh_live_labels()
             return
-        self._position_reference_mm = self._current_position_mm
+        self._effective_position_mm = self._current_position_mm
+        self._last_effective_move_target_mm = self._effective_position_mm
+        self._position_reference_mm = self._effective_position_mm
         self._preload_reference_armed = (
             self.check_zero_on_preload.isChecked() and self.spin_preload_threshold_g.value() > 0
         )
@@ -6042,7 +6251,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self._session_active:
                 return
         self._recipe_origin_mm = self._current_position_mm
-        self._position_reference_mm = self._current_position_mm
+        self._effective_position_mm = self._current_position_mm
+        self._last_effective_move_target_mm = self._effective_position_mm
+        self._position_reference_mm = self._effective_position_mm
         self._preload_reference_armed = False
         self._preload_trigger_elapsed_s = None
         self._session_points = []
@@ -6153,25 +6364,27 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         elapsed_s: float,
         position_mm: float,
+        effective_position_mm: float | None = None,
         raw_load_g: float,
         load_g: float,
         load_summary: ScaleIntervalSummary | None = None,
     ) -> MeasurementPoint:
+        specimen_position_mm = float(position_mm) if effective_position_mm is None else float(effective_position_mm)
         preload_state = self._current_preload_state(load_g)
         if preload_state == PRELOAD_PENDING and abs(load_g) >= float(self.spin_preload_threshold_g.value()):
-            self._position_reference_mm = position_mm
+            self._position_reference_mm = specimen_position_mm
             self._preload_reference_armed = False
             self._preload_trigger_elapsed_s = elapsed_s
             preload_state = PRELOAD_ACTIVE
             self._log(
-                f"Preload reached at {load_g:.5f} g. Gauge zero moved to {position_mm:.4f} mm."
+                f"Preload reached at {load_g:.5f} g. Gauge zero moved to {specimen_position_mm:.4f} mm."
             )
         strain = None
         stress = None
         if preload_state != PRELOAD_PENDING:
-            strain = self._strain_percent_for_position(position_mm)
+            strain = self._strain_percent_for_position(specimen_position_mm)
             stress = stress_mpa_from_load_g(load_g, float(self.spin_diameter.value()))
-        tensile_displacement_mm = self._tensile_displacement_mm(position_mm)
+        tensile_displacement_mm = self._tensile_displacement_mm(specimen_position_mm)
         snapshot = self._refresh_supply_snapshot()
         current_set_mA = self._supply_last_setpoint_mA
         current_measured_mA = snapshot.get("current_mA")
@@ -6276,9 +6489,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if load_summary.load_mean_g is None
             else load_summary.load_mean_g
         )
+        effective_position_mm = self._measurement_effective_position_mm()
         point = self._capture_measurement_point(
             elapsed_s=elapsed_s,
             position_mm=position_mm,
+            effective_position_mm=effective_position_mm,
             raw_load_g=raw_load_g,
             load_g=load_g,
             load_summary=load_summary,
@@ -6333,6 +6548,7 @@ class MainWindow(QtWidgets.QMainWindow):
         point = self._capture_measurement_point(
             elapsed_s=elapsed_s,
             position_mm=self._current_position_mm,
+            effective_position_mm=self._effective_position_mm,
             raw_load_g=self._latest_scale_value_g,
             load_g=self._current_effective_load_g(),
         )
@@ -6617,6 +6833,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._manual_jog_uses_last_target = False
         self._last_move_target_mm = self._current_position_mm
+        self._effective_position_mm = self._current_position_mm
+        self._last_effective_move_target_mm = self._effective_position_mm
         self._last_move_direction = 0.0
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
@@ -6630,6 +6848,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._calibration_report = None
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
+        self._seek_last_effective_position_by_key.clear()
+        self._seek_live_stiffness_by_key.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         if not self._session_active:
@@ -6707,6 +6927,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_last_tick_s = None
         self._manual_jog_pending_mm = 0.0
         self._last_move_target_mm = self._current_position_mm
+        self._effective_position_mm = self._current_position_mm
+        self._last_effective_move_target_mm = self._effective_position_mm
 
     def _ask_recovery_after_stop(self) -> None:
         if self._tic_motor_power_ok is False:
@@ -6818,6 +7040,7 @@ class MainWindow(QtWidgets.QMainWindow):
         point = self._capture_measurement_point(
             elapsed_s=elapsed_s,
             position_mm=self._current_position_mm,
+            effective_position_mm=self._effective_position_mm,
             raw_load_g=self._latest_scale_value_g,
             load_g=load_g,
         )
@@ -7828,6 +8051,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if report.get("status") == "ok":
             stiffness = report.get("average_stiffness_g_per_mm")
             backlash = report.get("backlash_mm")
+            baseline = report.get("baseline")
+            if stiffness is not None and math.isfinite(float(stiffness)) and float(stiffness) > 0.0:
+                self._calibrated_stiffness_g_per_mm = float(stiffness)
+                self._calibrated_stiffness_length_mm = max(0.001, float(self.spin_initial_length.value()))
+                if self._persist_settings:
+                    self.settings.setValue("calibration_stiffness_g_per_mm", self._calibrated_stiffness_g_per_mm)
+                    self.settings.setValue("calibration_stiffness_length_mm", self._calibrated_stiffness_length_mm)
+            if isinstance(baseline, Mapping):
+                load_std = baseline.get("load_std_g")
+                if load_std is not None and math.isfinite(float(load_std)) and float(load_std) >= 0.0:
+                    self._calibrated_load_noise_g = float(load_std)
+                    if self._persist_settings:
+                        self.settings.setValue("calibration_load_noise_g", self._calibrated_load_noise_g)
+            if backlash is not None and math.isfinite(float(backlash)) and float(backlash) >= 0.0:
+                self.spin_backlash_mm.setValue(float(backlash))
+                if self._persist_settings:
+                    self.settings.setValue("backlash_mm", float(backlash))
+            if self._persist_settings:
+                self.settings.sync()
             self._log(
                 "Calibration report ready: "
                 f"stiffness {_format_compact_unit(float(stiffness), 'g/mm', decimals=4) if stiffness is not None else '-'}, "
@@ -8034,7 +8276,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_scale_raw.setText(f"Raw line: {self._latest_scale_text or '-'}")
         self.label_tic_position.setText(
             f"Raw position: {self._current_position_mm:.4f} mm ({self._current_position_steps} steps) | "
-            f"Tensile displacement: {self._tensile_displacement_mm(self._current_position_mm):.4f} mm"
+            f"Tensile displacement: {self._tensile_displacement_mm(self._effective_position_mm):.4f} mm"
         )
         self.label_reference_status.setText(
             f"Reference position: {self._position_reference_mm:.4f} mm | "
@@ -8047,7 +8289,7 @@ class MainWindow(QtWidgets.QMainWindow):
             strain = None
             stress = None
         else:
-            strain = self._strain_percent_for_position(self._current_position_mm)
+            strain = self._strain_percent_for_position(self._effective_position_mm)
             stress = stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
         self.label_live_summary.setText(
             f"Live strain: {'-' if strain is None else f'{strain:.4f} %'} | "
@@ -8071,7 +8313,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._tic_motor_power_ok is False:
             motion_state = f"Motor power low/off | VIN {vin_text}"
         else:
-            motion_state = f"{self._tensile_displacement_mm(self._current_position_mm):.4f} mm tensile"
+            motion_state = f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm tensile"
             if self._last_tic_vin_v is not None:
                 motion_state += f" | VIN {vin_text}"
         if self.check_soft_limits.isChecked():
@@ -8231,6 +8473,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("positive_motion_is_tension", self.check_positive_motion_is_tension.isChecked())
         self.settings.setValue("backlash_mm", self.spin_backlash_mm.value())
         self.settings.setValue("initial_length_mm", self.spin_initial_length.value())
+        if self._calibrated_stiffness_g_per_mm is not None:
+            self.settings.setValue("calibration_stiffness_g_per_mm", self._calibrated_stiffness_g_per_mm)
+        if self._calibrated_stiffness_length_mm is not None:
+            self.settings.setValue("calibration_stiffness_length_mm", self._calibrated_stiffness_length_mm)
+        if self._calibrated_load_noise_g is not None:
+            self.settings.setValue("calibration_load_noise_g", self._calibrated_load_noise_g)
         self.settings.setValue("diameter_mm", self.spin_diameter.value())
         self.settings.setValue("name_composition", self.edit_name_composition.text())
         self.settings.setValue("name_wire", self.edit_name_wire.text())
@@ -8416,6 +8664,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_positive_motion_is_tension.setChecked(motion_positive_is_tension)
         self.spin_backlash_mm.setValue(float(self.settings.value("backlash_mm", 0.0)))
         self.spin_initial_length.setValue(float(self.settings.value("initial_length_mm", 30.0)))
+        self._calibrated_stiffness_g_per_mm = _safe_float(
+            self.settings.value("calibration_stiffness_g_per_mm", None)
+        )
+        self._calibrated_stiffness_length_mm = _safe_float(
+            self.settings.value("calibration_stiffness_length_mm", None)
+        )
+        self._calibrated_load_noise_g = _safe_float(
+            self.settings.value("calibration_load_noise_g", None)
+        )
         self.spin_diameter.setValue(float(self.settings.value("diameter_mm", 0.03)))
         self._mark_diameter_imported(False)
         self.check_zero_on_preload.setChecked(False)
