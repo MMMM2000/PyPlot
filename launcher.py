@@ -1885,6 +1885,9 @@ LOGGERS: Dict[str, LauncherFactory] = {
     "Current Annealing Logger": _lazy(
         "data_logging.current_annealing_logger", "main"
     ),
+    "AC Susceptibility Logger": _lazy(
+        "data_logging.ac_susceptibility_logger", "main"
+    ),
     "Mini DMA Logger": _lazy(
         "data_logging.mini_dma_logger", "main"
     ),
