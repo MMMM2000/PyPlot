@@ -243,6 +243,60 @@ def test_launcher_detects_microwire_eda_cli_flags() -> None:
     assert args.microwire_eda_force_project_rebuild is False
 
 
+def test_launcher_detects_microwire_word_report_cli_flags() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(
+        [
+            "--microwire-word-report",
+            "Ni50Fe27Ga23_12_2.csv",
+            "--microwire-word-sample",
+            "Ni50Fe27Ga23 12/2",
+            "--out",
+            "artifacts/word-report",
+        ]
+    )
+
+    assert launcher_module._is_microwire_word_report_requested(args) is True  # noqa: SLF001
+    assert args.microwire_word_report == "Ni50Fe27Ga23_12_2.csv"
+    assert args.microwire_word_sample == "Ni50Fe27Ga23 12/2"
+    assert args.microwire_word_origin is True
+    assert args.out == "artifacts/word-report"
+
+
+def test_run_microwire_word_report_cli_accepts_rvst_csv(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "Ni50Fe27Ga23_12_2.csv"
+    source.write_text(
+        "\n".join(
+            [
+                "iso_time;t_elapsed_s;sp_c;pv_c;resistance_ohm",
+                "2026-02-06T08:22:38;0.1;-100;-40.5;43.2903",
+                "2026-02-06T08:22:48;10.1;-90;-39.0;43.2882",
+                "2026-02-06T08:22:58;20.1;-80;-37.5;43.2700",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "reports"
+    args = argparse.Namespace(
+        microwire_word_report=str(source),
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_force_project_rebuild=False,
+        microwire_word_origin=False,
+        out=str(output_dir),
+    )
+
+    exit_code = launcher_module._run_microwire_word_report_cli(args)  # noqa: SLF001 - internal automation hook
+
+    report_path = output_dir / "Ni50Fe27Ga23_12-2.docx"
+    assert exit_code == 0
+    assert report_path.exists()
+    output = capsys.readouterr().out
+    assert "reports=1" in output
+    assert str(report_path) in output
+
+
 def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -78,6 +78,8 @@ For the dedicated manual fabrication-video workflow, see [Universal Video Builde
 ## Export Targets
 
 - CSV, Excel, HTML (self-contained) outputs are supported.
+- Word sample reports can be exported from Assemble as one `.docx` per sample row. The reports use the full assembled sample data and embed any generated Origin graph object files as editable Word OLE objects when Microsoft Word automation is available.
+- Word sample reports can also be generated without opening the Builder UI: `launcher.py --microwire-word-report <project.pydpj|assembled.xlsx|RvsT.csv> [--microwire-word-sample "Ni50Fe27Ga23 12/2"] [--out <dir>]`. Direct R vs T CSV inputs create a sample report with parsed R-vs-T metadata and an embedded Origin OLE graph object when Origin and Word automation are available.
 - HTML export must not require the Videos section to be processed, and includes a compare view (Ctrl/Cmd-click rows to compare).
 - Matplotlib/Origin outputs should use the same rows and columns as the Assemble preview.
 - No PyPlot UI should be embedded inside the builder; graphs are rendered as static previews like the current annealing section.

@@ -21600,6 +21600,7 @@ class _AssemblyExportDialog(QtWidgets.QDialog):
         export_csv: bool,
         export_excel: bool,
         export_html: bool,
+        export_word: bool,
         export_matplotlib: bool,
         export_origin: bool,
         parent: QtWidgets.QWidget | None = None,
@@ -21637,6 +21638,9 @@ class _AssemblyExportDialog(QtWidgets.QDialog):
         self.html_checkbox = QtWidgets.QCheckBox("HTML (self-contained)")
         self.html_checkbox.setChecked(export_html)
         formats_layout.addWidget(self.html_checkbox)
+        self.word_checkbox = QtWidgets.QCheckBox("Word sample reports")
+        self.word_checkbox.setChecked(export_word)
+        formats_layout.addWidget(self.word_checkbox)
         formats_layout.addStretch(1)
         layout.addWidget(formats_box)
 
@@ -21650,6 +21654,8 @@ class _AssemblyExportDialog(QtWidgets.QDialog):
         plot_layout.addWidget(self.origin_checkbox)
         plot_layout.addStretch(1)
         layout.addWidget(plot_box)
+        self.word_checkbox.toggled.connect(self._sync_word_origin_requirement)
+        self._sync_word_origin_requirement(self.word_checkbox.isChecked())
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -21667,9 +21673,14 @@ class _AssemblyExportDialog(QtWidgets.QDialog):
             "export_csv": self.csv_checkbox.isChecked(),
             "export_excel": self.excel_checkbox.isChecked(),
             "export_html": self.html_checkbox.isChecked(),
+            "export_word": self.word_checkbox.isChecked(),
             "export_matplotlib": self.matplotlib_checkbox.isChecked(),
             "export_origin": self.origin_checkbox.isChecked(),
         }
+
+    def _sync_word_origin_requirement(self, enabled: bool) -> None:
+        if enabled:
+            self.origin_checkbox.setChecked(True)
 
     def _choose_output_dir(self) -> None:
         start_dir = _dialog_start_directory(self.output_dir_edit.text().strip())
@@ -23200,6 +23211,7 @@ class AssemblySection(QtWidgets.QWidget):
         self._export_matplotlib = False
         self._export_origin = False
         self._export_html = False
+        self._export_word = False
         self._section_choices = [
             ("fabrication", "Fabrication"),
             ("annealing", "Current annealing"),
@@ -23713,6 +23725,7 @@ class AssemblySection(QtWidgets.QWidget):
             export_csv=self._export_csv,
             export_excel=self._export_excel,
             export_html=self._export_html,
+            export_word=self._export_word,
             export_matplotlib=self._export_matplotlib,
             export_origin=self._export_origin,
             parent=self,
@@ -23728,6 +23741,7 @@ class AssemblySection(QtWidgets.QWidget):
             "export_csv": self._export_csv,
             "export_excel": self._export_excel,
             "export_html": self._export_html,
+            "export_word": self._export_word,
             "export_matplotlib": self._export_matplotlib,
             "export_origin": self._export_origin,
             "sections": dict(self._section_states),
@@ -23745,8 +23759,11 @@ class AssemblySection(QtWidgets.QWidget):
         self._export_csv = bool(settings.get("export_csv", self._export_csv))
         self._export_excel = bool(settings.get("export_excel", self._export_excel))
         self._export_html = bool(settings.get("export_html", self._export_html))
+        self._export_word = bool(settings.get("export_word", self._export_word))
         self._export_matplotlib = bool(settings.get("export_matplotlib", self._export_matplotlib))
         self._export_origin = bool(settings.get("export_origin", self._export_origin))
+        if self._export_word:
+            self._export_origin = True
         sections = settings.get("sections")
         if isinstance(sections, Mapping):
             for key, _label in self._section_choices:
@@ -24108,6 +24125,8 @@ class AssemblySection(QtWidgets.QWidget):
             formats.append("Excel")
         if self._export_html:
             formats.append("HTML")
+        if self._export_word:
+            formats.append("Word reports")
         if self._export_matplotlib:
             formats.append("Matplotlib")
         if self._export_origin:
@@ -27711,10 +27730,12 @@ class AssemblySection(QtWidgets.QWidget):
             formats.append("csv")
         if self._export_excel:
             formats.append("excel")
+        if self._export_word:
+            formats.append("word")
         backends: List[str] = []
         if self._export_matplotlib:
             backends.append("matplotlib")
-        if self._export_origin:
+        if self._export_origin or self._export_word:
             backends.append("origin")
         column_filter = self._current_column_filter()
         column_order = self._current_column_order_for_export()
@@ -27727,7 +27748,7 @@ class AssemblySection(QtWidgets.QWidget):
             microscope_files=[],
             video_files=[],
             strain_files=[],
-            make_plots=bool(self._export_matplotlib or self._export_origin),
+            make_plots=bool(self._export_matplotlib or self._export_origin or self._export_word),
             export_formats=tuple(formats),
             plot_backends=tuple(backends),
             output_name=output_name,

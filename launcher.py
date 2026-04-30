@@ -7,6 +7,7 @@ import time
 import logging
 import traceback
 import json
+import re
 import secrets
 import socket
 import socketserver
@@ -694,6 +695,36 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         help="Generate a Microwire EDA report from a .pydpj project or assembled spreadsheet and exit.",
     )
     parser.add_argument(
+        "--microwire-word-report",
+        default=None,
+        help=(
+            "Generate Word sample reports from a Builder .pydpj, assembled spreadsheet, "
+            "or direct R vs T CSV without opening the Builder UI."
+        ),
+    )
+    parser.add_argument(
+        "--microwire-word-sample",
+        default=None,
+        help='Limit the Word export to one sample, e.g. "Ni50Fe27Ga23 12/2".',
+    )
+    parser.add_argument(
+        "--microwire-word-force-project-rebuild",
+        action="store_true",
+        help="For .pydpj Word exports, rebuild Assemble rows transiently before writing reports.",
+    )
+    parser.add_argument(
+        "--microwire-word-origin",
+        dest="microwire_word_origin",
+        action="store_true",
+        help="Generate available Origin objects for Word reports (default).",
+    )
+    parser.add_argument(
+        "--no-microwire-word-origin",
+        dest="microwire_word_origin",
+        action="store_false",
+        help="Skip Origin object generation for Word report CLI runs.",
+    )
+    parser.add_argument(
         "--rows",
         choices=(("all", "filtered", "selected")),
         default="all",
@@ -702,7 +733,7 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
     parser.add_argument(
         "--out",
         default=None,
-        help="Output directory for Microwire EDA CLI runs.",
+        help="Output directory for Microwire EDA and Microwire Word CLI runs.",
     )
     parser.add_argument(
         "--microwire-eda-title",
@@ -763,6 +794,7 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         microwire_eda_composition_splits=True,
         microwire_eda_findings=True,
         microwire_eda_force_project_rebuild=False,
+        microwire_word_origin=True,
     )
     args, qt_args = parser.parse_known_args(argv)
     return args, qt_args
@@ -794,6 +826,10 @@ def _is_pyplot_session_requested(args: argparse.Namespace) -> bool:
 
 def _is_microwire_eda_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_eda", None))
+
+
+def _is_microwire_word_report_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "microwire_word_report", None))
 
 
 def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
@@ -838,6 +874,331 @@ def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
     if result.findings:
         for finding in result.findings[:3]:
             print(f"[microwire-eda] finding={finding.get('headline', 'Finding')}")
+    return 0
+
+
+_RVST_CSV_HEADER = ("iso_time", "t_elapsed_s", "sp_c", "pv_c", "resistance_ohm")
+
+
+def _parse_microwire_word_sample(sample: object) -> tuple[str | None, str | None]:
+    text = str(sample or "").strip()
+    if not text:
+        return None, None
+    match = re.search(
+        r"^(?P<composition>\S+)\s+(?P<draw>\d+)\s*[/_\-]\s*(?P<piece>\d+[A-Za-z0-9]*)",
+        text,
+    )
+    if match:
+        return (
+            match.group("composition"),
+            f"{match.group('draw')}/{match.group('piece')}",
+        )
+    return text, None
+
+
+def _normalise_microwire_word_part(value: object) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip()).casefold()
+
+
+def _normalise_microwire_word_key(value: object) -> str:
+    text = _normalise_microwire_word_part(value)
+    return text.replace("\\", "/").replace("-", "/").replace("_", "/")
+
+
+def _looks_like_rvst_csv(path: Path) -> bool:
+    if path.suffix.lower() != ".csv":
+        return False
+    try:
+        header = path.read_text(encoding="utf-8-sig", errors="ignore").splitlines()[0]
+    except (OSError, IndexError):
+        return False
+    columns = tuple(column.strip().casefold() for column in header.split(";"))
+    return columns[: len(_RVST_CSV_HEADER)] == _RVST_CSV_HEADER
+
+
+def _infer_rvst_word_sample(path: Path, sample_override: object) -> tuple[str, str]:
+    composition, microwire = _parse_microwire_word_sample(sample_override)
+    if composition and microwire:
+        return composition, microwire
+
+    tokens = [token for token in re.split(r"[_\s]+", path.stem.strip()) if token]
+    if len(tokens) >= 3 and tokens[1].isdigit():
+        piece_match = re.match(r"(?P<piece>\d+[A-Za-z0-9]*)", tokens[2])
+        if piece_match:
+            return tokens[0], f"{tokens[1]}/{piece_match.group('piece')}"
+    if composition:
+        return composition, microwire or ""
+    return path.stem, ""
+
+
+def _format_numeric_range(values: object) -> str:
+    import pandas as pd
+
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric.empty:
+        return ""
+    return f"{float(numeric.min()):.6g} to {float(numeric.max()):.6g}"
+
+
+def _set_origin_plot_color(plot_obj: object, color: str) -> None:
+    for attr, value in (
+        ("color", color),
+        ("symbol_edge_color", color),
+        ("symbol_fill_color", color),
+        ("line_width", 1.5),
+        ("symbol_kind", 0),
+    ):
+        if not hasattr(plot_obj, attr):
+            continue
+        try:
+            setattr(plot_obj, attr, value)
+        except Exception:
+            continue
+
+
+def _export_rvst_origin_artifact(
+    rvst_frame: object,
+    *,
+    title: str,
+    source_path: Path,
+    output_dir: Path,
+):
+    import pandas as pd
+
+    from microwire_data_builder.core import OriginArtifact, _export_origin_object, _safe_plot_stem
+    from plotting.plugins.r_vs_t import core as rvst_core
+    from plotting.shared.origin import (
+        hide_origin_workbook,
+        origin_safe_token,
+        origin_session,
+        schedule_origin_release,
+        set_origin_axis_title,
+        set_origin_graph_title,
+    )
+
+    segments = rvst_core.split_heating_cooling(pd.DataFrame(rvst_frame))
+    if not segments:
+        return None
+
+    data: dict[str, pd.Series] = {}
+    for segment in segments:
+        data[f"{segment.label} temperature"] = pd.Series(segment.x)
+        data[f"{segment.label} resistance"] = pd.Series(segment.y)
+    workbook_frame = pd.DataFrame(data)
+    origin_dir = output_dir / "_origin_objects"
+    origin_dir.mkdir(parents=True, exist_ok=True)
+    descriptor = f"{_safe_plot_stem(source_path.stem)}_rvst.oggu"
+    target_path = origin_dir / descriptor
+
+    with origin_session(keep_open=True) as origin_any:
+        try:
+            schedule_origin_release()
+        except Exception:
+            pass
+        book_name = origin_safe_token(f"{source_path.stem}_rvst", fallback="RvsT", max_len=32)
+        workbook = origin_any.new_book("w", lname=book_name)
+        worksheet = workbook[0]
+        try:
+            worksheet.name = origin_safe_token("RvsT", fallback="RvsT", max_len=13)
+        except Exception:
+            pass
+        worksheet.from_df(workbook_frame)
+        try:
+            worksheet.cols_axis("".join("XY" for _segment in segments))
+        except Exception:
+            pass
+
+        graph = None
+        for template in ("line", "ORIGIN"):
+            try:
+                graph = origin_any.new_graph(template=template)
+            except Exception:
+                graph = None
+            if graph is not None:
+                break
+        if graph is None:
+            graph = origin_any.new_graph()
+        layer = graph[0]
+        for index, segment in enumerate(segments):
+            try:
+                plot_obj = layer.add_plot(worksheet, coly=(index * 2) + 1, colx=index * 2, type="y")
+            except TypeError:
+                plot_obj = layer.add_plot(worksheet, coly=(index * 2) + 1, colx=index * 2)
+            try:
+                plot_obj.lname = segment.label
+            except Exception:
+                pass
+            palette = rvst_core.HEATING_COLORS if segment.kind == "heating" else rvst_core.COOLING_COLORS
+            color = palette[index % len(palette)] if palette else ""
+            if color:
+                _set_origin_plot_color(plot_obj, color)
+        try:
+            layer.rescale()
+        except Exception:
+            pass
+        set_origin_axis_title(layer, "x", "Temperature (deg C)")
+        set_origin_axis_title(layer, "y", "Resistance (Ohm)")
+        set_origin_graph_title(origin_any, graph, layer, title)
+        hide_origin_workbook(origin_any, workbook, graph)
+
+        exported_path = _export_origin_object(
+            {
+                "origin": origin_any,
+                "graph": graph,
+                "workbook": workbook,
+                "worksheet": worksheet,
+                "legend_label": title,
+            },
+            target_path,
+            LOGGER,
+        )
+        clipboard_fallback = False
+        if exported_path is not None:
+            try:
+                graph.copy_page("OLE", ratio=85)
+                clipboard_fallback = True
+            except Exception:
+                clipboard_fallback = False
+
+    if exported_path is None:
+        return None
+    return OriginArtifact(
+        descriptor=descriptor,
+        object_path=exported_path,
+        graph_name=title,
+        workbook_name=book_name,
+        worksheet_name="RvsT",
+        display_text=f"R vs T Origin graph: {title}",
+        clipboard_fallback=clipboard_fallback,
+    )
+
+
+def _load_rvst_word_report_frame(source_path: Path, sample_override: object, output_dir: Path, *, include_origin: bool):
+    import pandas as pd
+
+    from microwire_data_builder.core import (
+        RVT_FILE_COLUMN,
+        RVT_GRAPH_COLUMN,
+        RVT_ORIGIN_COLUMN,
+        RVT_POINT_COUNT_COLUMN,
+        RVT_RESISTANCE_RANGE_COLUMN,
+        RVT_TEMPERATURE_RANGE_COLUMN,
+    )
+    from plotting.plugins.r_vs_t.core import load_file
+
+    frame = load_file(source_path)
+    composition, microwire = _infer_rvst_word_sample(source_path, sample_override)
+    first_timestamp = ""
+    if "iso_time" in frame.columns and not frame.empty:
+        try:
+            parsed_timestamp = pd.to_datetime(frame["iso_time"].iloc[0], errors="coerce")
+        except Exception:
+            parsed_timestamp = pd.NaT
+        if pd.notna(parsed_timestamp):
+            first_timestamp = parsed_timestamp.isoformat(sep=" ", timespec="seconds")
+        else:
+            first_timestamp = str(frame["iso_time"].iloc[0]).strip()
+    title = " ".join(part for part in (composition, microwire) if part).strip() or source_path.stem
+    origin_artifacts = {}
+    row = {
+        "Composition": composition,
+        "Microwire": microwire,
+        "Production datetime": first_timestamp,
+        "Data source": "R vs T CSV",
+        "Notes": f"Generated from R vs T CSV file {source_path.name}.",
+        RVT_FILE_COLUMN: str(source_path),
+        RVT_POINT_COUNT_COLUMN: int(len(frame)),
+        RVT_TEMPERATURE_RANGE_COLUMN: _format_numeric_range(frame["pv_c"]),
+        RVT_RESISTANCE_RANGE_COLUMN: _format_numeric_range(frame["resistance_ohm"]),
+    }
+    if include_origin:
+        try:
+            artifact = _export_rvst_origin_artifact(
+                frame,
+                title=title,
+                source_path=source_path,
+                output_dir=output_dir,
+            )
+        except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
+            LOGGER.warning("R vs T Origin object generation skipped for %s: %s", source_path, exc)
+            artifact = None
+        if artifact is not None:
+            row[RVT_GRAPH_COLUMN] = artifact.display_text or artifact.descriptor
+            row[RVT_ORIGIN_COLUMN] = artifact.descriptor
+            origin_artifacts[artifact.descriptor] = artifact
+    return pd.DataFrame([row]), origin_artifacts
+
+
+def _filter_microwire_word_report_frame(frame, sample: object):
+    import pandas as pd
+
+    if not sample:
+        return frame.reset_index(drop=True)
+    composition, microwire = _parse_microwire_word_sample(sample)
+    if not composition and not microwire:
+        return frame.reset_index(drop=True)
+    if "Composition" not in frame.columns:
+        raise ValueError("Cannot filter Word reports by sample because the input has no Composition column.")
+
+    mask = frame["Composition"].map(_normalise_microwire_word_part) == _normalise_microwire_word_part(composition)
+    if microwire:
+        if "Microwire" not in frame.columns:
+            raise ValueError("Cannot filter Word reports by sample because the input has no Microwire column.")
+        mask = mask & (
+            frame["Microwire"].map(_normalise_microwire_word_key)
+            == _normalise_microwire_word_key(microwire)
+        )
+    filtered = frame.loc[mask].copy()
+    if filtered.empty:
+        raise ValueError(f"No rows matched sample {sample!r}.")
+    return filtered.reset_index(drop=True)
+
+
+def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespace, output_dir: Path):
+    if _looks_like_rvst_csv(source_path):
+        return _load_rvst_word_report_frame(
+            source_path,
+            getattr(args, "microwire_word_sample", None),
+            output_dir,
+            include_origin=bool(getattr(args, "microwire_word_origin", True)),
+        )
+
+    from microwire_eda import MicrowireEdaConfig
+    from microwire_eda.core import load_analysis_frame
+
+    config = MicrowireEdaConfig(
+        input_path=source_path,
+        copy_project=True,
+        force_project_rebuild=bool(getattr(args, "microwire_word_force_project_rebuild", False)),
+    )
+    frame, _kind, _working_path, _copied_project_path, _used_project_rebuild = load_analysis_frame(config)
+    return (
+        _filter_microwire_word_report_frame(
+            frame,
+            getattr(args, "microwire_word_sample", None),
+        ),
+        {},
+    )
+
+
+def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
+    from microwire_data_builder.core import export_word_reports
+
+    source_path = Path(str(getattr(args, "microwire_word_report", "")).strip()).expanduser()
+    if not source_path.exists():
+        raise FileNotFoundError(source_path)
+    output_dir_value = getattr(args, "out", None)
+    output_dir = (
+        Path(str(output_dir_value)).expanduser()
+        if output_dir_value
+        else source_path.with_suffix("").parent / f"{source_path.stem}_word_reports"
+    )
+    frame, origin_artifacts = _load_microwire_word_report_frame(source_path, args, output_dir)
+    reports = export_word_reports(frame, output_dir, origin_artifacts=origin_artifacts, logger=LOGGER)
+    print(f"[microwire-word] output_dir={output_dir}")
+    print(f"[microwire-word] reports={len(reports)}")
+    for report in reports:
+        print(f"[microwire-word] report={report}")
     return 0
 
 
@@ -2547,6 +2908,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_run_visual_check(args))
     if getattr(args, "automation_recipe", None):
         raise SystemExit(_run_automation_recipe(args, qt_args))
+    if _is_microwire_word_report_requested(args):
+        raise SystemExit(_run_microwire_word_report_cli(args))
     if _is_microwire_eda_requested(args):
         raise SystemExit(_run_microwire_eda_cli(args))
     if _is_pyplot_automation_requested(args):

@@ -5,12 +5,14 @@ from __future__ import annotations
 import csv
 import hashlib
 import importlib.util
+import json
 import sys
 import logging
 import math
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import unicodedata
 from dataclasses import dataclass, field
@@ -18,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
 from xml.etree import ElementTree as ET
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
 import pandas as pd
@@ -60,6 +62,7 @@ R_CHECK_THRESHOLD = 0.05
 DEFAULT_OUTPUT_NAME = "microwire_database"
 PLOT_DIR_NAME = "plots"
 ORIGIN_DIR_NAME = "origin_objects"
+WORD_REPORT_DIR_NAME = "word_reports"
 
 
 class BuildCancelledError(Exception):
@@ -257,6 +260,12 @@ SHAPE_MEMORY_FRACTURE_LOAD_COLUMN = "Fracture load (g)"
 SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN = "Fracture strain (%)"
 SHAPE_MEMORY_FRACTURE_STRESS_COLUMN = "Fracture stress (MPa)"
 FMR_COLUMN = "FMR graphs"
+RVT_FILE_COLUMN = "R vs T files"
+RVT_GRAPH_COLUMN = "R vs T graphs"
+RVT_ORIGIN_COLUMN = "R vs T graphs (Origin)"
+RVT_POINT_COUNT_COLUMN = "R vs T points"
+RVT_TEMPERATURE_RANGE_COLUMN = "R vs T temperature range (deg C)"
+RVT_RESISTANCE_RANGE_COLUMN = "R vs T resistance range (Ohm)"
 
 TRANSITION_TEMP_AS_COLUMN = "As (°C)"
 TRANSITION_TEMP_AF_COLUMN = "Af (°C)"
@@ -275,7 +284,7 @@ ORIGIN_FIGURE_COLUMNS = tuple(
     column
     for column in OUTPUT_COLUMNS
     if column.startswith("Figure") and "(Origin)" in column
-)
+) + (RVT_ORIGIN_COLUMN,)
 
 MICROWIRE_LABEL_RE = re.compile(r"(\d+)\s*[/\-]\s*(\d+)")
 MICROWIRE_SORT_RE = re.compile(
@@ -627,6 +636,17 @@ class OriginArtifact:
     workbook_name: Optional[str] = None
     worksheet_name: Optional[str] = None
     display_text: Optional[str] = None
+    clipboard_fallback: bool = False
+
+
+@dataclass(frozen=True)
+class WordOleInsertion:
+    """Origin object insertion request for a generated Word report."""
+
+    bookmark_name: str
+    object_path: Path
+    label: str
+    clipboard_fallback: bool = False
 
 
 @dataclass
@@ -640,6 +660,7 @@ class BuildResult:
     stats: BuildStats
     microscope_crops: Dict[str, Path] = field(default_factory=dict)
     ocr_highlights: Dict[str, Set[int]] = field(default_factory=dict)
+    word_reports: List[Path] = field(default_factory=list)
 
 
 @dataclass
@@ -4045,6 +4066,7 @@ def _export_origin_object(
     if origin_any is None or graph is None:
         return None
 
+    target_path = target_path.resolve()
     target_path.parent.mkdir(parents=True, exist_ok=True)
     attempted: list[str] = []
 
@@ -4084,24 +4106,35 @@ def _export_origin_object(
             except Exception:
                 attempted.append(attr)
 
-    lt_exec = getattr(origin_any, "lt_exec", None)
-    if callable(lt_exec):
+    lt_executors = (
+        getattr(graph, "lt_exec", None),
+        getattr(origin_any, "lt_exec", None),
+    )
+    if any(callable(executor) for executor in lt_executors):
         graph_name = _origin_object_name(graph) or ""
         base = str(target_path)
         commands = []
         if graph_name:
+            commands.append(f"page -s \"{graph_name}\"; save -i \"{base}\";")
+            commands.append(f"page -s \"{graph_name}\"; save -ix \"{base}\";")
             commands.append(f"page -s \"{graph_name}\"; save -oggu \"{base}\";")
             commands.append(f"page -s \"{graph_name}\"; save -opju \"{base}\";")
+        commands.append(f"save -i \"{base}\";")
+        commands.append(f"save -ix \"{base}\";")
         commands.append(f"save -oggu \"{base}\";")
         commands.append(f"save -opju \"{base}\";")
         for command in commands:
-            try:
-                lt_exec(command)
-                created = _path_created()
-                if created is not None:
-                    return created
-            except Exception:
-                attempted.append(command)
+            for lt_exec in lt_executors:
+                if not callable(lt_exec):
+                    continue
+                try:
+                    lt_exec(command)
+                    created = _path_created()
+                    if created is not None:
+                        return created
+                    attempted.append(f"{command} (no file)")
+                except Exception:
+                    attempted.append(command)
 
     if log is not None:
         log.warning(
@@ -4140,6 +4173,580 @@ def _single_asset_reference(value: Any) -> Optional[str]:
         if len(resolved) == 1:
             return resolved[0]
     return None
+
+
+def _asset_references(value: Any) -> List[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, (list, tuple, set)):
+        resolved: List[str] = []
+        for item in value:
+            for candidate in _asset_references(item):
+                if candidate and candidate not in resolved:
+                    resolved.append(candidate)
+        return resolved
+    return []
+
+
+_WORD_REPORT_LABELS: Dict[str, str] = {
+    DIAMETER_COLUMN: "d (um)",
+    GLASS_DIAMETER_COLUMN: "D (um)",
+    DIAMETER_RATIO_COLUMN: "d/D",
+    RVT_FILE_COLUMN: "R vs T source files",
+    RVT_GRAPH_COLUMN: "R vs T graphs",
+    RVT_ORIGIN_COLUMN: "R vs T graphs (Origin)",
+    RVT_POINT_COUNT_COLUMN: "R vs T points",
+    RVT_TEMPERATURE_RANGE_COLUMN: "R vs T temperature range (deg C)",
+    RVT_RESISTANCE_RANGE_COLUMN: "R vs T resistance range (Ohm)",
+    CORE_TEMPERATURE_COLUMN: "Core temperature (deg C)",
+    GLASS_TEMPERATURE_COLUMN: "Glass temperature (deg C)",
+    "Resistance (Î©)": "Resistance (Ohm)",
+    "As (Â°C)": "As (deg C)",
+    "Af (Â°C)": "Af (deg C)",
+    "Ms (Â°C)": "Ms (deg C)",
+    "Mf (Â°C)": "Mf (deg C)",
+    "Figure â€” 1000 mA": "Figure - 1000 mA",
+    "Figure â€” other annealing": "Figure - other annealing",
+    "Figure â€” 1000 mA (Origin)": "Figure - 1000 mA (Origin)",
+    "Figure â€” other annealing (Origin)": "Figure - other annealing (Origin)",
+}
+
+_WORD_SAMPLE_SUMMARY_COLUMNS: Tuple[str, ...] = (
+    "Composition",
+    "Microwire",
+    "e/a",
+    ESTIMATED_TRANSITION_COLUMN,
+    DIAMETER_COLUMN,
+    GLASS_DIAMETER_COLUMN,
+    DIAMETER_RATIO_COLUMN,
+    BRITTLE_COLUMN,
+    STRAIN_COLUMN,
+)
+
+_WORD_FABRICATION_COLUMNS: Tuple[str, ...] = (
+    "Length (m)",
+    "Production datetime",
+    "Mass (g)",
+    "Resistance (Î©)",
+    CORE_TEMPERATURE_COLUMN,
+    GLASS_TEMPERATURE_COLUMN,
+    "Winding speed (m/min)",
+    "Glass feeding (mm/min)",
+    "Underpressure",
+    GLASS_PULL_COLUMN,
+    VIDEO_END_LENGTH_COLUMN,
+    VIDEO_MW_LENGTH_COLUMN,
+    "Notes",
+    "Data source",
+)
+
+_WORD_TRANSITION_COLUMNS: Tuple[str, ...] = (
+    "As (mA)",
+    "Ms (mA)",
+    *CURRENT_DENSITY_EXTRA_COLUMNS,
+    *TRANSITION_TEMP_COLUMNS,
+)
+
+_WORD_MECHANICAL_COLUMNS: Tuple[str, ...] = (
+    *STRAIN_EXTRA_COLUMNS,
+    *SHAPE_MEMORY_VALUE_COLUMNS,
+    *SHAPE_MEMORY_FRACTURE_COLUMNS,
+)
+
+_WORD_GRAPH_REFERENCE_COLUMNS: Tuple[str, ...] = (
+    "File 1000 mA",
+    "Other annealing files",
+    *FIGURE_COLUMNS,
+    RVT_FILE_COLUMN,
+    RVT_GRAPH_COLUMN,
+    RVT_ORIGIN_COLUMN,
+    RVT_POINT_COUNT_COLUMN,
+    RVT_TEMPERATURE_RANGE_COLUMN,
+    RVT_RESISTANCE_RANGE_COLUMN,
+    VSM_HYSTERESIS_COLUMN,
+    VSM_TEMPERATURE_SCAN_COLUMN,
+    DMA_ISOSTRESS_COLUMN,
+    SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+    FMR_COLUMN,
+)
+
+
+def _word_label(column: str) -> str:
+    return _WORD_REPORT_LABELS.get(column, column)
+
+
+def _word_xml_escape(value: object) -> str:
+    text = str(value)
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _word_has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        stripped = value.strip()
+        return bool(stripped) and stripped.lower() != "nan"
+    if isinstance(value, (list, tuple, set)):
+        return any(_word_has_value(item) for item in value)
+    try:
+        missing = pd.isna(value)
+    except Exception:
+        missing = False
+    if isinstance(missing, (bool, np.bool_)) and missing:
+        return False
+    return True
+
+
+def _word_format_value(value: Any) -> str:
+    if not _word_has_value(value):
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        parts = [_word_format_value(item) for item in value if _word_has_value(item)]
+        return ", ".join(part for part in parts if part)
+    if isinstance(value, (pd.Timestamp, datetime)):
+        try:
+            return value.isoformat(sep=" ", timespec="seconds")
+        except TypeError:
+            return value.isoformat()
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return ""
+        return f"{numeric:.6g}"
+    text = str(value).strip()
+    return "" if text.lower() == "nan" else text
+
+
+def _word_key_values(row: pd.Series, columns: Sequence[str]) -> List[Tuple[str, str]]:
+    values: List[Tuple[str, str]] = []
+    for column in columns:
+        if column not in row.index:
+            continue
+        value = row.get(column)
+        if not _word_has_value(value):
+            continue
+        formatted = _word_format_value(value)
+        if formatted:
+            values.append((_word_label(column), formatted))
+    return values
+
+
+def _word_sample_title(row: pd.Series, fallback_index: int) -> str:
+    composition = _word_format_value(row.get("Composition"))
+    microwire = _word_format_value(row.get("Microwire"))
+    title = " ".join(part for part in (composition, microwire) if part).strip()
+    if title:
+        return title
+    return f"Sample {fallback_index + 1}"
+
+
+def _word_report_filename(row: pd.Series, fallback_index: int) -> str:
+    title = _word_sample_title(row, fallback_index).replace("/", "-")
+    return f"{_safe_plot_stem(title).replace(' ', '_')}.docx"
+
+
+def _word_run(text: str, *, bold: bool = False, size: int | None = None) -> str:
+    props: List[str] = []
+    if bold:
+        props.append("<w:b/>")
+    if size is not None:
+        props.append(f'<w:sz w:val="{int(size)}"/>')
+    prop_xml = f"<w:rPr>{''.join(props)}</w:rPr>" if props else ""
+    return f"<w:r>{prop_xml}<w:t>{_word_xml_escape(text)}</w:t></w:r>"
+
+
+def _word_paragraph(
+    text: str = "",
+    *,
+    bold: bool = False,
+    size: int | None = None,
+    spacing_after: int = 160,
+    bookmark_name: str | None = None,
+    bookmark_id: int | None = None,
+) -> str:
+    ppr = f'<w:pPr><w:spacing w:after="{int(spacing_after)}"/></w:pPr>'
+    bookmark_start = ""
+    bookmark_end = ""
+    if bookmark_name and bookmark_id is not None:
+        safe_name = re.sub(r"[^A-Za-z0-9_]", "_", bookmark_name)
+        bookmark_start = f'<w:bookmarkStart w:id="{int(bookmark_id)}" w:name="{safe_name}"/>'
+        bookmark_end = f'<w:bookmarkEnd w:id="{int(bookmark_id)}"/>'
+    return f"<w:p>{ppr}{bookmark_start}{_word_run(text, bold=bold, size=size)}{bookmark_end}</w:p>"
+
+
+def _word_table(rows: Sequence[Tuple[str, str]]) -> str:
+    if not rows:
+        return ""
+    border = (
+        '<w:top w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:left w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:right w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
+        '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
+    )
+    table_rows: List[str] = []
+    for label, value in rows:
+        label_cell = (
+            '<w:tc><w:tcPr><w:tcW w:w="2600" w:type="dxa"/>'
+            '<w:shd w:fill="F3F4F6"/></w:tcPr>'
+            f'{_word_paragraph(label, bold=True, spacing_after=0)}</w:tc>'
+        )
+        value_cell = (
+            '<w:tc><w:tcPr><w:tcW w:w="6200" w:type="dxa"/></w:tcPr>'
+            f'{_word_paragraph(value, spacing_after=0)}</w:tc>'
+        )
+        table_rows.append(f"<w:tr>{label_cell}{value_cell}</w:tr>")
+    return (
+        "<w:tbl>"
+        '<w:tblPr><w:tblW w:w="0" w:type="auto"/>'
+        f"<w:tblBorders>{border}</w:tblBorders>"
+        '<w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="90" w:type="dxa"/>'
+        '<w:bottom w:w="90" w:type="dxa"/><w:right w:w="90" w:type="dxa"/></w:tblCellMar>'
+        "</w:tblPr>"
+        f"{''.join(table_rows)}"
+        "</w:tbl>"
+        + _word_paragraph("", spacing_after=120)
+    )
+
+
+def _word_section(title: str, rows: Sequence[Tuple[str, str]]) -> str:
+    if not rows:
+        return ""
+    return _word_paragraph(title, bold=True, size=28, spacing_after=120) + _word_table(rows)
+
+
+def _word_origin_sections(
+    row: pd.Series,
+    origin_artifacts: Mapping[str, OriginArtifact],
+    bookmark_start: int,
+) -> Tuple[str, List[WordOleInsertion], int]:
+    parts: List[str] = []
+    insertions: List[WordOleInsertion] = []
+    bookmark_id = bookmark_start
+    for column in ORIGIN_FIGURE_COLUMNS:
+        if column not in row.index:
+            continue
+        for descriptor in _asset_references(row.get(column)):
+            artifact = origin_artifacts.get(descriptor)
+            label = _word_label(column)
+            display = artifact.display_text if artifact and artifact.display_text else descriptor
+            parts.append(_word_paragraph(f"{label}: {display}", bold=True, spacing_after=60))
+            bookmark_name = f"OriginGraph{bookmark_id}"
+            parts.append(
+                _word_paragraph(
+                    f"[Origin object placeholder: {descriptor}]",
+                    spacing_after=220,
+                    bookmark_name=bookmark_name,
+                    bookmark_id=bookmark_id,
+                )
+            )
+            if artifact is not None and artifact.object_path is not None:
+                insertions.append(
+                    WordOleInsertion(
+                        bookmark_name=bookmark_name,
+                        object_path=Path(artifact.object_path),
+                        label=display or descriptor,
+                        clipboard_fallback=bool(getattr(artifact, "clipboard_fallback", False)),
+                    )
+                )
+            bookmark_id += 1
+    if not parts:
+        parts.append(_word_paragraph("No Origin graph objects were generated for this sample."))
+    return "".join(parts), insertions, bookmark_id
+
+
+def _word_document_xml(
+    row: pd.Series,
+    fallback_index: int,
+    origin_artifacts: Mapping[str, OriginArtifact],
+) -> Tuple[str, List[WordOleInsertion]]:
+    title = _word_sample_title(row, fallback_index)
+    body: List[str] = [
+        _word_paragraph(title, bold=True, size=40, spacing_after=220),
+        _word_section("Sample summary", _word_key_values(row, _WORD_SAMPLE_SUMMARY_COLUMNS)),
+        _word_section("Fabrication and dimensions", _word_key_values(row, _WORD_FABRICATION_COLUMNS)),
+        _word_section("Transition and current-density values", _word_key_values(row, _WORD_TRANSITION_COLUMNS)),
+        _word_section("Mechanical values", _word_key_values(row, _WORD_MECHANICAL_COLUMNS)),
+        _word_section("Measurement references", _word_key_values(row, _WORD_GRAPH_REFERENCE_COLUMNS)),
+        _word_paragraph("Origin graph objects", bold=True, size=28, spacing_after=120),
+    ]
+    origin_xml, insertions, _ = _word_origin_sections(row, origin_artifacts, 1)
+    body.append(origin_xml)
+    body.append(
+        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="900" w:right="900" w:bottom="900" w:left="900" '
+        'w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+    )
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{''.join(body)}</w:body></w:document>"
+    )
+    return xml, insertions
+
+
+def _write_word_docx(path: Path, document_xml: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '<Override PartName="/word/styles.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+        '<Override PartName="/word/settings.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
+        '<Override PartName="/docProps/core.xml" '
+        'ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+        '<Override PartName="/docProps/app.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+        "</Types>"
+    )
+    root_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="word/document.xml"/>'
+        '<Relationship Id="rId2" '
+        'Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" '
+        'Target="docProps/core.xml"/>'
+        '<Relationship Id="rId3" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" '
+        'Target="docProps/app.xml"/>'
+        "</Relationships>"
+    )
+    document_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+        'Target="styles.xml"/>'
+        '<Relationship Id="rId2" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" '
+        'Target="settings.xml"/>'
+        "</Relationships>"
+    )
+    styles = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+        '<w:name w:val="Normal"/><w:qFormat/></w:style>'
+        "</w:styles>"
+    )
+    settings = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:defaultTabStop w:val="720"/></w:settings>'
+    )
+    created = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    core_props = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:dcterms="http://purl.org/dc/terms/" '
+        'xmlns:dcmitype="http://purl.org/dc/dcmitype/" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+        "<dc:title>Microwire sample report</dc:title>"
+        "<dc:creator>PyPlot Microwire Data Builder</dc:creator>"
+        f'<dcterms:created xsi:type="dcterms:W3CDTF">{created}</dcterms:created>'
+        f'<dcterms:modified xsi:type="dcterms:W3CDTF">{created}</dcterms:modified>'
+        "</cp:coreProperties>"
+    )
+    app_props = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
+        'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+        "<Application>PyPlot</Application></Properties>"
+    )
+    with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", root_rels)
+        archive.writestr("word/document.xml", document_xml)
+        archive.writestr("word/_rels/document.xml.rels", document_rels)
+        archive.writestr("word/styles.xml", styles)
+        archive.writestr("word/settings.xml", settings)
+        archive.writestr("docProps/core.xml", core_props)
+        archive.writestr("docProps/app.xml", app_props)
+
+
+def _embed_origin_objects_with_word(
+    docx_path: Path,
+    insertions: Sequence[WordOleInsertion],
+    log: logging.Logger,
+) -> None:
+    if not insertions:
+        return
+    docx_path = docx_path.resolve()
+    if os.name != "nt":
+        log.warning("Word OLE embedding is only available on Windows; left placeholders in %s", docx_path)
+        return
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        log.warning("PowerShell is unavailable; left Origin placeholders in %s", docx_path)
+        return
+    payload = [
+        {
+            "bookmark": insertion.bookmark_name,
+            "path": str(insertion.object_path),
+            "label": insertion.label,
+            "clipboard_fallback": bool(insertion.clipboard_fallback),
+        }
+        for insertion in insertions
+        if insertion.object_path.exists()
+    ]
+    if not payload:
+        log.warning("No saved Origin object files were available for %s", docx_path)
+        return
+    script = r"""
+param(
+    [Parameter(Mandatory=$true)][string]$DocxPath,
+    [Parameter(Mandatory=$true)][string]$PayloadPath
+)
+$ErrorActionPreference = 'Stop'
+$items = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$word = $null
+$doc = $null
+try {
+    $word = New-Object -ComObject Word.Application
+    $word.Visible = $false
+    $doc = $word.Documents.Open($DocxPath)
+    foreach ($item in @($items)) {
+        if (-not (Test-Path -LiteralPath $item.path)) {
+            continue
+        }
+        if (-not $doc.Bookmarks.Exists($item.bookmark)) {
+            continue
+        }
+        $bookmark = $doc.Bookmarks.Item($item.bookmark)
+        $range = $bookmark.Range
+        $range.Text = ""
+        $shape = $null
+        $lastError = $null
+        foreach ($classType in @("Origin95.Graph", "Origin.Graph", "")) {
+            try {
+                $shape = $doc.InlineShapes.AddOLEObject([string]$classType, [string]$item.path, $false, $false, "", 0, [string]$item.label, $range)
+                break
+            } catch {
+                $lastError = $_
+            }
+        }
+        if ($shape -eq $null) {
+            if ($item.clipboard_fallback) {
+                $range.Paste() | Out-Null
+                $shape = $range.InlineShapes.Item(1)
+            } else {
+                throw $lastError
+            }
+        }
+        try {
+            $shape.LockAspectRatio = $true
+            if ($shape.Width -gt 430) {
+                $shape.Width = 430
+            }
+        } catch {
+        }
+    }
+    $doc.Save()
+} finally {
+    if ($doc -ne $null) {
+        $doc.Close($true) | Out-Null
+    }
+    if ($word -ne $null) {
+        $word.Quit() | Out-Null
+    }
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="pyplot-word-ole-") as tmp:
+        tmp_path = Path(tmp)
+        payload_path = tmp_path / "insertions.json"
+        script_path = tmp_path / "embed_origin_objects.ps1"
+        payload_path.write_text(json.dumps(payload), encoding="utf-8")
+        script_path.write_text(script, encoding="utf-8")
+        completed = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_path),
+                "-DocxPath",
+                str(docx_path),
+                "-PayloadPath",
+                str(payload_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        log.warning("Failed to embed Origin objects into %s: %s", docx_path, detail or completed.returncode)
+
+
+def _export_word_reports(
+    dataframe: pd.DataFrame,
+    output_dir: Path,
+    origin_artifacts: Mapping[str, OriginArtifact],
+    log: logging.Logger,
+) -> List[Path]:
+    if dataframe.empty:
+        return []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    reports: List[Path] = []
+    used_names: Set[str] = set()
+    for index, (_, row) in enumerate(dataframe.reset_index(drop=True).iterrows()):
+        filename = _word_report_filename(row, index)
+        stem = Path(filename).stem
+        suffix = Path(filename).suffix or ".docx"
+        candidate = filename
+        duplicate_index = 2
+        while candidate.lower() in used_names:
+            candidate = f"{stem}_{duplicate_index}{suffix}"
+            duplicate_index += 1
+        used_names.add(candidate.lower())
+        report_path = output_dir / candidate
+        document_xml, insertions = _word_document_xml(row, index, origin_artifacts)
+        _write_word_docx(report_path, document_xml)
+        try:
+            _embed_origin_objects_with_word(report_path, insertions, log)
+        except Exception:
+            log.exception("Failed to run Word OLE embedding for %s", report_path)
+        reports.append(report_path)
+    return reports
+
+
+def export_word_reports(
+    dataframe: pd.DataFrame,
+    output_dir: Path | str,
+    *,
+    origin_artifacts: Mapping[str, OriginArtifact] | None = None,
+    logger: logging.Logger | None = None,
+) -> List[Path]:
+    """Write one Word sample report per row without requiring the Builder UI."""
+
+    log = logger if logger is not None else logging.getLogger(LOGGER_NAME)
+    return _export_word_reports(
+        dataframe,
+        Path(output_dir),
+        origin_artifacts or {},
+        log,
+    )
 
 
 def _embed_plots_in_excel_openpyxl(
@@ -5661,12 +6268,20 @@ def build_database(
                     ocr_highlights.setdefault(column, set()).add(row_index)
         stats.rows_built += 1
     if rows:
-        df_out = pd.DataFrame(rows, columns=output_columns)
+        df_full = pd.DataFrame(rows, columns=output_columns)
     else:
-        df_out = pd.DataFrame(columns=output_columns)
+        df_full = pd.DataFrame(columns=output_columns)
     column_filter = getattr(config, "column_filter", None)
     column_order = getattr(config, "column_order", None)
     sort_spec = getattr(config, "sort_spec", None)
+    df_word, _ = _apply_output_preferences(
+        df_full,
+        column_filter=None,
+        column_order=None,
+        sort_spec=sort_spec,
+        highlight_map=None,
+    )
+    df_out = df_full
     df_out, ocr_highlights = _apply_output_preferences(
         df_out,
         column_filter=column_filter,
@@ -5690,6 +6305,7 @@ def build_database(
             if config.export_formats
             else ()
         )
+    word_reports: List[Path] = []
     behaviours = {
         (key.lower() if isinstance(key, str) else ""): str(value).lower()
         for key, value in (config.export_behaviour or {}).items()
@@ -5800,6 +6416,16 @@ def build_database(
                 except Exception:
                     log.exception("Failed to embed figure images into %s", excel_path)
             exports["excel"] = excel_path
+        elif fmt_lower in {"word", "docx", "word_reports"}:
+            report_dir = output_dir / f"{output_name}_{WORD_REPORT_DIR_NAME}"
+            word_reports = _export_word_reports(
+                df_word,
+                report_dir,
+                origin_artifacts,
+                log,
+            )
+            if word_reports:
+                exports["word"] = report_dir
         else:
             log.warning("Unsupported export format '%s'; skipping", fmt)
     log.info(
@@ -5827,6 +6453,7 @@ def build_database(
         stats=stats,
         microscope_crops=microscope_crop_map if include_crops else {},
         ocr_highlights=ocr_highlights if highlight_ocr else {},
+        word_reports=word_reports,
     )
 
 
@@ -5835,6 +6462,7 @@ __all__ = [
     "BuildResult",
     "BuildStats",
     "OriginArtifact",
+    "WordOleInsertion",
     "FabricationIndex",
     "StrainRecord",
     "VsmHysteresisRecord",
@@ -5854,9 +6482,17 @@ __all__ = [
     "SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN",
     "SHAPE_MEMORY_FRACTURE_STRESS_COLUMN",
     "FMR_COLUMN",
+    "RVT_FILE_COLUMN",
+    "RVT_GRAPH_COLUMN",
+    "RVT_ORIGIN_COLUMN",
+    "RVT_POINT_COUNT_COLUMN",
+    "RVT_TEMPERATURE_RANGE_COLUMN",
+    "RVT_RESISTANCE_RANGE_COLUMN",
     "build_database",
     "build_fabrication_index",
+    "export_word_reports",
     "_compute_ea_from_composition",
     "LOGGER_NAME",
     "DEFAULT_OUTPUT_NAME",
+    "WORD_REPORT_DIR_NAME",
 ]

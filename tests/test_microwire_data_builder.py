@@ -3808,6 +3808,98 @@ def test_build_database_origin_backend(tmp_path: Path, monkeypatch: pytest.Monke
     assert pd.isna(row[core.STRAIN_COLUMN])
 
 
+def test_word_report_export_embeds_available_origin_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 1_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+
+    def fake_origin(
+        df: pd.DataFrame,
+        source: Path,
+        origin_dir: Path,
+        log: logging.Logger | None,
+    ) -> OriginArtifact:
+        origin_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = origin_dir / f"{source.stem}.oggu"
+        artifact_path.write_bytes(b"origin graph object")
+        return OriginArtifact(
+            descriptor=artifact_path.name,
+            object_path=artifact_path,
+            display_text=f"Origin graph for {source.stem}",
+        )
+
+    captured_insertions: list[tuple[Path, list[core.WordOleInsertion]]] = []
+
+    def fake_embed(
+        docx_path: Path,
+        insertions: list[core.WordOleInsertion],
+        log: logging.Logger,
+    ) -> None:
+        captured_insertions.append((docx_path, list(insertions)))
+
+    monkeypatch.setattr(core, "_plot_measurement_origin", fake_origin)
+    monkeypatch.setattr(core, "_embed_origin_objects_with_word", fake_embed)
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[high, low],
+            output_dir=tmp_path / "out",
+            make_plots=True,
+            plot_backends=("origin",),
+            export_formats=("word",),
+            column_filter=("Composition", "Microwire"),
+        )
+    )
+
+    assert "word" in result.exports
+    assert result.exports["word"].is_dir()
+    assert len(result.word_reports) == 1
+    assert result.word_reports[0].name == "Ni55Fe18Ga27_1-1.docx"
+    assert len(captured_insertions) == 1
+    assert captured_insertions[0][0] == result.word_reports[0]
+    assert {item.object_path.name for item in captured_insertions[0][1]} == {
+        f"{high.stem}.oggu",
+        f"{low.stem}.oggu",
+    }
+
+    from zipfile import ZipFile
+
+    with ZipFile(result.word_reports[0], "r") as archive:
+        names = set(archive.namelist())
+        assert "word/document.xml" in names
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+
+    assert "Ni55Fe18Ga27 1/1" in document_xml
+    assert "Sample summary" in document_xml
+    assert "Origin graph objects" in document_xml
+    assert "Origin object placeholder" in document_xml
+
+
+def test_assembly_export_dialog_word_reports_enable_origin(qtbot) -> None:
+    dialog = builder_ui._AssemblyExportDialog(
+        output_dir=".",
+        output_name="microwire_database",
+        export_csv=False,
+        export_excel=False,
+        export_html=False,
+        export_word=False,
+        export_matplotlib=False,
+        export_origin=False,
+    )
+    qtbot.addWidget(dialog)
+
+    dialog.word_checkbox.setChecked(True)
+
+    settings = dialog.export_settings()
+    assert settings["export_word"] is True
+    assert settings["export_origin"] is True
+
+
 def test_build_database_groups_all_non_anchor_measurements_into_other_bucket(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
