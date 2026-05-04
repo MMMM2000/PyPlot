@@ -540,6 +540,23 @@ def test_preload_length_setup_calculates_l0_from_tensile_stage_delta(tmp_path: P
         _close_test_window(window)
 
 
+def test_restore_cleans_chained_run_suffix_from_saved_log_name(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("log_name", "Ni50Fe27Ga23 12_2 test_run04_run02_run02")
+    settings.sync()
+
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    qtbot.addWidget(window)
+
+    try:
+        assert window.edit_log_name.text() == "Ni50Fe27Ga23 12_2 test"
+        assert settings.value("log_name") == "Ni50Fe27Ga23 12_2 test"
+    finally:
+        _close_test_window(window)
+
+
 def test_starting_length_prompt_updates_stiffness_prior_length(
     tmp_path: Path,
     qtbot,
@@ -1959,6 +1976,30 @@ def test_setup_preload_correction_step_uses_setup_speed_interval(tmp_path: Path,
         )
 
         assert window._seek_step_mm(error_value=5.0, tolerance=0.25) == pytest.approx(0.25)
+    finally:
+        _close_test_window(window)
+
+
+def test_output_folder_open_button_opens_current_log_dir(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    opened: list[str] = []
+
+    def _capture_open(url: QtCore.QUrl) -> bool:
+        opened.append(url.toLocalFile())
+        return True
+
+    monkeypatch.setattr(mini_dma_mod.QtGui.QDesktopServices, "openUrl", _capture_open)
+    window.edit_log_dir.setText(str(tmp_path / "new-output"))
+
+    try:
+        window._open_log_dir()
+
+        assert [Path(path) for path in opened] == [tmp_path / "new-output"]
+        assert (tmp_path / "new-output").is_dir()
     finally:
         _close_test_window(window)
 
@@ -3862,6 +3903,56 @@ def test_seek_overshoot_uses_fine_reverse_correction(tmp_path: Path, qtbot) -> N
         _close_test_window(window)
 
 
+def test_load_seek_accepts_near_target_crossing_without_reverse_hunt(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_initial_length.setValue(20.0)
+    window.spin_distribution_nudge_mm.setValue(0.1)
+    window.spin_backlash_mm.setValue(0.03)
+    window._calibrated_stiffness_g_per_mm = 10.0
+    window._calibrated_stiffness_length_mm = 20.0
+    window._current_position_mm = 1.0
+    window._current_position_steps = 100
+    window._last_move_target_mm = 1.0
+    window._last_move_direction = -1.0
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        window._latest_scale_value_g = 0.0
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        ) is False
+        _wait_for_tic_commands(window)
+
+        window._latest_scale_value_g = -5.35
+        window._latest_scale_timestamp = time.time()
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        ) is True
+        _wait_for_tic_commands(window)
+
+        assert controller.targets == [90]
+        assert "reverse correction skipped" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -3894,7 +3985,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
         )
         _wait_for_tic_commands(window)
 
-        window._latest_scale_value_g = -6.0
+        window._latest_scale_value_g = -20.0
         window._latest_scale_timestamp = time.time()
         window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_LOAD_G,

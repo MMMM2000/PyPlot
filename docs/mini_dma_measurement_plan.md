@@ -2,6 +2,8 @@
 
 This note is the working plan for turning Mini DMA from a manual bring-up logger into a practical measurement workflow for copper-wire tests and real microwires.
 
+The detailed control-law reference for ramp speed, target seeking, live stiffness scaling, predictive corrections, and iso-load/iso-stress/iso-strain servo hold is `docs/mini_dma_speed_control.md`.
+
 ## What Already Works
 
 - Scale communication: G&G balance on serial, including live real-gram reads and zero-load reference capture.
@@ -49,6 +51,8 @@ Target experiment:
 - Scheduled CSV logging should never be the reason a long iso-load/stress run stops; if a row is due while the controller is still waiting for fresh post-move scale feedback, the row is deferred and the control loop continues.
 - After a current ramp finishes, the settle step must reacquire the requested load/stress/strain target before the recipe advances to the next plateau; otherwise the next stress level would start from a mechanically wrong state.
 - Load/stress target-ramp and hold movement should use one target-stage-speed ceiling, with dynamic balancing choosing the actual speed from target error, recent load/stress trend, stiffness, backlash state, and the 4-5 Hz force-feedback cadence.
+- The detailed speed-control reference in `docs/mini_dma_speed_control.md` should be kept aligned with the code whenever ramp, seek, or hold logic changes.
+- Near target, the controller should avoid immediate reversal if the target was crossed by less than the physical reversal band. With backlash and slow scale feedback, one small overshoot is better than repeatedly taking up backlash and hunting around the target.
 - A wire break during a current sweep should stop immediately when the supply is at voltage limit and measured current collapses near zero, then offer displacement recovery instead of treating the event as a normal voltage-limit unwind.
 - Log resistance, current, voltage, stress, strain, load, displacement, and phase/step labels.
 - For the HMP4030, treat current as 0.2 mA-resolution setpoints below 1 A; the software should time the ramp from elapsed time and keep supply readbacks paced so reads do not slow current updates.

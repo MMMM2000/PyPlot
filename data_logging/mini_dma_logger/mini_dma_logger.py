@@ -241,7 +241,7 @@ def _mini_dma_settings() -> QtCore.QSettings:
 
 
 def _session_paths_for_basename(directory: Path, basename: str) -> tuple[Path, Path, Path, Path]:
-    run_dir = directory / (basename.strip() or DEFAULT_LOG_BASENAME)
+    run_dir = directory / ((basename or "").strip() or DEFAULT_LOG_BASENAME)
     return (
         run_dir / SESSION_MEASUREMENT_TX,
         run_dir / SESSION_MEASUREMENT_CSV,
@@ -264,16 +264,26 @@ def _session_paths_exist(paths: Sequence[Path]) -> bool:
         base_dir / f"{basename}.json",
         base_dir / f"{basename}.scale_raw.csv",
     )
-    return any(path.exists() for path in legacy_paths)
+    if any(path.exists() for path in legacy_paths):
+        return True
+    run_prefix = f"{basename}_run"
+    return any(
+        sibling.name.startswith(run_prefix) and RUN_SUFFIX_PATTERN.search(sibling.name)
+        for sibling in base_dir.glob(f"{basename}_run*")
+    )
 
 
 def _session_setup_paths_for_measurement(txt_path: Path) -> tuple[Path, Path]:
     return txt_path.parent / SESSION_SETUP_TX, txt_path.parent / SESSION_SETUP_CSV
 
 
+def _clean_session_basename(basename: str) -> str:
+    clean_basename = (basename or "").strip() or DEFAULT_LOG_BASENAME
+    return RUN_SUFFIX_PATTERN.sub("", clean_basename).strip() or DEFAULT_LOG_BASENAME
+
+
 def _next_run_session_paths(directory: Path, basename: str) -> tuple[str, tuple[Path, Path, Path, Path]]:
-    clean_basename = basename.strip() or DEFAULT_LOG_BASENAME
-    clean_basename = RUN_SUFFIX_PATTERN.sub("", clean_basename).strip() or DEFAULT_LOG_BASENAME
+    clean_basename = _clean_session_basename(basename)
     for run_number in range(2, 10000):
         candidate = f"{clean_basename}_run{run_number:02d}"
         candidate_paths = _session_paths_for_basename(directory, candidate)
@@ -2782,6 +2792,9 @@ class MainWindow(QtWidgets.QMainWindow):
         browse_button = QtWidgets.QPushButton("Browse", logging_box)
         browse_button.clicked.connect(self._choose_log_dir)
         log_dir_buttons.addWidget(browse_button)
+        open_button = QtWidgets.QPushButton("Open", logging_box)
+        open_button.clicked.connect(self._open_log_dir)
+        log_dir_buttons.addWidget(open_button)
         logging_form.addRow("Output folder", log_dir_buttons)
 
         self.edit_log_name = QtWidgets.QLineEdit(logging_box)
@@ -5685,6 +5698,49 @@ class MainWindow(QtWidgets.QMainWindow):
         reversal_cost = abs(float(sensitivity)) * abs(float(backlash_takeup_mm))
         return abs(float(error_value)) > abs(float(tolerance)) + reversal_cost
 
+    def _reversal_acceptance_tolerance(
+        self,
+        basis: str,
+        tolerance: float,
+        *,
+        seek_key: tuple[str, int, float],
+    ) -> float:
+        base = abs(float(tolerance))
+        if self._automation_step_note == "setup_preload":
+            base *= 4.0
+        else:
+            base *= 2.0
+        sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        if sensitivity is not None and math.isfinite(float(sensitivity)) and abs(float(sensitivity)) > 0.0:
+            step_value = abs(float(sensitivity)) * self._motor_step_mm()
+            backlash_value = abs(float(sensitivity)) * max(0.0, float(self.spin_backlash_mm.value()))
+            base = max(base, step_value * 1.5, backlash_value)
+        return base
+
+    def _target_reversal_is_practical_hold(
+        self,
+        basis: str,
+        error_value: float,
+        tolerance: float,
+        *,
+        seek_key: tuple[str, int, float],
+    ) -> bool:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
+            return False
+        return abs(float(error_value)) <= self._reversal_acceptance_tolerance(
+            basis,
+            tolerance,
+            seek_key=seek_key,
+        )
+
+    def _clear_seek_state(self, seek_key: tuple[str, int, float]) -> None:
+        self._seek_last_error_by_key.pop(seek_key, None)
+        self._seek_last_value_by_key.pop(seek_key, None)
+        self._seek_last_time_by_key.pop(seek_key, None)
+        self._seek_last_effective_position_by_key.pop(seek_key, None)
+        self._seek_no_response_count_by_key.pop(seek_key, None)
+        self._seek_travel_by_key.pop(seek_key, None)
+
     def _seek_step_mm(self, error_value: float, tolerance: float, *, basis: str | None = None) -> float:
         if self._automation_name == RECOVERY_LOAD:
             interval_s = self._seek_decision_interval_s(basis)
@@ -6063,12 +6119,7 @@ class MainWindow(QtWidgets.QMainWindow):
             seek_key=seek_key,
         )
         if abs(delta_value) <= effective_tolerance:
-            self._seek_last_error_by_key.pop(seek_key, None)
-            self._seek_last_value_by_key.pop(seek_key, None)
-            self._seek_last_time_by_key.pop(seek_key, None)
-            self._seek_last_effective_position_by_key.pop(seek_key, None)
-            self._seek_no_response_count_by_key.pop(seek_key, None)
-            self._seek_travel_by_key.pop(seek_key, None)
+            self._clear_seek_state(seek_key)
             return True
         if self._maybe_start_setup_zero_plateau_fallback(basis, current_value, effective_tolerance):
             return False
@@ -6091,6 +6142,18 @@ class MainWindow(QtWidgets.QMainWindow):
         previous_error = self._seek_last_error_by_key.get(seek_key)
         overshot_target = previous_error is not None and previous_error * delta_value < 0.0
         if overshot_target:
+            if self._target_reversal_is_practical_hold(
+                basis,
+                delta_value,
+                effective_tolerance,
+                seek_key=seek_key,
+            ):
+                self._clear_seek_state(seek_key)
+                self._log(
+                    "Load/stress target accepted after crossing target; "
+                    "reverse correction skipped inside the physical reversal band."
+                )
+                return True
             nudge_mm = max(self._motor_step_mm(), self._seek_nudge_mm() * 0.25)
             self._seek_no_response_count_by_key[seek_key] = 0
             self._log(
@@ -6134,12 +6197,7 @@ class MainWindow(QtWidgets.QMainWindow):
             backlash_takeup_mm,
             seek_key=seek_key,
         ):
-            self._seek_last_error_by_key.pop(seek_key, None)
-            self._seek_last_value_by_key.pop(seek_key, None)
-            self._seek_last_time_by_key.pop(seek_key, None)
-            self._seek_last_effective_position_by_key.pop(seek_key, None)
-            self._seek_no_response_count_by_key.pop(seek_key, None)
-            self._seek_travel_by_key.pop(seek_key, None)
+            self._clear_seek_state(seek_key)
             self._log(
                 "Load/stress target accepted within backlash-limited tolerance; "
                 "reversal skipped because take-up would be larger than the predicted improvement."
@@ -6937,7 +6995,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _session_base_paths(self) -> tuple[Path, Path, Path, Path]:
         directory = Path(self.edit_log_dir.text().strip() or _default_download_dir())
         directory.mkdir(parents=True, exist_ok=True)
-        basename = self.edit_log_name.text().strip() or DEFAULT_LOG_BASENAME
+        basename = _clean_session_basename(self.edit_log_name.text())
+        if basename != self.edit_log_name.text().strip():
+            self.edit_log_name.setText(basename)
         return _session_paths_for_basename(directory, basename)
 
     def _ask_existing_output_action(self, paths: Sequence[Path]) -> str:
@@ -6973,7 +7033,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return paths
         if action == OUTPUT_COLLISION_NEXT:
             directory = paths[0].parent.parent
-            basename = self.edit_log_name.text().strip() or DEFAULT_LOG_BASENAME
+            basename = _clean_session_basename(self.edit_log_name.text())
             next_basename, next_paths = _next_run_session_paths(directory, basename)
             self.edit_log_name.setText(next_basename)
             self._log(f"Existing output preserved; using next run filename {next_basename}.")
@@ -9749,6 +9809,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if new_dir:
             self.edit_log_dir.setText(new_dir)
 
+    def _open_log_dir(self) -> None:
+        directory = Path(self.edit_log_dir.text().strip() or _default_download_dir()).expanduser()
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Output folder",
+                f"Could not create output folder:\n{directory}\n\n{exc}",
+            )
+            return
+        if not QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(directory))):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Output folder",
+                f"Could not open output folder:\n{directory}",
+            )
+
     def _save_settings(self) -> None:
         self.settings.setValue("scale_port", self.combo_scale_port.currentData() or "")
         self.settings.setValue("scale_baud", self.combo_scale_baud.currentText())
@@ -9806,7 +9884,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._provided_log_dir and log_dir_to_save == self._provided_log_dir:
             log_dir_to_save = self._restored_log_dir or log_dir_to_save
         self.settings.setValue("log_dir", log_dir_to_save)
-        self.settings.setValue("log_name", self.edit_log_name.text())
+        self.settings.setValue("log_name", _clean_session_basename(self.edit_log_name.text()))
         self.settings.setValue("tare_on_start", self.check_tare_on_start.isChecked())
         self.settings.setValue("capture_zero_load_reference_on_start", self.check_hardware_tare_on_start.isChecked())
         self.settings.setValue("developer_run_log_mirror_enabled", self._run_log_mirror_enabled)
@@ -10019,7 +10097,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_log_dir.setText(self._provided_log_dir)
         else:
             self.edit_log_dir.setText(restored_log_dir)
-        self.edit_log_name.setText(self.settings.value("log_name", DEFAULT_LOG_BASENAME, type=str))
+        saved_log_name = self.settings.value("log_name", DEFAULT_LOG_BASENAME, type=str)
+        cleaned_log_name = _clean_session_basename(saved_log_name)
+        self.edit_log_name.setText(cleaned_log_name)
+        if cleaned_log_name != (saved_log_name or "").strip():
+            self.settings.setValue("log_name", cleaned_log_name)
         self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
         self.check_zero_position_on_start.setChecked(False)
         self.check_tare_on_start.setChecked(
