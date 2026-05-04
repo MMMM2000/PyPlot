@@ -4,6 +4,10 @@ The AC Susceptibility Logger combines the existing current annealing ramp with a
 GW Instek LCR-6200/LCR-6000 series meter. The first three logfile columns remain
 compatible with current annealing plots:
 
+For the full hardware/code handoff, including driver setup, probe results,
+verified commands, and next experimental steps, see
+`docs/ac_susceptibility_handoff.md`.
+
 ```text
 Current (mA)    Voltage (V)    Resistance (Ohm)
 ```
