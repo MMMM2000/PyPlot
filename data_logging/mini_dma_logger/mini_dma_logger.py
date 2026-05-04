@@ -129,9 +129,10 @@ DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 SETUP_ZERO_FALLBACK_MIN_POINTS = 6
 SETUP_ZERO_FALLBACK_MIN_TRAVEL_MM = 0.5
-SETUP_ZERO_FALLBACK_RAW_SPAN_G = 0.005
+SETUP_ZERO_FALLBACK_RAW_SPAN_G = 0.012
 SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
 SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
+SETUP_PRELOAD_TAKEUP_LOAD_G = 0.03
 MIN_RESISTANCE_CURRENT_MA = 0.05
 SUPPLY_READ_MIN_INTERVAL_S = DEFAULT_SUPPLY_READ_INTERVAL_MS / 1000.0
 RECOVERY_POSITION = "recovery_position"
@@ -184,7 +185,7 @@ CALIBRATION_BASELINE = "calibration_baseline"
 CALIBRATION_PRELOAD = "calibration_preload"
 CALIBRATION_FORWARD = "calibration_forward"
 CALIBRATION_REVERSE = "calibration_reverse"
-CALIBRATION_DEFAULTS_VERSION = 3
+CALIBRATION_DEFAULTS_VERSION = 4
 SERVO_CORRECTION_GAIN = 0.75
 SERVO_LIVE_STIFFNESS_ALPHA = 0.35
 SERVO_NOISE_SIGMA = 3.0
@@ -192,6 +193,7 @@ SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S = 1.5
 SERVO_CURRENT_SWEEP_RATE_GAIN = 1.2
 SERVO_FULL_SPEED_ERROR_RATIO = 8.0
 SERVO_MOTION_SETTLE_AFTER_MOVE_S = 0.05
+SERVO_AUTO_TOLERANCE_LOAD_G = 0.005
 WIRE_BREAK_MIN_SETPOINT_MA = 5.0
 WIRE_BREAK_MAX_MEASURED_MA = 0.5
 WIRE_BREAK_VOLTAGE_LIMIT_FRACTION = 0.95
@@ -1985,6 +1987,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._diameter_imported = False
         self._builder_import_in_progress = False
         self._plot_tiles: list[PlotTileWidgets] = []
+        self._dashboard_value_labels: dict[str, QtWidgets.QLabel] = {}
         self._control_scroll_area: QtWidgets.QScrollArea | None = None
         self._manual_jog_direction = 0.0
         self._manual_jog_last_tick_s: float | None = None
@@ -2173,6 +2176,49 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(label)
         return row, label
 
+    def _hide_form_row(self, form: QtWidgets.QFormLayout, field: QtWidgets.QWidget) -> None:
+        field.setVisible(False)
+        label = form.labelForField(field)
+        if label is not None:
+            label.setVisible(False)
+
+    def _build_dashboard_value_cell(
+        self,
+        parent: QtWidgets.QWidget,
+        key: str,
+        title: str,
+        *,
+        min_width: int = 118,
+    ) -> QtWidgets.QFrame:
+        cell = QtWidgets.QFrame(parent)
+        cell.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        cell.setMinimumWidth(min_width)
+        cell.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        layout = QtWidgets.QVBoxLayout(cell)
+        layout.setContentsMargins(8, 5, 8, 5)
+        layout.setSpacing(2)
+        title_label = QtWidgets.QLabel(title, cell)
+        title_label.setStyleSheet("color: palette(text);")
+        value_label = QtWidgets.QLabel("-", cell)
+        value_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        value_font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
+        value_font.setFixedPitch(True)
+        value_label.setFont(value_font)
+        value_label.setMinimumWidth(max(70, min_width - 24))
+        value_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        self._dashboard_value_labels[key] = value_label
+        return cell
+
+    def _set_dashboard_value(self, key: str, text: str) -> None:
+        label = self._dashboard_value_labels.get(key)
+        if label is not None:
+            label.setText(text)
+
     def _build_ui(self, log_dir: str) -> None:
         install_standard_menu(self, open_folder=self._choose_log_dir)
         self._install_mini_dma_settings_menu()
@@ -2207,56 +2253,23 @@ class MainWindow(QtWidgets.QMainWindow):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(10)
 
-        self.overview_section = CollapsibleSection("Overview", expanded=False, parent=control_panel)
-        overview_layout = self.overview_section.content_layout
-        overview_label = QtWidgets.QLabel(
-            "Mini DMA is a hardware-driven stress/strain logger for your small stepper stage and "
-            "serial balance. The current build is focused on safe mechanical probing, repeatable "
-            "displacement-controlled recipes, and output compatible with the Shape Memory Stress/Strain workflow."
-        )
-        overview_label.setWordWrap(True)
-        overview_layout.addWidget(overview_label)
-        self.label_session_status = QtWidgets.QLabel("Session idle")
-        overview_layout.addWidget(self.label_session_status)
-        self.label_live_summary = QtWidgets.QLabel("Live strain: - | Live stress: -")
-        overview_layout.addWidget(self.label_live_summary)
-        self.label_live_speed = QtWidgets.QLabel("Command speed: -")
-        self.label_live_speed.setWordWrap(True)
-        overview_layout.addWidget(self.label_live_speed)
-        cards_grid = QtWidgets.QGridLayout()
-        cards_grid.setContentsMargins(0, 4, 0, 0)
-        cards_grid.setHorizontalSpacing(8)
-        cards_grid.setVerticalSpacing(8)
-        session_card, self.label_card_session = self._build_status_card(
-            "Session",
-            "Idle",
-            "No active run.",
-            "#2ca02c",
-        )
-        scale_card, self.label_card_scale = self._build_status_card(
-            "Scale",
-            "Disconnected",
-            "COM link not active.",
-            "#1f77b4",
-        )
-        motion_card, self.label_card_motion = self._build_status_card(
-            "Motion",
-            "Unknown",
-            "Tic status not queried yet.",
-            "#ff7f0e",
-        )
-        recipe_card, self.label_card_recipe = self._build_status_card(
-            "Recipe",
-            "Manual",
-            "Ready for ramp, cycle, or hold control.",
-            "#9467bd",
-        )
-        cards_grid.addWidget(session_card, 0, 0)
-        cards_grid.addWidget(scale_card, 0, 1)
-        cards_grid.addWidget(motion_card, 1, 0)
-        cards_grid.addWidget(recipe_card, 1, 1)
-        overview_layout.addLayout(cards_grid)
-        controls.addWidget(self.overview_section)
+        self.label_session_status = QtWidgets.QLabel("Session idle", control_panel)
+        self.label_live_summary = QtWidgets.QLabel("Live strain: - | Live stress: -", control_panel)
+        self.label_live_speed = QtWidgets.QLabel("Command speed: -", control_panel)
+        self.label_card_session = QtWidgets.QLabel("Idle", control_panel)
+        self.label_card_scale = QtWidgets.QLabel("Disconnected", control_panel)
+        self.label_card_motion = QtWidgets.QLabel("Unknown", control_panel)
+        self.label_card_recipe = QtWidgets.QLabel("Manual", control_panel)
+        for hidden_status_label in (
+            self.label_session_status,
+            self.label_live_summary,
+            self.label_live_speed,
+            self.label_card_session,
+            self.label_card_scale,
+            self.label_card_motion,
+            self.label_card_recipe,
+        ):
+            hidden_status_label.setVisible(False)
 
         tabs = QtWidgets.QTabWidget(control_panel)
         tabs.setMinimumWidth(0)
@@ -2947,16 +2960,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_setup_preload_tolerance_mpa,
         )
         strain_setup_form.addRow("Setup preload tolerance", setup_tolerance_row)
+        self._hide_form_row(strain_setup_form, setup_tolerance_row)
         self.spin_setup_zero_tolerance_g = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_zero_tolerance_g.setDecimals(4)
         self.spin_setup_zero_tolerance_g.setRange(0.0001, 1000.0)
-        self.spin_setup_zero_tolerance_g.setValue(0.02)
+        self.spin_setup_zero_tolerance_g.setValue(SERVO_AUTO_TOLERANCE_LOAD_G)
         self.spin_setup_zero_tolerance_g.setSuffix(" g")
         setup_zero_tolerance_row, self.label_setup_zero_tolerance_equiv = self._spin_with_equivalent_label(
             self.strain_setup_box,
             self.spin_setup_zero_tolerance_g,
         )
         strain_setup_form.addRow("Setup zero-load tolerance", setup_zero_tolerance_row)
+        self._hide_form_row(strain_setup_form, setup_zero_tolerance_row)
+        self.spin_setup_zero_tolerance_g.hide()
+        self.label_setup_zero_tolerance_equiv.hide()
         self.spin_setup_zero_stable_s = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_zero_stable_s.setDecimals(2)
         self.spin_setup_zero_stable_s.setRange(0.0, 60.0)
@@ -3112,6 +3129,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_distribution_tolerance,
         )
         distribution_form.addRow("Target tolerance", distribution_tolerance_row)
+        self._hide_form_row(distribution_form, distribution_tolerance_row)
         self.spin_distribution_nudge_mm = CompactDoubleSpinBox(automation_box)
         self.spin_distribution_nudge_mm.setDecimals(4)
         self.spin_distribution_nudge_mm.setRange(0.0001, 10.0)
@@ -3203,13 +3221,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_calibration_tolerance_g = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_tolerance_g.setDecimals(4)
         self.spin_calibration_tolerance_g.setRange(0.0001, 10.0)
-        self.spin_calibration_tolerance_g.setValue(0.02)
+        self.spin_calibration_tolerance_g.setValue(SERVO_AUTO_TOLERANCE_LOAD_G)
         self.spin_calibration_tolerance_g.setSuffix(" g")
         calibration_tolerance_row, self.label_calibration_tolerance_equiv = self._spin_with_equivalent_label(
             automation_box,
             self.spin_calibration_tolerance_g,
         )
         calibration_form.addRow("Load tolerance", calibration_tolerance_row)
+        self._hide_form_row(calibration_form, calibration_tolerance_row)
         self.spin_calibration_settle_s = CompactDoubleSpinBox(automation_box)
         self.spin_calibration_settle_s.setDecimals(2)
         self.spin_calibration_settle_s.setRange(0.0, 60.0)
@@ -3352,6 +3371,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_tolerance,
         )
         current_sweep_form.addRow("Hold tolerance", current_tolerance_row)
+        self._hide_form_row(current_sweep_form, current_tolerance_row)
         self.spin_current_sweep_nudge_mm = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_nudge_mm.setDecimals(4)
         self.spin_current_sweep_nudge_mm.setRange(0.0001, 10.0)
@@ -3524,6 +3544,7 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_layout.setSpacing(6)
 
         hero_box = QtWidgets.QFrame(plot_panel)
+        self.dashboard_header = hero_box
         hero_box.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         hero_layout = QtWidgets.QHBoxLayout(hero_box)
         hero_layout.setContentsMargins(12, 10, 12, 10)
@@ -3559,17 +3580,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_plot_setup = QtWidgets.QPushButton("Configure plots", hero_box)
         self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
         hero_layout.addWidget(self.button_plot_setup)
-        self.label_live_speed_header = QtWidgets.QLabel("Command speed: -", hero_box)
-        self.label_live_speed_header.setWordWrap(True)
-        self.label_live_speed_header.setAlignment(
-            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+
+        self.dashboard_status_box = QtWidgets.QFrame(hero_box)
+        status_layout = QtWidgets.QGridLayout(self.dashboard_status_box)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setHorizontalSpacing(8)
+        status_layout.setVerticalSpacing(6)
+        status_cells = (
+            ("session", "Session", 122),
+            ("load_g", "Load", 112),
+            ("stress_mpa", "Stress", 118),
+            ("strain_pct", "Strain", 112),
+            ("speed_mm_s", "mm/s", 112),
+            ("speed_g_s", "g/s", 112),
+            ("speed_mpa_s", "MPa/s", 112),
+            ("speed_pct_s", "%/s", 112),
+            ("scale", "Scale", 132),
+            ("motor", "Motor", 150),
+            ("supply", "Supply", 132),
+            ("recipe", "Recipe", 150),
         )
-        self.label_live_speed_header.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Preferred,
-        )
-        hero_layout.addWidget(self.label_live_speed_header, stretch=1)
-        hero_layout.addStretch(1)
+        for index, (key, title, min_width) in enumerate(status_cells):
+            row = index // 6
+            column = index % 6
+            status_layout.addWidget(
+                self._build_dashboard_value_cell(
+                    self.dashboard_status_box,
+                    key,
+                    title,
+                    min_width=min_width,
+                ),
+                row,
+                column,
+            )
+            status_layout.setColumnStretch(column, 1)
+        hero_layout.addWidget(self.dashboard_status_box, stretch=1)
         self.label_recipe_banner = QtWidgets.QLabel("Manual mode", hero_box)
         self.label_recipe_banner.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
@@ -3578,6 +3623,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
+        self.label_recipe_banner.setVisible(False)
         hero_layout.addWidget(self.label_recipe_banner)
         plot_layout.addWidget(hero_box, stretch=0)
 
@@ -5524,10 +5570,15 @@ class MainWindow(QtWidgets.QMainWindow):
         scaled = max(0.0, min(1.0, scaled))
         return scaled * scaled * (3.0 - 2.0 * scaled)
 
-    def _live_speed_summary_text(self) -> str:
+    def _live_speed_values(self) -> dict[str, float | None]:
         speed_mm_s = abs(float(self._last_commanded_speed_mm_s))
         if speed_mm_s <= 0.0:
-            return "Command speed: -"
+            return {
+                "speed_mm_s": None,
+                "load_rate_g_s": None,
+                "stress_rate_mpa_s": None,
+                "strain_rate_pct_s": None,
+            }
         stiffness = self._seek_live_stiffness_g_per_mm
         if stiffness is None or not math.isfinite(float(stiffness)) or float(stiffness) <= 0.0:
             stiffness = self._stored_calibration_stiffness_g_per_mm()
@@ -5539,6 +5590,18 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         length_mm = max(0.001, float(self.spin_initial_length.value()))
         strain_rate_pct_s = abs(speed_mm_s * 100.0 / length_mm)
+        return {
+            "speed_mm_s": speed_mm_s,
+            "load_rate_g_s": load_rate_g_s,
+            "stress_rate_mpa_s": stress_rate_mpa_s,
+            "strain_rate_pct_s": strain_rate_pct_s,
+        }
+
+    def _live_speed_summary_text(self) -> str:
+        speed_values = self._live_speed_values()
+        speed_mm_s = speed_values["speed_mm_s"]
+        if speed_mm_s is None:
+            return "Command speed: -"
 
         def _rate_text(value: float | None, unit: str) -> str:
             if value is None or not math.isfinite(float(value)):
@@ -5547,10 +5610,37 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return (
             f"Command speed: {_format_compact_number(speed_mm_s)} mm/s | "
-            f"{_rate_text(load_rate_g_s, 'g/s')} | "
-            f"{_rate_text(stress_rate_mpa_s, 'MPa/s')} | "
-            f"{_rate_text(strain_rate_pct_s, '%/s')}"
+            f"{_rate_text(speed_values['load_rate_g_s'], 'g/s')} | "
+            f"{_rate_text(speed_values['stress_rate_mpa_s'], 'MPa/s')} | "
+            f"{_rate_text(speed_values['strain_rate_pct_s'], '%/s')}"
         )
+
+    def _auto_requested_tolerance_for_basis(self, basis: str | None) -> float:
+        if basis == HSW_BASIS_LOAD_G:
+            return SERVO_AUTO_TOLERANCE_LOAD_G
+        if basis == HSW_BASIS_STRESS_MPA:
+            stress_tolerance = stress_mpa_from_load_g(
+                SERVO_AUTO_TOLERANCE_LOAD_G,
+                float(self.spin_diameter.value()),
+            )
+            return 0.0 if stress_tolerance is None else abs(float(stress_tolerance))
+        if basis == HSW_BASIS_STRAIN_PCT:
+            return 0.0
+        return SERVO_AUTO_TOLERANCE_LOAD_G
+
+    def _auto_tolerance_summary_text(self, basis: str | None) -> str:
+        tolerance = self._auto_requested_tolerance_for_basis(basis)
+        suffix, decimals = self._distribution_units(basis)
+        if basis == HSW_BASIS_LOAD_G:
+            return f"{_format_compact_number(tolerance)} g minimum"
+        if basis == HSW_BASIS_STRESS_MPA:
+            return (
+                f"{_format_compact_number(tolerance, decimals=decimals)}{suffix} "
+                f"from {_format_compact_number(SERVO_AUTO_TOLERANCE_LOAD_G)} g minimum"
+            )
+        if basis == HSW_BASIS_STRAIN_PCT:
+            return "motor-step/noise floor"
+        return f"{_format_compact_number(SERVO_AUTO_TOLERANCE_LOAD_G)} g minimum"
 
     def _distribution_target_reached(self, basis: str, target_value: float, tolerance: float) -> bool:
         current_value = self._current_distribution_value(basis)
@@ -5645,13 +5735,29 @@ class MainWindow(QtWidgets.QMainWindow):
         delta_value: float,
         effective_tolerance: float,
     ) -> bool:
-        return (
-            self._automation_phase == "target_ramp"
-            and self._automation_step_note == "setup_preload"
-            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
-            and delta_value > 0.0
-            and abs(float(current_value)) <= abs(float(effective_tolerance))
-        )
+        if (
+            self._automation_phase != "target_ramp"
+            or self._automation_step_note != "setup_preload"
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            or delta_value <= 0.0
+        ):
+            return False
+        current_load_g = self._basis_value_as_load_g(basis, current_value)
+        if current_load_g is not None:
+            load_noise_g = (
+                0.0
+                if self._calibrated_load_noise_g is None
+                or not math.isfinite(float(self._calibrated_load_noise_g))
+                else abs(float(self._calibrated_load_noise_g))
+            )
+            takeup_threshold_g = max(
+                SETUP_PRELOAD_TAKEUP_LOAD_G,
+                SERVO_AUTO_TOLERANCE_LOAD_G * 4.0,
+                load_noise_g * SERVO_NOISE_SIGMA,
+            )
+            if abs(float(current_load_g)) <= takeup_threshold_g:
+                return True
+        return abs(float(current_value)) <= abs(float(effective_tolerance))
 
     def _basis_noise_floor(
         self,
@@ -5864,6 +5970,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_name == RECOVERY_LOAD:
             return max(self._minimum_held_speed_mm_s(), base_speed)
         if (
+            current_value is not None
+            and basis is not None
+            and self._setup_preload_takeup_active(
+                basis,
+                current_value,
+                error_value,
+                tolerance,
+            )
+        ):
+            return max(self._minimum_held_speed_mm_s(), base_speed)
+        if (
             self._is_current_sweep_mode(self._automation_name)
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}
         ):
@@ -5934,19 +6051,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return basis, plateau, round(float(target_value), 9)
 
     def _automation_tolerance_for_step(self, step: AutomationStep) -> float:
-        if step.note in {"setup_zero", "setup_return_zero"} and step.basis == HSW_BASIS_LOAD_G:
-            return abs(float(self.spin_setup_zero_tolerance_g.value()))
-        if step.note == "setup_preload" and step.basis == HSW_BASIS_STRESS_MPA:
-            return abs(float(self.spin_setup_preload_tolerance_mpa.value()))
-        if self._is_calibration_mode(self._automation_name) and step.basis == HSW_BASIS_LOAD_G:
-            return abs(float(self.spin_calibration_tolerance_g.value()))
-        return abs(
-            float(
-                self.spin_current_sweep_tolerance.value()
-                if self._is_current_sweep_mode(self._automation_name)
-                else self.spin_distribution_tolerance.value()
-            )
-        )
+        return self._auto_requested_tolerance_for_basis(step.basis)
 
     def _log_waiting_for_feedback(self, message: str) -> None:
         now_s = time.monotonic()
@@ -6012,7 +6117,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._setup_zero_fallback_return_position_mm is not None:
             return True
         residual_load_g = abs(float(current_value))
-        if residual_load_g <= max(float(tolerance), SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G):
+        min_plateau_residual_g = SERVO_AUTO_TOLERANCE_LOAD_G
+        if residual_load_g < min_plateau_residual_g:
             return False
         if residual_load_g > max(SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G, float(tolerance) * 5.0):
             return False
@@ -6025,22 +6131,21 @@ class MainWindow(QtWidgets.QMainWindow):
         raw_tolerance_g = max(SETUP_ZERO_FALLBACK_RAW_SPAN_G, float(tolerance) * 0.25)
         if raw_span_g > raw_tolerance_g:
             return False
-        recent_positions = [point.raw_position_mm for point in recent_points]
-        travel_mm = max(recent_positions) - min(recent_positions)
+        plateau_raw_g = 0.5 * (min(recent_raw_values) + max(recent_raw_values))
+        plateau_residual_g = abs(self._effective_load_from_raw_g(plateau_raw_g))
+        if plateau_residual_g < min_plateau_residual_g:
+            return False
+        plateau_points = [
+            point for point in return_points if abs(point.raw_load_g - plateau_raw_g) <= raw_tolerance_g
+        ]
+        if len(plateau_points) < SETUP_ZERO_FALLBACK_MIN_POINTS:
+            return False
+        plateau_positions = [point.raw_position_mm for point in plateau_points]
+        travel_mm = max(plateau_positions) - min(plateau_positions)
         min_travel_mm = max(SETUP_ZERO_FALLBACK_MIN_TRAVEL_MM, self._motor_step_mm() * 5.0)
         if abs(travel_mm) < min_travel_mm:
             return False
-        plateau_raw_g = _median(recent_raw_values)
-        if plateau_raw_g is None:
-            return False
-        plateau_residual_g = abs(self._effective_load_from_raw_g(plateau_raw_g))
-        if plateau_residual_g <= max(float(tolerance), SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G):
-            return False
-        plateau_first_position_mm: float | None = None
-        for point in return_points:
-            if abs(point.raw_load_g - plateau_raw_g) <= raw_tolerance_g:
-                plateau_first_position_mm = float(point.raw_position_mm)
-                break
+        plateau_first_position_mm = float(plateau_points[0].raw_position_mm)
         if plateau_first_position_mm is None:
             return False
 
@@ -6110,7 +6215,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if target_load_g > max(tolerance_load_g, SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G):
             return False
         residual_load_g = abs(self._current_effective_load_g())
-        if residual_load_g <= max(tolerance_load_g, SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G):
+        min_plateau_residual_g = SERVO_AUTO_TOLERANCE_LOAD_G
+        if residual_load_g < min_plateau_residual_g:
             return False
         if residual_load_g > max(SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G, tolerance_load_g * 5.0):
             return False
@@ -6123,22 +6229,21 @@ class MainWindow(QtWidgets.QMainWindow):
         raw_tolerance_g = max(SETUP_ZERO_FALLBACK_RAW_SPAN_G, tolerance_load_g * 0.25)
         if raw_span_g > raw_tolerance_g:
             return False
-        recent_positions = [point.raw_position_mm for point in recent_points]
-        travel_mm = max(recent_positions) - min(recent_positions)
+        plateau_raw_g = 0.5 * (min(recent_raw_values) + max(recent_raw_values))
+        plateau_residual_g = abs(self._effective_load_from_raw_g(plateau_raw_g))
+        if plateau_residual_g < min_plateau_residual_g:
+            return False
+        plateau_points = [
+            point for point in return_points if abs(point.raw_load_g - plateau_raw_g) <= raw_tolerance_g
+        ]
+        if len(plateau_points) < SETUP_ZERO_FALLBACK_MIN_POINTS:
+            return False
+        plateau_positions = [point.raw_position_mm for point in plateau_points]
+        travel_mm = max(plateau_positions) - min(plateau_positions)
         min_travel_mm = max(SETUP_ZERO_FALLBACK_MIN_TRAVEL_MM, self._motor_step_mm() * 5.0)
         if abs(travel_mm) < min_travel_mm:
             return False
-        plateau_raw_g = _median(recent_raw_values)
-        if plateau_raw_g is None:
-            return False
-        plateau_residual_g = abs(self._effective_load_from_raw_g(plateau_raw_g))
-        if plateau_residual_g <= max(tolerance_load_g, SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G):
-            return False
-        plateau_first_position_mm: float | None = None
-        for point in return_points:
-            if abs(point.raw_load_g - plateau_raw_g) <= raw_tolerance_g:
-                plateau_first_position_mm = float(point.raw_position_mm)
-                break
+        plateau_first_position_mm = float(plateau_points[0].raw_position_mm)
         if plateau_first_position_mm is None:
             return False
 
@@ -6203,13 +6308,13 @@ class MainWindow(QtWidgets.QMainWindow):
             tolerance,
             seek_key=seek_key,
         )
-        if abs(delta_value) <= effective_tolerance:
-            self._clear_seek_state(seek_key)
-            return True
         if self._maybe_start_setup_zero_plateau_fallback(basis, current_value, effective_tolerance):
             return False
         if self._maybe_start_end_zero_plateau_fallback(basis, target_value, effective_tolerance):
             return False
+        if abs(delta_value) <= effective_tolerance:
+            self._clear_seek_state(seek_key)
+            return True
         if self._setup_preload_takeup_active(basis, current_value, delta_value, effective_tolerance):
             nudge_mm = self._seek_speed_limited_step_mm(
                 basis,
@@ -6355,8 +6460,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.check_distribution_return_sweep.isChecked():
                 summary += " Includes a reverse sweep."
             summary += (
-                f" Target tolerance {_format_compact_number(self.spin_distribution_tolerance.value())}{suffix} "
-                f"with {_format_compact_unit(self.spin_distribution_nudge_mm.value(), 'mm')} correction steps and "
+                f" Automatic tolerance {self._auto_tolerance_summary_text(basis)} with "
                 f"{_format_compact_unit(self.spin_distribution_settle_s.value(), 's', decimals=2)} settling."
             )
             banner = "Hsw plateau scan"
@@ -6404,7 +6508,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.check_current_sweep_return_target.isChecked():
                 summary += " Target returns to start."
             summary += (
-                f" Hold tolerance {_format_compact_number(self.spin_current_sweep_tolerance.value())}{suffix}, "
+                f" Automatic hold tolerance {self._auto_tolerance_summary_text(basis)}, "
                 f"settle {_format_compact_unit(self.spin_current_sweep_settle_s.value(), 's', decimals=2)}."
             )
             if basis == HSW_BASIS_LOAD_G:
@@ -7285,7 +7389,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "start_load_g": float(self.spin_calibration_start_load_g.value()),
             "end_load_g": float(self.spin_calibration_end_load_g.value()),
             "load_step_g": float(self.spin_calibration_load_step_g.value()),
-            "tolerance_g": float(self.spin_calibration_tolerance_g.value()),
+            "tolerance_g": self._auto_requested_tolerance_for_basis(HSW_BASIS_LOAD_G),
+            "tolerance_mode": "automatic",
             "settle_s": float(self.spin_calibration_settle_s.value()),
             "preload_nudge_mm": float(self.spin_calibration_preload_nudge_mm.value()),
             "preload_speed_mm_s": float(self.spin_calibration_preload_speed_mm_s.value()),
@@ -7376,7 +7481,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "start": float(self.spin_distribution_start.value()),
                 "end": float(self.spin_distribution_end.value()),
                 "step": float(self.spin_distribution_step.value()),
-                "tolerance": float(self.spin_distribution_tolerance.value()),
+                "tolerance": self._auto_requested_tolerance_for_basis(self._distribution_basis()),
+                "tolerance_mode": "automatic",
                 "seek_nudge_mm": float(self.spin_distribution_nudge_mm.value()),
                 "settle_s": float(self.spin_distribution_settle_s.value()),
                 "points_per_plateau": int(self.spin_distribution_points.value()),
@@ -7391,8 +7497,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "pre_measurement_setup_enabled": self._pre_measurement_setup_enabled(),
                 "setup_preload_stress_mpa": float(self.spin_setup_preload_stress_mpa.value()),
                 "setup_preload_ramp_rate_mpa_s": float(self.spin_setup_preload_ramp_rate_mpa_s.value()),
-                "setup_preload_tolerance_mpa": float(self.spin_setup_preload_tolerance_mpa.value()),
-                "setup_zero_tolerance_g": float(self.spin_setup_zero_tolerance_g.value()),
+                "setup_preload_tolerance_mpa": self._auto_requested_tolerance_for_basis(HSW_BASIS_STRESS_MPA),
+                "setup_preload_tolerance_mode": "automatic",
+                "setup_zero_tolerance_g": float(self._auto_requested_tolerance_for_basis(HSW_BASIS_LOAD_G)),
+                "setup_zero_tolerance_mode": "automatic",
                 "setup_zero_stable_s": float(self.spin_setup_zero_stable_s.value()),
                 "setup_starting_length_mm": self._setup_starting_length_mm,
                 "setup_measured_length_mm": self._setup_measured_length_mm,
@@ -7407,7 +7515,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
                 "current_ramp_rate_mA_s": float(self.spin_current_sweep_step_mA.value()),
                 "reverse_current": self.check_current_sweep_reverse_current.isChecked(),
-                "tolerance": float(self.spin_current_sweep_tolerance.value()),
+                "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
+                "tolerance_mode": "automatic",
                 "dynamic_balance_max_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
                 "dynamic_balance_error_gain_per_s": SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S,
                 "dynamic_balance_rate_gain": SERVO_CURRENT_SWEEP_RATE_GAIN,
@@ -9774,19 +9883,42 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         live_speed_text = self._live_speed_summary_text()
         self.label_live_speed.setText(live_speed_text)
-        self.label_live_speed_header.setText(live_speed_text)
         session_value = "Running" if self._session_active else "Idle"
+        self._set_dashboard_value("session", f"{session_value} {len(self._session_points)}")
+        self._set_dashboard_value("load_g", f"{effective_load: .5f}")
+        self._set_dashboard_value(
+            "stress_mpa",
+            "-" if stress is None else f"{stress: .4f}",
+        )
+        self._set_dashboard_value(
+            "strain_pct",
+            "-" if strain is None else f"{strain: .4f}",
+        )
+        speed_values = self._live_speed_values()
+
+        def _dashboard_rate_text(value: float | None) -> str:
+            if value is None or not math.isfinite(float(value)):
+                return "-"
+            return f"{float(value): .4g}"
+
+        self._set_dashboard_value("speed_mm_s", _dashboard_rate_text(speed_values["speed_mm_s"]))
+        self._set_dashboard_value("speed_g_s", _dashboard_rate_text(speed_values["load_rate_g_s"]))
+        self._set_dashboard_value("speed_mpa_s", _dashboard_rate_text(speed_values["stress_rate_mpa_s"]))
+        self._set_dashboard_value("speed_pct_s", _dashboard_rate_text(speed_values["strain_rate_pct_s"]))
         self.label_card_session.setText(
             f"{session_value} | {len(self._session_points)} point(s)"
         )
         if self._latest_scale_timestamp is None:
             scale_value = "No readings yet"
+            self._set_dashboard_value("scale", "-")
         else:
             age_s = self._scale_reading_age_s() or 0.0
             freshness = "stale" if age_s > STALE_SCALE_AFTER_S else "live"
             recent_rate = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
             rate_suffix = "" if recent_rate is None else f" | {recent_rate:.1f} Hz"
             scale_value = f"{effective_load:.4f} g | {freshness} {age_s:.1f} s{rate_suffix}"
+            rate_cell_text = "-" if recent_rate is None else f"{recent_rate: .1f} Hz"
+            self._set_dashboard_value("scale", f"{freshness} {rate_cell_text}")
         self.label_card_scale.setText(scale_value)
         vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
         if self._tic_motor_power_ok is False:
@@ -9803,6 +9935,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if preload_state == PRELOAD_PENDING:
             motion_state += f" | preload < {self.spin_preload_threshold_g.value():.4f} g"
         self.label_card_motion.setText(motion_state)
+        self._set_dashboard_value("motor", f"{self._tensile_displacement_mm(self._effective_position_mm): .4f} mm")
         if self._automation_active:
             recipe_state = (
                 f"{self._automation_name} | done {self._automation_index}"
@@ -9815,6 +9948,12 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             recipe_state = str(self.combo_recipe_mode.currentText())
         self.label_card_recipe.setText(recipe_state)
+        self._set_dashboard_value("recipe", recipe_state[:18])
+        supply_current = self._supply_snapshot.get("current_mA")
+        supply_voltage = self._supply_snapshot.get("voltage_V")
+        current_text = "-" if supply_current is None else f"{supply_current: .2f} mA"
+        voltage_text = "-" if supply_voltage is None else f"{supply_voltage: .2f} V"
+        self._set_dashboard_value("supply", f"{current_text}/{voltage_text}")
         self._refresh_supply_live_label()
 
     def _refresh_plots(self) -> None:
@@ -9938,7 +10077,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("scale_interval_ms", self.spin_scale_interval.value())
         self.settings.setValue("scale_request", self.edit_scale_request.text())
         self.settings.setValue("scale_terminator", self.edit_scale_terminator.text())
-        self.settings.setValue("overview_expanded", self.overview_section.is_expanded())
         self.settings.setValue("supply_port", self.combo_supply_port.currentData() or "")
         self.settings.setValue("supply_baud", self.combo_supply_baud.currentText())
         self.settings.setValue("supply_profile", self.combo_supply_profile.currentData() or "hmp4030")
@@ -10038,7 +10176,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("setup_preload_ramp_rate_mpa_s", self.spin_setup_preload_ramp_rate_mpa_s.value())
         self.settings.setValue("setup_stage_speed_mm_s", self.spin_setup_stage_speed_mm_s.value())
         self.settings.setValue("setup_preload_tolerance_mpa", self.spin_setup_preload_tolerance_mpa.value())
-        self.settings.setValue("setup_zero_tolerance_g", self.spin_setup_zero_tolerance_g.value())
+        self.settings.setValue("setup_zero_tolerance_g", SERVO_AUTO_TOLERANCE_LOAD_G)
         self.settings.setValue("setup_zero_stable_s", self.spin_setup_zero_stable_s.value())
         self.settings.setValue("current_sweep_target_start", self.spin_current_sweep_target_start.value())
         self.settings.setValue("current_sweep_target_end", self.spin_current_sweep_target_end.value())
@@ -10074,9 +10212,6 @@ class MainWindow(QtWidgets.QMainWindow):
         saved_scale_interval_ms = int(self.settings.value("scale_interval_ms", DEFAULT_SCALE_REQUEST_INTERVAL_MS))
         scale_request = self.settings.value("scale_request", "\\x1bp", type=str)
         scale_terminator = self.settings.value("scale_terminator", "", type=str)
-        self.overview_section.set_expanded(
-            bool(self.settings.value("overview_expanded", False, type=bool))
-        )
         if baud == "9600" and (not scale_request) and scale_terminator == "\\r\\n":
             baud = "600"
             self.combo_scale_baud.setCurrentText(baud)
@@ -10316,7 +10451,14 @@ class MainWindow(QtWidgets.QMainWindow):
             max(0.001, _calibration_setting_float("calibration_load_step_g", old_default=1.0, new_default=0.25))
         )
         self.spin_calibration_tolerance_g.setValue(
-            max(0.0001, _calibration_setting_float("calibration_tolerance_g", old_default=0.1, new_default=0.02))
+            max(
+                0.0001,
+                _calibration_setting_float(
+                    "calibration_tolerance_g",
+                    old_default=(0.1, 0.02),
+                    new_default=SERVO_AUTO_TOLERANCE_LOAD_G,
+                ),
+            )
         )
         self.spin_calibration_settle_s.setValue(
             max(0.0, _calibration_setting_float("calibration_settle_s", old_default=0.5, new_default=0.25))
@@ -10367,9 +10509,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_setup_preload_tolerance_mpa.setValue(
             max(0.0001, float(self.settings.value("setup_preload_tolerance_mpa", 0.25)))
         )
-        self.spin_setup_zero_tolerance_g.setValue(
-            max(0.0001, float(self.settings.value("setup_zero_tolerance_g", 0.02)))
-        )
+        self.spin_setup_zero_tolerance_g.setValue(SERVO_AUTO_TOLERANCE_LOAD_G)
         self.spin_setup_zero_stable_s.setValue(
             max(0.0, float(self.settings.value("setup_zero_stable_s", 1.0)))
         )

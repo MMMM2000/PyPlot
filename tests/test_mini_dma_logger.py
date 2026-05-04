@@ -1926,7 +1926,7 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
         assert "diameter 0.03 mm" in window.label_recipe_sample.text()
         assert "0.7208 g" in window.label_setup_preload_stress_equiv.text()
         assert "0.07208 g/s" in window.label_setup_preload_ramp_equiv.text()
-        assert "0.2775 MPa" in window.label_setup_zero_tolerance_equiv.text()
+        assert window.spin_setup_zero_tolerance_g.isHidden() is True
         assert "0.7208 g" in window.label_current_target_start_equiv.text()
         assert "0.07208 g/s" in window.label_current_target_ramp_equiv.text()
         assert "palette(mid)" not in window.label_current_target_start_equiv.styleSheet()
@@ -2097,7 +2097,7 @@ def test_setup_preload_target_ramp_uses_elapsed_mpa_rate(
         _close_test_window(window)
 
 
-def test_setup_preload_target_ramp_finishes_inside_configured_tolerance(
+def test_setup_preload_target_ramp_finishes_inside_automatic_tolerance(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -2121,7 +2121,7 @@ def test_setup_preload_target_ramp_finishes_inside_configured_tolerance(
     window.check_tension_load_positive.setChecked(False)
     window.spin_diameter.setValue(0.03)
     window.spin_setup_preload_tolerance_mpa.setValue(0.25)
-    load_g = mini_dma_mod.load_g_from_stress_mpa(10.2, window.spin_diameter.value())
+    load_g = mini_dma_mod.load_g_from_stress_mpa(10.05, window.spin_diameter.value())
     assert load_g is not None
     window._latest_scale_value_g = load_g
     window._latest_scale_timestamp = time.time()
@@ -4125,6 +4125,211 @@ def test_seek_tolerance_floor_uses_stiffness_and_motor_step(tmp_path: Path, qtbo
             mini_dma_mod.HSW_BASIS_LOAD_G,
             requested_tolerance=0.005,
         ) == pytest.approx(0.1)
+    finally:
+        _close_test_window(window)
+
+
+def test_automation_tolerance_uses_automatic_load_floor(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_diameter.setValue(0.02)
+    window.spin_setup_preload_tolerance_mpa.setValue(99.0)
+    window.spin_calibration_tolerance_g.setValue(9.0)
+    window.spin_current_sweep_tolerance.setValue(99.0)
+    window._automation_name = mini_dma_mod.CALIBRATION
+
+    try:
+        setup_step = mini_dma_mod.AutomationStep(
+            "target_ramp",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            note="setup_preload",
+        )
+        calibration_step = mini_dma_mod.AutomationStep(
+            "settle",
+            basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+            note=mini_dma_mod.CALIBRATION_PRELOAD,
+        )
+        stress_tolerance = window._automation_tolerance_for_step(setup_step)
+        load_tolerance = window._automation_tolerance_for_step(calibration_step)
+
+        assert load_tolerance == pytest.approx(0.005)
+        assert stress_tolerance == pytest.approx(
+            mini_dma_mod.stress_mpa_from_load_g(0.005, 0.02)
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_dashboard_uses_fixed_live_value_cells_without_overview(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert not hasattr(window, "overview_section")
+        assert "speed_mm_s" in window._dashboard_value_labels
+        assert "scale" in window._dashboard_value_labels
+        assert window.dashboard_status_box.parentWidget() is window.dashboard_header
+        width = window._dashboard_value_labels["speed_mm_s"].minimumWidth()
+        assert width >= 70
+        assert window._dashboard_value_labels["speed_mm_s"].font().fixedPitch()
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_zero_plateau_fallback_runs_before_target_acceptance(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_zero_load_scale_g.setValue(21.17)
+    window._calibrated_stiffness_g_per_mm = 1.56
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="seek",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=0.0,
+        note="setup_return_zero",
+    )
+    window._setup_return_zero_start_point_index = 0
+    window._current_position_mm = 38.44
+    window._current_position_steps = 3844
+    window._last_move_target_mm = 38.44
+    window._latest_scale_value_g = 21.16
+    window._latest_scale_timestamp = time.time()
+    for index in range(8):
+        raw = 21.165 if index % 2 == 0 else 21.16
+        point = _calibration_point(
+            position_mm=37.65 + index * 0.12,
+            load_g=abs(21.17 - raw),
+            phase="setup_return_zero",
+        )
+        point.raw_load_g = raw
+        window._length_setup_points.append(point)
+
+    moves: list[float] = []
+
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
+        moves.append(target_mm)
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=0.005,
+        )
+
+        assert reached is False
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.1625)
+        assert moves == [pytest.approx(37.65)]
+        assert "Detected zero-load plateau" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_recovery_zero_plateau_fallback_runs_before_target_acceptance(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_zero_load_scale_g.setValue(21.17)
+    window._calibrated_stiffness_g_per_mm = 1.56
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.RECOVERY_LOAD
+    window._set_automation_context(
+        phase="recover",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=0.0,
+        note="0",
+    )
+    window._end_zero_fallback_armed = True
+    window._end_zero_fallback_start_point_index = 0
+    window._current_position_mm = 38.44
+    window._current_position_steps = 3844
+    window._last_move_target_mm = 38.44
+    window._latest_scale_value_g = 21.16
+    window._latest_scale_timestamp = time.time()
+    for index in range(8):
+        raw = 21.165 if index % 2 == 0 else 21.16
+        point = _calibration_point(
+            position_mm=37.65 + index * 0.12,
+            load_g=abs(21.17 - raw),
+            phase="recovery_load",
+        )
+        point.raw_load_g = raw
+        window._recovery_points.append(point)
+
+    moves: list[float] = []
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=0.005,
+        )
+
+        assert reached is False
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.1625)
+        assert moves == [pytest.approx(37.65)]
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_preload_tiny_baseline_load_still_counts_as_slack_takeup(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.target_steps: int | None = None
+            self.max_speed: int | None = None
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.target_steps = position_steps
+            self.max_speed = max_speed
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_steps_per_mm.setValue(10000.0)
+    window.spin_diameter.setValue(0.0137)
+    window.spin_zero_load_scale_g.setValue(21.17)
+    window.spin_scale_interval.setValue(250)
+    window.spin_setup_stage_speed_mm_s.setValue(1.0)
+    window.spin_setup_preload_ramp_rate_mpa_s.setValue(0.5)
+    window._calibrated_stiffness_g_per_mm = 1.56
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        note="setup_preload",
+    )
+    window._current_position_mm = 1.0
+    window._current_position_steps = 10000
+    window._last_move_target_mm = 1.0
+    window._latest_scale_value_g = 21.15
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            tolerance=window._auto_requested_tolerance_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        )
+        _wait_for_tic_commands(window)
+
+        assert reached is False
+        assert controller.target_steps == 7500
+        assert controller.max_speed == 100_000_000
     finally:
         _close_test_window(window)
 

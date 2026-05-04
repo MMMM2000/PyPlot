@@ -58,15 +58,16 @@ Step 9 is important. A balance reply that arrives after the command was sent is 
 
 ## Effective Tolerance
 
-The user-facing tolerance is treated as a lower bound. The effective tolerance used by the servo is automatic: the app raises it when the hardware cannot physically resolve something tighter.
+Load/stress target tolerance is automatic. Mini DMA starts from a small requested load floor of `0.005 g`, converts it to stress when the active basis is MPa, and then raises that request when the hardware cannot physically resolve something tighter.
 
 ```text
+requested_load_floor = 0.005 g
 step_floor = abs(sensitivity) * motor_step_mm
 noise_floor = calibrated_load_noise_g * 3  (converted to MPa when needed)
-effective_tolerance = max(requested_tolerance, step_floor, noise_floor)
+effective_tolerance = max(requested_load_floor_in_current_basis, step_floor, noise_floor)
 ```
 
-For example, if one motor step changes stress by 2 MPa, a 0.25 MPa tolerance is not physically meaningful. The controller must treat a roughly step-sized band as the realistic target region. This is why the operator should not need to retune tolerance for every wire length; the calibrated/live stiffness and motor step size set the real floor.
+For example, if one motor step changes stress by 2 MPa, a 0.25 MPa tolerance is not physically meaningful, and neither is the 0.005 g starting floor. The controller must treat a roughly step-sized band as the realistic target region. This is why the operator should not need to retune tolerance for every wire length; the calibrated/live stiffness and motor step size set the real floor.
 
 ## Stiffness And Sensitivity
 
@@ -178,7 +179,7 @@ This means:
 - the user still has one hard safety ceiling in mm/s.
 - the same smooth landing cap applies near target, so a high ceiling such as 5 mm/s is not used right outside the hold band.
 
-The Overview panel displays the most recent commanded speed as equivalent rates:
+The dashboard header displays the most recent commanded speed in fixed-width cells:
 
 ```text
 mm/s, g/s, MPa/s, %/s
@@ -219,9 +220,11 @@ The setup sequence is:
 5. Ask for measured length at preload.
 6. Return toward zero load and compute `l0`.
 
-Before force starts responding, Mini DMA can use `Setup stage speed` for slack take-up. After force starts responding, it uses the stiffness/ramp-rate model. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full stage-speed-sized correction.
+Before force starts responding, Mini DMA can use `Setup stage speed` for slack take-up. Tiny residual loads near zero are still treated as slack take-up, because a long or bent wire can show a few milligrams of apparent load before it is meaningfully straight. Once applied load rises above the slack-take-up threshold, setup uses the stiffness/ramp-rate model. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full stage-speed-sized correction.
 
 The setup points are saved to `setup.csv` and `setup.txt` in the run folder. If setup jumps or oscillates, inspect `setup.csv` first.
+
+During the post-preload return to zero, Mini DMA watches for a stable raw-balance plateau. If the motor keeps relaxing but the raw balance only fluctuates inside a small flat band, the controller uses the center of that raw band as the corrected zero-load reference for the current run and returns to the first plateau position before computing `l0`. The same plateau fallback is used by final zero-load return and manual load-zero recovery.
 
 ## Backlash And Reversal Rules
 
