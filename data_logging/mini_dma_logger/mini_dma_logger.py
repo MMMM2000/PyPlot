@@ -190,6 +190,8 @@ SERVO_LIVE_STIFFNESS_ALPHA = 0.35
 SERVO_NOISE_SIGMA = 3.0
 SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S = 1.5
 SERVO_CURRENT_SWEEP_RATE_GAIN = 1.2
+SERVO_FULL_SPEED_ERROR_RATIO = 8.0
+SERVO_MOTION_SETTLE_AFTER_MOVE_S = 0.05
 WIRE_BREAK_MIN_SETPOINT_MA = 5.0
 WIRE_BREAK_MAX_MEASURED_MA = 0.5
 WIRE_BREAK_VOLTAGE_LIMIT_FRACTION = 0.95
@@ -1877,6 +1879,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_live_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._seek_travel_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_live_stiffness_g_per_mm: float | None = None
+        self._seek_last_stiffness_value_by_basis: dict[str, float] = {}
+        self._seek_last_stiffness_position_by_basis: dict[str, float] = {}
         self._session_points: list[MeasurementPoint] = []
         self._session_active = False
         self._session_start_monotonic = 0.0
@@ -1987,6 +1992,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_timer_moves = 0
         self._manual_jog_click_suppressed = False
         self._last_motion_command_time_s: float | None = None
+        self._last_motion_expected_complete_time_s: float | None = None
+        self._last_commanded_speed_mm_s = 0.0
         self._last_tic_status_time_s: float | None = None
         self._last_feedback_wait_log_s = 0.0
         self._recovery_plot_dialog: QtWidgets.QDialog | None = None
@@ -2213,6 +2220,9 @@ class MainWindow(QtWidgets.QMainWindow):
         overview_layout.addWidget(self.label_session_status)
         self.label_live_summary = QtWidgets.QLabel("Live strain: - | Live stress: -")
         overview_layout.addWidget(self.label_live_summary)
+        self.label_live_speed = QtWidgets.QLabel("Command speed: -")
+        self.label_live_speed.setWordWrap(True)
+        overview_layout.addWidget(self.label_live_speed)
         cards_grid = QtWidgets.QGridLayout()
         cards_grid.setContentsMargins(0, 4, 0, 0)
         cards_grid.setHorizontalSpacing(8)
@@ -3549,6 +3559,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_plot_setup = QtWidgets.QPushButton("Configure plots", hero_box)
         self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
         hero_layout.addWidget(self.button_plot_setup)
+        self.label_live_speed_header = QtWidgets.QLabel("Command speed: -", hero_box)
+        self.label_live_speed_header.setWordWrap(True)
+        self.label_live_speed_header.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        self.label_live_speed_header.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        hero_layout.addWidget(self.label_live_speed_header, stretch=1)
         hero_layout.addStretch(1)
         self.label_recipe_banner = QtWidgets.QLabel("Manual mode", hero_box)
         self.label_recipe_banner.setAlignment(
@@ -5466,7 +5486,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
 
     def _current_distribution_value(self, basis: str, *, require_after_last_move: bool = False) -> float | None:
-        after_s = self._last_motion_command_time_s if require_after_last_move else None
+        after_s = self._motion_feedback_ready_after_s() if require_after_last_move else None
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading(after_s=after_s):
             return None
         effective_load = self._current_effective_load_g()
@@ -5485,6 +5505,52 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_STRESS_MPA:
             return load_g_from_stress_mpa(abs(float(value)), float(self.spin_diameter.value()))
         return None
+
+    def _motion_feedback_ready_after_s(self) -> float | None:
+        if self._last_motion_command_time_s is None:
+            return None
+        ready_after_s = float(self._last_motion_command_time_s)
+        if self._last_motion_expected_complete_time_s is not None:
+            ready_after_s = max(ready_after_s, float(self._last_motion_expected_complete_time_s))
+        return ready_after_s
+
+    def _servo_landing_factor(self, error_value: float, tolerance: float) -> float:
+        error_ratio = abs(float(error_value)) / max(abs(float(tolerance)), 1e-12)
+        if error_ratio <= 1.0:
+            return 0.0
+        if error_ratio >= SERVO_FULL_SPEED_ERROR_RATIO:
+            return 1.0
+        scaled = (error_ratio - 1.0) / max(1e-9, SERVO_FULL_SPEED_ERROR_RATIO - 1.0)
+        scaled = max(0.0, min(1.0, scaled))
+        return scaled * scaled * (3.0 - 2.0 * scaled)
+
+    def _live_speed_summary_text(self) -> str:
+        speed_mm_s = abs(float(self._last_commanded_speed_mm_s))
+        if speed_mm_s <= 0.0:
+            return "Command speed: -"
+        stiffness = self._seek_live_stiffness_g_per_mm
+        if stiffness is None or not math.isfinite(float(stiffness)) or float(stiffness) <= 0.0:
+            stiffness = self._stored_calibration_stiffness_g_per_mm()
+        load_rate_g_s = None if stiffness is None else abs(speed_mm_s * float(stiffness))
+        stress_rate_mpa_s = (
+            None
+            if load_rate_g_s is None
+            else stress_mpa_from_load_g(load_rate_g_s, float(self.spin_diameter.value()))
+        )
+        length_mm = max(0.001, float(self.spin_initial_length.value()))
+        strain_rate_pct_s = abs(speed_mm_s * 100.0 / length_mm)
+
+        def _rate_text(value: float | None, unit: str) -> str:
+            if value is None or not math.isfinite(float(value)):
+                return f"- {unit}"
+            return f"{_format_compact_number(float(value))} {unit}"
+
+        return (
+            f"Command speed: {_format_compact_number(speed_mm_s)} mm/s | "
+            f"{_rate_text(load_rate_g_s, 'g/s')} | "
+            f"{_rate_text(stress_rate_mpa_s, 'MPa/s')} | "
+            f"{_rate_text(strain_rate_pct_s, '%/s')}"
+        )
 
     def _distribution_target_reached(self, basis: str, target_value: float, tolerance: float) -> bool:
         current_value = self._current_distribution_value(basis)
@@ -5561,6 +5627,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if seek_key is not None:
             stiffness = self._seek_live_stiffness_by_key.get(seek_key)
         if stiffness is None:
+            stiffness = self._seek_live_stiffness_g_per_mm
+        if stiffness is None:
             stiffness = self._stored_calibration_stiffness_g_per_mm()
         if stiffness is None or not math.isfinite(float(stiffness)) or float(stiffness) <= 0.0:
             return None
@@ -5604,6 +5672,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0.0
         return 0.0
 
+    def _remember_live_stiffness(self, load_stiffness_g_per_mm: float) -> None:
+        if not math.isfinite(float(load_stiffness_g_per_mm)) or float(load_stiffness_g_per_mm) <= 0.0:
+            return
+        old = self._seek_live_stiffness_g_per_mm
+        if old is None or old <= 0.0 or not math.isfinite(float(old)):
+            self._seek_live_stiffness_g_per_mm = float(load_stiffness_g_per_mm)
+            return
+        self._seek_live_stiffness_g_per_mm = (
+            (1.0 - SERVO_LIVE_STIFFNESS_ALPHA) * float(old)
+            + SERVO_LIVE_STIFFNESS_ALPHA * float(load_stiffness_g_per_mm)
+        )
+
     def _seek_effective_tolerance(
         self,
         basis: str,
@@ -5615,7 +5695,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or sensitivity <= 0.0:
             return tolerance
-        step_floor = abs(float(sensitivity)) * self._motor_step_mm() * 0.5
+        step_floor = abs(float(sensitivity)) * self._motor_step_mm()
         noise_floor = self._basis_noise_floor(basis, sensitivity_per_mm=sensitivity)
         return max(tolerance, step_floor, noise_floor)
 
@@ -5625,11 +5705,26 @@ class MainWindow(QtWidgets.QMainWindow):
         basis: str,
         current_value: float,
     ) -> None:
+        current_position = self._current_effective_tensile_position_mm()
+        previous_basis_value = self._seek_last_stiffness_value_by_basis.get(basis)
+        previous_basis_position = self._seek_last_stiffness_position_by_basis.get(basis)
+        self._seek_last_stiffness_value_by_basis[basis] = float(current_value)
+        self._seek_last_stiffness_position_by_basis[basis] = float(current_position)
+        if previous_basis_value is not None and previous_basis_position is not None:
+            delta_position = abs(current_position - previous_basis_position)
+            delta_value = abs(float(current_value) - float(previous_basis_value))
+            if delta_position >= self._motor_step_mm() * 0.5 and delta_value > 0.0 and math.isfinite(delta_value):
+                load_stiffness = self._load_stiffness_from_basis_sensitivity(
+                    basis,
+                    delta_value / delta_position,
+                )
+                if load_stiffness is not None:
+                    self._remember_live_stiffness(load_stiffness)
+
         previous_value = self._seek_last_value_by_key.get(seek_key)
         previous_position = self._seek_last_effective_position_by_key.get(seek_key)
         if previous_value is None or previous_position is None:
             return
-        current_position = self._current_effective_tensile_position_mm()
         delta_position = abs(current_position - previous_position)
         if delta_position < self._motor_step_mm() * 0.5:
             return
@@ -5642,11 +5737,13 @@ class MainWindow(QtWidgets.QMainWindow):
         old = self._seek_live_stiffness_by_key.get(seek_key)
         if old is None or old <= 0.0 or not math.isfinite(float(old)):
             self._seek_live_stiffness_by_key[seek_key] = load_stiffness
+            self._remember_live_stiffness(load_stiffness)
             return
         self._seek_live_stiffness_by_key[seek_key] = (
             (1.0 - SERVO_LIVE_STIFFNESS_ALPHA) * float(old)
             + SERVO_LIVE_STIFFNESS_ALPHA * load_stiffness
         )
+        self._remember_live_stiffness(load_stiffness)
 
     def _predictive_seek_step_mm(
         self,
@@ -5744,24 +5841,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_step_mm(self, error_value: float, tolerance: float, *, basis: str | None = None) -> float:
         if self._automation_name == RECOVERY_LOAD:
             interval_s = self._seek_decision_interval_s(basis)
-            return max(
-                self._motor_step_mm(),
-                float(self.spin_motion_speed_mm_s.value()) * interval_s,
-            )
+            max_step_mm = float(self.spin_motion_speed_mm_s.value()) * interval_s
+            return max(self._motor_step_mm(), max_step_mm * self._servo_landing_factor(error_value, tolerance))
         if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
             interval_s = self._seek_decision_interval_s(basis)
-            return max(
-                self._motor_step_mm(),
-                float(self.spin_setup_stage_speed_mm_s.value()) * interval_s,
-            )
+            max_step_mm = float(self.spin_setup_stage_speed_mm_s.value()) * interval_s
+            return max(self._motor_step_mm(), max_step_mm * self._servo_landing_factor(error_value, tolerance))
         max_step_mm = max(self._motor_step_mm(), self._seek_nudge_mm())
-        error_ratio = abs(error_value) / max(tolerance, 1e-12)
-        if error_ratio <= 1.5:
-            factor = 0.25
-        elif error_ratio <= 3.0:
-            factor = 0.5
-        else:
-            factor = 1.0
+        factor = self._servo_landing_factor(error_value, tolerance)
         return max(self._motor_step_mm(), max_step_mm * factor)
 
     def _seek_speed_mm_s(
@@ -5796,17 +5883,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     + SERVO_CURRENT_SWEEP_RATE_GAIN * away_rate
                 )
                 speed_mm_s = requested_value_rate_s / abs(float(sensitivity))
+                landing_cap_mm_s = max(
+                    self._minimum_held_speed_mm_s(),
+                    base_speed * self._servo_landing_factor(error_value, tolerance),
+                )
                 return max(
                     self._minimum_held_speed_mm_s(),
-                    min(base_speed, speed_mm_s),
+                    min(base_speed, landing_cap_mm_s, speed_mm_s),
                 )
-        error_ratio = abs(error_value) / max(tolerance, 1e-12)
-        if error_ratio >= 3.0:
-            factor = 1.0
-        else:
-            scaled = max(0.0, min(1.0, (error_ratio - 1.0) / 2.0))
-            smooth = scaled * scaled * (3.0 - 2.0 * scaled)
-            factor = 0.2 + 0.8 * smooth
+        factor = self._servo_landing_factor(error_value, tolerance)
         return max(self._minimum_held_speed_mm_s(), base_speed * factor)
 
     def _target_ramp_rate_value_s_for_context(self, basis: str) -> float | None:
@@ -6965,6 +7050,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if speed_mm_s is None
             else max(self._minimum_held_speed_mm_s(), float(speed_mm_s))
         )
+        command_base_mm = self._relative_motion_base_mm()
+        expected_duration_s = self._move_duration_s(position_mm - command_base_mm, selected_speed_mm_s)
         max_speed_units = max(1, int(round(selected_speed_mm_s * steps_per_mm * 10000.0)))
         try:
             self._build_tic_dispatcher().set_target_position(target_steps, max_speed=max_speed_units)
@@ -6975,7 +7062,12 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Move command sent to {_format_compact_unit(position_mm, 'mm')} "
             f"({target_steps} steps) at {_format_compact_unit(selected_speed_mm_s, 'mm/s', decimals=3)}."
         )
-        self._last_motion_command_time_s = time.time()
+        command_time_s = time.time()
+        self._last_motion_command_time_s = command_time_s
+        self._last_motion_expected_complete_time_s = (
+            command_time_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
+        )
+        self._last_commanded_speed_mm_s = selected_speed_mm_s
         self._last_commanded_position_steps = target_steps
         self._start_tic_keepalive()
         self._last_effective_move_target_mm = (
@@ -7693,7 +7785,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if require_fresh_after_move is None:
             require_fresh_after_move = self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
-        after_s = self._last_motion_command_time_s if require_fresh_after_move else None
+        after_s = self._motion_feedback_ready_after_s() if require_fresh_after_move else None
         if self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading(after_s=after_s):
             self._log("Point not recorded because load/stress feedback is stale after the last move.")
             if self._automation_active:
@@ -7761,7 +7853,7 @@ class MainWindow(QtWidgets.QMainWindow):
             not force
             and require_fresh_after_move
             and self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
-            and not self._has_fresh_scale_reading(after_s=self._last_motion_command_time_s)
+            and not self._has_fresh_scale_reading(after_s=self._motion_feedback_ready_after_s())
         ):
             self._log_waiting_for_feedback("Waiting for a fresh scale reading before logging the next load/stress point.")
             return True
@@ -8103,6 +8195,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._effective_position_mm = self._current_position_mm
         self._last_effective_move_target_mm = self._effective_position_mm
         self._last_move_direction = 0.0
+        self._last_motion_command_time_s = None
+        self._last_motion_expected_complete_time_s = None
+        self._last_commanded_speed_mm_s = 0.0
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
@@ -8128,6 +8223,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_time_by_key.clear()
         self._seek_last_effective_position_by_key.clear()
         self._seek_live_stiffness_by_key.clear()
+        self._seek_live_stiffness_g_per_mm = None
+        self._seek_last_stiffness_value_by_basis.clear()
+        self._seek_last_stiffness_position_by_basis.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         if not self._session_active:
@@ -8527,6 +8625,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
         self._seek_last_time_by_key.clear()
+        self._seek_last_effective_position_by_key.clear()
+        self._seek_live_stiffness_by_key.clear()
+        self._seek_last_stiffness_value_by_basis.clear()
+        self._seek_last_stiffness_position_by_basis.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         self._active_current_sweep_step_index = None
@@ -9375,7 +9477,7 @@ class MainWindow(QtWidgets.QMainWindow):
         requires_post_move_feedback = step.note in {CALIBRATION_FORWARD, CALIBRATION_REVERSE}
         if (
             requires_post_move_feedback
-            and not self._has_fresh_scale_reading(after_s=self._last_motion_command_time_s)
+            and not self._has_fresh_scale_reading(after_s=self._motion_feedback_ready_after_s())
         ):
             self._log_waiting_for_feedback("Waiting for a fresh scale reading before recording calibration point.")
             return False
@@ -9670,6 +9772,9 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Live stress: {'-' if stress is None else f'{stress:.4f} MPa'}"
             f" | Heating: {'off' if not self._supply_output_enabled else f'{self._supply_last_setpoint_mA or 0.0:.2f} mA'}"
         )
+        live_speed_text = self._live_speed_summary_text()
+        self.label_live_speed.setText(live_speed_text)
+        self.label_live_speed_header.setText(live_speed_text)
         session_value = "Running" if self._session_active else "Idle"
         self.label_card_session.setText(
             f"{session_value} | {len(self._session_points)} point(s)"

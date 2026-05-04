@@ -52,19 +52,21 @@ Load, stress, and strain seeking are closed-loop. A correction cycle is:
 6. Choose a speed.
 7. Apply backlash/reversal rules.
 8. Send one motor move.
-9. Wait for move completion and fresh feedback before deciding again.
+9. Wait until the commanded move should be physically complete, add a small settle margin, then wait for fresh scale feedback before deciding again.
+
+Step 9 is important. A balance reply that arrives after the command was sent is not enough if the stage is still moving. Otherwise the controller can stack several corrections before the wire has actually responded, which appears as large near-target jumps.
 
 ## Effective Tolerance
 
-The user can request a tolerance, but the app raises it when the hardware cannot physically resolve something tighter.
+The user-facing tolerance is treated as a lower bound. The effective tolerance used by the servo is automatic: the app raises it when the hardware cannot physically resolve something tighter.
 
 ```text
-step_floor = abs(sensitivity) * motor_step_mm * 0.5
+step_floor = abs(sensitivity) * motor_step_mm
 noise_floor = calibrated_load_noise_g * 3  (converted to MPa when needed)
 effective_tolerance = max(requested_tolerance, step_floor, noise_floor)
 ```
 
-For example, if one motor step changes stress by 2 MPa, a 0.25 MPa tolerance is not physically meaningful. The controller must treat a wider band as the realistic target region.
+For example, if one motor step changes stress by 2 MPa, a 0.25 MPa tolerance is not physically meaningful. The controller must treat a roughly step-sized band as the realistic target region. This is why the operator should not need to retune tolerance for every wire length; the calibrated/live stiffness and motor step size set the real floor.
 
 ## Stiffness And Sensitivity
 
@@ -104,6 +106,8 @@ live_stiffness = (1 - alpha) * old_live_stiffness + alpha * observed_stiffness
 
 Only moves large enough to be meaningful are used. Tiny moves below about half a motor step are ignored.
 
+The live stiffness is kept both for the exact target currently being chased and as a run-level stiffness estimate. That matters during ramps, where the desired target changes every tick. Without the run-level estimate, the controller would forget what it learned at intermediate ramp targets and then behave as if stiffness were unknown at the final settle.
+
 ## Predictive Correction Distance
 
 When sensitivity is available, Mini DMA estimates the correction distance:
@@ -123,7 +127,7 @@ This is why speed and correction distance are connected. A max speed of 1 mm/s w
 
 ## Generic Smooth Landing
 
-For non-current-sweep seeking without sensitivity-specific behavior, Mini DMA uses a smooth landing zone. Far from target it can use full speed; near target it slows down.
+For non-current-sweep seeking without sensitivity-specific behavior, Mini DMA uses a smooth landing zone. Far from target it can use full speed; near target it slows down to the minimum useful motor speed.
 
 ![Generic seek speed vs target error](assets/mini_dma_smooth_landing_speed.svg)
 
@@ -132,12 +136,12 @@ The generic shape is:
 ```text
 error_ratio = abs(error) / effective_tolerance
 
-if error_ratio >= 3:
+if error_ratio >= full_speed_error_ratio:
     speed = max_speed
 else:
-    scaled = clamp((error_ratio - 1) / 2, 0, 1)
+    scaled = clamp((error_ratio - 1) / (full_speed_error_ratio - 1), 0, 1)
     smooth = smoothstep(scaled)
-    speed = max_speed * (0.2 + 0.8 * smooth)
+    speed = max_speed * smooth
 ```
 
 Inside tolerance, the target is reached and no correction is sent.
@@ -172,6 +176,15 @@ This means:
 - stiffer samples move slower for the same stress error because a small displacement changes stress a lot;
 - more compliant or longer samples can move faster without overshooting as much;
 - the user still has one hard safety ceiling in mm/s.
+- the same smooth landing cap applies near target, so a high ceiling such as 5 mm/s is not used right outside the hold band.
+
+The Overview panel displays the most recent commanded speed as equivalent rates:
+
+```text
+mm/s, g/s, MPa/s, %/s
+```
+
+The g/s and MPa/s values use the current live stiffness estimate when available, otherwise the length-scaled calibration prior. The %/s value uses the current `l0`.
 
 ![Iso-stress/current-sweep dynamic balance speed](assets/mini_dma_current_sweep_servo_speed.svg)
 
@@ -206,7 +219,7 @@ The setup sequence is:
 5. Ask for measured length at preload.
 6. Return toward zero load and compute `l0`.
 
-Before force starts responding, Mini DMA can use `Setup stage speed` for slack take-up. After force starts responding, it uses the stiffness/ramp-rate model.
+Before force starts responding, Mini DMA can use `Setup stage speed` for slack take-up. After force starts responding, it uses the stiffness/ramp-rate model. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full stage-speed-sized correction.
 
 The setup points are saved to `setup.csv` and `setup.txt` in the run folder. If setup jumps or oscillates, inspect `setup.csv` first.
 

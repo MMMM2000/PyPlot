@@ -3859,6 +3859,17 @@ def test_load_seek_continues_from_commanded_target_after_fresh_feedback_without_
         )
         assert window._build_tic_dispatcher().wait_until_idle(timeout_s=2.0)
 
+        assert controller.targets == [-10]
+
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
+        window._latest_scale_timestamp = time.time()
+        window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=0.25,
+        )
+        assert window._build_tic_dispatcher().wait_until_idle(timeout_s=2.0)
+
         assert controller.targets == [-10, -20]
         assert "Move skipped" not in window.log_output.toPlainText()
     finally:
@@ -3939,6 +3950,7 @@ def test_load_seek_accepts_near_target_crossing_without_reverse_hunt(tmp_path: P
         _wait_for_tic_commands(window)
 
         window._latest_scale_value_g = -5.35
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
         window._latest_scale_timestamp = time.time()
         assert window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_LOAD_G,
@@ -3948,7 +3960,7 @@ def test_load_seek_accepts_near_target_crossing_without_reverse_hunt(tmp_path: P
         _wait_for_tic_commands(window)
 
         assert controller.targets == [90]
-        assert "reverse correction skipped" in window.log_output.toPlainText()
+        assert "backlash take-up" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -3986,6 +3998,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
         _wait_for_tic_commands(window)
 
         window._latest_scale_value_g = -20.0
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
         window._latest_scale_timestamp = time.time()
         window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_LOAD_G,
@@ -4111,7 +4124,66 @@ def test_seek_tolerance_floor_uses_stiffness_and_motor_step(tmp_path: Path, qtbo
         assert window._seek_effective_tolerance(
             mini_dma_mod.HSW_BASIS_LOAD_G,
             requested_tolerance=0.005,
-        ) == pytest.approx(0.05)
+        ) == pytest.approx(0.1)
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_preload_near_target_fallback_uses_minimum_speed(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_diameter.setValue(0.0137)
+    window.spin_setup_stage_speed_mm_s.setValue(1.0)
+    window.spin_scale_interval.setValue(250)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CALIBRATION
+    window._automation_phase = "settle"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+    window._automation_step_note = "setup_preload"
+    window._current_position_mm = 0.0
+    window._last_move_target_mm = 0.0
+    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(19.7, 0.0137)
+    window._latest_scale_timestamp = time.time()
+
+    moves: list[tuple[float, float | None]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        speed = kwargs.get("speed_mm_s")
+        moves.append((target_mm, None if speed is None else float(speed)))
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            tolerance=0.25,
+        )
+
+        assert reached is False
+        assert moves == [(pytest.approx(0.01), pytest.approx(0.01))]
+    finally:
+        _close_test_window(window)
+
+
+def test_live_speed_summary_reports_equivalent_rates(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_diameter.setValue(0.02)
+    window.spin_initial_length.setValue(25.0)
+    window._calibrated_stiffness_g_per_mm = 2.0
+    window._calibrated_stiffness_length_mm = 25.0
+    window._last_commanded_speed_mm_s = 0.5
+
+    try:
+        text = window._live_speed_summary_text()
+
+        assert "0.5 mm/s" in text
+        assert "1 g/s" in text
+        assert "MPa/s" in text
+        assert "2 %/s" in text
     finally:
         _close_test_window(window)
 
