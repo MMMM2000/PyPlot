@@ -205,6 +205,9 @@ The AC panel adds:
 - Aperture, default `FAST`.
 - **One current sweep per AC setting**. When enabled, the logger sets loop count
   to the number of frequency-by-level combinations and enables reverse-to-zero.
+- **Measure baseline**. Runs the LCR frequency-by-level matrix without using
+  the current annealing power-supply path and saves a timestamped
+  `*_baseline_YYYYMMDD_HHMMSS.tsv` file next to the selected log file.
 
 Log rows keep the first three current annealing columns:
 
@@ -249,6 +252,10 @@ Before a real transition sweep:
 2. Measure fixture/coil with microwire inserted, no DC annealing current.
 3. Run a very low-current DC sweep to prove logging and wiring.
 4. Only then run the transition-range sweep.
+
+Use the baseline button for steps 1 and 2 when possible. Treat the baseline as
+relative comparison context; absolute susceptibility calibration is still not
+implemented.
 
 ## Suggested First Experiment
 

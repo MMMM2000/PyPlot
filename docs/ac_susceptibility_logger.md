@@ -58,6 +58,14 @@ current sweep per AC setting** enabled, it sets the current annealing loop count
 to the number of generated AC settings, enables reverse-to-zero, and advances
 the LCR setting after each completed current sweep.
 
+Use **Measure baseline** for an LCR-only baseline before a real current sweep.
+It does not talk to the power supply. It runs the current frequency-by-level
+matrix with the configured repeat count and writes a timestamped
+`*_baseline_YYYYMMDD_HHMMSS.tsv` file next to the selected log file. Use it for
+empty fixture/coil readings and, optionally, wire-in-fixture/no-current
+readings. This is baseline context for relative comparisons, not absolute
+susceptibility calibration.
+
 Suggested first-pass settings for finding a strong transition signal:
 
 - LCR function: `Ls-Q`

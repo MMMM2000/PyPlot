@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import math
 import os
 import sys
+import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Sequence, cast
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -36,6 +38,13 @@ HEADER_LINE = (
     "AC plan index\tLCR frequency (Hz)\tLCR level mode\tLCR level\t"
     "LCR function\tLCR primary\tLCR secondary\tLCR monitor1\t"
     "LCR monitor2\tLCR comparator\tLCR raw"
+)
+
+BASELINE_HEADER_LINE = (
+    "# Timestamp UTC\tBaseline setting index\tBaseline repeat index\t"
+    "LCR frequency (Hz)\tLCR level mode\tLCR level\tLCR function\t"
+    "LCR primary\tLCR secondary\tLCR monitor1\tLCR monitor2\t"
+    "LCR comparator\tLCR raw"
 )
 
 
@@ -104,6 +113,10 @@ class MainWindow(CurrentAnnealingWindow):
         self.checkBox_ac_plan_loops = QtWidgets.QCheckBox("One current sweep per AC setting", group)
         self.checkBox_ac_plan_loops.setChecked(True)
         self.pushButton_apply_lcr_setting = QtWidgets.QPushButton("Apply setting", group)
+        self.spinBox_lcr_baseline_repeats = QtWidgets.QSpinBox(group)
+        self.spinBox_lcr_baseline_repeats.setRange(1, 100)
+        self.spinBox_lcr_baseline_repeats.setValue(3)
+        self.pushButton_measure_lcr_baseline = QtWidgets.QPushButton("Measure baseline", group)
 
         self.lineEdit_lcr_frequencies.setPlaceholderText("100, 1k, 10k, 100k")
         self.lineEdit_lcr_levels.setPlaceholderText("0.1, 0.3, 1.0")
@@ -124,6 +137,9 @@ class MainWindow(CurrentAnnealingWindow):
         grid.addWidget(self.comboBox_lcr_aperture, 3, 3)
         grid.addWidget(self.checkBox_ac_plan_loops, 4, 0, 1, 3)
         grid.addWidget(self.pushButton_apply_lcr_setting, 4, 3)
+        grid.addWidget(QtWidgets.QLabel("Baseline repeats:", group), 5, 0)
+        grid.addWidget(self.spinBox_lcr_baseline_repeats, 5, 1)
+        grid.addWidget(self.pushButton_measure_lcr_baseline, 5, 2, 1, 2)
         outer.addLayout(grid)
 
         self.label_lcr_status = QtWidgets.QLabel("LCR not connected", group)
@@ -137,6 +153,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_connect_lcr.clicked.connect(self.handle_connect_lcr_clicked)
         self.pushButton_identify_lcr.clicked.connect(self.handle_identify_lcr_clicked)
         self.pushButton_apply_lcr_setting.clicked.connect(self.handle_apply_lcr_setting_clicked)
+        self.pushButton_measure_lcr_baseline.clicked.connect(self.handle_measure_lcr_baseline_clicked)
         for edit in (self.lineEdit_lcr_frequencies, self.lineEdit_lcr_levels):
             edit.editingFinished.connect(self._store_lcr_settings)
         for combo in (
@@ -148,6 +165,7 @@ class MainWindow(CurrentAnnealingWindow):
         ):
             combo.currentIndexChanged.connect(lambda *_args: self._store_lcr_settings())
         self.checkBox_ac_plan_loops.toggled.connect(lambda *_args: self._store_lcr_settings())
+        self.spinBox_lcr_baseline_repeats.valueChanged.connect(lambda *_args: self._store_lcr_settings())
 
     def _load_lcr_settings(self) -> None:
         self.lineEdit_lcr_frequencies.setText(
@@ -161,6 +179,11 @@ class MainWindow(CurrentAnnealingWindow):
         self._set_combo_text(self.comboBox_lcr_monitor1, self.ac_settings.value("monitor1", "Z", type=str))
         self._set_combo_text(self.comboBox_lcr_monitor2, self.ac_settings.value("monitor2", "IAC", type=str))
         self._set_combo_text(self.comboBox_lcr_aperture, self.ac_settings.value("aperture", "FAST", type=str))
+        repeats = self.ac_settings.value("baseline_repeats", 3)
+        try:
+            self.spinBox_lcr_baseline_repeats.setValue(max(1, int(repeats)))
+        except (TypeError, ValueError):
+            self.spinBox_lcr_baseline_repeats.setValue(3)
         plan_loops = self.ac_settings.value("plan_loops", 1)
         self.checkBox_ac_plan_loops.setChecked(str(plan_loops).lower() not in {"0", "false", "no"})
 
@@ -185,6 +208,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("monitor2", self.comboBox_lcr_monitor2.currentText())
         self.ac_settings.setValue("aperture", self.comboBox_lcr_aperture.currentText())
         self.ac_settings.setValue("plan_loops", int(self.checkBox_ac_plan_loops.isChecked()))
+        self.ac_settings.setValue("baseline_repeats", int(self.spinBox_lcr_baseline_repeats.value()))
 
     def populate_lcr_ports(self) -> None:
         self.comboBox_lcr_port.clear()
@@ -237,6 +261,31 @@ class MainWindow(CurrentAnnealingWindow):
         self._prepare_lcr_plan()
         self._lcr_plan_index = 0
         self._configure_lcr_for_current_index(show_errors=True)
+
+    def handle_measure_lcr_baseline_clicked(self) -> None:
+        meter = self.lcr_meter
+        if meter is None or not meter.is_open:
+            QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
+            return
+        try:
+            plan = self._prepare_lcr_plan()
+            repeats = max(1, int(self.spinBox_lcr_baseline_repeats.value()))
+            path = self._baseline_output_path()
+            self.pushButton_measure_lcr_baseline.setEnabled(False)
+            self.label_lcr_status.setText(
+                f"Measuring baseline: {len(plan)} settings x {repeats} repeats"
+            )
+            rows = self._collect_baseline_rows(plan, repeats=repeats)
+            self._write_baseline_file(path, plan, rows)
+        except Exception as exc:
+            self._lcr_last_error = str(exc)
+            self.label_lcr_status.setText(f"Baseline failed: {exc}")
+            QtWidgets.QMessageBox.warning(self, "Baseline failed", str(exc))
+            return
+        finally:
+            self.pushButton_measure_lcr_baseline.setEnabled(True)
+        self.label_lcr_status.setText(f"Baseline saved: {path}")
+        QtWidgets.QMessageBox.information(self, "Baseline saved", f"Saved LCR baseline to:\n{path}")
 
     def _prepare_lcr_plan(self) -> list[Lcr6000Settings]:
         self._store_lcr_settings()
@@ -344,6 +393,100 @@ class MainWindow(CurrentAnnealingWindow):
             return None
         self._lcr_last_reading = reading
         return reading
+
+    def _baseline_output_path(self) -> Path:
+        log_path = Path(self.build_log_path())
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return log_path.with_name(f"{log_path.stem}_baseline_{timestamp}.tsv")
+
+    def _collect_baseline_rows(
+        self,
+        plan: Sequence[Lcr6000Settings],
+        *,
+        repeats: int,
+    ) -> list[list[str]]:
+        meter = self.lcr_meter
+        if meter is None or not meter.is_open:
+            raise RuntimeError("LCR meter is not connected")
+        rows: list[list[str]] = []
+        repeat_count = max(1, int(repeats))
+        for setting_index, setting in enumerate(plan, start=1):
+            meter.configure(setting)
+            self._lcr_plan_index = setting_index - 1
+            for repeat_index in range(1, repeat_count + 1):
+                reading = self._fetch_baseline_reading()
+                self._lcr_last_reading = reading
+                rows.append(
+                    self._format_baseline_row(
+                        setting_index=setting_index,
+                        repeat_index=repeat_index,
+                        setting=setting,
+                        reading=reading,
+                    )
+                )
+                QtWidgets.QApplication.processEvents()
+        return rows
+
+    def _fetch_baseline_reading(self, *, attempts: int = 3) -> Lcr6000Reading:
+        meter = self.lcr_meter
+        if meter is None or not meter.is_open:
+            raise RuntimeError("LCR meter is not connected")
+        for attempt in range(1, max(1, int(attempts)) + 1):
+            reading = meter.fetch_impedance()
+            if reading.raw.strip():
+                return reading
+            if attempt < attempts:
+                self._lcr_last_error = "Empty LCR response"
+                QtWidgets.QApplication.processEvents()
+                time.sleep(0.25)
+        raise RuntimeError("LCR returned an empty response during baseline measurement")
+
+    @staticmethod
+    def _format_baseline_row(
+        *,
+        setting_index: int,
+        repeat_index: int,
+        setting: Lcr6000Settings,
+        reading: Lcr6000Reading,
+    ) -> list[str]:
+        return [
+            reading.timestamp_utc,
+            str(setting_index),
+            str(repeat_index),
+            CurrentAnnealingWindow._format_sample_value(setting.frequency_hz),
+            setting.level_mode,
+            CurrentAnnealingWindow._format_sample_value(setting.level_value),
+            setting.function,
+            MainWindow._format_optional_sample_value(reading.primary),
+            MainWindow._format_optional_sample_value(reading.secondary),
+            MainWindow._format_optional_sample_value(reading.monitor1),
+            MainWindow._format_optional_sample_value(reading.monitor2),
+            reading.comparator,
+            reading.raw,
+        ]
+
+    @staticmethod
+    def _format_optional_sample_value(value: float | None) -> str:
+        if value is None or not math.isfinite(value):
+            return ""
+        return CurrentAnnealingWindow._format_sample_value(value)
+
+    @staticmethod
+    def _write_baseline_file(
+        path: str | Path,
+        plan: Sequence[Lcr6000Settings],
+        rows: Sequence[Sequence[str]],
+    ) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8", newline="") as fh:
+            fh.write("# AC susceptibility baseline generated from LCR-6200 settings\n")
+            for index, setting in enumerate(plan, start=1):
+                commands = " ".join(command.strip() for command in commands_for_settings(setting))
+                fh.write(f"# AC setting {index}: {commands}\n")
+            fh.write(BASELINE_HEADER_LINE + "\n")
+            for row in rows:
+                fh.write("\t".join(row) + "\n")
 
     def _ensure_log_header(self, path: str) -> None:  # type: ignore[override]
         try:
@@ -479,9 +622,7 @@ class MainWindow(CurrentAnnealingWindow):
         ]
 
     def _format_optional_float(self, value: float | None) -> str:
-        if value is None or not math.isfinite(value):
-            return ""
-        return self._format_sample_value(value)
+        return self._format_optional_sample_value(value)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         meter = self.lcr_meter

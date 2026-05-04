@@ -466,6 +466,8 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                frequency by level matrix and can run one current sweep per AC setting.
             3. Choose the LCR function and monitor channels. For coil-based susceptibility scans,
                `Ls-Q` with monitor `Z`/`IAC` is a useful starting point.
+            4. Use **Measure baseline** to run the LCR matrix without current annealing. This
+               writes a timestamped baseline TSV for empty-fixture or wire/no-current checks.
 
             ### Running the process
             * The current ramp, hold, reverse, voltage-limit handling, and contact-loss logic are
