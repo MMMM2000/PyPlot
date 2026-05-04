@@ -421,7 +421,40 @@ class VSMTemperatureScanProcessor:
                         PlotSeries(field_float, direction, direction_counts[direction], segment)
                     )
             else:
-                sorted_subset = ordered_subset.sort_values("temperature").reset_index(drop=True)
+                # Collapse acquisition sections into one field trace.  Keeping
+                # section ids here makes later temperature sorting connect
+                # repeated section blocks vertically in Origin exports.
+                sorted_subset = ordered_subset.drop(
+                    columns=[
+                        column
+                        for column in ("section", "section_index")
+                        if column in ordered_subset.columns
+                    ],
+                    errors="ignore",
+                )
+                temperature_values = pd.to_numeric(
+                    sorted_subset["temperature"], errors="coerce"
+                )
+                signal_values = pd.to_numeric(sorted_subset["signal"], errors="coerce")
+                sorted_subset = sorted_subset.assign(
+                    temperature=temperature_values,
+                    signal=signal_values,
+                ).dropna(subset=["temperature", "signal"])
+                if not sorted_subset.empty:
+                    # VSM scans usually revisit nearly the same temperatures in
+                    # multiple sections.  Bin before averaging so collapsed
+                    # field traces do not zig-zag between near-duplicate points.
+                    bin_width = 0.1
+                    sorted_subset["_temperature_bin"] = (
+                        (sorted_subset["temperature"] / bin_width).round() * bin_width
+                    )
+                    sorted_subset = (
+                        sorted_subset.groupby("_temperature_bin", as_index=False)
+                        .agg({"temperature": "mean", "signal": "mean"})
+                        .drop(columns=["_temperature_bin"], errors="ignore")
+                    )
+                sorted_subset, _removed = self._dedupe_temperatures(sorted_subset)
+                sorted_subset = sorted_subset.sort_values("temperature").reset_index(drop=True)
                 series.append(PlotSeries(field_float, "all", 1, sorted_subset))
         return series
 
@@ -1217,12 +1250,18 @@ class VSMTemperatureScanProcessor:
             self.log(f"Displayed Matplotlib plot for {entry.sample}.")
 
     # ------------------------------------------------------------------ Origin plotting
-    def plot_origin(self, dataset: list[VSMEntry]) -> None:
+    def plot_origin(
+        self,
+        dataset: list[VSMEntry],
+        *,
+        release_origin_on_exit: bool = True,
+    ) -> list[Any]:
         if op is None or origin_session is None:  # pragma: no cover - requires Origin
             raise RuntimeError(
                 "originpro is not available. Install OriginLab's Python package on this machine."
             )
         plotted = 0
+        created_graphs: list[Any] = []
         x_axis_label = "Temperature [°C]"
         derivative_axis_label = "d(Signal X)/dT [emu/°C]"
 
@@ -1314,6 +1353,10 @@ class VSMTemperatureScanProcessor:
             except Exception:
                 pass
             try:
+                layer.lt_exec("layer.x2.show=0; layer.x2.ticks=0; layer.x2.showlabels=0;")
+            except Exception:
+                pass
+            try:
                 axis_top = layer.axis("x2")
                 try:
                     axis_top.label.text = ""
@@ -1334,7 +1377,15 @@ class VSMTemperatureScanProcessor:
                 except Exception:
                     pass
 
-        with origin_session(keep_open=True) as origin:
+        try:
+            origin_context = origin_session(
+                keep_open=True,
+                release_on_exit=release_origin_on_exit,
+            )
+        except TypeError:
+            origin_context = origin_session(keep_open=True)
+
+        with origin_context as origin:
             for entry in dataset:
                 series = self._build_series(entry.dataframe.copy())
                 if not series:
@@ -1409,6 +1460,7 @@ class VSMTemperatureScanProcessor:
                 )
                 graph = origin.new_graph(template=template)
                 graphs.append(graph)
+                created_graphs.append(graph)
                 graph_title = self._plot_title(entry.sample, "Signal X", fields)
                 _set_origin_graph_title(origin, graph, graph_title)
                 unique_fields: list[float] = self.field_axis_order([field for field, _, _, _ in column_pairs])
@@ -1557,6 +1609,7 @@ class VSMTemperatureScanProcessor:
                     )
                     smooth_graph = origin.new_graph(template=smooth_template)
                     graphs.append(smooth_graph)
+                    created_graphs.append(smooth_graph)
                     smooth_title = self._plot_title(entry.sample, "Smoothed Signal X", fields)
                     _set_origin_graph_title(origin, smooth_graph, smooth_title)
                     s_unique: list[float] = self.field_axis_order([field for field, _, _, _ in smooth_pairs])
@@ -1700,6 +1753,7 @@ class VSMTemperatureScanProcessor:
                         pass
                     deriv_graph = origin.new_graph(template="line")
                     graphs.append(deriv_graph)
+                    created_graphs.append(deriv_graph)
                     deriv_title = self._plot_title(entry.sample, "dSignal/dT", fields)
                     _set_origin_graph_title(origin, deriv_graph, deriv_title)
                     layer = deriv_graph[0]
@@ -1791,6 +1845,7 @@ class VSMTemperatureScanProcessor:
                         pass
                     deriv_sm_graph = origin.new_graph(template="line")
                     graphs.append(deriv_sm_graph)
+                    created_graphs.append(deriv_sm_graph)
                     deriv_sm_title = self._plot_title(entry.sample, "Smoothed dSignal/dT", fields)
                     _set_origin_graph_title(origin, deriv_sm_graph, deriv_sm_title)
                     layer = deriv_sm_graph[0]
@@ -1838,6 +1893,7 @@ class VSMTemperatureScanProcessor:
                         pass
                 plotted += 1
                 self.log(f"Sent {entry.sample} to Origin.")
+        return created_graphs
     
     # ------------------------------------------------------------------ TXT export
     def export_txt(self, dataset: list[VSMEntry], output_dir: Path) -> None:

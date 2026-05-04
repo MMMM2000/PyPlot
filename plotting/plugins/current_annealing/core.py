@@ -600,6 +600,57 @@ def _apply_origin_readability(layer: Any, graph: Any | None) -> None:
             pass
 
 
+def _apply_origin_curve_color(plot_any: Any, color: str) -> None:
+    set_cmd = getattr(plot_any, "set_cmd", None)
+    if callable(set_cmd):
+        try:
+            red = int(color[1:3], 16)
+            green = int(color[3:5], 16)
+            blue = int(color[5:7], 16)
+            origin_color = f"color({red},{green},{blue})"
+            origin_html_color = f'color("{color}")'
+            for command in (
+                f"-c {origin_color}",
+                f"-cse {origin_html_color}",
+                f"-csf {origin_html_color}",
+                f"-cr {origin_color}",
+                f"-cser {origin_color}",
+                f"-csfr {origin_color}",
+                f"-cf {origin_color}",
+                "-kf 0",
+            ):
+                try:
+                    set_cmd(command)
+                except TypeError:
+                    set_cmd(command, "")
+        except Exception:
+            pass
+    for attr, value in (
+        ("color", color),
+        ("line_color", color),
+        ("symbol_color", color),
+        ("symbol_edge_color", color),
+        ("symbol_fill_color", color),
+        ("symbol_interior", 1),
+    ):
+        try:
+            setattr(plot_any, attr, value)
+        except Exception:
+            pass
+    symbol = getattr(plot_any, "symbol", None)
+    if symbol is not None:
+        for attr, value in (
+            ("color", color),
+            ("edge_color", color),
+            ("fill_color", color),
+            ("symbol_color", color),
+        ):
+            try:
+                setattr(symbol, attr, value)
+            except Exception:
+                pass
+
+
 def _plot_origin_simple(
     workbook: Any | None,
     worksheet: Any | None,
@@ -616,12 +667,10 @@ def _plot_origin_simple(
     plot_any = cast(Any, plot_obj)
     color = '#000000'
     try:
-        plot_any.color = color
+        _apply_origin_curve_color(plot_any, color)
         plot_any.line_width = 1.5
         plot_any.symbol_shape = 2
         plot_any.symbol_size = 4
-        plot_any.symbol_edge_color = color
-        plot_any.symbol_fill_color = color
         plot_any.legend = line_label
     except Exception:
         try:
@@ -750,6 +799,7 @@ def _plot_origin_experimental(
         if not isinstance(dataset_index, int):
             dataset_index = len(legend_entries) + 1
         legend_entries.append((dataset_index, label))
+        _apply_origin_curve_color(plot_any, color)
 
     try:
         worksheet.header_rows("LUC")

@@ -6,3 +6,4 @@
 - Project-based Word report exports now merge saved Builder section rows directly and discover sibling `RvsT` CSVs, so sample reports can include project measurements even when the saved Assemble table is stale.
 - Project-based Word report exports now reuse PyPlot/Origin graph generation for available graph families and keep live Origin sessions attached long enough for Word to paste editable Origin OLE objects.
 - Assemble Word exports now also route available VSM, DMA, shape-memory, and FMR records through the reusable PyPlot/Origin graph export path before embedding Word OLE objects.
+- Word reports now use outline-friendly heading styles, fit embedded Origin objects inside the page, suppress graph/book/sheet captions and Origin descriptor filenames, preserve PyPlot line/symbol styling, and export VSM temperature scans through the normal PyPlot/Origin TScan graph instead of persisted derivative/smoothed/overlay workbooks.

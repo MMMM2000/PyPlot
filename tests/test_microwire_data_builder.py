@@ -3817,20 +3817,32 @@ def test_word_report_export_embeds_available_origin_objects(
     high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
     low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
 
-    def fake_origin(
-        df: pd.DataFrame,
-        source: Path,
+    captured_pyplot: list[tuple[str, list[Path]]] = []
+
+    def fake_pyplot_origin(
+        *,
+        paths: list[Path],
+        plugin_name: str,
         origin_dir: Path,
+        descriptor_prefix: str,
+        display_prefix: str,
         log: logging.Logger | None,
-    ) -> OriginArtifact:
+    ) -> list[OriginArtifact]:
+        del descriptor_prefix, display_prefix, log
+        captured_pyplot.append((plugin_name, list(paths)))
         origin_dir.mkdir(parents=True, exist_ok=True)
-        artifact_path = origin_dir / f"{source.stem}.oggu"
-        artifact_path.write_bytes(b"origin graph object")
-        return OriginArtifact(
-            descriptor=artifact_path.name,
-            object_path=artifact_path,
-            display_text=f"Origin graph for {source.stem}",
-        )
+        artifacts: list[OriginArtifact] = []
+        for source in paths:
+            artifact_path = origin_dir / f"{source.stem}.oggu"
+            artifact_path.write_bytes(b"origin graph object")
+            artifacts.append(
+                OriginArtifact(
+                    descriptor=artifact_path.name,
+                    object_path=artifact_path,
+                    display_text=f"Origin graph for {source.stem}",
+                )
+            )
+        return artifacts
 
     captured_insertions: list[tuple[Path, list[core.WordOleInsertion]]] = []
 
@@ -3841,7 +3853,7 @@ def test_word_report_export_embeds_available_origin_objects(
     ) -> None:
         captured_insertions.append((docx_path, list(insertions)))
 
-    monkeypatch.setattr(core, "_plot_measurement_origin", fake_origin)
+    monkeypatch.setattr(core, "export_pyplot_origin_artifacts_for_paths", fake_pyplot_origin)
     monkeypatch.setattr(core, "_embed_origin_objects_with_word", fake_embed)
 
     result = build_database(
@@ -3860,6 +3872,10 @@ def test_word_report_export_embeds_available_origin_objects(
     assert result.exports["word"].is_dir()
     assert len(result.word_reports) == 1
     assert result.word_reports[0].name == "Ni55Fe18Ga27_1-1.docx"
+    assert captured_pyplot == [
+        ("Current Annealing", [high]),
+        ("Current Annealing", [low]),
+    ]
     assert len(captured_insertions) == 1
     assert captured_insertions[0][0] == result.word_reports[0]
     assert {item.object_path.name for item in captured_insertions[0][1]} == {
@@ -3875,14 +3891,15 @@ def test_word_report_export_embeds_available_origin_objects(
         document_xml = archive.read("word/document.xml").decode("utf-8")
 
     assert "Ni55Fe18Ga27 1/1" in document_xml
-    assert "Sample summary" in document_xml
-    assert "Fabrication" in document_xml
-    assert "Functional summary" in document_xml
+    assert "Assemble data" in document_xml
+    assert 'w:pStyle w:val="Heading1"' in document_xml
     assert "Microscope and dimensions" in document_xml
     assert "Current annealing" in document_xml
     assert "VSM temperature scan" in document_xml
     assert "DMA iso-stress" in document_xml
     assert "Measurement references" not in document_xml
+    assert "Graph:" not in document_xml
+    assert "Book:" not in document_xml
     assert "Origin object placeholder" in document_xml
 
 
@@ -3944,19 +3961,6 @@ def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(
     captured: list[tuple[str, list[Path]]] = []
     captured_insertions: list[core.WordOleInsertion] = []
 
-    def fake_current_origin(
-        df: pd.DataFrame,
-        source: Path,
-        origin_dir: Path,
-        log: logging.Logger | None,
-    ) -> OriginArtifact:
-        del df, source, origin_dir, log
-        return OriginArtifact(
-            descriptor="current.oggu",
-            object_path=tmp_path / "current.oggu",
-            display_text="Current Origin graph",
-        )
-
     def fake_pyplot_origin(
         *,
         paths: list[Path],
@@ -3968,13 +3972,18 @@ def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(
     ) -> list[OriginArtifact]:
         del origin_dir, descriptor_prefix, display_prefix, log
         captured.append((plugin_name, list(paths)))
-        artifact_path = tmp_path / "vsm-temperature.oggu"
+        artifact_name = (
+            "current.oggu"
+            if plugin_name == "Current Annealing"
+            else "vsm-temperature.oggu"
+        )
+        artifact_path = tmp_path / artifact_name
         artifact_path.write_bytes(b"origin graph object")
         return [
             OriginArtifact(
                 descriptor=artifact_path.name,
                 object_path=artifact_path,
-                display_text="VSM temperature Origin graph",
+                display_text=f"{plugin_name} Origin graph",
             )
         ]
 
@@ -3986,7 +3995,6 @@ def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(
         del docx_path, log
         captured_insertions.extend(insertions)
 
-    monkeypatch.setattr(core, "_plot_measurement_origin", fake_current_origin)
     monkeypatch.setattr(core, "export_pyplot_origin_artifacts_for_paths", fake_pyplot_origin)
     monkeypatch.setattr(core, "_embed_origin_objects_with_word", fake_embed)
 
@@ -4010,7 +4018,10 @@ def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(
         ],
     )
 
-    assert captured == [("VSM Temperature Scan", [vsm_path])]
+    assert {plugin_name: paths for plugin_name, paths in captured} == {
+        "Current Annealing": [high],
+        "VSM Temperature Scan": [vsm_path],
+    }
     assert result.dataframe.iloc[0][core.VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN] == "vsm-temperature.oggu"
     assert result.origin_artifacts["vsm-temperature.oggu"].object_path == tmp_path / "vsm-temperature.oggu"
     assert {item.object_path.name for item in captured_insertions} == {

@@ -1348,6 +1348,9 @@ class _TabSeriesExportEntry:
     y_label: str
     y_unit: str
     color: str = ""
+    marker: str = ""
+    markersize: float = 0.0
+    linestyle: str = ""
     x_scale_factor: float = 1.0
     y_scale_factor: float = 1.0
 
@@ -1368,6 +1371,9 @@ class WorksheetColumnMeta:
     comments: str = ""
     formula: str = ""
     plot_color: str = ""
+    plot_marker: str = ""
+    plot_markersize: float = 0.0
+    plot_linestyle: str = ""
 
 
 @dataclass
@@ -4904,6 +4910,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     if line_obj is not None
                     else ""
                 )
+                marker_text = ""
+                markersize = 0.0
+                linestyle = ""
+                if line_obj is not None:
+                    marker_text = str(getattr(line_obj, "get_marker", lambda: "")() or "")
+                    try:
+                        markersize = float(getattr(line_obj, "get_markersize", lambda: 0.0)() or 0.0)
+                    except Exception:
+                        markersize = 0.0
+                    linestyle = str(getattr(line_obj, "get_linestyle", lambda: "")() or "")
                 entries.append(
                     _TabSeriesExportEntry(
                         label=label,
@@ -4914,6 +4930,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
                         color=color,
+                        marker=marker_text,
+                        markersize=markersize,
+                        linestyle=linestyle,
                         x_scale_factor=x_factor,
                         y_scale_factor=y_factor,
                     )
@@ -4960,6 +4979,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 x_vals, y_vals = self._paired_numeric_arrays(line.get_xdata(), line.get_ydata())
                 if x_vals.size == 0 or y_vals.size == 0:
                     continue
+                try:
+                    marker_size = float(getattr(line, "get_markersize", lambda: 0.0)() or 0.0)
+                except Exception:
+                    marker_size = 0.0
                 entries.append(
                     _TabSeriesExportEntry(
                         label=label,
@@ -4970,6 +4993,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
                         color=_normalize_export_color(line.get_color()),
+                        marker=str(getattr(line, "get_marker", lambda: "")() or ""),
+                        markersize=marker_size,
+                        linestyle=str(getattr(line, "get_linestyle", lambda: "")() or ""),
                         x_scale_factor=x_factor,
                         y_scale_factor=y_factor,
                     )
@@ -5024,6 +5050,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
                         color=collection_color,
+                        marker="o",
+                        markersize=4.0,
+                        linestyle="",
                         x_scale_factor=x_factor,
                         y_scale_factor=y_factor,
                     )
@@ -5125,6 +5154,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 units=entry.y_unit,
                 comments=label,
                 plot_color=entry.color,
+                plot_marker=entry.marker,
+                plot_markersize=entry.markersize,
+                plot_linestyle=entry.linestyle,
             )
             axis_roles.extend(["X", "Y"])
 
@@ -6016,7 +6048,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
     def _origin_graph_templates(self, origin_any: Any) -> list[str]:
         _ = origin_any
-        templates: list[str] = ["ORIGIN", "line", "scatter"]
+        templates: list[str] = ["line", "scatter", "ORIGIN"]
         seen: set[str] = set()
         ordered: list[str] = []
         for template in templates:
@@ -6067,16 +6099,88 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     continue
 
     @staticmethod
-    def _apply_origin_plot_style(plot_obj: Any, *, color: str | None = None) -> None:
+    @staticmethod
+    def _origin_marker_active(marker: str | None, markersize: float | None) -> bool:
+        marker_text = str(marker or "").strip().lower()
+        if marker_text in {"", "none", "null"}:
+            return False
+        try:
+            size = float(markersize or 0.0)
+        except Exception:
+            size = 0.0
+        return size > 0
+
+    def _origin_plot_marker_active(self, worksheet: WorksheetData, y_index: int) -> bool:
+        columns = list(worksheet.dataframe.columns)
+        if not (0 <= y_index < len(columns)):
+            return False
+        meta = worksheet.columns.get(str(columns[y_index]))
+        if meta is None:
+            return False
+        return self._origin_marker_active(meta.plot_marker, meta.plot_markersize)
+
+    def _origin_plot_marker_size(self, worksheet: WorksheetData, y_index: int) -> float:
+        columns = list(worksheet.dataframe.columns)
+        if not (0 <= y_index < len(columns)):
+            return 4.0
+        meta = worksheet.columns.get(str(columns[y_index]))
+        if meta is None:
+            return 4.0
+        try:
+            size = float(meta.plot_markersize or 0.0)
+        except Exception:
+            size = 0.0
+        return max(6.0, min(size * 1.4, 10.0)) if size > 0 else 6.0
+
+    @staticmethod
+    def _apply_origin_plot_style(
+        plot_obj: Any,
+        *,
+        color: str | None = None,
+        show_symbols: bool = False,
+        symbol_size: float = 4.0,
+    ) -> None:
         if not color:
             return
+        set_cmd = getattr(plot_obj, "set_cmd", None)
+        if callable(set_cmd):
+            try:
+                red = int(color[1:3], 16)
+                green = int(color[3:5], 16)
+                blue = int(color[5:7], 16)
+                origin_color = f"color({red},{green},{blue})"
+                origin_html_color = f'color("{color}")'
+                commands = [
+                    f"-c {origin_color}",
+                    f"-cse {origin_html_color}",
+                    f"-csf {origin_html_color}",
+                    f"-cr {origin_color}",
+                    f"-cser {origin_color}",
+                    f"-csfr {origin_color}",
+                    f"-cf {origin_color}",
+                ]
+                if show_symbols:
+                    commands.extend(["-k 2", "-kf 0", f"-z {float(symbol_size):g}"])
+                else:
+                    commands.append("-z 0")
+                for command in commands:
+                    try:
+                        set_cmd(command)
+                    except TypeError:
+                        set_cmd(command, "")
+            except Exception:
+                pass
+        resolved_symbol_size = float(symbol_size if show_symbols else 0.0)
         for attr, value in (
             ("color", color),
+            ("line_color", color),
+            ("symbol_color", color),
             ("symbol_edge_color", color),
             ("symbol_fill_color", color),
             ("line_width", 1.5),
-            ("symbol_kind", 2),
-            ("symbol_size", 4.0),
+            ("symbol_shape", 2 if show_symbols else 0),
+            ("symbol_size", resolved_symbol_size),
+            ("symbol_interior", 1 if show_symbols else 0),
         ):
             if not hasattr(plot_obj, attr):
                 continue
@@ -6084,6 +6188,23 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 setattr(plot_obj, attr, value)
             except Exception:
                 continue
+        symbol = getattr(plot_obj, "symbol", None)
+        if symbol is not None:
+            for attr, value in (
+                ("color", color),
+                ("edge_color", color),
+                ("fill_color", color),
+                ("edgecolor", color),
+                ("fillcolor", color),
+                ("symbol_color", color),
+                ("shape", 2 if show_symbols else 0),
+                ("size", resolved_symbol_size),
+                ("interior", 1 if show_symbols else 0),
+            ):
+                try:
+                    setattr(symbol, attr, value)
+                except Exception:
+                    continue
 
     def _plot_origin_worksheet(
         self,
@@ -6192,9 +6313,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             if not callable(add_plot):
                 continue
             for x_index, y_index in group_pairs:
+                show_symbols = self._origin_plot_marker_active(worksheet, y_index)
+                plot_type = "y" if show_symbols else "l"
                 plot_obj = None
                 try:
-                    plot_obj = add_plot(sheet, coly=y_index, colx=x_index, type='y')
+                    plot_obj = add_plot(sheet, coly=y_index, colx=x_index, type=plot_type)
                 except TypeError:
                     try:
                         plot_obj = add_plot(sheet, coly=y_index, colx=x_index)
@@ -6207,7 +6330,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 plotted_any = True
                 label = self._origin_plot_label(worksheet, y_index)
                 normalized = label.strip().casefold()
-                duplicate_label = bool(group_index > 0 and normalized and normalized in seen_plot_labels)
+                duplicate_label = bool(normalized and normalized in seen_plot_labels)
                 if duplicate_label:
                     label = ""
                 elif normalized:
@@ -6225,7 +6348,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         ]
                         color_by_label[color_key] = color
                         next_color_index += 1
-                self._apply_origin_plot_style(plot_obj, color=color)
+                self._apply_origin_plot_style(
+                    plot_obj,
+                    color=color,
+                    show_symbols=show_symbols,
+                    symbol_size=self._origin_plot_marker_size(worksheet, y_index),
+                )
                 if (
                     group_index > 0
                     and normalized
