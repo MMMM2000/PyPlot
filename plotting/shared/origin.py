@@ -28,15 +28,25 @@ def _ensure_origin_sdk_on_path() -> None:
 
 
 @contextmanager
-def origin_session(*, keep_open: bool = False) -> Iterator[Any]:
+def origin_session(*, keep_open: bool = False, release_on_exit: bool = True) -> Iterator[Any]:
     """Return an Origin session; optionally leave Origin open on exit."""
 
     _ensure_origin_sdk_on_path()
     import originpro as op  # lazy import
-    # OriginExt on some Windows setups can leave an invalid automation pointer
-    # after a prior crash. Prefer re-attaching before any LT/set_show calls.
     attach = getattr(op, "attach", None)
-    if callable(attach):
+    lt_int = getattr(op, "lt_int", None)
+
+    # OriginExt can abort the whole Python process when attach() is called while
+    # an automation session is already healthy. Probe first and re-attach only
+    # when the existing pointer is unusable.
+    probe_ok = False
+    if callable(lt_int):
+        try:
+            _ = lt_int("@V")
+            probe_ok = True
+        except Exception:
+            probe_ok = False
+    if not probe_ok and callable(attach):
         try:
             attach()
         except Exception:
@@ -48,7 +58,6 @@ def origin_session(*, keep_open: bool = False) -> Iterator[Any]:
     # Probe automation health early so callers get a deterministic error dialog
     # instead of delayed low-level OriginExt crashes.
     probe_ok = False
-    lt_int = getattr(op, "lt_int", None)
     if callable(lt_int):
         try:
             _ = lt_int("@V")
@@ -77,14 +86,15 @@ def origin_session(*, keep_open: bool = False) -> Iterator[Any]:
         yield cast(Any, op)
     finally:
         if keep_open:
-            try:
-                cast(Any, op).detach()
-            except Exception:
-                pass
-            try:
-                schedule_origin_release()
-            except Exception:
-                pass
+            if release_on_exit:
+                try:
+                    cast(Any, op).detach()
+                except Exception:
+                    pass
+                try:
+                    schedule_origin_release()
+                except Exception:
+                    pass
         else:
             try:
                 cast(Any, op).exit()

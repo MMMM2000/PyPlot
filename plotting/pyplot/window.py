@@ -30,7 +30,7 @@ from typing import (
 )
 
 import json
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import uuid
 from functools import partial
 
@@ -73,6 +73,7 @@ from plotting.shared.utils import (
     format_annealing_title,
 )
 from plotting.shared.origin import (
+    _ensure_origin_sdk_on_path,
     origin_session,
     schedule_origin_release,
     release_origin,
@@ -5352,8 +5353,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         workbooks: Iterable[WorkbookData],
         *,
         create_graphs: bool = False,
-        graph_callback: Callable[[Any, WorkbookData, WorksheetData], None] | None = None,
+        graph_callback: Callable[[Any, Any, WorkbookData, WorksheetData], None] | None = None,
         keep_origin_open: bool = True,
+        release_origin_on_exit: bool = True,
     ) -> tuple[int, int, list[str]]:
         workbook_list = list(workbooks)
         errors: list[str] = []
@@ -5366,8 +5368,22 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             value=0,
         )
         try:
-            with origin_session(keep_open=keep_origin_open) as origin_any:
-                if keep_origin_open:
+            if release_origin_on_exit:
+                origin_context = origin_session(
+                    keep_open=keep_origin_open,
+                    release_on_exit=release_origin_on_exit,
+                )
+            else:
+                _ensure_origin_sdk_on_path()
+                import originpro as origin_any_direct  # type: ignore
+
+                try:
+                    origin_any_direct.set_show()
+                except Exception:
+                    pass
+                origin_context = nullcontext(cast(Any, origin_any_direct))
+            with origin_context as origin_any:
+                if keep_origin_open and release_origin_on_exit:
                     schedule_origin_release()
                 workbook_names: set[str] = set()
                 for workbook_index, workbook in enumerate(workbook_list, start=1):
@@ -6077,7 +6093,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         worksheet: WorksheetData,
         *,
         roles: str,
-        graph_callback: Callable[[Any, WorkbookData, WorksheetData], None] | None = None,
+        graph_callback: Callable[[Any, Any, WorkbookData, WorksheetData], None] | None = None,
     ) -> bool:
         frame = worksheet.dataframe
         pairs = self._origin_plot_pairs(frame, roles)
@@ -6316,7 +6332,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 )
         if callable(graph_callback):
             try:
-                graph_callback(graph, workbook, worksheet)
+                graph_callback(origin_any, graph, workbook, worksheet)
             except Exception as exc:
                 self._append_log(
                     f"Origin graph callback failed for {graph_title}: {exc}",

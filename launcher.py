@@ -965,13 +965,12 @@ def _export_rvst_origin_artifact(
 ):
     import pandas as pd
 
-    from microwire_data_builder.core import OriginArtifact, _export_origin_object, _safe_plot_stem
+    from microwire_data_builder.core import export_origin_graph_artifact, _safe_plot_stem
     from plotting.plugins.r_vs_t import core as rvst_core
     from plotting.shared.origin import (
+        _ensure_origin_sdk_on_path,
         hide_origin_workbook,
         origin_safe_token,
-        origin_session,
-        schedule_origin_release,
         set_origin_axis_title,
         set_origin_graph_title,
     )
@@ -987,90 +986,85 @@ def _export_rvst_origin_artifact(
     workbook_frame = pd.DataFrame(data)
     origin_dir = output_dir / "_origin_objects"
     origin_dir.mkdir(parents=True, exist_ok=True)
-    descriptor = f"{_safe_plot_stem(source_path.stem)}_rvst.oggu"
-    target_path = origin_dir / descriptor
+    descriptor_stem = f"{_safe_plot_stem(source_path.stem)}_rvst"
 
-    with origin_session(keep_open=True) as origin_any:
+    _ensure_origin_sdk_on_path()
+    import originpro as origin_any  # type: ignore
+
+    try:
+        origin_any.set_show()
+    except Exception:
+        pass
+
+    try:
+        lt_int = getattr(origin_any, "lt_int", None)
+        if callable(lt_int):
+            lt_int("@V")
+    except Exception:
+        pass
+    book_name = origin_safe_token(f"{source_path.stem}_rvst", fallback="RvsT", max_len=32)
+    workbook = origin_any.new_book("w", lname=book_name)
+    worksheet = workbook[0]
+    try:
+        worksheet.name = origin_safe_token("RvsT", fallback="RvsT", max_len=13)
+    except Exception:
+        pass
+    worksheet.from_df(workbook_frame)
+    try:
+        worksheet.cols_axis("".join("XY" for _segment in segments))
+    except Exception:
+        pass
+
+    graph = None
+    for template in ("line", "ORIGIN"):
         try:
-            schedule_origin_release()
+            graph = origin_any.new_graph(template=template)
+        except Exception:
+            graph = None
+        if graph is not None:
+            break
+    if graph is None:
+        graph = origin_any.new_graph()
+    layer = graph[0]
+    for index, segment in enumerate(segments):
+        try:
+            plot_obj = layer.add_plot(worksheet, coly=(index * 2) + 1, colx=index * 2, type="y")
+        except TypeError:
+            plot_obj = layer.add_plot(worksheet, coly=(index * 2) + 1, colx=index * 2)
+        try:
+            plot_obj.lname = segment.label
         except Exception:
             pass
-        book_name = origin_safe_token(f"{source_path.stem}_rvst", fallback="RvsT", max_len=32)
-        workbook = origin_any.new_book("w", lname=book_name)
-        worksheet = workbook[0]
-        try:
-            worksheet.name = origin_safe_token("RvsT", fallback="RvsT", max_len=13)
-        except Exception:
-            pass
-        worksheet.from_df(workbook_frame)
-        try:
-            worksheet.cols_axis("".join("XY" for _segment in segments))
-        except Exception:
-            pass
+        palette = rvst_core.HEATING_COLORS if segment.kind == "heating" else rvst_core.COOLING_COLORS
+        color = palette[index % len(palette)] if palette else ""
+        if color:
+            _set_origin_plot_color(plot_obj, color)
+    try:
+        layer.rescale()
+    except Exception:
+        pass
+    set_origin_axis_title(layer, "x", "Temperature (deg C)")
+    set_origin_axis_title(layer, "y", "Resistance (Ohm)")
+    set_origin_graph_title(origin_any, graph, layer, title)
+    hide_origin_workbook(origin_any, workbook, graph)
 
-        graph = None
-        for template in ("line", "ORIGIN"):
-            try:
-                graph = origin_any.new_graph(template=template)
-            except Exception:
-                graph = None
-            if graph is not None:
-                break
-        if graph is None:
-            graph = origin_any.new_graph()
-        layer = graph[0]
-        for index, segment in enumerate(segments):
-            try:
-                plot_obj = layer.add_plot(worksheet, coly=(index * 2) + 1, colx=index * 2, type="y")
-            except TypeError:
-                plot_obj = layer.add_plot(worksheet, coly=(index * 2) + 1, colx=index * 2)
-            try:
-                plot_obj.lname = segment.label
-            except Exception:
-                pass
-            palette = rvst_core.HEATING_COLORS if segment.kind == "heating" else rvst_core.COOLING_COLORS
-            color = palette[index % len(palette)] if palette else ""
-            if color:
-                _set_origin_plot_color(plot_obj, color)
-        try:
-            layer.rescale()
-        except Exception:
-            pass
-        set_origin_axis_title(layer, "x", "Temperature (deg C)")
-        set_origin_axis_title(layer, "y", "Resistance (Ohm)")
-        set_origin_graph_title(origin_any, graph, layer, title)
-        hide_origin_workbook(origin_any, workbook, graph)
-
-        exported_path = _export_origin_object(
-            {
-                "origin": origin_any,
-                "graph": graph,
-                "workbook": workbook,
-                "worksheet": worksheet,
-                "legend_label": title,
-            },
-            target_path,
-            LOGGER,
-        )
-        clipboard_fallback = False
-        if exported_path is not None:
-            try:
-                graph.copy_page("OLE", ratio=85)
-                clipboard_fallback = True
-            except Exception:
-                clipboard_fallback = False
-
-    if exported_path is None:
-        return None
-    return OriginArtifact(
-        descriptor=descriptor,
-        object_path=exported_path,
-        graph_name=title,
-        workbook_name=book_name,
-        worksheet_name="RvsT",
+    artifact = export_origin_graph_artifact(
+        handles={
+            "origin": origin_any,
+            "graph": graph,
+            "workbook": workbook,
+            "worksheet": worksheet,
+            "legend_label": title,
+        },
+        descriptor_stem=descriptor_stem,
+        origin_dir=origin_dir,
         display_text=f"R vs T Origin graph: {title}",
-        clipboard_fallback=clipboard_fallback,
+        log=LOGGER,
     )
+
+    if artifact is None or (artifact.object_path is None and not getattr(artifact, "clipboard_fallback", False)):
+        return None
+    return artifact
 
 
 def _load_rvst_word_report_frame(source_path: Path, sample_override: object, output_dir: Path, *, include_origin: bool):
@@ -1126,6 +1120,28 @@ def _load_rvst_word_report_frame(source_path: Path, sample_override: object, out
             row[RVT_ORIGIN_COLUMN] = artifact.descriptor
             origin_artifacts[artifact.descriptor] = artifact
     return pd.DataFrame([row]), origin_artifacts
+
+
+def _export_pyplot_origin_artifacts_for_paths(
+    *,
+    paths: list[Path],
+    plugin_name: str,
+    output_dir: Path,
+    descriptor_prefix: str,
+    display_prefix: str,
+) -> list[object]:
+    from microwire_data_builder.core import export_pyplot_origin_artifacts_for_paths
+
+    return list(
+        export_pyplot_origin_artifacts_for_paths(
+            paths=paths,
+            plugin_name=plugin_name,
+            origin_dir=output_dir / "_origin_objects",
+            descriptor_prefix=descriptor_prefix,
+            display_prefix=display_prefix,
+            log=LOGGER,
+        )
+    )
 
 
 def _project_section_rows(section: object) -> list[dict[str, Any]]:
@@ -1238,6 +1254,64 @@ def _word_project_add_current_annealing_sources(target: dict[str, Any], sources:
         )
 
 
+_WORD_PROJECT_GRAPH_SOURCE_SPECS: dict[str, tuple[str, str, str, str, str]] = {
+    "vsm_temperature_scan": (
+        "_word_vsm_temperature_scan_sources",
+        "VSM temperature scan graphs",
+        "VSM temperature scan graphs (Origin)",
+        "VSM Temperature Scan",
+        "VSM temperature scan Origin graph",
+    ),
+    "vsm_hysteresis": (
+        "_word_vsm_hysteresis_sources",
+        "VSM hysteresis graphs",
+        "VSM hysteresis graphs (Origin)",
+        "VSM Hysteresis Loops",
+        "VSM hysteresis Origin graph",
+    ),
+    "dma_iso_stress": (
+        "_word_dma_iso_stress_sources",
+        "DMA iso-stress graphs",
+        "DMA iso-stress graphs (Origin)",
+        "DMA Iso-Stress",
+        "DMA iso-stress Origin graph",
+    ),
+    "shape_memory_stress_strain": (
+        "_word_shape_memory_stress_strain_sources",
+        "Shape memory stress/strain graphs",
+        "Shape memory stress/strain graphs (Origin)",
+        "Shape Memory Stress/Strain",
+        "Shape memory stress/strain Origin graph",
+    ),
+    "fmr": (
+        "_word_fmr_sources",
+        "FMR graphs",
+        "FMR graphs (Origin)",
+        "FMR",
+        "FMR Origin graph",
+    ),
+}
+
+
+def _word_project_add_graph_sources(
+    target: dict[str, Any],
+    section_name: str,
+    sources: object,
+) -> None:
+    spec = _WORD_PROJECT_GRAPH_SOURCE_SPECS.get(section_name)
+    if spec is None:
+        return
+    source_column, graph_column, _origin_column, _plugin_name, _display_prefix = spec
+    source_values = [str(item) for item in _word_project_value_items(sources) if str(item or "").strip()]
+    if not source_values:
+        return
+    target[source_column] = _word_project_merge_value(target.get(source_column), source_values)
+    target[graph_column] = _word_project_merge_value(
+        target.get(graph_column),
+        [_word_project_public_source_name(source) for source in source_values],
+    )
+
+
 def _load_project_word_report_frame(
     source_path: Path,
     sample: object,
@@ -1253,14 +1327,20 @@ def _load_project_word_report_frame(
         DIAMETER_RATIO_COLUMN,
         GLASS_DIAMETER_COLUMN,
         MICROSCOPE_IMAGE_COLUMNS,
+        DMA_ISOSTRESS_ORIGIN_COLUMN,
+        FMR_ORIGIN_COLUMN,
         RVT_FILE_COLUMN,
         RVT_GRAPH_COLUMN,
         RVT_ORIGIN_COLUMN,
         RVT_POINT_COUNT_COLUMN,
         RVT_RESISTANCE_RANGE_COLUMN,
         RVT_TEMPERATURE_RANGE_COLUMN,
+        SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+        VSM_HYSTERESIS_ORIGIN_COLUMN,
+        VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
         _load_annealing,
         _plot_measurement_origin,
+        _safe_plot_stem,
     )
     from plotting.plugins.r_vs_t.core import load_file
 
@@ -1271,6 +1351,27 @@ def _load_project_word_report_frame(
 
     rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     microscope_dimension_columns = {DIAMETER_COLUMN, GLASS_DIAMETER_COLUMN, DIAMETER_RATIO_COLUMN}
+    rvt_search_roots: list[Path] = [source_path.parent]
+
+    def _remember_rvt_search_root(value: object) -> None:
+        for item in _word_project_value_items(value):
+            text = str(item or "").strip()
+            if not text:
+                continue
+            path = Path(text)
+            try:
+                if not path.exists():
+                    continue
+            except OSError:
+                continue
+            for parent in path.parents:
+                try:
+                    rvt_root = parent / "RvsT"
+                    if rvt_root.exists() and parent not in rvt_search_roots:
+                        rvt_search_roots.append(parent)
+                except OSError:
+                    continue
+
     for section_name, section in sections.items():
         if section_name in {"assemble", "compare"}:
             continue
@@ -1301,7 +1402,12 @@ def _load_project_word_report_frame(
                 elif column == "_glass_image":
                     column = MICROSCOPE_IMAGE_COLUMNS[1]
                 elif column == "_sources" and section_name == "annealing":
+                    _remember_rvt_search_root(value)
                     _word_project_add_current_annealing_sources(target, value)
+                    continue
+                elif column == "_sources" and section_name in _WORD_PROJECT_GRAPH_SOURCE_SPECS:
+                    _remember_rvt_search_root(value)
+                    _word_project_add_graph_sources(target, section_name, value)
                     continue
                 elif column.startswith("_"):
                     continue
@@ -1321,6 +1427,11 @@ def _load_project_word_report_frame(
         RVT_POINT_COUNT_COLUMN,
         RVT_TEMPERATURE_RANGE_COLUMN,
         RVT_RESISTANCE_RANGE_COLUMN,
+        VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
+        VSM_HYSTERESIS_ORIGIN_COLUMN,
+        DMA_ISOSTRESS_ORIGIN_COLUMN,
+        SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+        FMR_ORIGIN_COLUMN,
     ):
         if column not in frame.columns:
             frame[column] = pd.Series([None] * len(frame), dtype=object)
@@ -1355,15 +1466,70 @@ def _load_project_word_report_frame(
                 if descriptors:
                     frame.at[index, origin_column] = descriptors if len(descriptors) > 1 else descriptors[0]
 
-    rvt_root = source_path.parent / "RvsT"
-    if rvt_root.exists():
-        rvt_paths = [
-            path
-            for path in rvt_root.rglob("*.csv")
-            if path.is_file() and _looks_like_rvst_csv(path)
-        ]
-    else:
-        rvt_paths = []
+            for section_name, spec in _WORD_PROJECT_GRAPH_SOURCE_SPECS.items():
+                source_column, _graph_column, origin_column, plugin_name, display_prefix = spec
+                descriptors = []
+                source_paths = [
+                    Path(str(source))
+                    for source in _word_project_value_items(row.get(source_column))
+                    if str(source or "").strip()
+                ]
+                source_paths = [path for path in dict.fromkeys(source_paths) if path.exists()]
+                if not source_paths:
+                    continue
+                sample_title = " ".join(
+                    part
+                    for part in (
+                        str(row.get("Composition") or "").strip(),
+                        str(row.get("Microwire") or "").strip(),
+                    )
+                    if part
+                ).strip()
+                prefix = _safe_plot_stem(
+                    "_".join(
+                        part
+                        for part in (
+                            sample_title or f"sample_{index + 1}",
+                            section_name,
+                        )
+                        if part
+                    )
+                )
+                try:
+                    artifacts = _export_pyplot_origin_artifacts_for_paths(
+                        paths=source_paths,
+                        plugin_name=plugin_name,
+                        output_dir=output_dir,
+                        descriptor_prefix=prefix,
+                        display_prefix=display_prefix,
+                    )
+                except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
+                    LOGGER.warning("%s Origin object generation skipped for %s: %s", display_prefix, sample_title, exc)
+                    artifacts = []
+                for artifact in artifacts:
+                    descriptor = getattr(artifact, "descriptor", None)
+                    if not descriptor:
+                        continue
+                    descriptors.append(str(descriptor))
+                    origin_artifacts[str(descriptor)] = artifact
+                if descriptors:
+                    frame.at[index, origin_column] = descriptors if len(descriptors) > 1 else descriptors[0]
+
+    rvt_paths = []
+    seen_rvt_paths: set[Path] = set()
+    for root in rvt_search_roots:
+        rvt_root = root / "RvsT"
+        if not rvt_root.exists():
+            continue
+        for path in rvt_root.rglob("*.csv"):
+            try:
+                resolved = path.resolve()
+            except OSError:
+                resolved = path
+            if resolved in seen_rvt_paths or not path.is_file() or not _looks_like_rvst_csv(path):
+                continue
+            seen_rvt_paths.add(resolved)
+            rvt_paths.append(path)
 
     for index, row in frame.iterrows():
         composition = row.get("Composition")
@@ -1471,25 +1637,75 @@ def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespac
     )
 
 
+def _disable_originpro_exit_detach() -> None:
+    try:
+        import plotting.shared.origin as shared_origin
+
+        setattr(shared_origin, "_ORIGIN_RELEASED", True)
+    except Exception:
+        pass
+    try:
+        import atexit
+        import originpro.config as origin_config  # type: ignore
+    except Exception:
+        return
+    handler = getattr(origin_config, "_exit_handler", None)
+    if callable(handler):
+        try:
+            atexit.unregister(handler)
+        except Exception:
+            pass
+    obj_count = getattr(origin_config, "_OBJS_COUNT", None)
+    if isinstance(obj_count, list) and obj_count:
+        try:
+            obj_count[0] = max(int(obj_count[0]), 1)
+        except Exception:
+            obj_count[0] = 1
+
+
+def _attach_origin_for_word_report() -> None:
+    from plotting.shared.origin import _ensure_origin_sdk_on_path
+
+    _ensure_origin_sdk_on_path()
+    import originpro as op  # type: ignore
+
+    attach = getattr(op, "attach", None)
+    if callable(attach):
+        attach()
+    try:
+        op.set_show()
+    except Exception:
+        pass
+
+
 def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
     from microwire_data_builder.core import export_word_reports
 
-    source_path = Path(str(getattr(args, "microwire_word_report", "")).strip()).expanduser()
-    if not source_path.exists():
-        raise FileNotFoundError(source_path)
-    output_dir_value = getattr(args, "out", None)
-    output_dir = (
-        Path(str(output_dir_value)).expanduser()
-        if output_dir_value
-        else source_path.with_suffix("").parent / f"{source_path.stem}_word_reports"
-    )
-    frame, origin_artifacts = _load_microwire_word_report_frame(source_path, args, output_dir)
-    reports = export_word_reports(frame, output_dir, origin_artifacts=origin_artifacts, logger=LOGGER)
-    print(f"[microwire-word] output_dir={output_dir}")
-    print(f"[microwire-word] reports={len(reports)}")
-    for report in reports:
-        print(f"[microwire-word] report={report}")
-    return 0
+    try:
+        source_path = Path(str(getattr(args, "microwire_word_report", "")).strip()).expanduser()
+        if not source_path.exists():
+            raise FileNotFoundError(source_path)
+        output_dir_value = getattr(args, "out", None)
+        output_dir = (
+            Path(str(output_dir_value)).expanduser()
+            if output_dir_value
+            else source_path.with_suffix("").parent / f"{source_path.stem}_word_reports"
+        )
+        if bool(getattr(args, "microwire_word_origin", True)):
+            try:
+                _attach_origin_for_word_report()
+            except Exception as exc:
+                LOGGER.warning("Origin object generation skipped for Word report: %s", exc)
+                setattr(args, "microwire_word_origin", False)
+        frame, origin_artifacts = _load_microwire_word_report_frame(source_path, args, output_dir)
+        reports = export_word_reports(frame, output_dir, origin_artifacts=origin_artifacts, logger=LOGGER)
+        print(f"[microwire-word] output_dir={output_dir}")
+        print(f"[microwire-word] reports={len(reports)}")
+        for report in reports:
+            print(f"[microwire-word] report={report}")
+        return 0
+    finally:
+        _disable_originpro_exit_detach()
 
 
 def _run_visual_check(args: argparse.Namespace) -> int:

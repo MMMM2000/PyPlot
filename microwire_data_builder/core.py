@@ -252,6 +252,10 @@ VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
+VSM_HYSTERESIS_ORIGIN_COLUMN = "VSM hysteresis graphs (Origin)"
+VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN = "VSM temperature scan graphs (Origin)"
+DMA_ISOSTRESS_ORIGIN_COLUMN = "DMA iso-stress graphs (Origin)"
+SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Shape memory stress/strain graphs (Origin)"
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Displacement (mm)"
 SHAPE_MEMORY_LOAD_COLUMN = "Load (g)"
 SHAPE_MEMORY_STRAIN_COLUMN = "Strain (%)"
@@ -260,6 +264,7 @@ SHAPE_MEMORY_FRACTURE_LOAD_COLUMN = "Fracture load (g)"
 SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN = "Fracture strain (%)"
 SHAPE_MEMORY_FRACTURE_STRESS_COLUMN = "Fracture stress (MPa)"
 FMR_COLUMN = "FMR graphs"
+FMR_ORIGIN_COLUMN = "FMR graphs (Origin)"
 RVT_FILE_COLUMN = "R vs T files"
 RVT_GRAPH_COLUMN = "R vs T graphs"
 RVT_ORIGIN_COLUMN = "R vs T graphs (Origin)"
@@ -280,11 +285,28 @@ TRANSITION_TEMP_COLUMNS = (
 
 STRAIN_COLUMN = "Legacy strain"
 
+for _graph_column, _origin_column in (
+    (VSM_HYSTERESIS_COLUMN, VSM_HYSTERESIS_ORIGIN_COLUMN),
+    (VSM_TEMPERATURE_SCAN_COLUMN, VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN),
+    (DMA_ISOSTRESS_COLUMN, DMA_ISOSTRESS_ORIGIN_COLUMN),
+    (SHAPE_MEMORY_STRESS_STRAIN_COLUMN, SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN),
+    (FMR_COLUMN, FMR_ORIGIN_COLUMN),
+):
+    if _graph_column in OUTPUT_COLUMNS and _origin_column not in OUTPUT_COLUMNS:
+        OUTPUT_COLUMNS.insert(OUTPUT_COLUMNS.index(_graph_column) + 1, _origin_column)
+
 ORIGIN_FIGURE_COLUMNS = tuple(
     column
     for column in OUTPUT_COLUMNS
     if column.startswith("Figure") and "(Origin)" in column
-) + (RVT_ORIGIN_COLUMN,)
+) + (
+    RVT_ORIGIN_COLUMN,
+    VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
+    VSM_HYSTERESIS_ORIGIN_COLUMN,
+    DMA_ISOSTRESS_ORIGIN_COLUMN,
+    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+    FMR_ORIGIN_COLUMN,
+)
 
 MICROWIRE_LABEL_RE = re.compile(r"(\d+)\s*[/\-]\s*(\d+)")
 MICROWIRE_SORT_RE = re.compile(
@@ -647,6 +669,7 @@ class WordOleInsertion:
     object_path: Path
     label: str
     clipboard_fallback: bool = False
+    graph_name: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -4002,7 +4025,7 @@ def _plot_measurement_origin(
 ) -> Optional[OriginArtifact]:
     try:
         from plotting.plugins.current_annealing.core import plot_one_origin
-        from plotting.shared.utils import format_annealing_title, schedule_origin_release
+        from plotting.shared.utils import format_annealing_title
     except ImportError as exc:  # pragma: no cover - depends on optional module
         raise RuntimeError("originpro is not available") from exc
 
@@ -4018,28 +4041,17 @@ def _plot_measurement_origin(
         source.name,
         return_handles=True,
     )
-    try:
-        schedule_origin_release()
-    except Exception:
-        pass
 
     if not isinstance(handles, dict):
         return None
 
-    description, graph_name, workbook_name, worksheet_name = _describe_origin_handles(handles)
     safe_stem = _safe_plot_stem(source.stem)
-    origin_dir.mkdir(parents=True, exist_ok=True)
-    artifact_name = f"{safe_stem}.oggu"
-    target_path = origin_dir / artifact_name
-    exported_path = _export_origin_object(handles, target_path, log)
-
-    return OriginArtifact(
-        descriptor=artifact_name,
-        object_path=exported_path,
-        graph_name=graph_name,
-        workbook_name=workbook_name,
-        worksheet_name=worksheet_name,
-        display_text=description,
+    return export_origin_graph_artifact(
+        handles=handles,
+        descriptor_stem=safe_stem,
+        origin_dir=origin_dir,
+        display_text=None,
+        log=log,
     )
 
 
@@ -4184,6 +4196,256 @@ def _single_asset_reference(value: Any) -> Optional[str]:
     return None
 
 
+def _copy_origin_graph_page(
+    graph: object,
+    log: Optional[logging.Logger] = None,
+) -> bool:
+    if graph is None:
+        return False
+    try:
+        graph.activate()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    lt_exec = getattr(graph, "lt_exec", None)
+    if callable(lt_exec):
+        try:
+            # Keep master-page items from forcing an image-only clipboard payload.
+            lt_exec("@GMC=1;")
+        except Exception:
+            pass
+    copy_page = getattr(graph, "copy_page", None)
+    if not callable(copy_page):
+        return False
+    try:
+        copy_page("OLE", ratio=85)
+        return True
+    except TypeError:
+        try:
+            copy_page("OLE")
+            return True
+        except Exception:
+            pass
+    except Exception:
+        pass
+    if log is not None:
+        log.debug("Failed to copy Origin graph page %s as OLE", _origin_object_name(graph))
+    return False
+
+
+def export_origin_graph_artifact(
+    *,
+    handles: Dict[str, object],
+    descriptor_stem: str,
+    origin_dir: Path,
+    display_text: Optional[str] = None,
+    log: Optional[logging.Logger] = None,
+) -> Optional[OriginArtifact]:
+    """Save and describe a live Origin graph page for Word/Excel embedding."""
+
+    graph = handles.get("graph")
+    if graph is None:
+        return None
+    description, graph_name, workbook_name, worksheet_name = _describe_origin_handles(handles)
+    safe_stem = _safe_plot_stem(descriptor_stem)
+    origin_dir.mkdir(parents=True, exist_ok=True)
+    artifact_name = f"{safe_stem}.oggu"
+    target_path = origin_dir / artifact_name
+    exported_path = _export_origin_object(handles, target_path, log)
+    clipboard_fallback = _copy_origin_graph_page(graph, log)
+    return OriginArtifact(
+        descriptor=artifact_name,
+        object_path=exported_path,
+        graph_name=graph_name,
+        workbook_name=workbook_name,
+        worksheet_name=worksheet_name,
+        display_text=display_text or description,
+        clipboard_fallback=clipboard_fallback,
+    )
+
+
+def _pump_qt_events(app: object, *, rounds: int = 3) -> None:
+    processor = getattr(app, "processEvents", None)
+    if not callable(processor):
+        return
+    for _ in range(max(1, int(rounds))):
+        try:
+            processor()
+        except Exception:
+            break
+
+
+def export_pyplot_origin_artifacts_for_paths(
+    *,
+    paths: Sequence[Path | str],
+    plugin_name: str,
+    origin_dir: Path,
+    descriptor_prefix: str,
+    display_prefix: str,
+    log: Optional[logging.Logger] = None,
+) -> List[OriginArtifact]:
+    """Generate PyPlot graphs for paths and save them as Origin graph artifacts."""
+
+    filtered: List[Path] = []
+    seen: Set[Path] = set()
+    for raw_path in paths:
+        path = Path(raw_path)
+        if not path.exists():
+            continue
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen:
+            continue
+        seen.add(key)
+        filtered.append(path)
+    if not filtered:
+        return []
+
+    try:
+        from PyQt6 import QtWidgets
+        from plotting.pyplot.app import PyPlotWorkbench
+    except Exception as exc:  # pragma: no cover - depends on optional GUI stack
+        raise RuntimeError("PyPlot automation is unavailable.") from exc
+
+    created_app = False
+    app = QtWidgets.QApplication.instance()
+    if not isinstance(app, QtWidgets.QApplication):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication([sys.argv[0]])
+        created_app = True
+        try:
+            app.setQuitOnLastWindowClosed(False)
+        except Exception:
+            pass
+
+    window: Any | None = None
+    artifacts: List[OriginArtifact] = []
+    try:
+        window = PyPlotWorkbench(initial_plotter=plugin_name)
+        _pump_qt_events(app, rounds=4)
+        selector = getattr(window, "automation_select_plugin", None)
+        if not callable(selector):
+            raise RuntimeError("PyPlot plugin selection automation is unavailable.")
+        selector(plugin_name)
+
+        importer = getattr(window, "automation_import_paths", None)
+        if not callable(importer):
+            raise RuntimeError("PyPlot import automation is unavailable.")
+        importer(filtered)
+
+        generator = getattr(window, "automation_generate", None)
+        if not callable(generator):
+            raise RuntimeError("PyPlot generate automation is unavailable.")
+        generator()
+        _pump_qt_events(app, rounds=10)
+
+        pruner = getattr(window, "_prune_shared_plot_workbooks", None)
+        if callable(pruner):
+            pruner()
+        workbook_getter = getattr(window, "_shared_plot_workbooks_for_plugin", None)
+        workbooks = workbook_getter(plugin_name) if callable(workbook_getter) else []
+        if not workbooks:
+            current_tab = getattr(window, "tab_widget", None)
+            current_widget = current_tab.currentWidget() if current_tab is not None else None
+            descriptor = getattr(window, "_tab_descriptors", {}).get(current_widget)
+            registrar = getattr(window, "_register_shared_plot_workbook_for_tab", None)
+            if current_widget is not None and descriptor is not None and callable(registrar):
+                registrar(current_widget, descriptor)
+                workbooks = workbook_getter(plugin_name) if callable(workbook_getter) else []
+        if not workbooks:
+            plugin_getter = getattr(window, "_plugin_instance_for_name", None)
+            plugin = plugin_getter(plugin_name) if callable(plugin_getter) else None
+            managed_keys = getattr(plugin, "_managed_workbooks", None)
+            workbook_store = getattr(window, "_workbooks", {})
+            if managed_keys and isinstance(workbook_store, dict):
+                workbooks = [
+                    workbook_store[key]
+                    for key in sorted(managed_keys, key=str)
+                    if key in workbook_store
+                ]
+        if not workbooks:
+            if log is not None:
+                log.warning("No PyPlot workbooks were available for %s Origin export.", plugin_name)
+            return artifacts
+
+        counter = 0
+
+        def _capture_artifact(
+            origin_any: object,
+            graph: object,
+            workbook: object,
+            worksheet: object,
+        ) -> None:
+            nonlocal counter
+            counter += 1
+            workbook_name = str(getattr(workbook, "name", "") or "").strip()
+            worksheet_name = str(getattr(worksheet, "name", "") or "").strip()
+            label_parts = [part for part in (display_prefix, workbook_name, worksheet_name) if part]
+            display_text = (
+                ": ".join([label_parts[0], " - ".join(label_parts[1:])])
+                if label_parts
+                else display_prefix
+            )
+            descriptor_parts = [
+                descriptor_prefix,
+                workbook_name or "graph",
+                worksheet_name or f"{counter:02d}",
+            ]
+            artifact = export_origin_graph_artifact(
+                handles={
+                    "origin": origin_any,
+                    "graph": graph,
+                    "workbook": workbook,
+                    "worksheet": worksheet,
+                    "legend_label": display_text,
+                },
+                descriptor_stem=_safe_plot_stem("_".join(descriptor_parts)),
+                origin_dir=origin_dir,
+                display_text=display_text,
+                log=log,
+            )
+            if artifact is not None and (
+                artifact.object_path is not None or artifact.clipboard_fallback
+            ):
+                artifacts.append(artifact)
+
+        pusher = getattr(window, "_push_workbooks_to_origin", None)
+        if not callable(pusher):
+            raise RuntimeError("PyPlot Origin workbook export is unavailable.")
+        _exported, _plotted, errors = pusher(
+            workbooks,
+            create_graphs=True,
+            graph_callback=_capture_artifact,
+            keep_origin_open=True,
+            release_origin_on_exit=False,
+        )
+        if log is not None:
+            for error in errors or []:
+                log.warning("%s Origin export warning: %s", plugin_name, error)
+        _pump_qt_events(app, rounds=4)
+        return artifacts
+    finally:
+        if window is not None:
+            try:
+                clear_dirty = getattr(window, "_clear_project_dirty", None)
+                if callable(clear_dirty):
+                    clear_dirty()
+            except Exception:
+                pass
+            try:
+                window.close()
+            except Exception:
+                pass
+        if isinstance(app, QtWidgets.QApplication):
+            _pump_qt_events(app, rounds=4)
+            if created_app:
+                try:
+                    app.quit()
+                except Exception:
+                    pass
+
+
 def _asset_references(value: Any) -> List[str]:
     if isinstance(value, str):
         stripped = value.strip()
@@ -4205,6 +4467,11 @@ _WORD_REPORT_LABELS: Dict[str, str] = {
     RVT_FILE_COLUMN: "R vs T source files",
     RVT_GRAPH_COLUMN: "R vs T graphs",
     RVT_ORIGIN_COLUMN: "R vs T graphs (Origin)",
+    VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN: "VSM temperature scan graphs (Origin)",
+    VSM_HYSTERESIS_ORIGIN_COLUMN: "VSM hysteresis graphs (Origin)",
+    DMA_ISOSTRESS_ORIGIN_COLUMN: "DMA iso-stress graphs (Origin)",
+    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN: "Shape memory stress/strain graphs (Origin)",
+    FMR_ORIGIN_COLUMN: "FMR graphs (Origin)",
     RVT_POINT_COUNT_COLUMN: "R vs T points",
     RVT_TEMPERATURE_RANGE_COLUMN: "R vs T temperature range (deg C)",
     RVT_RESISTANCE_RANGE_COLUMN: "R vs T resistance range (Ohm)",
@@ -4276,10 +4543,15 @@ _WORD_GRAPH_COLUMNS: Tuple[str, ...] = (
     RVT_GRAPH_COLUMN,
     RVT_ORIGIN_COLUMN,
     VSM_HYSTERESIS_COLUMN,
+    VSM_HYSTERESIS_ORIGIN_COLUMN,
     VSM_TEMPERATURE_SCAN_COLUMN,
+    VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
     DMA_ISOSTRESS_COLUMN,
+    DMA_ISOSTRESS_ORIGIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     FMR_COLUMN,
+    FMR_ORIGIN_COLUMN,
 )
 
 _CURRENT_ANNEALING_ORIGIN_COLUMNS = tuple(f"{column} (Origin)" for column in FIGURE_COLUMNS)
@@ -4290,11 +4562,15 @@ _WORD_GRAPH_SECTIONS: Tuple[
 ] = (
     ("Current annealing", _CURRENT_ANNEALING_ORIGIN_COLUMNS, FIGURE_COLUMNS),
     ("R vs T", (RVT_ORIGIN_COLUMN,), (RVT_GRAPH_COLUMN,)),
-    ("VSM temperature scan", (), (VSM_TEMPERATURE_SCAN_COLUMN,)),
-    ("VSM hysteresis loops", (), (VSM_HYSTERESIS_COLUMN,)),
-    ("DMA iso-stress", (), (DMA_ISOSTRESS_COLUMN,)),
-    ("Shape memory stress/strain", (), (SHAPE_MEMORY_STRESS_STRAIN_COLUMN,)),
-    ("FMR", (), (FMR_COLUMN,)),
+    ("VSM temperature scan", (VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,), (VSM_TEMPERATURE_SCAN_COLUMN,)),
+    ("VSM hysteresis loops", (VSM_HYSTERESIS_ORIGIN_COLUMN,), (VSM_HYSTERESIS_COLUMN,)),
+    ("DMA iso-stress", (DMA_ISOSTRESS_ORIGIN_COLUMN,), (DMA_ISOSTRESS_COLUMN,)),
+    (
+        "Shape memory stress/strain",
+        (SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,),
+        (SHAPE_MEMORY_STRESS_STRAIN_COLUMN,),
+    ),
+    ("FMR", (FMR_ORIGIN_COLUMN,), (FMR_COLUMN,)),
 )
 
 _WORD_ALWAYS_OMIT_COLUMNS: Tuple[str, ...] = (
@@ -4575,15 +4851,23 @@ def _word_graph_sections(
                         bookmark_id=bookmark_id,
                     )
                 )
-                if artifact is not None and artifact.object_path is not None:
+                if artifact is not None and (
+                    artifact.object_path is not None
+                    or bool(getattr(artifact, "clipboard_fallback", False))
+                ):
                     insertions.append(
                         WordOleInsertion(
                             bookmark_name=bookmark_name,
-                            object_path=Path(artifact.object_path),
+                            object_path=(
+                                Path(artifact.object_path)
+                                if artifact.object_path is not None
+                                else Path(artifact.descriptor)
+                            ),
                             label=str(display or descriptor),
                             clipboard_fallback=bool(
                                 getattr(artifact, "clipboard_fallback", False)
                             ),
+                            graph_name=artifact.graph_name,
                         )
                     )
                 else:
@@ -4600,12 +4884,13 @@ def _word_graph_sections(
         if reference_values and not section_has_origin_descriptors:
             section_has_content = True
             parts.append(_word_table([("Graphs in Assemble", ", ".join(reference_values))]))
-            if not origin_columns:
-                parts.append(
-                    _word_paragraph(
-                        "Editable Origin object export is not available for this graph type yet."
-                    )
+            parts.append(
+                _word_paragraph(
+                    "Editable Origin object was not generated for this graph yet."
+                    if origin_columns
+                    else "Editable Origin object export is not available for this graph type yet."
                 )
+            )
         if missing_origin_object:
             parts.append(
                 _word_paragraph(
@@ -4759,6 +5044,78 @@ def _write_word_docx(path: Path, document_xml: str) -> None:
         archive.writestr("docProps/app.xml", app_props)
 
 
+def _copy_origin_graph_to_clipboard_by_name(
+    graph_name: Optional[str],
+    log: logging.Logger,
+) -> bool:
+    name = str(graph_name or "").strip()
+    if not name:
+        return False
+    try:
+        try:
+            from plotting.shared.origin import _ensure_origin_sdk_on_path
+
+            _ensure_origin_sdk_on_path()
+        except Exception:
+            pass
+        import originpro as op  # type: ignore
+    except Exception as exc:
+        log.debug("Unable to import originpro for Word OLE copy: %s", exc)
+        return False
+    lt_int = getattr(op, "lt_int", None)
+    probe_ok = False
+    if callable(lt_int):
+        try:
+            lt_int("@V")
+            probe_ok = True
+        except Exception:
+            probe_ok = False
+    if not probe_ok:
+        log.debug("Origin automation is not active for Word OLE copy of %s", name)
+        return False
+    try:
+        op.set_show()
+    except Exception:
+        pass
+    try:
+        op.lt_exec("@GMC=1;")
+    except Exception:
+        pass
+    graph = None
+    finder = getattr(op, "find_graph", None)
+    if callable(finder):
+        try:
+            graph = finder(name)
+        except Exception:
+            graph = None
+    if graph is None:
+        graph_list = getattr(op, "graph_list", None)
+        if callable(graph_list):
+            try:
+                candidates = graph_list()
+            except Exception:
+                candidates = []
+            for candidate in candidates:
+                candidate_names = {
+                    text
+                    for text in (
+                        _origin_object_name(candidate),
+                        getattr(candidate, "name", None),
+                        getattr(candidate, "lname", None),
+                        getattr(candidate, "long_name", None),
+                        str(candidate),
+                    )
+                    if isinstance(text, str) and text.strip()
+                }
+                if name in candidate_names:
+                    graph = candidate
+                    break
+    if graph is None:
+        log.debug("Origin graph %s was not found for Word OLE copy", name)
+        return False
+    return _copy_origin_graph_page(graph, log)
+
+
 def _embed_origin_objects_with_word(
     docx_path: Path,
     insertions: Sequence[WordOleInsertion],
@@ -4774,79 +5131,122 @@ def _embed_origin_objects_with_word(
     if not powershell:
         log.warning("PowerShell is unavailable; left Origin placeholders in %s", docx_path)
         return
-    payload = [
-        {
-            "bookmark": insertion.bookmark_name,
-            "path": str(insertion.object_path),
-            "label": insertion.label,
-            "clipboard_fallback": bool(insertion.clipboard_fallback),
-        }
-        for insertion in insertions
-        if insertion.object_path.exists()
-    ]
-    if not payload:
-        log.warning("No saved Origin object files were available for %s", docx_path)
-        return
     script = r"""
 param(
     [Parameter(Mandatory=$true)][string]$DocxPath,
-    [Parameter(Mandatory=$true)][string]$PayloadPath
+    [Parameter(Mandatory=$true)][string]$BookmarkName,
+    [Parameter(Mandatory=$true)][string]$ObjectPath,
+    [Parameter(Mandatory=$true)][string]$Label,
+    [Parameter(Mandatory=$true)][string]$PreferClipboard
 )
 $ErrorActionPreference = 'Stop'
-$items = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$preferClipboardValue = $PreferClipboard -in @("1", "true", "True", "$true", "yes", "Yes")
+$wdCollapseStart = 1
+$wdInLine = 0
+$wdPasteOLEObject = 0
+$missing = [Type]::Missing
+$result = [ordered]@{
+    inserted = $false
+    method = ""
+    before = 0
+    after = 0
+    shapeType = $null
+    progId = ""
+    warning = ""
+}
 $word = $null
 $doc = $null
 try {
     $word = New-Object -ComObject Word.Application
     $word.Visible = $false
     $doc = $word.Documents.Open($DocxPath)
-    foreach ($item in @($items)) {
-        if (-not (Test-Path -LiteralPath $item.path)) {
-            continue
-        }
-        if (-not $doc.Bookmarks.Exists($item.bookmark)) {
-            continue
-        }
-        $bookmark = $doc.Bookmarks.Item($item.bookmark)
-        $range = $bookmark.Range
-        $range.Text = ""
-        $shape = $null
-        $lastError = $null
-        foreach ($classType in @("Origin95.Graph", "Origin.Graph", "")) {
-            try {
-                $shape = $doc.InlineShapes.AddOLEObject([string]$classType, [string]$item.path, $false, $false, "", 0, [string]$item.label, $range)
+    if (-not $doc.Bookmarks.Exists($BookmarkName)) {
+        $result.warning = "Bookmark not found: " + $BookmarkName
+    } else {
+        $bookmarkObj = $null
+        for ($bookmarkIndex = 1; $bookmarkIndex -le $doc.Bookmarks.Count; $bookmarkIndex++) {
+            $candidate = $doc.Bookmarks.Item($bookmarkIndex)
+            if ([string]$candidate.Name -eq $BookmarkName) {
+                $bookmarkObj = $candidate
                 break
-            } catch {
-                $lastError = $_
             }
         }
-        if ($shape -eq $null) {
-            if ($item.clipboard_fallback) {
+        if ($bookmarkObj -eq $null) {
+            throw "Bookmark not found after lookup: $BookmarkName"
+        }
+        $insertRange = $bookmarkObj.Range
+        $insertRange.Text = ""
+        $insertRange.Collapse($wdCollapseStart)
+        $insertRange.Select() | Out-Null
+        $selection = $word.Selection
+        $shape = $null
+        if ($preferClipboardValue) {
+            try {
+                $before = $doc.InlineShapes.Count
+                $result.before = $before
                 try {
-                    $range.Paste() | Out-Null
-                    $shape = $range.InlineShapes.Item(1)
+                    $selection.PasteSpecial($false, $false, $wdInLine, $false, $wdPasteOLEObject, "", "") | Out-Null
                 } catch {
-                    Write-Warning ("Failed to paste Origin object from clipboard for " + $item.path + ": " + $_.Exception.Message)
-                    continue
+                    $selection.Paste() | Out-Null
                 }
-            } else {
+                $after = $doc.InlineShapes.Count
+                $result.after = $after
+                if ($after -gt $before) {
+                    $shape = $doc.InlineShapes.Item($after)
+                    $result.inserted = $true
+                    $result.method = "clipboard"
+                }
+            } catch {
+                $result.warning = "Clipboard paste failed: " + $_.Exception.Message
+            }
+        }
+        if ($shape -eq $null -and (Test-Path -LiteralPath $ObjectPath)) {
+            $lastError = $null
+            foreach ($classType in @($null, "Origin.Graph", "Origin95.Graph", "")) {
+                try {
+                    if ($classType -eq $null) {
+                        $shape = $doc.InlineShapes.AddOLEObject($missing, [string]$ObjectPath, $false, $false, $missing, $missing, $missing, $insertRange)
+                    } else {
+                        $shape = $doc.InlineShapes.AddOLEObject([string]$classType, [string]$ObjectPath, $false, $false, $missing, $missing, $missing, $insertRange)
+                    }
+                    $result.inserted = $true
+                    $result.method = "file"
+                    break
+                } catch {
+                    $lastError = $_
+                }
+            }
+            if ($shape -eq $null) {
                 $message = "unknown error"
                 if ($lastError -ne $null -and $lastError.Exception -ne $null) {
                     $message = $lastError.Exception.Message
                 }
-                Write-Warning ("Failed to insert Origin object for " + $item.path + ": " + $message)
-                continue
+                if ($result.warning) {
+                    $result.warning = $result.warning + "; file insert failed: " + $message
+                } else {
+                    $result.warning = "File insert failed: " + $message
+                }
             }
         }
-        try {
-            $shape.LockAspectRatio = $true
-            if ($shape.Width -gt 430) {
-                $shape.Width = 430
+        if ($shape -ne $null) {
+            try {
+                $result.shapeType = $shape.Type
+            } catch {
             }
-        } catch {
         }
     }
     $doc.Save()
+} catch {
+    $line = ""
+    try {
+        $line = [string]$_.InvocationInfo.ScriptLineNumber
+    } catch {
+    }
+    if ($line) {
+        $result.warning = "PowerShell line " + $line + ": " + $_.Exception.Message
+    } else {
+        $result.warning = $_.Exception.Message
+    }
 } finally {
     if ($doc -ne $null) {
         $doc.Close($true) | Out-Null
@@ -4855,34 +5255,90 @@ try {
         $word.Quit() | Out-Null
     }
 }
+$result | ConvertTo-Json -Compress
 """
+    inserted_count = 0
+    attempted_count = 0
     with tempfile.TemporaryDirectory(prefix="pyplot-word-ole-") as tmp:
         tmp_path = Path(tmp)
-        payload_path = tmp_path / "insertions.json"
         script_path = tmp_path / "embed_origin_objects.ps1"
-        payload_path.write_text(json.dumps(payload), encoding="utf-8")
         script_path.write_text(script, encoding="utf-8")
-        completed = subprocess.run(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(script_path),
-                "-DocxPath",
-                str(docx_path),
-                "-PayloadPath",
-                str(payload_path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
+        for insertion in insertions:
+            object_path = insertion.object_path
+            try:
+                if object_path.exists():
+                    object_path = object_path.resolve()
+            except OSError:
+                pass
+            object_exists = object_path.exists()
+            copied_to_clipboard = False
+            if insertion.clipboard_fallback or insertion.graph_name:
+                copied_to_clipboard = _copy_origin_graph_to_clipboard_by_name(
+                    insertion.graph_name,
+                    log,
+                )
+            if not object_exists and not copied_to_clipboard:
+                log.warning(
+                    "Origin object for %s is unavailable; left placeholder in %s",
+                    insertion.label,
+                    docx_path,
+                )
+                continue
+            attempted_count += 1
+            completed = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script_path),
+                    "-DocxPath",
+                    str(docx_path),
+                    "-BookmarkName",
+                    insertion.bookmark_name,
+                    "-ObjectPath",
+                    str(object_path),
+                    "-Label",
+                    insertion.label,
+                    "-PreferClipboard",
+                    "1" if copied_to_clipboard else "0",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+            )
+            detail = (completed.stderr or completed.stdout or "").strip()
+            if completed.returncode != 0:
+                log.warning(
+                    "Failed to embed Origin object %s into %s: %s",
+                    insertion.label,
+                    docx_path,
+                    detail or completed.returncode,
+                )
+                continue
+            result: Dict[str, Any] = {}
+            try:
+                result = json.loads(completed.stdout or "{}")
+            except Exception:
+                result = {}
+            if result.get("inserted"):
+                inserted_count += 1
+            else:
+                log.warning(
+                    "Failed to embed Origin object %s into %s: %s",
+                    insertion.label,
+                    docx_path,
+                    result.get("warning") or detail or "unknown error",
+                )
+    if attempted_count and inserted_count != attempted_count:
+        log.warning(
+            "Embedded %s of %s Origin object(s) into %s",
+            inserted_count,
+            attempted_count,
+            docx_path,
         )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        log.warning("Failed to embed Origin objects into %s: %s", docx_path, detail or completed.returncode)
 
 
 def _embed_pictures_with_word(
@@ -5514,7 +5970,10 @@ def _origin_object_name(obj: object) -> Optional[str]:
     if obj is None:
         return None
     for attr in ("lt_name", "name", "lname", "long_name"):
-        value = getattr(obj, attr, None)
+        try:
+            value = getattr(obj, attr, None)
+        except Exception:
+            continue
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
@@ -5615,6 +6074,10 @@ def build_database(
 
     wants_matplotlib = "matplotlib" in plot_backends
     wants_origin_requested = "origin" in plot_backends
+    wants_word_reports = not skip_exports and any(
+        str(fmt).lower() in {"word", "docx", "word_reports"}
+        for fmt in (config.export_formats or ())
+    )
 
     fabrication_index = fabrication_index or build_fabrication_index(
         config.fabrication_files, log
@@ -5760,6 +6223,81 @@ def build_database(
         shape_memory_stress_strain_records
     )
     fmr_groups = _group_records(fmr_records)
+
+    def _assign_pyplot_origin_artifacts(
+        row: Dict[str, object],
+        *,
+        records: Iterable[object],
+        origin_column: str,
+        plugin_name: str,
+        display_prefix: str,
+        section_token: str,
+    ) -> None:
+        nonlocal origin_enabled, origin_disabled_reason
+        if not (origin_enabled and wants_word_reports):
+            return
+        paths: List[Path] = []
+        for record in records:
+            path_value = getattr(record, "path", None)
+            if isinstance(path_value, Path):
+                path = path_value
+            elif isinstance(path_value, str) and path_value.strip():
+                path = Path(path_value)
+            else:
+                continue
+            if path.exists() and path not in paths:
+                paths.append(path)
+        if not paths:
+            return
+        sample_title = " ".join(
+            part
+            for part in (
+                str(row.get("Composition") or "").strip(),
+                str(row.get("Microwire") or "").strip(),
+            )
+            if part
+        ).strip()
+        descriptor_prefix = _safe_plot_stem(
+            "_".join(
+                part
+                for part in (
+                    sample_title or "sample",
+                    section_token,
+                )
+                if part
+            )
+        )
+        try:
+            artifacts = export_pyplot_origin_artifacts_for_paths(
+                paths=paths,
+                plugin_name=plugin_name,
+                origin_dir=origin_dir,
+                descriptor_prefix=descriptor_prefix,
+                display_prefix=display_prefix,
+                log=log,
+            )
+        except RuntimeError as exc:
+            if origin_disabled_reason is None:
+                origin_disabled_reason = str(exc) or exc.__class__.__name__
+                log.warning("Origin plotting disabled: %s", origin_disabled_reason)
+            origin_enabled = False
+            return
+        except Exception:
+            log.exception(
+                "Failed to generate %s Origin object(s) for %s",
+                display_prefix,
+                sample_title or "sample",
+            )
+            return
+        descriptors: List[str] = []
+        for artifact in artifacts:
+            if not artifact.descriptor:
+                continue
+            descriptors.append(artifact.descriptor)
+            origin_artifacts.setdefault(artifact.descriptor, artifact)
+        collapsed = _collapse_asset_references(descriptors)
+        if collapsed is not None:
+            row[origin_column] = collapsed
 
     phase_points_map: Dict[str, Dict[str, float]] = {}
     if phase_points:
@@ -6376,6 +6914,14 @@ def build_database(
             labels = [_record_label(record) for record in vsm_records if _record_label(record)]
             if labels:
                 row[VSM_HYSTERESIS_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=vsm_records,
+                origin_column=VSM_HYSTERESIS_ORIGIN_COLUMN,
+                plugin_name="VSM Hysteresis Loops",
+                display_prefix="VSM hysteresis Origin graph",
+                section_token="vsm_hysteresis",
+            )
         vsm_scan_records = vsm_temperature_groups.get(key, [])
         if not vsm_scan_records:
             vsm_scan_records = vsm_temperature_groups.get((composition, draw_x, piece_y, None), [])
@@ -6385,6 +6931,14 @@ def build_database(
             labels = [_record_label(record) for record in vsm_scan_records if _record_label(record)]
             if labels:
                 row[VSM_TEMPERATURE_SCAN_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=vsm_scan_records,
+                origin_column=VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
+                plugin_name="VSM Temperature Scan",
+                display_prefix="VSM temperature scan Origin graph",
+                section_token="vsm_temperature_scan",
+            )
         dma_records = dma_isostress_groups.get(key, [])
         if not dma_records:
             dma_records = dma_isostress_groups.get((composition, draw_x, piece_y, None), [])
@@ -6394,6 +6948,14 @@ def build_database(
             labels = [_record_label(record) for record in dma_records if _record_label(record)]
             if labels:
                 row[DMA_ISOSTRESS_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=dma_records,
+                origin_column=DMA_ISOSTRESS_ORIGIN_COLUMN,
+                plugin_name="DMA Iso-Stress",
+                display_prefix="DMA iso-stress Origin graph",
+                section_token="dma_iso_stress",
+            )
         shape_memory_records = shape_memory_stress_strain_groups.get(key, [])
         if not shape_memory_records:
             shape_memory_records = shape_memory_stress_strain_groups.get(
@@ -6413,6 +6975,14 @@ def build_database(
             ]
             if labels:
                 row[SHAPE_MEMORY_STRESS_STRAIN_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=shape_memory_records,
+                origin_column=SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+                plugin_name="Shape Memory Stress/Strain",
+                display_prefix="Shape memory stress/strain Origin graph",
+                section_token="shape_memory_stress_strain",
+            )
         shape_memory_entry = shape_memory_entry_map.get(key_str, {})
         if shape_memory_entry:
             for column in SHAPE_MEMORY_VALUE_COLUMNS + SHAPE_MEMORY_FRACTURE_COLUMNS:
@@ -6431,6 +7001,14 @@ def build_database(
             labels = [_record_label(record) for record in fmr_entries if _record_label(record)]
             if labels:
                 row[FMR_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=fmr_entries,
+                origin_column=FMR_ORIGIN_COLUMN,
+                plugin_name="FMR",
+                display_prefix="FMR Origin graph",
+                section_token="fmr",
+            )
         ratio_display = _parse_numeric(row["d/D"])
         if ratio_display is not None:
             row["d/D"] = round(ratio_display, 3)
@@ -6760,6 +7338,8 @@ __all__ = [
     "OriginArtifact",
     "WordOleInsertion",
     "WordPictureInsertion",
+    "export_origin_graph_artifact",
+    "export_pyplot_origin_artifacts_for_paths",
     "FabricationIndex",
     "StrainRecord",
     "VsmHysteresisRecord",
@@ -6771,6 +7351,10 @@ __all__ = [
     "VSM_TEMPERATURE_SCAN_COLUMN",
     "DMA_ISOSTRESS_COLUMN",
     "SHAPE_MEMORY_STRESS_STRAIN_COLUMN",
+    "VSM_HYSTERESIS_ORIGIN_COLUMN",
+    "VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN",
+    "DMA_ISOSTRESS_ORIGIN_COLUMN",
+    "SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN",
     "SHAPE_MEMORY_DISPLACEMENT_COLUMN",
     "SHAPE_MEMORY_LOAD_COLUMN",
     "SHAPE_MEMORY_STRAIN_COLUMN",
@@ -6779,6 +7363,7 @@ __all__ = [
     "SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN",
     "SHAPE_MEMORY_FRACTURE_STRESS_COLUMN",
     "FMR_COLUMN",
+    "FMR_ORIGIN_COLUMN",
     "RVT_FILE_COLUMN",
     "RVT_GRAPH_COLUMN",
     "RVT_ORIGIN_COLUMN",

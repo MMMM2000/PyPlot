@@ -3886,6 +3886,139 @@ def test_word_report_export_embeds_available_origin_objects(
     assert "Origin object placeholder" in document_xml
 
 
+def test_word_report_export_accepts_clipboard_only_origin_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_insertions: list[core.WordOleInsertion] = []
+
+    def fake_embed(
+        docx_path: Path,
+        insertions: list[core.WordOleInsertion],
+        log: logging.Logger,
+    ) -> None:
+        del docx_path, log
+        captured_insertions.extend(insertions)
+
+    monkeypatch.setattr(core, "_embed_origin_objects_with_word", fake_embed)
+
+    descriptor = "live-origin-graph.oggu"
+    reports = core.export_word_reports(
+        pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    f"{core.FIGURE_COLUMNS[0]} (Origin)": descriptor,
+                }
+            ]
+        ),
+        tmp_path / "reports",
+        origin_artifacts={
+            descriptor: OriginArtifact(
+                descriptor=descriptor,
+                object_path=None,
+                graph_name="Graph1",
+                display_text="Live Origin graph",
+                clipboard_fallback=True,
+            )
+        },
+    )
+
+    assert len(reports) == 1
+    assert len(captured_insertions) == 1
+    insertion = captured_insertions[0]
+    assert insertion.object_path == Path(descriptor)
+    assert insertion.graph_name == "Graph1"
+    assert insertion.clipboard_fallback is True
+
+
+def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    high.write_text("0.1 40 1\n0.2 41 1\n", encoding="utf-8")
+    vsm_path = tmp_path / "Ni55Fe18Ga27 1_1 scan.VSM-TSCN-Data"
+    vsm_path.write_text("stub", encoding="utf-8")
+    captured: list[tuple[str, list[Path]]] = []
+    captured_insertions: list[core.WordOleInsertion] = []
+
+    def fake_current_origin(
+        df: pd.DataFrame,
+        source: Path,
+        origin_dir: Path,
+        log: logging.Logger | None,
+    ) -> OriginArtifact:
+        del df, source, origin_dir, log
+        return OriginArtifact(
+            descriptor="current.oggu",
+            object_path=tmp_path / "current.oggu",
+            display_text="Current Origin graph",
+        )
+
+    def fake_pyplot_origin(
+        *,
+        paths: list[Path],
+        plugin_name: str,
+        origin_dir: Path,
+        descriptor_prefix: str,
+        display_prefix: str,
+        log: logging.Logger | None,
+    ) -> list[OriginArtifact]:
+        del origin_dir, descriptor_prefix, display_prefix, log
+        captured.append((plugin_name, list(paths)))
+        artifact_path = tmp_path / "vsm-temperature.oggu"
+        artifact_path.write_bytes(b"origin graph object")
+        return [
+            OriginArtifact(
+                descriptor=artifact_path.name,
+                object_path=artifact_path,
+                display_text="VSM temperature Origin graph",
+            )
+        ]
+
+    def fake_embed(
+        docx_path: Path,
+        insertions: list[core.WordOleInsertion],
+        log: logging.Logger,
+    ) -> None:
+        del docx_path, log
+        captured_insertions.extend(insertions)
+
+    monkeypatch.setattr(core, "_plot_measurement_origin", fake_current_origin)
+    monkeypatch.setattr(core, "export_pyplot_origin_artifacts_for_paths", fake_pyplot_origin)
+    monkeypatch.setattr(core, "_embed_origin_objects_with_word", fake_embed)
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[high],
+            output_dir=tmp_path / "out",
+            make_plots=True,
+            plot_backends=("origin",),
+            export_formats=("word",),
+        ),
+        vsm_temperature_scan_records=[
+            core.VsmTemperatureScanRecord(
+                path=vsm_path,
+                sample="Ni55Fe18Ga27 1/1",
+                data=pd.DataFrame(),
+                key=("Ni55Fe18Ga27", 1, 1),
+                label="temperature scan",
+            )
+        ],
+    )
+
+    assert captured == [("VSM Temperature Scan", [vsm_path])]
+    assert result.dataframe.iloc[0][core.VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN] == "vsm-temperature.oggu"
+    assert result.origin_artifacts["vsm-temperature.oggu"].object_path == tmp_path / "vsm-temperature.oggu"
+    assert {item.object_path.name for item in captured_insertions} == {
+        "current.oggu",
+        "vsm-temperature.oggu",
+    }
+
+
 def test_word_report_export_embeds_microscope_images(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

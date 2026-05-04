@@ -235,7 +235,7 @@ def _capture_origin_outputs(
         }
         return origin_images, origin_errors, origin_warnings
 
-    def _graph_callback(graph: Any, workbook: WorkbookData, worksheet: WorksheetData) -> None:
+    def _graph_callback(_origin_any: Any, graph: Any, workbook: WorkbookData, worksheet: WorksheetData) -> None:
         stem = _safe_stem(f"{workbook.name}_{worksheet.name}", fallback="origin")
         path = output_dir / f"origin_{len(origin_images) + 1:02d}_{stem}.png"
         save_fig = getattr(graph, "save_fig", None)

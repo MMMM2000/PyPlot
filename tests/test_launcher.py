@@ -300,11 +300,13 @@ def test_run_microwire_word_report_cli_accepts_rvst_csv(
 def test_microwire_word_report_project_merges_section_rows_and_rvst(
     tmp_path: Path,
 ) -> None:
-    project_path = tmp_path / "microwire_project.pydpj"
-    annealing_path = tmp_path / "current annealing" / "Ni50Fe27Ga23 12_2 s1 1000mA.txt"
-    annealing_path.parent.mkdir()
+    data_root = tmp_path / "Praha"
+    project_path = tmp_path / "copied" / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir()
+    annealing_path = data_root / "current annealing" / "Ni50Fe27Ga23 12_2 s1 1000mA.txt"
+    annealing_path.parent.mkdir(parents=True)
     annealing_path.write_text("0.1 40 1\n0.2 41 1\n", encoding="utf-8")
-    rvt_path = tmp_path / "RvsT" / "RvsT" / "Ni50Fe27Ga23_12_2.csv"
+    rvt_path = data_root / "RvsT" / "RvsT" / "Ni50Fe27Ga23_12_2.csv"
     rvt_path.parent.mkdir(parents=True)
     rvt_path.write_text(
         "\n".join(
