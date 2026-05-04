@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from data_logging.ac_susceptibility_logger import lcr6000
+
+ac_logger = pytest.importorskip(
+    "data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
+    reason="Qt widgets backend is unavailable",
+    exc_type=ImportError,
+)
 
 
 def test_parse_numeric_list_accepts_frequency_suffixes() -> None:
@@ -69,3 +77,89 @@ def test_parse_fetch_impedance_keeps_raw_and_numeric_values() -> None:
     assert reading.monitor2 == pytest.approx(0.0)
     assert reading.comparator == "BIN1,AUX-OK,OK"
     assert reading.raw.startswith("+2.61788e-11")
+
+
+def test_ac_logger_formats_lcr_columns_with_plan_index() -> None:
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window._lcr_plan_index = 1
+    setting = lcr6000.Lcr6000Settings(
+        frequency_hz=1000.0,
+        level_value=0.1,
+        level_mode="voltage",
+        function="Ls-Q",
+        monitor1="Z",
+        monitor2="IAC",
+        aperture="FAST",
+    )
+    reading = lcr6000.Lcr6000Reading(
+        timestamp_utc="2026-05-04T12:00:00.000+00:00",
+        raw="+1.0,+2.0,+3.0,+4.0,BIN1,AUX-OK,OK",
+        primary=1.0,
+        secondary=2.0,
+        monitor1=3.0,
+        monitor2=4.0,
+        comparator="BIN1,AUX-OK,OK",
+    )
+
+    assert window._format_lcr_columns(setting, reading) == [
+        "2",
+        "1000",
+        "voltage",
+        "0.1",
+        "Ls-Q",
+        "1",
+        "2",
+        "3",
+        "4",
+        "BIN1,AUX-OK,OK",
+        "+1.0,+2.0,+3.0,+4.0,BIN1,AUX-OK,OK",
+    ]
+
+
+def test_ac_logger_ensure_header_replaces_current_annealing_header(tmp_path: Path) -> None:
+    path = tmp_path / "existing-log.txt"
+    path.write_text("# Current (mA)\tVoltage (V)\tResistance (Ohm)\n1\t2\t3\n", encoding="utf-8")
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+
+    window._ensure_log_header(str(path))
+
+    assert path.read_text(encoding="utf-8").splitlines() == [
+        ac_logger.HEADER_LINE,
+        "1\t2\t3",
+    ]
+
+
+def test_ac_logger_configure_reports_meter_failure() -> None:
+    class FakeStatus:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def setText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
+            self.text = text
+
+    class FailingMeter:
+        is_open = True
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            raise RuntimeError("meter did not accept setting")
+
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window._lcr_plan = [
+        lcr6000.Lcr6000Settings(
+            frequency_hz=1000.0,
+            level_value=0.1,
+            level_mode="voltage",
+            function="Ls-Q",
+            monitor1="Z",
+            monitor2="IAC",
+            aperture="FAST",
+        )
+    ]
+    window._lcr_plan_index = 0
+    window._lcr_last_error = ""
+    window.lcr_meter = FailingMeter()
+    window.label_lcr_status = FakeStatus()
+
+    assert window._configure_lcr_for_current_index() is False
+    assert window._lcr_last_error == "meter did not accept setting"
+    assert window.label_lcr_status.text == "LCR configure failed: meter did not accept setting"

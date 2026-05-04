@@ -257,7 +257,7 @@ class MainWindow(CurrentAnnealingWindow):
             raise ValueError("No LCR settings were generated.")
         return self._lcr_plan
 
-    def _configure_lcr_for_current_index(self, *, show_errors: bool = False) -> None:
+    def _configure_lcr_for_current_index(self, *, show_errors: bool = False) -> bool:
         if not self._lcr_plan:
             try:
                 self._prepare_lcr_plan()
@@ -265,7 +265,7 @@ class MainWindow(CurrentAnnealingWindow):
                 if show_errors:
                     QtWidgets.QMessageBox.warning(self, "Invalid AC settings", str(exc))
                 self.label_lcr_status.setText(f"Invalid AC settings: {exc}")
-                return
+                return False
         index = min(max(0, self._lcr_plan_index), len(self._lcr_plan) - 1)
         setting = self._lcr_plan[index]
         meter = self.lcr_meter
@@ -277,13 +277,14 @@ class MainWindow(CurrentAnnealingWindow):
                 if show_errors:
                     QtWidgets.QMessageBox.warning(self, "LCR configure failed", str(exc))
                 self.label_lcr_status.setText(f"LCR configure failed: {exc}")
-                return
+                return False
         plan_count = len(self._lcr_plan)
         level_unit = "A" if setting.level_mode == "current" else "V"
         self.label_lcr_status.setText(
             f"AC setting {index + 1}/{plan_count}: {setting.function}, "
             f"{setting.frequency_hz:g} Hz, {setting.level_value:g} {level_unit}"
         )
+        return True
 
     def handle_toggle_process_clicked(self):  # type: ignore[override]
         starting = not bool(getattr(self, "process_running", False))
@@ -304,7 +305,8 @@ class MainWindow(CurrentAnnealingWindow):
                     reverse.setChecked(True)
                 if isinstance(loops, QtWidgets.QSpinBox):
                     loops.setValue(len(plan))
-            self._configure_lcr_for_current_index(show_errors=False)
+            if not self._configure_lcr_for_current_index(show_errors=True):
+                return
         super().handle_toggle_process_clicked()
 
     def _finalize_loop_cycle(self) -> None:
