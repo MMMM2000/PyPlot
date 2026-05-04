@@ -500,18 +500,18 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
 
         assert interval_ms == 250
         assert "length setup" in summary
-        assert steps[0].action == "ramp_target"
-        assert steps[0].basis == mini_dma_mod.HSW_BASIS_STRESS_MPA
-        assert steps[0].target_end_value == pytest.approx(10.0)
+        assert steps[0].action == "starting_length_prompt"
         actions = [step.action for step in steps]
+        assert "starting_length_prompt" in actions
         assert "measure_length_prompt" in actions
         assert "apply_length_setup" in actions
         assert "start_session" in actions
+        start_length_index = actions.index("starting_length_prompt")
         prompt_index = actions.index("measure_length_prompt")
         apply_index = actions.index("apply_length_setup")
         session_index = actions.index("start_session")
         first_recipe_index = actions.index("set_current")
-        assert prompt_index < apply_index < session_index < first_recipe_index
+        assert start_length_index < prompt_index < apply_index < session_index < first_recipe_index
         preload_step = next(step for step in steps if step.note == "setup_preload")
         assert preload_step.action == "ramp_target"
         assert preload_step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA
@@ -536,6 +536,30 @@ def test_preload_length_setup_calculates_l0_from_tensile_stage_delta(tmp_path: P
         assert window.spin_initial_length.value() == pytest.approx(30.0)
         assert window._position_reference_mm == pytest.approx(-1.0)
         assert "Computed l0 = 30" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_starting_length_prompt_updates_stiffness_prior_length(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_initial_length.setValue(12.0)
+
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: (42.5, True),
+    )
+
+    try:
+        assert window._handle_starting_length_prompt_step() is True
+
+        assert window.spin_initial_length.value() == pytest.approx(42.5)
+        assert window._setup_starting_length_mm == pytest.approx(42.5)
+        assert "Starting length prior accepted" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -1014,7 +1038,7 @@ def test_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> 
         assert "calibration" in summary
         assert window.combo_recipe_mode.itemText(mode_index) == "Calibration"
         actions = [step.action for step in steps]
-        assert steps[0].action == "ramp_target"
+        assert steps[0].action == "starting_length_prompt"
         assert "start_session" in actions
         first_record = next(step for step in steps if step.action == "calibration_record")
         assert first_record.note == "calibration_baseline"
@@ -1057,11 +1081,13 @@ def test_calibration_recipe_includes_mandatory_length_setup(tmp_path: Path, qtbo
         assert interval_ms == 250
         assert "mandatory length setup" in summary
         actions = [step.action for step in steps]
-        assert steps[0].action == "ramp_target"
-        assert steps[0].note == "setup_preload"
+        assert steps[0].action == "starting_length_prompt"
+        assert steps[0].note == "setup_start_length"
+        assert "starting_length_prompt" in actions
         assert "measure_length_prompt" in actions
         assert "apply_length_setup" in actions
         assert "start_session" in actions
+        assert actions.index("starting_length_prompt") < actions.index("measure_length_prompt")
         assert actions.index("measure_length_prompt") < actions.index("apply_length_setup")
         assert actions.index("apply_length_setup") < actions.index("start_session") < actions.index("calibration_record")
     finally:
@@ -1937,7 +1963,7 @@ def test_setup_preload_correction_step_uses_setup_speed_interval(tmp_path: Path,
         _close_test_window(window)
 
 
-def test_setup_preload_slack_takeup_uses_stress_ramp_rate_speed_budget(tmp_path: Path, qtbot) -> None:
+def test_setup_preload_slack_takeup_uses_setup_stage_speed(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
@@ -1987,8 +2013,8 @@ def test_setup_preload_slack_takeup_uses_stress_ramp_rate_speed_budget(tmp_path:
         _wait_for_tic_commands(window)
 
         assert reached is False
-        assert controller.target_steps == 9750
-        assert controller.max_speed == 10_000_000
+        assert controller.target_steps == 7500
+        assert controller.max_speed == 100_000_000
     finally:
         _close_test_window(window)
 
@@ -2324,8 +2350,8 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         window.combo_recipe_mode.setCurrentIndex(index)
         window._update_recipe_mode_ui()
 
-        assert window.spin_current_sweep_nudge_mm.isHidden() is False
-        assert window.spin_current_sweep_balance_speed_mm_s.isHidden() is False
+        assert window.spin_current_sweep_nudge_mm.isHidden() is True
+        assert window.spin_current_sweep_balance_speed_mm_s.isHidden() is True
         assert window.check_hardware_tare_on_start.isHidden() is False
         assert window.button_scale_connect.text() in {"Connect scale", "Disconnect scale"}
         assert window.button_scale_tare.text() == "Capture zero-load"
@@ -3403,8 +3429,8 @@ def test_logged_load_uses_positive_applied_tension(tmp_path: Path, qtbot) -> Non
         window._start_session()
         window._stop_session()
 
-        txt_path = tmp_path / "positive_tension_log.txt"
-        csv_path = tmp_path / "positive_tension_log.csv"
+        txt_path = tmp_path / "positive_tension_log" / "measurement.txt"
+        csv_path = tmp_path / "positive_tension_log" / "measurement.csv"
 
         txt_lines = txt_path.read_text(encoding="utf-8").splitlines()
         assert txt_lines[-1].split("\t")[1] == "5.000000"
@@ -3455,7 +3481,8 @@ def test_session_writes_raw_scale_sidecar_and_interval_summary(
 
         window._stop_session()
 
-        rows = list(csv.DictReader((tmp_path / "scale_buffered_session.csv").open(encoding="utf-8", newline="")))
+        run_dir = tmp_path / "scale_buffered_session"
+        rows = list(csv.DictReader((run_dir / "measurement.csv").open(encoding="utf-8", newline="")))
         assert len(rows) == 2
         assert rows[-1]["raw_load_g"] == "20.600000"
         assert rows[-1]["load_g"] == "0.400000"
@@ -3467,15 +3494,56 @@ def test_session_writes_raw_scale_sidecar_and_interval_summary(
         assert rows[-1]["scale_sample_rate_hz"] == "20.000000"
 
         raw_rows = list(
-            csv.DictReader((tmp_path / "scale_buffered_session.scale_raw.csv").open(encoding="utf-8", newline=""))
+            csv.DictReader((run_dir / "scale_raw.csv").open(encoding="utf-8", newline=""))
         )
         assert [row["raw_load_g"] for row in raw_rows] == ["21.000000", "20.800000", "20.600000"]
         assert [row["applied_load_g"] for row in raw_rows] == ["0.200000", "0.400000", "0.600000"]
 
-        metadata = json.loads((tmp_path / "scale_buffered_session.json").read_text(encoding="utf-8"))
+        metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
         assert metadata["logging"]["log_interval_ms"] == 500
-        assert metadata["logging"]["raw_scale_sidecar"] == "scale_buffered_session.scale_raw.csv"
+        assert metadata["logging"]["raw_scale_sidecar"] == "scale_raw.csv"
+        assert metadata["logging"]["setup_csv"] == "setup.csv"
         assert metadata["logging"]["raw_scale_sample_count"] == 3
+    finally:
+        _close_test_window(window)
+
+
+def test_length_setup_points_are_written_to_setup_sidecar(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("setup_sidecar_session")
+    window.check_tension_load_positive.setChecked(True)
+    window.check_zero_on_preload.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window._latest_scale_value_g = 21.0
+    window._latest_scale_text = "21.000 g"
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 0.25
+    window._effective_position_mm = 0.25
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._set_automation_context(
+            phase="target_ramp",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=10.0,
+            note="setup_preload",
+        )
+        assert window._record_length_setup_point() is True
+        window._stop_session()
+
+        run_dir = tmp_path / "setup_sidecar_session"
+        setup_rows = list(csv.DictReader((run_dir / "setup.csv").open(encoding="utf-8", newline="")))
+        measurement_rows = list(csv.DictReader((run_dir / "measurement.csv").open(encoding="utf-8", newline="")))
+        metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+
+        assert len(setup_rows) == 1
+        assert setup_rows[0]["automation_phase"] == "target_ramp"
+        assert setup_rows[0]["automation_basis"] == mini_dma_mod.HSW_BASIS_STRESS_MPA
+        assert setup_rows[0]["raw_position_mm"] == "0.250000"
+        assert setup_rows[0]["load_g"] == "0.200000"
+        assert measurement_rows == []
+        assert metadata["logging"]["setup_csv"] == "setup.csv"
     finally:
         _close_test_window(window)
 
@@ -3522,7 +3590,14 @@ def test_logged_load_clamps_non_tensile_side_of_reference_to_zero(tmp_path: Path
         window._start_session()
         window._stop_session()
 
-        rows = list(csv.DictReader((tmp_path / "positive_tension_magnitude_log.csv").open(encoding="utf-8", newline="")))
+        rows = list(
+            csv.DictReader(
+                (tmp_path / "positive_tension_magnitude_log" / "measurement.csv").open(
+                    encoding="utf-8",
+                    newline="",
+                )
+            )
+        )
         assert rows[0]["raw_load_g"] == "-2.500000"
         assert rows[0]["load_g"] == "0.000000"
     finally:
@@ -3553,7 +3628,14 @@ def test_logged_displacement_is_positive_for_tensile_pull_direction(tmp_path: Pa
         assert point.position_mm == pytest.approx(0.5)
         assert point.strain_pct == pytest.approx((0.5 / window.spin_initial_length.value()) * 100.0)
 
-        rows = list(csv.DictReader((tmp_path / "positive_displacement_log.csv").open(encoding="utf-8", newline="")))
+        rows = list(
+            csv.DictReader(
+                (tmp_path / "positive_displacement_log" / "measurement.csv").open(
+                    encoding="utf-8",
+                    newline="",
+                )
+            )
+        )
         assert rows[-1]["raw_position_mm"] == "-0.500000"
         assert rows[-1]["position_mm"] == "0.500000"
     finally:
@@ -3986,7 +4068,7 @@ def test_backlash_limited_reverse_correction_counts_as_practical_target(tmp_path
         _close_test_window(window)
 
 
-def test_current_sweep_seek_uses_recipe_balancing_speed(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_seek_uses_target_stage_speed_for_dynamic_balance(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
@@ -4024,13 +4106,13 @@ def test_current_sweep_seek_uses_recipe_balancing_speed(tmp_path: Path, qtbot) -
         _wait_for_tic_commands(window)
 
         assert reached is False
-        assert controller.target_steps == 9980
-        assert controller.max_speed == 5_000_000
+        assert controller.target_steps == 7500
+        assert controller.max_speed == 100_000_000
     finally:
         _close_test_window(window)
 
 
-def test_current_sweep_load_target_ramp_is_limited_by_balance_speed(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_load_target_ramp_uses_target_stage_speed(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
@@ -4071,8 +4153,8 @@ def test_current_sweep_load_target_ramp_is_limited_by_balance_speed(tmp_path: Pa
         _wait_for_tic_commands(window)
 
         assert reached is False
-        assert controller.target_steps == 9875
-        assert controller.max_speed == 5_000_000
+        assert controller.target_steps == 7500
+        assert controller.max_speed == 100_000_000
     finally:
         _close_test_window(window)
 
@@ -4266,7 +4348,14 @@ def test_zero_current_points_do_not_report_resistance(tmp_path: Path, qtbot) -> 
         window._start_session()
 
         assert window._session_points[-1].resistance_ohm is None
-        rows = list(csv.DictReader((tmp_path / "zero_current_resistance.csv").open(encoding="utf-8", newline="")))
+        rows = list(
+            csv.DictReader(
+                (tmp_path / "zero_current_resistance" / "measurement.csv").open(
+                    encoding="utf-8",
+                    newline="",
+                )
+            )
+        )
         assert rows[-1]["resistance_ohm"] == ""
     finally:
         _close_test_window(window)
@@ -4504,21 +4593,60 @@ def test_prepare_session_files_can_save_as_next_run_without_replacing_existing(
             _csv_writer,
             raw_scale_handle,
             _raw_scale_writer,
+            setup_txt_handle,
+            setup_csv_handle,
+            _setup_csv_writer,
             txt_path,
             csv_path,
             json_path,
             raw_scale_path,
+            setup_txt_path,
+            setup_csv_path,
         ) = window._prepare_session_files(created_utc="2026-04-28 12:00:00")
-        for handle in (txt_handle, csv_handle, raw_scale_handle):
+        for handle in (txt_handle, csv_handle, raw_scale_handle, setup_txt_handle, setup_csv_handle):
             handle.close()
 
-        assert txt_path.name == "same_sample_run03.txt"
-        assert csv_path.name == "same_sample_run03.csv"
-        assert json_path.name == "same_sample_run03.json"
-        assert raw_scale_path.name == "same_sample_run03.scale_raw.csv"
+        assert txt_path == tmp_path / "same_sample_run03" / "measurement.txt"
+        assert csv_path == tmp_path / "same_sample_run03" / "measurement.csv"
+        assert json_path == tmp_path / "same_sample_run03" / "metadata.json"
+        assert raw_scale_path == tmp_path / "same_sample_run03" / "scale_raw.csv"
+        assert setup_txt_path == tmp_path / "same_sample_run03" / "setup.txt"
+        assert setup_csv_path == tmp_path / "same_sample_run03" / "setup.csv"
         assert window.edit_log_name.text() == "same_sample_run03"
         assert (tmp_path / "same_sample.txt").read_text(encoding="utf-8") == "old"
         assert (tmp_path / "same_sample_run02.csv").read_text(encoding="utf-8") == "old run 2"
+    finally:
+        _close_test_window(window)
+
+
+def test_prepare_session_files_does_not_chain_run_suffixes(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("same_sample_run02")
+    (tmp_path / "same_sample_run02").mkdir()
+    (tmp_path / "same_sample_run03").mkdir()
+    window._ask_existing_output_action = (  # type: ignore[method-assign]
+        lambda _paths: mini_dma_mod.OUTPUT_COLLISION_NEXT
+    )
+
+    try:
+        (
+            txt_handle,
+            csv_handle,
+            _csv_writer,
+            raw_scale_handle,
+            _raw_scale_writer,
+            setup_txt_handle,
+            setup_csv_handle,
+            _setup_csv_writer,
+            txt_path,
+            *_paths,
+        ) = window._prepare_session_files(created_utc="2026-04-28 12:03:00")
+        for handle in (txt_handle, csv_handle, raw_scale_handle, setup_txt_handle, setup_csv_handle):
+            handle.close()
+
+        assert txt_path == tmp_path / "same_sample_run04" / "measurement.txt"
+        assert window.edit_log_name.text() == "same_sample_run04"
+        assert not (tmp_path / "same_sample_run02_run02").exists()
     finally:
         _close_test_window(window)
 
@@ -4527,7 +4655,8 @@ def test_prepare_session_files_can_replace_existing_outputs(tmp_path: Path, qtbo
     window = _build_window(tmp_path, qtbot)
     window.edit_sample_name.setText("repeat sample")
     window.edit_log_name.setText("replace_sample")
-    txt_path = tmp_path / "replace_sample.txt"
+    txt_path = tmp_path / "replace_sample" / "measurement.txt"
+    txt_path.parent.mkdir()
     txt_path.write_text("old", encoding="utf-8")
     window._ask_existing_output_action = (  # type: ignore[method-assign]
         lambda _paths: mini_dma_mod.OUTPUT_COLLISION_REPLACE
@@ -4540,10 +4669,13 @@ def test_prepare_session_files_can_replace_existing_outputs(tmp_path: Path, qtbo
             _csv_writer,
             raw_scale_handle,
             _raw_scale_writer,
+            setup_txt_handle,
+            setup_csv_handle,
+            _setup_csv_writer,
             returned_txt_path,
             *_paths,
         ) = window._prepare_session_files(created_utc="2026-04-28 12:05:00")
-        for handle in (txt_handle, csv_handle, raw_scale_handle):
+        for handle in (txt_handle, csv_handle, raw_scale_handle, setup_txt_handle, setup_csv_handle):
             handle.close()
 
         assert returned_txt_path == txt_path

@@ -60,10 +60,46 @@ APP_NAME = "Mini DMA Logger"
 DEFAULT_LOG_BASENAME = "mini_dma"
 DEFAULT_RUN_LOG_MIRROR_PATH = Path("logs") / "mini_dma_run_log.txt"
 DEFAULT_ZERO_LOAD_SCALE_G = 21.2
+SESSION_MEASUREMENT_TX = "measurement.txt"
+SESSION_MEASUREMENT_CSV = "measurement.csv"
+SESSION_METADATA_JSON = "metadata.json"
+SESSION_RAW_SCALE_CSV = "scale_raw.csv"
+SESSION_SETUP_TX = "setup.txt"
+SESSION_SETUP_CSV = "setup.csv"
 GRAVITY_MS2 = 9.80665
 LONG_NAMES = ("Displacement", "Load", "Strain", "Stress")
 UNITS = ("mm", "g", "%", "MPa")
+MEASUREMENT_CSV_FIELDNAMES = [
+    "elapsed_s",
+    "timestamp_utc",
+    "recipe_mode",
+    "automation_phase",
+    "automation_basis",
+    "automation_target_value",
+    "plateau_index",
+    "plateau_label",
+    "raw_position_mm",
+    "position_mm",
+    "raw_load_g",
+    "load_g",
+    "load_raw_last_g",
+    "load_mean_g",
+    "load_std_g",
+    "load_min_g",
+    "load_max_g",
+    "load_sample_count",
+    "scale_sample_rate_hz",
+    "preload_state",
+    "strain_pct",
+    "stress_mpa",
+    "current_set_mA",
+    "current_measured_mA",
+    "voltage_V",
+    "resistance_ohm",
+    "power_W",
+]
 FLOAT_PATTERN = re.compile(r"[-+]?(?:\d+(?:[.,]\d*)?|[.,]\d+)")
+RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
 WINDOWS: list[QtWidgets.QWidget] = []
 GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
@@ -152,6 +188,8 @@ CALIBRATION_DEFAULTS_VERSION = 3
 SERVO_CORRECTION_GAIN = 0.75
 SERVO_LIVE_STIFFNESS_ALPHA = 0.35
 SERVO_NOISE_SIGMA = 3.0
+SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S = 1.5
+SERVO_CURRENT_SWEEP_RATE_GAIN = 1.2
 WIRE_BREAK_MIN_SETPOINT_MA = 5.0
 WIRE_BREAK_MAX_MEASURED_MA = 0.5
 WIRE_BREAK_VOLTAGE_LIMIT_FRACTION = 0.95
@@ -203,20 +241,39 @@ def _mini_dma_settings() -> QtCore.QSettings:
 
 
 def _session_paths_for_basename(directory: Path, basename: str) -> tuple[Path, Path, Path, Path]:
+    run_dir = directory / (basename.strip() or DEFAULT_LOG_BASENAME)
     return (
-        directory / f"{basename}.txt",
-        directory / f"{basename}.csv",
-        directory / f"{basename}.json",
-        directory / f"{basename}.scale_raw.csv",
+        run_dir / SESSION_MEASUREMENT_TX,
+        run_dir / SESSION_MEASUREMENT_CSV,
+        run_dir / SESSION_METADATA_JSON,
+        run_dir / SESSION_RAW_SCALE_CSV,
     )
 
 
 def _session_paths_exist(paths: Sequence[Path]) -> bool:
-    return any(path.exists() for path in paths)
+    if any(path.exists() for path in paths) or (bool(paths) and paths[0].parent.exists()):
+        return True
+    if not paths:
+        return False
+    run_dir = paths[0].parent
+    base_dir = run_dir.parent
+    basename = run_dir.name
+    legacy_paths = (
+        base_dir / f"{basename}.txt",
+        base_dir / f"{basename}.csv",
+        base_dir / f"{basename}.json",
+        base_dir / f"{basename}.scale_raw.csv",
+    )
+    return any(path.exists() for path in legacy_paths)
+
+
+def _session_setup_paths_for_measurement(txt_path: Path) -> tuple[Path, Path]:
+    return txt_path.parent / SESSION_SETUP_TX, txt_path.parent / SESSION_SETUP_CSV
 
 
 def _next_run_session_paths(directory: Path, basename: str) -> tuple[str, tuple[Path, Path, Path, Path]]:
     clean_basename = basename.strip() or DEFAULT_LOG_BASENAME
+    clean_basename = RUN_SUFFIX_PATTERN.sub("", clean_basename).strip() or DEFAULT_LOG_BASENAME
     for run_number in range(2, 10000):
         candidate = f"{clean_basename}_run{run_number:02d}"
         candidate_paths = _session_paths_for_basename(directory, candidate)
@@ -1805,6 +1862,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_move_direction = 0.0
         self._seek_last_error_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_value_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_last_time_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_effective_position_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_live_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
@@ -1818,9 +1876,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_csv_writer: csv.DictWriter[str] | None = None
         self._session_raw_scale_handle: Any = None
         self._session_raw_scale_writer: csv.DictWriter[str] | None = None
+        self._session_setup_txt_handle: Any = None
+        self._session_setup_csv_handle: Any = None
+        self._session_setup_csv_writer: csv.DictWriter[str] | None = None
         self._session_base_path: Path | None = None
+        self._session_csv_path: Path | None = None
         self._session_json_path: Path | None = None
         self._session_raw_scale_path: Path | None = None
+        self._session_setup_txt_path: Path | None = None
+        self._session_setup_csv_path: Path | None = None
         self._session_start_wall_s = 0.0
         self._last_session_log_timestamp_s: float | None = None
         self._session_raw_scale_count = 0
@@ -1878,6 +1942,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_timed_step_started_s = 0.0
         self._active_timed_move_sent = False
         self._setup_measured_length_mm: float | None = None
+        self._setup_starting_length_mm: float | None = None
         self._setup_preload_position_mm: float | None = None
         self._setup_zero_position_mm: float | None = None
         self._setup_return_zero_start_point_index = 0
@@ -3225,8 +3290,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_target_speed_mm_s.setValue(1.0)
         self.spin_current_sweep_target_speed_mm_s.setSuffix(" mm/s")
         self.spin_current_sweep_target_speed_mm_s.setToolTip(
-            "Maximum linear stage speed while ramping to the next load, stress, or strain target. "
-            "Fine holding corrections still use Correction move speed."
+            "Maximum linear stage speed for target ramps and dynamic iso-load/iso-stress/iso-strain balancing."
         )
         current_sweep_form.addRow("Target ramp stage speed", self.spin_current_sweep_target_speed_mm_s)
         self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
@@ -3271,15 +3335,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_nudge_mm.setValue(0.1)
         self.spin_current_sweep_nudge_mm.setSuffix(" mm")
         self.spin_current_sweep_nudge_mm.setToolTip(
-            "Linear stage correction step used while holding the iso-load, iso-stress, or iso-strain target."
+            "Legacy internal safety clamp retained for older settings. Dynamic balancing uses the target ramp stage speed."
         )
-        current_sweep_form.addRow("Correction step", self.spin_current_sweep_nudge_mm)
+        current_sweep_form.addRow("Legacy correction step", self.spin_current_sweep_nudge_mm)
+        current_nudge_label = current_sweep_form.labelForField(self.spin_current_sweep_nudge_mm)
+        self.spin_current_sweep_nudge_mm.setVisible(False)
+        if current_nudge_label is not None:
+            current_nudge_label.setVisible(False)
         self.spin_current_sweep_balance_speed_mm_s = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_balance_speed_mm_s.setDecimals(3)
         self.spin_current_sweep_balance_speed_mm_s.setRange(0.001, 50.0)
         self.spin_current_sweep_balance_speed_mm_s.setValue(0.05)
         self.spin_current_sweep_balance_speed_mm_s.setSuffix(" mm/s")
-        current_sweep_form.addRow("Correction move speed", self.spin_current_sweep_balance_speed_mm_s)
+        self.spin_current_sweep_balance_speed_mm_s.setToolTip(
+            "Legacy hidden correction-speed setting. Dynamic balancing is capped by Target ramp stage speed."
+        )
+        current_sweep_form.addRow("Legacy correction speed", self.spin_current_sweep_balance_speed_mm_s)
+        current_balance_label = current_sweep_form.labelForField(self.spin_current_sweep_balance_speed_mm_s)
+        self.spin_current_sweep_balance_speed_mm_s.setVisible(False)
+        if current_balance_label is not None:
+            current_balance_label.setVisible(False)
         self.spin_current_sweep_max_seek_mm = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_max_seek_mm.setDecimals(3)
         self.spin_current_sweep_max_seek_mm.setRange(0.01, 100.0)
@@ -3289,6 +3364,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "Maximum tensile-stage travel allowed while seeking one target before stopping as no-response."
         )
         self.spin_current_sweep_max_seek_mm.setVisible(False)
+        current_max_seek_label = current_sweep_form.labelForField(self.spin_current_sweep_max_seek_mm)
+        if current_max_seek_label is not None:
+            current_max_seek_label.setVisible(False)
         self.spin_current_sweep_settle_s = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_settle_s.setDecimals(2)
         self.spin_current_sweep_settle_s.setRange(0.0, 3600.0)
@@ -3314,7 +3392,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if current_log_interval_label is not None:
             current_log_interval_label.setVisible(False)
         current_sweep_hint = QtWidgets.QLabel(
-            "This recipe holds the selected target with backlash-aware correction steps while ramping current; control can run faster than logged recipe rows.",
+            "This recipe holds the selected target with dynamic stage-speed balancing while ramping current; control can run faster than logged recipe rows.",
             current_sweep_page,
         )
         current_sweep_hint.setWordWrap(True)
@@ -5407,7 +5485,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._is_calibration_mode(self._automation_name):
             return abs(float(self.spin_calibration_preload_nudge_mm.value()))
         if self._is_current_sweep_mode(self._automation_name):
-            return abs(float(self.spin_current_sweep_nudge_mm.value()))
+            return self._seek_speed_limited_step_mm(
+                self._automation_basis,
+                self._motion_speed_for_current_context(manual_jog=False),
+            )
         return abs(float(self.spin_distribution_nudge_mm.value()))
 
     def _seek_decision_interval_s(self, basis: str | None = None) -> float:
@@ -5564,9 +5645,20 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> float:
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or sensitivity <= 0.0:
+            if self._is_current_sweep_mode(self._automation_name):
+                return self._seek_speed_limited_step_mm(
+                    basis,
+                    self._motion_speed_for_current_context(manual_jog=False),
+                )
             return self._seek_step_mm(error_value, tolerance, basis=basis)
         predicted_mm = (abs(float(error_value)) / abs(float(sensitivity))) * SERVO_CORRECTION_GAIN
         max_step_mm = self._seek_nudge_mm()
+        if self._is_current_sweep_mode(self._automation_name):
+            max_step_mm = max(
+                self._motor_step_mm(),
+                self._motion_speed_for_current_context(manual_jog=False)
+                * self._seek_decision_interval_s(basis),
+            )
         if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
             max_step_mm = self._seek_speed_limited_step_mm(
                 basis,
@@ -5616,10 +5708,42 @@ class MainWindow(QtWidgets.QMainWindow):
             factor = 1.0
         return max(self._motor_step_mm(), max_step_mm * factor)
 
-    def _seek_speed_mm_s(self, error_value: float, tolerance: float) -> float:
+    def _seek_speed_mm_s(
+        self,
+        error_value: float,
+        tolerance: float,
+        *,
+        basis: str | None = None,
+        seek_key: tuple[str, int, float] | None = None,
+        current_value: float | None = None,
+    ) -> float:
         base_speed = self._motion_speed_for_current_context(manual_jog=False)
         if self._automation_name == RECOVERY_LOAD:
             return max(self._minimum_held_speed_mm_s(), base_speed)
+        if (
+            self._is_current_sweep_mode(self._automation_name)
+            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}
+        ):
+            sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+            if sensitivity is not None and abs(float(sensitivity)) > 0.0:
+                away_rate = 0.0
+                if seek_key is not None and current_value is not None and abs(float(error_value)) > 0.0:
+                    previous_value = self._seek_last_value_by_key.get(seek_key)
+                    previous_time_s = self._seek_last_time_by_key.get(seek_key)
+                    if previous_value is not None and previous_time_s is not None:
+                        dt_s = max(1e-6, time.monotonic() - float(previous_time_s))
+                        rate_value_s = (float(current_value) - float(previous_value)) / dt_s
+                        error_sign = math.copysign(1.0, float(error_value))
+                        away_rate = max(0.0, -error_sign * rate_value_s)
+                requested_value_rate_s = (
+                    SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S * abs(float(error_value))
+                    + SERVO_CURRENT_SWEEP_RATE_GAIN * away_rate
+                )
+                speed_mm_s = requested_value_rate_s / abs(float(sensitivity))
+                return max(
+                    self._minimum_held_speed_mm_s(),
+                    min(base_speed, speed_mm_s),
+                )
         error_ratio = abs(error_value) / max(tolerance, 1e-12)
         if error_ratio >= 3.0:
             factor = 1.0
@@ -5930,6 +6054,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         delta_value = target_value - current_value
         seek_key = self._seek_error_key(basis, target_value)
+        seek_sample_time_s = time.monotonic()
         current_effective_tensile_position_mm = self._current_effective_tensile_position_mm()
         self._update_live_seek_stiffness(seek_key, basis, current_value)
         effective_tolerance = self._seek_effective_tolerance(
@@ -5940,6 +6065,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if abs(delta_value) <= effective_tolerance:
             self._seek_last_error_by_key.pop(seek_key, None)
             self._seek_last_value_by_key.pop(seek_key, None)
+            self._seek_last_time_by_key.pop(seek_key, None)
             self._seek_last_effective_position_by_key.pop(seek_key, None)
             self._seek_no_response_count_by_key.pop(seek_key, None)
             self._seek_travel_by_key.pop(seek_key, None)
@@ -5987,8 +6113,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             seek_direction *= self._tension_motion_sign()
         movement_direction = math.copysign(1.0, seek_direction)
-        speed_mm_s = self._seek_speed_mm_s(delta_value, effective_tolerance)
-        ramp_speed_cap_mm_s = self._target_ramp_speed_cap_mm_s(basis, seek_key=seek_key)
+        speed_mm_s = self._seek_speed_mm_s(
+            delta_value,
+            effective_tolerance,
+            basis=basis,
+            seek_key=seek_key,
+            current_value=current_value,
+        )
+        ramp_speed_cap_mm_s = None
+        if not self._setup_preload_takeup_active(basis, current_value, delta_value, effective_tolerance):
+            ramp_speed_cap_mm_s = self._target_ramp_speed_cap_mm_s(basis, seek_key=seek_key)
         if ramp_speed_cap_mm_s is not None:
             speed_mm_s = min(speed_mm_s, ramp_speed_cap_mm_s)
         nudge_mm = self._seek_command_step_mm(nudge_mm, speed_mm_s, basis=basis)
@@ -6002,6 +6136,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             self._seek_last_error_by_key.pop(seek_key, None)
             self._seek_last_value_by_key.pop(seek_key, None)
+            self._seek_last_time_by_key.pop(seek_key, None)
             self._seek_last_effective_position_by_key.pop(seek_key, None)
             self._seek_no_response_count_by_key.pop(seek_key, None)
             self._seek_travel_by_key.pop(seek_key, None)
@@ -6028,6 +6163,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         self._seek_last_error_by_key[seek_key] = delta_value
         self._seek_last_value_by_key[seek_key] = current_value
+        self._seek_last_time_by_key[seek_key] = seek_sample_time_s
         self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
         self._seek_travel_by_key[seek_key] = (
             self._seek_travel_by_key.get(seek_key, 0.0) + abs(nudge_mm + backlash_takeup_mm)
@@ -6666,20 +6802,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     float(self.spin_setup_stage_speed_mm_s.value()),
                 )
             if self._is_current_sweep_mode(self._automation_name):
-                if self._automation_phase == "target_ramp":
-                    target_speed_mm_s = float(self.spin_current_sweep_target_speed_mm_s.value())
-                    if self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
-                        target_speed_mm_s = min(
-                            target_speed_mm_s,
-                            float(self.spin_current_sweep_balance_speed_mm_s.value()),
-                        )
-                    return max(
-                        self._minimum_held_speed_mm_s(),
-                        target_speed_mm_s,
-                    )
                 return max(
                     self._minimum_held_speed_mm_s(),
-                    float(self.spin_current_sweep_balance_speed_mm_s.value()),
+                    float(self.spin_current_sweep_target_speed_mm_s.value()),
                 )
             if self._is_calibration_mode(self._automation_name):
                 if self._automation_phase == "seek":
@@ -6706,7 +6831,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._is_current_sweep_mode(mode):
             return max(
                 self._minimum_held_speed_mm_s(),
-                float(self.spin_current_sweep_balance_speed_mm_s.value()),
+                float(self.spin_current_sweep_target_speed_mm_s.value()),
             )
         if self._is_calibration_mode(mode):
             return max(
@@ -6820,10 +6945,10 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle(APP_NAME)
         box.setIcon(QtWidgets.QMessageBox.Icon.Question)
-        box.setText("Output files already exist for this base filename.")
+        box.setText("An output folder or files already exist for this base filename.")
         box.setInformativeText(
             f"Existing file(s): {existing_names or paths[0].name}\n\n"
-            "Save as next run keeps the existing data and appends _run02, _run03, and so on."
+            "Save as next run keeps the existing data and creates a new _run02, _run03, and so on folder."
         )
         next_button = box.addButton("Save as next run", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
         replace_button = box.addButton("Replace existing", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
@@ -6847,7 +6972,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if action == OUTPUT_COLLISION_REPLACE:
             return paths
         if action == OUTPUT_COLLISION_NEXT:
-            directory = paths[0].parent
+            directory = paths[0].parent.parent
             basename = self.edit_log_name.text().strip() or DEFAULT_LOG_BASENAME
             next_basename, next_paths = _next_run_session_paths(directory, basename)
             self.edit_log_name.setText(next_basename)
@@ -6859,12 +6984,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self,
         *,
         created_utc: str,
-    ) -> tuple[Any, Any, csv.DictWriter[str], Any, csv.DictWriter[str], Path, Path, Path, Path]:
+    ) -> tuple[
+        Any,
+        Any,
+        csv.DictWriter[str],
+        Any,
+        csv.DictWriter[str],
+        Any,
+        Any,
+        csv.DictWriter[str],
+        Path,
+        Path,
+        Path,
+        Path,
+        Path,
+        Path,
+    ]:
         txt_path, csv_path, json_path, raw_scale_path = self._resolve_session_base_paths()
+        txt_path.parent.mkdir(parents=True, exist_ok=True)
+        setup_txt_path, setup_csv_path = _session_setup_paths_for_measurement(txt_path)
 
         txt_handle = txt_path.open("w", encoding="utf-8", newline="")
         csv_handle = csv_path.open("w", encoding="utf-8", newline="")
         raw_scale_handle = raw_scale_path.open("w", encoding="utf-8", newline="")
+        setup_txt_handle = setup_txt_path.open("w", encoding="utf-8", newline="")
+        setup_csv_handle = setup_csv_path.open("w", encoding="utf-8", newline="")
         txt_handle.write("\t".join(LONG_NAMES) + "\n")
         txt_handle.write("\t".join(UNITS) + "\n")
         txt_handle.write(f"# Created UTC\t{created_utc}\n")
@@ -6879,40 +7023,28 @@ class MainWindow(QtWidgets.QMainWindow):
         txt_handle.write(f"# Recipe mode\t{self.combo_recipe_mode.currentText()}\n")
         txt_handle.flush()
 
+        setup_txt_handle.write("\t".join(LONG_NAMES) + "\n")
+        setup_txt_handle.write("\t".join(UNITS) + "\n")
+        setup_txt_handle.write(f"# Created UTC\t{created_utc}\n")
+        setup_txt_handle.write(f"# Sample\t{self.edit_sample_name.text().strip()}\n")
+        setup_txt_handle.write(f"# Notes\t{self.edit_run_notes.toPlainText().strip()}\n")
+        setup_txt_handle.write(f"# Starting length prior mm\t{self.spin_initial_length.value():.6f}\n")
+        setup_txt_handle.write(f"# Wire diameter mm\t{self.spin_diameter.value():.6f}\n")
+        setup_txt_handle.write(f"# Zero-load scale reading g\t{self._zero_load_scale_reference_g():.6f}\n")
+        setup_txt_handle.write(f"# Setup preload stress MPa\t{self.spin_setup_preload_stress_mpa.value():.6f}\n")
+        setup_txt_handle.write(f"# Setup preload ramp rate MPa/s\t{self.spin_setup_preload_ramp_rate_mpa_s.value():.6f}\n")
+        setup_txt_handle.write(f"# Setup stage max speed mm/s\t{self.spin_setup_stage_speed_mm_s.value():.6f}\n")
+        setup_txt_handle.flush()
+
         writer = csv.DictWriter(
             csv_handle,
-            fieldnames=[
-                "elapsed_s",
-                "timestamp_utc",
-                "recipe_mode",
-                "automation_phase",
-                "automation_basis",
-                "automation_target_value",
-                "plateau_index",
-                "plateau_label",
-                "raw_position_mm",
-                "position_mm",
-                "raw_load_g",
-                "load_g",
-                "load_raw_last_g",
-                "load_mean_g",
-                "load_std_g",
-                "load_min_g",
-                "load_max_g",
-                "load_sample_count",
-                "scale_sample_rate_hz",
-                "preload_state",
-                "strain_pct",
-                "stress_mpa",
-                "current_set_mA",
-                "current_measured_mA",
-                "voltage_V",
-                "resistance_ohm",
-                "power_W",
-            ],
+            fieldnames=MEASUREMENT_CSV_FIELDNAMES,
         )
         writer.writeheader()
         csv_handle.flush()
+        setup_writer = csv.DictWriter(setup_csv_handle, fieldnames=MEASUREMENT_CSV_FIELDNAMES)
+        setup_writer.writeheader()
+        setup_csv_handle.flush()
         raw_scale_writer = csv.DictWriter(
             raw_scale_handle,
             fieldnames=[
@@ -6925,7 +7057,22 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         raw_scale_writer.writeheader()
         raw_scale_handle.flush()
-        return txt_handle, csv_handle, writer, raw_scale_handle, raw_scale_writer, txt_path, csv_path, json_path, raw_scale_path
+        return (
+            txt_handle,
+            csv_handle,
+            writer,
+            raw_scale_handle,
+            raw_scale_writer,
+            setup_txt_handle,
+            setup_csv_handle,
+            setup_writer,
+            txt_path,
+            csv_path,
+            json_path,
+            raw_scale_path,
+            setup_txt_path,
+            setup_csv_path,
+        )
 
     def _control_interval_ms(self) -> int:
         if hasattr(self, "spin_control_interval"):
@@ -7036,10 +7183,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 "recent_sample_rate_hz": self._scale_signal_buffer.sample_rate_hz(now_s=time.time()),
             },
             "logging": {
+                "output_folder": None if self._session_base_path is None else self._session_base_path.parent.name,
+                "measurement_txt": None if self._session_base_path is None else self._session_base_path.name,
+                "measurement_csv": None if self._session_csv_path is None else self._session_csv_path.name,
+                "metadata_json": None if self._session_json_path is None else self._session_json_path.name,
                 "log_interval_ms": self._log_interval_ms(),
                 "raw_scale_sidecar": None
                 if self._session_raw_scale_path is None
                 else self._session_raw_scale_path.name,
+                "setup_txt": None if self._session_setup_txt_path is None else self._session_setup_txt_path.name,
+                "setup_csv": None if self._session_setup_csv_path is None else self._session_setup_csv_path.name,
                 "raw_scale_sample_count": int(self._session_raw_scale_count),
                 "raw_scale_session_rate_hz": self._session_raw_scale_rate_hz(),
             },
@@ -7089,6 +7242,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_preload_tolerance_mpa": float(self.spin_setup_preload_tolerance_mpa.value()),
                 "setup_zero_tolerance_g": float(self.spin_setup_zero_tolerance_g.value()),
                 "setup_zero_stable_s": float(self.spin_setup_zero_stable_s.value()),
+                "setup_starting_length_mm": self._setup_starting_length_mm,
                 "setup_measured_length_mm": self._setup_measured_length_mm,
                 "setup_preload_position_mm": self._setup_preload_position_mm,
                 "target_start": float(self.spin_current_sweep_target_start.value()),
@@ -7102,8 +7256,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_rate_mA_s": float(self.spin_current_sweep_step_mA.value()),
                 "reverse_current": self.check_current_sweep_reverse_current.isChecked(),
                 "tolerance": float(self.spin_current_sweep_tolerance.value()),
-                "balancing_nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
-                "balancing_speed_mm_s": float(self.spin_current_sweep_balance_speed_mm_s.value()),
+                "dynamic_balance_max_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
+                "dynamic_balance_error_gain_per_s": SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S,
+                "dynamic_balance_rate_gain": SERVO_CURRENT_SWEEP_RATE_GAIN,
+                "legacy_balancing_nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
+                "legacy_balancing_speed_mm_s": float(self.spin_current_sweep_balance_speed_mm_s.value()),
                 "max_correction_travel_mm": float(self.spin_current_sweep_max_seek_mm.value()),
                 "settle_s": float(self.spin_current_sweep_settle_s.value()),
                 "legacy_interval_ms": int(self.spin_current_sweep_interval.value()),
@@ -7160,10 +7317,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 csv_writer,
                 raw_scale_handle,
                 raw_scale_writer,
+                setup_txt_handle,
+                setup_csv_handle,
+                setup_csv_writer,
                 txt_path,
                 csv_path,
                 json_path,
                 raw_scale_path,
+                setup_txt_path,
+                setup_csv_path,
             ) = self._prepare_session_files(created_utc=created_utc)
         except Exception as exc:
             if str(exc):
@@ -7182,16 +7344,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 self._load_offset_g = -signed_load
         except Exception as exc:
-            for handle in (txt_handle, csv_handle, raw_scale_handle):
+            for handle in (txt_handle, csv_handle, raw_scale_handle, setup_txt_handle, setup_csv_handle):
                 try:
                     handle.close()
                 except Exception:
                     pass
-            for path in (txt_path, csv_path, json_path, raw_scale_path):
+            for path in (txt_path, csv_path, json_path, raw_scale_path, setup_txt_path, setup_csv_path):
                 try:
                     path.unlink(missing_ok=True)
                 except Exception:
                     pass
+            try:
+                txt_path.parent.rmdir()
+            except Exception:
+                pass
             self._session_created_utc = None
             self._log(str(exc))
             self._refresh_live_labels()
@@ -7215,13 +7381,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_csv_writer = csv_writer
         self._session_raw_scale_handle = raw_scale_handle
         self._session_raw_scale_writer = raw_scale_writer
+        self._session_setup_txt_handle = setup_txt_handle
+        self._session_setup_csv_handle = setup_csv_handle
+        self._session_setup_csv_writer = setup_csv_writer
         self._session_base_path = txt_path
+        self._session_csv_path = csv_path
         self._session_json_path = json_path
         self._session_raw_scale_path = raw_scale_path
+        self._session_setup_txt_path = setup_txt_path
+        self._session_setup_csv_path = setup_csv_path
         self.button_start_session.setEnabled(False)
         self.button_stop_session.setEnabled(True)
-        self.label_session_status.setText(f"Session running -> {txt_path.name}")
-        self._log(f"Session started: {txt_path}")
+        self.label_session_status.setText(f"Session running -> {txt_path.parent.name}")
+        self._log(f"Session started: {txt_path.parent}")
         self._prepare_heating_for_session()
         self._apply_ui_refresh_interval()
         self._ui_refresh_timer.start()
@@ -7271,6 +7443,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_raw_scale_handle.close()
             self._session_raw_scale_handle = None
         self._session_raw_scale_writer = None
+        if self._session_setup_txt_handle is not None:
+            self._session_setup_txt_handle.close()
+            self._session_setup_txt_handle = None
+        if self._session_setup_csv_handle is not None:
+            self._session_setup_csv_handle.close()
+            self._session_setup_csv_handle = None
+        self._session_setup_csv_writer = None
         self.button_start_session.setEnabled(True)
         self.button_stop_session.setEnabled(False)
         point_count = len(self._session_points)
@@ -7552,8 +7731,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         return True
 
-    def _write_point(self, point: MeasurementPoint) -> None:
-        if self._session_txt_handle is None or self._session_csv_writer is None:
+    def _write_point_to_handles(
+        self,
+        point: MeasurementPoint,
+        *,
+        txt_handle: Any,
+        csv_writer: csv.DictWriter[str],
+        csv_handle: Any,
+    ) -> None:
+        if txt_handle is None or csv_writer is None:
             return
         txt_values = (
             f"{point.position_mm:.6f}",
@@ -7561,10 +7747,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "" if point.strain_pct is None else f"{point.strain_pct:.6f}",
             "" if point.stress_mpa is None else f"{point.stress_mpa:.6f}",
         )
-        self._session_txt_handle.write("\t".join(txt_values) + "\n")
-        self._session_txt_handle.flush()
+        txt_handle.write("\t".join(txt_values) + "\n")
+        txt_handle.flush()
 
-        self._session_csv_writer.writerow(
+        csv_writer.writerow(
             {
                 "elapsed_s": f"{point.elapsed_s:.6f}",
                 "timestamp_utc": point.timestamp_utc,
@@ -7599,8 +7785,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 "power_W": "" if point.power_W is None else f"{point.power_W:.6f}",
             }
         )
-        if self._session_csv_handle is not None:
-            self._session_csv_handle.flush()
+        if csv_handle is not None:
+            csv_handle.flush()
+
+    def _write_point(self, point: MeasurementPoint) -> None:
+        if self._session_txt_handle is None or self._session_csv_writer is None:
+            return
+        self._write_point_to_handles(
+            point,
+            txt_handle=self._session_txt_handle,
+            csv_writer=self._session_csv_writer,
+            csv_handle=self._session_csv_handle,
+        )
+
+    def _write_setup_point(self, point: MeasurementPoint) -> None:
+        if self._session_setup_txt_handle is None or self._session_setup_csv_writer is None:
+            return
+        self._write_point_to_handles(
+            point,
+            txt_handle=self._session_setup_txt_handle,
+            csv_writer=self._session_setup_csv_writer,
+            csv_handle=self._session_setup_csv_handle,
+        )
 
     def _recipe_requires_tic(self, steps: Sequence[AutomationStep]) -> bool:
         return any(step.action in {"move", "seek_target", "ramp_target", "calibration_move"} for step in steps)
@@ -7846,6 +8052,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_rate_value_s = None
         self._reset_timed_step_state()
         self._setup_measured_length_mm = None
+        self._setup_starting_length_mm = None
         self._setup_preload_position_mm = None
         self._setup_zero_position_mm = None
         self._setup_return_zero_start_point_index = 0
@@ -7858,6 +8065,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._calibration_report = None
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
+        self._seek_last_time_by_key.clear()
         self._seek_last_effective_position_by_key.clear()
         self._seek_live_stiffness_by_key.clear()
         self._seek_no_response_count_by_key.clear()
@@ -7880,7 +8088,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
         self._last_recipe_summary = summary
         self._set_automation_context(phase="start")
-        if steps and steps[0].note == "setup_preload":
+        if steps and steps[0].note in {"setup_start_length", "setup_preload"}:
             self._show_length_setup_dialog()
         self._auto_ramp_timer.start(interval_ms)
         self._log(summary)
@@ -8030,7 +8238,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_raw_g = None
         self._length_setup_start_monotonic = time.monotonic()
-        self._update_length_setup_dialog("Moving to setup preload.")
+        self._update_length_setup_dialog("Enter the approximate mounted wire length before setup.")
         self._update_length_setup_progress()
         self._update_length_setup_controls()
         self._refresh_length_setup_plot()
@@ -8062,6 +8270,7 @@ class MainWindow(QtWidgets.QMainWindow):
             load_g=load_g,
         )
         self._length_setup_points.append(point)
+        self._write_setup_point(point)
         if len(self._length_setup_points) > 1000:
             self._length_setup_points = self._length_setup_points[-1000:]
         self._refresh_length_setup_plot()
@@ -8257,6 +8466,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._automation_completed_ticks = 0
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
+        self._seek_last_time_by_key.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         self._active_current_sweep_step_index = None
@@ -8336,6 +8546,7 @@ class MainWindow(QtWidgets.QMainWindow):
             raise ValueError("Set a positive wire diameter before using preload length setup.")
         stable_s = max(0.0, float(self.spin_setup_zero_stable_s.value()))
         steps: list[AutomationStep] = [
+            AutomationStep("starting_length_prompt", note="setup_start_length"),
             AutomationStep(
                 "ramp_target",
                 target_value=preload_stress_mpa,
@@ -8953,6 +9164,38 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         return False
 
+    def _handle_starting_length_prompt_step(self) -> bool:
+        default_length_mm = max(0.001, float(self.spin_initial_length.value()))
+        self._update_length_setup_dialog("Enter the approximate mounted wire length before setup.")
+        starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            APP_NAME,
+            "Approximate mounted wire length before preload (mm):",
+            default_length_mm,
+            0.001,
+            100000.0,
+            4,
+        )
+        if not accepted:
+            self._log("Recipe stopped because starting length entry was cancelled.")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        self._setup_starting_length_mm = float(starting_length_mm)
+        self.spin_initial_length.setValue(float(starting_length_mm))
+        if self._session_setup_txt_handle is not None:
+            self._session_setup_txt_handle.write(
+                f"# Accepted starting length prior mm\t{self._setup_starting_length_mm:.6f}\n"
+            )
+            self._session_setup_txt_handle.flush()
+        self._refresh_equivalent_labels()
+        self._update_length_setup_dialog("Moving to setup preload.")
+        self._log(
+            "Starting length prior accepted: "
+            f"{_format_compact_unit(self._setup_starting_length_mm, 'mm', decimals=4)}. "
+            "The stiffness prior was rescaled before preload."
+        )
+        return True
+
     def _handle_measure_length_prompt_step(self) -> bool:
         try:
             self._refresh_tic_status()
@@ -8976,6 +9219,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
         self._setup_measured_length_mm = float(measured_length_mm)
+        if self._session_setup_txt_handle is not None:
+            self._session_setup_txt_handle.write(
+                f"# Measured preload length mm\t{self._setup_measured_length_mm:.6f}\n"
+            )
+            self._session_setup_txt_handle.flush()
         self._setup_return_zero_start_point_index = len(self._length_setup_points)
         self._setup_zero_position_mm = None
         self._setup_zero_fallback_return_position_mm = None
@@ -8999,11 +9247,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self._setup_zero_position_mm is not None
                 else float(self._current_position_mm)
             )
-            self._apply_preload_length_result(
+            l0_mm = self._apply_preload_length_result(
                 measured_length_mm=self._setup_measured_length_mm,
                 preload_position_mm=self._setup_preload_position_mm,
                 zero_position_mm=zero_position_mm,
             )
+            if self._session_setup_txt_handle is not None:
+                self._session_setup_txt_handle.write(f"# Computed l0 mm\t{l0_mm:.6f}\n")
+                self._session_setup_txt_handle.write(f"# Zero-load position mm\t{zero_position_mm:.6f}\n")
+                self._session_setup_txt_handle.flush()
             self._record_length_setup_point()
             self._update_length_setup_dialog("Length setup finished. Starting the recipe log.")
         except Exception as exc:
@@ -9222,6 +9474,9 @@ class MainWindow(QtWidgets.QMainWindow):
             finished = self._handle_current_sweep_step(step, step_index)
             if not finished and self._automation_active:
                 self._automation_index -= 1
+        elif step.action == "starting_length_prompt":
+            self._set_automation_context(phase="starting_length", note=step.note)
+            self._handle_starting_length_prompt_step()
         elif step.action == "measure_length_prompt":
             self._set_automation_context(
                 phase="length_prompt",
