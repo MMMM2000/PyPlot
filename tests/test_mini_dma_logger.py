@@ -3386,6 +3386,31 @@ def test_tic_keepalive_resets_command_timeout_during_active_recipe(tmp_path: Pat
         _close_test_window(window)
 
 
+def test_tic_keepalive_resets_command_timeout_during_motor_step_calibration(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeDispatcher:
+        def __init__(self) -> None:
+            self.keepalive_count = 0
+
+        def reset_command_timeout(self) -> None:
+            self.keepalive_count += 1
+
+    dispatcher = _FakeDispatcher()
+    window._build_tic_dispatcher = lambda: dispatcher  # type: ignore[method-assign]
+    window._tic_motor_power_ok = True
+    window._automation_active = False
+    window._motor_step_calibration_active = True
+    window._manual_jog_timer.stop()
+
+    try:
+        window._handle_tic_keepalive_timer()
+
+        assert dispatcher.keepalive_count == 1
+    finally:
+        _close_test_window(window)
+
+
 def test_negative_scale_reading_is_reported_as_positive_tensile_load(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -5355,6 +5380,80 @@ def test_custom_steps_per_mm_survives_motor_defaults_migration(tmp_path: Path, q
     finally:
         _close_test_window(window)
         _restore_settings(snapshot)
+
+
+def test_motor_step_calibration_dialog_shows_progress_and_points(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._show_motor_step_calibration_dialog(
+            total_moves=5,
+            signed_increment_steps=800,
+            speed_steps_per_s=8.0,
+        )
+
+        assert window._motor_step_calibration_dialog is not None
+        assert window._motor_step_calibration_dialog.isVisible()
+        assert window._motor_step_calibration_progress is not None
+        assert window._motor_step_calibration_progress.maximum() == 500
+        assert window._motor_step_calibration_status_label is not None
+        assert "baseline" in window._motor_step_calibration_status_label.text().lower()
+
+        window._update_motor_step_calibration_dialog(
+            "Moving calibration point 1/5.",
+            completed_moves=0,
+            total_moves=5,
+            active_move_fraction=0.5,
+            detail="Current 5227 steps -> target 6027 steps.",
+        )
+
+        assert window._motor_step_calibration_progress.value() == 50
+        assert "Moving calibration point 1/5" in window._motor_step_calibration_status_label.text()
+        assert window._motor_step_calibration_detail_label is not None
+        assert "6027 steps" in window._motor_step_calibration_detail_label.text()
+
+        point = mini_dma_mod.MotorStepCalibrationPoint(
+            point_index=1,
+            timestamp_utc="2026-05-05 10:00:00",
+            tic_position_steps=6027,
+            entered_displacement_mm=1.23,
+            move_command_steps=800,
+            move_speed_steps_per_s=8.0,
+        )
+        window._append_motor_step_calibration_dialog_point(point)
+
+        assert window._motor_step_calibration_points_view is not None
+        assert "reading 1.230000 mm" in window._motor_step_calibration_points_view.toPlainText()
+    finally:
+        window._close_motor_step_calibration_dialog()
+        _close_test_window(window)
+
+
+def test_motor_step_calibration_run_shows_dialog_before_baseline_prompt(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._stop_tic_keepalive = lambda: None  # type: ignore[method-assign]
+
+    def _cancel_baseline(*_args: object, **_kwargs: object) -> tuple[float, bool]:
+        assert window._motor_step_calibration_dialog is not None
+        assert window._motor_step_calibration_dialog.isVisible()
+        assert window._motor_step_calibration_active is True
+        return 0.0, False
+
+    monkeypatch.setattr(mini_dma_mod.QtWidgets.QInputDialog, "getDouble", _cancel_baseline)
+
+    try:
+        window._run_motor_step_calibration()
+
+        assert window._motor_step_calibration_dialog is None
+        assert window._motor_step_calibration_active is False
+    finally:
+        window._close_motor_step_calibration_dialog()
+        _close_test_window(window)
 
 
 def test_motor_step_calibration_report_fits_external_gauge_points() -> None:

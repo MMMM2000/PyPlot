@@ -38,3 +38,5 @@
 - Mini DMA speed-control docs now distinguish the 4-5 Hz scale reply rate from the slower near-target correction frequency and include diagrams for hybrid far/near servo behavior.
 - Mini DMA gated load/stress corrections now treat recipe/dynamic speed as desired average speed over the full correction cycle and raise the instantaneous motor command speed to compensate for settle plus scale-response dead time, while still respecting the hard `mm/s` and `%/s` caps.
 - Mini DMA motor displacement calibration now uses a provisional `800 steps/mm` default for the expected 1/8-microstep configuration, migrates only old saved `100 steps/mm` defaults, and adds an external-gauge motor step calibration workflow that moves by raw Tic units, writes CSV/JSON logs, reports fit quality, and does not apply the result by default.
+- Mini DMA motor step calibration now keeps a progress window visible for the whole calibration, including slow move waits and accepted external-gauge readings.
+- Mini DMA motor step calibration now keeps the Tic command-timeout keepalive active during slow raw-step calibration moves, preventing the controller from stopping after only a few steps.

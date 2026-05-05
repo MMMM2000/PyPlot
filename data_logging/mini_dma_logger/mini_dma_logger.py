@@ -2102,6 +2102,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_canvas: Any = None
         self._length_setup_start_monotonic = 0.0
         self._length_setup_points: list[MeasurementPoint] = []
+        self._motor_step_calibration_dialog: QtWidgets.QDialog | None = None
+        self._motor_step_calibration_status_label: QtWidgets.QLabel | None = None
+        self._motor_step_calibration_detail_label: QtWidgets.QLabel | None = None
+        self._motor_step_calibration_progress: QtWidgets.QProgressBar | None = None
+        self._motor_step_calibration_points_view: QtWidgets.QPlainTextEdit | None = None
+        self._motor_step_calibration_active = False
+        self._motor_step_calibration_stop_requested = False
         self._calibration_report: dict[str, Any] | None = None
         self._calibrated_stiffness_g_per_mm: float | None = None
         self._calibrated_stiffness_length_mm: float | None = None
@@ -5640,6 +5647,130 @@ class MainWindow(QtWidgets.QMainWindow):
             except OSError as exc:
                 self._log(f"Could not remove calibration log {path}: {exc}")
 
+    def _request_stop_motor_step_calibration(self) -> None:
+        self._motor_step_calibration_stop_requested = True
+        if self._motor_step_calibration_status_label is not None:
+            self._motor_step_calibration_status_label.setText(
+                "Stop requested. Mini DMA will stop after the current prompt or move."
+            )
+        self._log("Motor step calibration stop requested.")
+
+    def _show_motor_step_calibration_dialog(
+        self,
+        *,
+        total_moves: int,
+        signed_increment_steps: int,
+        speed_steps_per_s: float,
+    ) -> None:
+        dialog = self._motor_step_calibration_dialog
+        if dialog is None or dialog.isHidden():
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle("Mini DMA Motor Step Calibration")
+            dialog.resize(620, 420)
+            layout = QtWidgets.QVBoxLayout(dialog)
+            status_label = QtWidgets.QLabel("Preparing motor step calibration baseline...", dialog)
+            status_label.setWordWrap(True)
+            layout.addWidget(status_label)
+            progress = QtWidgets.QProgressBar(dialog)
+            progress.setRange(0, max(1, int(total_moves) * 100))
+            progress.setValue(0)
+            progress.setTextVisible(True)
+            progress.setFormat("Motor calibration: baseline")
+            layout.addWidget(progress)
+            detail_label = QtWidgets.QLabel(dialog)
+            detail_label.setWordWrap(True)
+            layout.addWidget(detail_label)
+            points_view = QtWidgets.QPlainTextEdit(dialog)
+            points_view.setReadOnly(True)
+            points_view.setMaximumBlockCount(200)
+            points_view.setPlaceholderText("Accepted gauge readings will appear here.")
+            layout.addWidget(points_view, stretch=1)
+            note = QtWidgets.QLabel(
+                "Keep this window visible while the external-gauge prompts are open. "
+                "The calibration result is saved to CSV/JSON before anything is applied.",
+                dialog,
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet("color: palette(mid);")
+            layout.addWidget(note)
+            button_row = QtWidgets.QHBoxLayout()
+            button_row.addStretch(1)
+            stop_button = QtWidgets.QPushButton("Stop after current step", dialog)
+            stop_button.clicked.connect(self._request_stop_motor_step_calibration)
+            button_row.addWidget(stop_button)
+            layout.addLayout(button_row)
+            self._motor_step_calibration_dialog = dialog
+            self._motor_step_calibration_status_label = status_label
+            self._motor_step_calibration_detail_label = detail_label
+            self._motor_step_calibration_progress = progress
+            self._motor_step_calibration_points_view = points_view
+        self._motor_step_calibration_stop_requested = False
+        self._update_motor_step_calibration_dialog(
+            "Enter the external-gauge baseline reading.",
+            completed_moves=0,
+            total_moves=total_moves,
+            detail=(
+                f"Plan: {total_moves} move(s), {signed_increment_steps:+d} raw Tic steps per move, "
+                f"{float(speed_steps_per_s):.3f} steps/s."
+            ),
+        )
+        if self._motor_step_calibration_points_view is not None:
+            self._motor_step_calibration_points_view.clear()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        QtWidgets.QApplication.processEvents()
+
+    def _update_motor_step_calibration_dialog(
+        self,
+        message: str,
+        *,
+        completed_moves: int,
+        total_moves: int,
+        active_move_fraction: float = 0.0,
+        detail: str | None = None,
+    ) -> None:
+        if self._motor_step_calibration_dialog is None:
+            return
+        total = max(1, int(total_moves))
+        completed = max(0, min(total, int(completed_moves)))
+        active_fraction = max(0.0, min(1.0, float(active_move_fraction)))
+        progress_value = int(round((completed + active_fraction) * 100.0))
+        progress_max = total * 100
+        if self._motor_step_calibration_status_label is not None:
+            self._motor_step_calibration_status_label.setText(message)
+        if self._motor_step_calibration_detail_label is not None and detail is not None:
+            self._motor_step_calibration_detail_label.setText(detail)
+        if self._motor_step_calibration_progress is not None:
+            self._motor_step_calibration_progress.setRange(0, progress_max)
+            self._motor_step_calibration_progress.setValue(max(0, min(progress_value, progress_max)))
+            self._motor_step_calibration_progress.setFormat(
+                f"Motor calibration: {completed}/{total} move(s)"
+            )
+        QtWidgets.QApplication.processEvents()
+
+    def _append_motor_step_calibration_dialog_point(self, point: MotorStepCalibrationPoint) -> None:
+        if self._motor_step_calibration_points_view is None:
+            return
+        move_text = ""
+        if int(point.move_command_steps) != 0:
+            move_text = f", move {int(point.move_command_steps):+d} steps at {point.move_speed_steps_per_s:.3f} steps/s"
+        self._motor_step_calibration_points_view.appendPlainText(
+            f"Point {point.point_index}: {point.tic_position_steps} steps, "
+            f"reading {point.entered_displacement_mm:.6f} mm{move_text}"
+        )
+
+    def _close_motor_step_calibration_dialog(self) -> None:
+        if self._motor_step_calibration_dialog is not None:
+            self._motor_step_calibration_dialog.close()
+        self._motor_step_calibration_dialog = None
+        self._motor_step_calibration_status_label = None
+        self._motor_step_calibration_detail_label = None
+        self._motor_step_calibration_progress = None
+        self._motor_step_calibration_points_view = None
+        self._motor_step_calibration_active = False
+        self._motor_step_calibration_stop_requested = False
+
     def _offer_motor_step_calibration_result(
         self,
         report: Mapping[str, Any],
@@ -5688,7 +5819,14 @@ class MainWindow(QtWidgets.QMainWindow):
             f"({csv_path.name}, {json_path.name})."
         )
 
-    def _wait_for_motor_step_calibration_move(self, expected_duration_s: float) -> bool:
+    def _wait_for_motor_step_calibration_move(
+        self,
+        expected_duration_s: float,
+        *,
+        point_index: int,
+        total_moves: int,
+        target_position_steps: int | None,
+    ) -> bool:
         dispatcher = self._build_tic_dispatcher()
         if not self._wait_for_tic_dispatcher(
             dispatcher,
@@ -5696,14 +5834,37 @@ class MainWindow(QtWidgets.QMainWindow):
             timeout_s=max(2.0, min(30.0, float(expected_duration_s) + 2.0)),
         ):
             return False
-        deadline_s = time.time() + max(0.0, float(expected_duration_s)) + SERVO_MOTION_SETTLE_AFTER_MOVE_S
+        move_started_s = time.time()
+        move_duration_s = max(0.0, float(expected_duration_s))
+        deadline_s = move_started_s + move_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
         while time.time() < deadline_s:
+            elapsed_s = max(0.0, time.time() - move_started_s)
+            move_fraction = 1.0 if move_duration_s <= 1e-9 else min(1.0, elapsed_s / move_duration_s)
+            remaining_s = max(0.0, deadline_s - time.time())
+            target_text = "-" if target_position_steps is None else str(target_position_steps)
+            self._update_motor_step_calibration_dialog(
+                f"Moving calibration point {point_index}/{total_moves}.",
+                completed_moves=max(0, point_index - 1),
+                total_moves=total_moves,
+                active_move_fraction=move_fraction,
+                detail=(
+                    f"Confirmed position {self._current_position_steps} steps; "
+                    f"commanded target {target_text} steps. "
+                    f"Elapsed {elapsed_s:.1f} s, remaining about {remaining_s:.1f} s."
+                ),
+            )
             QtWidgets.QApplication.processEvents()
             time.sleep(min(0.05, max(0.0, deadline_s - time.time())))
         try:
             self._refresh_tic_status()
         except Exception as exc:
             self._log(f"Tic status refresh after calibration move failed: {exc}")
+        self._update_motor_step_calibration_dialog(
+            f"Move {point_index}/{total_moves} finished. Enter the external-gauge reading.",
+            completed_moves=point_index,
+            total_moves=total_moves,
+            detail=f"Move complete at {self._commanded_position_steps()} commanded steps.",
+        )
         return True
 
     def _run_motor_step_calibration(self) -> None:
@@ -5731,6 +5892,12 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Motor step calibration started: baseline plus {move_count} down move(s), "
             f"{signed_increment_steps:+d} raw Tic steps per move at {speed_steps_per_s:.3f} steps/s."
         )
+        self._motor_step_calibration_active = True
+        self._show_motor_step_calibration_dialog(
+            total_moves=move_count,
+            signed_increment_steps=signed_increment_steps,
+            speed_steps_per_s=speed_steps_per_s,
+        )
 
         baseline_mm, accepted = QtWidgets.QInputDialog.getDouble(
             self,
@@ -5743,6 +5910,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not accepted:
             self._log("Motor step calibration cancelled before baseline entry.")
+            self._close_motor_step_calibration_dialog()
+            self._motor_step_calibration_active = False
+            if not self._automation_active and not self._manual_jog_timer.isActive():
+                self._stop_tic_keepalive()
             return
 
         points = [
@@ -5751,10 +5922,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 entered_displacement_mm=float(baseline_mm),
             )
         ]
+        self._append_motor_step_calibration_dialog_point(points[0])
         previous_reading = float(baseline_mm)
         completed_all_moves = True
         for point_index in range(1, move_count + 1):
+            if self._motor_step_calibration_stop_requested:
+                completed_all_moves = False
+                break
             self._log(f"Motor step calibration move {point_index}/{move_count}: moving down.")
+            start_steps = self._commanded_position_steps()
+            target_steps = start_steps + signed_increment_steps
+            self._update_motor_step_calibration_dialog(
+                f"Starting calibration move {point_index}/{move_count}.",
+                completed_moves=point_index - 1,
+                total_moves=move_count,
+                detail=(
+                    f"Commanding {signed_increment_steps:+d} raw Tic steps: "
+                    f"{start_steps} -> {target_steps} steps at {speed_steps_per_s:.3f} steps/s."
+                ),
+            )
             if not self._move_relative_raw_tic_steps(
                 signed_increment_steps,
                 speed_steps_per_s=speed_steps_per_s,
@@ -5762,7 +5948,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 completed_all_moves = False
                 break
             expected_duration_s = increment_steps / max(speed_steps_per_s, 1e-9)
-            if not self._wait_for_motor_step_calibration_move(expected_duration_s):
+            if not self._wait_for_motor_step_calibration_move(
+                expected_duration_s,
+                point_index=point_index,
+                total_moves=move_count,
+                target_position_steps=self._last_commanded_position_steps,
+            ):
                 completed_all_moves = False
                 break
             reading_mm, accepted = QtWidgets.QInputDialog.getDouble(
@@ -5787,6 +5978,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     move_speed_steps_per_s=speed_steps_per_s,
                 )
             )
+            self._append_motor_step_calibration_dialog_point(points[-1])
 
         report = motor_step_calibration_report_from_points(points)
         csv_path, json_path = self._write_motor_step_calibration_log(
@@ -5803,10 +5995,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"R2 {float(report.get('r2', 0.0)):.5f}, "
                 f"max residual {float(report.get('max_residual_mm', 0.0)):.6f} mm."
             )
+            self._update_motor_step_calibration_dialog(
+                "Motor step calibration fit is ready.",
+                completed_moves=move_count,
+                total_moves=move_count,
+                detail=(
+                    f"Recommended {float(report['recommended_steps_per_mm']):.3f} steps/mm; "
+                    f"R2 {float(report.get('r2', 0.0)):.5f}; "
+                    f"max residual {float(report.get('max_residual_mm', 0.0)):.6f} mm. "
+                    f"Saved CSV/JSON: {csv_path.name}, {json_path.name}."
+                ),
+            )
         else:
             self._log("Motor step calibration saved as partial/insufficient data for inspection.")
+            self._update_motor_step_calibration_dialog(
+                "Motor step calibration saved as partial/insufficient data.",
+                completed_moves=max(0, len(points) - 1),
+                total_moves=move_count,
+                detail=f"Saved CSV/JSON: {csv_path.name}, {json_path.name}.",
+            )
         self._offer_motor_step_calibration_result(report, csv_path=csv_path, json_path=json_path)
-        if not self._automation_active:
+        self._close_motor_step_calibration_dialog()
+        self._motor_step_calibration_active = False
+        if not self._automation_active and not self._manual_jog_timer.isActive():
             self._stop_tic_keepalive()
 
     def _apply_preload_length_result(
@@ -7679,7 +7890,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tic_keepalive_warning_active = False
 
     def _handle_tic_keepalive_timer(self) -> None:
-        if not self._automation_active and not self._manual_jog_timer.isActive():
+        if (
+            not self._automation_active
+            and not self._manual_jog_timer.isActive()
+            and not self._motor_step_calibration_active
+        ):
             self._stop_tic_keepalive()
             return
         if self._tic_motor_power_ok is False:
