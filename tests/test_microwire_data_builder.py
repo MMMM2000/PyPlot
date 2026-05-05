@@ -3891,7 +3891,8 @@ def test_word_report_export_embeds_available_origin_objects(
         document_xml = archive.read("word/document.xml").decode("utf-8")
 
     assert "Ni55Fe18Ga27 1/1" in document_xml
-    assert "Assemble data" in document_xml
+    assert "Microwire data" in document_xml
+    assert "Stress/strain current (mA)" in document_xml
     assert 'w:pStyle w:val="Heading1"' in document_xml
     assert "Microscope and dimensions" in document_xml
     assert "Current annealing" in document_xml
@@ -3948,6 +3949,37 @@ def test_word_report_export_accepts_clipboard_only_origin_objects(
     assert insertion.object_path == Path(descriptor)
     assert insertion.graph_name == "Graph1"
     assert insertion.clipboard_fallback is True
+
+
+def test_word_report_microwire_data_uses_requested_column_order_and_empty_values() -> None:
+    values = core._word_assemble_values(
+        pd.Series(
+            {
+                "Microwire": "12/2",
+                "Composition": "Ni50Fe27Ga23",
+                "Stress/strain current (mA)": "",
+                "As (°C)": np.nan,
+                "Custom data": "kept",
+                "Data source": "hidden",
+                "R vs T graphs (Origin)": "hidden.oggu",
+            }
+        )
+    )
+
+    labels = [label for label, _value in values]
+    value_map = dict(values)
+    assert labels[:4] == [
+        "Composition",
+        "Microwire",
+        "e/a",
+        "Strain (%)",
+    ]
+    assert labels.index("Stress/strain current (mA)") < labels.index("As (°C)")
+    assert value_map["Stress/strain current (mA)"] == ""
+    assert value_map["As (°C)"] == ""
+    assert "Custom data" not in value_map
+    assert "Data source" not in value_map
+    assert "R vs T graphs (Origin)" not in value_map
 
 
 def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(

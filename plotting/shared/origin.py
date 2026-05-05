@@ -264,7 +264,7 @@ def origin_safe_token(text: str, *, fallback: str = "Graph", max_len: int | None
 
 
 def origin_title_xy(layer: Any) -> tuple[float, float] | None:
-    """Compute a centered title position above the plot area in data coords."""
+    """Compute a centered title position just above the plot area in data coords."""
 
     get_float = getattr(layer, "get_float", None)
     if not callable(get_float):
@@ -283,10 +283,9 @@ def origin_title_xy(layer: Any) -> tuple[float, float] | None:
     y_span = y_to - y_from
     if x_span <= 0.0 or y_span <= 0.0:
         return None
-    # Keep the title well above the plotting range. Dual-axis exports need
-    # extra clearance so the centered title does not collide with top-axis
-    # tick labels or the mirrored x-axis caption.
-    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.08))
+    # Keep the title just above the plotting range. Larger offsets can place
+    # the preview text outside Origin's OLE export bounds and crop it in Word.
+    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.10))
 
 
 def _origin_title_font_size(text: str, default: float) -> float:
@@ -501,6 +500,10 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         if not callable(set_float) or not callable(layer_get_float):
             return
         try:
+            set_float("fsize", 10.0)
+        except Exception:
+            pass
+        try:
             x_from = float(layer_get_float("x.from"))
             x_to = float(layer_get_float("x.to"))
             y_from = float(layer_get_float("y.from"))
@@ -520,7 +523,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         try:
             # Keep the top-axis caption just above the top ticks instead of
             # inside the plotting area, where it can overlap the graph title.
-            set_float("y", y_to + (y_span * 0.02))
+            set_float("y", y_to + (y_span * 0.005))
         except Exception:
             pass
         return
@@ -551,6 +554,10 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
     layer_get_float = getattr(layer, "get_float", None)
     if not callable(set_float) or not callable(layer_get_float):
         return
+    try:
+        set_float("fsize", 10.0)
+    except Exception:
+        pass
     label_get_float = getattr(axis_label, "get_float", None)
     existing_label_x: float | None = None
     if callable(label_get_float):
@@ -575,7 +582,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         return
 
     # Keep titles just outside axes (not inside data area) while avoiding export clipping.
-    offset = x_span * 0.03
+    offset = x_span * (0.12 if key == "y2" else 0.03)
     target_x = x_to + offset
     if key == "y":
         target_y = (y_from + y_to) / 2.0

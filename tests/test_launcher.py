@@ -397,6 +397,82 @@ def test_microwire_word_report_project_merges_section_rows_and_rvst(
     assert row["R vs T temperature range (deg C)"] == "-40.5 to -39"
 
 
+def test_microwire_word_report_project_exports_rvst_through_pyplot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "Praha"
+    project_path = data_root / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir(parents=True)
+    rvt_path = data_root / "RvsT" / "RvsT" / "Ni50Fe27Ga23_12_2.csv"
+    rvt_path.parent.mkdir(parents=True)
+    rvt_path.write_text(
+        "\n".join(
+            [
+                "iso_time;t_elapsed_s;sp_c;pv_c;resistance_ohm",
+                "2026-02-06T08:22:38;0.1;-100;-40.5;43.2903",
+                "2026-02-06T08:22:48;10.1;-90;-39.0;43.2882",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 1,
+                "sections": {
+                    "assemble": {"rows": [], "columns": []},
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                            }
+                        ]
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: list[tuple[str, list[Path]]] = []
+
+    def fake_export_pyplot_origin_artifacts_for_paths(**kwargs: object) -> list[object]:
+        captured.append(
+            (
+                str(kwargs["plugin_name"]),
+                [Path(path) for path in kwargs["paths"]],  # type: ignore[index]
+            )
+        )
+        return [
+            argparse.Namespace(
+                descriptor="rvst.oggu",
+                display_text="R vs T from PyPlot",
+            )
+        ]
+
+    monkeypatch.setattr(
+        launcher_module,
+        "_export_pyplot_origin_artifacts_for_paths",
+        fake_export_pyplot_origin_artifacts_for_paths,
+    )
+    args = argparse.Namespace(
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_origin=True,
+    )
+
+    frame, origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        args,
+        tmp_path / "reports",
+    )
+
+    assert captured == [("R vs T", [rvt_path])]
+    assert origin_artifacts["rvst.oggu"].display_text == "R vs T from PyPlot"
+    assert frame.iloc[0]["R vs T graphs (Origin)"] == "rvst.oggu"
+
+
 def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

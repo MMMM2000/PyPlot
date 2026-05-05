@@ -124,14 +124,14 @@ def test_set_origin_axis_title_places_top_label_above_axis() -> None:
     set_origin_axis_title(layer, "x2", "Strain [%]")
     assert layer.axis("x2").label.text == "Strain [%]"
     assert layer._xt.get_float("x") == 5.0
-    assert layer._xt.get_float("y") == 102.0
+    assert layer._xt.get_float("y") == 100.5
     assert layer._xt._ints.get("horzalign") == 1
     assert "layer.x2.color = color(black);" in layer.commands
 
 
-def test_origin_title_xy_adds_extra_clearance_for_top_axis_exports() -> None:
+def test_origin_title_xy_stays_inside_origin_ole_preview_bounds() -> None:
     layer = _Layer()
-    assert origin_title_xy(layer) == (5.0, 108.0)
+    assert origin_title_xy(layer) == (5.0, 110.0)
 
 
 def test_set_origin_graph_title_sets_title_label_and_graph_names() -> None:

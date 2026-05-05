@@ -918,6 +918,7 @@ class VSMTemperatureScanProcessor:
             )
         except Exception:
             pass
+        self._style_origin_legend_label(legend)
 
     def _set_origin_combined_legend(
         self,
@@ -946,6 +947,22 @@ class VSMTemperatureScanProcessor:
             legend.text = "\n".join(lines)
         except Exception:
             pass
+        self._style_origin_legend_label(legend)
+
+    @staticmethod
+    def _style_origin_legend_label(legend: Any) -> None:
+        set_float = getattr(legend, "set_float", None)
+        if callable(set_float):
+            try:
+                set_float("fsize", 10.0)
+            except Exception:
+                pass
+        set_int = getattr(legend, "set_int", None)
+        if callable(set_int):
+            try:
+                set_int("show", 1)
+            except Exception:
+                pass
 
     def _hide_origin_legend(self, layer: Any) -> None:
         legend = self._origin_legend_label(layer)
@@ -1349,7 +1366,22 @@ class VSMTemperatureScanProcessor:
             except Exception:
                 pass
             try:
+                layer.set_float("top", 18.0)
+                layer.set_float("left", 22.0)
+                layer.set_float("width", 52.0)
+                layer.set_float("height", 56.0)
+            except Exception:
+                pass
+            try:
                 layer.lt_exec("layer -s 0;")
+            except Exception:
+                pass
+            try:
+                layer.lt_exec(
+                    "layer -u 1; layer 52 56 22 18; "
+                    "layer.top=18; layer.left=22; layer.width=52; layer.height=56; "
+                    "legend.fsize=10;"
+                )
             except Exception:
                 pass
             try:

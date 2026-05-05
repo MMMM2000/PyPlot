@@ -308,6 +308,57 @@ ORIGIN_FIGURE_COLUMNS = tuple(
     FMR_ORIGIN_COLUMN,
 )
 
+WORD_MICROWIRE_DATA_COLUMNS = (
+    "Composition",
+    "Microwire",
+    "e/a",
+    "Strain (%)",
+    "Stress (MPa)",
+    "Load (g)",
+    "Stress/strain current (mA)",
+    "Stress/strain current density (A/mm^2)",
+    "Fracture strain (%)",
+    "Fracture stress (MPa)",
+    "Fracture load (g)",
+    "Fracture stress/strain current (mA)",
+    "Fracture stress/strain current density (A/mm^2)",
+    DIAMETER_COLUMN,
+    GLASS_DIAMETER_COLUMN,
+    DIAMETER_RATIO_COLUMN,
+    TRANSITION_TEMP_AS_COLUMN,
+    TRANSITION_TEMP_AF_COLUMN,
+    TRANSITION_TEMP_MS_COLUMN,
+    TRANSITION_TEMP_MF_COLUMN,
+    "As1 (mA)",
+    "Af1 (mA)",
+    "Ms1 (mA)",
+    "Mf1 (mA)",
+    "As2 (mA)",
+    "Af2 (mA)",
+    "Ms2 (mA)",
+    "Mf2 (mA)",
+    "Mf2-Mf1 (mA)",
+    "As2-As1 (mA)",
+    "Mf1-Af1 (mA)",
+    "Af2-Af1 (mA)",
+    "Mf2-Af2 (mA)",
+    "Ms2-Ms1 (mA)",
+    "As current density (A/mm^2)",
+    "Ms current density (A/mm^2)",
+    "Length (m)",
+    "Production datetime",
+    "Mass (g)",
+    "Resistance (Ω)",
+    CORE_TEMPERATURE_COLUMN,
+    GLASS_TEMPERATURE_COLUMN,
+    "Winding speed (m/min)",
+    "Glass feeding (mm/min)",
+    ESTIMATED_TRANSITION_COLUMN,
+    "Underpressure",
+    GLASS_PULL_COLUMN,
+    BRITTLE_COLUMN,
+)
+
 MICROWIRE_LABEL_RE = re.compile(r"(\d+)\s*[/\-]\s*(\d+)")
 MICROWIRE_SORT_RE = re.compile(
     r"^\s*(\d+)\s*[/\-]\s*(\d+)\s*([A-Za-z][A-Za-z0-9]*)?\s*$"
@@ -4752,6 +4803,15 @@ def _word_format_value(value: Any) -> str:
     return "" if text.lower() == "nan" else text
 
 
+def _word_format_value_cells(value: Any) -> List[str]:
+    if not _word_has_value(value):
+        return [""]
+    if isinstance(value, (list, tuple, set)):
+        cells = [_word_format_value(item) for item in value if _word_has_value(item)]
+        return cells or [""]
+    return [_word_format_value(value)]
+
+
 def _word_key_values(row: pd.Series, columns: Sequence[str]) -> List[Tuple[str, str]]:
     values: List[Tuple[str, str]] = []
     for column in columns:
@@ -4847,6 +4907,49 @@ def _word_table(rows: Sequence[Tuple[str, str]]) -> str:
     )
 
 
+def _word_microwire_data_table(rows: Sequence[Tuple[str, Sequence[str]]]) -> str:
+    if not rows:
+        return ""
+    max_values = max((len(values) for _label, values in rows), default=1)
+    max_values = max(1, min(max_values, 6))
+    border = (
+        '<w:top w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:left w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:right w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
+        '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
+    )
+    value_width = max(1100, int(6200 / max_values))
+    table_rows: List[str] = []
+    for label, raw_values in rows:
+        values = [str(value) for value in list(raw_values)[:max_values]]
+        values.extend([""] * (max_values - len(values)))
+        label_cell = (
+            '<w:tc><w:tcPr><w:tcW w:w="2600" w:type="dxa"/>'
+            '<w:shd w:fill="F3F4F6"/></w:tcPr>'
+            f'{_word_paragraph(label, bold=True, spacing_after=0)}</w:tc>'
+        )
+        value_cells = "".join(
+            '<w:tc><w:tcPr>'
+            f'<w:tcW w:w="{value_width}" w:type="dxa"/></w:tcPr>'
+            f'{_word_paragraph(value, spacing_after=0)}</w:tc>'
+            for value in values
+        )
+        table_rows.append(f"<w:tr>{label_cell}{value_cells}</w:tr>")
+    return (
+        "<w:tbl>"
+        '<w:tblPr><w:tblW w:w="0" w:type="auto"/>'
+        f"<w:tblBorders>{border}</w:tblBorders>"
+        '<w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="90" w:type="dxa"/>'
+        '<w:bottom w:w="90" w:type="dxa"/><w:right w:w="90" w:type="dxa"/></w:tblCellMar>'
+        "</w:tblPr>"
+        f"{''.join(table_rows)}"
+        "</w:tbl>"
+        + _word_paragraph("", spacing_after=120)
+    )
+
+
 def _word_section(
     title: str,
     rows: Sequence[Tuple[str, str]],
@@ -4858,6 +4961,28 @@ def _word_section(
         parts.append(_word_table(rows))
     elif empty_text:
         parts.append(_word_paragraph(empty_text))
+    return "".join(parts)
+
+
+def _word_microwire_data_section(row: pd.Series) -> str:
+    rows: List[Tuple[str, List[str]]] = []
+    for column in WORD_MICROWIRE_DATA_COLUMNS:
+        column_text = str(column)
+        lowered = column_text.casefold()
+        if (
+            column_text in _WORD_ALWAYS_OMIT_COLUMNS
+            or column_text.startswith("_")
+            or column_text.endswith("(Origin)")
+        ):
+            continue
+        if "file" in lowered or "path" in lowered or "image" in lowered:
+            continue
+        rows.append((_word_label(column_text), _word_format_value_cells(row.get(column))))
+    parts = [_word_paragraph("Microwire data", bold=True, size=28, spacing_after=120, style="Heading1")]
+    if rows:
+        parts.append(_word_microwire_data_table(rows))
+    else:
+        parts.append(_word_paragraph("No microwire values available."))
     return "".join(parts)
 
 
@@ -4947,7 +5072,7 @@ def _word_additional_values(row: pd.Series, used_columns: Sequence[str]) -> List
 
 def _word_assemble_values(row: pd.Series) -> List[Tuple[str, str]]:
     values: List[Tuple[str, str]] = []
-    for column in row.index:
+    for column in WORD_MICROWIRE_DATA_COLUMNS:
         column_text = str(column)
         lowered = column_text.casefold()
         if (
@@ -4959,11 +5084,8 @@ def _word_assemble_values(row: pd.Series) -> List[Tuple[str, str]]:
         if "file" in lowered or "path" in lowered or "image" in lowered:
             continue
         value = row.get(column)
-        if not _word_has_value(value):
-            continue
-        formatted = _word_format_value(value)
-        if formatted:
-            values.append((_word_label(column_text), formatted))
+        formatted = _word_format_value(value) if _word_has_value(value) else ""
+        values.append((_word_label(column_text), formatted))
     return values
 
 
@@ -5056,11 +5178,7 @@ def _word_document_xml(
     title = _word_sample_title(row, fallback_index)
     body: List[str] = [
         _word_paragraph(title, bold=True, size=40, spacing_after=220, style="Title"),
-        _word_section(
-            "Assemble data",
-            _word_assemble_values(row),
-            empty_text="No Assemble values available.",
-        ),
+        _word_microwire_data_section(row),
     ]
     microscope_xml, picture_insertions, bookmark_id = _word_microscope_section(
         row,

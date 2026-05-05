@@ -7,6 +7,7 @@ import time
 import logging
 import traceback
 import json
+import math
 import re
 import secrets
 import socket
@@ -1077,6 +1078,7 @@ def _load_rvst_word_report_frame(source_path: Path, sample_override: object, out
         RVT_POINT_COUNT_COLUMN,
         RVT_RESISTANCE_RANGE_COLUMN,
         RVT_TEMPERATURE_RANGE_COLUMN,
+        _safe_plot_stem,
     )
     from plotting.plugins.r_vs_t.core import load_file
 
@@ -1106,16 +1108,18 @@ def _load_rvst_word_report_frame(source_path: Path, sample_override: object, out
     }
     if include_origin:
         try:
-            artifact = _export_rvst_origin_artifact(
-                frame,
-                title=title,
-                source_path=source_path,
+            artifacts = _export_pyplot_origin_artifacts_for_paths(
+                paths=[source_path],
+                plugin_name="R vs T",
                 output_dir=output_dir,
+                descriptor_prefix=_safe_plot_stem(f"{source_path.stem}_rvst"),
+                display_prefix=f"R vs T Origin graph: {title}",
             )
         except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
             LOGGER.warning("R vs T Origin object generation skipped for %s: %s", source_path, exc)
-            artifact = None
-        if artifact is not None:
+            artifacts = []
+        if artifacts:
+            artifact = artifacts[0]
             row[RVT_GRAPH_COLUMN] = artifact.display_text or artifact.descriptor
             row[RVT_ORIGIN_COLUMN] = artifact.descriptor
             origin_artifacts[artifact.descriptor] = artifact
@@ -1312,6 +1316,82 @@ def _word_project_add_graph_sources(
     )
 
 
+def _word_project_shape_memory_current(path: Path) -> float | None:
+    match = re.search(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*mA\b", path.stem, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _word_project_current_density(current_mA: float | None, diameter_um: object) -> float | None:
+    if current_mA is None:
+        return None
+    try:
+        diameter = float(diameter_um)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(diameter) or diameter <= 0:
+        return None
+    area_mm2 = math.pi * (diameter / 2000.0) ** 2
+    if area_mm2 <= 0:
+        return None
+    return current_mA / area_mm2
+
+
+def _word_project_shape_memory_summary(path: Path) -> dict[str, Any]:
+    try:
+        from plotting.plugins.shape_memory_stress_strain.core import load_manual_stress_strain_file
+        import pandas as pd
+    except Exception:
+        return {}
+    try:
+        frame = load_manual_stress_strain_file(path)
+    except Exception:
+        return {}
+    if frame.empty:
+        return {}
+
+    def _max(column: str) -> float | None:
+        if column not in frame.columns:
+            return None
+        values = pd.to_numeric(frame[column], errors="coerce").dropna()
+        if values.empty:
+            return None
+        return float(values.max())
+
+    summary: dict[str, Any] = {}
+    is_fracture = "fracture" in path.stem.casefold()
+    current = _word_project_shape_memory_current(path)
+    if is_fracture:
+        summary["Fracture load (g)"] = _max("load_g")
+        summary["Fracture strain (%)"] = _max("strain_pct")
+        summary["Fracture stress (MPa)"] = _max("stress_mpa")
+        if current is not None:
+            summary["Fracture stress/strain current (mA)"] = current
+    else:
+        summary["Load (g)"] = _max("load_g")
+        summary["Strain (%)"] = _max("strain_pct")
+        summary["Stress (MPa)"] = _max("stress_mpa")
+        if current is not None:
+            summary["Stress/strain current (mA)"] = current
+    return {key: value for key, value in summary.items() if value not in (None, "")}
+
+
+def _word_project_enrich_shape_memory_row(source_row: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(source_row)
+    for source in _word_project_value_items(source_row.get("_sources")):
+        path = Path(str(source))
+        if not path.exists():
+            continue
+        for column, value in _word_project_shape_memory_summary(path).items():
+            if enriched.get(column) in (None, ""):
+                enriched[column] = value
+    return enriched
+
+
 def _load_project_word_report_frame(
     source_path: Path,
     sample: object,
@@ -1373,9 +1453,11 @@ def _load_project_word_report_frame(
                     continue
 
     for section_name, section in sections.items():
-        if section_name in {"assemble", "compare"}:
+        if section_name in {"compare"}:
             continue
         for source_row in _project_section_rows(section):
+            if section_name == "shape_memory_stress_strain":
+                source_row = _word_project_enrich_shape_memory_row(source_row)
             composition, microwire = _word_project_row_sample(source_row)
             if not composition or not microwire:
                 continue
@@ -1413,9 +1495,42 @@ def _load_project_word_report_frame(
                     continue
                 if column in microscope_dimension_columns and section_name != "microscope":
                     continue
-                target[column] = _word_project_merge_value(target.get(column), value)
+                if section_name == "assemble":
+                    if _word_project_value_items(value) or not _word_project_value_items(
+                        target.get(column)
+                    ):
+                        target[column] = value
+                else:
+                    target[column] = _word_project_merge_value(target.get(column), value)
 
     frame = pd.DataFrame(list(rows_by_key.values()))
+    for index, row in frame.iterrows():
+        diameter = row.get(DIAMETER_COLUMN)
+        for current_column, density_column in (
+            ("Stress/strain current (mA)", "Stress/strain current density (A/mm^2)"),
+            (
+                "Fracture stress/strain current (mA)",
+                "Fracture stress/strain current density (A/mm^2)",
+            ),
+        ):
+            if density_column not in frame.columns:
+                frame[density_column] = pd.Series([None] * len(frame), dtype=object)
+            else:
+                frame[density_column] = frame[density_column].astype(object)
+            if _word_project_value_items(row.get(density_column)):
+                continue
+            densities = []
+            for value in _word_project_value_items(row.get(current_column)):
+                try:
+                    current_value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                density = _word_project_current_density(current_value, diameter)
+                if density is not None:
+                    densities.append(density)
+            densities = [value for value in densities if value is not None]
+            if densities:
+                frame.at[index, density_column] = densities if len(densities) > 1 else densities[0]
     frame = _filter_microwire_word_report_frame(frame, sample)
     origin_artifacts: dict[str, Any] = {}
     for column in (
@@ -1435,6 +1550,8 @@ def _load_project_word_report_frame(
     ):
         if column not in frame.columns:
             frame[column] = pd.Series([None] * len(frame), dtype=object)
+        else:
+            frame[column] = frame[column].astype(object)
 
     if include_origin:
         origin_dir = output_dir / "_origin_objects"
@@ -1557,16 +1674,27 @@ def _load_project_word_report_frame(
             if include_origin:
                 title = " ".join(part for part in (str(composition or ""), str(microwire or "")) if part).strip()
                 try:
-                    artifact = _export_rvst_origin_artifact(
-                        rvt_frame,
-                        title=title or path.stem,
-                        source_path=path,
+                    artifacts = _export_pyplot_origin_artifacts_for_paths(
+                        paths=[path],
+                        plugin_name="R vs T",
                         output_dir=output_dir,
+                        descriptor_prefix=_safe_plot_stem(
+                            "_".join(
+                                part
+                                for part in (
+                                    title or path.stem,
+                                    "r_vs_t",
+                                    path.stem,
+                                )
+                                if part
+                            )
+                        ),
+                        display_prefix=f"R vs T Origin graph: {title or path.stem}",
                     )
                 except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
                     LOGGER.warning("R vs T Origin object generation skipped for %s: %s", path, exc)
-                    artifact = None
-                if artifact is not None:
+                    artifacts = []
+                for artifact in artifacts:
                     rvt_origin_descriptors.append(artifact.descriptor)
                     origin_artifacts[artifact.descriptor] = artifact
                     frame.at[index, RVT_GRAPH_COLUMN] = artifact.display_text or artifact.descriptor
