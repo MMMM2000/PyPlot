@@ -354,9 +354,9 @@ The setup sequence is:
 3. Move toward the setup preload target.
 4. Once the wire responds, convert the requested setup time into an `MPa/s` target ramp through stiffness.
 5. Ask for measured length at preload.
-6. Return toward zero load and compute `l0`.
+6. Return toward zero load over the setup return-time target and compute `l0`.
 
-Before force starts responding, Mini DMA uses the setup slack take-up speed in `%/s`; with `20 mm` length and `1 %/s`, that is `0.2 mm/s`. Tiny residual loads near zero are still treated as slack take-up, because a long or bent wire can show a few milligrams of apparent load before it is meaningfully straight. Once applied load rises above the slack-take-up threshold, setup uses the stiffness/ramp-rate model derived from setup preload stress divided by setup time. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full global-speed-sized correction.
+Before force starts responding, Mini DMA uses the setup slack take-up speed in `%/s`; with `20 mm` length and `1 %/s`, that is `0.2 mm/s`. Tiny residual loads near zero are still treated as slack take-up, because a long or bent wire can show a few milligrams of apparent load before it is meaningfully straight. Once applied load rises above the slack-take-up threshold, setup uses the stiffness/ramp-rate model derived from setup preload stress divided by setup time. Setup return-to-zero estimates the unload travel from live load and stiffness, then divides by the setup return time, so the actual return can be slower when feedback gating and zero-plateau checks add time. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full global-speed-sized correction.
 
 The setup points are saved to `setup.csv` and `setup.txt` in the run folder. If setup jumps or oscillates, inspect `setup.csv` first.
 

@@ -50,3 +50,4 @@
 - Mini DMA setup preload relaxation from above target now uses cruise feedback and the global motion-speed ceiling instead of being clamped by the preload ramp rate.
 - Mini DMA calibration now caps the load-equivalent plateau acceptance band so an inflated live stiffness estimate cannot mark a preload target reached while the measured load is still far away.
 - Mini DMA setup now derives the engaged-wire preload ramp from setup time, uses a separate `%/s` slack take-up speed before force response, relies on the global motion speed as the hard stage-speed ceiling, and quantizes applied calibration backlash to achievable Tic units.
+- Mini DMA setup return-to-zero and automatic post-calibration return-to-start now use a setup return-time-derived speed instead of the global motion speed directly.

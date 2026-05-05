@@ -4785,6 +4785,68 @@ def test_setup_preload_tiny_baseline_load_still_counts_as_slack_takeup(
         _close_test_window(window)
 
 
+def test_setup_return_zero_uses_return_time_speed(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.17)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_diameter.setValue(0.0137)
+    window.spin_setup_return_duration_s.setValue(5.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+    window._calibrated_stiffness_g_per_mm = 22.7
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CALIBRATION
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=0.0,
+        note="setup_return_zero",
+    )
+    window._latest_scale_value_g = 20.17
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        speed = window._seek_speed_mm_s(
+            -1.0,
+            0.005,
+            basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+            current_value=1.0,
+        )
+
+        assert speed == pytest.approx((1.0 / 22.7) / 5.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_calibration_auto_recovery_uses_setup_return_time_speed(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_setup_return_duration_s.setValue(5.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+    window._automation_name = mini_dma_mod.CALIBRATION
+    window._current_position_mm = 7.5
+    window._recipe_origin_mm = 8.0
+    captured: dict[str, object] = {}
+
+    def _capture_preflight(_steps: object) -> bool:
+        captured["steps"] = _steps
+        return False
+
+    window._preflight_recipe_hardware = _capture_preflight  # type: ignore[method-assign]
+
+    try:
+        window._start_recovery_position_origin()
+
+        steps = captured["steps"]
+        assert isinstance(steps, list)
+        assert steps[0].action == "move"
+        assert steps[0].duration_s == pytest.approx(5.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_setup_preload_near_target_fallback_uses_minimum_speed(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_tension_load_positive.setChecked(False)

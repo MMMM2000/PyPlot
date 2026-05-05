@@ -134,6 +134,7 @@ SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
 SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
 SETUP_PRELOAD_TAKEUP_LOAD_G = 0.03
 SETUP_PRELOAD_DEFAULT_DURATION_S = 10.0
+SETUP_RETURN_DEFAULT_DURATION_S = 5.0
 SETUP_SLACK_DEFAULT_STRAIN_RATE_PCT_S = 1.0
 MIN_RESISTANCE_CURRENT_MA = 0.05
 SUPPLY_READ_MIN_INTERVAL_S = DEFAULT_SUPPLY_READ_INTERVAL_MS / 1000.0
@@ -3255,6 +3256,15 @@ class MainWindow(QtWidgets.QMainWindow):
             "Mechanical take-up speed while the wire is slack and load/stress feedback is not yet meaningful."
         )
         strain_setup_form.addRow("Slack take-up speed", self.spin_setup_slack_speed_strain_pct_s)
+        self.spin_setup_return_duration_s = CompactDoubleSpinBox(self.strain_setup_box)
+        self.spin_setup_return_duration_s.setDecimals(2)
+        self.spin_setup_return_duration_s.setRange(0.1, 3600.0)
+        self.spin_setup_return_duration_s.setValue(SETUP_RETURN_DEFAULT_DURATION_S)
+        self.spin_setup_return_duration_s.setSuffix(" s")
+        self.spin_setup_return_duration_s.setToolTip(
+            "Desired time for the setup return to zero load and calibration return-to-start recovery."
+        )
+        strain_setup_form.addRow("Setup return time", self.spin_setup_return_duration_s)
         self.spin_setup_preload_tolerance_mpa = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_preload_tolerance_mpa.setDecimals(4)
         self.spin_setup_preload_tolerance_mpa.setRange(0.0001, 10000.0)
@@ -4105,6 +4115,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_distribution_interval,
             self.spin_setup_preload_stress_mpa,
             self.spin_setup_preload_duration_s,
+            self.spin_setup_return_duration_s,
             self.spin_setup_slack_speed_strain_pct_s,
             self.spin_setup_preload_tolerance_mpa,
             self.spin_setup_zero_tolerance_g,
@@ -5718,6 +5729,28 @@ class MainWindow(QtWidgets.QMainWindow):
     def _setup_motion_speed_cap_mm_s(self) -> float:
         return max(self._minimum_held_speed_mm_s(), float(self.spin_motion_speed_mm_s.value()))
 
+    def _setup_return_duration_s(self) -> float:
+        return max(0.1, float(self.spin_setup_return_duration_s.value()))
+
+    def _setup_return_speed_for_distance_mm_s(self, distance_mm: float) -> float:
+        speed = abs(float(distance_mm)) / self._setup_return_duration_s()
+        return max(self._minimum_held_speed_mm_s(), min(self._setup_motion_speed_cap_mm_s(), speed))
+
+    def _setup_return_zero_speed_mm_s(self, basis: str | None, current_value: float | None) -> float:
+        if current_value is None or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return self._setup_motion_speed_cap_mm_s()
+        current_load_g = self._basis_value_as_load_g(basis, current_value)
+        stiffness = self._basis_sensitivity_per_mm(HSW_BASIS_LOAD_G)
+        if (
+            current_load_g is None
+            or stiffness is None
+            or not math.isfinite(float(stiffness))
+            or abs(float(stiffness)) <= 0.0
+        ):
+            return self._setup_motion_speed_cap_mm_s()
+        distance_mm = abs(float(current_load_g)) / abs(float(stiffness))
+        return self._setup_return_speed_for_distance_mm_s(distance_mm)
+
     def _refresh_equivalent_labels(self) -> None:
         if not hasattr(self, "label_setup_preload_stress_equiv"):
             return
@@ -7172,6 +7205,8 @@ class MainWindow(QtWidgets.QMainWindow):
         base_speed = self._motion_speed_for_current_context(manual_jog=False)
         if self._automation_name == RECOVERY_LOAD:
             return max(self._minimum_held_speed_mm_s(), base_speed)
+        if self._automation_step_note == "setup_return_zero":
+            return self._setup_return_zero_speed_mm_s(basis, current_value)
         if (
             current_value is not None
             and basis is not None
@@ -7536,7 +7571,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not self._move_to_position_mm(
             plateau_first_position_mm,
-            speed_mm_s=self._motion_speed_for_current_context(manual_jog=False),
+            speed_mm_s=self._setup_return_speed_for_distance_mm_s(
+                abs(float(self._current_position_mm) - plateau_first_position_mm)
+            ),
         ):
             if abs(float(self._current_position_mm) - plateau_first_position_mm) <= self._motor_step_mm():
                 self._setup_zero_fallback_return_position_mm = None
@@ -8826,6 +8863,7 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_txt_handle.write(f"# Setup preload stress MPa\t{self.spin_setup_preload_stress_mpa.value():.6f}\n")
         setup_txt_handle.write(f"# Setup preload duration s\t{self.spin_setup_preload_duration_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup preload ramp rate MPa/s\t{self._setup_preload_ramp_rate_mpa_s():.6f}\n")
+        setup_txt_handle.write(f"# Setup return duration s\t{self.spin_setup_return_duration_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup slack speed pct/s\t{self.spin_setup_slack_speed_strain_pct_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup stage max speed mm/s\t{self._setup_motion_speed_cap_mm_s():.6f}\n")
         setup_txt_handle.flush()
@@ -9040,6 +9078,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_preload_stress_mpa": float(self.spin_setup_preload_stress_mpa.value()),
                 "setup_preload_duration_s": float(self.spin_setup_preload_duration_s.value()),
                 "setup_preload_ramp_rate_mpa_s": self._setup_preload_ramp_rate_mpa_s(),
+                "setup_return_duration_s": float(self.spin_setup_return_duration_s.value()),
                 "setup_slack_speed_strain_pct_s": float(self.spin_setup_slack_speed_strain_pct_s.value()),
                 "setup_stage_max_speed_mm_s": self._setup_motion_speed_cap_mm_s(),
                 "setup_preload_tolerance_mpa": self._auto_requested_tolerance_for_basis(HSW_BASIS_STRESS_MPA),
@@ -10208,7 +10247,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_recovery_position_target(self, target_mm: float, label: str) -> None:
         self._sync_manual_motion_base_from_current_position()
         distance_mm = abs(target_mm - self._current_position_mm)
-        speed_mm_s = max(self._minimum_held_speed_mm_s(), self._motion_speed_for_current_context(manual_jog=True))
+        if self._is_calibration_mode(self._automation_name):
+            speed_mm_s = self._setup_return_speed_for_distance_mm_s(distance_mm)
+        else:
+            speed_mm_s = max(self._minimum_held_speed_mm_s(), self._motion_speed_for_current_context(manual_jog=True))
         interval_ms = self._control_interval_ms()
         move_duration_s = self._move_duration_s(distance_mm, speed_mm_s)
         steps = [AutomationStep("move", target_mm=target_mm, duration_s=move_duration_s, note=label)]
@@ -11766,6 +11808,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("setup_preload_stress_mpa", self.spin_setup_preload_stress_mpa.value())
         self.settings.setValue("setup_preload_duration_s", self.spin_setup_preload_duration_s.value())
         self.settings.setValue("setup_preload_ramp_rate_mpa_s", self._setup_preload_ramp_rate_mpa_s())
+        self.settings.setValue("setup_return_duration_s", self.spin_setup_return_duration_s.value())
         self.settings.setValue(
             "setup_slack_speed_strain_pct_s",
             self.spin_setup_slack_speed_strain_pct_s.value(),
@@ -12166,6 +12209,12 @@ class MainWindow(QtWidgets.QMainWindow):
             saved_setup_duration = float(self.spin_setup_preload_stress_mpa.value()) / max(0.001, saved_setup_rate)
         self.spin_setup_preload_duration_s.setValue(
             max(0.1, float(saved_setup_duration))
+        )
+        self.spin_setup_return_duration_s.setValue(
+            max(
+                0.1,
+                float(self.settings.value("setup_return_duration_s", SETUP_RETURN_DEFAULT_DURATION_S)),
+            )
         )
         self.spin_setup_slack_speed_strain_pct_s.setValue(
             max(
