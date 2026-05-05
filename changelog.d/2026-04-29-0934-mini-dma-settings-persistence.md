@@ -44,3 +44,6 @@
 - Mini DMA advanced motor settings now expose mechanical full steps/mm, Tic step mode, and derived Tic units/mm; applying a new Tic step mode updates the controller through `ticcmd` and rewrites the current-position register so physical mm values stay continuous.
 - Mini DMA now has a continuity-current monitor for automated measurements, logs raw scale samples during mandatory setup, stops setup preload on large overload, and makes setup preload wait for post-move force feedback before issuing the next correction.
 - Mini DMA output-collision and setup windows now show the active sample/output identity, and calibration ignores the saved backlash compensation while measuring new stiffness/backlash.
+- Mini DMA now replaces stale output base filenames when the current sample identity changes, and setup preload starts by relaxing toward the final preload target if the wire is already above it.
+- Mini DMA setup zero-load plateau fallback now uses a run-level corrected zero reference without changing the configured/default `21.200 g` baseline unless the operator explicitly edits or captures a new zero-load value.
+- Mini DMA setup preload no longer treats an already-over-target sample as an immediate overload stop when the next control action can relax toward the requested preload.

@@ -2175,6 +2175,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._end_zero_fallback_start_point_index = 0
         self._end_zero_fallback_return_position_mm: float | None = None
         self._end_zero_fallback_raw_g: float | None = None
+        self._run_zero_load_scale_g: float | None = None
         self._length_setup_dialog: QtWidgets.QDialog | None = None
         self._length_setup_status_label: QtWidgets.QLabel | None = None
         self._length_setup_progress: QtWidgets.QProgressBar | None = None
@@ -2840,7 +2841,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Real scale reading when the hanging weight applies 0 g to the wire. "
             "For the current 21.200 g weight, a raw scale reading of 18.200 g means 3.000 g applied load."
         )
-        self.spin_zero_load_scale_g.valueChanged.connect(lambda _value: self._refresh_live_labels())
+        self.spin_zero_load_scale_g.valueChanged.connect(self._handle_zero_load_scale_changed)
         zero_load_row.addWidget(self.spin_zero_load_scale_g, stretch=1)
         capture_zero_button = QtWidgets.QPushButton("Use live", safety_box)
         capture_zero_button.setToolTip("Set the zero-load reference from the current raw scale reading.")
@@ -5464,9 +5465,32 @@ class MainWindow(QtWidgets.QMainWindow):
         return _parse_first_float(raw_text), raw_text
 
     def _zero_load_scale_reference_g(self) -> float:
+        run_reference_g = getattr(self, "_run_zero_load_scale_g", None)
+        if run_reference_g is not None:
+            return float(run_reference_g)
         if hasattr(self, "spin_zero_load_scale_g"):
             return float(self.spin_zero_load_scale_g.value())
         return DEFAULT_ZERO_LOAD_SCALE_G
+
+    def _configured_zero_load_scale_reference_g(self) -> float:
+        if hasattr(self, "spin_zero_load_scale_g"):
+            return float(self.spin_zero_load_scale_g.value())
+        return DEFAULT_ZERO_LOAD_SCALE_G
+
+    def _set_run_zero_load_scale_reference(self, value_g: float, *, reason: str) -> None:
+        self._run_zero_load_scale_g = float(value_g)
+        self._load_offset_g = 0.0
+        self._refresh_live_labels()
+        if reason:
+            self._log(f"Run zero-load scale reference set to {float(value_g):.5f} g ({reason}).")
+
+    def _clear_run_zero_load_scale_reference(self) -> None:
+        self._run_zero_load_scale_g = None
+        self._refresh_live_labels()
+
+    def _handle_zero_load_scale_changed(self, _value: float) -> None:
+        self._run_zero_load_scale_g = None
+        self._refresh_live_labels()
 
     def _capture_zero_load_scale_reference(self) -> bool:
         if not self._has_fresh_scale_reading():
@@ -5608,6 +5632,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_recipe_sample_label()
         self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
         self._persist_settings_if_enabled()
+
+    def _sync_stale_log_name_from_sample(self) -> None:
+        sample_name = self.edit_sample_name.text().strip()
+        if not sample_name:
+            return
+        desired = _clean_session_basename(self._build_log_name_label(sample_name))
+        current = _clean_session_basename(self.edit_log_name.text())
+        if not desired or current == desired:
+            return
+        stale_values = {
+            "",
+            DEFAULT_LOG_BASENAME,
+            _clean_session_basename(self._last_auto_log_name),
+        }
+        if current in stale_values:
+            self.edit_log_name.setText(desired)
+            self._last_auto_log_name = desired
+            self._log(f"Output base filename synced to current sample: {desired}")
+            return
+        sample_tokens = [
+            _clean_session_basename(self.edit_name_composition.text()),
+            _clean_session_basename(MicrowireLineEdit.to_filename_token(self.edit_name_wire.text())),
+            _clean_session_basename(self.edit_name_specimen.text()),
+        ]
+        meaningful_tokens = [token for token in sample_tokens if len(token) >= 2]
+        matched_tokens = [token for token in meaningful_tokens if token and token in current]
+        required_matches = min(2, len(meaningful_tokens))
+        if meaningful_tokens and len(matched_tokens) < required_matches:
+            self.edit_log_name.setText(desired)
+            self._last_auto_log_name = desired
+            self._log(f"Stale output base filename replaced with current sample: {desired}")
 
     def _refresh_recipe_sample_label(self) -> None:
         if not hasattr(self, "label_recipe_sample"):
@@ -7296,6 +7351,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tolerance_load_g = self._basis_value_as_load_g(basis, effective_tolerance) or 0.0
         if target_load_g is None or current_load_g is None:
             return False
+        if float(current_load_g) > float(target_load_g) + abs(float(tolerance_load_g)):
+            return False
         allowed_load_g = max(
             float(target_load_g) + abs(float(tolerance_load_g)) * 4.0,
             abs(float(target_load_g)) * SETUP_PRELOAD_OVERLOAD_FACTOR,
@@ -7390,8 +7447,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if plateau_first_position_mm is None:
             return False
 
-        self.spin_zero_load_scale_g.setValue(float(plateau_raw_g))
-        self._load_offset_g = 0.0
+        self._set_run_zero_load_scale_reference(float(plateau_raw_g), reason="setup zero-load plateau")
         self._setup_zero_position_mm = plateau_first_position_mm
         self._setup_zero_fallback_raw_g = float(plateau_raw_g)
         self._setup_zero_fallback_return_position_mm = plateau_first_position_mm
@@ -7488,8 +7544,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if plateau_first_position_mm is None:
             return False
 
-        self.spin_zero_load_scale_g.setValue(float(plateau_raw_g))
-        self._load_offset_g = 0.0
+        self._set_run_zero_load_scale_reference(float(plateau_raw_g), reason="zero-load plateau return")
         self._end_zero_fallback_raw_g = float(plateau_raw_g)
         self._end_zero_fallback_return_position_mm = plateau_first_position_mm
         self._log(
@@ -8812,6 +8867,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "max_load_limit_g": self._effective_max_load_limit_g(),
             "custom_max_load_limit_g": float(self.spin_max_load_g.value()),
             "zero_load_scale_g": self._zero_load_scale_reference_g(),
+            "configured_zero_load_scale_g": self._configured_zero_load_scale_reference_g(),
+            "run_zero_load_scale_g": self._run_zero_load_scale_g,
             "diagnostic_load_offset_g": float(self._load_offset_g),
             "tension_decreases_scale_reading": self.check_tension_load_positive.isChecked(),
             "positive_motion_is_tension": self.check_positive_motion_is_tension.isChecked(),
@@ -8962,6 +9019,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_active:
             return
         self._persist_settings_if_enabled()
+        self._clear_run_zero_load_scale_reference()
         created_utc = _utc_timestamp()
         try:
             (
@@ -9113,6 +9171,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ui_refresh_timer.stop()
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
+        self._clear_run_zero_load_scale_reference()
         self._refresh_live_labels()
 
     def _write_raw_scale_sample(self, sample: ScaleSample) -> None:
@@ -9689,11 +9748,13 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
             return
+        self._sync_stale_log_name_from_sample()
         if not self._preflight_recipe_hardware(steps):
             return
         if not self._prepare_continuity_current_for_recipe(steps):
             return
         self._manual_jog_uses_last_target = False
+        self._clear_run_zero_load_scale_reference()
         self._last_move_target_mm = self._current_position_mm
         self._effective_position_mm = self._current_position_mm
         self._last_effective_move_target_mm = self._effective_position_mm
@@ -10812,6 +10873,18 @@ class MainWindow(QtWidgets.QMainWindow):
             desired_value = min(end_value, desired_value)
         else:
             desired_value = max(end_value, desired_value)
+        if step.note == "setup_preload" and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            current_value = self._current_distribution_value(step.basis)
+            tolerance = self._automation_tolerance_for_step(step)
+            current_load_g = None if current_value is None else self._basis_value_as_load_g(step.basis, current_value)
+            end_load_g = self._basis_value_as_load_g(step.basis, end_value)
+            tolerance_load_g = self._basis_value_as_load_g(step.basis, tolerance) or 0.0
+            if (
+                current_load_g is not None
+                and end_load_g is not None
+                and float(current_load_g) > float(end_load_g) + abs(float(tolerance_load_g))
+            ):
+                desired_value = end_value
 
         plateau_index = int(step.note) if step.note.isdigit() else None
         self._set_automation_context(

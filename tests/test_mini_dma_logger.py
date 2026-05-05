@@ -622,11 +622,33 @@ def test_setup_zero_plateau_fallback_updates_reference_and_returns_to_first_plat
         )
 
         assert reached is False
-        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.17, abs=0.001)
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
         assert targets == [pytest.approx(-1.0)]
         assert window._setup_zero_fallback_return_position_mm == pytest.approx(-1.0)
         assert window._setup_zero_position_mm == pytest.approx(-1.0)
         assert "zero-load plateau" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_run_zero_load_fallback_does_not_persist_as_default(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_zero_load_scale_g.setValue(21.2)
+
+    try:
+        window._set_run_zero_load_scale_reference(21.17, reason="test fallback")
+
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.17)
+
+        window._clear_run_zero_load_scale_reference()
+
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.2)
     finally:
         _close_test_window(window)
 
@@ -721,7 +743,8 @@ def test_current_sweep_final_zero_plateau_fallback_accepts_near_zero_load(
         )
 
         assert reached is False
-        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.17, abs=0.001)
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
         assert targets == [pytest.approx(-1.0)]
         assert window._end_zero_fallback_return_position_mm == pytest.approx(-1.0)
         assert "zero-load plateau" in window.log_output.toPlainText()
@@ -775,7 +798,8 @@ def test_recovery_load_zero_plateau_fallback_accepts_near_zero_load(
         )
 
         assert reached is False
-        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.17, abs=0.001)
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
         assert targets == [pytest.approx(-1.0)]
         assert window._end_zero_fallback_return_position_mm == pytest.approx(-1.0)
     finally:
@@ -2108,7 +2132,7 @@ def test_setup_preload_waits_for_post_move_feedback_before_next_correction(
         _close_test_window(window)
 
 
-def test_setup_preload_stops_on_large_target_overload(tmp_path: Path, qtbot) -> None:
+def test_setup_preload_above_target_relaxes_instead_of_stopping(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     moves: list[float] = []
     window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
@@ -2137,9 +2161,9 @@ def test_setup_preload_stops_on_large_target_overload(tmp_path: Path, qtbot) -> 
         )
 
         assert reached is False
-        assert moves == []
-        assert window._automation_active is False
-        assert "overload" in window.log_output.toPlainText().lower()
+        assert moves
+        assert window._automation_active is True
+        assert "overload" not in window.log_output.toPlainText().lower()
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -2178,6 +2202,48 @@ def test_setup_preload_target_ramp_uses_elapsed_mpa_rate(
 
         assert window._handle_target_ramp_step(step, 4) is False
         assert captured_targets == [pytest.approx(0.0), pytest.approx(1.25)]
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_preload_target_ramp_above_target_seeks_final_preload(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [100.0]
+    captured_targets: list[float] = []
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.17)
+    window.spin_diameter.setValue(0.0137)
+    overload_g = mini_dma_mod.load_g_from_stress_mpa(185.0, window.spin_diameter.value())
+    assert overload_g is not None
+    window._latest_scale_value_g = 21.17 - overload_g
+    window._latest_scale_timestamp = time.time()
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+
+    def _capture_seek(_basis: str, target_value: float, _tolerance: float) -> bool:
+        captured_targets.append(target_value)
+        return False
+
+    window._seek_distribution_target = _capture_seek  # type: ignore[method-assign]
+    step = mini_dma_mod.AutomationStep(
+        "ramp_target",
+        target_value=20.0,
+        target_start_value=0.0,
+        target_end_value=20.0,
+        target_ramp_rate_value_s=2.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        note="setup_preload",
+    )
+
+    try:
+        assert window._handle_target_ramp_step(step, 4) is False
+
+        assert captured_targets == [pytest.approx(20.0)]
     finally:
         _close_test_window(window)
 
@@ -4515,7 +4581,8 @@ def test_setup_zero_plateau_fallback_runs_before_target_acceptance(tmp_path: Pat
         )
 
         assert reached is False
-        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.1625)
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.17)
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.1625)
         assert moves == [pytest.approx(37.65)]
         assert "Detected zero-load plateau" in window.log_output.toPlainText()
     finally:
@@ -4566,7 +4633,8 @@ def test_recovery_zero_plateau_fallback_runs_before_target_acceptance(tmp_path: 
         )
 
         assert reached is False
-        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.1625)
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.17)
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.1625)
         assert moves == [pytest.approx(37.65)]
     finally:
         _close_test_window(window)
@@ -5307,6 +5375,22 @@ def test_existing_output_message_names_sample_and_output_folder(tmp_path: Path, 
         assert "Sample: Ni50Fe27Ga23 10/4 calibration" in message
         assert "Base filename: Ni50Fe27Ga23 10_4 calibration" in message
         assert str(tmp_path / "Ni50Fe27Ga23 10_4 calibration") in message
+    finally:
+        _close_test_window(window)
+
+
+def test_stale_output_base_filename_syncs_to_current_sample(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_name_composition.setText("Ni50Fe27Ga23")
+    window.edit_name_wire.setText("10/4")
+    window.edit_name_specimen.setText("calibration")
+    window.edit_sample_name.setText("Ni50Fe27Ga23 10/4 calibration")
+    window.edit_log_name.setText("Ni50Fe27Ga23 12_2 test")
+
+    try:
+        window._sync_stale_log_name_from_sample()
+
+        assert window.edit_log_name.text() == "Ni50Fe27Ga23 10_4 calibration"
     finally:
         _close_test_window(window)
 
