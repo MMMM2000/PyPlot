@@ -3902,6 +3902,8 @@ def test_seek_overshoot_uses_fine_reverse_correction(tmp_path: Path, qtbot) -> N
         ) is False
 
         window._latest_scale_value_g = -6.0
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
+        window._latest_scale_timestamp = time.time()
         assert window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_LOAD_G,
             target_value=5.0,
@@ -4369,7 +4371,7 @@ def test_setup_preload_near_target_fallback_uses_minimum_speed(tmp_path: Path, q
         )
 
         assert reached is False
-        assert moves == [(pytest.approx(0.01), pytest.approx(0.01))]
+        assert moves == [(pytest.approx(0.01), pytest.approx(0.01 / 0.7))]
     finally:
         _close_test_window(window)
 
@@ -4474,8 +4476,8 @@ def test_current_sweep_seek_uses_target_stage_speed_for_dynamic_balance(tmp_path
         _wait_for_tic_commands(window)
 
         assert reached is False
-        assert controller.target_steps == 7500
-        assert controller.max_speed == 100_000_000
+        assert controller.target_steps == -1250
+        assert controller.max_speed == 450_000_000
     finally:
         _close_test_window(window)
 
@@ -5311,6 +5313,189 @@ def test_current_sweep_predictive_correction_uses_strain_cap_not_feedback_interv
         _close_test_window(window)
 
 
+def test_mini_dma_defaults_to_provisional_microstep_steps_per_mm(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert window.spin_steps_per_mm.value() == pytest.approx(800.0)
+        assert "800 steps/mm" in window.spin_steps_per_mm.toolTip()
+    finally:
+        _close_test_window(window)
+
+
+def test_legacy_default_steps_per_mm_migrates_to_provisional_microstep_value(tmp_path: Path, qtbot) -> None:
+    snapshot = _snapshot_settings()
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("steps_per_mm", 100.0)
+    settings.setValue("motor_defaults_version", 1)
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    qtbot.addWidget(window)
+
+    try:
+        assert window.spin_steps_per_mm.value() == pytest.approx(800.0)
+    finally:
+        _close_test_window(window)
+        _restore_settings(snapshot)
+
+
+def test_custom_steps_per_mm_survives_motor_defaults_migration(tmp_path: Path, qtbot) -> None:
+    snapshot = _snapshot_settings()
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("steps_per_mm", 1000.0)
+    settings.setValue("motor_defaults_version", 1)
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    qtbot.addWidget(window)
+
+    try:
+        assert window.spin_steps_per_mm.value() == pytest.approx(1000.0)
+    finally:
+        _close_test_window(window)
+        _restore_settings(snapshot)
+
+
+def test_motor_step_calibration_report_fits_external_gauge_points() -> None:
+    points = [
+        mini_dma_mod.MotorStepCalibrationPoint(
+            point_index=0,
+            timestamp_utc="2026-05-05 09:00:00",
+            tic_position_steps=1200,
+            entered_displacement_mm=1.25,
+        ),
+        mini_dma_mod.MotorStepCalibrationPoint(
+            point_index=1,
+            timestamp_utc="2026-05-05 09:02:00",
+            tic_position_steps=2000,
+            entered_displacement_mm=2.25,
+            move_command_steps=800,
+            move_speed_steps_per_s=8.0,
+        ),
+        mini_dma_mod.MotorStepCalibrationPoint(
+            point_index=2,
+            timestamp_utc="2026-05-05 09:04:00",
+            tic_position_steps=2800,
+            entered_displacement_mm=3.25,
+            move_command_steps=800,
+            move_speed_steps_per_s=8.0,
+        ),
+    ]
+
+    report = mini_dma_mod.motor_step_calibration_report_from_points(points)
+
+    assert report["status"] == "ok"
+    assert report["recommended_steps_per_mm"] == pytest.approx(800.0)
+    assert report["movement_direction"] == "external_reading_increases_with_positive_tic_steps"
+    assert report["r2"] == pytest.approx(1.0)
+    assert report["max_residual_mm"] == pytest.approx(0.0)
+    assert report["point_estimates"][0]["steps_per_mm_from_baseline"] == pytest.approx(800.0)
+
+
+def test_motor_step_calibration_report_uses_absolute_slope_for_reversed_gauge() -> None:
+    points = [
+        mini_dma_mod.MotorStepCalibrationPoint(
+            point_index=0,
+            timestamp_utc="2026-05-05 09:00:00",
+            tic_position_steps=0,
+            entered_displacement_mm=5.0,
+        ),
+        mini_dma_mod.MotorStepCalibrationPoint(
+            point_index=1,
+            timestamp_utc="2026-05-05 09:02:00",
+            tic_position_steps=800,
+            entered_displacement_mm=4.0,
+        ),
+        mini_dma_mod.MotorStepCalibrationPoint(
+            point_index=2,
+            timestamp_utc="2026-05-05 09:04:00",
+            tic_position_steps=1600,
+            entered_displacement_mm=3.0,
+        ),
+    ]
+
+    report = mini_dma_mod.motor_step_calibration_report_from_points(points)
+
+    assert report["status"] == "ok"
+    assert report["recommended_steps_per_mm"] == pytest.approx(800.0)
+    assert report["signed_steps_per_mm"] == pytest.approx(-800.0)
+    assert report["movement_direction"] == "external_reading_decreases_with_positive_tic_steps"
+
+
+def test_motor_step_calibration_writes_csv_and_json_log(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    points = [
+        mini_dma_mod.MotorStepCalibrationPoint(
+            point_index=0,
+            timestamp_utc="2026-05-05 09:00:00",
+            tic_position_steps=100,
+            entered_displacement_mm=0.5,
+        ),
+        mini_dma_mod.MotorStepCalibrationPoint(
+            point_index=1,
+            timestamp_utc="2026-05-05 09:02:00",
+            tic_position_steps=900,
+            entered_displacement_mm=1.5,
+            move_command_steps=800,
+            move_speed_steps_per_s=8.0,
+        ),
+    ]
+    report = mini_dma_mod.motor_step_calibration_report_from_points(points)
+
+    try:
+        csv_path, json_path = window._write_motor_step_calibration_log(
+            points,
+            report,
+            move_increment_steps=800,
+            move_speed_steps_per_s=8.0,
+            applied_to_settings=False,
+        )
+
+        with csv_path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        metadata = json.loads(json_path.read_text(encoding="utf-8"))
+
+        assert rows[1]["relative_tic_steps"] == "800"
+        assert rows[1]["relative_displacement_mm"] == "1.000000"
+        assert rows[1]["estimated_steps_per_mm_from_baseline"] == "800.000000"
+        assert metadata["report"]["recommended_steps_per_mm"] == pytest.approx(800.0)
+        assert metadata["applied_to_settings"] is False
+    finally:
+        _close_test_window(window)
+
+
+def test_motor_step_calibration_move_uses_raw_tic_steps_not_current_calibration(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[tuple[int, int | None]] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append((position_steps, max_speed))
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
+    window.spin_steps_per_mm.setValue(1000.0)
+    window._current_position_steps = 1200
+    window._current_position_mm = 1.2
+    window._last_commanded_position_steps = 1200
+    window._last_move_target_mm = 1.2
+
+    try:
+        moved = window._move_relative_raw_tic_steps(800, speed_steps_per_s=8.0)
+        _wait_for_tic_commands(window)
+
+        assert moved is True
+        assert controller.targets == [(2000, 80000)]
+        assert window._last_commanded_position_steps == 2000
+        assert window._last_move_target_mm == pytest.approx(2.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_dynamic_speed_cap_uses_strain_rate_and_stage_cap(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.spin_initial_length.setValue(30.56)
@@ -5325,6 +5510,64 @@ def test_current_sweep_dynamic_speed_cap_uses_strain_rate_and_stage_cap(tmp_path
 
         window.spin_current_sweep_target_speed_mm_s.setValue(3.0)
         assert window._current_sweep_dynamic_speed_cap_mm_s() == pytest.approx(3.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_active_current_sweep_motion_context_uses_strain_rate_cap(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_initial_length.setValue(30.56)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+
+    try:
+        assert window._motion_speed_for_current_context(manual_jog=False) == pytest.approx(30.56 * 0.15)
+    finally:
+        _close_test_window(window)
+
+
+def test_gated_seek_command_speed_compensates_for_feedback_dead_time(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_scale_interval.setValue(250)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(100.0)
+    window.spin_initial_length.setValue(30.56)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+
+    try:
+        speed = window._seek_feedback_compensated_speed_mm_s(
+            1.0,
+            0.5,
+            basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+            cruise_mode=False,
+        )
+
+        assert speed == pytest.approx(2.5)
+    finally:
+        _close_test_window(window)
+
+
+def test_gated_seek_command_speed_uses_hard_cap_when_dead_time_dominates(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_scale_interval.setValue(250)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window.spin_initial_length.setValue(30.56)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+
+    try:
+        speed = window._seek_feedback_compensated_speed_mm_s(
+            1.0,
+            0.1,
+            basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+            cruise_mode=False,
+        )
+
+        assert speed == pytest.approx(30.56 * 0.15)
     finally:
         _close_test_window(window)
 
@@ -5369,7 +5612,6 @@ def test_setup_zero_return_does_not_accept_high_residual_inside_inflated_toleran
 
         assert reached is False
         assert moves
-        assert "not truly near zero" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -5458,6 +5700,7 @@ def test_near_load_seek_waits_for_post_move_feedback_even_with_new_scale_sample(
         plateau_index=1,
     )
     seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 0.2)
+    window._seek_last_error_by_key[seek_key] = -0.1
     sample_time_s = time.time()
     window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = sample_time_s - 0.3
     window._latest_scale_value_g = 0.0

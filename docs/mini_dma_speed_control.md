@@ -37,7 +37,11 @@ Mini DMA keeps several related speed and sensitivity terms:
 | `effective_tolerance` | Requested tolerance raised to what the rig can physically resolve. |
 | `sensitivity` | Current estimate of how strongly the sample responds to motion, e.g. g/mm, MPa/mm, or %/mm. |
 | `decision_interval` | Expected time between useful load/stress feedback samples, usually the scale request interval. |
-| `max_speed` | User-facing maximum motor speed for the active mode. |
+| `desired_average_speed` | Average motor speed the controller wants to achieve over a full correction cycle. |
+| `command_speed` | Instantaneous motor speed sent to the Tic for the moving part of that cycle. |
+| `max_speed` | User-facing hard motor speed cap for the active mode. |
+
+The provisional Mini DMA motor calibration is `800 steps/mm`, based on the expected relationship `100 full steps/mm * 1/8 microstep`. Older runs and profiles that used `100 steps/mm` will report motor displacement and strain eight times too large for the same Tic step travel. The external-gauge motor step calibration workflow should be used to make the final value authoritative before relying on displacement or strain numbers.
 
 ## Position Ramps
 
@@ -67,6 +71,47 @@ The final mode decision is important:
 
 - **Far mode:** if the remaining predicted correction distance is safely larger than the distance the motor can travel before the next useful balance sample, Mini DMA may extend the motor target without waiting for the previous move to finish. It still waits for a new scale sample before making the next force-control decision.
 - **Near mode:** if the target is close, the trend disagrees with prediction, the target was crossed, or the scale data is stale, Mini DMA sends one correction and then waits for expected move completion plus fresh post-move scale feedback before deciding again.
+
+In near mode, the speed shown by the recipe or dynamic controller is treated as the desired average speed over the full correction cycle, not only the speed while the motor is physically moving. Mini DMA can therefore command a higher instantaneous motor speed to compensate for dead time:
+
+```text
+dead_time_s =
+    settle_margin_s + decision_interval_s
+
+desired_cycle_s =
+    correction_move_mm / desired_average_speed_mm_s
+
+moving_time_s =
+    desired_cycle_s - dead_time_s
+
+command_speed_mm_s =
+    correction_move_mm / moving_time_s
+```
+
+Then:
+
+```text
+command_speed_mm_s =
+    clamp(command_speed_mm_s, minimum_speed, hard_speed_cap)
+```
+
+If `moving_time_s <= 0`, the requested average speed is impossible for that tiny correction and feedback dead time, so Mini DMA uses the hard speed cap. The move will still be slower than the requested average, but that is a physical timing limit rather than a calculation delay.
+
+Example:
+
+```text
+desired average speed = 1.0 mm/s
+correction distance = 0.5 mm
+dead time = 0.30 s
+
+desired cycle time = 0.5 s
+moving time = 0.5 - 0.30 = 0.20 s
+command speed = 0.5 / 0.20 = 2.5 mm/s
+```
+
+Without this compensation the same correction would move for `0.5 s`, then wait about `0.30 s`, giving only about `0.63 mm/s` average.
+
+![Gated command-speed compensation](assets/mini_dma_gated_speed_compensation.svg)
 
 ## Effective Tolerance
 
@@ -232,6 +277,8 @@ speed_mm_s =
 speed_mm_s = clamp(speed_mm_s, minimum_speed, speed_ceiling_mm_s)
 ```
 
+In this block, `speed_mm_s` is the desired average servo speed. In far/cruise mode it is also approximately the motor command speed, because the motor can keep moving continuously between scale samples. In near/gated mode, Mini DMA converts it to a higher instantaneous command speed with the dead-time compensation above, then clamps that command to the same `speed_ceiling_mm_s`.
+
 This means:
 
 - larger error increases speed;
@@ -240,6 +287,7 @@ This means:
 - more compliant or longer samples can move faster without overshooting as much;
 - the `%/s` ceiling makes correction speed scale with gauge length;
 - the user still has one hard safety ceiling in mm/s for the motor;
+- gated wait time is compensated by faster moving-part speed when the hard caps allow it;
 - the same smooth landing cap applies near target, so a high ceiling such as 5 mm/s is not used right outside the hold band.
 
 The current ramp itself stays static. Mini DMA does not pause the current ramp for ordinary servo error and does not add a stress-based safety unwind, because transition temperature and thermal history can depend on the commanded current-ramp rate. If the sample response is too fast for the servo to track, the preferred physics-preserving change is to lower the fixed current ramp rate, for example from `1 mA/s` to `0.5 mA/s`.

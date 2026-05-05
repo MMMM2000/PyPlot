@@ -186,6 +186,22 @@ CALIBRATION_PRELOAD = "calibration_preload"
 CALIBRATION_FORWARD = "calibration_forward"
 CALIBRATION_REVERSE = "calibration_reverse"
 CALIBRATION_DEFAULTS_VERSION = 4
+MOTOR_DEFAULTS_VERSION = 2
+DEFAULT_STEPS_PER_MM = 800.0
+MOTOR_STEP_CALIBRATION_DEFAULT_INCREMENT_STEPS = 800
+MOTOR_STEP_CALIBRATION_DEFAULT_MOVES = 5
+MOTOR_STEP_CALIBRATION_DEFAULT_SPEED_MM_S = 0.01
+MOTOR_STEP_CALIBRATION_CSV_FIELDNAMES = [
+    "point_index",
+    "timestamp_utc",
+    "tic_position_steps",
+    "relative_tic_steps",
+    "entered_displacement_mm",
+    "relative_displacement_mm",
+    "move_command_steps",
+    "move_speed_steps_per_s",
+    "estimated_steps_per_mm_from_baseline",
+]
 SERVO_CORRECTION_GAIN = 0.75
 SERVO_LIVE_STIFFNESS_ALPHA = 0.35
 SERVO_NOISE_SIGMA = 3.0
@@ -307,6 +323,10 @@ def _utc_timestamp() -> str:
 
 def _utc_timestamp_from_epoch(timestamp_s: float) -> str:
     return datetime.fromtimestamp(timestamp_s, timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _utc_filename_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 def _find_ticcmd() -> str:
@@ -674,6 +694,16 @@ class AutomationStep:
 
 
 @dataclass
+class MotorStepCalibrationPoint:
+    point_index: int
+    timestamp_utc: str
+    tic_position_steps: int
+    entered_displacement_mm: float
+    move_command_steps: int = 0
+    move_speed_steps_per_s: float = 0.0
+
+
+@dataclass
 class AutomationResumeState:
     steps: list[AutomationStep]
     index: int
@@ -883,6 +913,93 @@ def calibration_report_from_points(points: Sequence[MeasurementPoint]) -> dict[s
             "forward": len(forward),
             "reverse": len(reverse),
         },
+    }
+
+
+def motor_step_calibration_report_from_points(
+    points: Sequence[MotorStepCalibrationPoint],
+) -> dict[str, Any]:
+    if len(points) < 2:
+        return {
+            "status": "insufficient_data",
+            "reason": "at_least_two_points_required",
+            "sample_count": len(points),
+        }
+
+    baseline = points[0]
+    relative_pairs = [
+        (
+            int(point.tic_position_steps) - int(baseline.tic_position_steps),
+            float(point.entered_displacement_mm) - float(baseline.entered_displacement_mm),
+        )
+        for point in points
+    ]
+    x_values = [float(pair[0]) for pair in relative_pairs]
+    y_values = [float(pair[1]) for pair in relative_pairs]
+    x_mean = sum(x_values) / len(x_values)
+    y_mean = sum(y_values) / len(y_values)
+    denominator = sum((x_value - x_mean) ** 2 for x_value in x_values)
+    if denominator <= 0.0:
+        return {
+            "status": "insufficient_data",
+            "reason": "tic_positions_do_not_change",
+            "sample_count": len(points),
+        }
+    slope_mm_per_step = sum(
+        (x_value - x_mean) * (y_value - y_mean)
+        for x_value, y_value in zip(x_values, y_values, strict=False)
+    ) / denominator
+    if abs(slope_mm_per_step) <= 1e-12:
+        return {
+            "status": "insufficient_data",
+            "reason": "external_displacement_does_not_change",
+            "sample_count": len(points),
+            "signed_mm_per_step": slope_mm_per_step,
+        }
+
+    intercept_mm = y_mean - slope_mm_per_step * x_mean
+    fitted_values = [intercept_mm + slope_mm_per_step * x_value for x_value in x_values]
+    residuals = [observed - fitted for observed, fitted in zip(y_values, fitted_values, strict=False)]
+    ss_res = sum(residual**2 for residual in residuals)
+    ss_tot = sum((y_value - y_mean) ** 2 for y_value in y_values)
+    r2 = 1.0 if ss_tot <= 1e-18 and ss_res <= 1e-18 else 1.0 - (ss_res / ss_tot if ss_tot > 0.0 else 0.0)
+    signed_steps_per_mm = 1.0 / slope_mm_per_step
+    point_estimates: list[dict[str, float | int | None]] = []
+    for point, (relative_steps, relative_mm) in zip(points[1:], relative_pairs[1:], strict=False):
+        if abs(relative_mm) <= 1e-12:
+            signed_estimate = None
+            estimate = None
+        else:
+            signed_estimate = float(relative_steps) / float(relative_mm)
+            estimate = abs(signed_estimate)
+        point_estimates.append(
+            {
+                "point_index": point.point_index,
+                "relative_tic_steps": relative_steps,
+                "relative_displacement_mm": relative_mm,
+                "signed_steps_per_mm_from_baseline": signed_estimate,
+                "steps_per_mm_from_baseline": estimate,
+            }
+        )
+
+    return {
+        "status": "ok",
+        "sample_count": len(points),
+        "baseline_tic_position_steps": int(baseline.tic_position_steps),
+        "baseline_displacement_mm": float(baseline.entered_displacement_mm),
+        "signed_mm_per_step": slope_mm_per_step,
+        "mm_per_step": abs(slope_mm_per_step),
+        "signed_steps_per_mm": signed_steps_per_mm,
+        "recommended_steps_per_mm": abs(signed_steps_per_mm),
+        "fit_intercept_mm": intercept_mm,
+        "r2": max(0.0, min(1.0, r2)),
+        "max_residual_mm": max(abs(residual) for residual in residuals),
+        "movement_direction": (
+            "external_reading_increases_with_positive_tic_steps"
+            if slope_mm_per_step > 0.0
+            else "external_reading_decreases_with_positive_tic_steps"
+        ),
+        "point_estimates": point_estimates,
     }
 
 
@@ -2510,11 +2627,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_steps_per_mm = CompactDoubleSpinBox(motion_advanced_box)
         self.spin_steps_per_mm.setDecimals(3)
         self.spin_steps_per_mm.setRange(1.0, 100000.0)
-        self.spin_steps_per_mm.setValue(100.0)
+        self.spin_steps_per_mm.setValue(DEFAULT_STEPS_PER_MM)
         self.spin_steps_per_mm.setToolTip(
-            "Controller position units per mm. Full-step nominal value for your actuator is 100 steps/mm."
+            "Controller position units per mm. The provisional 800 steps/mm default assumes "
+            "100 full steps/mm at 1/8 microstep."
         )
         motion_advanced_form.addRow("Steps per mm", self.spin_steps_per_mm)
+
+        self.spin_motor_step_calibration_increment_steps = QtWidgets.QSpinBox(motion_advanced_box)
+        self.spin_motor_step_calibration_increment_steps.setRange(1, 1000000)
+        self.spin_motor_step_calibration_increment_steps.setValue(MOTOR_STEP_CALIBRATION_DEFAULT_INCREMENT_STEPS)
+        self.spin_motor_step_calibration_increment_steps.setSuffix(" steps")
+        self.spin_motor_step_calibration_increment_steps.setToolTip(
+            "Raw Tic position units per calibration move. This does not use the current steps/mm value."
+        )
+        motion_advanced_form.addRow("Calibration move", self.spin_motor_step_calibration_increment_steps)
+
+        self.spin_motor_step_calibration_moves = QtWidgets.QSpinBox(motion_advanced_box)
+        self.spin_motor_step_calibration_moves.setRange(1, 20)
+        self.spin_motor_step_calibration_moves.setValue(MOTOR_STEP_CALIBRATION_DEFAULT_MOVES)
+        motion_advanced_form.addRow("Calibration points", self.spin_motor_step_calibration_moves)
+
+        self.spin_motor_step_calibration_speed_mm_s = CompactDoubleSpinBox(motion_advanced_box)
+        self.spin_motor_step_calibration_speed_mm_s.setDecimals(4)
+        self.spin_motor_step_calibration_speed_mm_s.setRange(0.0001, 10.0)
+        self.spin_motor_step_calibration_speed_mm_s.setValue(MOTOR_STEP_CALIBRATION_DEFAULT_SPEED_MM_S)
+        self.spin_motor_step_calibration_speed_mm_s.setSuffix(" mm/s")
+        self.spin_motor_step_calibration_speed_mm_s.setToolTip(
+            "Expected linear calibration speed. Mini DMA converts this to raw Tic steps/s using the calibration move size."
+        )
+        motion_advanced_form.addRow("Calibration speed", self.spin_motor_step_calibration_speed_mm_s)
+
+        self.button_motor_step_calibration = QtWidgets.QPushButton("Run motor step calibration", motion_advanced_box)
+        self.button_motor_step_calibration.setObjectName("motor_step_calibration_button")
+        self.button_motor_step_calibration.setToolTip(
+            "Prompt for an external-gauge baseline, move down by raw Tic units, prompt after each move, "
+            "and save CSV/JSON logs without applying the result by default."
+        )
+        self.button_motor_step_calibration.clicked.connect(self._run_motor_step_calibration)
+        motion_advanced_form.addRow("", self.button_motor_step_calibration)
         advanced_layout.addWidget(motion_advanced_box)
         hardware_layout.addWidget(self.advanced_hardware_panel)
 
@@ -5368,6 +5519,296 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         self._log(f"Reference position set to the current specimen position ({self._position_reference_mm:.4f} mm).")
 
+    def _motor_step_calibration_down_sign(self) -> int:
+        return -1 if self._tension_motion_sign() > 0.0 else 1
+
+    def _motor_step_calibration_speed_steps_per_s(self) -> float:
+        increment_steps = max(1, abs(int(self.spin_motor_step_calibration_increment_steps.value())))
+        return max(
+            1.0,
+            float(self.spin_motor_step_calibration_speed_mm_s.value()) * increment_steps,
+        )
+
+    def _motor_step_calibration_point(
+        self,
+        *,
+        point_index: int,
+        entered_displacement_mm: float,
+        move_command_steps: int = 0,
+        move_speed_steps_per_s: float = 0.0,
+    ) -> MotorStepCalibrationPoint:
+        return MotorStepCalibrationPoint(
+            point_index=int(point_index),
+            timestamp_utc=_utc_timestamp(),
+            tic_position_steps=int(self._commanded_position_steps()),
+            entered_displacement_mm=float(entered_displacement_mm),
+            move_command_steps=int(move_command_steps),
+            move_speed_steps_per_s=float(move_speed_steps_per_s),
+        )
+
+    def _next_motor_step_calibration_paths(self) -> tuple[Path, Path]:
+        directory = Path(self.edit_log_dir.text().strip() or _default_download_dir()).expanduser()
+        directory.mkdir(parents=True, exist_ok=True)
+        stem = f"motor_step_calibration_{_utc_filename_timestamp()}"
+        for suffix in ("", *(f"_{index:02d}" for index in range(2, 10000))):
+            csv_path = directory / f"{stem}{suffix}.csv"
+            json_path = directory / f"{stem}{suffix}.json"
+            if not csv_path.exists() and not json_path.exists():
+                return csv_path, json_path
+        raise RuntimeError("Could not find a free motor-step calibration filename.")
+
+    def _write_motor_step_calibration_log(
+        self,
+        points: Sequence[MotorStepCalibrationPoint],
+        report: Mapping[str, Any],
+        *,
+        move_increment_steps: int,
+        move_speed_steps_per_s: float,
+        applied_to_settings: bool,
+    ) -> tuple[Path, Path]:
+        if not points:
+            raise ValueError("Cannot write a motor-step calibration log without points.")
+        csv_path, json_path = self._next_motor_step_calibration_paths()
+        baseline = points[0]
+        with csv_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=MOTOR_STEP_CALIBRATION_CSV_FIELDNAMES)
+            writer.writeheader()
+            for point in points:
+                relative_steps = int(point.tic_position_steps) - int(baseline.tic_position_steps)
+                relative_mm = float(point.entered_displacement_mm) - float(baseline.entered_displacement_mm)
+                if point.point_index == 0 or abs(relative_mm) <= 1e-12:
+                    estimate_text = ""
+                else:
+                    estimate_text = f"{abs(relative_steps / relative_mm):.6f}"
+                writer.writerow(
+                    {
+                        "point_index": point.point_index,
+                        "timestamp_utc": point.timestamp_utc,
+                        "tic_position_steps": point.tic_position_steps,
+                        "relative_tic_steps": relative_steps,
+                        "entered_displacement_mm": f"{point.entered_displacement_mm:.6f}",
+                        "relative_displacement_mm": f"{relative_mm:.6f}",
+                        "move_command_steps": point.move_command_steps,
+                        "move_speed_steps_per_s": f"{point.move_speed_steps_per_s:.6f}",
+                        "estimated_steps_per_mm_from_baseline": estimate_text,
+                    }
+                )
+
+        step_mode = _extract_status_value(self._tic_status_text, "Step mode") if self._tic_status_text else None
+        payload = {
+            "created_utc": _utc_timestamp(),
+            "tic_serial": self.edit_tic_serial.text().strip() or None,
+            "tic_step_mode": step_mode,
+            "start_position_steps": int(baseline.tic_position_steps),
+            "move_increment_steps": int(move_increment_steps),
+            "move_direction": "down",
+            "move_speed_steps_per_s": float(move_speed_steps_per_s),
+            "steps_per_mm_before": float(self.spin_steps_per_mm.value()),
+            "applied_to_settings": bool(applied_to_settings),
+            "points": [dict(point.__dict__) for point in points],
+            "report": dict(report),
+        }
+        json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return csv_path, json_path
+
+    def _update_motor_step_calibration_applied_flag(self, json_path: Path, applied: bool) -> None:
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                payload["applied_to_settings"] = bool(applied)
+                payload["applied_utc"] = _utc_timestamp() if applied else None
+                json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception as exc:
+            self._log(f"Could not update calibration metadata apply flag: {exc}")
+
+    def _apply_motor_step_calibration_report(self, report: Mapping[str, Any]) -> bool:
+        value = report.get("recommended_steps_per_mm")
+        if value is None:
+            return False
+        steps_per_mm = float(value)
+        if not math.isfinite(steps_per_mm) or steps_per_mm <= 0.0:
+            return False
+        self.spin_steps_per_mm.setValue(steps_per_mm)
+        self._persist_settings_if_enabled()
+        self._log(f"Applied motor step calibration: {steps_per_mm:.3f} steps/mm.")
+        return True
+
+    def _discard_motor_step_calibration_log(self, paths: Sequence[Path]) -> None:
+        for path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                self._log(f"Could not remove calibration log {path}: {exc}")
+
+    def _offer_motor_step_calibration_result(
+        self,
+        report: Mapping[str, Any],
+        *,
+        csv_path: Path,
+        json_path: Path,
+    ) -> None:
+        if report.get("status") != "ok":
+            QtWidgets.QMessageBox.information(
+                self,
+                APP_NAME,
+                "Motor step calibration log saved, but there was not enough displacement data to compute a fit.\n\n"
+                f"CSV: {csv_path}\nJSON: {json_path}",
+            )
+            return
+
+        recommended = float(report["recommended_steps_per_mm"])
+        r2 = float(report.get("r2", 0.0))
+        residual = float(report.get("max_residual_mm", 0.0))
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        box.setText(f"Recommended motor calibration: {recommended:.3f} steps/mm")
+        box.setInformativeText(
+            f"Linearity R2: {r2:.5f}\n"
+            f"Max residual: {residual:.6f} mm\n\n"
+            f"CSV: {csv_path}\n"
+            f"JSON: {json_path}\n\n"
+            "The default choice keeps the log and does not change Mini DMA settings."
+        )
+        apply_button = box.addButton("Apply result", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        save_only_button = box.addButton("Save only", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        discard_button = box.addButton("Discard log", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(save_only_button)  # type: ignore[arg-type]
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is apply_button and self._apply_motor_step_calibration_report(report):
+            self._update_motor_step_calibration_applied_flag(json_path, True)
+            return
+        if clicked is discard_button:
+            self._discard_motor_step_calibration_log((csv_path, json_path))
+            self._log("Motor step calibration log discarded.")
+            return
+        self._log(
+            f"Motor step calibration saved only: {recommended:.3f} steps/mm recommendation "
+            f"({csv_path.name}, {json_path.name})."
+        )
+
+    def _wait_for_motor_step_calibration_move(self, expected_duration_s: float) -> bool:
+        dispatcher = self._build_tic_dispatcher()
+        if not self._wait_for_tic_dispatcher(
+            dispatcher,
+            "motor-step calibration move",
+            timeout_s=max(2.0, min(30.0, float(expected_duration_s) + 2.0)),
+        ):
+            return False
+        deadline_s = time.time() + max(0.0, float(expected_duration_s)) + SERVO_MOTION_SETTLE_AFTER_MOVE_S
+        while time.time() < deadline_s:
+            QtWidgets.QApplication.processEvents()
+            time.sleep(min(0.05, max(0.0, deadline_s - time.time())))
+        try:
+            self._refresh_tic_status()
+        except Exception as exc:
+            self._log(f"Tic status refresh after calibration move failed: {exc}")
+        return True
+
+    def _run_motor_step_calibration(self) -> None:
+        if self._automation_active or self._session_active:
+            QtWidgets.QMessageBox.information(
+                self,
+                APP_NAME,
+                "Stop the running recipe/session before starting motor step calibration.",
+            )
+            return
+        self._stop_manual_jog()
+        if not self._ensure_tic_ready_for_recipe():
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Motor step calibration needs a reachable Tic controller with motor power ready.",
+            )
+            return
+
+        increment_steps = max(1, abs(int(self.spin_motor_step_calibration_increment_steps.value())))
+        move_count = max(1, int(self.spin_motor_step_calibration_moves.value()))
+        speed_steps_per_s = self._motor_step_calibration_speed_steps_per_s()
+        signed_increment_steps = self._motor_step_calibration_down_sign() * increment_steps
+        self._log(
+            f"Motor step calibration started: baseline plus {move_count} down move(s), "
+            f"{signed_increment_steps:+d} raw Tic steps per move at {speed_steps_per_s:.3f} steps/s."
+        )
+
+        baseline_mm, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            APP_NAME,
+            "External gauge baseline reading (mm):",
+            0.0,
+            -100000.0,
+            100000.0,
+            6,
+        )
+        if not accepted:
+            self._log("Motor step calibration cancelled before baseline entry.")
+            return
+
+        points = [
+            self._motor_step_calibration_point(
+                point_index=0,
+                entered_displacement_mm=float(baseline_mm),
+            )
+        ]
+        previous_reading = float(baseline_mm)
+        completed_all_moves = True
+        for point_index in range(1, move_count + 1):
+            self._log(f"Motor step calibration move {point_index}/{move_count}: moving down.")
+            if not self._move_relative_raw_tic_steps(
+                signed_increment_steps,
+                speed_steps_per_s=speed_steps_per_s,
+            ):
+                completed_all_moves = False
+                break
+            expected_duration_s = increment_steps / max(speed_steps_per_s, 1e-9)
+            if not self._wait_for_motor_step_calibration_move(expected_duration_s):
+                completed_all_moves = False
+                break
+            reading_mm, accepted = QtWidgets.QInputDialog.getDouble(
+                self,
+                APP_NAME,
+                f"External gauge reading after down move {point_index}/{move_count} (mm):",
+                previous_reading,
+                -100000.0,
+                100000.0,
+                6,
+            )
+            if not accepted:
+                self._log("Motor step calibration stopped because gauge reading entry was cancelled.")
+                completed_all_moves = False
+                break
+            previous_reading = float(reading_mm)
+            points.append(
+                self._motor_step_calibration_point(
+                    point_index=point_index,
+                    entered_displacement_mm=previous_reading,
+                    move_command_steps=signed_increment_steps,
+                    move_speed_steps_per_s=speed_steps_per_s,
+                )
+            )
+
+        report = motor_step_calibration_report_from_points(points)
+        csv_path, json_path = self._write_motor_step_calibration_log(
+            points,
+            report,
+            move_increment_steps=signed_increment_steps,
+            move_speed_steps_per_s=speed_steps_per_s,
+            applied_to_settings=False,
+        )
+        if completed_all_moves and report.get("status") == "ok":
+            self._log(
+                "Motor step calibration fit ready: "
+                f"{float(report['recommended_steps_per_mm']):.3f} steps/mm, "
+                f"R2 {float(report.get('r2', 0.0)):.5f}, "
+                f"max residual {float(report.get('max_residual_mm', 0.0)):.6f} mm."
+            )
+        else:
+            self._log("Motor step calibration saved as partial/insufficient data for inspection.")
+        self._offer_motor_step_calibration_result(report, csv_path=csv_path, json_path=json_path)
+        if not self._automation_active:
+            self._stop_tic_keepalive()
+
     def _apply_preload_length_result(
         self,
         *,
@@ -6135,6 +6576,44 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return max(self._minimum_held_speed_mm_s(), abs(float(ramp_rate)) / abs(float(sensitivity)))
 
+    def _seek_feedback_dead_time_s(self, basis: str | None) -> float:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return 0.0
+        return SERVO_MOTION_SETTLE_AFTER_MOVE_S + self._seek_decision_interval_s(basis)
+
+    def _seek_feedback_compensated_speed_mm_s(
+        self,
+        desired_average_speed_mm_s: float,
+        move_distance_mm: float,
+        *,
+        basis: str | None,
+        cruise_mode: bool,
+    ) -> float:
+        desired_speed = max(
+            self._minimum_held_speed_mm_s(),
+            abs(float(desired_average_speed_mm_s)),
+        )
+        hard_cap = max(
+            self._minimum_held_speed_mm_s(),
+            self._motion_speed_for_current_context(manual_jog=False),
+        )
+        desired_speed = min(desired_speed, hard_cap)
+        if cruise_mode:
+            return desired_speed
+        dead_time_s = self._seek_feedback_dead_time_s(basis)
+        move_distance = abs(float(move_distance_mm))
+        if dead_time_s <= 0.0 or move_distance <= 0.0:
+            return desired_speed
+        desired_cycle_s = move_distance / max(desired_speed, 1e-9)
+        moving_time_s = desired_cycle_s - dead_time_s
+        if moving_time_s <= 1e-9:
+            return hard_cap
+        compensated_speed = move_distance / moving_time_s
+        return max(
+            self._minimum_held_speed_mm_s(),
+            min(hard_cap, max(desired_speed, compensated_speed)),
+        )
+
     def _seek_command_step_mm(
         self,
         nudge_mm: float,
@@ -6620,11 +7099,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(
                 f"Direction reversal: adding {_format_compact_unit(backlash_takeup_mm, 'mm')} backlash take-up."
             )
+        command_speed_mm_s = self._seek_feedback_compensated_speed_mm_s(
+            speed_mm_s,
+            nudge_mm + backlash_takeup_mm,
+            basis=basis,
+            cruise_mode=cruise_mode,
+        )
         if not self._move_to_position_mm(
             target_mm,
             chain_from_last_target=chain_from_last_target,
             effective_position_mm=effective_target_mm,
-            speed_mm_s=speed_mm_s,
+            speed_mm_s=command_speed_mm_s,
         ):
             return False
         self._seek_last_error_by_key[seek_key] = delta_value
@@ -7273,7 +7758,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._is_current_sweep_mode(self._automation_name):
                 return max(
                     self._minimum_held_speed_mm_s(),
-                    float(self.spin_current_sweep_target_speed_mm_s.value()),
+                    self._current_sweep_dynamic_speed_cap_mm_s(),
                 )
             if self._is_calibration_mode(self._automation_name):
                 if self._automation_phase == "seek":
@@ -7320,6 +7805,72 @@ class MainWindow(QtWidgets.QMainWindow):
         if abs(delta_mm) < 1e-12:
             return False
         return delta_mm * self._tension_motion_sign() > 0.0
+
+    def _move_relative_raw_tic_steps(self, delta_steps: int, *, speed_steps_per_s: float) -> bool:
+        if self._tic_motor_power_ok is False:
+            vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
+            self._log(
+                "Raw-step move cancelled because Tic motor power is not ready "
+                f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V)."
+            )
+            return False
+        delta_steps = int(delta_steps)
+        if delta_steps == 0:
+            self._log("Raw-step move skipped because the requested step delta is zero.")
+            return False
+        steps_per_mm = max(1.0, float(self.spin_steps_per_mm.value()))
+        start_steps = int(self._commanded_position_steps())
+        target_steps = start_steps + delta_steps
+        if target_steps == start_steps:
+            return False
+        target_mm = target_steps / steps_per_mm
+        if self._is_max_load_exceeded() and self._move_increases_tension(target_mm):
+            load_g = abs(self._current_effective_load_g())
+            limit_g = self._effective_max_load_limit_g()
+            self._log(
+                f"Raw-step move cancelled because it would increase applied load "
+                f"{load_g:.5f} g beyond the safety limit of "
+                f"{0.0 if limit_g is None else limit_g:.5f} g."
+            )
+            return False
+        if self.check_soft_limits.isChecked():
+            min_mm = min(float(self.spin_soft_min_mm.value()), float(self.spin_soft_max_mm.value()))
+            max_mm = max(float(self.spin_soft_min_mm.value()), float(self.spin_soft_max_mm.value()))
+            if target_mm < min_mm or target_mm > max_mm:
+                self._log(
+                    f"Raw-step move cancelled because the provisional target {target_mm:.4f} mm is outside "
+                    f"soft limits [{min_mm:.4f}, {max_mm:.4f}] mm."
+                )
+                return False
+
+        selected_speed_steps_per_s = max(1.0, abs(float(speed_steps_per_s)))
+        max_speed_units = max(1, int(round(selected_speed_steps_per_s * 10000.0)))
+        try:
+            self._build_tic_dispatcher().set_target_position(target_steps, max_speed=max_speed_units)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to move Tic: {exc}")
+            return False
+
+        selected_speed_mm_s = selected_speed_steps_per_s / steps_per_mm
+        expected_duration_s = abs(delta_steps) / max(selected_speed_steps_per_s, 1e-9)
+        self._log(
+            f"Raw-step move command sent to {target_steps} steps "
+            f"({delta_steps:+d} steps) at {selected_speed_steps_per_s:.3f} steps/s."
+        )
+        command_time_s = time.time()
+        self._last_motion_command_time_s = command_time_s
+        self._last_motion_expected_complete_time_s = (
+            command_time_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
+        )
+        self._last_commanded_speed_mm_s = selected_speed_mm_s
+        self._last_commanded_position_steps = target_steps
+        self._last_effective_move_target_mm = target_mm
+        self._last_move_target_mm = target_mm
+        self._manual_jog_uses_last_target = True
+        self._last_move_direction = math.copysign(1.0, delta_steps)
+        self._start_tic_keepalive()
+        self._refresh_live_labels()
+        return True
 
     def _move_to_position_mm(
         self,
@@ -10319,6 +10870,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("tic_status_interval_ms", self._tic_status_interval_ms())
         self.settings.setValue("tic_keepalive_interval_ms", self._tic_keepalive_interval_ms())
         self.settings.setValue("steps_per_mm", self.spin_steps_per_mm.value())
+        self.settings.setValue("motor_defaults_version", MOTOR_DEFAULTS_VERSION)
+        self.settings.setValue(
+            "motor_step_calibration_increment_steps",
+            self.spin_motor_step_calibration_increment_steps.value(),
+        )
+        self.settings.setValue("motor_step_calibration_moves", self.spin_motor_step_calibration_moves.value())
+        self.settings.setValue(
+            "motor_step_calibration_speed_mm_s",
+            self.spin_motor_step_calibration_speed_mm_s.value(),
+        )
         self.settings.setValue("jog_mm", self.spin_jog_mm.value())
         self.settings.setValue("manual_motion_speed_mm_s", self.spin_motion_speed_mm_s.value())
         self.settings.setValue("ramp_speed_mm_s", self.spin_ramp_speed_mm_s.value())
@@ -10503,7 +11064,47 @@ class MainWindow(QtWidgets.QMainWindow):
             int(self.settings.value("tic_keepalive_interval_ms", TIC_KEEPALIVE_INTERVAL_MS))
         )
         self._apply_hardware_timer_intervals()
-        self.spin_steps_per_mm.setValue(float(self.settings.value("steps_per_mm", 100.0)))
+        motor_defaults_version = int(self.settings.value("motor_defaults_version", 0))
+        saved_steps_per_mm = float(self.settings.value("steps_per_mm", DEFAULT_STEPS_PER_MM))
+        if (
+            motor_defaults_version < MOTOR_DEFAULTS_VERSION
+            and math.isclose(saved_steps_per_mm, 100.0, rel_tol=1e-9, abs_tol=1e-9)
+        ):
+            saved_steps_per_mm = DEFAULT_STEPS_PER_MM
+        self.spin_steps_per_mm.setValue(saved_steps_per_mm)
+        self.spin_motor_step_calibration_increment_steps.setValue(
+            max(
+                1,
+                int(
+                    self.settings.value(
+                        "motor_step_calibration_increment_steps",
+                        MOTOR_STEP_CALIBRATION_DEFAULT_INCREMENT_STEPS,
+                    )
+                ),
+            )
+        )
+        self.spin_motor_step_calibration_moves.setValue(
+            max(
+                1,
+                int(
+                    self.settings.value(
+                        "motor_step_calibration_moves",
+                        MOTOR_STEP_CALIBRATION_DEFAULT_MOVES,
+                    )
+                ),
+            )
+        )
+        self.spin_motor_step_calibration_speed_mm_s.setValue(
+            max(
+                0.0001,
+                float(
+                    self.settings.value(
+                        "motor_step_calibration_speed_mm_s",
+                        MOTOR_STEP_CALIBRATION_DEFAULT_SPEED_MM_S,
+                    )
+                ),
+            )
+        )
         self.spin_jog_mm.setValue(max(0.01, float(self.settings.value("jog_mm", 0.1))))
         self.spin_motion_speed_mm_s.setValue(
             max(
