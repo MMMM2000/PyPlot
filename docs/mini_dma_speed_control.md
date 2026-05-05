@@ -64,6 +64,8 @@ There is usually no reason to reduce microstepping for the current Mini DMA spee
 
 For example, `5 mm/s` at 1/8 step is `4000 Tic units/s`, sent as a Tic max-speed value of `40,000,000`. Switching to 1/4 step would halve the required pulse rate, but it also halves displacement resolution. When Mini DMA applies a different Tic step mode, it halts the motor, changes the controller mode, recomputes `Tic units/mm`, and rewrites the Tic current-position register so the physical mm coordinate remains continuous.
 
+The saved backlash compensation is intentionally disabled during the `Calibration` recipe. Calibration uses its forward/reverse micro-move data to estimate backlash, so the previous value must not inflate the target acceptance band or add reversal take-up while the new value is being measured.
+
 ## Position Ramps
 
 Displacement-only recipes are open-loop position motion. The target position is known from the recipe, so Mini DMA schedules motion by distance and the configured displacement speed:
@@ -91,7 +93,7 @@ Load, stress, and strain seeking are closed-loop. A correction decision is:
 The final mode decision is important:
 
 - **Far mode:** if the remaining predicted correction distance is safely larger than the distance the motor can travel before the next useful balance sample, Mini DMA may extend the motor target without waiting for the previous move to finish. It still waits for a new scale sample before making the next force-control decision.
-- **Near mode:** if the target is close, the trend disagrees with prediction, the target was crossed, or the scale data is stale, Mini DMA sends one correction and then waits for expected move completion plus fresh post-move scale feedback before deciding again.
+- **Near/setup mode:** if the target is close, the trend disagrees with prediction, the target was crossed, the scale data is stale, or the mandatory setup preload is running, Mini DMA sends one correction and then waits for expected move completion plus fresh post-move scale feedback before deciding again. Setup preload also has an overload guard: if the live load/stress greatly exceeds the requested setup target, the run stops instead of issuing another tensioning correction.
 
 In near mode, the speed shown by the recipe or dynamic controller is treated as the desired average speed over the full correction cycle, not only the speed while the motor is physically moving. Mini DMA can therefore command a higher instantaneous motor speed to compensate for dead time:
 

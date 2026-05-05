@@ -239,6 +239,8 @@ SERVO_AUTO_TOLERANCE_LOAD_G = 0.005
 WIRE_BREAK_MIN_SETPOINT_MA = 5.0
 WIRE_BREAK_MAX_MEASURED_MA = 0.5
 WIRE_BREAK_VOLTAGE_LIMIT_FRACTION = 0.95
+CONTINUITY_CURRENT_DEFAULT_MA = 1.0
+SETUP_PRELOAD_OVERLOAD_FACTOR = 2.0
 CURRENT_SWEEP_BASIS_BY_MODE = {
     CURRENT_SWEEP_LOAD: HSW_BASIS_LOAD_G,
     CURRENT_SWEEP_STRESS: HSW_BASIS_STRESS_MPA,
@@ -2928,6 +2930,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_supply_manual_current.setSuffix(" mA")
         supply_form.addRow("Manual set current", self.spin_supply_manual_current)
 
+        self.check_continuity_monitor = QtWidgets.QCheckBox(
+            "Run continuity current during measurements",
+            supply_box,
+        )
+        self.check_continuity_monitor.setChecked(True)
+        self.check_continuity_monitor.setToolTip(
+            "Applies a small current during automated measurements so an open circuit can stop the run."
+        )
+        supply_form.addRow("", self.check_continuity_monitor)
+        self.spin_continuity_current_mA = CompactDoubleSpinBox(supply_box)
+        self.spin_continuity_current_mA.setDecimals(2)
+        self.spin_continuity_current_mA.setRange(0.0, 100.0)
+        self.spin_continuity_current_mA.setValue(CONTINUITY_CURRENT_DEFAULT_MA)
+        self.spin_continuity_current_mA.setSuffix(" mA")
+        supply_form.addRow("Continuity current", self.spin_continuity_current_mA)
+
         connect_supply_row = QtWidgets.QHBoxLayout()
         self.button_supply_connect = QtWidgets.QPushButton("Connect supply", supply_box)
         self.button_supply_connect.clicked.connect(self._connect_supply)
@@ -4945,6 +4963,33 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return True
 
+    def _continuity_monitor_enabled(self) -> bool:
+        return hasattr(self, "check_continuity_monitor") and self.check_continuity_monitor.isChecked()
+
+    def _continuity_current_mA(self) -> float:
+        if hasattr(self, "spin_continuity_current_mA"):
+            return max(0.0, float(self.spin_continuity_current_mA.value()))
+        return CONTINUITY_CURRENT_DEFAULT_MA
+
+    def _recipe_uses_explicit_current(self, steps: Sequence[AutomationStep]) -> bool:
+        if any(step.action in {"set_current", "sweep_current"} for step in steps):
+            return True
+        return self._is_current_sweep_mode(str(self.combo_recipe_mode.currentData() or self._automation_name))
+
+    def _prepare_continuity_current_for_recipe(self, steps: Sequence[AutomationStep]) -> bool:
+        if not self._continuity_monitor_enabled() or self._recipe_uses_explicit_current(steps):
+            return True
+        current_mA = self._continuity_current_mA()
+        if current_mA <= 0.0:
+            return True
+        if not self._set_recipe_current_mA(current_mA, measure_after=True):
+            self._log("Recipe stopped because continuity-current setup failed.")
+            return False
+        self._log(
+            f"Continuity monitor enabled at {_format_compact_unit(current_mA, 'mA', decimals=3)}."
+        )
+        return True
+
     def _set_reference_from_current_position(self) -> None:
         self._position_reference_mm = self._effective_position_mm
         self._preload_reference_armed = False
@@ -4962,7 +5007,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return
 
     def _handle_supply_limit_condition(self) -> None:
-        if self._current_sweep_wire_break_detected():
+        if self._wire_break_detected():
             self._stop_for_wire_break()
             return
         limit_v = float(self.spin_supply_voltage_limit.value())
@@ -4991,17 +5036,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._supply_output_enabled and (self._supply_last_setpoint_mA or 0.0) > 0.0:
             self._set_recipe_current_mA(0.0, measure_after=False)
 
-    def _current_sweep_wire_break_detected(self) -> bool:
+    def _wire_break_detected(self) -> bool:
         if self._wire_break_stop_in_progress:
             return False
-        if not self._automation_active or not self._is_current_sweep_mode(self._automation_name):
+        if not self._automation_active:
             return False
         if not self._supply_output_enabled:
             return False
         setpoint_mA = self._active_current_sweep_last_setpoint_mA
         if setpoint_mA is None:
             setpoint_mA = self._supply_last_setpoint_mA
-        if setpoint_mA is None or abs(float(setpoint_mA)) < WIRE_BREAK_MIN_SETPOINT_MA:
+        if setpoint_mA is None:
+            return False
+        min_setpoint_mA = (
+            min(WIRE_BREAK_MIN_SETPOINT_MA, max(self._supply_current_resolution_mA(), self._continuity_current_mA()))
+            if self._continuity_monitor_enabled()
+            else WIRE_BREAK_MIN_SETPOINT_MA
+        )
+        if abs(float(setpoint_mA)) < min_setpoint_mA:
             return False
         measured_current_mA = self._supply_snapshot.get("current_mA")
         measured_voltage_v = self._supply_snapshot.get("voltage_V")
@@ -5012,6 +5064,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if abs(float(measured_current_mA)) > current_threshold_mA:
             return False
         return float(measured_voltage_v) >= limit_v * WIRE_BREAK_VOLTAGE_LIMIT_FRACTION
+
+    def _current_sweep_wire_break_detected(self) -> bool:
+        return self._wire_break_detected()
 
     def _wire_break_stop_message(self) -> str:
         setpoint_mA = self._active_current_sweep_last_setpoint_mA
@@ -6920,6 +6975,9 @@ class MainWindow(QtWidgets.QMainWindow):
         reversal_cost = abs(float(sensitivity)) * abs(float(backlash_takeup_mm))
         return abs(float(error_value)) > abs(float(tolerance)) + reversal_cost
 
+    def _use_backlash_compensation_for_current_recipe(self) -> bool:
+        return not self._is_calibration_mode(self._automation_name)
+
     def _reversal_acceptance_tolerance(
         self,
         basis: str,
@@ -6935,7 +6993,12 @@ class MainWindow(QtWidgets.QMainWindow):
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is not None and math.isfinite(float(sensitivity)) and abs(float(sensitivity)) > 0.0:
             step_value = abs(float(sensitivity)) * self._motor_step_mm()
-            backlash_value = abs(float(sensitivity)) * max(0.0, float(self.spin_backlash_mm.value()))
+            backlash_mm = (
+                max(0.0, float(self.spin_backlash_mm.value()))
+                if self._use_backlash_compensation_for_current_recipe()
+                else 0.0
+            )
+            backlash_value = abs(float(sensitivity)) * backlash_mm
             base = max(base, step_value * 1.5, backlash_value)
         return base
 
@@ -7154,6 +7217,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_supports_cruise_feedback(self, basis: str) -> bool:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
+        if self._automation_step_note == "setup_preload":
+            return False
         if self._automation_step_note == "setup_return_zero" or self._is_recovery_mode():
             return False
         if self._end_zero_fallback_armed:
@@ -7200,6 +7265,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return remaining_mm > feedback_travel_mm + safety_margin_mm + tolerance_mm
 
     def _seek_backlash_takeup_mm(self, movement_direction: float) -> float:
+        if not self._use_backlash_compensation_for_current_recipe():
+            return 0.0
         backlash_mm = max(0.0, float(self.spin_backlash_mm.value()))
         if backlash_mm <= 0.0:
             return 0.0
@@ -7211,6 +7278,40 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
         return not self._seek_supports_cruise_feedback(basis)
+
+    def _setup_preload_overload_exceeded(
+        self,
+        basis: str,
+        target_value: float,
+        current_value: float,
+        effective_tolerance: float,
+    ) -> bool:
+        if (
+            self._automation_step_note != "setup_preload"
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+        ):
+            return False
+        target_load_g = self._basis_value_as_load_g(basis, target_value)
+        current_load_g = self._basis_value_as_load_g(basis, current_value)
+        tolerance_load_g = self._basis_value_as_load_g(basis, effective_tolerance) or 0.0
+        if target_load_g is None or current_load_g is None:
+            return False
+        allowed_load_g = max(
+            float(target_load_g) + abs(float(tolerance_load_g)) * 4.0,
+            abs(float(target_load_g)) * SETUP_PRELOAD_OVERLOAD_FACTOR,
+            SETUP_PRELOAD_TAKEUP_LOAD_G * 10.0,
+        )
+        return abs(float(current_load_g)) > allowed_load_g
+
+    def _stop_for_setup_preload_overload(self, basis: str, target_value: float, current_value: float) -> None:
+        suffix, _ = self._distribution_units(basis)
+        message = (
+            "Setup preload stopped for overload: "
+            f"live {HSW_BASIS_LABELS.get(basis, basis)} {_format_compact_number(current_value)}{suffix} "
+            f"exceeded the setup target {_format_compact_number(target_value)}{suffix}."
+        )
+        self._log(message)
+        self._stop_auto_ramp(log_completion=False, offer_recovery=False)
 
     def _seek_uses_planned_motion_base(self, basis: str) -> bool:
         if self._automation_phase != "target_ramp":
@@ -7423,6 +7524,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log_waiting_for_feedback("Waiting for a new scale sample before the next load/stress correction.")
             return False
         require_after_last_move = self._seek_requires_fresh_after_last_move(basis)
+        if (
+            require_after_last_move
+            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and not self._has_fresh_scale_reading(after_s=self._motion_feedback_ready_after_s())
+        ):
+            self._log_waiting_for_feedback("Waiting for post-move scale feedback before the next load/stress correction.")
+            return False
         current_value = self._current_distribution_value(
             basis,
             require_after_last_move=require_after_last_move,
@@ -7448,6 +7556,9 @@ class MainWindow(QtWidgets.QMainWindow):
             tolerance,
             seek_key=seek_key,
         )
+        if self._setup_preload_overload_exceeded(basis, target_value, current_value, effective_tolerance):
+            self._stop_for_setup_preload_overload(basis, target_value, current_value)
+            return False
         if self._maybe_start_setup_zero_plateau_fallback(basis, current_value, effective_tolerance):
             return False
         if self._maybe_start_end_zero_plateau_fallback(basis, target_value, effective_tolerance):
@@ -8460,6 +8571,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_log_name.setText(basename)
         return _session_paths_for_basename(directory, basename)
 
+    def _current_session_identity_text(self, paths: Sequence[Path] | None = None) -> str:
+        sample_name = self.edit_sample_name.text().strip() or "(unnamed sample)"
+        log_name = _clean_session_basename(self.edit_log_name.text())
+        output_folder = paths[0].parent if paths else Path(self.edit_log_dir.text().strip() or _default_download_dir()) / log_name
+        return (
+            f"Sample: {sample_name}\n"
+            f"Base filename: {log_name or DEFAULT_LOG_BASENAME}\n"
+            f"Output folder: {output_folder}"
+        )
+
     def _ask_existing_output_action(self, paths: Sequence[Path]) -> str:
         existing_names = ", ".join(path.name for path in paths if path.exists())
         box = QtWidgets.QMessageBox(self)
@@ -8467,6 +8588,7 @@ class MainWindow(QtWidgets.QMainWindow):
         box.setIcon(QtWidgets.QMessageBox.Icon.Question)
         box.setText("An output folder or files already exist for this base filename.")
         box.setInformativeText(
+            f"{self._current_session_identity_text(paths)}\n\n"
             f"Existing file(s): {existing_names or paths[0].name}\n\n"
             "Save as next run keeps the existing data and creates a new _run02, _run03, and so on folder."
         )
@@ -8731,6 +8853,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "voltage_limit_v": float(self.spin_supply_voltage_limit.value()),
                 "mode": HEATING_MODE_OFF,
                 "voltage_limit_behavior": "current_sweeps_unwind_to_start_current",
+                "continuity_monitor_enabled": self._continuity_monitor_enabled(),
+                "continuity_current_mA": self._continuity_current_mA(),
                 "output_off_on_stop": True,
                 "motor_supply_enabled": self.check_motor_supply_power.isChecked(),
                 "motor_supply_channel": self._motor_supply_channel(),
@@ -8947,7 +9071,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_start_monotonic = time.monotonic()
         self._session_start_wall_s = time.time()
         self._last_session_log_timestamp_s = self._session_start_wall_s
-        self._session_raw_scale_count = 0
         self._set_automation_context(phase="start")
         self._write_session_metadata()
         self._refresh_plots()
@@ -8995,7 +9118,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _write_raw_scale_sample(self, sample: ScaleSample) -> None:
         if (
             not self._session_active
-            or not self._session_logging_enabled
             or self._session_raw_scale_writer is None
             or self._session_raw_scale_handle is None
             or self._session_start_wall_s <= 0.0
@@ -9355,6 +9477,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         if any(step.action == "set_current" for step in steps):
             return True
+        if self._continuity_monitor_enabled() and self._continuity_current_mA() > 0.0:
+            return True
         mode = str(self.combo_recipe_mode.currentData() or "")
         if self._is_calibration_mode(mode) or self._is_calibration_mode(self._automation_name):
             return False
@@ -9567,6 +9691,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._preflight_recipe_hardware(steps):
             return
+        if not self._prepare_continuity_current_for_recipe(steps):
+            return
         self._manual_jog_uses_last_target = False
         self._last_move_target_mm = self._current_position_mm
         self._effective_position_mm = self._current_position_mm
@@ -9732,9 +9858,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _show_length_setup_dialog(self) -> None:
         dialog = self._length_setup_dialog
+        title_sample = self.edit_sample_name.text().strip() or self.edit_log_name.text().strip() or "unnamed sample"
+        title = f"Mini DMA Length Setup - {title_sample}"
         if dialog is None or dialog.isHidden():
             dialog = QtWidgets.QDialog(self)
-            dialog.setWindowTitle("Mini DMA Length Setup")
+            dialog.setWindowTitle(title)
             dialog.resize(760, 520)
             layout = QtWidgets.QVBoxLayout(dialog)
             label = QtWidgets.QLabel("Preparing mandatory zero-load and length setup...", dialog)
@@ -9769,6 +9897,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._button_length_setup_pause = pause_button
             self._button_length_setup_stop = stop_button
             self._length_setup_dialog = dialog
+        else:
+            dialog.setWindowTitle(title)
         self._length_setup_points.clear()
         self._setup_return_zero_start_point_index = 0
         self._setup_zero_position_mm = None
@@ -11354,6 +11484,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("supply_profile", self.combo_supply_profile.currentData() or "hmp4030")
         self.settings.setValue("supply_voltage_limit_v", self.spin_supply_voltage_limit.value())
         self.settings.setValue("supply_manual_current_mA", self.spin_supply_manual_current.value())
+        self.settings.setValue("continuity_monitor_enabled", self.check_continuity_monitor.isChecked())
+        self.settings.setValue("continuity_current_mA", self.spin_continuity_current_mA.value())
         self.settings.setValue("motor_supply_enabled", self.check_motor_supply_power.isChecked())
         self.settings.setValue("motor_supply_channel", self.combo_motor_supply_channel.currentData() or 1)
         self.settings.setValue("motor_supply_voltage_v", self.spin_motor_supply_voltage.value())
@@ -11524,6 +11656,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_supply_profile.setCurrentIndex(supply_profile_index)
         self.spin_supply_voltage_limit.setValue(float(self.settings.value("supply_voltage_limit_v", 30.0)))
         self.spin_supply_manual_current.setValue(float(self.settings.value("supply_manual_current_mA", 1.0)))
+        self.check_continuity_monitor.setChecked(
+            bool(self.settings.value("continuity_monitor_enabled", True, type=bool))
+        )
+        self.spin_continuity_current_mA.setValue(
+            float(self.settings.value("continuity_current_mA", CONTINUITY_CURRENT_DEFAULT_MA))
+        )
         self.check_motor_supply_power.setChecked(bool(self.settings.value("motor_supply_enabled", False, type=bool)))
         motor_channel = int(self.settings.value("motor_supply_channel", 1))
         motor_channel_index = self.combo_motor_supply_channel.findData(motor_channel)

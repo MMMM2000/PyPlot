@@ -42,3 +42,5 @@
 - Mini DMA motor step calibration now keeps the Tic command-timeout keepalive active during slow raw-step calibration moves, preventing the controller from stopping after only a few steps.
 - Mini DMA motor settings and docs now distinguish mechanical full steps/mm from Tic controller units/mm, documenting the verified `100 full steps/mm * 8 microsteps = 800 Tic units/mm` relationship.
 - Mini DMA advanced motor settings now expose mechanical full steps/mm, Tic step mode, and derived Tic units/mm; applying a new Tic step mode updates the controller through `ticcmd` and rewrites the current-position register so physical mm values stay continuous.
+- Mini DMA now has a continuity-current monitor for automated measurements, logs raw scale samples during mandatory setup, stops setup preload on large overload, and makes setup preload wait for post-move force feedback before issuing the next correction.
+- Mini DMA output-collision and setup windows now show the active sample/output identity, and calibration ignores the saved backlash compensation while measuring new stiffness/backlash.
