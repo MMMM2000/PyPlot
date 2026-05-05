@@ -488,7 +488,7 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
     assert mode_index >= 0
     window.combo_recipe_mode.setCurrentIndex(mode_index)
     window.spin_setup_preload_stress_mpa.setValue(10.0)
-    window.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
+    window.spin_setup_preload_duration_s.setValue(5.0)
     window.spin_setup_zero_stable_s.setValue(1.0)
     window.spin_current_sweep_target_start.setValue(0.0)
     window.spin_current_sweep_target_end.setValue(10.0)
@@ -516,7 +516,7 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
         assert preload_step.action == "ramp_target"
         assert preload_step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA
         assert preload_step.target_end_value == pytest.approx(10.0)
-        assert preload_step.target_ramp_rate_value_s == pytest.approx(1.0)
+        assert preload_step.target_ramp_rate_value_s == pytest.approx(2.0)
     finally:
         _close_test_window(window)
 
@@ -992,6 +992,17 @@ def test_calibration_report_estimates_stiffness_and_backlash() -> None:
     }
 
 
+def test_calibration_backlash_is_quantized_to_tic_units(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(800.0)
+
+    try:
+        assert window._quantize_backlash_mm(0.0196) == pytest.approx(0.02)
+        assert window._quantize_backlash_mm(0.0002) == pytest.approx(0.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_stop_session_finalizes_partial_calibration_report(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("partial_calibration")
@@ -1108,7 +1119,7 @@ def test_calibration_recipe_includes_mandatory_length_setup(tmp_path: Path, qtbo
     assert mode_index >= 0
     window.combo_recipe_mode.setCurrentIndex(mode_index)
     window.spin_setup_preload_stress_mpa.setValue(10.0)
-    window.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
+    window.spin_setup_preload_duration_s.setValue(10.0)
     window.spin_setup_zero_stable_s.setValue(1.0)
     window.spin_calibration_baseline_s.setValue(1.0)
     window.spin_calibration_start_load_g.setValue(0.25)
@@ -1969,11 +1980,11 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
         _close_test_window(window)
 
 
-def test_setup_preload_target_ramp_uses_setup_stage_speed(tmp_path: Path, qtbot) -> None:
+def test_setup_preload_target_ramp_uses_global_stage_speed(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
-        window.spin_setup_stage_speed_mm_s.setValue(1.25)
+        window.spin_motion_speed_mm_s.setValue(1.25)
         window.spin_calibration_speed_mm_s.setValue(0.05)
         window._automation_active = True
         window._automation_name = mini_dma_mod.CALIBRATION
@@ -1983,12 +1994,12 @@ def test_setup_preload_target_ramp_uses_setup_stage_speed(tmp_path: Path, qtbot)
         _close_test_window(window)
 
 
-def test_setup_preload_correction_step_uses_setup_speed_interval(tmp_path: Path, qtbot) -> None:
+def test_setup_preload_correction_step_uses_global_speed_interval(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
         window.spin_steps_per_mm.setValue(10000.0)
-        window.spin_setup_stage_speed_mm_s.setValue(1.0)
+        window.spin_motion_speed_mm_s.setValue(1.0)
         window.spin_calibration_preload_nudge_mm.setValue(0.01)
         window._automation_interval_ms = 250
         window._automation_active = True
@@ -2028,7 +2039,7 @@ def test_output_folder_open_button_opens_current_log_dir(
         _close_test_window(window)
 
 
-def test_setup_preload_slack_takeup_uses_setup_stage_speed(tmp_path: Path, qtbot) -> None:
+def test_setup_preload_slack_takeup_uses_slack_strain_speed(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
@@ -2044,11 +2055,14 @@ def test_setup_preload_slack_takeup_uses_setup_stage_speed(tmp_path: Path, qtbot
     window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.17)
     window.spin_steps_per_mm.setValue(10000.0)
     window.spin_diameter.setValue(0.03)
+    window.spin_initial_length.setValue(20.0)
     window.spin_scale_interval.setValue(250)
-    window.spin_setup_stage_speed_mm_s.setValue(1.0)
-    window.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+    window.spin_setup_slack_speed_strain_pct_s.setValue(1.0)
+    window.spin_setup_preload_duration_s.setValue(10.0)
     window.spin_calibration_preload_nudge_mm.setValue(0.01)
     window.spin_setup_preload_tolerance_mpa.setValue(0.25)
     window._automation_interval_ms = 50
@@ -2066,7 +2080,7 @@ def test_setup_preload_slack_takeup_uses_setup_stage_speed(tmp_path: Path, qtbot
     window._current_position_mm = 1.0
     window._current_position_steps = 10000
     window._last_move_target_mm = 1.0
-    window._latest_scale_value_g = 0.0
+    window._latest_scale_value_g = 21.17
     window._latest_scale_timestamp = time.time()
 
     try:
@@ -2078,8 +2092,8 @@ def test_setup_preload_slack_takeup_uses_setup_stage_speed(tmp_path: Path, qtbot
         _wait_for_tic_commands(window)
 
         assert reached is False
-        assert controller.target_steps == 7500
-        assert controller.max_speed == 100_000_000
+        assert controller.target_steps == 9500
+        assert controller.max_speed == 20_000_000
     finally:
         _close_test_window(window)
 
@@ -2097,7 +2111,7 @@ def test_setup_preload_waits_for_post_move_feedback_before_next_correction(
     window.spin_steps_per_mm.setValue(800.0)
     window.spin_diameter.setValue(0.0137)
     window.spin_scale_interval.setValue(250)
-    window.spin_setup_stage_speed_mm_s.setValue(1.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
     window._calibrated_stiffness_g_per_mm = 1.0
     window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
     window._automation_active = True
@@ -2166,6 +2180,80 @@ def test_setup_preload_above_target_relaxes_instead_of_stopping(tmp_path: Path, 
         assert "overload" not in window.log_output.toPlainText().lower()
     finally:
         window._automation_active = False
+        _close_test_window(window)
+
+
+def test_setup_preload_above_target_uses_cruise_global_stage_speed(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    commands: list[dict[str, object]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        commands.append({"target_mm": target_mm, **kwargs})
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.17)
+    window.spin_diameter.setValue(0.0137)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_motion_speed_mm_s.setValue(0.1)
+    window.spin_setup_preload_duration_s.setValue(10.0)
+    window._calibrated_stiffness_g_per_mm = 22.7
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CALIBRATION
+    window._active_target_ramp_rate_value_s = 2.0
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=20.0,
+        note="setup_preload",
+    )
+    overload_g = mini_dma_mod.load_g_from_stress_mpa(170.0, window.spin_diameter.value())
+    assert overload_g is not None
+    window._latest_scale_value_g = 21.17 - overload_g
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            tolerance=window._auto_requested_tolerance_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        )
+
+        assert reached is False
+        assert commands
+        assert commands[0]["speed_mm_s"] == pytest.approx(0.1)
+        assert commands[0]["chain_from_last_target"] is True
+        assert abs(float(commands[0]["target_mm"]) - window._current_position_mm) > window._motor_step_mm()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_calibration_target_acceptance_caps_inflated_live_stiffness(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._automation_name = mini_dma_mod.CALIBRATION
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 0.75)
+    window._seek_live_stiffness_by_key[seek_key] = 200.0
+
+    try:
+        tolerance = window._seek_effective_tolerance(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            0.005,
+            seek_key=seek_key,
+        )
+
+        assert tolerance == pytest.approx(0.05)
+        assert not window._target_reversal_is_practical_hold(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            error_value=0.17,
+            tolerance=0.005,
+            seek_key=seek_key,
+        )
+    finally:
         _close_test_window(window)
 
 
@@ -2412,7 +2500,7 @@ def test_load_target_ramp_waits_for_feedback_between_moves(tmp_path: Path, qtbot
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_steps_per_mm.setValue(100.0)
-    window.spin_setup_stage_speed_mm_s.setValue(1.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
     window.spin_setup_preload_tolerance_mpa.setValue(0.25)
     window.spin_diameter.setValue(0.03)
     window._current_position_mm = 0.0
@@ -2443,7 +2531,7 @@ def test_load_target_ramp_waits_for_feedback_between_moves(tmp_path: Path, qtbot
             ) is False
 
         assert len(targets) == 1
-        assert targets[0] == (pytest.approx(-0.25), False)
+        assert targets[0] == (pytest.approx(-0.075), False)
     finally:
         _close_test_window(window)
 
@@ -4663,8 +4751,10 @@ def test_setup_preload_tiny_baseline_load_still_counts_as_slack_takeup(
     window.spin_diameter.setValue(0.0137)
     window.spin_zero_load_scale_g.setValue(21.17)
     window.spin_scale_interval.setValue(250)
-    window.spin_setup_stage_speed_mm_s.setValue(1.0)
-    window.spin_setup_preload_ramp_rate_mpa_s.setValue(0.5)
+    window.spin_initial_length.setValue(20.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+    window.spin_setup_slack_speed_strain_pct_s.setValue(1.0)
+    window.spin_setup_preload_duration_s.setValue(10.0)
     window._calibrated_stiffness_g_per_mm = 1.56
     window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
     window._automation_active = True
@@ -4689,8 +4779,8 @@ def test_setup_preload_tiny_baseline_load_still_counts_as_slack_takeup(
         _wait_for_tic_commands(window)
 
         assert reached is False
-        assert controller.target_steps == 7500
-        assert controller.max_speed == 100_000_000
+        assert controller.target_steps == 9500
+        assert controller.max_speed == 20_000_000
     finally:
         _close_test_window(window)
 
@@ -4701,7 +4791,7 @@ def test_setup_preload_near_target_fallback_uses_minimum_speed(tmp_path: Path, q
     window.check_positive_motion_is_tension.setChecked(True)
     window.spin_steps_per_mm.setValue(100.0)
     window.spin_diameter.setValue(0.0137)
-    window.spin_setup_stage_speed_mm_s.setValue(1.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
     window.spin_scale_interval.setValue(250)
     window._automation_active = True
     window._automation_name = mini_dma_mod.CALIBRATION

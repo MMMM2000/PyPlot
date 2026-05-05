@@ -341,7 +341,7 @@ Examples:
 - `0.1 g/s` with `2 g/mm` sensitivity becomes `0.05 mm/s`.
 - `1 %/s` with `3.33 %/mm` sensitivity becomes `0.30 mm/s`.
 
-The final motor speed is the smaller of the recipe's max mm/s and any active target-ramp speed cap, except during slack take-up where the sample has not started responding yet.
+The final motor speed is the smaller of the recipe/global max mm/s and any active target-ramp speed cap, except during setup slack take-up where the sample has not started responding yet.
 
 ## Setup Preload
 
@@ -352,11 +352,11 @@ The setup sequence is:
 1. Ask for approximate starting length.
 2. Use that length to rescale the stiffness prior.
 3. Move toward the setup preload target.
-4. Once the wire responds, respect the requested `MPa/s` target ramp through stiffness.
+4. Once the wire responds, convert the requested setup time into an `MPa/s` target ramp through stiffness.
 5. Ask for measured length at preload.
 6. Return toward zero load and compute `l0`.
 
-Before force starts responding, Mini DMA can use `Setup stage speed` for slack take-up. Tiny residual loads near zero are still treated as slack take-up, because a long or bent wire can show a few milligrams of apparent load before it is meaningfully straight. Once applied load rises above the slack-take-up threshold, setup uses the stiffness/ramp-rate model. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full stage-speed-sized correction.
+Before force starts responding, Mini DMA uses the setup slack take-up speed in `%/s`; with `20 mm` length and `1 %/s`, that is `0.2 mm/s`. Tiny residual loads near zero are still treated as slack take-up, because a long or bent wire can show a few milligrams of apparent load before it is meaningfully straight. Once applied load rises above the slack-take-up threshold, setup uses the stiffness/ramp-rate model derived from setup preload stress divided by setup time. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full global-speed-sized correction.
 
 The setup points are saved to `setup.csv` and `setup.txt` in the run folder. If setup jumps or oscillates, inspect `setup.csv` first.
 

@@ -133,6 +133,8 @@ SETUP_ZERO_FALLBACK_RAW_SPAN_G = 0.012
 SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
 SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
 SETUP_PRELOAD_TAKEUP_LOAD_G = 0.03
+SETUP_PRELOAD_DEFAULT_DURATION_S = 10.0
+SETUP_SLACK_DEFAULT_STRAIN_RATE_PCT_S = 1.0
 MIN_RESISTANCE_CURRENT_MA = 0.05
 SUPPLY_READ_MIN_INTERVAL_S = DEFAULT_SUPPLY_READ_INTERVAL_MS / 1000.0
 RECOVERY_POSITION = "recovery_position"
@@ -236,6 +238,7 @@ SERVO_FULL_SPEED_ERROR_RATIO = 8.0
 SERVO_CRUISE_FEEDBACK_SAFETY_FACTOR = 1.25
 SERVO_MOTION_SETTLE_AFTER_MOVE_S = 0.05
 SERVO_AUTO_TOLERANCE_LOAD_G = 0.005
+CALIBRATION_MAX_AUTO_ACCEPTANCE_LOAD_G = 0.05
 WIRE_BREAK_MIN_SETPOINT_MA = 5.0
 WIRE_BREAK_MAX_MEASURED_MA = 0.5
 WIRE_BREAK_VOLTAGE_LIMIT_FRACTION = 0.95
@@ -2874,7 +2877,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_backlash_mm = CompactDoubleSpinBox(safety_box)
         self.spin_backlash_mm.setDecimals(4)
         self.spin_backlash_mm.setRange(0.0, 5.0)
-        self.spin_backlash_mm.setValue(0.0)
+        self.spin_backlash_mm.setValue(0.02)
         self.spin_backlash_mm.setSuffix(" mm")
         self.spin_backlash_mm.setToolTip(
             "Optional measured linear backlash. When the controller reverses direction while seeking a target, "
@@ -3230,25 +3233,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_setup_preload_stress_mpa,
         )
         strain_setup_form.addRow("Setup preload stress", setup_stress_row)
-        self.spin_setup_preload_ramp_rate_mpa_s = CompactDoubleSpinBox(self.strain_setup_box)
-        self.spin_setup_preload_ramp_rate_mpa_s.setDecimals(3)
-        self.spin_setup_preload_ramp_rate_mpa_s.setRange(0.001, 10000.0)
-        self.spin_setup_preload_ramp_rate_mpa_s.setValue(1.0)
-        self.spin_setup_preload_ramp_rate_mpa_s.setSuffix(" MPa/s")
+        self.spin_setup_preload_duration_s = CompactDoubleSpinBox(self.strain_setup_box)
+        self.spin_setup_preload_duration_s.setDecimals(2)
+        self.spin_setup_preload_duration_s.setRange(0.1, 3600.0)
+        self.spin_setup_preload_duration_s.setValue(SETUP_PRELOAD_DEFAULT_DURATION_S)
+        self.spin_setup_preload_duration_s.setSuffix(" s")
+        self.spin_setup_preload_duration_s.setToolTip(
+            "Desired time for the setup preload ramp after the wire is engaged; Mini DMA derives the MPa/s rate."
+        )
         setup_ramp_row, self.label_setup_preload_ramp_equiv = self._spin_with_equivalent_label(
             self.strain_setup_box,
-            self.spin_setup_preload_ramp_rate_mpa_s,
+            self.spin_setup_preload_duration_s,
         )
-        strain_setup_form.addRow("Setup preload ramp rate", setup_ramp_row)
-        self.spin_setup_stage_speed_mm_s = CompactDoubleSpinBox(self.strain_setup_box)
-        self.spin_setup_stage_speed_mm_s.setDecimals(3)
-        self.spin_setup_stage_speed_mm_s.setRange(0.001, 50.0)
-        self.spin_setup_stage_speed_mm_s.setValue(1.0)
-        self.spin_setup_stage_speed_mm_s.setSuffix(" mm/s")
-        self.spin_setup_stage_speed_mm_s.setToolTip(
-            "Maximum linear stage speed while the mandatory setup chases the preload stress ramp."
+        strain_setup_form.addRow("Setup preload time", setup_ramp_row)
+        self.spin_setup_slack_speed_strain_pct_s = CompactDoubleSpinBox(self.strain_setup_box)
+        self.spin_setup_slack_speed_strain_pct_s.setDecimals(3)
+        self.spin_setup_slack_speed_strain_pct_s.setRange(0.001, 100.0)
+        self.spin_setup_slack_speed_strain_pct_s.setValue(SETUP_SLACK_DEFAULT_STRAIN_RATE_PCT_S)
+        self.spin_setup_slack_speed_strain_pct_s.setSuffix(" %/s")
+        self.spin_setup_slack_speed_strain_pct_s.setToolTip(
+            "Mechanical take-up speed while the wire is slack and load/stress feedback is not yet meaningful."
         )
-        strain_setup_form.addRow("Setup stage speed", self.spin_setup_stage_speed_mm_s)
+        strain_setup_form.addRow("Slack take-up speed", self.spin_setup_slack_speed_strain_pct_s)
         self.spin_setup_preload_tolerance_mpa = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_preload_tolerance_mpa.setDecimals(4)
         self.spin_setup_preload_tolerance_mpa.setRange(0.0001, 10000.0)
@@ -4098,8 +4104,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_hold_interval,
             self.spin_distribution_interval,
             self.spin_setup_preload_stress_mpa,
-            self.spin_setup_preload_ramp_rate_mpa_s,
-            self.spin_setup_stage_speed_mm_s,
+            self.spin_setup_preload_duration_s,
+            self.spin_setup_slack_speed_strain_pct_s,
             self.spin_setup_preload_tolerance_mpa,
             self.spin_setup_zero_tolerance_g,
             self.spin_setup_zero_stable_s,
@@ -5699,14 +5705,29 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._stress_equivalent_text(value, per_second=per_second)
         return "-"
 
+    def _setup_preload_ramp_rate_mpa_s(self) -> float:
+        preload_stress_mpa = max(0.001, float(self.spin_setup_preload_stress_mpa.value()))
+        preload_duration_s = max(0.1, float(self.spin_setup_preload_duration_s.value()))
+        return preload_stress_mpa / preload_duration_s
+
+    def _setup_slack_speed_mm_s(self) -> float:
+        length_mm = max(0.001, float(self.spin_initial_length.value()))
+        strain_rate_pct_s = max(0.001, float(self.spin_setup_slack_speed_strain_pct_s.value()))
+        return max(self._minimum_held_speed_mm_s(), length_mm * strain_rate_pct_s / 100.0)
+
+    def _setup_motion_speed_cap_mm_s(self) -> float:
+        return max(self._minimum_held_speed_mm_s(), float(self.spin_motion_speed_mm_s.value()))
+
     def _refresh_equivalent_labels(self) -> None:
         if not hasattr(self, "label_setup_preload_stress_equiv"):
             return
         self.label_setup_preload_stress_equiv.setText(
             self._load_equivalent_text(float(self.spin_setup_preload_stress_mpa.value()))
         )
+        setup_ramp_mpa_s = self._setup_preload_ramp_rate_mpa_s()
         self.label_setup_preload_ramp_equiv.setText(
-            self._load_equivalent_text(float(self.spin_setup_preload_ramp_rate_mpa_s.value()), per_second=True)
+            f"{_format_compact_unit(setup_ramp_mpa_s, 'MPa/s', decimals=4)}; "
+            f"{self._load_equivalent_text(setup_ramp_mpa_s, per_second=True)}"
         )
         self.label_setup_preload_tolerance_equiv.setText(
             self._load_equivalent_text(float(self.spin_setup_preload_tolerance_mpa.value()))
@@ -6453,6 +6474,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _motor_step_mm(self) -> float:
         return 1.0 / max(1.0, float(self.spin_steps_per_mm.value()))
 
+    def _quantize_backlash_mm(self, backlash_mm: float) -> float:
+        step_mm = self._motor_step_mm()
+        if step_mm <= 0.0:
+            return max(0.0, float(backlash_mm))
+        return max(0.0, round(float(backlash_mm) / step_mm) * step_mm)
+
     def _current_effective_tensile_position_mm(self) -> float:
         return self._tensile_position_mm(self._measurement_effective_position_mm())
 
@@ -6544,7 +6571,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_cycle_speed_mm_s,
             self.spin_hold_speed_mm_s,
             self.spin_distribution_seek_speed_mm_s,
-            self.spin_setup_stage_speed_mm_s,
             self.spin_calibration_preload_speed_mm_s,
             self.spin_calibration_speed_mm_s,
             self.spin_current_sweep_target_speed_mm_s,
@@ -6889,6 +6915,26 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
         return abs(float(current_value)) <= abs(float(effective_tolerance))
 
+    def _setup_preload_relaxation_active(
+        self,
+        basis: str,
+        current_value: float,
+        target_value: float,
+        tolerance: float,
+    ) -> bool:
+        if (
+            self._automation_phase != "target_ramp"
+            or self._automation_step_note != "setup_preload"
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+        ):
+            return False
+        current_load_g = self._basis_value_as_load_g(basis, current_value)
+        target_load_g = self._basis_value_as_load_g(basis, target_value)
+        tolerance_load_g = self._basis_value_as_load_g(basis, tolerance) or 0.0
+        if current_load_g is None or target_load_g is None:
+            return False
+        return float(current_load_g) > float(target_load_g) + abs(float(tolerance_load_g))
+
     def _basis_noise_floor(
         self,
         basis: str,
@@ -6933,7 +6979,23 @@ class MainWindow(QtWidgets.QMainWindow):
             return tolerance
         step_floor = abs(float(sensitivity)) * self._motor_step_mm()
         noise_floor = self._basis_noise_floor(basis, sensitivity_per_mm=sensitivity)
-        return max(tolerance, step_floor, noise_floor)
+        effective_tolerance = max(tolerance, step_floor, noise_floor)
+        calibration_cap = self._calibration_acceptance_cap_for_basis(basis, tolerance)
+        if calibration_cap is not None:
+            effective_tolerance = min(effective_tolerance, calibration_cap)
+        return effective_tolerance
+
+    def _calibration_acceptance_cap_for_basis(self, basis: str, requested_tolerance: float) -> float | None:
+        if not self._is_calibration_mode(self._automation_name):
+            return None
+        requested = abs(float(requested_tolerance))
+        cap_load_g = max(requested, CALIBRATION_MAX_AUTO_ACCEPTANCE_LOAD_G)
+        if basis == HSW_BASIS_LOAD_G:
+            return cap_load_g
+        if basis == HSW_BASIS_STRESS_MPA:
+            cap_stress = stress_mpa_from_load_g(cap_load_g, float(self.spin_diameter.value()))
+            return None if cap_stress is None else max(requested, abs(float(cap_stress)))
+        return None
 
     def _update_live_seek_stiffness(
         self,
@@ -7055,6 +7117,9 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             backlash_value = abs(float(sensitivity)) * backlash_mm
             base = max(base, step_value * 1.5, backlash_value)
+        calibration_cap = self._calibration_acceptance_cap_for_basis(basis, tolerance)
+        if calibration_cap is not None:
+            base = min(base, calibration_cap)
         return base
 
     def _target_reversal_is_practical_hold(
@@ -7089,7 +7154,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return max(self._motor_step_mm(), max_step_mm * self._servo_landing_factor(error_value, tolerance))
         if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
             interval_s = self._seek_decision_interval_s(basis)
-            max_step_mm = float(self.spin_setup_stage_speed_mm_s.value()) * interval_s
+            max_step_mm = self._setup_motion_speed_cap_mm_s() * interval_s
             return max(self._motor_step_mm(), max_step_mm * self._servo_landing_factor(error_value, tolerance))
         max_step_mm = max(self._motor_step_mm(), self._seek_nudge_mm())
         factor = self._servo_landing_factor(error_value, tolerance)
@@ -7117,7 +7182,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 tolerance,
             )
         ):
-            return max(self._minimum_held_speed_mm_s(), base_speed)
+            return min(base_speed, self._setup_slack_speed_mm_s())
         if (
             self._is_current_sweep_mode(self._automation_name)
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}
@@ -7155,7 +7220,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._active_target_ramp_rate_value_s is not None:
             return abs(float(self._active_target_ramp_rate_value_s))
         if self._automation_step_note == "setup_preload" and basis == HSW_BASIS_STRESS_MPA:
-            return abs(float(self.spin_setup_preload_ramp_rate_mpa_s.value()))
+            return self._setup_preload_ramp_rate_mpa_s()
         if self._is_current_sweep_mode(self._automation_name) and basis in {
             HSW_BASIS_LOAD_G,
             HSW_BASIS_STRESS_MPA,
@@ -7291,8 +7356,12 @@ class MainWindow(QtWidgets.QMainWindow):
         speed_mm_s: float,
         seek_key: tuple[str, int, float],
         previous_error: float | None,
+        setup_preload_relaxation: bool = False,
     ) -> bool:
-        if not self._seek_supports_cruise_feedback(basis):
+        if self._automation_step_note == "setup_preload":
+            if not setup_preload_relaxation:
+                return False
+        elif not self._seek_supports_cruise_feedback(basis):
             return False
         if abs(float(error_value)) <= abs(float(tolerance)):
             return False
@@ -7329,8 +7398,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0.0
         return backlash_mm
 
-    def _seek_requires_fresh_after_last_move(self, basis: str) -> bool:
+    def _seek_requires_fresh_after_last_move(
+        self,
+        basis: str,
+        *,
+        setup_preload_relaxation: bool = False,
+    ) -> bool:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        if setup_preload_relaxation:
             return False
         return not self._seek_supports_cruise_feedback(basis)
 
@@ -7578,7 +7654,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._seek_has_unused_scale_sample(seek_key):
             self._log_waiting_for_feedback("Waiting for a new scale sample before the next load/stress correction.")
             return False
-        require_after_last_move = self._seek_requires_fresh_after_last_move(basis)
+        current_value = self._current_distribution_value(basis, require_after_last_move=False)
+        if current_value is None:
+            if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+                self._log_waiting_for_feedback("Waiting for a fresh scale reading before the next load/stress correction.")
+                return False
+            current_value = 0.0
+        setup_preload_relaxation = self._setup_preload_relaxation_active(
+            basis,
+            current_value,
+            target_value,
+            tolerance,
+        )
+        require_after_last_move = self._seek_requires_fresh_after_last_move(
+            basis,
+            setup_preload_relaxation=setup_preload_relaxation,
+        )
         if (
             require_after_last_move
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
@@ -7586,15 +7677,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             self._log_waiting_for_feedback("Waiting for post-move scale feedback before the next load/stress correction.")
             return False
-        current_value = self._current_distribution_value(
-            basis,
-            require_after_last_move=require_after_last_move,
-        )
-        if current_value is None:
-            if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
-                self._log_waiting_for_feedback("Waiting for a fresh scale reading before the next load/stress correction.")
-                return False
-            current_value = 0.0
         early_recorded_seek_point = False
         if self._is_recovery_mode():
             self._record_recovery_point()
@@ -7636,10 +7718,19 @@ class MainWindow(QtWidgets.QMainWindow):
         elif abs(delta_value) <= effective_tolerance:
             self._clear_seek_state(seek_key)
             return True
-        if self._setup_preload_takeup_active(basis, current_value, delta_value, effective_tolerance):
+        setup_preload_takeup = self._setup_preload_takeup_active(
+            basis,
+            current_value,
+            delta_value,
+            effective_tolerance,
+        )
+        if setup_preload_takeup:
             nudge_mm = self._seek_speed_limited_step_mm(
                 basis,
-                self._motion_speed_for_current_context(manual_jog=False),
+                min(
+                    self._motion_speed_for_current_context(manual_jog=False),
+                    self._setup_slack_speed_mm_s(),
+                ),
             )
         else:
             nudge_mm = self._predictive_seek_step_mm(
@@ -7659,7 +7750,10 @@ class MainWindow(QtWidgets.QMainWindow):
             current_value=current_value,
         )
         preliminary_ramp_speed_cap_mm_s = None
-        if not self._setup_preload_takeup_active(basis, current_value, delta_value, effective_tolerance):
+        if (
+            not setup_preload_relaxation
+            and not setup_preload_takeup
+        ):
             preliminary_ramp_speed_cap_mm_s = self._target_ramp_speed_cap_mm_s(basis, seek_key=seek_key)
         if preliminary_ramp_speed_cap_mm_s is not None:
             preliminary_speed_mm_s = min(preliminary_speed_mm_s, preliminary_ramp_speed_cap_mm_s)
@@ -7670,6 +7764,7 @@ class MainWindow(QtWidgets.QMainWindow):
             speed_mm_s=preliminary_speed_mm_s,
             seek_key=seek_key,
             previous_error=previous_error,
+            setup_preload_relaxation=setup_preload_relaxation,
         )
         if (
             basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
@@ -7751,12 +7846,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(
                 f"Direction reversal: adding {_format_compact_unit(backlash_takeup_mm, 'mm')} backlash take-up."
             )
-        command_speed_mm_s = self._seek_feedback_compensated_speed_mm_s(
-            speed_mm_s,
-            nudge_mm + backlash_takeup_mm,
-            basis=basis,
-            cruise_mode=cruise_mode,
-        )
+        if setup_preload_takeup:
+            command_speed_mm_s = speed_mm_s
+        else:
+            command_speed_mm_s = self._seek_feedback_compensated_speed_mm_s(
+                speed_mm_s,
+                nudge_mm + backlash_takeup_mm,
+                basis=basis,
+                cruise_mode=cruise_mode,
+            )
         if not self._move_to_position_mm(
             target_mm,
             chain_from_last_target=chain_from_last_target,
@@ -8411,10 +8509,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 and self._is_calibration_mode(self._automation_name)
                 and self._automation_basis == HSW_BASIS_STRESS_MPA
             ):
-                return max(
-                    self._minimum_held_speed_mm_s(),
-                    float(self.spin_setup_stage_speed_mm_s.value()),
-                )
+                return self._setup_motion_speed_cap_mm_s()
             if self._is_current_sweep_mode(self._automation_name):
                 return max(
                     self._minimum_held_speed_mm_s(),
@@ -8729,8 +8824,10 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_txt_handle.write(f"# Wire diameter mm\t{self.spin_diameter.value():.6f}\n")
         setup_txt_handle.write(f"# Zero-load scale reading g\t{self._zero_load_scale_reference_g():.6f}\n")
         setup_txt_handle.write(f"# Setup preload stress MPa\t{self.spin_setup_preload_stress_mpa.value():.6f}\n")
-        setup_txt_handle.write(f"# Setup preload ramp rate MPa/s\t{self.spin_setup_preload_ramp_rate_mpa_s.value():.6f}\n")
-        setup_txt_handle.write(f"# Setup stage max speed mm/s\t{self.spin_setup_stage_speed_mm_s.value():.6f}\n")
+        setup_txt_handle.write(f"# Setup preload duration s\t{self.spin_setup_preload_duration_s.value():.6f}\n")
+        setup_txt_handle.write(f"# Setup preload ramp rate MPa/s\t{self._setup_preload_ramp_rate_mpa_s():.6f}\n")
+        setup_txt_handle.write(f"# Setup slack speed pct/s\t{self.spin_setup_slack_speed_strain_pct_s.value():.6f}\n")
+        setup_txt_handle.write(f"# Setup stage max speed mm/s\t{self._setup_motion_speed_cap_mm_s():.6f}\n")
         setup_txt_handle.flush()
 
         writer = csv.DictWriter(
@@ -8941,7 +9038,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "basis": self._current_sweep_basis(),
                 "pre_measurement_setup_enabled": self._pre_measurement_setup_enabled(),
                 "setup_preload_stress_mpa": float(self.spin_setup_preload_stress_mpa.value()),
-                "setup_preload_ramp_rate_mpa_s": float(self.spin_setup_preload_ramp_rate_mpa_s.value()),
+                "setup_preload_duration_s": float(self.spin_setup_preload_duration_s.value()),
+                "setup_preload_ramp_rate_mpa_s": self._setup_preload_ramp_rate_mpa_s(),
+                "setup_slack_speed_strain_pct_s": float(self.spin_setup_slack_speed_strain_pct_s.value()),
+                "setup_stage_max_speed_mm_s": self._setup_motion_speed_cap_mm_s(),
                 "setup_preload_tolerance_mpa": self._auto_requested_tolerance_for_basis(HSW_BASIS_STRESS_MPA),
                 "setup_preload_tolerance_mode": "automatic",
                 "setup_zero_tolerance_g": float(self._auto_requested_tolerance_for_basis(HSW_BASIS_LOAD_G)),
@@ -10270,11 +10370,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_pre_measurement_setup_steps(self) -> list[AutomationStep]:
         preload_stress_mpa = float(self.spin_setup_preload_stress_mpa.value())
-        preload_ramp_rate_mpa_s = float(self.spin_setup_preload_ramp_rate_mpa_s.value())
+        preload_duration_s = float(self.spin_setup_preload_duration_s.value())
+        preload_ramp_rate_mpa_s = self._setup_preload_ramp_rate_mpa_s()
         if preload_stress_mpa <= 0.0:
             raise ValueError("Set a positive setup preload stress.")
-        if preload_ramp_rate_mpa_s <= 0.0:
-            raise ValueError("Set a positive setup preload ramp rate.")
+        if preload_duration_s <= 0.0:
+            raise ValueError("Set a positive setup preload duration.")
         preload_load_g = load_g_from_stress_mpa(preload_stress_mpa, float(self.spin_diameter.value()))
         if preload_load_g is None:
             raise ValueError("Set a positive wire diameter before using preload length setup.")
@@ -11116,6 +11217,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     if self._persist_settings:
                         self.settings.setValue("calibration_load_noise_g", self._calibrated_load_noise_g)
             if backlash is not None and math.isfinite(float(backlash)) and float(backlash) >= 0.0:
+                backlash = self._quantize_backlash_mm(float(backlash))
                 self.spin_backlash_mm.setValue(float(backlash))
                 if self._persist_settings:
                     self.settings.setValue("backlash_mm", float(backlash))
@@ -11662,8 +11764,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("calibration_defaults_version", CALIBRATION_DEFAULTS_VERSION)
         self.settings.setValue("current_sweep_basis", self._current_sweep_basis())
         self.settings.setValue("setup_preload_stress_mpa", self.spin_setup_preload_stress_mpa.value())
-        self.settings.setValue("setup_preload_ramp_rate_mpa_s", self.spin_setup_preload_ramp_rate_mpa_s.value())
-        self.settings.setValue("setup_stage_speed_mm_s", self.spin_setup_stage_speed_mm_s.value())
+        self.settings.setValue("setup_preload_duration_s", self.spin_setup_preload_duration_s.value())
+        self.settings.setValue("setup_preload_ramp_rate_mpa_s", self._setup_preload_ramp_rate_mpa_s())
+        self.settings.setValue(
+            "setup_slack_speed_strain_pct_s",
+            self.spin_setup_slack_speed_strain_pct_s.value(),
+        )
         self.settings.setValue("setup_preload_tolerance_mpa", self.spin_setup_preload_tolerance_mpa.value())
         self.settings.setValue("setup_zero_tolerance_g", SERVO_AUTO_TOLERANCE_LOAD_G)
         self.settings.setValue("setup_zero_stable_s", self.spin_setup_zero_stable_s.value())
@@ -11860,7 +11966,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.settings.value("positive_motion_is_tension", False, type=bool)
             )
         self.check_positive_motion_is_tension.setChecked(motion_positive_is_tension)
-        self.spin_backlash_mm.setValue(float(self.settings.value("backlash_mm", 0.0)))
+        self.spin_backlash_mm.setValue(float(self.settings.value("backlash_mm", 0.02)))
         self.spin_initial_length.setValue(float(self.settings.value("initial_length_mm", 30.0)))
         self._calibrated_stiffness_g_per_mm = _safe_float(
             self.settings.value("calibration_stiffness_g_per_mm", None)
@@ -12054,11 +12160,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_setup_preload_stress_mpa.setValue(
             max(0.001, float(self.settings.value("setup_preload_stress_mpa", 10.0)))
         )
-        self.spin_setup_preload_ramp_rate_mpa_s.setValue(
-            max(0.001, float(self.settings.value("setup_preload_ramp_rate_mpa_s", 1.0)))
+        saved_setup_duration = self.settings.value("setup_preload_duration_s", None)
+        if saved_setup_duration is None:
+            saved_setup_rate = float(self.settings.value("setup_preload_ramp_rate_mpa_s", 1.0))
+            saved_setup_duration = float(self.spin_setup_preload_stress_mpa.value()) / max(0.001, saved_setup_rate)
+        self.spin_setup_preload_duration_s.setValue(
+            max(0.1, float(saved_setup_duration))
         )
-        self.spin_setup_stage_speed_mm_s.setValue(
-            max(0.001, float(self.settings.value("setup_stage_speed_mm_s", 1.0)))
+        self.spin_setup_slack_speed_strain_pct_s.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "setup_slack_speed_strain_pct_s",
+                        SETUP_SLACK_DEFAULT_STRAIN_RATE_PCT_S,
+                    )
+                ),
+            )
         )
         self.spin_setup_preload_tolerance_mpa.setValue(
             max(0.0001, float(self.settings.value("setup_preload_tolerance_mpa", 0.25)))
