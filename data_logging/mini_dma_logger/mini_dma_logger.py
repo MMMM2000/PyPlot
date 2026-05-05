@@ -191,6 +191,10 @@ SERVO_LIVE_STIFFNESS_ALPHA = 0.35
 SERVO_NOISE_SIGMA = 3.0
 SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S = 1.5
 SERVO_CURRENT_SWEEP_RATE_GAIN = 1.2
+SERVO_CURRENT_SWEEP_DEFAULTS_VERSION = 2
+SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT = 5.0
+SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S = 15.0
+SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S = 5.0
 SERVO_FULL_SPEED_ERROR_RATIO = 8.0
 SERVO_MOTION_SETTLE_AFTER_MOVE_S = 0.05
 SERVO_AUTO_TOLERANCE_LOAD_G = 0.005
@@ -3329,12 +3333,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_target_speed_mm_s = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_speed_mm_s.setDecimals(3)
         self.spin_current_sweep_target_speed_mm_s.setRange(0.001, 50.0)
-        self.spin_current_sweep_target_speed_mm_s.setValue(1.0)
+        self.spin_current_sweep_target_speed_mm_s.setValue(SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S)
         self.spin_current_sweep_target_speed_mm_s.setSuffix(" mm/s")
         self.spin_current_sweep_target_speed_mm_s.setToolTip(
-            "Maximum linear stage speed for target ramps and dynamic iso-load/iso-stress/iso-strain balancing."
+            "Absolute motor speed ceiling for target ramps and dynamic iso-load/iso-stress/iso-strain balancing."
         )
-        current_sweep_form.addRow("Target ramp stage speed", self.spin_current_sweep_target_speed_mm_s)
+        current_sweep_form.addRow("Stage speed cap", self.spin_current_sweep_target_speed_mm_s)
+        self.spin_current_sweep_max_correction_strain_pct = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_max_correction_strain_pct.setDecimals(3)
+        self.spin_current_sweep_max_correction_strain_pct.setRange(0.001, 100.0)
+        self.spin_current_sweep_max_correction_strain_pct.setValue(
+            SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT
+        )
+        self.spin_current_sweep_max_correction_strain_pct.setSuffix(" %")
+        self.spin_current_sweep_max_correction_strain_pct.setToolTip(
+            "Maximum specimen-strain change allowed in one predictive servo correction."
+        )
+        current_sweep_form.addRow("Correction strain cap", self.spin_current_sweep_max_correction_strain_pct)
+        self.spin_current_sweep_correction_rate_pct_s = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_correction_rate_pct_s.setDecimals(3)
+        self.spin_current_sweep_correction_rate_pct_s.setRange(0.001, 1000.0)
+        self.spin_current_sweep_correction_rate_pct_s.setValue(
+            SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S
+        )
+        self.spin_current_sweep_correction_rate_pct_s.setSuffix(" %/s")
+        self.spin_current_sweep_correction_rate_pct_s.setToolTip(
+            "Specimen-strain-rate ceiling for dynamic servo corrections; still limited by the stage speed cap."
+        )
+        current_sweep_form.addRow("Correction strain-rate cap", self.spin_current_sweep_correction_rate_pct_s)
         self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
         self.check_current_sweep_return_target.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_return_target)
@@ -3787,6 +3813,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_target_step,
             self.spin_current_sweep_target_ramp_rate,
             self.spin_current_sweep_target_speed_mm_s,
+            self.spin_current_sweep_max_correction_strain_pct,
+            self.spin_current_sweep_correction_rate_pct_s,
             self.spin_current_sweep_start_mA,
             self.spin_current_sweep_end_mA,
             self.spin_current_sweep_step_mA,
@@ -5391,6 +5419,68 @@ class MainWindow(QtWidgets.QMainWindow):
     def _minimum_held_speed_mm_s(self) -> float:
         return self._motor_step_mm()
 
+    def _strain_pct_to_stage_mm(self, strain_pct: float) -> float:
+        length_mm = max(0.001, float(self.spin_initial_length.value()))
+        return abs(float(strain_pct)) * length_mm / 100.0
+
+    def _current_sweep_max_correction_mm(self) -> float:
+        strain_pct = SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT
+        if hasattr(self, "spin_current_sweep_max_correction_strain_pct"):
+            strain_pct = float(self.spin_current_sweep_max_correction_strain_pct.value())
+        return max(self._motor_step_mm(), self._strain_pct_to_stage_mm(strain_pct))
+
+    def _current_sweep_stage_speed_cap_mm_s(self) -> float:
+        speed_mm_s = SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S
+        if hasattr(self, "spin_current_sweep_target_speed_mm_s"):
+            speed_mm_s = float(self.spin_current_sweep_target_speed_mm_s.value())
+        return max(self._minimum_held_speed_mm_s(), speed_mm_s)
+
+    def _current_sweep_strain_rate_speed_cap_mm_s(self) -> float:
+        strain_rate_pct_s = SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S
+        if hasattr(self, "spin_current_sweep_correction_rate_pct_s"):
+            strain_rate_pct_s = float(self.spin_current_sweep_correction_rate_pct_s.value())
+        return max(self._minimum_held_speed_mm_s(), self._strain_pct_to_stage_mm(strain_rate_pct_s))
+
+    def _current_sweep_dynamic_speed_cap_mm_s(self) -> float:
+        return max(
+            self._minimum_held_speed_mm_s(),
+            min(
+                self._current_sweep_stage_speed_cap_mm_s(),
+                self._current_sweep_strain_rate_speed_cap_mm_s(),
+            ),
+        )
+
+    def _zero_return_acceptance_tolerance_g(self) -> float:
+        load_noise_g = self._calibrated_load_noise_g
+        noise_floor_g = 0.0
+        if load_noise_g is not None and math.isfinite(float(load_noise_g)) and float(load_noise_g) > 0.0:
+            noise_floor_g = abs(float(load_noise_g)) * SERVO_NOISE_SIGMA
+        return max(SERVO_AUTO_TOLERANCE_LOAD_G, noise_floor_g)
+
+    def _zero_return_requires_true_zero(
+        self,
+        basis: str,
+        target_value: float,
+    ) -> bool:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        target_load_g = self._basis_value_as_load_g(basis, target_value)
+        if target_load_g is None:
+            return False
+        if target_load_g > self._zero_return_acceptance_tolerance_g():
+            return False
+        return (
+            self._automation_step_note == "setup_return_zero"
+            or self._automation_name == RECOVERY_LOAD
+            or self._end_zero_fallback_armed
+        )
+
+    def _zero_return_current_load_g(self, basis: str, current_value: float) -> float:
+        current_load_g = self._basis_value_as_load_g(basis, current_value)
+        if current_load_g is None:
+            current_load_g = self._current_effective_load_g()
+        return abs(float(current_load_g))
+
     def _clamp_motion_resolution_controls(self) -> None:
         step_mm = self._motor_step_mm()
         min_speed = self._minimum_held_speed_mm_s()
@@ -5869,16 +5959,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._seek_step_mm(error_value, tolerance, basis=basis)
         predicted_mm = (abs(float(error_value)) / abs(float(sensitivity))) * SERVO_CORRECTION_GAIN
         max_step_mm = self._seek_nudge_mm()
-        if self._is_current_sweep_mode(self._automation_name):
-            max_step_mm = max(
-                self._motor_step_mm(),
-                self._motion_speed_for_current_context(manual_jog=False)
-                * self._seek_decision_interval_s(basis),
-            )
         if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
             max_step_mm = self._seek_speed_limited_step_mm(
                 basis,
                 self._motion_speed_for_current_context(manual_jog=False),
+            )
+        elif self._is_current_sweep_mode(self._automation_name):
+            max_step_mm = max(
+                self._motor_step_mm(),
+                self._current_sweep_max_correction_mm(),
             )
         return max(self._motor_step_mm(), min(max_step_mm, predicted_mm))
 
@@ -6043,6 +6132,14 @@ class MainWindow(QtWidgets.QMainWindow):
         return max(self._minimum_held_speed_mm_s(), abs(float(ramp_rate)) / abs(float(sensitivity)))
 
     def _seek_command_step_mm(self, nudge_mm: float, speed_mm_s: float, *, basis: str | None = None) -> float:
+        if (
+            self._is_current_sweep_mode(self._automation_name)
+            and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
+        ):
+            return max(
+                self._motor_step_mm(),
+                min(abs(nudge_mm), self._current_sweep_max_correction_mm()),
+            )
         speed_limited_step = self._seek_speed_limited_step_mm(basis, speed_mm_s)
         return max(self._motor_step_mm(), min(abs(nudge_mm), speed_limited_step))
 
@@ -6120,7 +6217,7 @@ class MainWindow(QtWidgets.QMainWindow):
         min_plateau_residual_g = SERVO_AUTO_TOLERANCE_LOAD_G
         if residual_load_g < min_plateau_residual_g:
             return False
-        if residual_load_g > max(SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G, float(tolerance) * 5.0):
+        if residual_load_g > SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G:
             return False
         return_points = self._length_setup_points[self._setup_return_zero_start_point_index :]
         if len(return_points) < SETUP_ZERO_FALLBACK_MIN_POINTS:
@@ -6218,7 +6315,7 @@ class MainWindow(QtWidgets.QMainWindow):
         min_plateau_residual_g = SERVO_AUTO_TOLERANCE_LOAD_G
         if residual_load_g < min_plateau_residual_g:
             return False
-        if residual_load_g > max(SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G, tolerance_load_g * 5.0):
+        if residual_load_g > SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G:
             return False
         return_points = self._end_zero_fallback_points()
         if len(return_points) < SETUP_ZERO_FALLBACK_MIN_POINTS:
@@ -6313,6 +6410,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._maybe_start_end_zero_plateau_fallback(basis, target_value, effective_tolerance):
             return False
         if abs(delta_value) <= effective_tolerance:
+            if self._zero_return_requires_true_zero(basis, target_value):
+                current_load_g = self._zero_return_current_load_g(basis, current_value)
+                if current_load_g > self._zero_return_acceptance_tolerance_g():
+                    self._log_waiting_for_feedback(
+                        "Zero-load return is inside the inflated servo band, but load is not truly near zero yet."
+                    )
+                else:
+                    self._clear_seek_state(seek_key)
+                    return True
+            else:
+                self._clear_seek_state(seek_key)
+                return True
+        if abs(delta_value) <= effective_tolerance and self._zero_return_requires_true_zero(basis, target_value):
+            pass
+        elif abs(delta_value) <= effective_tolerance:
             self._clear_seek_state(seek_key)
             return True
         if self._setup_preload_takeup_active(basis, current_value, delta_value, effective_tolerance):
@@ -7076,10 +7188,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return max(self._minimum_held_speed_mm_s(), float(self.spin_ramp_speed_mm_s.value()))
         mode = str(self.combo_recipe_mode.currentData() or "ramp")
         if self._is_current_sweep_mode(mode):
-            return max(
-                self._minimum_held_speed_mm_s(),
-                float(self.spin_current_sweep_target_speed_mm_s.value()),
-            )
+            return self._current_sweep_dynamic_speed_cap_mm_s()
         if self._is_calibration_mode(mode):
             return max(
                 self._minimum_held_speed_mm_s(),
@@ -7510,6 +7619,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "target_step": float(self.spin_current_sweep_target_step.value()),
                 "target_ramp_rate_value_s": float(self.spin_current_sweep_target_ramp_rate.value()),
                 "target_ramp_stage_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
+                "correction_max_strain_pct": float(self.spin_current_sweep_max_correction_strain_pct.value()),
+                "correction_max_strain_rate_pct_s": float(self.spin_current_sweep_correction_rate_pct_s.value()),
                 "return_target": self.check_current_sweep_return_target.isChecked(),
                 "current_start_mA": float(self.spin_current_sweep_start_mA.value()),
                 "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
@@ -7518,6 +7629,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
                 "tolerance_mode": "automatic",
                 "dynamic_balance_max_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
+                "dynamic_balance_effective_speed_cap_mm_s": self._current_sweep_dynamic_speed_cap_mm_s(),
+                "dynamic_balance_max_correction_mm": self._current_sweep_max_correction_mm(),
                 "dynamic_balance_error_gain_per_s": SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S,
                 "dynamic_balance_rate_gain": SERVO_CURRENT_SWEEP_RATE_GAIN,
                 "legacy_balancing_nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
@@ -10183,6 +10296,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("current_sweep_target_step", self.spin_current_sweep_target_step.value())
         self.settings.setValue("current_sweep_target_ramp_rate", self.spin_current_sweep_target_ramp_rate.value())
         self.settings.setValue("current_sweep_target_speed_mm_s", self.spin_current_sweep_target_speed_mm_s.value())
+        self.settings.setValue(
+            "current_sweep_max_correction_strain_pct",
+            self.spin_current_sweep_max_correction_strain_pct.value(),
+        )
+        self.settings.setValue(
+            "current_sweep_correction_rate_pct_s",
+            self.spin_current_sweep_correction_rate_pct_s.value(),
+        )
+        self.settings.setValue("current_sweep_servo_defaults_version", SERVO_CURRENT_SWEEP_DEFAULTS_VERSION)
         self.settings.setValue("current_sweep_return_target", self.check_current_sweep_return_target.isChecked())
         self.settings.setValue("current_sweep_start_mA", self.spin_current_sweep_start_mA.value())
         self.settings.setValue("current_sweep_end_mA", self.spin_current_sweep_end_mA.value())
@@ -10519,8 +10641,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_target_ramp_rate.setValue(
             max(0.0001, float(self.settings.value("current_sweep_target_ramp_rate", 0.1)))
         )
+        current_sweep_servo_defaults_version = int(
+            self.settings.value("current_sweep_servo_defaults_version", 0)
+        )
+        saved_current_sweep_target_speed = float(
+            self.settings.value(
+                "current_sweep_target_speed_mm_s",
+                SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S,
+            )
+        )
+        if (
+            current_sweep_servo_defaults_version < SERVO_CURRENT_SWEEP_DEFAULTS_VERSION
+            and math.isclose(saved_current_sweep_target_speed, 1.0, rel_tol=1e-9, abs_tol=1e-9)
+        ):
+            saved_current_sweep_target_speed = SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S
         self.spin_current_sweep_target_speed_mm_s.setValue(
-            max(0.001, float(self.settings.value("current_sweep_target_speed_mm_s", 1.0)))
+            max(0.001, saved_current_sweep_target_speed)
+        )
+        self.spin_current_sweep_max_correction_strain_pct.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "current_sweep_max_correction_strain_pct",
+                        SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT,
+                    )
+                ),
+            )
+        )
+        self.spin_current_sweep_correction_rate_pct_s.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "current_sweep_correction_rate_pct_s",
+                        SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S,
+                    )
+                ),
+            )
         )
         self.check_current_sweep_return_target.setChecked(
             bool(self.settings.value("current_sweep_return_target", True, type=bool))

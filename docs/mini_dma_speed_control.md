@@ -120,11 +120,11 @@ predicted_move_mm = correction_gain * abs(error) / abs(sensitivity)
 Then it clamps the move:
 
 ```text
-max_move_mm = max_speed_mm_s * decision_interval_s
+max_move_mm = l0_mm * max_correction_strain_pct / 100
 correction_move_mm = clamp(predicted_move_mm, motor_step_mm, max_move_mm)
 ```
 
-This is why speed and correction distance are connected. A max speed of 1 mm/s with a 250 ms scale interval means one force-feedback correction should normally not exceed about 0.25 mm.
+For current-sweep servo holds, this clamp is strain-based instead of clock-based. The default `5 %` cap means a `30.56 mm` wire can receive at most about `1.53 mm` of predicted correction in one feedback decision, while a longer wire receives a proportionally larger absolute travel. Motor speed still controls how long that move takes, but it no longer artificially limits the correction distance to `speed * scale_interval`.
 
 ## Generic Smooth Landing
 
@@ -149,15 +149,25 @@ Inside tolerance, the target is reached and no correction is sent.
 
 ## Current-Sweep Servo Hold
 
-During iso-load, iso-stress, and iso-strain current sweeps, the motor must keep balancing while current changes the sample. This is not a fixed correction-step controller anymore. The visible setting is:
+During iso-load, iso-stress, and iso-strain current sweeps, the motor must keep balancing while current changes the sample. This is not a fixed correction-step controller anymore. The visible settings are:
 
 ```text
-Target ramp stage speed = absolute max motor speed
+Stage speed cap = absolute max motor speed
+Correction strain cap = maximum specimen strain change per predictive move
+Correction strain-rate cap = maximum correction speed in %/s
 ```
 
-The actual speed below that ceiling is dynamic:
+The correction distance is predictive, but capped by strain instead of by the scale feedback interval. With the default `5%` cap, a `30.56 mm` wire can receive up to about `1.53 mm` of predicted correction in one move. A `10 mm` wire would cap the same correction at `0.50 mm`, so the aggressiveness scales with specimen length instead of absolute stage travel.
+
+The actual speed below the configured ceilings is dynamic:
 
 ```text
+speed_cap_from_strain_rate_mm_s =
+    l0_mm * correction_strain_rate_pct_s / 100
+
+speed_ceiling_mm_s =
+    min(stage_speed_cap_mm_s, speed_cap_from_strain_rate_mm_s)
+
 away_rate = max(0, -sign(error) * measured_value_rate)
 
 requested_value_rate =
@@ -167,7 +177,7 @@ requested_value_rate =
 speed_mm_s =
     requested_value_rate / abs(sensitivity)
 
-speed_mm_s = clamp(speed_mm_s, minimum_speed, target_ramp_stage_speed)
+speed_mm_s = clamp(speed_mm_s, minimum_speed, speed_ceiling_mm_s)
 ```
 
 This means:
@@ -176,8 +186,11 @@ This means:
 - if load/stress is moving away from the target, speed gets an extra boost;
 - stiffer samples move slower for the same stress error because a small displacement changes stress a lot;
 - more compliant or longer samples can move faster without overshooting as much;
-- the user still has one hard safety ceiling in mm/s.
+- the `%/s` ceiling makes correction speed scale with gauge length;
+- the user still has one hard safety ceiling in mm/s for the motor;
 - the same smooth landing cap applies near target, so a high ceiling such as 5 mm/s is not used right outside the hold band.
+
+The current ramp itself stays static. Mini DMA does not pause the current ramp for ordinary servo error and does not add a stress-based safety unwind, because transition temperature and thermal history can depend on the commanded current-ramp rate. If the sample response is too fast for the servo to track, the preferred physics-preserving change is to lower the fixed current ramp rate, for example from `1 mA/s` to `0.5 mA/s`.
 
 The dashboard header displays the most recent commanded speed in fixed-width cells:
 
@@ -225,6 +238,8 @@ Before force starts responding, Mini DMA can use `Setup stage speed` for slack t
 The setup points are saved to `setup.csv` and `setup.txt` in the run folder. If setup jumps or oscillates, inspect `setup.csv` first.
 
 During the post-preload return to zero, Mini DMA watches for a stable raw-balance plateau. If the motor keeps relaxing but the raw balance only fluctuates inside a small flat band, the controller uses the center of that raw band as the corrected zero-load reference for the current run and returns to the first plateau position before computing `l0`. The same plateau fallback is used by final zero-load return and manual load-zero recovery.
+
+Zero-load acceptance is stricter than ordinary target acceptance. The ordinary load/stress tolerance can be inflated by stiffness, motor step size, noise, and backlash so the controller does not hunt near a preload target. During return-to-zero, that inflated band is not allowed to silently accept a high residual load as `0 g`; only a truly near-zero residual or the stable near-zero plateau fallback can finish the return.
 
 ## Backlash And Reversal Rules
 

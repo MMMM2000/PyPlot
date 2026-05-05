@@ -5262,3 +5262,111 @@ def test_hardware_tare_sends_escape_t_and_clears_software_offset(tmp_path: Path,
         assert window._load_offset_g == 0.0
     finally:
         _close_test_window(window)
+
+
+def test_current_sweep_predictive_correction_uses_strain_cap_not_feedback_interval(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_initial_length.setValue(30.56)
+    window.spin_diameter.setValue(0.0137)
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_scale_interval.setValue(250)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_max_correction_strain_pct.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window._calibrated_stiffness_g_per_mm = 1.56
+    window._calibrated_stiffness_length_mm = 30.56
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+
+    try:
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+        correction_mm = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            error_value=-300.0,
+            tolerance=0.5,
+            seek_key=seek_key,
+        )
+        speed_mm_s = window._current_sweep_dynamic_speed_cap_mm_s()
+        command_mm = window._seek_command_step_mm(
+            correction_mm,
+            speed_mm_s,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        )
+
+        assert correction_mm == pytest.approx(30.56 * 0.05)
+        assert command_mm == pytest.approx(correction_mm)
+        assert command_mm > speed_mm_s * window._seek_decision_interval_s(mini_dma_mod.HSW_BASIS_STRESS_MPA)
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_dynamic_speed_cap_uses_strain_rate_and_stage_cap(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_initial_length.setValue(30.56)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+
+    try:
+        assert window._current_sweep_dynamic_speed_cap_mm_s() == pytest.approx(30.56 * 0.15)
+
+        window.spin_current_sweep_correction_rate_pct_s.setValue(100.0)
+        assert window._current_sweep_dynamic_speed_cap_mm_s() == pytest.approx(5.0)
+
+        window.spin_current_sweep_target_speed_mm_s.setValue(3.0)
+        assert window._current_sweep_dynamic_speed_cap_mm_s() == pytest.approx(3.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_zero_return_does_not_accept_high_residual_inside_inflated_tolerance(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.17)
+    window.spin_steps_per_mm.setValue(100.0)
+    window._seek_live_stiffness_g_per_mm = 46.0
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="seek",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=0.0,
+        note="setup_return_zero",
+    )
+    window._latest_scale_value_g = 20.71
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 36.82
+    window._effective_position_mm = 36.82
+    window._last_move_target_mm = 36.82
+    window._last_effective_move_target_mm = 36.82
+    window._current_position_steps = 3682
+    window._last_commanded_position_steps = 3682
+    window._setup_return_zero_start_point_index = 0
+    window._length_setup_start_monotonic = time.monotonic()
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+        )
+
+        assert reached is False
+        assert moves
+        assert "not truly near zero" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
