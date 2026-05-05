@@ -40,3 +40,5 @@
 - Mini DMA motor displacement calibration now uses a provisional `800 steps/mm` default for the expected 1/8-microstep configuration, migrates only old saved `100 steps/mm` defaults, and adds an external-gauge motor step calibration workflow that moves by raw Tic units, writes CSV/JSON logs, reports fit quality, and does not apply the result by default.
 - Mini DMA motor step calibration now keeps a progress window visible for the whole calibration, including slow move waits and accepted external-gauge readings.
 - Mini DMA motor step calibration now keeps the Tic command-timeout keepalive active during slow raw-step calibration moves, preventing the controller from stopping after only a few steps.
+- Mini DMA motor settings and docs now distinguish mechanical full steps/mm from Tic controller units/mm, documenting the verified `100 full steps/mm * 8 microsteps = 800 Tic units/mm` relationship.
+- Mini DMA advanced motor settings now expose mechanical full steps/mm, Tic step mode, and derived Tic units/mm; applying a new Tic step mode updates the controller through `ticcmd` and rewrites the current-position register so physical mm values stay continuous.

@@ -41,7 +41,28 @@ Mini DMA keeps several related speed and sensitivity terms:
 | `command_speed` | Instantaneous motor speed sent to the Tic for the moving part of that cycle. |
 | `max_speed` | User-facing hard motor speed cap for the active mode. |
 
-The provisional Mini DMA motor calibration is `800 steps/mm`, based on the expected relationship `100 full steps/mm * 1/8 microstep`. Older runs and profiles that used `100 steps/mm` will report motor displacement and strain eight times too large for the same Tic step travel. The external-gauge motor step calibration workflow should be used to make the final value authoritative before relying on displacement or strain numbers.
+Mini DMA stores the motor conversion as two values: mechanical full motor steps/mm and the Tic step mode. The derived value used for position commands is Tic controller position units/mm. The current rig is mechanically about `100 full motor steps/mm`; with the Tic configured for `1/8 step`, the controller coordinate is:
+
+```text
+Tic units/mm = full_motor_steps/mm * microsteps/full_step
+             = 100 * 8
+             = 800 Tic units/mm
+```
+
+The external-gauge motor step calibration confirmed this value (`798.4 Tic units/mm`, `R2 = 0.99998`), so Mini DMA should use about `100 full steps/mm` and `800 Tic units/mm` at 1/8 step. Older runs and profiles that used `100 steps/mm` treated full motor steps as if they were Tic position units and therefore report motor displacement and strain eight times too large for the same real Tic travel.
+
+If the Tic step mode is changed, Mini DMA derives the new controller conversion from the full-steps/mm setting:
+
+| Tic step mode | Mini DMA value for this rig |
+| --- | ---: |
+| Full step | `100 Tic units/mm` |
+| 1/2 step | `200 Tic units/mm` |
+| 1/4 step | `400 Tic units/mm` |
+| 1/8 step | `800 Tic units/mm` |
+
+There is usually no reason to reduce microstepping for the current Mini DMA speeds. At `1/8 step`, `1 mm/s` is `800 Tic units/s`, which Mini DMA sends to the Tic as a max-speed value of `8,000,000` because Tic speed units are `Tic units/s * 10000`. The inspected controller's permanent reset default was `10,000,000`, equivalent to `1.25 mm/s` at `800 Tic units/mm`, and Mini DMA can still request per-move temporary speed limits from the configured `mm/s` controls. Only consider a coarser step mode if the controller rejects the requested pulse rate or the motor loses steps at the needed speed; then recalibrate and update this conversion.
+
+For example, `5 mm/s` at 1/8 step is `4000 Tic units/s`, sent as a Tic max-speed value of `40,000,000`. Switching to 1/4 step would halve the required pulse rate, but it also halves displacement resolution. When Mini DMA applies a different Tic step mode, it halts the motor, changes the controller mode, recomputes `Tic units/mm`, and rewrites the Tic current-position register so the physical mm coordinate remains continuous.
 
 ## Position Ramps
 

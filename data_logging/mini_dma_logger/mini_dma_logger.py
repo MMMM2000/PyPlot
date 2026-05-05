@@ -186,8 +186,29 @@ CALIBRATION_PRELOAD = "calibration_preload"
 CALIBRATION_FORWARD = "calibration_forward"
 CALIBRATION_REVERSE = "calibration_reverse"
 CALIBRATION_DEFAULTS_VERSION = 4
-MOTOR_DEFAULTS_VERSION = 2
+MOTOR_DEFAULTS_VERSION = 3
+DEFAULT_FULL_STEPS_PER_MM = 100.0
+DEFAULT_TIC_STEP_MODE = "8"
 DEFAULT_STEPS_PER_MM = 800.0
+TIC_STEP_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("Full step", "full"),
+    ("1/2 step", "2"),
+    ("1/4 step", "4"),
+    ("1/8 step", "8"),
+    ("1/16 step", "16"),
+    ("1/32 step", "32"),
+)
+TIC_STEP_MODE_FACTORS = {
+    "full": 1,
+    "1": 1,
+    "half": 2,
+    "2": 2,
+    "2_100p": 2,
+    "4": 4,
+    "8": 8,
+    "16": 16,
+    "32": 32,
+}
 MOTOR_STEP_CALIBRATION_DEFAULT_INCREMENT_STEPS = 800
 MOTOR_STEP_CALIBRATION_DEFAULT_MOVES = 5
 MOTOR_STEP_CALIBRATION_DEFAULT_SPEED_MM_S = 0.01
@@ -446,6 +467,53 @@ def _extract_first_int(text: str) -> int | None:
         return int(match.group(0))
     except ValueError:
         return None
+
+
+def normalize_tic_step_mode(step_mode: object) -> str | None:
+    text = str(step_mode or "").strip().lower()
+    if not text:
+        return None
+    text = text.replace("-", " ").replace("_", " ")
+    text = re.sub(r"\s+", " ", text)
+    if "full" in text:
+        return "full"
+    if "half" in text:
+        return "2"
+    fraction_match = re.search(r"1\s*/\s*(2|4|8|16|32)\b", text)
+    if fraction_match:
+        return fraction_match.group(1)
+    compact = text.replace(" ", "_")
+    if compact == "2_100p":
+        return "2_100p"
+    token_match = re.fullmatch(r"(1|2|4|8|16|32)", text)
+    if token_match:
+        token = token_match.group(1)
+        return "full" if token == "1" else token
+    return None
+
+
+def tic_step_mode_factor(step_mode: object) -> int | None:
+    normalized = normalize_tic_step_mode(step_mode)
+    if normalized is None:
+        return None
+    return TIC_STEP_MODE_FACTORS.get(normalized)
+
+
+def tic_units_per_mm(full_steps_per_mm: float, step_mode: object) -> float:
+    factor = tic_step_mode_factor(step_mode)
+    if factor is None:
+        raise ValueError(f"Unsupported Tic step mode: {step_mode!r}")
+    return float(full_steps_per_mm) * float(factor)
+
+
+def _tic_step_mode_label(step_mode: object) -> str:
+    normalized = normalize_tic_step_mode(step_mode)
+    if normalized is None:
+        return str(step_mode or "unknown")
+    for label, value in TIC_STEP_MODE_OPTIONS:
+        if value == normalized:
+            return label
+    return str(step_mode)
 
 
 def _parse_tic_list_output(text: str) -> list[tuple[str, str]]:
@@ -1543,7 +1611,13 @@ class TicController:
     def get_status(self) -> str:
         native = self._native_controller()
         if native is not None:
-            return native.get_status()
+            native_status = native.get_status()
+            if self._native_only():
+                return native_status
+            try:
+                return self.run("--status", "--full")
+            except Exception:
+                return native_status
         for args in (("--status", "--full"), ("--status",), ("--full",)):
             try:
                 return self.run(*args)
@@ -1571,6 +1645,12 @@ class TicController:
             native.set_current_position(position_steps)
             return
         self.run("--halt-and-set-position", str(int(position_steps)))
+
+    def set_step_mode(self, step_mode: str) -> None:
+        normalized = normalize_tic_step_mode(step_mode)
+        if normalized is None:
+            raise ValueError(f"Unsupported Tic step mode: {step_mode!r}")
+        self.run("--step-mode", normalized)
 
     def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
         native = self._native_controller()
@@ -2631,22 +2711,57 @@ class MainWindow(QtWidgets.QMainWindow):
         if tic_keepalive_label is not None:
             tic_keepalive_label.setVisible(False)
 
+        self.spin_full_steps_per_mm = CompactDoubleSpinBox(motion_advanced_box)
+        self.spin_full_steps_per_mm.setDecimals(4)
+        self.spin_full_steps_per_mm.setRange(0.001, 100000.0)
+        self.spin_full_steps_per_mm.setValue(DEFAULT_FULL_STEPS_PER_MM)
+        self.spin_full_steps_per_mm.setToolTip(
+            "Mechanical full motor steps per mm before Tic microstepping. "
+            "The current external-gauge calibration confirms about 100 full steps/mm."
+        )
+        motion_advanced_form.addRow("Full steps/mm", self.spin_full_steps_per_mm)
+
+        step_mode_row = QtWidgets.QHBoxLayout()
+        self.combo_tic_step_mode = QtWidgets.QComboBox(motion_advanced_box)
+        for label, value in TIC_STEP_MODE_OPTIONS:
+            self.combo_tic_step_mode.addItem(label, value)
+        default_step_mode_index = self.combo_tic_step_mode.findData(DEFAULT_TIC_STEP_MODE)
+        if default_step_mode_index >= 0:
+            self.combo_tic_step_mode.setCurrentIndex(default_step_mode_index)
+        self.combo_tic_step_mode.setToolTip(
+            "Tic microstep mode. Applying this changes the controller step mode and rescales the Tic "
+            "position register so the physical mm position stays continuous."
+        )
+        self.button_apply_tic_step_mode = QtWidgets.QPushButton("Apply", motion_advanced_box)
+        self.button_apply_tic_step_mode.setToolTip(
+            "Apply the selected Tic step mode, then rewrite the current Tic position to preserve physical mm."
+        )
+        self.button_apply_tic_step_mode.clicked.connect(self._apply_tic_step_mode)
+        step_mode_row.addWidget(self.combo_tic_step_mode, stretch=1)
+        step_mode_row.addWidget(self.button_apply_tic_step_mode)
+        motion_advanced_form.addRow("Tic step mode", step_mode_row)
+
         self.spin_steps_per_mm = CompactDoubleSpinBox(motion_advanced_box)
         self.spin_steps_per_mm.setDecimals(3)
         self.spin_steps_per_mm.setRange(1.0, 100000.0)
         self.spin_steps_per_mm.setValue(DEFAULT_STEPS_PER_MM)
+        self.spin_steps_per_mm.setReadOnly(True)
         self.spin_steps_per_mm.setToolTip(
-            "Controller position units per mm. The provisional 800 steps/mm default assumes "
-            "100 full steps/mm at 1/8 microstep."
+            "Tic units/mm, not full motor steps/mm. The current 800 Tic units/mm default "
+            "matches 100 full motor steps/mm with the Tic set to 1/8 step."
         )
-        motion_advanced_form.addRow("Steps per mm", self.spin_steps_per_mm)
+        motion_advanced_form.addRow("Tic units/mm", self.spin_steps_per_mm)
+
+        self.label_tic_settings_summary = QtWidgets.QLabel("Live Tic settings: not queried yet.", motion_advanced_box)
+        self.label_tic_settings_summary.setWordWrap(True)
+        motion_advanced_form.addRow("", self.label_tic_settings_summary)
 
         self.spin_motor_step_calibration_increment_steps = QtWidgets.QSpinBox(motion_advanced_box)
         self.spin_motor_step_calibration_increment_steps.setRange(1, 1000000)
         self.spin_motor_step_calibration_increment_steps.setValue(MOTOR_STEP_CALIBRATION_DEFAULT_INCREMENT_STEPS)
-        self.spin_motor_step_calibration_increment_steps.setSuffix(" steps")
+        self.spin_motor_step_calibration_increment_steps.setSuffix(" Tic units")
         self.spin_motor_step_calibration_increment_steps.setToolTip(
-            "Raw Tic position units per calibration move. This does not use the current steps/mm value."
+            "Raw Tic position units per calibration move. This does not use the current Tic units/mm value."
         )
         motion_advanced_form.addRow("Calibration move", self.spin_motor_step_calibration_increment_steps)
 
@@ -2661,7 +2776,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_motor_step_calibration_speed_mm_s.setValue(MOTOR_STEP_CALIBRATION_DEFAULT_SPEED_MM_S)
         self.spin_motor_step_calibration_speed_mm_s.setSuffix(" mm/s")
         self.spin_motor_step_calibration_speed_mm_s.setToolTip(
-            "Expected linear calibration speed. Mini DMA converts this to raw Tic steps/s using the calibration move size."
+            "Expected linear calibration speed. Mini DMA converts this to raw Tic units/s using the calibration move size."
         )
         motion_advanced_form.addRow("Calibration speed", self.spin_motor_step_calibration_speed_mm_s)
 
@@ -3991,6 +4106,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_ui_interval.valueChanged.connect(self._apply_ui_refresh_interval)
         self.spin_tic_status_interval.valueChanged.connect(self._apply_hardware_timer_intervals)
         self.spin_tic_keepalive_interval.valueChanged.connect(self._apply_hardware_timer_intervals)
+        self.spin_full_steps_per_mm.valueChanged.connect(self._sync_tic_units_per_mm_from_full_steps)
         self.check_return_to_origin.toggled.connect(self._update_recipe_mode_ui)
         self.check_distribution_return_sweep.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_return_target.toggled.connect(self._update_recipe_mode_ui)
@@ -5526,6 +5642,162 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         self._log(f"Reference position set to the current specimen position ({self._position_reference_mm:.4f} mm).")
 
+    def _selected_tic_step_mode(self) -> str:
+        value = self.combo_tic_step_mode.currentData()
+        normalized = normalize_tic_step_mode(value)
+        if normalized is None:
+            normalized = DEFAULT_TIC_STEP_MODE
+        return normalized
+
+    def _set_tic_step_mode_combo(self, step_mode: object) -> bool:
+        normalized = normalize_tic_step_mode(step_mode)
+        if normalized is None:
+            return False
+        index = self.combo_tic_step_mode.findData(normalized)
+        if index < 0:
+            return False
+        blocker = QtCore.QSignalBlocker(self.combo_tic_step_mode)
+        self.combo_tic_step_mode.setCurrentIndex(index)
+        del blocker
+        return True
+
+    def _set_tic_units_per_mm(self, units_per_mm: float) -> None:
+        units_per_mm = max(1.0, float(units_per_mm))
+        blocker = QtCore.QSignalBlocker(self.spin_steps_per_mm)
+        self.spin_steps_per_mm.setValue(units_per_mm)
+        del blocker
+        self._clamp_motion_resolution_controls()
+        self._update_recipe_mode_ui()
+
+    def _sync_tic_units_per_mm_from_full_steps(self, *_args: object, persist: bool = True) -> None:
+        try:
+            units_per_mm = tic_units_per_mm(
+                float(self.spin_full_steps_per_mm.value()),
+                self._selected_tic_step_mode(),
+            )
+        except Exception:
+            return
+        self._set_tic_units_per_mm(units_per_mm)
+        self._refresh_tic_settings_summary()
+        if persist:
+            self._persist_settings_if_enabled()
+
+    def _refresh_tic_settings_summary(self) -> None:
+        if not hasattr(self, "label_tic_settings_summary"):
+            return
+        status_text = self._tic_status_text
+        step_mode = _extract_status_value(status_text, "Step mode") if status_text else None
+        if step_mode is None:
+            step_mode = _tic_step_mode_label(self._selected_tic_step_mode())
+        current_limit = _extract_status_value(status_text, "Current limit") if status_text else None
+        max_speed = _extract_status_value(status_text, "Max speed") if status_text else None
+        max_accel = _extract_status_value(status_text, "Max acceleration") if status_text else None
+        max_decel = _extract_status_value(status_text, "Max deceleration") if status_text else None
+        units_per_mm = max(1.0, float(self.spin_steps_per_mm.value()))
+        speed_detail = ""
+        if max_speed:
+            max_speed_units = _extract_first_int(max_speed)
+            if max_speed_units is not None:
+                speed_detail = f" ({max_speed_units / 10000.0 / units_per_mm:.4g} mm/s)"
+        parts = [
+            f"step mode {_tic_step_mode_label(step_mode)}",
+            f"{float(self.spin_full_steps_per_mm.value()):.4g} full steps/mm",
+            f"{units_per_mm:.4g} Tic units/mm",
+        ]
+        if max_speed:
+            parts.append(f"max speed {max_speed}{speed_detail}")
+        if max_accel:
+            parts.append(f"max accel {max_accel}")
+        if max_decel:
+            parts.append(f"max decel {max_decel}")
+        if current_limit:
+            parts.append(f"current limit {current_limit}")
+        self.label_tic_settings_summary.setText("Live Tic settings: " + " | ".join(parts))
+
+    def _apply_tic_step_mode(self, _checked: bool = False, *, confirm: bool = True) -> bool:
+        if self._automation_active or self._session_active or self._manual_jog_timer.isActive():
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Stop the active session or manual jog before changing the Tic step mode.",
+            )
+            return False
+        if self._motor_step_calibration_active:
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Stop motor step calibration before changing the Tic step mode.",
+            )
+            return False
+        requested_step_mode = self._selected_tic_step_mode()
+        if confirm:
+            self._refresh_tic_status()
+            self._set_tic_step_mode_combo(requested_step_mode)
+        old_units_per_mm = max(1.0, float(self.spin_steps_per_mm.value()))
+        new_step_mode = requested_step_mode
+        try:
+            new_units_per_mm = tic_units_per_mm(float(self.spin_full_steps_per_mm.value()), new_step_mode)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
+            return False
+        current_steps = int(self._commanded_position_steps())
+        physical_position_mm = current_steps / old_units_per_mm
+        new_position_steps = int(round(physical_position_mm * new_units_per_mm))
+        quantized_position_mm = new_position_steps / new_units_per_mm
+        if confirm:
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                APP_NAME,
+                (
+                    f"Apply Tic step mode {_tic_step_mode_label(new_step_mode)}?\n\n"
+                    f"Mini DMA will halt the motor, set the controller step mode, and rewrite the Tic "
+                    f"current-position register from {current_steps} to {new_position_steps} so the "
+                    "physical mm position remains continuous. This does not command a move."
+                ),
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
+                QtWidgets.QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return False
+        try:
+            dispatcher = self._build_tic_dispatcher()
+            dispatcher.halt_and_hold()
+            if not self._wait_for_tic_dispatcher(dispatcher, "halt", timeout_s=2.0):
+                QtWidgets.QMessageBox.warning(self, APP_NAME, "Tic halt command did not finish cleanly.")
+                return False
+            self._build_tic_controller().set_step_mode(new_step_mode)
+            dispatcher.set_current_position(new_position_steps)
+            if not self._wait_for_tic_dispatcher(dispatcher, "step-mode-position", timeout_s=2.0):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    APP_NAME,
+                    "Tic current-position rewrite did not finish cleanly after changing step mode.",
+                )
+                return False
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to apply Tic step mode: {exc}")
+            return False
+        self._set_tic_units_per_mm(new_units_per_mm)
+        self._current_position_steps = new_position_steps
+        self._current_position_mm = quantized_position_mm
+        self._effective_position_mm = quantized_position_mm
+        self._last_effective_move_target_mm = quantized_position_mm
+        self._last_move_target_mm = quantized_position_mm
+        self._last_commanded_position_steps = new_position_steps
+        self._manual_jog_uses_last_target = False
+        self._last_move_direction = 0.0
+        self._refresh_tic_settings_summary()
+        self._refresh_live_labels()
+        self._persist_settings_if_enabled()
+        self._log(
+            f"Applied Tic step mode {_tic_step_mode_label(new_step_mode)}: "
+            f"{float(self.spin_full_steps_per_mm.value()):.4g} full steps/mm -> "
+            f"{new_units_per_mm:.3f} Tic units/mm; position register {current_steps} -> {new_position_steps}."
+        )
+        if confirm:
+            self._refresh_tic_status()
+        return True
+
     def _motor_step_calibration_down_sign(self) -> int:
         return -1 if self._tension_motion_sign() > 0.0 else 1
 
@@ -5635,9 +5907,12 @@ class MainWindow(QtWidgets.QMainWindow):
         steps_per_mm = float(value)
         if not math.isfinite(steps_per_mm) or steps_per_mm <= 0.0:
             return False
-        self.spin_steps_per_mm.setValue(steps_per_mm)
+        factor = tic_step_mode_factor(self._selected_tic_step_mode())
+        if factor is not None and factor > 0:
+            self.spin_full_steps_per_mm.setValue(steps_per_mm / float(factor))
+        self._set_tic_units_per_mm(steps_per_mm)
         self._persist_settings_if_enabled()
-        self._log(f"Applied motor step calibration: {steps_per_mm:.3f} steps/mm.")
+        self._log(f"Applied motor step calibration: {steps_per_mm:.3f} Tic units/mm.")
         return True
 
     def _discard_motor_step_calibration_log(self, paths: Sequence[Path]) -> None:
@@ -5793,7 +6068,7 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle(APP_NAME)
         box.setIcon(QtWidgets.QMessageBox.Icon.Question)
-        box.setText(f"Recommended motor calibration: {recommended:.3f} steps/mm")
+        box.setText(f"Recommended motor calibration: {recommended:.3f} Tic units/mm")
         box.setInformativeText(
             f"Linearity R2: {r2:.5f}\n"
             f"Max residual: {residual:.6f} mm\n\n"
@@ -5815,7 +6090,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log("Motor step calibration log discarded.")
             return
         self._log(
-            f"Motor step calibration saved only: {recommended:.3f} steps/mm recommendation "
+            f"Motor step calibration saved only: {recommended:.3f} Tic units/mm recommendation "
             f"({csv_path.name}, {json_path.name})."
         )
 
@@ -5991,7 +6266,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if completed_all_moves and report.get("status") == "ok":
             self._log(
                 "Motor step calibration fit ready: "
-                f"{float(report['recommended_steps_per_mm']):.3f} steps/mm, "
+                f"{float(report['recommended_steps_per_mm']):.3f} Tic units/mm, "
                 f"R2 {float(report.get('r2', 0.0)):.5f}, "
                 f"max residual {float(report.get('max_residual_mm', 0.0)):.6f} mm."
             )
@@ -6000,7 +6275,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 completed_moves=move_count,
                 total_moves=move_count,
                 detail=(
-                    f"Recommended {float(report['recommended_steps_per_mm']):.3f} steps/mm; "
+                    f"Recommended {float(report['recommended_steps_per_mm']):.3f} Tic units/mm; "
                     f"R2 {float(report.get('r2', 0.0)):.5f}; "
                     f"max residual {float(report.get('max_residual_mm', 0.0)):.6f} mm. "
                     f"Saved CSV/JSON: {csv_path.name}, {json_path.name}."
@@ -7711,6 +7986,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._tic_motor_power_ok = False
             return False
         self._tic_status_text = status_text
+        step_mode_text = _extract_status_value(status_text, "Step mode")
+        if step_mode_text is not None and self._set_tic_step_mode_combo(step_mode_text):
+            self._sync_tic_units_per_mm_from_full_steps(persist=False)
         vin_v = _extract_status_float(status_text, "VIN voltage")
         self._last_tic_vin_v = vin_v
         power_warning = self._tic_motor_power_warning(vin_v)
@@ -7745,6 +8023,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{operation_state} | {self._tensile_displacement_mm(self._effective_position_mm):.4f} mm tensile | VIN {vin_text}"
             )
         self.label_tic_summary.setText(summary)
+        self._refresh_tic_settings_summary()
         self._refresh_live_labels()
         self._status_timer.start(self._tic_status_interval_ms())
         return True
@@ -11084,6 +11363,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("tic_serial", self.edit_tic_serial.text())
         self.settings.setValue("tic_status_interval_ms", self._tic_status_interval_ms())
         self.settings.setValue("tic_keepalive_interval_ms", self._tic_keepalive_interval_ms())
+        self.settings.setValue("full_steps_per_mm", self.spin_full_steps_per_mm.value())
+        self.settings.setValue("tic_step_mode", self._selected_tic_step_mode())
         self.settings.setValue("steps_per_mm", self.spin_steps_per_mm.value())
         self.settings.setValue("motor_defaults_version", MOTOR_DEFAULTS_VERSION)
         self.settings.setValue(
@@ -11280,13 +11561,23 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._apply_hardware_timer_intervals()
         motor_defaults_version = int(self.settings.value("motor_defaults_version", 0))
+        saved_step_mode = self.settings.value("tic_step_mode", DEFAULT_TIC_STEP_MODE, type=str)
+        if not self._set_tic_step_mode_combo(saved_step_mode):
+            self._set_tic_step_mode_combo(DEFAULT_TIC_STEP_MODE)
         saved_steps_per_mm = float(self.settings.value("steps_per_mm", DEFAULT_STEPS_PER_MM))
         if (
             motor_defaults_version < MOTOR_DEFAULTS_VERSION
             and math.isclose(saved_steps_per_mm, 100.0, rel_tol=1e-9, abs_tol=1e-9)
         ):
             saved_steps_per_mm = DEFAULT_STEPS_PER_MM
-        self.spin_steps_per_mm.setValue(saved_steps_per_mm)
+        saved_full_steps_value = self.settings.value("full_steps_per_mm", None)
+        if saved_full_steps_value is None:
+            factor = tic_step_mode_factor(self._selected_tic_step_mode()) or tic_step_mode_factor(DEFAULT_TIC_STEP_MODE) or 1
+            saved_full_steps_per_mm = saved_steps_per_mm / float(factor)
+        else:
+            saved_full_steps_per_mm = float(saved_full_steps_value)
+        self.spin_full_steps_per_mm.setValue(max(0.001, saved_full_steps_per_mm))
+        self._sync_tic_units_per_mm_from_full_steps(persist=False)
         self.spin_motor_step_calibration_increment_steps.setValue(
             max(
                 1,

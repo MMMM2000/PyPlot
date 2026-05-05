@@ -3003,6 +3003,34 @@ def test_tic_target_position_energizes_and_exits_safe_start(monkeypatch: pytest.
     ]
 
 
+def test_tic_controller_sets_step_mode_with_ticcmd(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    controller = mini_dma_mod.TicController(command_path="ticcmd", device_serial="00501366")
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    controller.set_step_mode("4")
+
+    assert calls == [["ticcmd.exe", "-d", "00501366", "--step-mode", "4"]]
+
+
+def test_tic_units_per_mm_follow_microstep_factor() -> None:
+    assert mini_dma_mod.tic_units_per_mm(100.0, "full") == pytest.approx(100.0)
+    assert mini_dma_mod.tic_units_per_mm(100.0, "1/2 step") == pytest.approx(200.0)
+    assert mini_dma_mod.tic_units_per_mm(100.0, "4") == pytest.approx(400.0)
+    assert mini_dma_mod.tic_units_per_mm(100.0, "1/8 step") == pytest.approx(800.0)
+
+
 def test_native_tic_usb_controller_sends_control_transfers(monkeypatch: pytest.MonkeyPatch) -> None:
     transfers: list[tuple[int, int, int, int, object]] = []
 
@@ -5342,8 +5370,156 @@ def test_mini_dma_defaults_to_provisional_microstep_steps_per_mm(tmp_path: Path,
     window = _build_window(tmp_path, qtbot)
 
     try:
+        assert window.spin_full_steps_per_mm.value() == pytest.approx(100.0)
+        assert window.combo_tic_step_mode.currentData() == "8"
         assert window.spin_steps_per_mm.value() == pytest.approx(800.0)
-        assert "800 steps/mm" in window.spin_steps_per_mm.toolTip()
+        tooltip = window.spin_steps_per_mm.toolTip()
+        assert "Tic units/mm" in tooltip
+        assert "100 full motor steps/mm" in tooltip
+        assert "1/8" in tooltip
+        assert "800 Tic units/mm" in tooltip
+    finally:
+        _close_test_window(window)
+
+
+def test_apply_tic_step_mode_preserves_physical_mm_position(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        class _FakeController:
+            def __init__(self) -> None:
+                self.step_modes: list[str] = []
+                self.positions: list[int] = []
+                self.halted = False
+
+            def set_step_mode(self, step_mode: str) -> None:
+                self.step_modes.append(step_mode)
+
+            def halt_and_hold(self) -> None:
+                self.halted = True
+
+            def set_current_position(self, position_steps: int) -> None:
+                self.positions.append(position_steps)
+
+        controller = _FakeController()
+        _use_immediate_tic_dispatcher(window, controller)
+        window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+        window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+        window.spin_full_steps_per_mm.setValue(100.0)
+        window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("8"))
+        window.spin_steps_per_mm.setValue(800.0)
+        window._current_position_steps = 4800
+        window._current_position_mm = 4800 / 800.0
+        window._effective_position_mm = window._current_position_mm
+        window._last_effective_move_target_mm = window._current_position_mm
+        window._last_move_target_mm = window._current_position_mm
+        window._last_commanded_position_steps = 4800
+        window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("4"))
+
+        assert window._apply_tic_step_mode(confirm=False) is True
+
+        expected_mm = 4800 / 800.0
+        expected_steps = round(expected_mm * 400.0)
+        assert controller.halted is True
+        assert controller.step_modes == ["4"]
+        assert controller.positions == [expected_steps]
+        assert window.spin_steps_per_mm.value() == pytest.approx(400.0)
+        assert window._current_position_mm == pytest.approx(expected_mm)
+        assert window._effective_position_mm == pytest.approx(expected_mm)
+        assert window._last_move_target_mm == pytest.approx(expected_mm)
+        assert window._last_commanded_position_steps == expected_steps
+    finally:
+        _close_test_window(window)
+
+
+def test_apply_tic_step_mode_keeps_requested_mode_after_status_refresh(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        class _FakeController:
+            def __init__(self) -> None:
+                self.step_modes: list[str] = []
+                self.positions: list[int] = []
+
+            def set_step_mode(self, step_mode: str) -> None:
+                self.step_modes.append(step_mode)
+
+            def halt_and_hold(self) -> None:
+                return None
+
+            def set_current_position(self, position_steps: int) -> None:
+                self.positions.append(position_steps)
+
+        controller = _FakeController()
+        _use_immediate_tic_dispatcher(window, controller)
+        window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            mini_dma_mod.QtWidgets.QMessageBox,
+            "question",
+            lambda *_args, **_kwargs: mini_dma_mod.QtWidgets.QMessageBox.StandardButton.Yes,
+        )
+        window.spin_full_steps_per_mm.setValue(100.0)
+        window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("4"))
+        window.spin_steps_per_mm.setValue(800.0)
+        window._current_position_steps = 800
+        window._current_position_mm = 1.0
+        window._last_commanded_position_steps = 800
+
+        refresh_calls = 0
+
+        def _status_refresh_resets_to_live_mode() -> bool:
+            nonlocal refresh_calls
+            refresh_calls += 1
+            mode = "8" if refresh_calls == 1 else "4"
+            units = 800.0 if mode == "8" else 400.0
+            window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData(mode))
+            window.spin_steps_per_mm.setValue(units)
+            return True
+
+        window._refresh_tic_status = _status_refresh_resets_to_live_mode  # type: ignore[method-assign]
+
+        assert window._apply_tic_step_mode(confirm=True) is True
+
+        assert controller.step_modes == ["4"]
+        assert controller.positions == [400]
+        assert window.combo_tic_step_mode.currentData() == "4"
+    finally:
+        _close_test_window(window)
+
+
+def test_refresh_tic_status_updates_step_mode_and_tic_units(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        class _FakeController:
+            def get_status(self) -> str:
+                return "\n".join(
+                    [
+                        "VIN voltage: 12.00 V",
+                        "Operation state: Normal",
+                        "Current position: 400",
+                        "Step mode: 1/4 step",
+                        "Max speed: 40000000",
+                        "Max acceleration: 100000",
+                        "Max deceleration: 100000",
+                        "Current limit: 343 mA",
+                        "Errors currently stopping the motor: None",
+                    ]
+                )
+
+        window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+        window.spin_full_steps_per_mm.setValue(100.0)
+        window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("8"))
+        window.spin_steps_per_mm.setValue(800.0)
+
+        assert window._refresh_tic_status() is True
+
+        assert window.combo_tic_step_mode.currentData() == "4"
+        assert window.spin_steps_per_mm.value() == pytest.approx(400.0)
+        assert window._current_position_mm == pytest.approx(1.0)
+        assert "1/4 step" in window.label_tic_settings_summary.text()
+        assert "400 Tic units/mm" in window.label_tic_settings_summary.text()
     finally:
         _close_test_window(window)
 
