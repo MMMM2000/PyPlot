@@ -11,7 +11,16 @@ The Mini DMA rig has two different clocks:
 - **Motor command clock:** Tic commands can be sent quickly, especially through the persistent native-USB/dispatcher path.
 - **Force-feedback clock:** the current G&G balance replies to request/response reads at about 4-5 Hz, so fresh load/stress feedback is roughly every 200-250 ms.
 
-This means load/stress control must be sample-driven. The app can keep the UI responsive faster than that, but it should not stack multiple force corrections from the same old scale value.
+This does not mean every closed-loop correction happens at 4-5 Hz. In conservative near-target mode, the controller sends one move, waits until that move should be physically complete, adds a small settle margin, and then waits for a fresh post-move balance sample. The real near-target correction frequency is therefore often closer to 1-2 Hz:
+
+```text
+near_target_period =
+    motor_move_duration
+  + settle_margin
+  + next_scale_reply
+```
+
+Far from target, Mini DMA can now use the scale clock more aggressively. The motor may keep moving toward an extended predicted target, and each new balance sample is used as a delayed reality check. The controller can update speed, extend the target, or drop back to conservative mode as soon as that fresh scale sample arrives. It still must not stack multiple force corrections from one unchanged scale value.
 
 ![Sample-driven load/stress correction clock](assets/mini_dma_scale_sample_timing.svg)
 
@@ -27,7 +36,7 @@ Mini DMA keeps several related speed and sensitivity terms:
 | `error` | `target_value - measured_value` in the selected basis. |
 | `effective_tolerance` | Requested tolerance raised to what the rig can physically resolve. |
 | `sensitivity` | Current estimate of how strongly the sample responds to motion, e.g. g/mm, MPa/mm, or %/mm. |
-| `decision_interval` | Expected time between meaningful load/stress decisions, usually the scale request interval. |
+| `decision_interval` | Expected time between useful load/stress feedback samples, usually the scale request interval. |
 | `max_speed` | User-facing maximum motor speed for the active mode. |
 
 ## Position Ramps
@@ -42,7 +51,7 @@ The motor may receive planned position updates between force samples because dis
 
 ## Load / Stress / Strain Seeking
 
-Load, stress, and strain seeking are closed-loop. A correction cycle is:
+Load, stress, and strain seeking are closed-loop. A correction decision is:
 
 1. Read the latest fresh feedback value.
 2. Compute error in the controlled basis.
@@ -50,11 +59,14 @@ Load, stress, and strain seeking are closed-loop. A correction cycle is:
 4. Estimate or reuse sensitivity.
 5. Predict a correction distance.
 6. Choose a speed.
-7. Apply backlash/reversal rules.
-8. Send one motor move.
-9. Wait until the commanded move should be physically complete, add a small settle margin, then wait for fresh scale feedback before deciding again.
+7. Decide whether the controller is safely far from target or near/suspicious.
+8. Apply backlash/reversal rules.
+9. Send or extend one motor move.
 
-Step 9 is important. A balance reply that arrives after the command was sent is not enough if the stage is still moving. Otherwise the controller can stack several corrections before the wire has actually responded, which appears as large near-target jumps.
+The final mode decision is important:
+
+- **Far mode:** if the remaining predicted correction distance is safely larger than the distance the motor can travel before the next useful balance sample, Mini DMA may extend the motor target without waiting for the previous move to finish. It still waits for a new scale sample before making the next force-control decision.
+- **Near mode:** if the target is close, the trend disagrees with prediction, the target was crossed, or the scale data is stale, Mini DMA sends one correction and then waits for expected move completion plus fresh post-move scale feedback before deciding again.
 
 ## Effective Tolerance
 
@@ -126,6 +138,40 @@ correction_move_mm = clamp(predicted_move_mm, motor_step_mm, max_move_mm)
 
 For current-sweep servo holds, this clamp is strain-based instead of clock-based. The default `5 %` cap means a `30.56 mm` wire can receive at most about `1.53 mm` of predicted correction in one feedback decision, while a longer wire receives a proportionally larger absolute travel. Motor speed still controls how long that move takes, but it no longer artificially limits the correction distance to `speed * scale_interval`.
 
+## Far-Vs-Near Mode Switching
+
+Mini DMA does not use a broad fixed hysteresis band for the far/near transition. The boundary is predictive and speed-dependent:
+
+```text
+remaining_correction_mm =
+    abs(error) / abs(sensitivity)
+
+tolerance_mm =
+    effective_tolerance / abs(sensitivity)
+
+feedback_travel_mm =
+    speed_mm_s * decision_interval_s * 1.25
+
+safety_margin_mm =
+    max(2 * motor_step_mm, backlash_mm, tolerance_mm)
+
+far_mode_allowed =
+    remaining_correction_mm
+      > feedback_travel_mm + safety_margin_mm + tolerance_mm
+```
+
+That means a high speed automatically switches to near mode earlier, because the motor can travel farther before the next reliable balance reply. A low speed can stay in far mode closer to the target. This keeps responsiveness high without using a lazy fixed hysteresis band.
+
+Far mode is disabled immediately if:
+
+- the scale sample has already been used for the current seek clock;
+- the target was crossed;
+- the new error is larger than the previous error by more than the tolerance margin;
+- the sensitivity estimate is missing or invalid;
+- the step is a zero-load return or recovery move.
+
+![Hybrid far and near control modes](assets/mini_dma_hybrid_far_near_modes.svg)
+
 ## Generic Smooth Landing
 
 For non-current-sweep seeking without sensitivity-specific behavior, Mini DMA uses a smooth landing zone. Far from target it can use full speed; near target it slows down to the minimum useful motor speed.
@@ -158,6 +204,12 @@ Correction strain-rate cap = maximum correction speed in %/s
 ```
 
 The correction distance is predictive, but capped by strain instead of by the scale feedback interval. With the default `5%` cap, a `30.56 mm` wire can receive up to about `1.53 mm` of predicted correction in one move. A `10 mm` wire would cap the same correction at `0.50 mm`, so the aggressiveness scales with specimen length instead of absolute stage travel.
+
+The far/near mode switch applies here too:
+
+- while far from the requested load/stress target, the servo can keep the motor moving continuously and revise the predicted target whenever a fresh scale sample arrives;
+- near the target, or when the sample response stops matching the prediction, it switches back to one-move-at-a-time gated landing;
+- the same dynamic speed calculation is used in both modes.
 
 The actual speed below the configured ceilings is dynamic:
 
@@ -263,9 +315,9 @@ If a correction crosses the target but the remaining error is inside this band, 
 
 ## Current Limitations
 
-The current controller is still mostly feedback-based. It compensates for large error and moving-away trends, but it does not yet have full current feed-forward.
+The current controller is now hybrid feedback-based: far from target it can keep the motor moving between scale replies, and near target it returns to conservative post-move feedback gating. It compensates for large error and moving-away trends, but it still does not have full current feed-forward.
 
-The planned next layer is latency/feed-forward prediction:
+A possible future layer is current-ramp feed-forward:
 
 ```text
 predicted_error =
@@ -283,7 +335,7 @@ requested_value_rate =
   + feedforward_from_current_ramp
 ```
 
-This matters during current annealing because the wire can contract quickly as current rises. Feed-forward would let the motor start compensating before the delayed scale feedback shows the full stress increase.
+This matters during current annealing because the wire can contract quickly as current rises. Feed-forward would let the motor start compensating before the delayed scale feedback shows the full stress increase. For now, Mini DMA keeps the requested current ramp static and uses the hybrid motor servo to follow it.
 
 ## What To Check In A Run
 

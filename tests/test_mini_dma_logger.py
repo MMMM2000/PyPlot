@@ -4544,7 +4544,9 @@ def test_flat_seek_feedback_continues_for_shape_memory_plateau(tmp_path: Path, q
     window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
 
     try:
-        for _ in range(6):
+        start_sample_time_s = time.time()
+        for index in range(6):
+            window._latest_scale_timestamp = start_sample_time_s + index * 0.3
             assert window._seek_distribution_target(
                 mini_dma_mod.HSW_BASIS_LOAD_G,
                 target_value=3.0,
@@ -5368,5 +5370,157 @@ def test_setup_zero_return_does_not_accept_high_residual_inside_inflated_toleran
         assert reached is False
         assert moves
         assert "not truly near zero" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_far_load_seek_can_cruise_on_fresh_inflight_scale_sample(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, bool, float | None]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append(
+            (
+                target_mm,
+                bool(kwargs.get("chain_from_last_target")),
+                kwargs.get("speed_mm_s"),  # type: ignore[arg-type]
+            )
+        )
+        window._last_move_target_mm = target_mm
+        window._last_motion_command_time_s = time.time()
+        window._last_motion_expected_complete_time_s = time.time() + 10.0
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_scale_interval.setValue(250)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window.spin_initial_length.setValue(30.56)
+    window._calibrated_stiffness_g_per_mm = 1.0
+    window._calibrated_stiffness_length_mm = 30.56
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=5.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 5.0)
+    sample_time_s = time.time()
+    window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = sample_time_s - 0.3
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = sample_time_s
+    window._last_motion_command_time_s = sample_time_s - 0.1
+    window._last_motion_expected_complete_time_s = sample_time_s + 10.0
+    window._last_move_target_mm = 0.0
+    window._last_effective_move_target_mm = 0.0
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+        )
+
+        assert reached is False
+        assert moves
+        assert moves[-1][1] is True
+        assert window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] == pytest.approx(sample_time_s)
+    finally:
+        _close_test_window(window)
+
+
+def test_near_load_seek_waits_for_post_move_feedback_even_with_new_scale_sample(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_scale_interval.setValue(250)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window.spin_initial_length.setValue(30.56)
+    window._calibrated_stiffness_g_per_mm = 1.0
+    window._calibrated_stiffness_length_mm = 30.56
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=0.2,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 0.2)
+    sample_time_s = time.time()
+    window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = sample_time_s - 0.3
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = sample_time_s
+    window._last_motion_command_time_s = sample_time_s - 0.1
+    window._last_motion_expected_complete_time_s = sample_time_s + 10.0
+    window._last_move_target_mm = 0.0
+    window._last_effective_move_target_mm = 0.0
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.2,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+        )
+
+        assert reached is False
+        assert moves == []
+        assert "post-move scale feedback" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_load_target_ramp_waits_for_new_scale_sample_even_as_target_changes(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_scale_interval.setValue(250)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window.spin_initial_length.setValue(30.56)
+    window._calibrated_stiffness_g_per_mm = 1.0
+    window._calibrated_stiffness_length_mm = 30.56
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=5.0,
+        plateau_index=1,
+    )
+    sample_time_s = time.time()
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = sample_time_s
+
+    try:
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+        ) is False
+        assert len(moves) == 1
+
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.1,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+        ) is False
+        assert len(moves) == 1
+        assert "new scale sample" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)

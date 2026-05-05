@@ -1,36 +1,54 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="330" viewBox="0 0 760 330">
-  <rect width="760" height="330" fill="#ffffff"/>
-  <text x="380" y="34" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="600">Sample-driven load/stress correction clock</text>
-  <line x1="80" y1="170" x2="700" y2="170" stroke="#222" stroke-width="2"/>
-  <g font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#222">
-    <text x="80" y="205" text-anchor="middle">0 ms</text>
-    <text x="235" y="205" text-anchor="middle">250 ms</text>
-    <text x="390" y="205" text-anchor="middle">500 ms</text>
-    <text x="545" y="205" text-anchor="middle">750 ms</text>
-    <text x="700" y="205" text-anchor="middle">1000 ms</text>
+﻿<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="470" viewBox="0 0 1040 470">
+  <rect width="1040" height="470" fill="#ffffff"/>
+  <text x="520" y="44" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="700" fill="#111827">Scale clock vs correction clock</text>
+  <text x="520" y="76" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#4b5563">Scale replies arrive about every 200-250 ms, but near-target corrections also include motor travel and settle time.</text>
+
+  <line x1="95" y1="135" x2="945" y2="135" stroke="#d1d5db" stroke-width="3"/>
+  <text x="70" y="141" text-anchor="end" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" fill="#2563eb">Scale</text>
+  <g fill="#2563eb">
+    <circle cx="120" cy="135" r="12"/>
+    <circle cx="315" cy="135" r="12"/>
+    <circle cx="510" cy="135" r="12"/>
+    <circle cx="705" cy="135" r="12"/>
+    <circle cx="900" cy="135" r="12"/>
   </g>
-  <g stroke="#2563eb" stroke-width="3" fill="#2563eb">
-    <circle cx="80" cy="170" r="8"/>
-    <circle cx="235" cy="170" r="8"/>
-    <circle cx="390" cy="170" r="8"/>
-    <circle cx="545" cy="170" r="8"/>
-    <circle cx="700" cy="170" r="8"/>
+  <g font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#374151" text-anchor="middle">
+    <text x="120" y="165">0 ms</text>
+    <text x="315" y="165">250 ms</text>
+    <text x="510" y="165">500 ms</text>
+    <text x="705" y="165">750 ms</text>
+    <text x="900" y="165">1000 ms</text>
   </g>
-  <g stroke="#f97316" stroke-width="4" fill="none" marker-end="url(#arrow)">
-    <path d="M90 150 C130 118 178 112 225 150"/>
-    <path d="M245 150 C285 118 333 112 380 150"/>
-    <path d="M400 150 C440 118 488 112 535 150"/>
-    <path d="M555 150 C595 118 643 112 690 150"/>
+
+  <text x="70" y="241" text-anchor="end" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" fill="#f97316">Near</text>
+  <line x1="120" y1="235" x2="900" y2="235" stroke="#e5e7eb" stroke-width="3"/>
+  <path d="M120 235 C180 195 250 195 315 235" fill="none" stroke="#f97316" stroke-width="6" stroke-linecap="round"/>
+  <path d="M315 235 C385 195 455 195 510 235" fill="none" stroke="#f97316" stroke-width="6" stroke-linecap="round" stroke-dasharray="1 13"/>
+  <path d="M510 235 C570 195 640 195 705 235" fill="none" stroke="#f97316" stroke-width="6" stroke-linecap="round"/>
+  <g fill="#f97316">
+    <polygon points="315,235 292,220 300,251"/>
+    <polygon points="705,235 682,220 690,251"/>
   </g>
-  <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f97316"/>
-    </marker>
-  </defs>
-  <text x="157" y="105" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#f97316">move + settle</text>
-  <text x="312" y="105" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#f97316">move + settle</text>
-  <text x="467" y="105" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#f97316">move + settle</text>
-  <text x="622" y="105" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#f97316">move + settle</text>
-  <text x="390" y="258" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#333">Load/stress decisions are made on fresh scale samples, not every UI/control tick.</text>
-  <text x="390" y="286" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#333">Motor can move smoothly between samples, but the next closed-loop correction waits for new force feedback.</text>
+  <text x="215" y="205" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#f97316">move + settle</text>
+  <text x="410" y="205" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#f97316">wait for post-move scale</text>
+  <text x="608" y="205" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#f97316">next gated move</text>
+
+  <text x="70" y="343" text-anchor="end" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" fill="#16a34a">Far</text>
+  <line x1="120" y1="337" x2="900" y2="337" stroke="#e5e7eb" stroke-width="3"/>
+  <path d="M120 337 C270 300 470 300 900 337" fill="none" stroke="#16a34a" stroke-width="8" stroke-linecap="round"/>
+  <g fill="#16a34a">
+    <polygon points="900,337 875,319 883,354"/>
+  </g>
+  <g stroke="#10b981" stroke-width="3" stroke-dasharray="6 7">
+    <line x1="315" y1="290" x2="315" y2="365"/>
+    <line x1="510" y1="290" x2="510" y2="365"/>
+    <line x1="705" y1="290" x2="705" y2="365"/>
+  </g>
+  <g font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#065f46" text-anchor="middle">
+    <text x="315" y="385">fresh sample updates prediction</text>
+    <text x="510" y="405">fresh sample updates speed</text>
+    <text x="705" y="385">fresh sample checks trend</text>
+  </g>
+
+  <text x="520" y="448" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#374151">Far mode can react at the scale cadence; near mode deliberately waits for completed motion plus post-move force feedback.</text>
 </svg>

@@ -196,6 +196,7 @@ SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S = 15.0
 SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S = 5.0
 SERVO_FULL_SPEED_ERROR_RATIO = 8.0
+SERVO_CRUISE_FEEDBACK_SAFETY_FACTOR = 1.25
 SERVO_MOTION_SETTLE_AFTER_MOVE_S = 0.05
 SERVO_AUTO_TOLERANCE_LOAD_G = 0.005
 WIRE_BREAK_MIN_SETPOINT_MA = 5.0
@@ -1881,6 +1882,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_error_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_value_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_time_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_last_scale_timestamp_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_last_scale_timestamp_by_clock: dict[tuple[str, int], float] = {}
         self._seek_last_effective_position_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_live_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
@@ -6029,6 +6032,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_error_by_key.pop(seek_key, None)
         self._seek_last_value_by_key.pop(seek_key, None)
         self._seek_last_time_by_key.pop(seek_key, None)
+        self._seek_last_scale_timestamp_by_key.pop(seek_key, None)
         self._seek_last_effective_position_by_key.pop(seek_key, None)
         self._seek_no_response_count_by_key.pop(seek_key, None)
         self._seek_travel_by_key.pop(seek_key, None)
@@ -6131,7 +6135,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return max(self._minimum_held_speed_mm_s(), abs(float(ramp_rate)) / abs(float(sensitivity)))
 
-    def _seek_command_step_mm(self, nudge_mm: float, speed_mm_s: float, *, basis: str | None = None) -> float:
+    def _seek_command_step_mm(
+        self,
+        nudge_mm: float,
+        speed_mm_s: float,
+        *,
+        basis: str | None = None,
+        cruise_mode: bool = False,
+    ) -> float:
+        if cruise_mode:
+            return max(self._motor_step_mm(), abs(float(nudge_mm)))
         if (
             self._is_current_sweep_mode(self._automation_name)
             and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
@@ -6156,6 +6169,71 @@ class MainWindow(QtWidgets.QMainWindow):
             self._last_feedback_wait_log_s = now_s
             self._log(message)
 
+    def _latest_scale_sample_time_s(self) -> float | None:
+        timestamp_s = self._latest_scale_timestamp
+        if timestamp_s is None:
+            return None
+        try:
+            return float(timestamp_s)
+        except (TypeError, ValueError):
+            return None
+
+    def _seek_has_unused_scale_sample(self, seek_key: tuple[str, int, float]) -> bool:
+        latest_s = self._latest_scale_sample_time_s()
+        if latest_s is None:
+            return True
+        clock_key = seek_key[0], seek_key[1]
+        last_s = self._seek_last_scale_timestamp_by_clock.get(clock_key)
+        return last_s is None or latest_s > float(last_s) + 1e-9
+
+    def _seek_supports_cruise_feedback(self, basis: str) -> bool:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        if self._automation_step_note == "setup_return_zero" or self._is_recovery_mode():
+            return False
+        if self._end_zero_fallback_armed:
+            return False
+        if self._is_calibration_mode(self._automation_name) and self._automation_step_note != "setup_preload":
+            return False
+        return True
+
+    def _seek_cruise_feedback_allowed(
+        self,
+        basis: str,
+        error_value: float,
+        tolerance: float,
+        *,
+        speed_mm_s: float,
+        seek_key: tuple[str, int, float],
+        previous_error: float | None,
+    ) -> bool:
+        if not self._seek_supports_cruise_feedback(basis):
+            return False
+        if abs(float(error_value)) <= abs(float(tolerance)):
+            return False
+        if previous_error is not None:
+            if float(previous_error) * float(error_value) < 0.0:
+                return False
+            if abs(float(error_value)) > abs(float(previous_error)) + max(abs(float(tolerance)) * 0.2, 1e-9):
+                return False
+        sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        if sensitivity is None or not math.isfinite(float(sensitivity)) or abs(float(sensitivity)) <= 0.0:
+            return False
+        sensitivity = abs(float(sensitivity))
+        remaining_mm = abs(float(error_value)) / sensitivity
+        tolerance_mm = abs(float(tolerance)) / sensitivity
+        feedback_travel_mm = (
+            max(self._minimum_held_speed_mm_s(), abs(float(speed_mm_s)))
+            * self._seek_decision_interval_s(basis)
+            * SERVO_CRUISE_FEEDBACK_SAFETY_FACTOR
+        )
+        safety_margin_mm = max(
+            self._motor_step_mm() * 2.0,
+            max(0.0, float(self.spin_backlash_mm.value())),
+            tolerance_mm,
+        )
+        return remaining_mm > feedback_travel_mm + safety_margin_mm + tolerance_mm
+
     def _seek_backlash_takeup_mm(self, movement_direction: float) -> float:
         backlash_mm = max(0.0, float(self.spin_backlash_mm.value()))
         if backlash_mm <= 0.0:
@@ -6167,7 +6245,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_requires_fresh_after_last_move(self, basis: str) -> bool:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
-        return True
+        return not self._seek_supports_cruise_feedback(basis)
 
     def _seek_uses_planned_motion_base(self, basis: str) -> bool:
         if self._automation_phase != "target_ramp":
@@ -6371,10 +6449,14 @@ class MainWindow(QtWidgets.QMainWindow):
             raise RuntimeError(
                 "Scale feedback is stale; fix the scale connection before closed-loop load/stress control."
             )
+        seek_key = self._seek_error_key(basis, target_value)
         if self._setup_zero_fallback_is_pending():
             return self._handle_pending_setup_zero_fallback()
         if self._end_zero_fallback_is_pending():
             return self._handle_pending_end_zero_fallback()
+        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._seek_has_unused_scale_sample(seek_key):
+            self._log_waiting_for_feedback("Waiting for a new scale sample before the next load/stress correction.")
+            return False
         require_after_last_move = self._seek_requires_fresh_after_last_move(basis)
         current_value = self._current_distribution_value(
             basis,
@@ -6385,18 +6467,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log_waiting_for_feedback("Waiting for a fresh scale reading before the next load/stress correction.")
                 return False
             current_value = 0.0
+        early_recorded_seek_point = False
         if self._is_recovery_mode():
             self._record_recovery_point()
-        elif self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+            early_recorded_seek_point = True
+        elif self._automation_step_note == "setup_return_zero":
             self._record_length_setup_point()
-        elif self._session_active and not self._maybe_record_scheduled_point(
-            quiet=True,
-            advance_heating=False,
-            require_fresh_after_move=require_after_last_move,
-        ):
-            return False
+            early_recorded_seek_point = True
         delta_value = target_value - current_value
-        seek_key = self._seek_error_key(basis, target_value)
         seek_sample_time_s = time.monotonic()
         current_effective_tensile_position_mm = self._current_effective_tensile_position_mm()
         self._update_live_seek_stiffness(seek_key, basis, current_value)
@@ -6442,6 +6520,45 @@ class MainWindow(QtWidgets.QMainWindow):
         if nudge_mm <= 0.0:
             raise ValueError("Set a non-zero correction step.")
         previous_error = self._seek_last_error_by_key.get(seek_key)
+        preliminary_speed_mm_s = self._seek_speed_mm_s(
+            delta_value,
+            effective_tolerance,
+            basis=basis,
+            seek_key=seek_key,
+            current_value=current_value,
+        )
+        preliminary_ramp_speed_cap_mm_s = None
+        if not self._setup_preload_takeup_active(basis, current_value, delta_value, effective_tolerance):
+            preliminary_ramp_speed_cap_mm_s = self._target_ramp_speed_cap_mm_s(basis, seek_key=seek_key)
+        if preliminary_ramp_speed_cap_mm_s is not None:
+            preliminary_speed_mm_s = min(preliminary_speed_mm_s, preliminary_ramp_speed_cap_mm_s)
+        cruise_mode = self._seek_cruise_feedback_allowed(
+            basis,
+            delta_value,
+            effective_tolerance,
+            speed_mm_s=preliminary_speed_mm_s,
+            seek_key=seek_key,
+            previous_error=previous_error,
+        )
+        if (
+            basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and not cruise_mode
+            and not self._has_fresh_scale_reading(after_s=self._motion_feedback_ready_after_s())
+        ):
+            self._log_waiting_for_feedback("Waiting for post-move scale feedback before near-target correction.")
+            return False
+        if early_recorded_seek_point:
+            pass
+        elif self._is_recovery_mode():
+            self._record_recovery_point()
+        elif self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+            self._record_length_setup_point()
+        elif self._session_active and not self._maybe_record_scheduled_point(
+            quiet=True,
+            advance_heating=False,
+            require_fresh_after_move=not cruise_mode and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA},
+        ):
+            return False
         overshot_target = previous_error is not None and previous_error * delta_value < 0.0
         if overshot_target:
             if self._target_reversal_is_practical_hold(
@@ -6478,19 +6595,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             seek_direction *= self._tension_motion_sign()
         movement_direction = math.copysign(1.0, seek_direction)
-        speed_mm_s = self._seek_speed_mm_s(
-            delta_value,
-            effective_tolerance,
-            basis=basis,
-            seek_key=seek_key,
-            current_value=current_value,
-        )
-        ramp_speed_cap_mm_s = None
-        if not self._setup_preload_takeup_active(basis, current_value, delta_value, effective_tolerance):
-            ramp_speed_cap_mm_s = self._target_ramp_speed_cap_mm_s(basis, seek_key=seek_key)
-        if ramp_speed_cap_mm_s is not None:
-            speed_mm_s = min(speed_mm_s, ramp_speed_cap_mm_s)
-        nudge_mm = self._seek_command_step_mm(nudge_mm, speed_mm_s, basis=basis)
+        speed_mm_s = preliminary_speed_mm_s
+        nudge_mm = self._seek_command_step_mm(nudge_mm, speed_mm_s, basis=basis, cruise_mode=cruise_mode)
         backlash_takeup_mm = self._seek_backlash_takeup_mm(movement_direction)
         if not self._reverse_correction_is_worthwhile(
             basis,
@@ -6505,7 +6611,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "reversal skipped because take-up would be larger than the predicted improvement."
             )
             return True
-        chain_from_last_target = self._seek_uses_planned_motion_base(basis)
+        chain_from_last_target = self._seek_uses_planned_motion_base(basis) or cruise_mode
         base_position_mm = self._seek_motion_base_mm(basis)
         effective_base_position_mm = self._measurement_effective_position_mm()
         target_mm = base_position_mm + movement_direction * (nudge_mm + backlash_takeup_mm)
@@ -6524,6 +6630,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_error_by_key[seek_key] = delta_value
         self._seek_last_value_by_key[seek_key] = current_value
         self._seek_last_time_by_key[seek_key] = seek_sample_time_s
+        latest_scale_sample_time_s = self._latest_scale_sample_time_s()
+        if latest_scale_sample_time_s is not None:
+            self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
+            self._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = latest_scale_sample_time_s
         self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
         self._seek_travel_by_key[seek_key] = (
             self._seek_travel_by_key.get(seek_key, 0.0) + abs(nudge_mm + backlash_takeup_mm)
@@ -8443,6 +8553,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
         self._seek_last_time_by_key.clear()
+        self._seek_last_scale_timestamp_by_key.clear()
+        self._seek_last_scale_timestamp_by_clock.clear()
         self._seek_last_effective_position_by_key.clear()
         self._seek_live_stiffness_by_key.clear()
         self._seek_live_stiffness_g_per_mm = None
@@ -8847,6 +8959,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
         self._seek_last_time_by_key.clear()
+        self._seek_last_scale_timestamp_by_key.clear()
+        self._seek_last_scale_timestamp_by_clock.clear()
         self._seek_last_effective_position_by_key.clear()
         self._seek_live_stiffness_by_key.clear()
         self._seek_last_stiffness_value_by_basis.clear()

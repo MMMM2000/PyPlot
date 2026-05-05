@@ -34,3 +34,5 @@
 - Mini DMA current-sweep servo corrections now cap predicted move distance by specimen strain percentage, defaulting to `5%`, and cap correction speed by both `%/s` and a hard `mm/s` motor ceiling so long and short wires scale more consistently.
 - Mini DMA current sweeps keep the requested current ramp static during ordinary servo error; operators should lower the fixed current-ramp rate when thermal-history control matters instead of relying on automatic current pauses or stress-triggered unwind.
 - Mini DMA setup/final zero-load return no longer accepts a high residual load as zero just because the ordinary stiffness/backlash tolerance band is wide; the stable near-zero plateau fallback remains the baseline update path.
+- Mini DMA load/stress seeking now uses a hybrid far/near controller: far from target it can keep the motor moving and revise the prediction on each fresh scale sample, while near target or suspicious feedback still uses conservative post-move scale gating.
+- Mini DMA speed-control docs now distinguish the 4-5 Hz scale reply rate from the slower near-target correction frequency and include diagrams for hybrid far/near servo behavior.
