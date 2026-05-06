@@ -128,7 +128,9 @@ DEFAULT_UI_REFRESH_INTERVAL_MS = 200
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 SETUP_ZERO_FALLBACK_MIN_POINTS = 6
-SETUP_ZERO_FALLBACK_MIN_TRAVEL_MM = 0.5
+SETUP_ZERO_FALLBACK_MIN_TIME_S = 1.5
+SETUP_ZERO_FALLBACK_MIN_STRAIN_PCT = 0.5
+SETUP_ZERO_FALLBACK_MIN_MOTOR_STEPS = 10.0
 SETUP_ZERO_FALLBACK_RAW_SPAN_G = 0.012
 SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
 SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
@@ -2091,6 +2093,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_live_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._seek_travel_by_key: dict[tuple[str, int, float], float] = {}
+        self._setup_preload_engaged_seek_keys: set[tuple[str, int, float]] = set()
         self._seek_live_stiffness_g_per_mm: float | None = None
         self._seek_last_stiffness_value_by_basis: dict[str, float] = {}
         self._seek_last_stiffness_position_by_basis: dict[str, float] = {}
@@ -6870,8 +6873,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_speed_limited_step_mm(self, basis: str | None, speed_mm_s: float) -> float:
         return max(
             self._motor_step_mm(),
-            abs(float(speed_mm_s)) * self._seek_decision_interval_s(basis),
+            self._seek_travel_during_interval_mm(speed_mm_s, basis),
         )
+
+    def _seek_travel_during_interval_mm(self, speed_mm_s: float, basis: str | None) -> float:
+        interval_s = self._seek_decision_interval_s(basis)
+        speed = max(self._minimum_held_speed_mm_s(), abs(float(speed_mm_s)))
+        profile_travel = self._motion_profile_travel_mm(speed, interval_s)
+        if profile_travel is not None:
+            return max(0.0, profile_travel)
+        return speed * interval_s
 
     def _seek_max_travel_mm(self) -> float:
         if self._is_current_sweep_mode(self._automation_name):
@@ -6935,6 +6946,8 @@ class MainWindow(QtWidgets.QMainWindow):
         current_value: float,
         delta_value: float,
         effective_tolerance: float,
+        *,
+        seek_key: tuple[str, int, float] | None = None,
     ) -> bool:
         if (
             self._automation_phase != "target_ramp"
@@ -6943,22 +6956,44 @@ class MainWindow(QtWidgets.QMainWindow):
             or delta_value <= 0.0
         ):
             return False
+        if seek_key is not None and seek_key in self._setup_preload_engaged_seek_keys:
+            return False
         current_load_g = self._basis_value_as_load_g(basis, current_value)
         if current_load_g is not None:
-            load_noise_g = (
-                0.0
-                if self._calibrated_load_noise_g is None
-                or not math.isfinite(float(self._calibrated_load_noise_g))
-                else abs(float(self._calibrated_load_noise_g))
-            )
-            takeup_threshold_g = max(
-                SETUP_PRELOAD_TAKEUP_LOAD_G,
-                SERVO_AUTO_TOLERANCE_LOAD_G * 4.0,
-                load_noise_g * SERVO_NOISE_SIGMA,
-            )
-            if abs(float(current_load_g)) <= takeup_threshold_g:
+            if abs(float(current_load_g)) <= self._setup_preload_contact_threshold_g():
                 return True
         return abs(float(current_value)) <= abs(float(effective_tolerance))
+
+    def _setup_preload_contact_threshold_g(self) -> float:
+        load_noise_g = (
+            0.0
+            if self._calibrated_load_noise_g is None
+            or not math.isfinite(float(self._calibrated_load_noise_g))
+            else abs(float(self._calibrated_load_noise_g))
+        )
+        return max(
+            SETUP_PRELOAD_TAKEUP_LOAD_G,
+            SERVO_AUTO_TOLERANCE_LOAD_G * 4.0,
+            load_noise_g * SERVO_NOISE_SIGMA,
+        )
+
+    def _update_setup_preload_engagement(
+        self,
+        seek_key: tuple[str, int, float],
+        basis: str,
+        current_value: float,
+    ) -> None:
+        if (
+            self._automation_phase != "target_ramp"
+            or self._automation_step_note != "setup_preload"
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+        ):
+            return
+        current_load_g = self._basis_value_as_load_g(basis, current_value)
+        if current_load_g is None:
+            return
+        if abs(float(current_load_g)) > self._setup_preload_contact_threshold_g():
+            self._setup_preload_engaged_seek_keys.add(seek_key)
 
     def _setup_preload_relaxation_active(
         self,
@@ -7227,6 +7262,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 current_value,
                 error_value,
                 tolerance,
+                seek_key=seek_key,
             )
         ):
             return min(base_speed, self._setup_slack_speed_mm_s())
@@ -7406,9 +7442,8 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_preload_relaxation: bool = False,
     ) -> bool:
         if self._automation_step_note == "setup_preload":
-            if not setup_preload_relaxation:
-                return False
-        elif not self._seek_supports_cruise_feedback(basis):
+            return False
+        if not self._seek_supports_cruise_feedback(basis):
             return False
         if abs(float(error_value)) <= abs(float(tolerance)):
             return False
@@ -7424,8 +7459,7 @@ class MainWindow(QtWidgets.QMainWindow):
         remaining_mm = abs(float(error_value)) / sensitivity
         tolerance_mm = abs(float(tolerance)) / sensitivity
         feedback_travel_mm = (
-            max(self._minimum_held_speed_mm_s(), abs(float(speed_mm_s)))
-            * self._seek_decision_interval_s(basis)
+            self._seek_travel_during_interval_mm(speed_mm_s, basis)
             * SERVO_CRUISE_FEEDBACK_SAFETY_FACTOR
         )
         safety_margin_mm = max(
@@ -7452,8 +7486,6 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_preload_relaxation: bool = False,
     ) -> bool:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
-            return False
-        if setup_preload_relaxation:
             return False
         return not self._seek_supports_cruise_feedback(basis)
 
@@ -7527,6 +7559,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log_waiting_for_feedback("Returning to zero-load plateau position before computing l0.")
         return False
 
+    def _zero_fallback_min_travel_mm(self) -> float:
+        length_mm = max(0.001, float(self.spin_initial_length.value()))
+        strain_travel_mm = length_mm * (SETUP_ZERO_FALLBACK_MIN_STRAIN_PCT / 100.0)
+        motor_travel_mm = self._motor_step_mm() * SETUP_ZERO_FALLBACK_MIN_MOTOR_STEPS
+        return max(strain_travel_mm, motor_travel_mm)
+
+    def _zero_fallback_plateau_motion_ready(
+        self,
+        plateau_points: Sequence[MeasurementPoint],
+    ) -> tuple[bool, float, float, float]:
+        if not plateau_points:
+            return False, 0.0, 0.0, self._zero_fallback_min_travel_mm()
+        plateau_positions = [point.raw_position_mm for point in plateau_points]
+        travel_mm = max(plateau_positions) - min(plateau_positions)
+        elapsed_values = [point.elapsed_s for point in plateau_points]
+        elapsed_s = max(elapsed_values) - min(elapsed_values)
+        min_travel_mm = self._zero_fallback_min_travel_mm()
+        ready = (
+            abs(travel_mm) >= min_travel_mm
+            and elapsed_s >= SETUP_ZERO_FALLBACK_MIN_TIME_S
+        )
+        return ready, abs(travel_mm), elapsed_s, min_travel_mm
+
     def _maybe_start_setup_zero_plateau_fallback(
         self,
         basis: str,
@@ -7561,10 +7616,10 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         if len(plateau_points) < SETUP_ZERO_FALLBACK_MIN_POINTS:
             return False
-        plateau_positions = [point.raw_position_mm for point in plateau_points]
-        travel_mm = max(plateau_positions) - min(plateau_positions)
-        min_travel_mm = max(SETUP_ZERO_FALLBACK_MIN_TRAVEL_MM, self._motor_step_mm() * 5.0)
-        if abs(travel_mm) < min_travel_mm:
+        plateau_ready, travel_mm, elapsed_s, min_travel_mm = self._zero_fallback_plateau_motion_ready(
+            plateau_points
+        )
+        if not plateau_ready:
             return False
         plateau_first_position_mm = float(plateau_points[0].raw_position_mm)
         if plateau_first_position_mm is None:
@@ -7577,7 +7632,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(
             "Detected zero-load plateau at "
             f"{float(plateau_raw_g):.5f} g after "
-            f"{_format_compact_unit(abs(travel_mm), 'mm')} of return travel; "
+            f"{_format_compact_unit(abs(travel_mm), 'mm')} of return travel "
+            f"over {_format_duration(elapsed_s)} "
+            f"(threshold {_format_compact_unit(min_travel_mm, 'mm')} and "
+            f"{_format_duration(SETUP_ZERO_FALLBACK_MIN_TIME_S)}); "
             "using it as this run's zero-load reference and returning to "
             f"{_format_compact_unit(plateau_first_position_mm, 'mm')} for l0."
         )
@@ -7660,10 +7718,10 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         if len(plateau_points) < SETUP_ZERO_FALLBACK_MIN_POINTS:
             return False
-        plateau_positions = [point.raw_position_mm for point in plateau_points]
-        travel_mm = max(plateau_positions) - min(plateau_positions)
-        min_travel_mm = max(SETUP_ZERO_FALLBACK_MIN_TRAVEL_MM, self._motor_step_mm() * 5.0)
-        if abs(travel_mm) < min_travel_mm:
+        plateau_ready, travel_mm, elapsed_s, min_travel_mm = self._zero_fallback_plateau_motion_ready(
+            plateau_points
+        )
+        if not plateau_ready:
             return False
         plateau_first_position_mm = float(plateau_points[0].raw_position_mm)
         if plateau_first_position_mm is None:
@@ -7675,7 +7733,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(
             "Detected zero-load plateau at "
             f"{float(plateau_raw_g):.5f} g after "
-            f"{_format_compact_unit(abs(travel_mm), 'mm')} of return travel; "
+            f"{_format_compact_unit(abs(travel_mm), 'mm')} of return travel "
+            f"over {_format_duration(elapsed_s)} "
+            f"(threshold {_format_compact_unit(min_travel_mm, 'mm')} and "
+            f"{_format_duration(SETUP_ZERO_FALLBACK_MIN_TIME_S)}); "
             "using it as the corrected zero-load reference and returning to "
             f"{_format_compact_unit(plateau_first_position_mm, 'mm')}."
         )
@@ -7742,6 +7803,7 @@ class MainWindow(QtWidgets.QMainWindow):
             tolerance,
             seek_key=seek_key,
         )
+        self._update_setup_preload_engagement(seek_key, basis, current_value)
         if self._setup_preload_overload_exceeded(basis, target_value, current_value, effective_tolerance):
             self._stop_for_setup_preload_overload(basis, target_value, current_value)
             return False
@@ -7772,6 +7834,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current_value,
             delta_value,
             effective_tolerance,
+            seek_key=seek_key,
         )
         if setup_preload_takeup:
             nudge_mm = self._seek_speed_limited_step_mm(
@@ -7799,10 +7862,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current_value=current_value,
         )
         preliminary_ramp_speed_cap_mm_s = None
-        if (
-            not setup_preload_relaxation
-            and not setup_preload_takeup
-        ):
+        if not setup_preload_takeup:
             preliminary_ramp_speed_cap_mm_s = self._target_ramp_speed_cap_mm_s(basis, seek_key=seek_key)
         if preliminary_ramp_speed_cap_mm_s is not None:
             preliminary_speed_mm_s = min(preliminary_speed_mm_s, preliminary_ramp_speed_cap_mm_s)
@@ -7895,7 +7955,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(
                 f"Direction reversal: adding {_format_compact_unit(backlash_takeup_mm, 'mm')} backlash take-up."
             )
-        if setup_preload_takeup:
+        if setup_preload_takeup or self._automation_step_note == "setup_preload":
             command_speed_mm_s = speed_mm_s
         else:
             command_speed_mm_s = self._seek_feedback_compensated_speed_mm_s(
@@ -8088,8 +8148,62 @@ class MainWindow(QtWidgets.QMainWindow):
         effective_log_interval_s = max(control_interval_s, self._current_sweep_log_interval_ms() / 1000.0)
         return max(1, int(math.ceil(max(0.0, duration_s) / effective_log_interval_s)))
 
+    def _tic_accel_decel_mm_s2(self) -> tuple[float, float] | None:
+        status_text = self._tic_status_text
+        if not status_text:
+            return None
+        accel_units = _extract_status_float(status_text, "Max acceleration")
+        decel_units = _extract_status_float(status_text, "Max deceleration")
+        if accel_units is None or not math.isfinite(float(accel_units)) or float(accel_units) <= 0.0:
+            return None
+        if decel_units is None or not math.isfinite(float(decel_units)) or float(decel_units) <= 0.0:
+            decel_units = accel_units
+        steps_per_mm = max(1e-9, float(self.spin_steps_per_mm.value()))
+        accel_mm_s2 = float(accel_units) / 100.0 / steps_per_mm
+        decel_mm_s2 = float(decel_units) / 100.0 / steps_per_mm
+        if accel_mm_s2 <= 0.0 or decel_mm_s2 <= 0.0:
+            return None
+        return accel_mm_s2, decel_mm_s2
+
+    def _motion_profile_duration_s(self, distance_mm: float, speed_mm_s: float) -> float | None:
+        accel_decel = self._tic_accel_decel_mm_s2()
+        if accel_decel is None:
+            return None
+        distance = abs(float(distance_mm))
+        if distance <= 0.0:
+            return 0.0
+        speed = max(self._minimum_held_speed_mm_s(), abs(float(speed_mm_s)))
+        accel_mm_s2, decel_mm_s2 = accel_decel
+        accel_distance = (speed * speed) / (2.0 * accel_mm_s2)
+        decel_distance = (speed * speed) / (2.0 * decel_mm_s2)
+        if distance >= accel_distance + decel_distance:
+            cruise_distance = distance - accel_distance - decel_distance
+            return (speed / accel_mm_s2) + (cruise_distance / speed) + (speed / decel_mm_s2)
+        peak_speed = math.sqrt(
+            (2.0 * distance * accel_mm_s2 * decel_mm_s2) / (accel_mm_s2 + decel_mm_s2)
+        )
+        return (peak_speed / accel_mm_s2) + (peak_speed / decel_mm_s2)
+
+    def _motion_profile_travel_mm(self, speed_mm_s: float, duration_s: float) -> float | None:
+        accel_decel = self._tic_accel_decel_mm_s2()
+        if accel_decel is None:
+            return None
+        duration = max(0.0, float(duration_s))
+        if duration <= 0.0:
+            return 0.0
+        speed = max(self._minimum_held_speed_mm_s(), abs(float(speed_mm_s)))
+        accel_mm_s2, _decel_mm_s2 = accel_decel
+        accel_time = speed / accel_mm_s2
+        accel_distance = (speed * speed) / (2.0 * accel_mm_s2)
+        if duration <= accel_time:
+            return 0.5 * accel_mm_s2 * duration * duration
+        return accel_distance + (speed * (duration - accel_time))
+
     def _move_duration_s(self, distance_mm: float, speed_mm_s: float) -> float:
         speed = max(self._minimum_held_speed_mm_s(), abs(float(speed_mm_s)))
+        profile_duration = self._motion_profile_duration_s(distance_mm, speed)
+        if profile_duration is not None:
+            return max(0.0, profile_duration)
         return max(0.0, abs(float(distance_mm)) / max(speed, 1e-9))
 
     def _control_summary_text(self) -> str:
@@ -8656,7 +8770,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         selected_speed_mm_s = selected_speed_steps_per_s / steps_per_mm
-        expected_duration_s = abs(delta_steps) / max(selected_speed_steps_per_s, 1e-9)
+        expected_duration_s = self._move_duration_s(delta_steps / steps_per_mm, selected_speed_mm_s)
         self._log(
             f"Raw-step move command sent to {target_steps} steps "
             f"({delta_steps:+d} steps) at {selected_speed_steps_per_s:.3f} steps/s."
@@ -9967,6 +10081,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_stiffness_position_by_basis.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
+        self._setup_preload_engaged_seek_keys.clear()
         if not self._session_active:
             self._start_session(enable_logging=False, record_initial_point=False)
             if not self._session_active:
@@ -10311,6 +10426,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_name = RECOVERY_POSITION
         self._set_automation_context(phase="recover")
         self._auto_ramp_timer.start(self._automation_interval_ms)
+        self._apply_ui_refresh_interval()
+        self._ui_refresh_timer.start()
         self._log(f"Started displacement recovery: {label}.")
         self._update_recipe_buttons()
         self._update_recipe_progress()
@@ -10353,6 +10470,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._end_zero_fallback_raw_g = None
         self._set_automation_context(phase="recover", basis=HSW_BASIS_LOAD_G, target_value=0.0, plateau_index=0)
         self._auto_ramp_timer.start(self._automation_interval_ms)
+        self._apply_ui_refresh_interval()
+        self._ui_refresh_timer.start()
         self._log("Started load-zero recovery.")
         self._update_recipe_buttons()
         self._update_recipe_progress()
@@ -10390,6 +10509,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_stiffness_position_by_basis.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
+        self._setup_preload_engaged_seek_keys.clear()
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None

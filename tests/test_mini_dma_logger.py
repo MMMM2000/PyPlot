@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import csv
 import importlib
 import json
+import math
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -609,6 +610,7 @@ def test_setup_zero_plateau_fallback_updates_reference_and_returns_to_first_plat
         window._current_position_mm = position_mm
         window._effective_position_mm = position_mm
         window._record_length_setup_point()
+        window._length_setup_points[-1].elapsed_s = index * 0.4
 
     window._latest_scale_value_g = 21.17
     window._current_position_mm = -2.2
@@ -628,6 +630,137 @@ def test_setup_zero_plateau_fallback_updates_reference_and_returns_to_first_plat
         assert window._setup_zero_fallback_return_position_mm == pytest.approx(-1.0)
         assert window._setup_zero_position_mm == pytest.approx(-1.0)
         assert "zero-load plateau" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_zero_plateau_fallback_accepts_short_stable_zero_travel(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    targets: list[float] = []
+    window._move_to_position_mm = lambda target_mm, **_kwargs: targets.append(target_mm) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(20.0)
+    window._automation_step_note = "setup_return_zero"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
+    window._automation_phase = "seek"
+    window._latest_scale_timestamp = time.time()
+    window._setup_return_zero_start_point_index = 0
+    window._length_setup_start_monotonic = time.monotonic()
+
+    for index, position_mm in enumerate([7.000, 7.025, 7.050, 7.075, 7.100, 7.125]):
+        window._latest_scale_value_g = 21.170 + (0.0005 if index % 2 else 0.0)
+        window._current_position_mm = position_mm
+        window._effective_position_mm = position_mm
+        window._record_length_setup_point()
+        window._length_setup_points[-1].elapsed_s = index * 0.4
+
+    window._latest_scale_value_g = 21.170
+    window._current_position_mm = 7.150
+    window._effective_position_mm = 7.150
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=0.02,
+        )
+
+        assert reached is False
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
+        assert targets == [pytest.approx(7.000)]
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_zero_plateau_fallback_waits_for_stable_plateau_time(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    targets: list[float] = []
+    window._move_to_position_mm = lambda target_mm, **_kwargs: targets.append(target_mm) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(20.0)
+    window._automation_step_note = "setup_return_zero"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
+    window._automation_phase = "seek"
+    window._latest_scale_timestamp = time.time()
+    window._setup_return_zero_start_point_index = 0
+    window._length_setup_start_monotonic = time.monotonic()
+
+    for index, position_mm in enumerate([7.000, 7.025, 7.050, 7.075, 7.100, 7.125]):
+        window._latest_scale_value_g = 21.170 + (0.0005 if index % 2 else 0.0)
+        window._current_position_mm = position_mm
+        window._effective_position_mm = position_mm
+        window._record_length_setup_point()
+        window._length_setup_points[-1].elapsed_s = index * 0.1
+
+    window._latest_scale_value_g = 21.170
+    window._current_position_mm = 7.150
+    window._effective_position_mm = 7.150
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=0.02,
+        )
+
+        assert reached is False
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.2)
+        assert targets
+        assert "zero-load plateau" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_zero_plateau_fallback_scales_travel_with_wire_length(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    targets: list[float] = []
+    window._move_to_position_mm = lambda target_mm, **_kwargs: targets.append(target_mm) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(40.0)
+    window._automation_step_note = "setup_return_zero"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
+    window._automation_phase = "seek"
+    window._latest_scale_timestamp = time.time()
+    window._setup_return_zero_start_point_index = 0
+    window._length_setup_start_monotonic = time.monotonic()
+
+    for index, position_mm in enumerate([7.000, 7.025, 7.050, 7.075, 7.100, 7.125]):
+        window._latest_scale_value_g = 21.170 + (0.0005 if index % 2 else 0.0)
+        window._current_position_mm = position_mm
+        window._effective_position_mm = position_mm
+        window._record_length_setup_point()
+        window._length_setup_points[-1].elapsed_s = index * 0.4
+
+    window._latest_scale_value_g = 21.170
+    window._current_position_mm = 7.150
+    window._effective_position_mm = 7.150
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=0.02,
+        )
+
+        assert reached is False
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.2)
+        assert targets
+        assert "zero-load plateau" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -784,6 +917,7 @@ def test_recovery_load_zero_plateau_fallback_accepts_near_zero_load(
         window._current_position_mm = position_mm
         window._effective_position_mm = position_mm
         window._record_recovery_point()
+        window._recovery_points[-1].elapsed_s = index * 0.4
 
     window._latest_scale_value_g = 21.17
     window._latest_scale_timestamp = time.time()
@@ -2208,7 +2342,7 @@ def test_setup_preload_above_target_relaxes_instead_of_stopping(tmp_path: Path, 
         _close_test_window(window)
 
 
-def test_setup_preload_above_target_uses_cruise_global_stage_speed(tmp_path: Path, qtbot) -> None:
+def test_setup_preload_above_target_uses_ramp_cap_without_cruise(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     commands: list[dict[str, object]] = []
 
@@ -2222,13 +2356,12 @@ def test_setup_preload_above_target_uses_cruise_global_stage_speed(tmp_path: Pat
     window.spin_zero_load_scale_g.setValue(21.17)
     window.spin_diameter.setValue(0.0137)
     window.spin_steps_per_mm.setValue(800.0)
-    window.spin_motion_speed_mm_s.setValue(0.1)
-    window.spin_setup_preload_duration_s.setValue(10.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+    window.spin_setup_preload_duration_s.setValue(20.0)
     window._calibrated_stiffness_g_per_mm = 22.7
     window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
     window._automation_active = True
     window._automation_name = mini_dma_mod.CALIBRATION
-    window._active_target_ramp_rate_value_s = 2.0
     window._set_automation_context(
         phase="target_ramp",
         basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
@@ -2249,9 +2382,120 @@ def test_setup_preload_above_target_uses_cruise_global_stage_speed(tmp_path: Pat
 
         assert reached is False
         assert commands
-        assert commands[0]["speed_mm_s"] == pytest.approx(0.1)
-        assert commands[0]["chain_from_last_target"] is True
-        assert abs(float(commands[0]["target_mm"]) - window._current_position_mm) > window._motor_step_mm()
+        sensitivity = mini_dma_mod.stress_mpa_from_load_g(22.7, window.spin_diameter.value())
+        assert sensitivity is not None
+        expected_cap_mm_s = max(window._minimum_held_speed_mm_s(), (20.0 / 20.0) / sensitivity)
+        assert commands[0]["speed_mm_s"] == pytest.approx(expected_cap_mm_s)
+        assert commands[0]["chain_from_last_target"] is False
+        assert abs(float(commands[0]["target_mm"]) - window._current_position_mm) >= window._motor_step_mm()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_setup_preload_relaxation_waits_for_post_move_feedback(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.17)
+    window.spin_diameter.setValue(0.0137)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._calibrated_stiffness_g_per_mm = 22.7
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CALIBRATION
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=20.0,
+        note="setup_preload",
+    )
+    overload_g = mini_dma_mod.load_g_from_stress_mpa(100.0, window.spin_diameter.value())
+    assert overload_g is not None
+    sample_time_s = time.time()
+    window._latest_scale_value_g = 21.17 - overload_g
+    window._latest_scale_timestamp = sample_time_s
+    window._last_motion_command_time_s = sample_time_s - 0.05
+    window._last_motion_expected_complete_time_s = sample_time_s + 5.0
+    window._last_move_target_mm = 7.6725
+    window._last_effective_move_target_mm = 7.6725
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            tolerance=window._auto_requested_tolerance_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        )
+
+        assert reached is False
+        assert moves == []
+        assert "post-move scale feedback" in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_setup_preload_leaves_slack_mode_after_load_response(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    commands: list[dict[str, object]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        commands.append({"target_mm": target_mm, **kwargs})
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.17)
+    window.spin_diameter.setValue(0.03)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(80.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+    window.spin_setup_slack_speed_strain_pct_s.setValue(1.0)
+    window.spin_setup_preload_duration_s.setValue(20.0)
+    window._calibrated_stiffness_g_per_mm = 100.0
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=20.0,
+        note="setup_preload",
+    )
+    response_g = mini_dma_mod.load_g_from_stress_mpa(5.0, window.spin_diameter.value())
+    assert response_g is not None
+    window._latest_scale_value_g = 21.17 - response_g
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            tolerance=window._auto_requested_tolerance_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        )
+
+        assert reached is False
+        assert commands
+        commands.clear()
+        window._latest_scale_value_g = 21.17
+        window._latest_scale_timestamp = time.time() + 1.0
+
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            tolerance=window._auto_requested_tolerance_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        )
+
+        assert reached is False
+        assert commands
+        sensitivity = mini_dma_mod.stress_mpa_from_load_g(100.0, window.spin_diameter.value())
+        assert sensitivity is not None
+        expected_cap_mm_s = max(window._minimum_held_speed_mm_s(), (20.0 / 20.0) / sensitivity)
+        assert commands[0]["speed_mm_s"] == pytest.approx(expected_cap_mm_s)
+        assert commands[0]["speed_mm_s"] < 0.8
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -4735,6 +4979,7 @@ def test_setup_zero_plateau_fallback_runs_before_target_acceptance(tmp_path: Pat
             phase="setup_return_zero",
         )
         point.raw_load_g = raw
+        point.elapsed_s = index * 0.4
         window._length_setup_points.append(point)
 
     moves: list[float] = []
@@ -4792,6 +5037,7 @@ def test_recovery_zero_plateau_fallback_runs_before_target_acceptance(tmp_path: 
             phase="recovery_load",
         )
         point.raw_load_g = raw
+        point.elapsed_s = index * 0.4
         window._recovery_points.append(point)
 
     moves: list[float] = []
@@ -5024,7 +5270,7 @@ def test_setup_preload_near_target_fallback_uses_minimum_speed(tmp_path: Path, q
         )
 
         assert reached is False
-        assert moves == [(pytest.approx(0.01), pytest.approx(0.01 / 0.7))]
+        assert moves == [(pytest.approx(0.01), pytest.approx(0.01))]
     finally:
         _close_test_window(window)
 
@@ -5313,6 +5559,24 @@ def test_recovery_timer_records_live_points_during_position_move(tmp_path: Path,
         assert len(window._recovery_points) == 1
         assert window._recovery_points[0].load_g == pytest.approx(0.2)
         assert len(window._session_points) == 0
+    finally:
+        _close_test_window(window)
+
+
+def test_recovery_position_start_restarts_ui_refresh_timer(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._preflight_recipe_hardware = lambda _steps: True  # type: ignore[method-assign]
+    window._ui_refresh_timer.stop()
+    window._current_position_mm = 1.0
+    window._effective_position_mm = 1.0
+    window._position_reference_mm = 0.0
+
+    try:
+        window._start_recovery_displacement_zero()
+
+        assert window._automation_active is True
+        assert window._automation_name == mini_dma_mod.RECOVERY_POSITION
+        assert window._ui_refresh_timer.isActive() is True
     finally:
         _close_test_window(window)
 
@@ -6513,6 +6777,58 @@ def test_gated_seek_command_speed_uses_hard_cap_when_dead_time_dominates(tmp_pat
         )
 
         assert speed == pytest.approx(30.56 * 0.15)
+    finally:
+        _close_test_window(window)
+
+
+def test_move_duration_includes_tic_acceleration_and_deceleration(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._tic_status_text = "\n".join(
+        [
+            "Max acceleration: 100000",
+            "Max deceleration: 100000",
+        ]
+    )
+
+    try:
+        # 100000 Tic accel units = 1000 microsteps/s^2 = 1.25 mm/s^2 at 800 units/mm.
+        assert window._move_duration_s(1.0, 1.0) == pytest.approx(1.8)
+        assert window._move_duration_s(0.1, 1.0) == pytest.approx(2.0 * math.sqrt(0.1 / 1.25))
+    finally:
+        _close_test_window(window)
+
+
+def test_move_duration_falls_back_to_linear_without_tic_acceleration(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert window._move_duration_s(1.0, 0.5) == pytest.approx(2.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_seek_travel_interval_uses_tic_acceleration_limit(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_scale_interval.setValue(250)
+    window._tic_status_text = "\n".join(
+        [
+            "Max acceleration: 100000",
+            "Max deceleration: 100000",
+        ]
+    )
+
+    try:
+        # At 1.25 mm/s^2, 250 ms from rest reaches only 0.5*a*t^2 = 0.0390625 mm.
+        assert window._seek_travel_during_interval_mm(
+            1.0,
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+        ) == pytest.approx(0.0390625)
+        assert window._seek_speed_limited_step_mm(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            1.0,
+        ) == pytest.approx(0.0390625)
     finally:
         _close_test_window(window)
 
