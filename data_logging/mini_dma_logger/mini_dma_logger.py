@@ -2113,6 +2113,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_setup_txt_path: Path | None = None
         self._session_setup_csv_path: Path | None = None
         self._session_start_wall_s = 0.0
+        self._session_raw_scale_start_wall_s = 0.0
         self._last_session_log_timestamp_s: float | None = None
         self._session_raw_scale_count = 0
         self._session_logging_enabled = True
@@ -2140,6 +2141,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_interval_ms = DEFAULT_CONTROL_INTERVAL_MS
         self._automation_total_steps = 0
         self._automation_completed_ticks = 0
+        self._automation_progress_started_s = 0.0
+        self._automation_progress_last_format_update_s = 0.0
         self._automation_name = ""
         self._automation_phase = "idle"
         self._automation_step_note: str | None = None
@@ -2188,6 +2191,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_figure: Figure | None = None
         self._length_setup_canvas: Any = None
         self._length_setup_start_monotonic = 0.0
+        self._length_setup_last_record_scale_timestamp: float | None = None
         self._length_setup_points: list[MeasurementPoint] = []
         self._motor_step_calibration_dialog: QtWidgets.QDialog | None = None
         self._motor_step_calibration_status_label: QtWidgets.QLabel | None = None
@@ -2222,6 +2226,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_canvas: Any = None
         self._recovery_start_elapsed_s: float | None = None
         self._recovery_start_monotonic = 0.0
+        self._recovery_last_record_scale_timestamp: float | None = None
+        self._pending_recovery_return_duration_s: float | None = None
         self._recovery_points: list[MeasurementPoint] = []
         self.action_timing_settings: QtGui.QAction | None = None
         self.action_mirror_run_log: QtGui.QAction | None = None
@@ -3262,9 +3268,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_setup_return_duration_s.setValue(SETUP_RETURN_DEFAULT_DURATION_S)
         self.spin_setup_return_duration_s.setSuffix(" s")
         self.spin_setup_return_duration_s.setToolTip(
-            "Desired time for the setup return to zero load and calibration return-to-start recovery."
+            "Desired time for return-to-zero/start recovery; setup and recipe-finish recovery use this target."
         )
-        strain_setup_form.addRow("Setup return time", self.spin_setup_return_duration_s)
         self.spin_setup_preload_tolerance_mpa = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_preload_tolerance_mpa.setDecimals(4)
         self.spin_setup_preload_tolerance_mpa.setRange(0.0001, 10000.0)
@@ -3823,6 +3828,7 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_form = QtWidgets.QFormLayout()
         manual_form.addRow("Manual move speed", self.spin_motion_speed_mm_s)
         manual_form.addRow("Single-click step", self.spin_jog_mm)
+        manual_form.addRow("Return-to-zero time", self.spin_setup_return_duration_s)
         manual_layout.addLayout(manual_form)
         manual_motion_row = QtWidgets.QVBoxLayout()
         manual_motion_row.setSpacing(6)
@@ -5732,8 +5738,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _setup_return_duration_s(self) -> float:
         return max(0.1, float(self.spin_setup_return_duration_s.value()))
 
-    def _setup_return_speed_for_distance_mm_s(self, distance_mm: float) -> float:
-        speed = abs(float(distance_mm)) / self._setup_return_duration_s()
+    def _setup_return_speed_for_distance_mm_s(
+        self,
+        distance_mm: float,
+        *,
+        duration_s: float | None = None,
+    ) -> float:
+        duration = self._setup_return_duration_s() if duration_s is None else max(0.1, float(duration_s))
+        speed = abs(float(distance_mm)) / duration
         return max(self._minimum_held_speed_mm_s(), min(self._setup_motion_speed_cap_mm_s(), speed))
 
     def _setup_return_zero_speed_mm_s(self, basis: str | None, current_value: float | None) -> float:
@@ -8952,9 +8964,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._tic_keepalive_timer.setInterval(self._tic_keepalive_interval_ms())
 
     def _session_raw_scale_rate_hz(self) -> float | None:
-        if self._session_start_wall_s <= 0.0:
+        started_s = self._session_raw_scale_start_wall_s or self._session_start_wall_s
+        if started_s <= 0.0:
             return None
-        elapsed_s = max(0.0, time.time() - self._session_start_wall_s)
+        elapsed_s = max(0.0, time.time() - started_s)
         if elapsed_s <= 0.0 or self._session_raw_scale_count <= 0:
             return None
         return self._session_raw_scale_count / elapsed_s
@@ -9224,6 +9237,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_logging_enabled = bool(enable_logging)
         self._session_start_monotonic = time.monotonic()
         self._session_start_wall_s = time.time()
+        self._session_raw_scale_start_wall_s = self._session_start_wall_s
         self._last_session_log_timestamp_s = self._session_start_wall_s
         self._session_raw_scale_count = 0
         self._session_txt_handle = txt_handle
@@ -9318,10 +9332,11 @@ class MainWindow(QtWidgets.QMainWindow):
             not self._session_active
             or self._session_raw_scale_writer is None
             or self._session_raw_scale_handle is None
-            or self._session_start_wall_s <= 0.0
+            or (self._session_raw_scale_start_wall_s or self._session_start_wall_s) <= 0.0
         ):
             return
-        elapsed_s = max(0.0, sample.timestamp_s - self._session_start_wall_s)
+        started_s = self._session_raw_scale_start_wall_s or self._session_start_wall_s
+        elapsed_s = max(0.0, sample.timestamp_s - started_s)
         self._session_raw_scale_writer.writerow(
             {
                 "elapsed_s": f"{elapsed_s:.6f}",
@@ -9576,6 +9591,7 @@ class MainWindow(QtWidgets.QMainWindow):
             load_g=self._current_effective_load_g(),
         )
         self._recovery_points.append(point)
+        self._recovery_last_record_scale_timestamp = self._latest_scale_timestamp
         self._refresh_recovery_plot()
         self._refresh_live_labels()
         return True
@@ -9745,8 +9761,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if complete:
             self.recipe_progress.setFormat(f"Recipe progress: complete ({total}/{total})")
         elif self._automation_active:
-            self.recipe_progress.setFormat(f"Recipe progress: {percent}% ({value}/{total})")
+            now_s = time.monotonic()
+            if self._automation_progress_started_s <= 0.0:
+                self._automation_progress_started_s = now_s
+            should_update_format = (
+                self._automation_progress_last_format_update_s <= 0.0
+                or now_s - self._automation_progress_last_format_update_s >= 1.0
+            )
+            if should_update_format:
+                self._automation_progress_last_format_update_s = now_s
+                progress_text = f"Recipe progress: {percent}% ({value}/{total})"
+                elapsed_s = max(0.0, now_s - self._automation_progress_started_s)
+                if value > 0 and elapsed_s > 0.0 and value < total:
+                    remaining_s = ((total - value) * elapsed_s) / value
+                    progress_text += f", {_format_duration(remaining_s)} remaining"
+                self.recipe_progress.setFormat(progress_text)
         else:
+            self._automation_progress_started_s = 0.0
+            self._automation_progress_last_format_update_s = 0.0
             self.recipe_progress.setFormat("Recipe progress: idle")
         self._update_length_setup_progress(value=value, total=total, complete=complete, percent=percent)
 
@@ -9839,6 +9871,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_index = min(max(0, int(state.index)), len(self._automation_steps))
         self._automation_total_steps = int(state.total_steps)
         self._automation_completed_ticks = min(self._automation_index, self._automation_total_steps)
+        self._automation_progress_started_s = time.monotonic()
+        self._automation_progress_last_format_update_s = 0.0
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = int(state.interval_ms)
@@ -10039,6 +10073,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_points = []
         self._recovery_start_monotonic = time.monotonic()
         self._recovery_start_elapsed_s = 0.0
+        self._recovery_last_record_scale_timestamp = None
         dialog = self._recovery_plot_dialog
         if dialog is None or dialog.isHidden():
             dialog = QtWidgets.QDialog(self)
@@ -10100,6 +10135,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             dialog.setWindowTitle(title)
         self._length_setup_points.clear()
+        self._length_setup_last_record_scale_timestamp = None
         self._setup_return_zero_start_point_index = 0
         self._setup_zero_position_mm = None
         self._setup_zero_fallback_return_position_mm = None
@@ -10137,6 +10173,7 @@ class MainWindow(QtWidgets.QMainWindow):
             load_g=load_g,
         )
         self._length_setup_points.append(point)
+        self._length_setup_last_record_scale_timestamp = self._latest_scale_timestamp
         self._write_setup_point(point)
         if len(self._length_setup_points) > 1000:
             self._length_setup_points = self._length_setup_points[-1000:]
@@ -10247,10 +10284,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_recovery_position_target(self, target_mm: float, label: str) -> None:
         self._sync_manual_motion_base_from_current_position()
         distance_mm = abs(target_mm - self._current_position_mm)
-        if self._is_calibration_mode(self._automation_name):
-            speed_mm_s = self._setup_return_speed_for_distance_mm_s(distance_mm)
-        else:
-            speed_mm_s = max(self._minimum_held_speed_mm_s(), self._motion_speed_for_current_context(manual_jog=True))
+        return_duration_s = self._pending_recovery_return_duration_s or self._setup_return_duration_s()
+        self._pending_recovery_return_duration_s = None
+        speed_mm_s = self._setup_return_speed_for_distance_mm_s(
+            distance_mm,
+            duration_s=return_duration_s,
+        )
         interval_ms = self._control_interval_ms()
         move_duration_s = self._move_duration_s(distance_mm, speed_mm_s)
         steps = [AutomationStep("move", target_mm=target_mm, duration_s=move_duration_s, note=label)]
@@ -10264,6 +10303,8 @@ class MainWindow(QtWidgets.QMainWindow):
         _, tick_count = self._estimate_recipe_points_and_ticks(steps, interval_ms)
         self._automation_total_steps = tick_count
         self._automation_completed_ticks = 0
+        self._automation_progress_started_s = time.monotonic()
+        self._automation_progress_last_format_update_s = 0.0
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = interval_ms
@@ -10301,6 +10342,8 @@ class MainWindow(QtWidgets.QMainWindow):
         _, tick_count = self._estimate_recipe_points_and_ticks(steps, self._automation_interval_ms)
         self._automation_total_steps = tick_count
         self._automation_completed_ticks = 0
+        self._automation_progress_started_s = time.monotonic()
+        self._automation_progress_last_format_update_s = 0.0
         self._automation_active = True
         self._automation_paused = False
         self._automation_name = RECOVERY_LOAD
@@ -10334,6 +10377,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_index = 0
         if not keep_progress:
             self._automation_completed_ticks = 0
+            self._automation_progress_started_s = 0.0
+            self._automation_progress_last_format_update_s = 0.0
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
         self._seek_last_time_by_key.clear()
@@ -11295,12 +11340,14 @@ class MainWindow(QtWidgets.QMainWindow):
             is_calibration = self._is_calibration_mode(self._automation_name)
             if is_calibration and self._session_active:
                 self._finalize_calibration_report()
+            recovery_return_duration_s = self._setup_return_duration_s() if is_calibration else None
             self._update_recipe_progress(complete=True)
             self._stop_auto_ramp(log_completion=False, keep_progress=True)
             self._log("Recovery completed." if is_recovery else "Recipe completed.")
             if not is_recovery and self._session_active:
                 self._stop_session()
             if not is_recovery and self.check_return_to_origin.isChecked():
+                self._pending_recovery_return_duration_s = recovery_return_duration_s
                 self._start_recovery_position_origin()
             return
         step_index = self._automation_index
@@ -11453,7 +11500,27 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._automation_active and not self._session_active:
             self._ui_refresh_timer.stop()
             return
+        self._record_live_dialog_samples_from_ui_refresh()
         self._refresh_live_labels()
+
+    def _record_live_dialog_samples_from_ui_refresh(self) -> None:
+        if self._latest_scale_timestamp is None:
+            return
+        if (
+            self._length_setup_dialog is not None
+            and not self._length_setup_dialog.isHidden()
+            and self._automation_active
+            and self._length_setup_last_record_scale_timestamp != self._latest_scale_timestamp
+        ):
+            self._record_length_setup_point()
+        if (
+            self._recovery_plot_dialog is not None
+            and not self._recovery_plot_dialog.isHidden()
+            and self._automation_active
+            and self._is_recovery_mode()
+            and self._recovery_last_record_scale_timestamp != self._latest_scale_timestamp
+        ):
+            self._record_recovery_point()
 
     def _refresh_live_labels(self) -> None:
         effective_load = self._current_effective_load_g()

@@ -1733,6 +1733,31 @@ def test_recipe_start_keeps_timed_progress_estimate(tmp_path: Path, qtbot) -> No
         _close_test_window(window)
 
 
+def test_recipe_progress_shows_throttled_time_remaining(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._automation_active = True
+        window._automation_total_steps = 100
+        window._automation_completed_ticks = 10
+        window._automation_progress_started_s = time.monotonic() - 10.0
+        window._automation_progress_last_format_update_s = 0.0
+
+        window._update_recipe_progress()
+
+        first_format = window.recipe_progress.format()
+        assert "remaining" in first_format
+        assert "1.5 min" in first_format
+
+        window._automation_completed_ticks = 20
+        window._update_recipe_progress()
+
+        assert window.recipe_progress.value() == 20
+        assert window.recipe_progress.format() == first_format
+    finally:
+        _close_test_window(window)
+
+
 def test_double_spin_boxes_trim_zero_only_decimals(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -2556,6 +2581,29 @@ def test_length_setup_dialog_contains_live_graph_and_records_setup_points(tmp_pa
         point = window._length_setup_points[0]
         assert point.load_g == pytest.approx(0.3)
         assert point.stress_mpa is not None
+    finally:
+        _close_test_window(window)
+
+
+def test_length_setup_timer_records_prompt_samples(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._show_length_setup_dialog()
+        window._automation_active = True
+        window._set_automation_context(phase="starting_length", note="starting_length")
+        window._latest_scale_value_g = 21.5
+        window._latest_scale_timestamp = time.time()
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_tension_load_positive.setChecked(False)
+        window._current_position_mm = -0.2
+        window._effective_position_mm = -0.2
+
+        window._handle_ui_refresh_timer()
+        window._handle_ui_refresh_timer()
+
+        assert len(window._length_setup_points) == 1
+        assert window._length_setup_points[0].load_g == pytest.approx(0.3)
     finally:
         _close_test_window(window)
 
@@ -3946,6 +3994,42 @@ def test_setup_raw_scale_samples_are_logged_before_main_measurement_starts(
         _close_test_window(window)
 
 
+def test_raw_scale_elapsed_stays_continuous_when_measurement_logging_starts(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("raw_elapsed_continuous")
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._session_raw_scale_path is not None
+        window._session_raw_scale_start_wall_s = 1000.0
+
+        window._write_raw_scale_sample(
+            mini_dma_mod.ScaleSample(
+                timestamp_s=1001.0,
+                raw_g=21.19,
+                applied_load_g=0.02,
+                raw_text="21.190 g",
+            )
+        )
+        window._begin_recipe_logging()
+        window._write_raw_scale_sample(
+            mini_dma_mod.ScaleSample(
+                timestamp_s=1002.0,
+                raw_g=21.18,
+                applied_load_g=0.03,
+                raw_text="21.180 g",
+            )
+        )
+
+        rows = list(csv.DictReader(window._session_raw_scale_path.open(encoding="utf-8", newline="")))
+        assert [row["elapsed_s"] for row in rows] == ["1.000000", "2.000000"]
+    finally:
+        _close_test_window(window)
+
+
 def test_length_setup_points_are_written_to_setup_sidecar(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("setup_sidecar_session")
@@ -4847,6 +4931,64 @@ def test_calibration_auto_recovery_uses_setup_return_time_speed(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_pending_calibration_auto_recovery_uses_setup_return_time_after_session_stop(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_setup_return_duration_s.setValue(5.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+    window._automation_name = ""
+    window._current_position_mm = 7.5
+    window._recipe_origin_mm = 8.0
+    window._pending_recovery_return_duration_s = 5.0
+    captured: dict[str, object] = {}
+
+    def _capture_preflight(_steps: object) -> bool:
+        captured["steps"] = _steps
+        return False
+
+    window._preflight_recipe_hardware = _capture_preflight  # type: ignore[method-assign]
+
+    try:
+        window._start_recovery_position_origin()
+
+        steps = captured["steps"]
+        assert isinstance(steps, list)
+        assert steps[0].action == "move"
+        assert steps[0].duration_s == pytest.approx(5.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_recovery_uses_return_time_setting(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_setup_return_duration_s.setValue(4.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+    window._automation_name = ""
+    window._current_position_mm = 7.5
+    window._position_reference_mm = 7.7
+    captured: dict[str, object] = {}
+
+    def _capture_preflight(_steps: object) -> bool:
+        captured["steps"] = _steps
+        return False
+
+    window._preflight_recipe_hardware = _capture_preflight  # type: ignore[method-assign]
+
+    try:
+        window._start_recovery_displacement_zero()
+
+        steps = captured["steps"]
+        assert isinstance(steps, list)
+        assert steps[0].action == "move"
+        assert steps[0].duration_s == pytest.approx(4.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_setup_preload_near_target_fallback_uses_minimum_speed(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_tension_load_positive.setChecked(False)
@@ -5146,6 +5288,31 @@ def test_recovery_sampling_does_not_append_to_session_log(tmp_path: Path, qtbot)
         assert len(window._session_points) == initial_count
         assert len(window._recovery_points) == 1
         assert window._recovery_points[-1].load_g == pytest.approx(1.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_recovery_timer_records_live_points_during_position_move(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+
+    try:
+        window._show_recovery_plot_dialog("Recovery test")
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.RECOVERY_POSITION
+        window._set_automation_context(phase="recover", note="displacement to 0")
+        window._latest_scale_value_g = 21.0
+        window._latest_scale_timestamp = time.time()
+        window._current_position_mm = 0.2
+        window._effective_position_mm = 0.2
+
+        window._handle_ui_refresh_timer()
+        window._handle_ui_refresh_timer()
+
+        assert len(window._recovery_points) == 1
+        assert window._recovery_points[0].load_g == pytest.approx(0.2)
+        assert len(window._session_points) == 0
     finally:
         _close_test_window(window)
 
