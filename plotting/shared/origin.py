@@ -283,9 +283,10 @@ def origin_title_xy(layer: Any) -> tuple[float, float] | None:
     y_span = y_to - y_from
     if x_span <= 0.0 or y_span <= 0.0:
         return None
-    # Keep the title just above the plotting range. Larger offsets can place
-    # the preview text outside Origin's OLE export bounds and crop it in Word.
-    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.10))
+    # Keep the title above the top-axis label band while staying inside the
+    # larger report-export OLE frame. Word's EMF preview clips labels that sit
+    # too close to the page boundary, so this deliberately leaves headroom.
+    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.24))
 
 
 def _origin_title_font_size(text: str, default: float) -> float:
@@ -295,6 +296,15 @@ def _origin_title_font_size(text: str, default: float) -> float:
     if length >= 30:
         return min(default, 14.0)
     return default
+
+
+def _set_origin_label_font_size(label_obj: Any, size: float = 14.0) -> None:
+    set_float = getattr(label_obj, "set_float", None)
+    if callable(set_float):
+        try:
+            set_float("fsize", float(size))
+        except Exception:
+            pass
 
 
 def position_origin_title_label(
@@ -427,6 +437,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
             try:
                 label_obj.text = display_title
                 title_set = True
+                _set_origin_label_font_size(label_obj)
             except Exception:
                 pass
         if not title_set:
@@ -465,6 +476,19 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
             origin_lt_exec(lt_exec, f"layer.{key}.color = color(black);")
         if key == "y2":
             origin_lt_exec(lt_exec, "layer.y2.showlabel = 1;")
+    if key == "x":
+        label_getter = getattr(layer, "label", None)
+        if callable(label_getter):
+            for token in ("xb", "XB", "Xb"):
+                try:
+                    axis_label = label_getter(token)
+                except Exception:
+                    axis_label = None
+                if axis_label is not None:
+                    _set_origin_label_font_size(axis_label)
+                    break
+        return
+
     if key not in {"x2", "y", "y2"}:
         return
 
@@ -499,10 +523,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         layer_get_float = getattr(layer, "get_float", None)
         if not callable(set_float) or not callable(layer_get_float):
             return
-        try:
-            set_float("fsize", 10.0)
-        except Exception:
-            pass
+        _set_origin_label_font_size(axis_label)
         try:
             x_from = float(layer_get_float("x.from"))
             x_to = float(layer_get_float("x.to"))
@@ -521,9 +542,9 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         except Exception:
             pass
         try:
-            # Keep the top-axis caption just above the top ticks instead of
-            # inside the plotting area, where it can overlap the graph title.
-            set_float("y", y_to + (y_span * 0.005))
+            # Keep the top-axis caption above the native top tick labels while
+            # leaving enough room for the graph title in Word's EMF preview.
+            set_float("y", y_to + (y_span * 0.135))
         except Exception:
             pass
         return
@@ -554,10 +575,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
     layer_get_float = getattr(layer, "get_float", None)
     if not callable(set_float) or not callable(layer_get_float):
         return
-    try:
-        set_float("fsize", 10.0)
-    except Exception:
-        pass
+    _set_origin_label_font_size(axis_label)
     label_get_float = getattr(axis_label, "get_float", None)
     existing_label_x: float | None = None
     if callable(label_get_float):

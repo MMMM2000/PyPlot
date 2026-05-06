@@ -920,6 +920,90 @@ class VSMTemperatureScanProcessor:
             pass
         self._style_origin_legend_label(legend)
 
+    def _set_origin_plain_legend(self, layer: Any, labels: Sequence[str]) -> None:
+        filtered: list[str] = []
+        seen: set[str] = set()
+        for label in labels:
+            text = (
+                str(label)
+                .replace("\u2191", " up")
+                .replace("\u2193", " down")
+                .strip()
+            )
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            filtered.append(text)
+        if not filtered:
+            return
+        self._hide_origin_legend(layer)
+        get_float = getattr(layer, "get_float", None)
+        add_label = getattr(layer, "add_label", None)
+        if not callable(get_float) or not callable(add_label):
+            return
+        try:
+            x_from = float(get_float("x.from"))
+            x_to = float(get_float("x.to"))
+            y_from = float(get_float("y.from"))
+            y_to = float(get_float("y.to"))
+        except Exception:
+            return
+        if not all(np.isfinite(value) for value in (x_from, x_to, y_from, y_to)):
+            return
+        x_span = x_to - x_from
+        y_span = y_to - y_from
+        if x_span <= 0.0 or y_span <= 0.0:
+            return
+        legend_x = x_from + (x_span * 0.74)
+        legend_y = y_to - (y_span * 0.035)
+        try:
+            legend = add_label("\n".join(filtered), legend_x, legend_y)
+        except Exception:
+            return
+        try:
+            legend.name = "py_vsm_legend"
+        except Exception:
+            pass
+        set_int = getattr(legend, "set_int", None)
+        if callable(set_int):
+            for key, value in (("show", 1), ("attach", 0), ("horzalign", 0), ("vertalign", 2)):
+                try:
+                    set_int(key, int(value))
+                except Exception:
+                    pass
+        set_float = getattr(legend, "set_float", None)
+        if callable(set_float):
+            for key, value in (("fsize", 7.0), ("x", legend_x), ("y", legend_y)):
+                try:
+                    set_float(key, float(value))
+                except Exception:
+                    pass
+        lt_exec = getattr(layer, "lt_exec", None)
+        if callable(lt_exec):
+            for command in (
+                "axis -ps X A 1;",
+                "axis -ps X L 1;",
+                "axis -ps Y A 1;",
+                "axis -ps Y L 1;",
+                "layer.x.showAxes=1;",
+                "layer.y.showAxes=1;",
+                "layer.x.showLabels=1;",
+                "layer.y.showLabels=1;",
+                "layer.x.showlabels=1;",
+                "layer.y.showlabels=1;",
+                "layer.x.showlabel=1;",
+                "layer.y.showlabel=1;",
+                "layer.x.ticks=1;",
+                "layer.y.ticks=1;",
+            ):
+                try:
+                    lt_exec(command)
+                except Exception:
+                    pass
+
     def _set_origin_combined_legend(
         self,
         layer: Any,
@@ -1352,7 +1436,7 @@ class VSMTemperatureScanProcessor:
             except Exception:
                 pass
 
-        def _style_origin_layer(layer: Any, title: str) -> None:
+        def _style_origin_layer(layer: Any, title: str, *, secondary_axes_only: bool = False) -> None:
             """Apply consistent axes and disable speed mode without duplicating titles."""
 
             try:
@@ -1366,10 +1450,10 @@ class VSMTemperatureScanProcessor:
             except Exception:
                 pass
             try:
-                layer.set_float("top", 18.0)
+                layer.set_float("top", 24.0)
                 layer.set_float("left", 22.0)
                 layer.set_float("width", 52.0)
-                layer.set_float("height", 56.0)
+                layer.set_float("height", 50.0)
             except Exception:
                 pass
             try:
@@ -1378,10 +1462,35 @@ class VSMTemperatureScanProcessor:
                 pass
             try:
                 layer.lt_exec(
-                    "layer -u 1; layer 52 56 22 18; "
-                    "layer.top=18; layer.left=22; layer.width=52; layer.height=56; "
+                    "layer -u 1; layer 52 50 22 24; "
+                    "layer.top=24; layer.left=22; layer.width=52; layer.height=50; "
                     "legend.fsize=10;"
                 )
+            except Exception:
+                pass
+            try:
+                if secondary_axes_only:
+                    layer.lt_exec(
+                        "axis -ps X A 0; axis -ps X L 0; "
+                        "axis -ps Y A 2; axis -ps Y L 2; "
+                        "layer.x.showAxes=0; layer.x.showlabel=0; "
+                        "layer.x.showLabels=0; layer.x.showlabels=0; "
+                        "layer.x2.showlabel=0; layer.x2.showLabels=0; layer.x2.showlabels=0; "
+                        "layer.y.showAxes=2; layer.y.showlabel=0; "
+                        "layer.y.showLabels=2; layer.y.showlabels=2; "
+                        "layer.y2.showlabel=1; layer.y2.showLabels=1; layer.y2.showlabels=1;"
+                    )
+                else:
+                    layer.lt_exec(
+                        "axis -ps X A 1; axis -ps X L 1; "
+                        "axis -ps Y A 1; axis -ps Y L 1; "
+                        "layer.x.showAxes=1; layer.x.showlabel=1; "
+                        "layer.x.showLabels=1; layer.x.showlabels=1; "
+                        "layer.x.ticks=1; "
+                        "layer.y.showAxes=1; layer.y.showlabel=1; "
+                        "layer.y.showLabels=1; layer.y.showlabels=1; "
+                        "layer.y2.showlabel=0; layer.y2.showLabels=0; layer.y2.showlabels=0;"
+                    )
             except Exception:
                 pass
             try:
@@ -1485,9 +1594,10 @@ class VSMTemperatureScanProcessor:
 
                 graphs: list[Any] = []
                 fields = [item.series.field for item in prepared]
+                single_origin_axis = bool(getattr(self, "origin_single_axis", False))
                 template = (
                     "doubley"
-                    if len({round(float(value), 6) for value in fields}) > 1
+                    if not single_origin_axis and len({round(float(value), 6) for value in fields}) > 1
                     else "line"
                 )
                 graph = origin.new_graph(template=template)
@@ -1498,17 +1608,24 @@ class VSMTemperatureScanProcessor:
                 unique_fields: list[float] = self.field_axis_order([field for field, _, _, _ in column_pairs])
                 layer_map: Dict[float, Any] = {}
                 layer_number_map: Dict[float, int] = {}
-                existing_layers = len(graph)
-                for idx, field_value in enumerate(unique_fields):
-                    if idx == 0:
-                        layer = graph[0]
-                    elif idx == 1 and existing_layers > 1:
-                        layer = graph[1]
-                    else:
-                        layer = graph.add_layer()
-                    layer_map[field_value] = layer
-                    layer_number_map[field_value] = idx + 1
-                axis_base = "Magnetization" if len({round(val, 6) for val in unique_fields}) > 1 else None
+                if single_origin_axis:
+                    single_layer = graph[0]
+                    for field_value in unique_fields:
+                        layer_map[field_value] = single_layer
+                        layer_number_map[field_value] = 1
+                    axis_base = "Magnetization [emu]"
+                else:
+                    existing_layers = len(graph)
+                    for idx, field_value in enumerate(unique_fields):
+                        if idx == 0:
+                            layer = graph[0]
+                        elif idx == 1 and existing_layers > 1:
+                            layer = graph[1]
+                        else:
+                            layer = graph.add_layer()
+                        layer_map[field_value] = layer
+                        layer_number_map[field_value] = idx + 1
+                    axis_base = "Magnetization" if len({round(val, 6) for val in unique_fields}) > 1 else None
                 layer_fields: Dict[Any, list[float]] = {}
                 for field_value, layer in layer_map.items():
                     layer_fields.setdefault(layer, []).append(field_value)
@@ -1557,7 +1674,7 @@ class VSMTemperatureScanProcessor:
                                 legend_text,
                             )
                         )
-                if len(layer_map) > 1 and combined_legend_entries:
+                if not single_origin_axis and len(layer_map) > 1 and combined_legend_entries:
                     primary_field = unique_fields[0]
                     primary_layer = layer_map.get(primary_field, graph[0])
                     self._set_origin_combined_legend(primary_layer, combined_legend_entries)
@@ -1573,11 +1690,25 @@ class VSMTemperatureScanProcessor:
                     else:
                         for layer, entries in legend_entries.items():
                             self._set_origin_legend(layer, entries)
-                else:
+                elif not single_origin_axis:
                     for layer, entries in legend_entries.items():
                         self._set_origin_legend(layer, entries)
-                for layer in layer_map.values():
-                    _style_origin_layer(layer, graph_title)
+                primary_layer = layer_map.get(unique_fields[0], graph[0]) if unique_fields else graph[0]
+                for layer in dict.fromkeys(layer_map.values()):
+                    _style_origin_layer(
+                        layer,
+                        graph_title,
+                        secondary_axes_only=layer is not primary_layer,
+                    )
+                    if single_origin_axis:
+                        _set_origin_axis_title(layer, "x", x_axis_label)
+                        _set_origin_axis_title(layer, "y", "Magnetization [emu]")
+                if single_origin_axis:
+                    for layer, entries in legend_entries.items():
+                        self._set_origin_plain_legend(
+                            layer,
+                            [label for _plot_index, label in entries],
+                        )
     
                 if self.show_smoothed_plot:
                     smooth_sheet = book.add_sheet()
@@ -1671,7 +1802,7 @@ class VSMTemperatureScanProcessor:
                         _set_origin_axis_title(
                             layer,
                             y_axis_name,
-                            self._axis_label_for_fields(layer_values, base=axis_base),
+                            axis_base if single_origin_axis else self._axis_label_for_fields(layer_values, base=axis_base),
                         )
                     legend_entries = {}
                     combined_legend_entries = []

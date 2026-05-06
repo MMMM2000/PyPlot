@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -3980,6 +3981,22 @@ def test_word_report_microwire_data_uses_requested_column_order_and_empty_values
     assert "Custom data" not in value_map
     assert "Data source" not in value_map
     assert "R vs T graphs (Origin)" not in value_map
+
+
+def test_word_report_microwire_data_table_only_expands_multi_value_rows() -> None:
+    table_xml = core._word_microwire_data_table(
+        [
+            ("Composition", ["Ni50Fe27Ga23"]),
+            ("Strain (%)", ["22.6904", "21.8579", "4.85437"]),
+            ("As (Â°C)", [""]),
+        ]
+    )
+
+    rows = re.findall(r"<w:tr>(.*?)</w:tr>", table_xml)
+    assert len(rows) == 3
+    assert rows[0].count("<w:tc>") == 2
+    assert rows[1].count("<w:tc>") == 4
+    assert rows[2].count("<w:tc>") == 2
 
 
 def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(

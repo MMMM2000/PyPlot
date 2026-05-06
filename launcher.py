@@ -9,6 +9,7 @@ import traceback
 import json
 import math
 import re
+import shutil
 import secrets
 import socket
 import socketserver
@@ -20,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple, cast, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple, Sequence, cast, Protocol
 
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PIL import Image
@@ -1398,6 +1399,7 @@ def _load_project_word_report_frame(
     output_dir: Path,
     *,
     include_origin: bool,
+    extra_search_roots: Sequence[Path] | None = None,
 ):
     import pandas as pd
 
@@ -1418,6 +1420,7 @@ def _load_project_word_report_frame(
         SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
         VSM_HYSTERESIS_ORIGIN_COLUMN,
         VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
+        WORD_MICROWIRE_DATA_COLUMNS,
         _load_annealing,
         _plot_measurement_origin,
         _safe_plot_stem,
@@ -1430,8 +1433,12 @@ def _load_project_word_report_frame(
         raise ValueError("Project file does not contain Builder sections.")
 
     rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    assemble_rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     microscope_dimension_columns = {DIAMETER_COLUMN, GLASS_DIAMETER_COLUMN, DIAMETER_RATIO_COLUMN}
     rvt_search_roots: list[Path] = [source_path.parent]
+    for root in extra_search_roots or ():
+        if root not in rvt_search_roots:
+            rvt_search_roots.append(root)
 
     def _remember_rvt_search_root(value: object) -> None:
         for item in _word_project_value_items(value):
@@ -1465,6 +1472,8 @@ def _load_project_word_report_frame(
                 _normalise_microwire_word_part(composition),
                 _normalise_microwire_word_key(microwire),
             )
+            if section_name == "assemble":
+                assemble_rows_by_key[key] = dict(source_row)
             target = rows_by_key.setdefault(
                 key,
                 {
@@ -1502,6 +1511,14 @@ def _load_project_word_report_frame(
                         target[column] = value
                 else:
                     target[column] = _word_project_merge_value(target.get(column), value)
+
+    for key, assemble_row in assemble_rows_by_key.items():
+        target = rows_by_key.get(key)
+        if target is None:
+            continue
+        for column in WORD_MICROWIRE_DATA_COLUMNS:
+            if column in assemble_row:
+                target[column] = assemble_row.get(column)
 
     frame = pd.DataFrame(list(rows_by_key.values()))
     for index, row in frame.iterrows():
@@ -1740,11 +1757,17 @@ def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespac
             include_origin=bool(getattr(args, "microwire_word_origin", True)),
         )
     if source_path.suffix.lower() == ".pydpj":
+        copy_dir = output_dir / "_project_copy"
+        copy_dir.mkdir(parents=True, exist_ok=True)
+        copied_source = copy_dir / f"{source_path.stem}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}{source_path.suffix}"
+        shutil.copy2(source_path, copied_source)
+        print(f"[microwire-word] copied_project={copied_source}")
         return _load_project_word_report_frame(
-            source_path,
+            copied_source,
             getattr(args, "microwire_word_sample", None),
             output_dir,
             include_origin=bool(getattr(args, "microwire_word_origin", True)),
+            extra_search_roots=[source_path.parent],
         )
 
     from microwire_eda import MicrowireEdaConfig

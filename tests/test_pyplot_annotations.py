@@ -100,9 +100,19 @@ def test_origin_secondary_export_layer_can_show_real_top_x_axis() -> None:
     assert layer.ints["x.showAxes"] == 2
     assert layer.ints["x.showlabel"] == 0
     assert layer.ints["x2.showlabel"] == 1
+    assert layer.ints["x.showLabels"] == 2
+    assert layer.ints["x2.showLabels"] == 2
+    assert "axis -ps X A 2;" in layer.commands
+    assert "axis -ps X L 2;" in layer.commands
     assert "layer.x.showAxes=2;" in layer.commands
     assert "layer.x.showlabel=0;" in layer.commands
     assert "layer.x2.showlabel=1;" in layer.commands
+    assert "layer.x.showLabels=2;" in layer.commands
+    assert "layer.x2.showLabels=2;" in layer.commands
+    assert "layer.x.ticks=10;" in layer.commands
+    assert "layer.x2.ticks=10;" in layer.commands
+    assert "layer.y.ticks=10;" in layer.commands
+    assert "layer.y2.ticks=10;" in layer.commands
     assert 'layer.x2.title$="";' not in layer.commands
 
 
@@ -125,15 +135,15 @@ def test_origin_export_layer_frame_uses_page_units_and_safe_margins() -> None:
     window._set_origin_layer_frame(layer)  # noqa: SLF001
 
     assert layer.floats == {
-        "top": 18.0,
+        "top": 24.0,
         "left": 22.0,
         "width": 52.0,
-        "height": 56.0,
+        "height": 50.0,
     }
     assert (
-        "layer -u 1; layer 52.000 56.000 22.000 18.000; "
-        "layer.top=18.000; layer.left=22.000; "
-        "layer.width=52.000; layer.height=56.000;"
+        "layer -u 1; layer 52.000 50.000 22.000 24.000; "
+        "layer.top=24.000; layer.left=22.000; "
+        "layer.width=52.000; layer.height=50.000;"
     ) in layer.commands
 
 

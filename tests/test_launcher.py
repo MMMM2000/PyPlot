@@ -381,6 +381,10 @@ def test_microwire_word_report_project_merges_section_rows_and_rvst(
         tmp_path / "reports",
     )
 
+    copied_projects = list((tmp_path / "reports" / "_project_copy").glob("*.pydpj"))
+    assert len(copied_projects) == 1
+    assert copied_projects[0] != project_path
+    assert copied_projects[0].read_text(encoding="utf-8") == project_path.read_text(encoding="utf-8")
     assert origin_artifacts == {}
     assert len(frame) == 1
     row = frame.iloc[0]

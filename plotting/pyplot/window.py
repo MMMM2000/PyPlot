@@ -116,11 +116,11 @@ ORIGIN_EXPORT_COLOR_CYCLE: tuple[str, ...] = (
     "#bcbd22",
     "#17becf",
 )
-ORIGIN_EXPORT_LAYER_TOP = 18.0
+ORIGIN_EXPORT_LAYER_TOP = 24.0
 ORIGIN_EXPORT_LAYER_BOTTOM = 20.0
 ORIGIN_EXPORT_LAYER_LEFT = 22.0
 ORIGIN_EXPORT_LAYER_WIDTH = 52.0
-ORIGIN_EXPORT_LAYER_HEIGHT = 56.0
+ORIGIN_EXPORT_LAYER_HEIGHT = 50.0
 
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
@@ -5158,6 +5158,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             label = entry.label
             x_vals = entry.x_values
             y_vals = entry.y_values
+            y_label = entry.y_label or "Y"
+            y_side = entry.y_side
+            if str(plugin_name or "").strip().casefold() == "vsm temperature scan":
+                normalized_y_label = str(y_label).casefold()
+                if "magnetization" in normalized_y_label or "signal x" in normalized_y_label:
+                    y_label = "Magnetization [emu]"
+                    y_side = "left"
             token = self._safe_series_token(label, fallback=f"series_{index:02d}")
             x_name = f"{token}_x"
             y_name = f"{token}_y"
@@ -5176,7 +5183,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 comments=label,
             )
             metadata[y_name] = WorksheetColumnMeta(
-                long_name=entry.y_label or "Y",
+                long_name=y_label,
                 units=entry.y_unit,
                 comments=label,
                 plot_color=entry.color,
@@ -5184,7 +5191,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 plot_markersize=entry.markersize,
                 plot_linestyle=entry.linestyle,
                 plot_x_side=entry.x_side,
-                plot_y_side=entry.y_side,
+                plot_y_side=y_side,
             )
             axis_roles.extend(["X", "Y"])
 
@@ -6054,9 +6061,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     set_int("y.showlabel", 0)
                     set_int("y2.showlabel", 1)
                     if show_top_x:
-                        set_int("x.showLabels", 0)
-                        set_int("x2.showLabels", 0)
-                    set_int("y.showLabels", 2)
+                        set_int("x.showLabels", 2)
+                        set_int("x2.showLabels", 2)
+                    set_int("y.showLabels", 0)
+                    set_int("y2.showLabels", 1)
                 else:
                     # Show bottom/left only on primary layer.
                     set_int("x.showAxes", 1)
@@ -6072,6 +6080,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
         if secondary_axes_only:
             commands = (
+                "axis -ps X A 2;" if show_top_x else "axis -ps X A 0;",
+                "axis -ps X L 2;" if show_top_x else "axis -ps X L 0;",
+                "axis -ps Y A 2;",
+                "axis -ps Y L 2;",
                 (
                     "layer.x.showAxes=2;"
                     if show_top_x
@@ -6079,11 +6091,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 ),
                 "layer.y.showAxes=2;",
                 (
-                    "layer.x.showLabels=0;"
+                    "layer.x.showLabels=2;"
                     if show_top_x
                     else "layer.x.showLabels=0;"
                 ),
-                "layer.y.showLabels=2;",
+                "layer.y.showLabels=0;",
+                "layer.y2.showLabels=1;",
                 "layer.x.showlabel=0;",
                 (
                     "layer.x2.showlabel=1;"
@@ -6091,15 +6104,18 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     else "layer.x2.showlabel=0;"
                 ),
                 (
-                    "layer.x2.showLabels=0;"
+                    "layer.x2.showLabels=2;"
                     if show_top_x
                     else "layer.x2.showLabels=0;"
                 ),
-                (
-                    "layer.x2.ticks=1;"
-                    if show_top_x
-                    else "layer.x2.ticks=0;"
-                ),
+                "layer.x.label.fsize=14;",
+                "layer.x2.label.fsize=14;",
+                "layer.y.label.fsize=14;",
+                "layer.y2.label.fsize=14;",
+                ("layer.x.ticks=10;" if show_top_x else "layer.x.ticks=0;"),
+                ("layer.x2.ticks=10;" if show_top_x else "layer.x2.ticks=0;"),
+                "layer.y.ticks=10;",
+                "layer.y2.ticks=10;",
                 "layer.x.postype=0;",
                 "layer.x2.postype=0;",
                 "layer.y.postype=0;",
@@ -6111,6 +6127,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 commands = (*commands, 'layer.x2.title$="";')
         else:
             commands = (
+                "axis -ps X A 1;",
+                "axis -ps X L 1;",
+                "axis -ps Y A 1;",
+                "axis -ps Y L 1;",
                 # 1 = show primary axes only (bottom/left)
                 "layer.x.showAxes=1;",
                 "layer.y.showAxes=1;",
@@ -6118,6 +6138,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 "layer.x2.showlabel=0;",
                 "layer.y.showlabel=1;",
                 "layer.y2.showlabel=0;",
+                "layer.x.label.fsize=14;",
+                "layer.x2.label.fsize=14;",
+                "layer.y.label.fsize=14;",
+                "layer.y2.label.fsize=14;",
+                "layer.x.ticks=10;",
+                "layer.x2.ticks=0;",
+                "layer.y.ticks=10;",
+                "layer.y2.ticks=0;",
             )
         for command in commands:
             self._origin_lt_exec(lt_exec, command)

@@ -4382,7 +4382,16 @@ def export_pyplot_origin_artifacts_for_paths(
 
         plugin_getter = getattr(window, "_plugin_instance_for_name", None)
         plugin = plugin_getter(plugin_name) if callable(plugin_getter) else None
-        if str(plugin_name).strip().casefold() == "vsm temperature scan" and plugin is not None:
+        # Word reports use the VSM plugin's PyPlot/Origin path, but force a
+        # report-safe single-axis graph. The interactive dual-axis template is
+        # useful in PyPlot, but its linked secondary layer renders misplaced tick
+        # labels in Word OLE/EMF previews.
+        use_live_vsm_origin_export = True
+        if (
+            use_live_vsm_origin_export
+            and str(plugin_name).strip().casefold() == "vsm temperature scan"
+            and plugin is not None
+        ):
             processor = getattr(plugin, "_processor", None)
             for setter_name, value in (
                 ("set_show_derivative", False),
@@ -4401,9 +4410,10 @@ def export_pyplot_origin_artifacts_for_paths(
                 "show_smoothed_derivative",
                 "show_overlay_derivative",
                 "show_smoothed_plot",
+                "origin_single_axis",
             ):
                 try:
-                    setattr(processor, attr, False)
+                    setattr(processor, attr, attr == "origin_single_axis")
                 except Exception:
                     pass
             try:
@@ -4428,7 +4438,11 @@ def export_pyplot_origin_artifacts_for_paths(
             raise RuntimeError("PyPlot import automation is unavailable.")
         importer(filtered)
 
-        if str(plugin_name).strip().casefold() == "vsm temperature scan" and plugin is not None:
+        if (
+            use_live_vsm_origin_export
+            and str(plugin_name).strip().casefold() == "vsm temperature scan"
+            and plugin is not None
+        ):
             processor = getattr(plugin, "_processor", None)
             dataset = getattr(plugin, "_dataset", None)
             if not dataset:
@@ -4910,8 +4924,6 @@ def _word_table(rows: Sequence[Tuple[str, str]]) -> str:
 def _word_microwire_data_table(rows: Sequence[Tuple[str, Sequence[str]]]) -> str:
     if not rows:
         return ""
-    max_values = max((len(values) for _label, values in rows), default=1)
-    max_values = max(1, min(max_values, 6))
     border = (
         '<w:top w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
         '<w:left w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
@@ -4920,11 +4932,12 @@ def _word_microwire_data_table(rows: Sequence[Tuple[str, Sequence[str]]]) -> str
         '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
         '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
     )
-    value_width = max(1100, int(6200 / max_values))
     table_rows: List[str] = []
     for label, raw_values in rows:
-        values = [str(value) for value in list(raw_values)[:max_values]]
-        values.extend([""] * (max_values - len(values)))
+        values = [str(value) for value in list(raw_values)[:6]]
+        if not values:
+            values = [""]
+        value_width = max(1100, int(6200 / len(values)))
         label_cell = (
             '<w:tc><w:tcPr><w:tcW w:w="2600" w:type="dxa"/>'
             '<w:shd w:fill="F3F4F6"/></w:tcPr>'
