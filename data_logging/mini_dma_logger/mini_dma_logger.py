@@ -7111,6 +7111,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if abs(float(current_load_g)) > self._setup_preload_contact_threshold_g():
             self._setup_preload_engaged_seek_keys.add(seek_key)
 
+    def _setup_preload_first_contact_transition(
+        self,
+        seek_key: tuple[str, int, float],
+        basis: str,
+        current_value: float,
+    ) -> bool:
+        if (
+            self._automation_phase != "target_ramp"
+            or self._automation_step_note != "setup_preload"
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            or seek_key in self._setup_preload_engaged_seek_keys
+        ):
+            return False
+        current_load_g = self._basis_value_as_load_g(basis, current_value)
+        if current_load_g is None:
+            return False
+        return abs(float(current_load_g)) > self._setup_preload_contact_threshold_g()
+
     def _setup_preload_relaxation_active(
         self,
         basis: str,
@@ -7179,7 +7197,26 @@ class MainWindow(QtWidgets.QMainWindow):
         calibration_cap = self._calibration_acceptance_cap_for_basis(basis, tolerance)
         if calibration_cap is not None:
             effective_tolerance = min(effective_tolerance, calibration_cap)
+        setup_preload_cap = self._setup_preload_acceptance_cap_for_basis(basis, tolerance)
+        if setup_preload_cap is not None:
+            effective_tolerance = min(effective_tolerance, setup_preload_cap)
         return effective_tolerance
+
+    def _setup_preload_acceptance_cap_for_basis(
+        self,
+        basis: str,
+        requested_tolerance: float,
+    ) -> float | None:
+        if self._automation_step_note != "setup_preload":
+            return None
+        requested = abs(float(requested_tolerance))
+        contact_load_g = self._setup_preload_contact_threshold_g()
+        if basis == HSW_BASIS_LOAD_G:
+            return max(requested, contact_load_g)
+        if basis == HSW_BASIS_STRESS_MPA:
+            contact_stress = stress_mpa_from_load_g(contact_load_g, float(self.spin_diameter.value()))
+            return None if contact_stress is None else max(requested, abs(float(contact_stress)))
+        return None
 
     def _calibration_acceptance_cap_for_basis(self, basis: str, requested_tolerance: float) -> float | None:
         if not self._is_calibration_mode(self._automation_name):
@@ -7200,6 +7237,12 @@ class MainWindow(QtWidgets.QMainWindow):
         current_value: float,
     ) -> None:
         current_position = self._current_effective_tensile_position_mm()
+        if self._setup_preload_first_contact_transition(seek_key, basis, current_value):
+            self._seek_last_stiffness_value_by_basis[basis] = float(current_value)
+            self._seek_last_stiffness_position_by_basis[basis] = float(current_position)
+            self._seek_last_value_by_key[seek_key] = float(current_value)
+            self._seek_last_effective_position_by_key[seek_key] = float(current_position)
+            return
         previous_basis_value = self._seek_last_stiffness_value_by_basis.get(basis)
         previous_basis_position = self._seek_last_stiffness_position_by_basis.get(basis)
         self._seek_last_stiffness_value_by_basis[basis] = float(current_value)
@@ -7281,6 +7324,8 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> bool:
         if backlash_takeup_mm <= 0.0:
             return True
+        if self._automation_step_note == "setup_preload":
+            return True
         if self._stored_calibration_stiffness_g_per_mm() is None:
             return True
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
@@ -7329,6 +7374,8 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> bool:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             return False
+        if self._automation_step_note == "setup_preload":
+            return abs(float(error_value)) <= abs(float(tolerance))
         return abs(float(error_value)) <= self._reversal_acceptance_tolerance(
             basis,
             tolerance,

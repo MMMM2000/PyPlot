@@ -2529,6 +2529,108 @@ def test_setup_preload_leaves_slack_mode_after_load_response(tmp_path: Path, qtb
         _close_test_window(window)
 
 
+def test_setup_preload_relaxes_after_first_contact_jump_instead_of_accepting_backlash_hold(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    commands: list[dict[str, object]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        commands.append({"target_mm": target_mm, **kwargs})
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.16)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(55.0)
+    window.spin_backlash_mm.setValue(0.02)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+    window.spin_setup_preload_duration_s.setValue(10.0)
+    window._calibrated_stiffness_g_per_mm = 22.7
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=20.0,
+        note="setup_preload",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 20.0)
+    window._setup_preload_engaged_seek_keys.add(seek_key)
+    window._seek_last_error_by_key[seek_key] = 14.0
+    window._seek_last_value_by_key[seek_key] = 6.0
+    window._seek_last_effective_position_by_key[seek_key] = 3.21875
+    window._seek_live_stiffness_by_key[seek_key] = 10000.0
+    window._seek_live_stiffness_g_per_mm = 10000.0
+    window._current_position_mm = 6.9775
+    window._effective_position_mm = 6.9775
+    window._last_effective_move_target_mm = 6.9775
+    window._last_move_target_mm = 6.9775
+    window._last_move_direction = -1.0
+    current_load_g = mini_dma_mod.load_g_from_stress_mpa(26.7, window.spin_diameter.value())
+    assert current_load_g is not None
+    window._latest_scale_value_g = 21.16 - current_load_g
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            tolerance=window._auto_requested_tolerance_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        )
+
+        assert reached is False
+        assert commands
+        assert commands[0]["target_mm"] > 6.9775
+        assert "backlash-limited tolerance" not in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_setup_preload_first_contact_jump_does_not_seed_live_stiffness(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.16)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_initial_length.setValue(55.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=20.0,
+        note="setup_preload",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 20.0)
+    window._current_position_mm = 7.10
+    window._effective_position_mm = 7.10
+    window._last_effective_move_target_mm = 7.10
+    window._seek_last_value_by_key[seek_key] = 0.0
+    window._seek_last_effective_position_by_key[seek_key] = 3.0
+    window._seek_last_stiffness_value_by_basis[mini_dma_mod.HSW_BASIS_STRESS_MPA] = 0.0
+    window._seek_last_stiffness_position_by_basis[mini_dma_mod.HSW_BASIS_STRESS_MPA] = 3.0
+
+    try:
+        window._update_live_seek_stiffness(seek_key, mini_dma_mod.HSW_BASIS_STRESS_MPA, 26.7)
+
+        assert seek_key not in window._seek_live_stiffness_by_key
+        assert window._seek_live_stiffness_g_per_mm is None
+        assert window._seek_last_value_by_key[seek_key] == pytest.approx(26.7)
+        assert window._seek_last_effective_position_by_key[seek_key] == pytest.approx(
+            window._current_effective_tensile_position_mm()
+        )
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_calibration_target_acceptance_caps_inflated_live_stiffness(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.spin_steps_per_mm.setValue(800.0)
