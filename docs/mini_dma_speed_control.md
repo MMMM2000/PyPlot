@@ -273,7 +273,7 @@ Correction strain cap = maximum specimen strain change per predictive move
 Correction strain-rate cap = maximum correction speed in %/s
 ```
 
-The correction distance is predictive, but capped by strain instead of by the scale feedback interval. With the default `5%` cap, a `30.56 mm` wire can receive up to about `1.53 mm` of predicted correction in one move. A `10 mm` wire would cap the same correction at `0.50 mm`, so the aggressiveness scales with specimen length instead of absolute stage travel.
+The correction distance is predictive, but capped by both strain and planned stress change instead of by the scale feedback interval. With the default `5%` strain cap, a `30.56 mm` wire can receive up to about `1.53 mm` of predicted correction in one move. A `10 mm` wire would cap the same correction at `0.50 mm`, so the aggressiveness scales with specimen length instead of absolute stage travel. The additional stress cap defaults to `10 MPa` per correction for stress/load current-sweep control, so a long or soft-looking wire cannot turn one bad stiffness estimate into a very large target jump.
 
 The far/near mode switch applies here too:
 
@@ -315,7 +315,7 @@ This means:
 - gated wait time is compensated by faster moving-part speed when the hard caps allow it;
 - the same smooth landing cap applies near target, so a high ceiling such as 5 mm/s is not used right outside the hold band.
 
-The current ramp itself stays static. Mini DMA does not pause the current ramp for ordinary servo error and does not add a stress-based safety unwind, because transition temperature and thermal history can depend on the commanded current-ramp rate. If the sample response is too fast for the servo to track, the preferred physics-preserving change is to lower the fixed current ramp rate, for example from `1 mA/s` to `0.5 mA/s`.
+By default the current ramp itself stays static, because transition temperature and thermal history can depend on the commanded current-ramp rate. When the optional current-ramp hold is enabled, Mini DMA holds the present current setpoint if the load/stress/strain error exceeds the configured pause band, keeps the displacement servo correcting, then resumes the current ramp only after the error stays inside the tighter resume band. The ramp clock is shifted by the hold duration, so resuming does not jump to the current that wall-clock time would otherwise imply. If the sample response is consistently too fast for the servo to track, lowering the fixed current ramp rate is still the cleaner first adjustment.
 
 The dashboard header displays the most recent commanded speed in fixed-width cells:
 
@@ -323,7 +323,7 @@ The dashboard header displays the most recent commanded speed in fixed-width cel
 mm/s, g/s, MPa/s, %/s
 ```
 
-The g/s and MPa/s values use the current live stiffness estimate when available, otherwise the length-scaled calibration prior. The %/s value uses the current `l0`.
+The g/s and MPa/s values use the safest available stiffness estimate during current-sweep control: Mini DMA compares the current target-specific live estimate, the broader live estimate, and the length-scaled calibration/setup prior, then uses the stiffest valid one for load/stress conversion. A temporarily soft live estimate therefore cannot increase stage speed or correction distance immediately after setup. The %/s value uses the current `l0`.
 
 ![Iso-stress/current-sweep dynamic balance speed](assets/mini_dma_current_sweep_servo_speed.svg)
 
@@ -358,11 +358,15 @@ The setup sequence is:
 5. Ask for measured length at preload.
 6. Return toward zero load over the setup return-time target and compute `l0`.
 
-Before force starts responding, Mini DMA uses the setup slack take-up speed in `%/s`; with `20 mm` length and `1 %/s`, that is `0.2 mm/s`. Tiny residual loads near zero are still treated as slack take-up, because a long or bent wire can show a few milligrams of apparent load before it is meaningfully straight. Once applied load rises above the slack-take-up threshold, setup leaves slack mode for that preload target and uses the stiffness/ramp-rate model derived from setup preload stress divided by setup time. That same setup-time ramp cap applies while increasing preload and while relaxing an overshoot from above target. Setup preload deliberately stays in one-move-at-a-time feedback and does not use cruise feedback or dead-time speed compensation. Setup return-to-zero estimates the unload travel from live load and stiffness, then divides by the Manual Actions `Return-to-zero time`, so the actual return can be slower when feedback gating and zero-plateau checks add time. The same return-time setting is used for manual displacement recovery and post-recipe return-to-start moves. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full global-speed-sized correction.
+Before force starts responding, Mini DMA uses the setup slack take-up speed in `%/s`; with `20 mm` length and `1 %/s`, that is `0.2 mm/s`. Tiny residual loads near zero are still treated as slack take-up, because a long or bent wire can show a few milligrams of apparent load before it is meaningfully straight. Once applied load rises above the slack-take-up threshold, setup leaves slack mode for that preload target and uses the stiffness/ramp-rate model. The setup time is interpreted as current engaged load/stress to preload target, not always `0 -> preload`; for example, starting at `82 MPa` with a `20 MPa` target and `10 s` setup time gives about `6.2 MPa/s`. That same setup-time ramp cap applies while increasing preload and while relaxing an overshoot from above target. Setup preload deliberately stays in one-move-at-a-time feedback and does not use cruise feedback or dead-time speed compensation. Setup return-to-zero estimates the unload travel from the initial live load and stiffness, divides by the Manual Actions `Return-to-zero time`, and holds that planned unload speed instead of shrinking it on every near-zero sample; the actual return can still be slower when feedback gating and zero-plateau checks add time. The same return-time setting is used for manual displacement recovery and post-recipe return-to-start moves. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full global-speed-sized correction.
+
+Current-sweep target ramps start in conservative gated feedback for load/stress control. Mini DMA sends one correction, waits for fresh post-move scale feedback, updates stiffness, and only then decides the next correction. This prevents the first approach after setup from chaining multiple corrections from a weak or stale stiffness estimate.
 
 The live setup and recovery graphs are UI views, not the raw acquisition clock. They append a new plotted point on the UI refresh timer when a fresh scale reply is available, including during operator prompts and post-session displacement recovery. For auditing true balance cadence, use `scale_raw.csv`, whose elapsed time remains continuous across setup and normal recipe logging.
 
 The setup points are saved to `setup.csv` and `setup.txt` in the run folder. If setup jumps or oscillates, inspect `setup.csv` first.
+
+Two load limits are enforced differently because they protect different things. The applied-load limit is a directional specimen/load boundary: above it, Mini DMA blocks new tension-increasing moves and halts an in-flight tensioning move, but it does not stop the recipe just because feedback slightly overshot; relaxing moves remain available so the controller can return toward target. The raw scale display limit is a hard balance-protection interlock: when the live balance display reaches the limit, Mini DMA halts the motor, stops automation, and blocks ordinary moves until the displayed scale value is below the limit again.
 
 During the post-preload return to zero, Mini DMA watches for a stable raw-balance plateau. If the motor keeps relaxing but the raw balance only fluctuates inside a small flat band, the controller uses the center of that raw band as the corrected zero-load reference for the current run and returns to the first plateau position before computing `l0`. The plateau must last at least `1.5 s` and span at least the larger of `0.5%` of the current `l0` or `10` motor units, so the fallback scales with wire length while still respecting motor resolution. The same plateau fallback is used by final zero-load return and manual load-zero recovery.
 

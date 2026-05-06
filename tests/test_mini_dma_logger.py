@@ -2384,7 +2384,7 @@ def test_setup_preload_above_target_uses_ramp_cap_without_cruise(tmp_path: Path,
         assert commands
         sensitivity = mini_dma_mod.stress_mpa_from_load_g(22.7, window.spin_diameter.value())
         assert sensitivity is not None
-        expected_cap_mm_s = max(window._minimum_held_speed_mm_s(), (20.0 / 20.0) / sensitivity)
+        expected_cap_mm_s = max(window._minimum_held_speed_mm_s(), ((170.0 - 20.0) / 20.0) / sensitivity)
         assert commands[0]["speed_mm_s"] == pytest.approx(expected_cap_mm_s)
         assert commands[0]["chain_from_last_target"] is False
         assert abs(float(commands[0]["target_mm"]) - window._current_position_mm) >= window._motor_step_mm()
@@ -2434,6 +2434,34 @@ def test_setup_preload_relaxation_waits_for_post_move_feedback(tmp_path: Path, q
         assert "post-move scale feedback" in window.log_output.toPlainText()
     finally:
         window._automation_active = False
+        _close_test_window(window)
+
+
+def test_setup_return_zero_keeps_initial_time_based_unload_speed(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(21.17)
+    window.spin_setup_return_duration_s.setValue(5.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+    window._calibrated_stiffness_g_per_mm = 22.7
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="seek",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=0.0,
+        note="setup_return_zero",
+    )
+
+    try:
+        first_speed = window._setup_return_zero_speed_mm_s(mini_dma_mod.HSW_BASIS_LOAD_G, 1.5)
+        second_speed = window._setup_return_zero_speed_mm_s(mini_dma_mod.HSW_BASIS_LOAD_G, 0.3)
+
+        assert first_speed == pytest.approx((1.5 / 22.7) / 5.0)
+        assert second_speed == pytest.approx(first_speed)
+    finally:
         _close_test_window(window)
 
 
@@ -3189,6 +3217,150 @@ def test_current_sweep_ramp_uses_elapsed_time_and_milliamp_resolution(
 
         assert window._handle_current_sweep_step(step, 4) is True
         assert supply.commands == [1.0, 2.0, 3.0]
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_holds_current_ramp_when_target_error_is_too_large(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 1.0}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 1.0
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def initialize_output(self, *, current_mA: float, reset_on_start: bool) -> None:
+            self.commands.append(current_mA)
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    seek_calls: list[tuple[str, float, float]] = []
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._current_distribution_value = lambda *_args, **_kwargs: 10.0  # type: ignore[method-assign]
+
+    def _fake_seek(basis: str, target_value: float, tolerance: float) -> bool:
+        seek_calls.append((basis, target_value, tolerance))
+        return False
+
+    window._seek_distribution_target = _fake_seek  # type: ignore[method-assign]
+    ticks = iter([100.0, 100.0, 102.0, 102.0])
+
+    def _fake_monotonic() -> float:
+        try:
+            return next(ticks)
+        except StopIteration:
+            return 102.0
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=0.0,
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        current_start_mA=1.0,
+        current_end_mA=5.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.0,
+        current_hold_max_s=30.0,
+    )
+
+    try:
+        assert window._handle_current_sweep_step(step, 4) is False
+        assert window._handle_current_sweep_step(step, 4) is False
+
+        assert supply.commands == [1.0]
+        assert len(seek_calls) == 2
+        assert "holding current ramp" in window.log_output.toPlainText().lower()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_ramp_resumes_without_wall_clock_current_jump(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 1.0}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 1.0
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def initialize_output(self, *, current_mA: float, reset_on_start: bool) -> None:
+            self.commands.append(current_mA)
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    measured_values = iter([10.0, 0.0, 0.0])
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._current_distribution_value = lambda *_args, **_kwargs: next(measured_values)  # type: ignore[method-assign]
+    window._seek_distribution_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+    ticks = iter([100.0, 100.0, 105.0, 106.1])
+
+    def _fake_monotonic() -> float:
+        try:
+            return next(ticks)
+        except StopIteration:
+            return 106.1
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=0.0,
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        current_start_mA=1.0,
+        current_end_mA=5.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.0,
+        current_hold_max_s=30.0,
+    )
+
+    try:
+        assert window._handle_current_sweep_step(step, 4) is False
+        assert window._handle_current_sweep_step(step, 4) is False
+        assert supply.commands == [1.0]
+
+        assert window._handle_current_sweep_step(step, 4) is False
+        assert supply.commands == [1.0, 2.0]
+        assert "resumed current ramp" in window.log_output.toPlainText().lower()
     finally:
         _close_test_window(window)
 
@@ -5428,6 +5600,76 @@ def test_current_sweep_load_target_ramp_uses_target_stage_speed(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_current_sweep_target_ramp_starts_with_gated_feedback(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_diameter.setValue(0.03)
+    window._calibrated_stiffness_g_per_mm = 72.0
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+
+    try:
+        assert (
+            window._seek_cruise_feedback_allowed(
+                mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                error_value=50.0,
+                tolerance=0.1,
+                speed_mm_s=0.05,
+                seek_key=seek_key,
+                previous_error=60.0,
+            )
+            is False
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_stress_correction_is_capped_by_planned_mpa_change(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_initial_length.setValue(80.0)
+    window.spin_diameter.setValue(0.03)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_current_sweep_max_correction_strain_pct.setValue(1.0)
+    window._calibrated_stiffness_g_per_mm = 72.0
+    window._calibrated_stiffness_length_mm = 80.0
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+
+    try:
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+        correction_mm = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            error_value=50.0,
+            tolerance=0.1,
+            seek_key=seek_key,
+        )
+        sensitivity = mini_dma_mod.stress_mpa_from_load_g(72.0, window.spin_diameter.value())
+        assert sensitivity is not None
+        assert correction_mm == pytest.approx(10.0 / sensitivity)
+        assert correction_mm < 80.0 * 0.01
+    finally:
+        _close_test_window(window)
+
+
 def test_flat_seek_feedback_continues_for_shape_memory_plateau(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_tension_load_positive.setChecked(True)
@@ -5800,6 +6042,246 @@ def test_max_load_limit_allows_relaxing_manual_move(tmp_path: Path, qtbot) -> No
         assert relaxing_move is True
         assert controller.targets == [10]
         assert "Relaxing moves are still allowed" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_raw_scale_display_limit_blocks_standard_moves_when_exceeded(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_raw_scale_limit_g.setValue(30.0)
+    window._latest_scale_value_g = 30.05
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window._last_move_target_mm = 0.0
+    window._manual_jog_uses_last_target = False
+    window.spin_steps_per_mm.setValue(100.0)
+
+    try:
+        pushing_down_move = window._move_to_position_mm(0.1, manual_jog=True)
+        unloading_move = window._move_to_position_mm(-0.1, manual_jog=True)
+        _wait_for_tic_commands(window)
+
+        assert pushing_down_move is False
+        assert unloading_move is False
+        assert controller.targets == []
+        assert "raw scale display" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_raw_scale_display_limit_blocks_raw_step_moves_when_exceeded(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[tuple[int, int | None]] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append((position_steps, max_speed))
+
+    controller = _FakeController()
+    _use_immediate_tic_dispatcher(window, controller)
+    window.spin_raw_scale_limit_g.setValue(30.0)
+    window._latest_scale_value_g = 30.05
+    window._latest_scale_timestamp = time.time()
+    window.spin_steps_per_mm.setValue(1000.0)
+    window._current_position_steps = 1200
+    window._current_position_mm = 1.2
+    window._last_commanded_position_steps = 1200
+    window._last_move_target_mm = 1.2
+
+    try:
+        positive_step = window._move_relative_raw_tic_steps(800, speed_steps_per_s=8.0)
+        negative_step = window._move_relative_raw_tic_steps(-800, speed_steps_per_s=8.0)
+        _wait_for_tic_commands(window)
+
+        assert positive_step is False
+        assert negative_step is False
+        assert controller.targets == []
+        assert "raw scale display" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_applied_load_limit_does_not_stop_active_recipe_when_exceeded(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._refresh_supply_snapshot = lambda: None  # type: ignore[method-assign]
+    stopped = False
+
+    def _record_stop(**_kwargs: object) -> None:
+        nonlocal stopped
+        stopped = True
+
+    window._stop_auto_ramp = _record_stop  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.check_max_load.setChecked(True)
+    window.spin_max_load_g.setValue(20.0)
+    window.spin_zero_load_scale_g.setValue(21.16)
+    window._latest_scale_value_g = 0.80
+    window._latest_scale_timestamp = time.time()
+    window._automation_active = True
+    window._session_active = True
+
+    try:
+        window._handle_status_timer()
+
+        assert stopped is False
+        assert window._automation_active is True
+        assert "Automation stopped because applied load" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_applied_load_limit_blocks_tensioning_move_without_stopping_recipe(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    _use_immediate_tic_dispatcher(window, controller)
+    stopped = False
+
+    def _record_stop(**_kwargs: object) -> None:
+        nonlocal stopped
+        stopped = True
+
+    window._stop_auto_ramp = _record_stop  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.check_max_load.setChecked(True)
+    window.spin_max_load_g.setValue(20.0)
+    window.spin_zero_load_scale_g.setValue(21.16)
+    window._latest_scale_value_g = 0.80
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window._last_move_target_mm = 0.0
+    window._manual_jog_uses_last_target = False
+    window.spin_steps_per_mm.setValue(100.0)
+    window._automation_active = True
+
+    try:
+        moved = window._move_to_position_mm(-0.1)
+        _wait_for_tic_commands(window)
+
+        assert moved is False
+        assert stopped is False
+        assert window._automation_active is True
+        assert controller.targets == []
+        assert "Relaxing moves are still allowed" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_applied_load_limit_halts_tensioning_motion_without_stopping_recipe(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeDispatcher:
+        def __init__(self) -> None:
+            self.halt_count = 0
+
+        def halt_and_hold(self) -> None:
+            self.halt_count += 1
+
+        def wait_until_idle(self, *, timeout_s: float = 2.0) -> bool:
+            return True
+
+    dispatcher = _FakeDispatcher()
+    window._build_tic_dispatcher = lambda: dispatcher  # type: ignore[method-assign]
+    window._wait_for_tic_dispatcher = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._refresh_supply_snapshot = lambda: None  # type: ignore[method-assign]
+    stopped = False
+
+    def _record_stop(**_kwargs: object) -> None:
+        nonlocal stopped
+        stopped = True
+
+    window._stop_auto_ramp = _record_stop  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.check_max_load.setChecked(True)
+    window.spin_max_load_g.setValue(20.0)
+    window.spin_zero_load_scale_g.setValue(21.16)
+    window._latest_scale_value_g = 0.80
+    window._latest_scale_timestamp = time.time()
+    window._last_move_direction = -1.0
+    window._last_motion_command_time_s = time.time()
+    window._last_tic_status_time_s = None
+    window._automation_active = True
+    window._session_active = True
+
+    try:
+        window._handle_status_timer()
+
+        assert dispatcher.halt_count == 1
+        assert stopped is False
+        assert window._automation_active is True
+        assert window._last_move_direction == 0.0
+        assert "Applied-load limit reached" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_raw_scale_display_limit_halts_and_stops_recipe_immediately(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeDispatcher:
+        def __init__(self) -> None:
+            self.halt_count = 0
+
+        def halt_and_hold(self) -> None:
+            self.halt_count += 1
+
+        def wait_until_idle(self, *, timeout_s: float = 2.0) -> bool:
+            return True
+
+    dispatcher = _FakeDispatcher()
+    window._build_tic_dispatcher = lambda: dispatcher  # type: ignore[method-assign]
+    window._wait_for_tic_dispatcher = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._refresh_supply_snapshot = lambda: None  # type: ignore[method-assign]
+    stop_calls: list[dict[str, object]] = []
+
+    def _record_stop(**kwargs: object) -> None:
+        stop_calls.append(kwargs)
+        window._automation_active = False
+
+    window._stop_auto_ramp = _record_stop  # type: ignore[method-assign]
+    window.spin_raw_scale_limit_g.setValue(30.0)
+    window._latest_scale_value_g = 30.05
+    window._latest_scale_timestamp = time.time()
+    window._last_move_direction = 1.0
+    window._last_motion_command_time_s = time.time()
+    window._automation_active = True
+    window._session_active = True
+
+    try:
+        window._handle_status_timer()
+
+        assert dispatcher.halt_count == 1
+        assert stop_calls == [{"log_completion": False, "offer_recovery": False}]
+        assert window._automation_active is False
+        assert "Raw scale display safety stop" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -6255,7 +6737,7 @@ def test_hardware_tare_sends_escape_t_and_clears_software_offset(tmp_path: Path,
         _close_test_window(window)
 
 
-def test_current_sweep_predictive_correction_uses_strain_cap_not_feedback_interval(
+def test_current_sweep_predictive_correction_uses_stress_cap_not_feedback_interval(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -6293,9 +6775,12 @@ def test_current_sweep_predictive_correction_uses_strain_cap_not_feedback_interv
             basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
         )
 
-        assert correction_mm == pytest.approx(30.56 * 0.05)
+        sensitivity = mini_dma_mod.stress_mpa_from_load_g(1.56, window.spin_diameter.value())
+        assert sensitivity is not None
+        assert correction_mm == pytest.approx(10.0 / sensitivity)
+        assert correction_mm < 30.56 * 0.05
         assert command_mm == pytest.approx(correction_mm)
-        assert command_mm > speed_mm_s * window._seek_decision_interval_s(mini_dma_mod.HSW_BASIS_STRESS_MPA)
+        assert command_mm > window._motor_step_mm()
     finally:
         _close_test_window(window)
 
