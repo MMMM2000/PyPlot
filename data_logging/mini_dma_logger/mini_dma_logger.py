@@ -164,6 +164,10 @@ SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA = 5.0
 SETUP_UNLOAD_BASELINE_MIN_POINTS = 5
 SETUP_UNLOAD_BASELINE_MIN_FRACTION = 0.15
 SETUP_UNLOAD_BASELINE_MIN_STRESS_MPA = 1.0
+SETUP_UNLOAD_SLACK_RECENT_POINTS = 5
+SETUP_UNLOAD_SLACK_MAX_STRESS_MPA = 4.0
+SETUP_UNLOAD_SLACK_MAX_STRESS_FRACTION = 0.30
+SETUP_UNLOAD_SLACK_SLOPE_FRACTION = 0.35
 SETUP_PRELOAD_DEFAULT_DURATION_S = 10.0
 SETUP_RETURN_DEFAULT_DURATION_S = 5.0
 SETUP_SLACK_DEFAULT_STRAIN_RATE_PCT_S = 1.0
@@ -833,6 +837,17 @@ class AutomationResumeState:
     origin_mm: float
     summary: str
     current_setpoint_mA: float | None = None
+
+
+@dataclass(frozen=True)
+class SetupUnloadBaselineFit:
+    zero_position_mm: float
+    slope_mpa_per_mm: float
+    intercept_mpa: float
+    r_squared: float
+    fit_point_count: int
+    max_stress_mpa: float
+    stress_floor_mpa: float
 
 
 def _numeric_values(values: Iterable[float | None]) -> list[float]:
@@ -2233,6 +2248,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_return_zero_speed_mm_s_value: float | None = None
         self._setup_zero_fallback_return_position_mm: float | None = None
         self._setup_zero_fallback_raw_g: float | None = None
+        self._setup_zero_fallback_reason = ""
         self._end_zero_fallback_armed = False
         self._end_zero_fallback_start_point_index = 0
         self._end_zero_fallback_return_position_mm: float | None = None
@@ -6638,11 +6654,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return l0_mm
 
-    def _fit_setup_unload_zero_position_mm(self) -> float | None:
+    def _setup_unload_candidate_points(self) -> list[tuple[float, float]]:
         start_index = max(0, int(self._setup_return_zero_start_point_index))
         return_points = self._length_setup_points[start_index:]
-        if len(return_points) < SETUP_UNLOAD_BASELINE_MIN_POINTS:
-            return None
         candidates: list[tuple[float, float]] = []
         for point in return_points:
             stress_mpa = point.stress_mpa
@@ -6652,6 +6666,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             stress_value = abs(float(stress_mpa))
             candidates.append((float(point.raw_position_mm), stress_value))
+        return candidates
+
+    def _setup_unload_baseline_fit(self) -> SetupUnloadBaselineFit | None:
+        candidates = self._setup_unload_candidate_points()
         if len(candidates) < SETUP_UNLOAD_BASELINE_MIN_POINTS:
             return None
         max_stress = max(stress for _position, stress in candidates)
@@ -6684,12 +6702,105 @@ class MainWindow(QtWidgets.QMainWindow):
         margin_mm = max(self._motor_step_mm() * 4.0, abs(max_position - min_position) * 0.25)
         if zero_position_mm < min_position - margin_mm or zero_position_mm > max_position + margin_mm:
             return None
+        mean_y = sum_y / n
+        residual_sum = sum((stress - (slope * position + intercept)) ** 2 for position, stress in fit_points)
+        total_sum = sum((stress - mean_y) ** 2 for _position, stress in fit_points)
+        r_squared = 1.0 if total_sum <= 1e-12 else 1.0 - residual_sum / total_sum
+        return SetupUnloadBaselineFit(
+            zero_position_mm=float(zero_position_mm),
+            slope_mpa_per_mm=float(slope),
+            intercept_mpa=float(intercept),
+            r_squared=float(r_squared),
+            fit_point_count=len(fit_points),
+            max_stress_mpa=float(max_stress),
+            stress_floor_mpa=float(stress_floor),
+        )
+
+    def _fit_setup_unload_zero_position_mm(self) -> float | None:
+        fit = self._setup_unload_baseline_fit()
+        if fit is None:
+            return None
         self._log(
             "Computed setup l0 zero position from linear unload fit: "
-            f"{_format_compact_unit(zero_position_mm, 'mm')} "
-            f"using {len(fit_points)} points."
+            f"{_format_compact_unit(fit.zero_position_mm, 'mm')} "
+            f"using {fit.fit_point_count} points."
         )
-        return float(zero_position_mm)
+        return fit.zero_position_mm
+
+    def _setup_unload_recent_slope_mpa_per_mm(
+        self,
+        candidates: Sequence[tuple[float, float]],
+    ) -> float | None:
+        if len(candidates) < SETUP_UNLOAD_SLACK_RECENT_POINTS:
+            return None
+        recent = list(candidates[-SETUP_UNLOAD_SLACK_RECENT_POINTS:])
+        n = float(len(recent))
+        sum_x = sum(position for position, _stress in recent)
+        sum_y = sum(stress for _position, stress in recent)
+        sum_xx = sum(position * position for position, _stress in recent)
+        sum_xy = sum(position * stress for position, stress in recent)
+        denominator = n * sum_xx - sum_x * sum_x
+        if abs(denominator) <= 1e-12:
+            return None
+        slope = (n * sum_xy - sum_x * sum_y) / denominator
+        if not math.isfinite(slope):
+            return None
+        return float(slope)
+
+    def _maybe_start_setup_unload_baseline_fallback(self) -> bool:
+        if self._automation_step_note != "setup_return_zero":
+            return False
+        if self._setup_zero_fallback_return_position_mm is not None:
+            return True
+        if self._setup_zero_position_mm is not None:
+            return False
+        fit = self._setup_unload_baseline_fit()
+        if fit is None or fit.r_squared < 0.90:
+            return False
+        candidates = self._setup_unload_candidate_points()
+        if len(candidates) < SETUP_UNLOAD_BASELINE_MIN_POINTS + SETUP_UNLOAD_SLACK_RECENT_POINTS:
+            return False
+        recent = candidates[-SETUP_UNLOAD_SLACK_RECENT_POINTS:]
+        recent_max_stress = max(stress for _position, stress in recent)
+        slack_stress_limit = max(
+            SETUP_UNLOAD_SLACK_MAX_STRESS_MPA,
+            fit.max_stress_mpa * SETUP_UNLOAD_SLACK_MAX_STRESS_FRACTION,
+        )
+        if recent_max_stress > slack_stress_limit:
+            return False
+        recent_slope = self._setup_unload_recent_slope_mpa_per_mm(candidates)
+        if recent_slope is None:
+            return False
+        if abs(recent_slope) > abs(fit.slope_mpa_per_mm) * SETUP_UNLOAD_SLACK_SLOPE_FRACTION:
+            return False
+
+        current_position_mm = float(self._current_position_mm)
+        zero_position_mm = fit.zero_position_mm
+        min_position = min(position for position, _stress in candidates)
+        max_position = max(position for position, _stress in candidates)
+        margin_mm = max(self._motor_step_mm() * 4.0, abs(max_position - min_position) * 0.25)
+        if zero_position_mm < min_position - margin_mm or zero_position_mm > max_position + margin_mm:
+            return False
+
+        self._setup_zero_position_mm = zero_position_mm
+        self._setup_zero_fallback_return_position_mm = zero_position_mm
+        self._setup_zero_fallback_reason = "linear_unload_slack"
+        self._log(
+            "Detected setup unload slack onset: recent load/stress slope collapsed "
+            f"to {abs(recent_slope):.4g} MPa/mm from the linear-fit "
+            f"{abs(fit.slope_mpa_per_mm):.4g} MPa/mm stiffness; using "
+            f"{_format_compact_unit(zero_position_mm, 'mm')} as the zero-stress l0 position "
+            "and returning there instead of driving farther into slack."
+        )
+        if not self._move_to_position_mm(
+            zero_position_mm,
+            speed_mm_s=self._setup_return_speed_for_distance_mm_s(abs(current_position_mm - zero_position_mm)),
+        ):
+            if abs(current_position_mm - zero_position_mm) <= self._motor_step_mm():
+                self._setup_zero_fallback_return_position_mm = None
+                return True
+            return False
+        return True
 
     def _tension_motion_sign(self) -> float:
         return 1.0 if self.check_positive_motion_is_tension.isChecked() else -1.0
@@ -6827,6 +6938,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if target_load_g is None:
             return False
         if target_load_g > self._zero_return_acceptance_tolerance_g():
+            return False
+        if (
+            self._automation_step_note == "setup_return_zero"
+            and self._setup_zero_position_mm is not None
+            and self._setup_zero_fallback_return_position_mm is None
+        ):
             return False
         return (
             self._automation_step_note == "setup_return_zero"
@@ -8012,9 +8129,15 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         if abs(float(self._current_position_mm) - float(target_mm)) <= self._motor_step_mm():
             self._setup_zero_fallback_return_position_mm = None
-            self._log("Returned to zero-load plateau position for l0.")
+            if self._setup_zero_fallback_reason == "linear_unload_slack":
+                self._log("Returned to the linear-unload zero-stress position for l0.")
+            else:
+                self._log("Returned to zero-load plateau position for l0.")
             return True
-        self._log_waiting_for_feedback("Returning to zero-load plateau position before computing l0.")
+        if self._setup_zero_fallback_reason == "linear_unload_slack":
+            self._log_waiting_for_feedback("Returning to the linear-unload zero-stress position before computing l0.")
+        else:
+            self._log_waiting_for_feedback("Returning to zero-load plateau position before computing l0.")
         return False
 
     def _zero_fallback_min_travel_mm(self) -> float:
@@ -8087,6 +8210,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_position_mm = plateau_first_position_mm
         self._setup_zero_fallback_raw_g = float(plateau_raw_g)
         self._setup_zero_fallback_return_position_mm = plateau_first_position_mm
+        self._setup_zero_fallback_reason = "zero_load_plateau"
         self._log(
             "Detected zero-load plateau at "
             f"{float(plateau_raw_g):.5f} g after "
@@ -8280,10 +8404,30 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._setup_preload_overload_exceeded(basis, target_value, current_value, effective_tolerance):
             self._stop_for_setup_preload_overload(basis, target_value, current_value)
             return False
+        if self._maybe_start_setup_unload_baseline_fallback():
+            return False
         if self._maybe_start_setup_zero_plateau_fallback(basis, current_value, effective_tolerance):
             return False
         if self._maybe_start_end_zero_plateau_fallback(basis, target_value, effective_tolerance):
             return False
+        if (
+            self._automation_step_note == "setup_return_zero"
+            and self._setup_zero_position_mm is not None
+            and self._setup_zero_fallback_return_position_mm is None
+        ):
+            self._clear_seek_state(seek_key)
+            self._write_control_trace(
+                decision="accept",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=effective_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                result="reached",
+                reason="setup_l0_baseline_committed",
+            )
+            return True
         if abs(delta_value) <= effective_tolerance:
             if self._zero_return_requires_true_zero(basis, target_value):
                 current_load_g = self._zero_return_current_load_g(basis, current_value)
@@ -10981,6 +11125,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_return_zero_speed_mm_s_value = None
         self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_raw_g = None
+        self._setup_zero_fallback_reason = ""
         self._end_zero_fallback_armed = False
         self._end_zero_fallback_start_point_index = 0
         self._end_zero_fallback_return_position_mm = None
@@ -11173,6 +11318,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_position_mm = None
         self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_raw_g = None
+        self._setup_zero_fallback_reason = ""
         self._length_setup_start_monotonic = time.monotonic()
         self._update_length_setup_dialog("Enter the approximate mounted wire length before setup.")
         self._update_length_setup_progress()
@@ -12395,6 +12541,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_position_mm = None
         self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_raw_g = None
+        self._setup_zero_fallback_reason = ""
         self._update_length_setup_dialog("Measured length saved. Returning load to 0 g to compute l0.")
         self._log(
             "Measured preload length accepted: "
