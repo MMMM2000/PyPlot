@@ -2693,7 +2693,7 @@ def test_setup_preload_target_ramp_uses_elapsed_mpa_rate(
         _close_test_window(window)
 
 
-def test_setup_preload_target_ramp_above_target_seeks_final_preload(
+def test_setup_preload_target_ramp_above_target_ramps_down_from_live_value(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -2705,7 +2705,8 @@ def test_setup_preload_target_ramp_above_target_seeks_final_preload(
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_zero_load_scale_g.setValue(21.17)
     window.spin_diameter.setValue(0.0137)
-    overload_g = mini_dma_mod.load_g_from_stress_mpa(185.0, window.spin_diameter.value())
+    window.spin_setup_preload_duration_s.setValue(10.0)
+    overload_g = mini_dma_mod.load_g_from_stress_mpa(80.0, window.spin_diameter.value())
     assert overload_g is not None
     window._latest_scale_value_g = 21.17 - overload_g
     window._latest_scale_timestamp = time.time()
@@ -2730,7 +2731,11 @@ def test_setup_preload_target_ramp_above_target_seeks_final_preload(
     try:
         assert window._handle_target_ramp_step(step, 4) is False
 
-        assert captured_targets == [pytest.approx(20.0)]
+        now_s[0] = 102.5
+
+        assert window._handle_target_ramp_step(step, 4) is False
+        assert captured_targets == [pytest.approx(80.0), pytest.approx(65.0)]
+        assert window._active_target_ramp_rate_value_s == pytest.approx(6.0)
     finally:
         _close_test_window(window)
 
@@ -5568,7 +5573,10 @@ def test_live_speed_summary_reports_equivalent_rates(tmp_path: Path, qtbot) -> N
         _close_test_window(window)
 
 
-def test_backlash_limited_reverse_correction_counts_as_practical_target(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_reverse_correction_uses_backlash_takeup_instead_of_acceptance(
+    tmp_path: Path,
+    qtbot,
+) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
@@ -5586,16 +5594,24 @@ def test_backlash_limited_reverse_correction_counts_as_practical_target(tmp_path
     window.spin_initial_length.setValue(20.0)
     window.spin_distribution_nudge_mm.setValue(1.0)
     window.spin_backlash_mm.setValue(0.03)
-    window._calibrated_stiffness_g_per_mm = 10.0
+    window._calibrated_stiffness_g_per_mm = 100.0
     window._calibrated_stiffness_length_mm = 20.0
     window._current_position_mm = 0.1
     window._effective_position_mm = 0.1
     window._last_effective_move_target_mm = 0.1
     window._current_position_steps = 100
     window._last_move_target_mm = 0.1
-    window._last_move_direction = 1.0
-    window._latest_scale_value_g = 5.10
+    window._last_move_direction = -1.0
+    window._latest_scale_value_g = 4.0
     window._latest_scale_timestamp = time.time()
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=5.0,
+        plateau_index=1,
+    )
 
     try:
         reached = window._seek_distribution_target(
@@ -5603,10 +5619,56 @@ def test_backlash_limited_reverse_correction_counts_as_practical_target(tmp_path
             target_value=5.0,
             tolerance=0.02,
         )
+        _wait_for_tic_commands(window)
 
-        assert reached is True
-        assert controller.targets == []
-        assert "within backlash-limited tolerance" in window.log_output.toPlainText()
+        assert reached is False
+        assert controller.targets
+        assert "backlash take-up" in window.log_output.toPlainText()
+        assert "within backlash-limited tolerance" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_does_not_update_live_stiffness_from_sweep_fluctuations(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_initial_length.setValue(20.0)
+    window.spin_diameter.setValue(0.0191)
+    window._calibrated_stiffness_g_per_mm = 20.0
+    window._calibrated_stiffness_length_mm = 20.0
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_stiffness_value_by_basis[mini_dma_mod.HSW_BASIS_STRESS_MPA] = 40.0
+    window._seek_last_stiffness_position_by_basis[mini_dma_mod.HSW_BASIS_STRESS_MPA] = 0.0
+    window._seek_last_value_by_key[seek_key] = 40.0
+    window._seek_last_effective_position_by_key[seek_key] = 0.0
+    window._current_position_mm = 0.02
+    window._effective_position_mm = 0.02
+
+    try:
+        window._update_live_seek_stiffness(
+            seek_key,
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            90.0,
+        )
+
+        assert seek_key not in window._seek_live_stiffness_by_key
+        assert window._seek_live_stiffness_g_per_mm is None
+        assert window._basis_sensitivity_per_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            seek_key=seek_key,
+        ) == pytest.approx(
+            mini_dma_mod.stress_mpa_from_load_g(20.0, window.spin_diameter.value())
+        )
     finally:
         _close_test_window(window)
 

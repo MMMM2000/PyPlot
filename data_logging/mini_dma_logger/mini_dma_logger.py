@@ -238,6 +238,7 @@ SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S = 15.0
 SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA = 10.0
+SERVO_CURRENT_SWEEP_REVERSAL_HOLD_STRESS_MPA = 1.0
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
@@ -7016,6 +7017,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return None if load_per_mm is None else abs(float(load_per_mm))
         return None
 
+    def _current_sweep_freezes_live_stiffness(self) -> bool:
+        return (
+            self._is_current_sweep_mode(self._automation_name)
+            and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
+        )
+
     def _basis_sensitivity_per_mm(
         self,
         basis: str,
@@ -7236,6 +7243,8 @@ class MainWindow(QtWidgets.QMainWindow):
         basis: str,
         current_value: float,
     ) -> None:
+        if self._current_sweep_freezes_live_stiffness():
+            return
         current_position = self._current_effective_tensile_position_mm()
         if self._setup_preload_first_contact_transition(seek_key, basis, current_value):
             self._seek_last_stiffness_value_by_basis[basis] = float(current_value)
@@ -7326,6 +7335,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         if self._automation_step_note == "setup_preload":
             return True
+        if self._current_sweep_freezes_live_stiffness():
+            return True
         if self._stored_calibration_stiffness_g_per_mm() is None:
             return True
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
@@ -7376,6 +7387,21 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if self._automation_step_note == "setup_preload":
             return abs(float(error_value)) <= abs(float(tolerance))
+        if self._current_sweep_freezes_live_stiffness():
+            if basis == HSW_BASIS_STRESS_MPA:
+                hold_tolerance = max(abs(float(tolerance)), SERVO_CURRENT_SWEEP_REVERSAL_HOLD_STRESS_MPA)
+            elif basis == HSW_BASIS_LOAD_G:
+                hold_load_g = load_g_from_stress_mpa(
+                    SERVO_CURRENT_SWEEP_REVERSAL_HOLD_STRESS_MPA,
+                    float(self.spin_diameter.value()),
+                )
+                hold_tolerance = max(
+                    abs(float(tolerance)),
+                    0.0 if hold_load_g is None else abs(float(hold_load_g)),
+                )
+            else:
+                hold_tolerance = abs(float(tolerance))
+            return abs(float(error_value)) <= hold_tolerance
         return abs(float(error_value)) <= self._reversal_acceptance_tolerance(
             basis,
             tolerance,
@@ -11625,11 +11651,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
         end_value = float(step.target_end_value if step.target_end_value is not None else step.target_value)
-        ramp_rate = max(1e-9, abs(float(step.target_ramp_rate_value_s or self.spin_current_sweep_target_ramp_rate.value())))
-        self._active_target_ramp_rate_value_s = ramp_rate
+        configured_ramp_rate = max(
+            1e-9,
+            abs(float(step.target_ramp_rate_value_s or self.spin_current_sweep_target_ramp_rate.value())),
+        )
+        ramp_rate = configured_ramp_rate
         if self._active_target_ramp_step_index != step_index:
             self._active_target_ramp_step_index = step_index
             self._active_target_ramp_started_s = time.monotonic()
+            self._active_target_ramp_rate_value_s = configured_ramp_rate
             start_value = step.target_start_value
             if start_value is None:
                 start_value = self._current_distribution_value(step.basis)
@@ -11654,6 +11684,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 ):
                     self._end_zero_fallback_armed = True
                     self._end_zero_fallback_start_point_index = len(self._session_points)
+        elif self._active_target_ramp_rate_value_s is not None:
+            ramp_rate = max(1e-9, abs(float(self._active_target_ramp_rate_value_s)))
+
+        if step.note == "setup_preload" and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            current_value = self._current_distribution_value(step.basis)
+            tolerance = self._automation_tolerance_for_step(step)
+            current_load_g = None if current_value is None else self._basis_value_as_load_g(step.basis, current_value)
+            end_load_g = self._basis_value_as_load_g(step.basis, end_value)
+            tolerance_load_g = self._basis_value_as_load_g(step.basis, tolerance) or 0.0
+            if (
+                current_load_g is not None
+                and end_load_g is not None
+                and float(current_load_g) > float(end_load_g) + abs(float(tolerance_load_g))
+            ):
+                active_start = float(
+                    end_value if self._active_target_ramp_start_value is None else self._active_target_ramp_start_value
+                )
+                if active_start < end_value or float(current_value) > active_start + abs(float(tolerance)):
+                    self._active_target_ramp_start_value = float(current_value)
+                    self._active_target_ramp_started_s = time.monotonic()
+                    setup_duration_s = max(0.1, float(self.spin_setup_preload_duration_s.value()))
+                    ramp_rate = max(1e-9, abs(float(current_value) - end_value) / setup_duration_s)
+                    self._active_target_ramp_rate_value_s = ramp_rate
 
         start_value = float(
             end_value if self._active_target_ramp_start_value is None else self._active_target_ramp_start_value
@@ -11666,18 +11719,6 @@ class MainWindow(QtWidgets.QMainWindow):
             desired_value = min(end_value, desired_value)
         else:
             desired_value = max(end_value, desired_value)
-        if step.note == "setup_preload" and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
-            current_value = self._current_distribution_value(step.basis)
-            tolerance = self._automation_tolerance_for_step(step)
-            current_load_g = None if current_value is None else self._basis_value_as_load_g(step.basis, current_value)
-            end_load_g = self._basis_value_as_load_g(step.basis, end_value)
-            tolerance_load_g = self._basis_value_as_load_g(step.basis, tolerance) or 0.0
-            if (
-                current_load_g is not None
-                and end_load_g is not None
-                and float(current_load_g) > float(end_load_g) + abs(float(tolerance_load_g))
-            ):
-                desired_value = end_value
 
         plateau_index = int(step.note) if step.note.isdigit() else None
         self._set_automation_context(

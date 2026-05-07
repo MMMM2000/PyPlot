@@ -180,7 +180,7 @@ Strain sensitivity is geometric:
 sensitivity_pct_per_mm = 100 / l0_mm
 ```
 
-During a run, Mini DMA can also update live stiffness from recent observed response:
+During setup, calibration, and ordinary load/stress seeking, Mini DMA can also update live stiffness from recent observed response:
 
 ```text
 observed_sensitivity = abs(delta_value / delta_effective_displacement_mm)
@@ -189,7 +189,7 @@ live_stiffness = (1 - alpha) * old_live_stiffness + alpha * observed_stiffness
 
 Only moves large enough to be meaningful are used. Tiny moves below about half a motor step are ignored.
 
-The live stiffness is kept both for the exact target currently being chased and as a run-level stiffness estimate. That matters during ramps, where the desired target changes every tick. Without the run-level estimate, the controller would forget what it learned at intermediate ramp targets and then behave as if stiffness were unknown at the final settle.
+The live stiffness is kept both for the exact target currently being chased and as a run-level stiffness estimate. That matters during setup and non-current ramps, where the desired target changes every tick. During iso-load/iso-stress/iso-strain current sweeps, live stiffness learning is frozen and Mini DMA uses the latest setup/calibration stiffness prior instead of treating current-driven load/stress fluctuations as mechanical stiffness.
 
 ## Predictive Correction Distance
 
@@ -323,7 +323,7 @@ The dashboard header displays the most recent commanded speed in fixed-width cel
 mm/s, g/s, MPa/s, %/s
 ```
 
-The g/s and MPa/s values use the safest available stiffness estimate during current-sweep control: Mini DMA compares the current target-specific live estimate, the broader live estimate, and the length-scaled calibration/setup prior, then uses the stiffest valid one for load/stress conversion. A temporarily soft live estimate therefore cannot increase stage speed or correction distance immediately after setup. The %/s value uses the current `l0`.
+The g/s and MPa/s values use the frozen setup/calibration stiffness prior during current-sweep control. Mini DMA does not update this stiffness from current-driven load/stress fluctuations, so phase/current transients cannot inflate backlash cost or rewrite the mechanical sensitivity while the sweep is in progress. The %/s value uses the current `l0`.
 
 ![Iso-stress/current-sweep dynamic balance speed](assets/mini_dma_current_sweep_servo_speed.svg)
 
@@ -360,7 +360,7 @@ The setup sequence is:
 
 Before force starts responding, Mini DMA uses the setup slack take-up speed in `%/s`; with `20 mm` length and `1 %/s`, that is `0.2 mm/s`. Tiny residual loads near zero are still treated as slack take-up, because a long or bent wire can show a few milligrams of apparent load before it is meaningfully straight. Once applied load rises above the slack-take-up threshold, setup leaves slack mode for that preload target and uses the stiffness/ramp-rate model. The first slack-to-taut load jump is treated only as engagement evidence, not as elastic stiffness evidence; live stiffness learning starts from later post-contact samples, and setup preload acceptance is capped so a single large jump cannot make a multi-MPa overshoot look "close enough." The setup time is interpreted as current engaged load/stress to preload target, not always `0 -> preload`; for example, starting at `82 MPa` with a `20 MPa` target and `10 s` setup time gives about `6.2 MPa/s`. That same setup-time ramp cap applies while increasing preload and while relaxing an overshoot from above target. Setup preload deliberately stays in one-move-at-a-time feedback and does not use cruise feedback or dead-time speed compensation. Setup return-to-zero estimates the unload travel from the initial live load and stiffness, divides by the Manual Actions `Return-to-zero time`, and holds that planned unload speed instead of shrinking it on every near-zero sample; the actual return can still be slower when feedback gating and zero-plateau checks add time. The same return-time setting is used for manual displacement recovery and post-recipe return-to-start moves. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full global-speed-sized correction.
 
-Current-sweep target ramps start in conservative gated feedback for load/stress control. Mini DMA sends one correction, waits for fresh post-move scale feedback, updates stiffness, and only then decides the next correction. This prevents the first approach after setup from chaining multiple corrections from a weak or stale stiffness estimate.
+Current-sweep target ramps start in conservative gated feedback for load/stress control. Mini DMA sends one correction, waits for fresh post-move scale feedback, and only then decides the next correction. It does not update stiffness during the current sweep. Direction reversals still include backlash take-up, but backlash no longer marks a large current-sweep load/stress error as reached; only a tiny reversal hold band is allowed.
 
 The live setup and recovery graphs are UI views, not the raw acquisition clock. They append a new plotted point on the UI refresh timer when a fresh scale reply is available, including during operator prompts and post-session displacement recovery. For auditing true balance cadence, use `scale_raw.csv`, whose elapsed time remains continuous across setup and normal recipe logging.
 
