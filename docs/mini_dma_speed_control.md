@@ -39,6 +39,7 @@ Mini DMA keeps several related speed and sensitivity terms:
 | `decision_interval` | Expected time between useful load/stress feedback samples, usually the scale request interval. |
 | `desired_average_speed` | Average motor speed the controller wants to achieve over a full correction cycle. |
 | `command_speed` | Instantaneous motor speed sent to the Tic for the moving part of that cycle. |
+| `correction_mm` | Specimen displacement correction requested by one closed-loop decision, excluding backlash take-up. |
 | `max_speed` | User-facing hard motor speed cap for the active mode. |
 
 Mini DMA stores the motor conversion as two values: mechanical full motor steps/mm and the Tic step mode. The derived value used for position commands is Tic controller position units/mm. The current rig is mechanically about `100 full motor steps/mm`; with the Tic configured for `1/8 step`, the controller coordinate is:
@@ -345,6 +346,8 @@ Examples:
 
 The final motor speed is the smaller of the recipe/global max mm/s and any active target-ramp speed cap, except during setup slack take-up where the sample has not started responding yet.
 
+For current-sweep load/stress target ramps, this ramp-rate cap is only applied near the target. If the controller is far from target, it is allowed to catch up under the dynamic balance speed ceiling instead of crawling at the recipe ramp rate while the current ramp keeps changing the sample.
+
 ## Setup Preload
 
 Setup preload is special because the wire may initially be slack or bent.
@@ -362,7 +365,26 @@ Before force starts responding, Mini DMA uses the setup slack take-up speed in `
 
 Current-sweep target ramps start in conservative gated feedback for load/stress control. Mini DMA sends one correction, waits for fresh post-move scale feedback, and only then decides the next correction. It does not update stiffness during the current sweep. Direction reversals still include backlash take-up, but backlash no longer marks a large current-sweep load/stress error as reached; only a tiny reversal hold band is allowed.
 
+For iso-load and iso-stress current sweeps, "dynamic speed control" means dynamic average correction speed. The most important controlled quantity is the step size, not the motor's instantaneous Tic speed. Mini DMA first predicts the mechanical correction from the frozen setup/calibration stiffness, then caps that correction by target-space error:
+
+| Error region | Planned correction cap |
+| --- | ---: |
+| Very far from target | up to `10 MPa` equivalent |
+| Mid range | up to `5 MPa` equivalent |
+| Near target after crossing or approaching | up to `1 MPa` equivalent |
+| Inside the near-target band | one motor step |
+
+For load-control sweeps, the same caps are converted from MPa to grams using the current wire diameter. The specimen correction is still clipped by the configured maximum correction strain percentage. This makes the controller progressively shrink real correction distance as it approaches target, so the average motion slows down even when the Tic command speed remains reasonably fast.
+
+The Tic command speed is kept practical for these small corrections. During current-sweep balancing, Mini DMA will not deliberately creep below about `0.05 mm/s` unless the stage speed cap itself is lower. The balance feedback is normally the bottleneck, so a tiny correction should finish quickly and then wait for the next fresh scale reply instead of spending seconds moving slowly.
+
+Backlash is treated as its own state. On a current-sweep reversal, Mini DMA first sends a backlash-only move and keeps the effective specimen displacement unchanged. The next fresh feedback sample is then used for the real stress/load correction. Backlash take-up is not added to the stress correction distance on every reversal, and it is not allowed to turn a large error into "target reached."
+
+Each closed-loop seek decision is written to `control_trace.csv` in the run folder. The trace includes target, live value, error, tolerance, stiffness/sensitivity, correction distance, backlash distance, command speed, target motor position, effective specimen target, wait reason, and command result. Use this file when the behavior looks strange: it should explain whether Mini DMA waited for feedback, took up backlash, sent a correction, blocked a move, or accepted the target.
+
 The live setup and recovery graphs are UI views, not the raw acquisition clock. They append a new plotted point on the UI refresh timer when a fresh scale reply is available, including during operator prompts and post-session displacement recovery. For auditing true balance cadence, use `scale_raw.csv`, whose elapsed time remains continuous across setup and normal recipe logging.
+
+The UI refresh interval does not set the control-loop or raw balance frequency. The default `200 ms` UI refresh only controls labels and live dialog/graph updates. The request/response scale cadence is set by the scale poll interval and the balance reply speed, the main recipe CSV cadence is set by the log interval, Tic status has its own slower polling path, and supply readbacks remain throttled separately so voltage/current queries do not block current setpoint commands. Seeing `measurement.csv` rows at `500 ms` therefore does not mean the scale or servo only updated every `500 ms`; inspect `scale_raw.csv` and `control_trace.csv` for that.
 
 The setup points are saved to `setup.csv` and `setup.txt` in the run folder. If setup jumps or oscillates, inspect `setup.csv` first.
 
@@ -424,8 +446,9 @@ For debugging speed control:
 2. Inspect `setup.csv` for pre-measurement preload behavior.
 3. Inspect `measurement.csv` for recipe behavior.
 4. Inspect `scale_raw.csv` for real balance sample timing and noise.
-5. Compare commanded displacement changes to load/stress changes.
-6. Check whether oscillations start at direction reversals, after stiffness updates, or during current-induced transitions.
+5. Inspect `control_trace.csv` for every closed-loop wait, correction, backlash take-up, acceptance, and blocked move.
+6. Compare commanded displacement changes to load/stress changes.
+7. Check whether oscillations start at direction reversals, after stiffness updates, or during current-induced transitions.
 
 Important symptoms:
 
@@ -434,6 +457,7 @@ Important symptoms:
 | Slow movement before any load change | Slack take-up or stiffness prior too conservative. |
 | Huge overshoot after first load response | Sensitivity too low, correction distance too large, or scale lag. |
 | Repeated target crossing around preload | Reversal/backlash band too small or speed too aggressive near target. |
+| Long, infrequent current-sweep steps | Correction distance too large, command speed too low, or waiting for post-move scale feedback. Check `control_trace.csv`. |
 | Stress rises during current ramp while displacement lags | Need higher max speed, stronger away-rate gain, or current feed-forward. |
 | Load stops changing while motor keeps moving toward zero | Zero-load plateau fallback should accept the new baseline. |
 

@@ -64,8 +64,30 @@ SESSION_MEASUREMENT_TX = "measurement.txt"
 SESSION_MEASUREMENT_CSV = "measurement.csv"
 SESSION_METADATA_JSON = "metadata.json"
 SESSION_RAW_SCALE_CSV = "scale_raw.csv"
+SESSION_CONTROL_TRACE_CSV = "control_trace.csv"
 SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
+CONTROL_TRACE_FIELDNAMES = [
+    "elapsed_s",
+    "timestamp_utc",
+    "recipe_mode",
+    "automation_phase",
+    "automation_basis",
+    "automation_target_value",
+    "plateau_index",
+    "decision",
+    "current_value",
+    "error_value",
+    "tolerance",
+    "sensitivity_per_mm",
+    "correction_mm",
+    "backlash_mm",
+    "command_speed_mm_s",
+    "target_mm",
+    "effective_target_mm",
+    "result",
+    "reason",
+]
 GRAVITY_MS2 = 9.80665
 LONG_NAMES = ("Displacement", "Load", "Strain", "Stress")
 UNITS = ("mm", "g", "%", "MPa")
@@ -238,7 +260,10 @@ SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S = 15.0
 SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA = 10.0
+SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA = 5.0
+SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_REVERSAL_HOLD_STRESS_MPA = 1.0
+SERVO_CURRENT_SWEEP_MIN_COMMAND_SPEED_MM_S = 0.05
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
@@ -2118,6 +2143,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_csv_writer: csv.DictWriter[str] | None = None
         self._session_raw_scale_handle: Any = None
         self._session_raw_scale_writer: csv.DictWriter[str] | None = None
+        self._session_control_trace_handle: Any = None
+        self._session_control_trace_writer: csv.DictWriter[str] | None = None
         self._session_setup_txt_handle: Any = None
         self._session_setup_csv_handle: Any = None
         self._session_setup_csv_writer: csv.DictWriter[str] | None = None
@@ -2125,6 +2152,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_csv_path: Path | None = None
         self._session_json_path: Path | None = None
         self._session_raw_scale_path: Path | None = None
+        self._session_control_trace_path: Path | None = None
         self._session_setup_txt_path: Path | None = None
         self._session_setup_csv_path: Path | None = None
         self._session_start_wall_s = 0.0
@@ -6629,21 +6657,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self,
         basis: str,
         sensitivity_per_mm: float,
+        *,
+        error_value: float | None = None,
     ) -> float | None:
         sensitivity = abs(float(sensitivity_per_mm))
         if not math.isfinite(sensitivity) or sensitivity <= 0.0:
             return None
+        def _basis_cap_from_stress(cap_mpa: float) -> float | None:
+            if basis == HSW_BASIS_STRESS_MPA:
+                return abs(float(cap_mpa))
+            if basis == HSW_BASIS_LOAD_G:
+                load_cap_g = load_g_from_stress_mpa(cap_mpa, float(self.spin_diameter.value()))
+                return None if load_cap_g is None else abs(float(load_cap_g))
+            return None
+
         cap_mpa = SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA
-        if basis == HSW_BASIS_STRESS_MPA:
-            cap_value = cap_mpa
-        elif basis == HSW_BASIS_LOAD_G:
-            load_cap_g = load_g_from_stress_mpa(cap_mpa, float(self.spin_diameter.value()))
-            if load_cap_g is None:
-                return None
-            cap_value = abs(float(load_cap_g))
-        else:
+        if error_value is not None and math.isfinite(float(error_value)):
+            error_abs = abs(float(error_value))
+            near_cap = _basis_cap_from_stress(SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA)
+            mid_cap = _basis_cap_from_stress(SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA)
+            max_cap = _basis_cap_from_stress(SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA)
+            near_threshold = 0.0 if near_cap is None else near_cap
+            mid_threshold = 0.0 if mid_cap is None else mid_cap
+            max_threshold = 0.0 if max_cap is None else max_cap
+            if near_threshold > 0.0 and error_abs <= near_threshold:
+                return self._motor_step_mm()
+            elif mid_threshold > 0.0 and error_abs <= mid_threshold * 2.0:
+                cap_mpa = SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA
+            elif max_threshold > 0.0 and error_abs <= max_threshold * 2.5:
+                cap_mpa = SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA
+        cap_value = _basis_cap_from_stress(cap_mpa)
+        if cap_value is None:
             return None
         return max(self._motor_step_mm(), cap_value / sensitivity)
+
+    def _current_sweep_basis_value_from_stress_cap(self, basis: str, stress_mpa: float) -> float | None:
+        if basis == HSW_BASIS_STRESS_MPA:
+            return abs(float(stress_mpa))
+        if basis == HSW_BASIS_LOAD_G:
+            load_cap_g = load_g_from_stress_mpa(abs(float(stress_mpa)), float(self.spin_diameter.value()))
+            return None if load_cap_g is None else abs(float(load_cap_g))
+        return None
 
     def _current_sweep_stage_speed_cap_mm_s(self) -> float:
         speed_mm_s = SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S
@@ -6664,6 +6718,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_sweep_stage_speed_cap_mm_s(),
                 self._current_sweep_strain_rate_speed_cap_mm_s(),
             ),
+        )
+
+    def _current_sweep_min_command_speed_mm_s(self) -> float:
+        return min(
+            self._current_sweep_stage_speed_cap_mm_s(),
+            max(self._minimum_held_speed_mm_s(), SERVO_CURRENT_SWEEP_MIN_COMMAND_SPEED_MM_S),
         )
 
     def _zero_return_acceptance_tolerance_g(self) -> float:
@@ -7316,7 +7376,11 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         elif self._is_current_sweep_mode(self._automation_name):
             correction_caps = [self._current_sweep_max_correction_mm()]
-            stress_cap_mm = self._current_sweep_max_stress_correction_mm(basis, sensitivity)
+            stress_cap_mm = self._current_sweep_max_stress_correction_mm(
+                basis,
+                sensitivity,
+                error_value=error_value,
+            )
             if stress_cap_mm is not None:
                 correction_caps.append(stress_cap_mm)
             max_step_mm = max(self._motor_step_mm(), min(correction_caps))
@@ -7481,7 +7545,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     base_speed * self._servo_landing_factor(error_value, tolerance),
                 )
                 return max(
-                    self._minimum_held_speed_mm_s(),
+                    self._current_sweep_min_command_speed_mm_s(),
                     min(base_speed, landing_cap_mm_s, speed_mm_s),
                 )
         factor = self._servo_landing_factor(error_value, tolerance)
@@ -7549,6 +7613,20 @@ class MainWindow(QtWidgets.QMainWindow):
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or not math.isfinite(float(sensitivity)) or abs(float(sensitivity)) <= 0.0:
             return None
+        if (
+            self._is_current_sweep_mode(self._automation_name)
+            and self._automation_step_note != "setup_preload"
+            and current_value is not None
+            and target_value is not None
+        ):
+            near_cap = self._current_sweep_basis_value_from_stress_cap(
+                basis,
+                SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA,
+            )
+            error_value = abs(float(target_value) - float(current_value))
+            ramp_gate = abs(float(ramp_rate)) * self._seek_decision_interval_s(basis) * 2.0
+            if near_cap is not None and error_value > max(near_cap, ramp_gate):
+                return None
         return max(self._minimum_held_speed_mm_s(), abs(float(ramp_rate)) / abs(float(sensitivity)))
 
     def _seek_feedback_dead_time_s(self, basis: str | None) -> float:
@@ -7988,11 +8066,27 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._handle_pending_end_zero_fallback()
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._seek_has_unused_scale_sample(seek_key):
             self._log_waiting_for_feedback("Waiting for a new scale sample before the next load/stress correction.")
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                tolerance=tolerance,
+                result="waiting",
+                reason="new_scale_sample",
+            )
             return False
         current_value = self._current_distribution_value(basis, require_after_last_move=False)
         if current_value is None:
             if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
                 self._log_waiting_for_feedback("Waiting for a fresh scale reading before the next load/stress correction.")
+                self._write_control_trace(
+                    decision="wait",
+                    basis=basis,
+                    target_value=target_value,
+                    tolerance=tolerance,
+                    result="waiting",
+                    reason="fresh_scale_reading",
+                )
                 return False
             current_value = 0.0
         setup_preload_relaxation = self._setup_preload_relaxation_active(
@@ -8011,6 +8105,16 @@ class MainWindow(QtWidgets.QMainWindow):
             and not self._has_fresh_scale_reading(after_s=self._motion_feedback_ready_after_s())
         ):
             self._log_waiting_for_feedback("Waiting for post-move scale feedback before the next load/stress correction.")
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=target_value - current_value,
+                tolerance=tolerance,
+                result="waiting",
+                reason="post_move_feedback",
+            )
             return False
         early_recorded_seek_point = False
         if self._is_recovery_mode():
@@ -8045,14 +8149,44 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                 else:
                     self._clear_seek_state(seek_key)
+                    self._write_control_trace(
+                        decision="accept",
+                        basis=basis,
+                        target_value=target_value,
+                        current_value=current_value,
+                        error_value=delta_value,
+                        tolerance=effective_tolerance,
+                        sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                        result="reached",
+                    )
                     return True
             else:
                 self._clear_seek_state(seek_key)
+                self._write_control_trace(
+                    decision="accept",
+                    basis=basis,
+                    target_value=target_value,
+                    current_value=current_value,
+                    error_value=delta_value,
+                    tolerance=effective_tolerance,
+                    sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                    result="reached",
+                )
                 return True
         if abs(delta_value) <= effective_tolerance and self._zero_return_requires_true_zero(basis, target_value):
             pass
         elif abs(delta_value) <= effective_tolerance:
             self._clear_seek_state(seek_key)
+            self._write_control_trace(
+                decision="accept",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=effective_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                result="reached",
+            )
             return True
         setup_preload_takeup = self._setup_preload_takeup_active(
             basis,
@@ -8111,6 +8245,17 @@ class MainWindow(QtWidgets.QMainWindow):
             and not self._has_fresh_scale_reading(after_s=self._motion_feedback_ready_after_s())
         ):
             self._log_waiting_for_feedback("Waiting for post-move scale feedback before near-target correction.")
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=effective_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                result="waiting",
+                reason="near_target_post_move_feedback",
+            )
             return False
         if early_recorded_seek_point:
             pass
@@ -8137,8 +8282,32 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Load/stress target accepted after crossing target; "
                     "reverse correction skipped inside the physical reversal band."
                 )
+                self._write_control_trace(
+                    decision="accept",
+                    basis=basis,
+                    target_value=target_value,
+                    current_value=current_value,
+                    error_value=delta_value,
+                    tolerance=effective_tolerance,
+                    sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                    result="reversal_hold",
+                )
                 return True
-            nudge_mm = max(self._motor_step_mm(), self._seek_nudge_mm() * 0.25)
+            if self._current_sweep_freezes_live_stiffness():
+                sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+                stress_cap_mm = (
+                    None
+                    if sensitivity is None
+                    else self._current_sweep_max_stress_correction_mm(
+                        basis,
+                        sensitivity,
+                        error_value=delta_value,
+                    )
+                )
+                if stress_cap_mm is not None:
+                    nudge_mm = max(self._motor_step_mm(), min(nudge_mm, stress_cap_mm))
+            else:
+                nudge_mm = max(self._motor_step_mm(), self._seek_nudge_mm() * 0.25)
             self._seek_no_response_count_by_key[seek_key] = 0
             self._log(
                 f"Overshoot detected at target {_format_compact_number(target_value)}"
@@ -8175,10 +8344,68 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Load/stress target accepted within backlash-limited tolerance; "
                 "reversal skipped because take-up would be larger than the predicted improvement."
             )
+            self._write_control_trace(
+                decision="accept",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=effective_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                backlash_mm=backlash_takeup_mm,
+                result="backlash_limited",
+            )
             return True
         chain_from_last_target = self._seek_uses_planned_motion_base(basis) or cruise_mode
         base_position_mm = self._seek_motion_base_mm(basis)
         effective_base_position_mm = self._measurement_effective_position_mm()
+        if backlash_takeup_mm > 0.0 and self._current_sweep_freezes_live_stiffness():
+            target_mm = base_position_mm + movement_direction * backlash_takeup_mm
+            command_speed_mm_s = max(
+                self._current_sweep_min_command_speed_mm_s(),
+                min(
+                    self._motion_speed_for_current_context(manual_jog=False),
+                    self._current_sweep_dynamic_speed_cap_mm_s(),
+                ),
+            )
+            self._log(
+                f"Direction reversal: taking up {_format_compact_unit(backlash_takeup_mm, 'mm')} "
+                "backlash take-up before the next load/stress correction."
+            )
+            if not self._move_to_position_mm(
+                target_mm,
+                chain_from_last_target=chain_from_last_target,
+                effective_position_mm=effective_base_position_mm,
+                speed_mm_s=command_speed_mm_s,
+            ):
+                return False
+            self._seek_last_error_by_key[seek_key] = delta_value
+            self._seek_last_value_by_key[seek_key] = current_value
+            self._seek_last_time_by_key[seek_key] = seek_sample_time_s
+            latest_scale_sample_time_s = self._latest_scale_sample_time_s()
+            if latest_scale_sample_time_s is not None:
+                self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
+                self._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = latest_scale_sample_time_s
+            self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
+            self._seek_travel_by_key[seek_key] = (
+                self._seek_travel_by_key.get(seek_key, 0.0) + abs(backlash_takeup_mm)
+            )
+            self._write_control_trace(
+                decision="backlash_takeup",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=effective_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                correction_mm=0.0,
+                backlash_mm=backlash_takeup_mm,
+                command_speed_mm_s=command_speed_mm_s,
+                target_mm=target_mm,
+                effective_target_mm=effective_base_position_mm,
+                result="move_sent",
+            )
+            return False
         target_mm = base_position_mm + movement_direction * (nudge_mm + backlash_takeup_mm)
         effective_target_mm = effective_base_position_mm + movement_direction * nudge_mm
         if backlash_takeup_mm > 0.0:
@@ -8200,7 +8427,38 @@ class MainWindow(QtWidgets.QMainWindow):
             effective_position_mm=effective_target_mm,
             speed_mm_s=command_speed_mm_s,
         ):
+            self._write_control_trace(
+                decision="correction",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=effective_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                correction_mm=nudge_mm,
+                backlash_mm=backlash_takeup_mm,
+                command_speed_mm_s=command_speed_mm_s,
+                target_mm=target_mm,
+                effective_target_mm=effective_target_mm,
+                result="move_blocked",
+            )
             return False
+        self._write_control_trace(
+            decision="correction",
+            basis=basis,
+            target_value=target_value,
+            current_value=current_value,
+            error_value=delta_value,
+            tolerance=effective_tolerance,
+            sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+            correction_mm=nudge_mm,
+            backlash_mm=backlash_takeup_mm,
+            command_speed_mm_s=command_speed_mm_s,
+            target_mm=target_mm,
+            effective_target_mm=effective_target_mm,
+            result="move_sent",
+            reason="cruise" if cruise_mode else "gated",
+        )
         self._seek_last_error_by_key[seek_key] = delta_value
         self._seek_last_value_by_key[seek_key] = current_value
         self._seek_last_time_by_key[seek_key] = seek_sample_time_s
@@ -9274,8 +9532,11 @@ class MainWindow(QtWidgets.QMainWindow):
         Any,
         csv.DictWriter[str],
         Any,
+        csv.DictWriter[str],
+        Any,
         Any,
         csv.DictWriter[str],
+        Path,
         Path,
         Path,
         Path,
@@ -9292,6 +9553,8 @@ class MainWindow(QtWidgets.QMainWindow):
         raw_scale_handle = raw_scale_path.open("w", encoding="utf-8", newline="")
         setup_txt_handle = setup_txt_path.open("w", encoding="utf-8", newline="")
         setup_csv_handle = setup_csv_path.open("w", encoding="utf-8", newline="")
+        control_trace_path = txt_path.parent / SESSION_CONTROL_TRACE_CSV
+        control_trace_handle = control_trace_path.open("w", encoding="utf-8", newline="")
         txt_handle.write("\t".join(LONG_NAMES) + "\n")
         txt_handle.write("\t".join(UNITS) + "\n")
         txt_handle.write(f"# Created UTC\t{created_utc}\n")
@@ -9343,12 +9606,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         raw_scale_writer.writeheader()
         raw_scale_handle.flush()
+        control_trace_writer = csv.DictWriter(control_trace_handle, fieldnames=CONTROL_TRACE_FIELDNAMES)
+        control_trace_writer.writeheader()
+        control_trace_handle.flush()
         return (
             txt_handle,
             csv_handle,
             writer,
             raw_scale_handle,
             raw_scale_writer,
+            control_trace_handle,
+            control_trace_writer,
             setup_txt_handle,
             setup_csv_handle,
             setup_writer,
@@ -9356,6 +9624,7 @@ class MainWindow(QtWidgets.QMainWindow):
             csv_path,
             json_path,
             raw_scale_path,
+            control_trace_path,
             setup_txt_path,
             setup_csv_path,
         )
@@ -9482,6 +9751,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "raw_scale_sidecar": None
                 if self._session_raw_scale_path is None
                 else self._session_raw_scale_path.name,
+                "control_trace_csv": None
+                if self._session_control_trace_path is None
+                else self._session_control_trace_path.name,
                 "setup_txt": None if self._session_setup_txt_path is None else self._session_setup_txt_path.name,
                 "setup_csv": None if self._session_setup_csv_path is None else self._session_setup_csv_path.name,
                 "raw_scale_sample_count": int(self._session_raw_scale_count),
@@ -9628,6 +9900,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 csv_writer,
                 raw_scale_handle,
                 raw_scale_writer,
+                control_trace_handle,
+                control_trace_writer,
                 setup_txt_handle,
                 setup_csv_handle,
                 setup_csv_writer,
@@ -9635,6 +9909,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 csv_path,
                 json_path,
                 raw_scale_path,
+                control_trace_path,
                 setup_txt_path,
                 setup_csv_path,
             ) = self._prepare_session_files(created_utc=created_utc)
@@ -9655,12 +9930,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 self._load_offset_g = -signed_load
         except Exception as exc:
-            for handle in (txt_handle, csv_handle, raw_scale_handle, setup_txt_handle, setup_csv_handle):
+            for handle in (
+                txt_handle,
+                csv_handle,
+                raw_scale_handle,
+                control_trace_handle,
+                setup_txt_handle,
+                setup_csv_handle,
+            ):
                 try:
                     handle.close()
                 except Exception:
                     pass
-            for path in (txt_path, csv_path, json_path, raw_scale_path, setup_txt_path, setup_csv_path):
+            for path in (
+                txt_path,
+                csv_path,
+                json_path,
+                raw_scale_path,
+                control_trace_path,
+                setup_txt_path,
+                setup_csv_path,
+            ):
                 try:
                     path.unlink(missing_ok=True)
                 except Exception:
@@ -9693,6 +9983,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_csv_writer = csv_writer
         self._session_raw_scale_handle = raw_scale_handle
         self._session_raw_scale_writer = raw_scale_writer
+        self._session_control_trace_handle = control_trace_handle
+        self._session_control_trace_writer = control_trace_writer
         self._session_setup_txt_handle = setup_txt_handle
         self._session_setup_csv_handle = setup_csv_handle
         self._session_setup_csv_writer = setup_csv_writer
@@ -9700,6 +9992,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_csv_path = csv_path
         self._session_json_path = json_path
         self._session_raw_scale_path = raw_scale_path
+        self._session_control_trace_path = control_trace_path
         self._session_setup_txt_path = setup_txt_path
         self._session_setup_csv_path = setup_csv_path
         self.button_start_session.setEnabled(False)
@@ -9754,6 +10047,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_raw_scale_handle.close()
             self._session_raw_scale_handle = None
         self._session_raw_scale_writer = None
+        if self._session_control_trace_handle is not None:
+            self._session_control_trace_handle.close()
+            self._session_control_trace_handle = None
+        self._session_control_trace_writer = None
         if self._session_setup_txt_handle is not None:
             self._session_setup_txt_handle.close()
             self._session_setup_txt_handle = None
@@ -9774,6 +10071,68 @@ class MainWindow(QtWidgets.QMainWindow):
             self._write_session_metadata(finished_utc=_utc_timestamp())
         self._clear_run_zero_load_scale_reference()
         self._refresh_live_labels()
+
+    def _write_control_trace(
+        self,
+        *,
+        decision: str,
+        basis: str | None = None,
+        target_value: float | None = None,
+        current_value: float | None = None,
+        error_value: float | None = None,
+        tolerance: float | None = None,
+        sensitivity_per_mm: float | None = None,
+        correction_mm: float | None = None,
+        backlash_mm: float | None = None,
+        command_speed_mm_s: float | None = None,
+        target_mm: float | None = None,
+        effective_target_mm: float | None = None,
+        result: str = "",
+        reason: str = "",
+    ) -> None:
+        if (
+            not self._session_active
+            or self._session_control_trace_writer is None
+            or self._session_control_trace_handle is None
+        ):
+            return
+
+        def _number(value: float | None) -> str:
+            if value is None:
+                return ""
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return ""
+            if not math.isfinite(value):
+                return ""
+            return f"{value:.9g}"
+
+        elapsed_s = max(0.0, time.monotonic() - self._session_start_monotonic)
+        self._session_control_trace_writer.writerow(
+            {
+                "elapsed_s": f"{elapsed_s:.6f}",
+                "timestamp_utc": _utc_timestamp(),
+                "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
+                "automation_phase": self._automation_phase,
+                "automation_basis": "" if basis is None else basis,
+                "automation_target_value": _number(target_value),
+                "plateau_index": "" if self._automation_plateau_index is None else self._automation_plateau_index,
+                "decision": decision,
+                "current_value": _number(current_value),
+                "error_value": _number(error_value),
+                "tolerance": _number(tolerance),
+                "sensitivity_per_mm": _number(sensitivity_per_mm),
+                "correction_mm": _number(correction_mm),
+                "backlash_mm": _number(backlash_mm),
+                "command_speed_mm_s": _number(command_speed_mm_s),
+                "target_mm": _number(target_mm),
+                "effective_target_mm": _number(effective_target_mm),
+                "result": result,
+                "reason": reason,
+            }
+        )
+        self._session_control_trace_handle.flush()
 
     def _write_raw_scale_sample(self, sample: ScaleSample) -> None:
         if (

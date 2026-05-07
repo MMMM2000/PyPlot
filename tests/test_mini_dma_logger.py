@@ -2571,7 +2571,7 @@ def test_setup_preload_relaxes_after_first_contact_jump_instead_of_accepting_bac
     window._effective_position_mm = 6.9775
     window._last_effective_move_target_mm = 6.9775
     window._last_move_target_mm = 6.9775
-    window._last_move_direction = -1.0
+    window._last_move_direction = 1.0
     current_load_g = mini_dma_mod.load_g_from_stress_mpa(26.7, window.spin_diameter.value())
     assert current_load_g is not None
     window._latest_scale_value_g = 21.16 - current_load_g
@@ -5518,6 +5518,7 @@ def test_setup_preload_near_target_fallback_uses_minimum_speed(tmp_path: Path, q
     window = _build_window(tmp_path, qtbot)
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
     window.spin_steps_per_mm.setValue(100.0)
     window.spin_diameter.setValue(0.0137)
     window.spin_motion_speed_mm_s.setValue(1.0)
@@ -5625,6 +5626,155 @@ def test_current_sweep_reverse_correction_uses_backlash_takeup_instead_of_accept
         assert controller.targets
         assert "backlash take-up" in window.log_output.toPlainText()
         assert "within backlash-limited tolerance" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_overshoot_shrinks_correction_to_target_space_step(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("speed_mm_s")))  # type: ignore[arg-type]
+        window._last_move_target_mm = target_mm
+        window._last_motion_command_time_s = time.time()
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(59.85)
+    window.spin_backlash_mm.setValue(0.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        113.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = 9.5
+    window._seek_last_value_by_key[seek_key] = 40.5
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.3
+    window._seek_last_effective_position_by_key[seek_key] = 6.7275
+    window._current_position_mm = 6.7275
+    window._effective_position_mm = 6.7275
+    window._last_move_target_mm = 6.7275
+    window._last_effective_move_target_mm = 6.7275
+    window._latest_scale_timestamp = time.time()
+    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(
+        55.8,
+        window.spin_diameter.value(),
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert moves
+        correction_mm = abs(moves[-1][0] - 6.7275)
+        one_mpa_mm = 1.0 / 113.0
+        assert correction_mm <= one_mpa_mm + 1e-9
+        assert moves[-1][1] is not None
+        assert moves[-1][1] >= 0.05
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_reversal_takes_up_backlash_before_stress_correction(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None, float | None]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append(
+            (
+                target_mm,
+                kwargs.get("effective_position_mm"),  # type: ignore[arg-type]
+                kwargs.get("speed_mm_s"),  # type: ignore[arg-type]
+            )
+        )
+        window._last_move_target_mm = target_mm
+        window._last_motion_command_time_s = time.time()
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(59.85)
+    window.spin_backlash_mm.setValue(0.02)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        113.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = 9.5
+    window._seek_last_value_by_key[seek_key] = 40.5
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.3
+    window._seek_last_effective_position_by_key[seek_key] = 6.7275
+    window._current_position_mm = 6.7275
+    window._effective_position_mm = 6.7275
+    window._last_move_target_mm = 6.7275
+    window._last_effective_move_target_mm = 6.7275
+    window._last_move_direction = 1.0
+    window._latest_scale_timestamp = time.time()
+    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(
+        55.8,
+        window.spin_diameter.value(),
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert moves
+        target_mm, effective_mm, speed_mm_s = moves[-1]
+        assert abs(target_mm - 6.7275) == pytest.approx(0.02)
+        assert effective_mm == pytest.approx(6.7275)
+        assert speed_mm_s is not None
+        assert speed_mm_s >= 0.05
+        assert "backlash take-up" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -6566,6 +6716,8 @@ def test_prepare_session_files_can_save_as_next_run_without_replacing_existing(
             _csv_writer,
             raw_scale_handle,
             _raw_scale_writer,
+            control_trace_handle,
+            _control_trace_writer,
             setup_txt_handle,
             setup_csv_handle,
             _setup_csv_writer,
@@ -6573,16 +6725,25 @@ def test_prepare_session_files_can_save_as_next_run_without_replacing_existing(
             csv_path,
             json_path,
             raw_scale_path,
+            control_trace_path,
             setup_txt_path,
             setup_csv_path,
         ) = window._prepare_session_files(created_utc="2026-04-28 12:00:00")
-        for handle in (txt_handle, csv_handle, raw_scale_handle, setup_txt_handle, setup_csv_handle):
+        for handle in (
+            txt_handle,
+            csv_handle,
+            raw_scale_handle,
+            control_trace_handle,
+            setup_txt_handle,
+            setup_csv_handle,
+        ):
             handle.close()
 
         assert txt_path == tmp_path / "same_sample_run03" / "measurement.txt"
         assert csv_path == tmp_path / "same_sample_run03" / "measurement.csv"
         assert json_path == tmp_path / "same_sample_run03" / "metadata.json"
         assert raw_scale_path == tmp_path / "same_sample_run03" / "scale_raw.csv"
+        assert control_trace_path == tmp_path / "same_sample_run03" / "control_trace.csv"
         assert setup_txt_path == tmp_path / "same_sample_run03" / "setup.txt"
         assert setup_csv_path == tmp_path / "same_sample_run03" / "setup.csv"
         assert window.edit_log_name.text() == "same_sample_run03"
@@ -6640,13 +6801,22 @@ def test_prepare_session_files_does_not_chain_run_suffixes(tmp_path: Path, qtbot
             _csv_writer,
             raw_scale_handle,
             _raw_scale_writer,
+            control_trace_handle,
+            _control_trace_writer,
             setup_txt_handle,
             setup_csv_handle,
             _setup_csv_writer,
             txt_path,
             *_paths,
         ) = window._prepare_session_files(created_utc="2026-04-28 12:03:00")
-        for handle in (txt_handle, csv_handle, raw_scale_handle, setup_txt_handle, setup_csv_handle):
+        for handle in (
+            txt_handle,
+            csv_handle,
+            raw_scale_handle,
+            control_trace_handle,
+            setup_txt_handle,
+            setup_csv_handle,
+        ):
             handle.close()
 
         assert txt_path == tmp_path / "same_sample_run04" / "measurement.txt"
@@ -6674,13 +6844,22 @@ def test_prepare_session_files_can_replace_existing_outputs(tmp_path: Path, qtbo
             _csv_writer,
             raw_scale_handle,
             _raw_scale_writer,
+            control_trace_handle,
+            _control_trace_writer,
             setup_txt_handle,
             setup_csv_handle,
             _setup_csv_writer,
             returned_txt_path,
             *_paths,
         ) = window._prepare_session_files(created_utc="2026-04-28 12:05:00")
-        for handle in (txt_handle, csv_handle, raw_scale_handle, setup_txt_handle, setup_csv_handle):
+        for handle in (
+            txt_handle,
+            csv_handle,
+            raw_scale_handle,
+            control_trace_handle,
+            setup_txt_handle,
+            setup_csv_handle,
+        ):
             handle.close()
 
         assert returned_txt_path == txt_path
