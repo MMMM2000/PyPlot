@@ -135,15 +135,15 @@ def test_origin_export_layer_frame_uses_page_units_and_safe_margins() -> None:
     window._set_origin_layer_frame(layer)  # noqa: SLF001
 
     assert layer.floats == {
-        "top": 24.0,
-        "left": 22.0,
-        "width": 52.0,
-        "height": 50.0,
+        "top": 20.0,
+        "left": 17.0,
+        "width": 62.0,
+        "height": 56.0,
     }
     assert (
-        "layer -u 1; layer 52.000 50.000 22.000 24.000; "
-        "layer.top=24.000; layer.left=22.000; "
-        "layer.width=52.000; layer.height=50.000;"
+        "layer -u 1; layer 62.000 56.000 17.000 20.000; "
+        "layer.top=20.000; layer.left=17.000; "
+        "layer.width=62.000; layer.height=56.000;"
     ) in layer.commands
 
 
