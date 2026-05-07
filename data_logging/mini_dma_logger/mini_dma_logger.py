@@ -8276,35 +8276,6 @@ class MainWindow(QtWidgets.QMainWindow):
             tolerance,
             seek_key=seek_key,
         )
-        if (
-            require_after_last_move
-            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
-            and self._last_motion_command_time_s is not None
-        ):
-            required_samples = self._seek_required_post_move_samples(
-                basis,
-                delta_value,
-                effective_tolerance,
-                seek_key=seek_key,
-            )
-            if self._seek_wait_for_required_post_move_samples(seek_key, required_samples):
-                self._log_waiting_for_feedback(
-                    f"Waiting for {required_samples} fresh scale samples before the next fine correction."
-                )
-                self._write_control_trace(
-                    decision="wait",
-                    basis=basis,
-                    target_value=target_value,
-                    current_value=current_value,
-                    error_value=delta_value,
-                    tolerance=effective_tolerance,
-                    sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
-                    required_fresh_samples=required_samples,
-                    post_move_sample_count=self._seek_post_move_sample_count_by_key.get(seek_key, 0),
-                    result="waiting",
-                    reason=f"{required_samples}_fresh_scale_samples",
-                )
-                return False
         self._update_setup_preload_engagement(seek_key, basis, current_value)
         if self._setup_preload_overload_exceeded(basis, target_value, current_value, effective_tolerance):
             self._stop_for_setup_preload_overload(basis, target_value, current_value)
@@ -8375,6 +8346,35 @@ class MainWindow(QtWidgets.QMainWindow):
                 reason="new_scale_sample",
             )
             return False
+        if (
+            require_after_last_move
+            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and self._last_motion_command_time_s is not None
+        ):
+            required_samples = self._seek_required_post_move_samples(
+                basis,
+                delta_value,
+                effective_tolerance,
+                seek_key=seek_key,
+            )
+            if self._seek_wait_for_required_post_move_samples(seek_key, required_samples):
+                self._log_waiting_for_feedback(
+                    f"Waiting for {required_samples} fresh scale samples before the next fine correction."
+                )
+                self._write_control_trace(
+                    decision="wait",
+                    basis=basis,
+                    target_value=target_value,
+                    current_value=current_value,
+                    error_value=delta_value,
+                    tolerance=effective_tolerance,
+                    sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                    required_fresh_samples=required_samples,
+                    post_move_sample_count=self._seek_post_move_sample_count_by_key.get(seek_key, 0),
+                    result="waiting",
+                    reason=f"{required_samples}_fresh_scale_samples",
+                )
+                return False
         setup_preload_takeup = self._setup_preload_takeup_active(
             basis,
             current_value,
