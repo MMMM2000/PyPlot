@@ -2489,29 +2489,32 @@ class MainWindow(QtWidgets.QMainWindow):
         key: str,
         title: str,
         *,
-        min_width: int = 118,
+        min_width: int = 96,
     ) -> QtWidgets.QFrame:
         cell = QtWidgets.QFrame(parent)
-        cell.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        cell.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         cell.setMinimumWidth(min_width)
         cell.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.MinimumExpanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        layout = QtWidgets.QVBoxLayout(cell)
-        layout.setContentsMargins(8, 5, 8, 5)
-        layout.setSpacing(2)
+        layout = QtWidgets.QHBoxLayout(cell)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(5)
         title_label = QtWidgets.QLabel(title, cell)
-        title_label.setStyleSheet("color: palette(text);")
+        title_font = title_label.font()
+        title_font.setPointSize(max(8, title_font.pointSize() - 1))
+        title_label.setFont(title_font)
+        title_label.setStyleSheet("color: palette(light);")
         value_label = QtWidgets.QLabel("-", cell)
-        value_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
-        value_font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
-        value_font.setFixedPitch(True)
+        value_font = value_label.font()
+        value_font.setBold(True)
         value_label.setFont(value_font)
-        value_label.setMinimumWidth(max(70, min_width - 24))
-        value_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        value_label.setMinimumWidth(max(54, min_width - 42))
+        value_label.setWordWrap(key == "task")
+        value_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(title_label)
-        layout.addWidget(value_label)
+        layout.addWidget(value_label, stretch=1)
         self._dashboard_value_labels[key] = value_label
         return cell
 
@@ -2519,6 +2522,7 @@ class MainWindow(QtWidgets.QMainWindow):
         label = self._dashboard_value_labels.get(key)
         if label is not None:
             label.setText(text)
+            label.setToolTip(text)
 
     def _build_ui(self, log_dir: str) -> None:
         install_standard_menu(self, open_folder=self._choose_log_dir)
@@ -3764,6 +3768,44 @@ class MainWindow(QtWidgets.QMainWindow):
             "Specimen-strain-rate ceiling for dynamic servo corrections; still limited by the stage speed cap."
         )
         current_sweep_form.addRow("Correction strain-rate cap", self.spin_current_sweep_correction_rate_pct_s)
+        self.spin_current_sweep_max_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_max_correction_stress_mpa.setDecimals(2)
+        self.spin_current_sweep_max_correction_stress_mpa.setRange(0.001, 100000.0)
+        self.spin_current_sweep_max_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA)
+        self.spin_current_sweep_max_correction_stress_mpa.setSuffix(" MPa")
+        self.spin_current_sweep_max_correction_stress_mpa.setToolTip(
+            "Largest planned stress-equivalent correction used for far-from-target current-sweep recovery."
+        )
+        current_sweep_form.addRow("Far correction cap", self.spin_current_sweep_max_correction_stress_mpa)
+        self.spin_current_sweep_hold_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_hold_correction_stress_mpa.setDecimals(2)
+        self.spin_current_sweep_hold_correction_stress_mpa.setRange(0.001, 100000.0)
+        self.spin_current_sweep_hold_correction_stress_mpa.setValue(
+            SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
+        )
+        self.spin_current_sweep_hold_correction_stress_mpa.setSuffix(" MPa")
+        self.spin_current_sweep_hold_correction_stress_mpa.setToolTip(
+            "Largest planned stress-equivalent correction while current is paused by target hold."
+        )
+        current_sweep_form.addRow("Hold correction cap", self.spin_current_sweep_hold_correction_stress_mpa)
+        self.spin_current_sweep_mid_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_mid_correction_stress_mpa.setDecimals(2)
+        self.spin_current_sweep_mid_correction_stress_mpa.setRange(0.001, 100000.0)
+        self.spin_current_sweep_mid_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA)
+        self.spin_current_sweep_mid_correction_stress_mpa.setSuffix(" MPa")
+        self.spin_current_sweep_mid_correction_stress_mpa.setToolTip(
+            "Intermediate planned stress-equivalent correction cap as the servo approaches the target."
+        )
+        current_sweep_form.addRow("Mid correction cap", self.spin_current_sweep_mid_correction_stress_mpa)
+        self.spin_current_sweep_near_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_near_correction_stress_mpa.setDecimals(2)
+        self.spin_current_sweep_near_correction_stress_mpa.setRange(0.001, 100000.0)
+        self.spin_current_sweep_near_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA)
+        self.spin_current_sweep_near_correction_stress_mpa.setSuffix(" MPa")
+        self.spin_current_sweep_near_correction_stress_mpa.setToolTip(
+            "Near-target stress-equivalent correction cap before the servo shrinks to single motor steps."
+        )
+        current_sweep_form.addRow("Near correction cap", self.spin_current_sweep_near_correction_stress_mpa)
         self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
         self.check_current_sweep_return_target.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_return_target)
@@ -3793,7 +3835,7 @@ class MainWindow(QtWidgets.QMainWindow):
             automation_box,
         )
         self.check_current_sweep_hold_on_error.setToolTip(
-            "Hold the current setpoint when load/stress/strain drifts too far from the requested target, "
+            "Hold the current setpoint when absolute load/stress/strain error is too far from the requested target, "
             "while the displacement servo keeps correcting."
         )
         current_sweep_form.addRow("", self.check_current_sweep_hold_on_error)
@@ -3833,6 +3875,42 @@ class MainWindow(QtWidgets.QMainWindow):
             "Maximum time to hold one current-ramp step before stopping the recipe. Set 0 to disable the limit."
         )
         current_sweep_form.addRow("Maximum pause time", self.spin_current_sweep_hold_max_s)
+        self.spin_current_sweep_hold_filter_window_s = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_hold_filter_window_s.setDecimals(2)
+        self.spin_current_sweep_hold_filter_window_s.setRange(0.1, 60.0)
+        self.spin_current_sweep_hold_filter_window_s.setValue(SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S)
+        self.spin_current_sweep_hold_filter_window_s.setSuffix(" s")
+        self.spin_current_sweep_hold_filter_window_s.setToolTip(
+            "Scale averaging window used for current-hold pause/resume decisions."
+        )
+        current_sweep_form.addRow("Hold filter window", self.spin_current_sweep_hold_filter_window_s)
+        self.spin_current_sweep_hold_noise_sigma = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_hold_noise_sigma.setDecimals(2)
+        self.spin_current_sweep_hold_noise_sigma.setRange(0.0, 100.0)
+        self.spin_current_sweep_hold_noise_sigma.setValue(SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA)
+        self.spin_current_sweep_hold_noise_sigma.setSuffix(" x")
+        self.spin_current_sweep_hold_noise_sigma.setToolTip(
+            "Recent scale-noise multiplier added to the current-hold pause/resume bands."
+        )
+        current_sweep_form.addRow("Hold noise band", self.spin_current_sweep_hold_noise_sigma)
+        self.spin_current_sweep_hold_min_pause_stress_mpa = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_hold_min_pause_stress_mpa.setDecimals(2)
+        self.spin_current_sweep_hold_min_pause_stress_mpa.setRange(0.0, 100000.0)
+        self.spin_current_sweep_hold_min_pause_stress_mpa.setValue(SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA)
+        self.spin_current_sweep_hold_min_pause_stress_mpa.setSuffix(" MPa")
+        self.spin_current_sweep_hold_min_pause_stress_mpa.setToolTip(
+            "Minimum MPa-equivalent error required before current hold can start."
+        )
+        current_sweep_form.addRow("Minimum pause band", self.spin_current_sweep_hold_min_pause_stress_mpa)
+        self.spin_current_sweep_hold_min_resume_stress_mpa = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_hold_min_resume_stress_mpa.setDecimals(2)
+        self.spin_current_sweep_hold_min_resume_stress_mpa.setRange(0.0, 100000.0)
+        self.spin_current_sweep_hold_min_resume_stress_mpa.setValue(SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA)
+        self.spin_current_sweep_hold_min_resume_stress_mpa.setSuffix(" MPa")
+        self.spin_current_sweep_hold_min_resume_stress_mpa.setToolTip(
+            "Minimum MPa-equivalent band used before current hold can resume the current ramp."
+        )
+        current_sweep_form.addRow("Minimum resume band", self.spin_current_sweep_hold_min_resume_stress_mpa)
         self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
         self.check_current_sweep_reverse_current.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_reverse_current)
@@ -3935,6 +4013,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.recipe_progress.setTextVisible(True)
         self.recipe_progress.setFormat("Recipe progress: idle")
         automation_form.addRow("", self.recipe_progress)
+        self.label_current_task = QtWidgets.QLabel("Current task: idle", automation_box)
+        self.label_current_task.setWordWrap(True)
+        task_font = self.label_current_task.font()
+        task_font.setBold(True)
+        self.label_current_task.setFont(task_font)
+        self.label_current_task.setStyleSheet("color: palette(text);")
+        automation_form.addRow("Current task", self.label_current_task)
 
         ramp_buttons = QtWidgets.QHBoxLayout()
         self.button_start_recipe = QtWidgets.QPushButton("Start recipe (auto-connect)", automation_box)
@@ -4062,22 +4147,18 @@ class MainWindow(QtWidgets.QMainWindow):
         status_layout.setHorizontalSpacing(8)
         status_layout.setVerticalSpacing(6)
         status_cells = (
-            ("session", "Session", 122),
-            ("load_g", "Load", 112),
-            ("stress_mpa", "Stress", 118),
-            ("strain_pct", "Strain", 112),
-            ("speed_mm_s", "mm/s", 112),
-            ("speed_g_s", "g/s", 112),
-            ("speed_mpa_s", "MPa/s", 112),
-            ("speed_pct_s", "%/s", 112),
-            ("scale", "Scale", 132),
-            ("motor", "Motor", 150),
-            ("supply", "Supply", 132),
-            ("recipe", "Recipe", 150),
+            ("load_g", "Load", 96),
+            ("stress_mpa", "Stress", 104),
+            ("strain_pct", "Strain", 96),
+            ("speed_mm_s", "Speed", 116),
+            ("scale", "Scale", 112),
+            ("motor", "Motor", 126),
+            ("supply", "Supply", 128),
+            ("task", "Task", 220),
         )
         for index, (key, title, min_width) in enumerate(status_cells):
-            row = index // 6
-            column = index % 6
+            row = index // 4
+            column = index % 4
             status_layout.addWidget(
                 self._build_dashboard_value_cell(
                     self.dashboard_status_box,
@@ -4265,6 +4346,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_target_speed_mm_s,
             self.spin_current_sweep_max_correction_strain_pct,
             self.spin_current_sweep_correction_rate_pct_s,
+            self.spin_current_sweep_max_correction_stress_mpa,
+            self.spin_current_sweep_hold_correction_stress_mpa,
+            self.spin_current_sweep_mid_correction_stress_mpa,
+            self.spin_current_sweep_near_correction_stress_mpa,
             self.spin_current_sweep_start_mA,
             self.spin_current_sweep_end_mA,
             self.spin_current_sweep_step_mA,
@@ -4272,6 +4357,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_hold_resume_factor,
             self.spin_current_sweep_hold_resume_stable_s,
             self.spin_current_sweep_hold_max_s,
+            self.spin_current_sweep_hold_filter_window_s,
+            self.spin_current_sweep_hold_noise_sigma,
+            self.spin_current_sweep_hold_min_pause_stress_mpa,
+            self.spin_current_sweep_hold_min_resume_stress_mpa,
             self.spin_current_sweep_tolerance,
             self.spin_current_sweep_nudge_mm,
             self.spin_current_sweep_balance_speed_mm_s,
@@ -6853,6 +6942,54 @@ class MainWindow(QtWidgets.QMainWindow):
             strain_pct = float(self.spin_current_sweep_max_correction_strain_pct.value())
         return max(self._motor_step_mm(), self._strain_pct_to_stage_mm(strain_pct))
 
+    def _current_sweep_max_correction_stress_mpa(self) -> float:
+        value = SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA
+        if hasattr(self, "spin_current_sweep_max_correction_stress_mpa"):
+            value = float(self.spin_current_sweep_max_correction_stress_mpa.value())
+        return max(0.001, abs(float(value)))
+
+    def _current_sweep_hold_correction_stress_mpa(self) -> float:
+        value = SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
+        if hasattr(self, "spin_current_sweep_hold_correction_stress_mpa"):
+            value = float(self.spin_current_sweep_hold_correction_stress_mpa.value())
+        return max(0.001, abs(float(value)))
+
+    def _current_sweep_mid_correction_stress_mpa(self) -> float:
+        value = SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA
+        if hasattr(self, "spin_current_sweep_mid_correction_stress_mpa"):
+            value = float(self.spin_current_sweep_mid_correction_stress_mpa.value())
+        return max(0.001, abs(float(value)))
+
+    def _current_sweep_near_correction_stress_mpa(self) -> float:
+        value = SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA
+        if hasattr(self, "spin_current_sweep_near_correction_stress_mpa"):
+            value = float(self.spin_current_sweep_near_correction_stress_mpa.value())
+        return max(0.001, abs(float(value)))
+
+    def _current_sweep_hold_filter_window_s(self) -> float:
+        value = SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S
+        if hasattr(self, "spin_current_sweep_hold_filter_window_s"):
+            value = float(self.spin_current_sweep_hold_filter_window_s.value())
+        return max(0.1, abs(float(value)))
+
+    def _current_sweep_hold_noise_sigma(self) -> float:
+        value = SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA
+        if hasattr(self, "spin_current_sweep_hold_noise_sigma"):
+            value = float(self.spin_current_sweep_hold_noise_sigma.value())
+        return max(0.0, abs(float(value)))
+
+    def _current_sweep_hold_min_pause_stress_mpa(self) -> float:
+        value = SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA
+        if hasattr(self, "spin_current_sweep_hold_min_pause_stress_mpa"):
+            value = float(self.spin_current_sweep_hold_min_pause_stress_mpa.value())
+        return max(0.0, abs(float(value)))
+
+    def _current_sweep_hold_min_resume_stress_mpa(self) -> float:
+        value = SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA
+        if hasattr(self, "spin_current_sweep_hold_min_resume_stress_mpa"):
+            value = float(self.spin_current_sweep_hold_min_resume_stress_mpa.value())
+        return max(0.0, abs(float(value)))
+
     def _current_sweep_max_stress_correction_mm(
         self,
         basis: str,
@@ -6871,27 +7008,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 return None if load_cap_g is None else abs(float(load_cap_g))
             return None
 
-        cap_mpa = SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA
+        cap_mpa = self._current_sweep_max_correction_stress_mpa()
         if self._automation_phase == "current_hold":
-            cap_mpa = SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
+            cap_mpa = self._current_sweep_hold_correction_stress_mpa()
         if error_value is not None and math.isfinite(float(error_value)):
             error_abs = abs(float(error_value))
-            near_cap = _basis_cap_from_stress(SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA)
-            mid_cap = _basis_cap_from_stress(SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA)
+            near_mpa = self._current_sweep_near_correction_stress_mpa()
+            mid_mpa = self._current_sweep_mid_correction_stress_mpa()
+            near_cap = _basis_cap_from_stress(near_mpa)
+            mid_cap = _basis_cap_from_stress(mid_mpa)
             max_cap = _basis_cap_from_stress(cap_mpa)
             near_threshold = 0.0 if near_cap is None else near_cap
             mid_threshold = 0.0 if mid_cap is None else mid_cap
             max_threshold = 0.0 if max_cap is None else max_cap
             if near_threshold > 0.0 and error_abs <= near_threshold:
                 return self._motor_step_mm()
-            elif cap_mpa <= SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA:
+            elif cap_mpa <= near_mpa:
                 pass
             elif mid_threshold > 0.0 and error_abs <= mid_threshold * 2.0:
-                cap_mpa = SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA
+                cap_mpa = near_mpa
             elif max_threshold > 0.0 and error_abs <= max_threshold * 2.5:
-                cap_mpa = SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA
+                cap_mpa = mid_mpa
         elif self._current_sweep_freezes_live_stiffness() and self._automation_phase != "target_ramp":
-            cap_mpa = SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA
+            cap_mpa = self._current_sweep_near_correction_stress_mpa()
         cap_value = _basis_cap_from_stress(cap_mpa)
         if cap_value is None:
             return None
@@ -10206,6 +10345,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "target_ramp_stage_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
                 "correction_max_strain_pct": float(self.spin_current_sweep_max_correction_strain_pct.value()),
                 "correction_max_strain_rate_pct_s": float(self.spin_current_sweep_correction_rate_pct_s.value()),
+                "correction_max_stress_mpa": self._current_sweep_max_correction_stress_mpa(),
+                "correction_hold_max_stress_mpa": self._current_sweep_hold_correction_stress_mpa(),
+                "correction_mid_stress_mpa": self._current_sweep_mid_correction_stress_mpa(),
+                "correction_near_stress_mpa": self._current_sweep_near_correction_stress_mpa(),
                 "return_target": self.check_current_sweep_return_target.isChecked(),
                 "current_start_mA": float(self.spin_current_sweep_start_mA.value()),
                 "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
@@ -10215,6 +10358,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_hold_resume_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
                 "current_ramp_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
                 "current_ramp_hold_max_s": float(self.spin_current_sweep_hold_max_s.value()),
+                "current_ramp_hold_filter_window_s": self._current_sweep_hold_filter_window_s(),
+                "current_ramp_hold_noise_sigma": self._current_sweep_hold_noise_sigma(),
+                "current_ramp_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
+                "current_ramp_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
                 "reverse_current": self.check_current_sweep_reverse_current.isChecked(),
                 "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
                 "tolerance_mode": "automatic",
@@ -10937,6 +11084,85 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.warning(self, APP_NAME, message)
         return False
 
+    def _automation_target_text(self, basis: str | None, target_value: float | None) -> str:
+        if basis is None or target_value is None:
+            return "target"
+        suffix, _ = self._distribution_units(basis)
+        return f"{_format_compact_number(float(target_value))}{suffix}"
+
+    def _automation_current_target_text(self, current_mA: float | None) -> str:
+        if current_mA is None:
+            return "current"
+        return f"{_format_compact_number(float(current_mA), decimals=3)} mA"
+
+    def _current_task_summary(self) -> str:
+        if not self._automation_active:
+            return "Manual mode"
+        if not self._automation_steps:
+            return "Starting recipe"
+        step_index = min(max(0, self._automation_index), len(self._automation_steps) - 1)
+        step = self._automation_steps[step_index]
+        target_text = self._automation_target_text(step.basis, step.target_value)
+
+        if step.note == "setup_start_length":
+            return "Setup: enter starting length"
+        if step.note == "setup_preload":
+            return f"Setup: ramp to preload {target_text}"
+        if step.note == "setup_return_zero":
+            return "Setup: return load to zero"
+        if step.note == "setup_measure_length":
+            return "Setup: measure loaded length"
+        if step.action == "apply_length_setup":
+            return "Setup: apply l0 baseline"
+        if step.action == "start_session":
+            return "Starting measurement log"
+
+        if step.action == "ramp_target":
+            end_value = step.target_end_value if step.target_end_value is not None else step.target_value
+            end_text = self._automation_target_text(step.basis, end_value)
+            if (
+                self._is_current_sweep_mode(self._automation_name)
+                and step.target_start_value is not None
+                and step.target_end_value is not None
+                and abs(float(step.target_end_value) - float(step.target_start_value)) > 1e-12
+            ):
+                direction = "Ramp up" if float(step.target_end_value) > float(step.target_start_value) else "Ramp down"
+                return f"{direction} to {end_text}"
+            return f"Ramp to {end_text}"
+
+        if step.action == "sweep_current":
+            start_mA = step.current_start_mA
+            end_mA = step.current_end_mA
+            if start_mA is None or end_mA is None:
+                return f"Current sweep at {target_text}"
+            direction = "Increasing" if float(end_mA) >= float(start_mA) else "Decreasing"
+            target_current = self._automation_current_target_text(end_mA)
+            if self._automation_phase == "current_hold":
+                held = self._automation_current_target_text(self._active_current_sweep_last_setpoint_mA)
+                return f"At {target_text}: holding {held}, recovering target"
+            return f"At {target_text}: {direction.lower()} current to {target_current}"
+
+        if step.action == "settle":
+            return f"Settling at {target_text}"
+        if step.action == "set_current":
+            return f"Setting current to {self._automation_current_target_text(step.current_mA)}"
+        if step.action == "record":
+            return f"Recording {target_text}"
+        if step.action == "move":
+            return "Moving stage"
+        if self._automation_phase not in {"idle", "start"}:
+            return self._automation_phase.replace("_", " ").capitalize()
+        return str(self.combo_recipe_mode.currentText())
+
+    def _update_current_task_display(self) -> None:
+        task_text = self._current_task_summary()
+        if hasattr(self, "label_current_task"):
+            self.label_current_task.setText(f"Current task: {task_text}")
+        if hasattr(self, "label_recipe_banner"):
+            self.label_recipe_banner.setText(task_text)
+            self.label_recipe_banner.setVisible(self._automation_active)
+        self._set_dashboard_value("task", task_text)
+
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
         total = max(1, self._automation_total_steps or len(self._automation_steps))
         if self._automation_active and not complete and self._automation_completed_ticks >= total:
@@ -10968,6 +11194,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._automation_progress_started_s = 0.0
             self._automation_progress_last_format_update_s = 0.0
             self.recipe_progress.setFormat("Recipe progress: idle")
+        self._update_current_task_display()
         self._update_length_setup_progress(value=value, total=total, complete=complete, percent=percent)
 
     def _update_length_setup_progress(
@@ -12097,7 +12324,8 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if current_hold_enabled:
                 summary += (
-                    f" Current ramp hold enabled: pause above {current_hold_pause_factor:.2f}x tolerance, "
+                    f" Current ramp hold enabled: pause on absolute target error above "
+                    f"{current_hold_pause_factor:.2f}x tolerance, "
                     f"resume inside {current_hold_resume_factor:.2f}x for "
                     f"{current_hold_resume_stable_s:.2f} s."
                 )
@@ -12189,7 +12417,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return float(current_value), 0.0
         summary = self._scale_signal_buffer.recent_summary(
             now_s=latest.timestamp_s,
-            window_s=SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S,
+            window_s=self._current_sweep_hold_filter_window_s(),
         )
         if summary.sample_count < 3 or summary.load_mean_g is None:
             return float(current_value), 0.0
@@ -12240,7 +12468,6 @@ class MainWindow(QtWidgets.QMainWindow):
         step_index: int,
         *,
         now_s: float,
-        current_direction: float = 1.0,
     ) -> tuple[bool, bool]:
         if not step.current_hold_enabled:
             if self._current_sweep_ramp_hold_step_index == step_index:
@@ -12250,7 +12477,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if error_state is None:
             return self._current_sweep_ramp_hold_step_index == step_index, False
 
-        signed_error, error_value, tolerance, noise_value = error_state
+        _signed_error, error_value, tolerance, noise_value = error_state
         pause_factor = max(
             1e-12,
             self._current_sweep_hold_setting(
@@ -12262,31 +12489,24 @@ class MainWindow(QtWidgets.QMainWindow):
         resume_factor = self._current_sweep_hold_resume_factor(step)
         pause_band = max(
             tolerance * pause_factor,
-            noise_value * SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA,
+            noise_value * self._current_sweep_hold_noise_sigma(),
             self._current_sweep_hold_min_band_for_basis(
                 step.basis,
-                SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA,
+                self._current_sweep_hold_min_pause_stress_mpa(),
             ),
         )
         resume_band = max(
             tolerance * resume_factor,
-            noise_value * SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA * 0.5,
+            noise_value * self._current_sweep_hold_noise_sigma() * 0.5,
             self._current_sweep_hold_min_band_for_basis(
                 step.basis,
-                SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA,
+                self._current_sweep_hold_min_resume_stress_mpa(),
             ),
         )
         holding = self._current_sweep_ramp_hold_step_index == step_index
-        if step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and current_direction >= 0.0:
-            hold_error = signed_error
-            pause_error = max(0.0, hold_error)
-            resume_error = hold_error
-            error_label = "filtered high-side target error"
-        else:
-            hold_error = error_value
-            pause_error = error_value
-            resume_error = error_value
-            error_label = "filtered target error"
+        pause_error = error_value
+        resume_error = error_value
+        error_label = "filtered absolute target error"
 
         if not holding and pause_error > pause_band:
             self._current_sweep_ramp_hold_step_index = step_index
@@ -12436,7 +12656,6 @@ class MainWindow(QtWidgets.QMainWindow):
             step,
             step_index,
             now_s=now_s,
-            current_direction=direction,
         )
         if stopped_for_hold:
             return True
@@ -13068,27 +13287,23 @@ class MainWindow(QtWidgets.QMainWindow):
         live_speed_text = self._live_speed_summary_text()
         self.label_live_speed.setText(live_speed_text)
         session_value = "Running" if self._session_active else "Idle"
-        self._set_dashboard_value("session", f"{session_value} {len(self._session_points)}")
-        self._set_dashboard_value("load_g", f"{effective_load: .5f}")
+        self._set_dashboard_value("load_g", f"{effective_load:.3f} g")
         self._set_dashboard_value(
             "stress_mpa",
-            "-" if stress is None else f"{stress: .4f}",
+            "-" if stress is None else f"{stress:.1f} MPa",
         )
         self._set_dashboard_value(
             "strain_pct",
-            "-" if strain is None else f"{strain: .4f}",
+            "-" if strain is None else f"{strain:.3f} %",
         )
         speed_values = self._live_speed_values()
 
-        def _dashboard_rate_text(value: float | None) -> str:
+        def _dashboard_rate_text(value: float | None, unit: str) -> str:
             if value is None or not math.isfinite(float(value)):
                 return "-"
-            return f"{float(value): .4g}"
+            return f"{float(value):.3g} {unit}"
 
-        self._set_dashboard_value("speed_mm_s", _dashboard_rate_text(speed_values["speed_mm_s"]))
-        self._set_dashboard_value("speed_g_s", _dashboard_rate_text(speed_values["load_rate_g_s"]))
-        self._set_dashboard_value("speed_mpa_s", _dashboard_rate_text(speed_values["stress_rate_mpa_s"]))
-        self._set_dashboard_value("speed_pct_s", _dashboard_rate_text(speed_values["strain_rate_pct_s"]))
+        self._set_dashboard_value("speed_mm_s", _dashboard_rate_text(speed_values["speed_mm_s"], "mm/s"))
         self.label_card_session.setText(
             f"{session_value} | {len(self._session_points)} point(s)"
         )
@@ -13101,7 +13316,7 @@ class MainWindow(QtWidgets.QMainWindow):
             recent_rate = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
             rate_suffix = "" if recent_rate is None else f" | {recent_rate:.1f} Hz"
             scale_value = f"{effective_load:.4f} g | {freshness} {age_s:.1f} s{rate_suffix}"
-            rate_cell_text = "-" if recent_rate is None else f"{recent_rate: .1f} Hz"
+            rate_cell_text = "-" if recent_rate is None else f"{recent_rate:.1f} Hz"
             self._set_dashboard_value("scale", f"{freshness} {rate_cell_text}")
         self.label_card_scale.setText(scale_value)
         vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
@@ -13119,7 +13334,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if preload_state == PRELOAD_PENDING:
             motion_state += f" | preload < {self.spin_preload_threshold_g.value():.4f} g"
         self.label_card_motion.setText(motion_state)
-        self._set_dashboard_value("motor", f"{self._tensile_displacement_mm(self._effective_position_mm): .4f} mm")
+        self._set_dashboard_value("motor", f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm")
         if self._automation_active:
             recipe_state = (
                 f"{self._automation_name} | done {self._automation_index}"
@@ -13132,12 +13347,12 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             recipe_state = str(self.combo_recipe_mode.currentText())
         self.label_card_recipe.setText(recipe_state)
-        self._set_dashboard_value("recipe", recipe_state[:18])
+        self._update_current_task_display()
         supply_current = self._supply_snapshot.get("current_mA")
         supply_voltage = self._supply_snapshot.get("voltage_V")
-        current_text = "-" if supply_current is None else f"{supply_current: .2f} mA"
-        voltage_text = "-" if supply_voltage is None else f"{supply_voltage: .2f} V"
-        self._set_dashboard_value("supply", f"{current_text}/{voltage_text}")
+        current_text = "-" if supply_current is None else f"{supply_current:.2f}mA"
+        voltage_text = "-" if supply_voltage is None else f"{supply_voltage:.2f}V"
+        self._set_dashboard_value("supply", f"{current_text} {voltage_text}")
         self._refresh_supply_live_label()
 
     def _refresh_plots(self) -> None:
@@ -13395,6 +13610,22 @@ class MainWindow(QtWidgets.QMainWindow):
             "current_sweep_correction_rate_pct_s",
             self.spin_current_sweep_correction_rate_pct_s.value(),
         )
+        self.settings.setValue(
+            "current_sweep_max_correction_stress_mpa",
+            self.spin_current_sweep_max_correction_stress_mpa.value(),
+        )
+        self.settings.setValue(
+            "current_sweep_hold_correction_stress_mpa",
+            self.spin_current_sweep_hold_correction_stress_mpa.value(),
+        )
+        self.settings.setValue(
+            "current_sweep_mid_correction_stress_mpa",
+            self.spin_current_sweep_mid_correction_stress_mpa.value(),
+        )
+        self.settings.setValue(
+            "current_sweep_near_correction_stress_mpa",
+            self.spin_current_sweep_near_correction_stress_mpa.value(),
+        )
         self.settings.setValue("current_sweep_servo_defaults_version", SERVO_CURRENT_SWEEP_DEFAULTS_VERSION)
         self.settings.setValue("current_sweep_return_target", self.check_current_sweep_return_target.isChecked())
         self.settings.setValue("current_sweep_start_mA", self.spin_current_sweep_start_mA.value())
@@ -13409,6 +13640,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_hold_resume_stable_s.value(),
         )
         self.settings.setValue("current_sweep_hold_max_s", self.spin_current_sweep_hold_max_s.value())
+        self.settings.setValue(
+            "current_sweep_hold_filter_window_s",
+            self.spin_current_sweep_hold_filter_window_s.value(),
+        )
+        self.settings.setValue(
+            "current_sweep_hold_noise_sigma",
+            self.spin_current_sweep_hold_noise_sigma.value(),
+        )
+        self.settings.setValue(
+            "current_sweep_hold_min_pause_stress_mpa",
+            self.spin_current_sweep_hold_min_pause_stress_mpa.value(),
+        )
+        self.settings.setValue(
+            "current_sweep_hold_min_resume_stress_mpa",
+            self.spin_current_sweep_hold_min_resume_stress_mpa.value(),
+        )
         self.settings.setValue("current_sweep_reverse_current", self.check_current_sweep_reverse_current.isChecked())
         self.settings.setValue("current_sweep_tolerance", self.spin_current_sweep_tolerance.value())
         self.settings.setValue("current_sweep_nudge_mm", self.spin_current_sweep_nudge_mm.value())
@@ -13856,6 +14103,50 @@ class MainWindow(QtWidgets.QMainWindow):
                 ),
             )
         )
+        self.spin_current_sweep_max_correction_stress_mpa.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "current_sweep_max_correction_stress_mpa",
+                        SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA,
+                    )
+                ),
+            )
+        )
+        self.spin_current_sweep_hold_correction_stress_mpa.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "current_sweep_hold_correction_stress_mpa",
+                        SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA,
+                    )
+                ),
+            )
+        )
+        self.spin_current_sweep_mid_correction_stress_mpa.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "current_sweep_mid_correction_stress_mpa",
+                        SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA,
+                    )
+                ),
+            )
+        )
+        self.spin_current_sweep_near_correction_stress_mpa.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "current_sweep_near_correction_stress_mpa",
+                        SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA,
+                    )
+                ),
+            )
+        )
         self.check_current_sweep_return_target.setChecked(
             bool(self.settings.value("current_sweep_return_target", True, type=bool))
         )
@@ -13913,6 +14204,50 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.settings.value(
                         "current_sweep_hold_max_s",
                         CURRENT_SWEEP_HOLD_MAX_S,
+                    )
+                ),
+            )
+        )
+        self.spin_current_sweep_hold_filter_window_s.setValue(
+            max(
+                0.1,
+                float(
+                    self.settings.value(
+                        "current_sweep_hold_filter_window_s",
+                        SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S,
+                    )
+                ),
+            )
+        )
+        self.spin_current_sweep_hold_noise_sigma.setValue(
+            max(
+                0.0,
+                float(
+                    self.settings.value(
+                        "current_sweep_hold_noise_sigma",
+                        SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA,
+                    )
+                ),
+            )
+        )
+        self.spin_current_sweep_hold_min_pause_stress_mpa.setValue(
+            max(
+                0.0,
+                float(
+                    self.settings.value(
+                        "current_sweep_hold_min_pause_stress_mpa",
+                        SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA,
+                    )
+                ),
+            )
+        )
+        self.spin_current_sweep_hold_min_resume_stress_mpa.setValue(
+            max(
+                0.0,
+                float(
+                    self.settings.value(
+                        "current_sweep_hold_min_resume_stress_mpa",
+                        SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA,
                     )
                 ),
             )

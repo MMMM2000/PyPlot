@@ -2083,6 +2083,59 @@ def test_recipe_progress_shows_throttled_time_remaining(tmp_path: Path, qtbot) -
         _close_test_window(window)
 
 
+def test_current_task_summary_shows_current_sweep_phase(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=1.0,
+            current_end_mA=80.0,
+            current_ramp_rate_mA_s=1.0,
+            note="1",
+        ),
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=80.0,
+            current_end_mA=1.0,
+            current_ramp_rate_mA_s=1.0,
+            note="1",
+        ),
+        mini_dma_mod.AutomationStep(
+            "ramp_target",
+            target_value=100.0,
+            target_start_value=50.0,
+            target_end_value=100.0,
+            target_ramp_rate_value_s=5.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            note="2",
+        ),
+    ]
+
+    try:
+        window._automation_index = 0
+        assert window._current_task_summary() == "At 50 MPa: increasing current to 80 mA"
+
+        window._automation_index = 1
+        assert window._current_task_summary() == "At 50 MPa: decreasing current to 1 mA"
+
+        window._automation_phase = "current_hold"
+        window._active_current_sweep_last_setpoint_mA = 42.4
+        assert window._current_task_summary() == "At 50 MPa: holding 42.4 mA, recovering target"
+
+        window._automation_phase = "target_ramp"
+        window._automation_index = 2
+        assert window._current_task_summary() == "Ramp up to 100 MPa"
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_double_spin_boxes_trim_zero_only_decimals(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -3352,6 +3405,12 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
 
         assert window.spin_current_sweep_nudge_mm.isHidden() is True
         assert window.spin_current_sweep_balance_speed_mm_s.isHidden() is True
+        assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is False
+        assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is False
+        assert window.spin_current_sweep_hold_filter_window_s.isHidden() is False
+        assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(
+            mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
+        )
         assert window.check_hardware_tare_on_start.isHidden() is False
         assert window.button_scale_connect.text() in {"Connect scale", "Disconnect scale"}
         assert window.button_scale_tare.text() == "Capture zero-load"
@@ -3695,7 +3754,7 @@ def test_current_sweep_holds_current_ramp_when_target_error_is_too_large(
         _close_test_window(window)
 
 
-def test_current_sweep_hold_ignores_low_side_stress_error_on_current_up_ramp(
+def test_current_sweep_hold_uses_absolute_stress_error_on_current_up_ramp(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -3719,9 +3778,9 @@ def test_current_sweep_hold_ignores_low_side_stress_error_on_current_up_ramp(
     try:
         holding, stopped = window._update_current_sweep_ramp_hold(step, 4, now_s=100.0)
 
-        assert holding is False
+        assert holding is True
         assert stopped is False
-        assert window._current_sweep_ramp_hold_step_index is None
+        assert window._current_sweep_ramp_hold_step_index == 4
     finally:
         _close_test_window(window)
 
@@ -3752,7 +3811,6 @@ def test_current_sweep_hold_uses_absolute_stress_error_on_current_down_ramp(
             step,
             4,
             now_s=100.0,
-            current_direction=-1.0,
         )
 
         assert holding is True
@@ -5634,17 +5692,19 @@ def test_automation_tolerance_uses_automatic_load_floor(tmp_path: Path, qtbot) -
         _close_test_window(window)
 
 
-def test_dashboard_uses_fixed_live_value_cells_without_overview(tmp_path: Path, qtbot) -> None:
+def test_dashboard_uses_compact_live_value_cells_without_overview(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
         assert not hasattr(window, "overview_section")
         assert "speed_mm_s" in window._dashboard_value_labels
         assert "scale" in window._dashboard_value_labels
+        assert "task" in window._dashboard_value_labels
+        assert window._dashboard_value_labels["task"].wordWrap()
         assert window.dashboard_status_box.parentWidget() is window.dashboard_header
         width = window._dashboard_value_labels["speed_mm_s"].minimumWidth()
-        assert width >= 70
-        assert window._dashboard_value_labels["speed_mm_s"].font().fixedPitch()
+        assert 54 <= width <= 90
+        assert not window._dashboard_value_labels["speed_mm_s"].font().fixedPitch()
     finally:
         _close_test_window(window)
 
