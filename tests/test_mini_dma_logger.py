@@ -6199,6 +6199,52 @@ def test_very_near_current_sweep_waits_for_two_fresh_samples_after_move(
         _close_test_window(window)
 
 
+def test_settle_accepts_target_on_already_used_near_target_scale_sample(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(61.767)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        602.814969,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="settle",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=20.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 20.0)
+    sample_s = time.time()
+    window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = sample_s
+    window._latest_scale_timestamp = sample_s
+    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(
+        19.8514417,
+        window.spin_diameter.value(),
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            tolerance=0.171133118,
+        )
+
+        assert reached is True
+        assert "Waiting for a new scale sample" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_does_not_update_live_stiffness_from_sweep_fluctuations(
     tmp_path: Path,
     qtbot,

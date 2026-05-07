@@ -8219,17 +8219,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._handle_pending_setup_zero_fallback()
         if self._end_zero_fallback_is_pending():
             return self._handle_pending_end_zero_fallback()
-        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._seek_has_unused_scale_sample(seek_key):
-            self._log_waiting_for_feedback("Waiting for a new scale sample before the next load/stress correction.")
-            self._write_control_trace(
-                decision="wait",
-                basis=basis,
-                target_value=target_value,
-                tolerance=tolerance,
-                result="waiting",
-                reason="new_scale_sample",
-            )
-            return False
         current_value = self._current_distribution_value(basis, require_after_last_move=False)
         if current_value is None:
             if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
@@ -8372,6 +8361,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 result="reached",
             )
             return True
+        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._seek_has_unused_scale_sample(seek_key):
+            self._log_waiting_for_feedback("Waiting for a new scale sample before the next load/stress correction.")
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=effective_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                result="waiting",
+                reason="new_scale_sample",
+            )
+            return False
         setup_preload_takeup = self._setup_preload_takeup_active(
             basis,
             current_value,
