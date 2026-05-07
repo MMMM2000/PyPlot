@@ -70,3 +70,7 @@
 - Mini DMA setup return-to-zero now treats collapse of the linear unload slope as slack onset, commits the fitted zero-stress intercept for `l0`, and returns there instead of continuing to drive the wire farther into slack.
 - Mini DMA current-sweep load/stress reversals no longer perform predictive full-backlash take-up, so dynamic correction steps around targets are not dominated by the saved backlash distance.
 - Mini DMA zero-load plateau fallback now accepts a stable flat balance after `0.05%` of `l0` or `4` motor units of return travel, and the recovery load-to-zero graph now labels load and displacement with a legend.
+- Mini DMA recovery graphs now use more distinct load/displacement colors and keep the x-axis label readable in dark mode.
+- Mini DMA setup now keeps the continuity current active before current-sweep recipes, and length setup reuses the committed slack-onset zero position when applying `l0` instead of refitting the baseline after additional low-slope samples.
+- Mini DMA current-ramp hold now uses a filtered, noise-adaptive high-side load/stress error so annealing fluctuations do not hold current indefinitely, and large current-sweep stress errors can use faster `10 MPa`/`5 MPa` correction caps before shrinking near target.
+- Mini DMA current-sweep settle after each current ramp is now time-bounded instead of waiting forever for noisy annealing feedback, reverse-current hold can pause on absolute load/stress error, and paused-current recovery can use a larger `20 MPa` equivalent correction cap while the current ramp is held.
