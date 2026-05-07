@@ -80,9 +80,12 @@ CONTROL_TRACE_FIELDNAMES = [
     "error_value",
     "tolerance",
     "sensitivity_per_mm",
+    "motor_step_mm",
     "correction_mm",
     "backlash_mm",
     "command_speed_mm_s",
+    "required_fresh_samples",
+    "post_move_sample_count",
     "target_mm",
     "effective_target_mm",
     "result",
@@ -149,14 +152,18 @@ DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
-SETUP_ZERO_FALLBACK_MIN_POINTS = 6
-SETUP_ZERO_FALLBACK_MIN_TIME_S = 1.5
-SETUP_ZERO_FALLBACK_MIN_STRAIN_PCT = 0.5
-SETUP_ZERO_FALLBACK_MIN_MOTOR_STEPS = 10.0
+SETUP_ZERO_FALLBACK_MIN_POINTS = 4
+SETUP_ZERO_FALLBACK_MIN_TIME_S = 0.8
+SETUP_ZERO_FALLBACK_MIN_STRAIN_PCT = 0.25
+SETUP_ZERO_FALLBACK_MIN_MOTOR_STEPS = 6.0
 SETUP_ZERO_FALLBACK_RAW_SPAN_G = 0.012
 SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
 SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
 SETUP_PRELOAD_TAKEUP_LOAD_G = 0.03
+SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA = 5.0
+SETUP_UNLOAD_BASELINE_MIN_POINTS = 5
+SETUP_UNLOAD_BASELINE_MIN_FRACTION = 0.15
+SETUP_UNLOAD_BASELINE_MIN_STRESS_MPA = 1.0
 SETUP_PRELOAD_DEFAULT_DURATION_S = 10.0
 SETUP_RETURN_DEFAULT_DURATION_S = 5.0
 SETUP_SLACK_DEFAULT_STRAIN_RATE_PCT_S = 1.0
@@ -2126,6 +2133,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_time_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_scale_timestamp_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_scale_timestamp_by_clock: dict[tuple[str, int], float] = {}
+        self._seek_post_move_sample_count_by_key: dict[tuple[str, int, float], int] = {}
         self._seek_last_effective_position_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_live_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
@@ -4439,23 +4447,41 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_set_mA",
                 "Set current (mA)",
                 "#f97316",
-                lambda point: point.current_set_mA,
+                lambda point: self._plot_nonzero_current_mA(point.current_set_mA),
             ),
             PlotChannel(
                 "current_measured_mA",
                 "Measured current (mA)",
                 "#fb7185",
-                lambda point: point.current_measured_mA,
+                lambda point: self._plot_nonzero_current_mA(point.current_measured_mA),
             ),
             PlotChannel("voltage_V", "Voltage (V)", "#facc15", lambda point: point.voltage_V),
             PlotChannel(
                 "resistance_ohm",
                 "Resistance (Ohm)",
                 "#14b8a6",
-                lambda point: point.resistance_ohm,
+                self._plot_resistance_ohm,
             ),
             PlotChannel("power_W", "Power (W)", "#c084fc", lambda point: point.power_W),
         ]
+
+    def _plot_nonzero_current_mA(self, value_mA: float | None) -> float | None:
+        if value_mA is None:
+            return None
+        value = float(value_mA)
+        if abs(value) < MIN_RESISTANCE_CURRENT_MA:
+            return None
+        return value
+
+    def _plot_resistance_ohm(self, point: MeasurementPoint) -> float | None:
+        if point.resistance_ohm is None:
+            return None
+        if (
+            self._plot_nonzero_current_mA(point.current_set_mA) is None
+            or self._plot_nonzero_current_mA(point.current_measured_mA) is None
+        ):
+            return None
+        return point.resistance_ohm
 
     def _plot_channel(self, key: str) -> PlotChannel | None:
         for channel in self._plot_channels():
@@ -6612,6 +6638,59 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return l0_mm
 
+    def _fit_setup_unload_zero_position_mm(self) -> float | None:
+        start_index = max(0, int(self._setup_return_zero_start_point_index))
+        return_points = self._length_setup_points[start_index:]
+        if len(return_points) < SETUP_UNLOAD_BASELINE_MIN_POINTS:
+            return None
+        candidates: list[tuple[float, float]] = []
+        for point in return_points:
+            stress_mpa = point.stress_mpa
+            if stress_mpa is None:
+                stress_mpa = stress_mpa_from_load_g(point.load_g, float(self.spin_diameter.value()))
+            if stress_mpa is None or not math.isfinite(float(stress_mpa)):
+                continue
+            stress_value = abs(float(stress_mpa))
+            candidates.append((float(point.raw_position_mm), stress_value))
+        if len(candidates) < SETUP_UNLOAD_BASELINE_MIN_POINTS:
+            return None
+        max_stress = max(stress for _position, stress in candidates)
+        stress_floor = max(
+            SETUP_UNLOAD_BASELINE_MIN_STRESS_MPA,
+            max_stress * SETUP_UNLOAD_BASELINE_MIN_FRACTION,
+        )
+        fit_points = [(position, stress) for position, stress in candidates if stress >= stress_floor]
+        if len(fit_points) < SETUP_UNLOAD_BASELINE_MIN_POINTS:
+            fit_points = candidates[:SETUP_UNLOAD_BASELINE_MIN_POINTS]
+        if len(fit_points) < SETUP_UNLOAD_BASELINE_MIN_POINTS:
+            return None
+        n = float(len(fit_points))
+        sum_x = sum(position for position, _stress in fit_points)
+        sum_y = sum(stress for _position, stress in fit_points)
+        sum_xx = sum(position * position for position, _stress in fit_points)
+        sum_xy = sum(position * stress for position, stress in fit_points)
+        denominator = n * sum_xx - sum_x * sum_x
+        if abs(denominator) <= 1e-12:
+            return None
+        slope = (n * sum_xy - sum_x * sum_y) / denominator
+        if not math.isfinite(slope) or abs(slope) <= 1e-12:
+            return None
+        intercept = (sum_y - slope * sum_x) / n
+        zero_position_mm = -intercept / slope
+        if not math.isfinite(zero_position_mm):
+            return None
+        min_position = min(position for position, _stress in candidates)
+        max_position = max(position for position, _stress in candidates)
+        margin_mm = max(self._motor_step_mm() * 4.0, abs(max_position - min_position) * 0.25)
+        if zero_position_mm < min_position - margin_mm or zero_position_mm > max_position + margin_mm:
+            return None
+        self._log(
+            "Computed setup l0 zero position from linear unload fit: "
+            f"{_format_compact_unit(zero_position_mm, 'mm')} "
+            f"using {len(fit_points)} points."
+        )
+        return float(zero_position_mm)
+
     def _tension_motion_sign(self) -> float:
         return 1.0 if self.check_positive_motion_is_tension.isChecked() else -1.0
 
@@ -6672,6 +6751,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
 
         cap_mpa = SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA
+        if self._current_sweep_freezes_live_stiffness() and self._automation_phase != "target_ramp":
+            cap_mpa = SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA
         if error_value is not None and math.isfinite(float(error_value)):
             error_abs = abs(float(error_value))
             near_cap = _basis_cap_from_stress(SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA)
@@ -6682,6 +6763,8 @@ class MainWindow(QtWidgets.QMainWindow):
             max_threshold = 0.0 if max_cap is None else max_cap
             if near_threshold > 0.0 and error_abs <= near_threshold:
                 return self._motor_step_mm()
+            elif cap_mpa <= SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA:
+                pass
             elif mid_threshold > 0.0 and error_abs <= mid_threshold * 2.0:
                 cap_mpa = SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA
             elif max_threshold > 0.0 and error_abs <= max_threshold * 2.5:
@@ -7160,6 +7243,25 @@ class MainWindow(QtWidgets.QMainWindow):
             load_noise_g * SERVO_NOISE_SIGMA,
         )
 
+    def _setup_preload_max_slack_takeup_step_mm(
+        self,
+        basis: str,
+        *,
+        seek_key: tuple[str, int, float] | None = None,
+    ) -> float | None:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return None
+        sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        if sensitivity is None or not math.isfinite(float(sensitivity)) or abs(float(sensitivity)) <= 0.0:
+            return None
+        cap_value = self._current_sweep_basis_value_from_stress_cap(
+            basis,
+            SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA,
+        )
+        if cap_value is None:
+            return None
+        return max(self._motor_step_mm(), cap_value / abs(float(sensitivity)))
+
     def _update_setup_preload_engagement(
         self,
         seek_key: tuple[str, int, float],
@@ -7369,7 +7471,22 @@ class MainWindow(QtWidgets.QMainWindow):
             return self._seek_step_mm(error_value, tolerance, basis=basis)
         predicted_mm = (abs(float(error_value)) / abs(float(sensitivity))) * SERVO_CORRECTION_GAIN
         max_step_mm = self._seek_nudge_mm()
-        if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+        if self._automation_step_note == "setup_preload" and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            correction_caps = [
+                self._seek_speed_limited_step_mm(
+                    basis,
+                    self._motion_speed_for_current_context(manual_jog=False),
+                )
+            ]
+            stress_cap_mm = self._current_sweep_max_stress_correction_mm(
+                basis,
+                sensitivity,
+                error_value=error_value,
+            )
+            if stress_cap_mm is not None:
+                correction_caps.append(stress_cap_mm)
+            max_step_mm = max(self._motor_step_mm(), min(correction_caps))
+        elif self._automation_step_note in {"setup_preload", "setup_return_zero"}:
             max_step_mm = self._seek_speed_limited_step_mm(
                 basis,
                 self._motion_speed_for_current_context(manual_jog=False),
@@ -7452,20 +7569,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_step_note == "setup_preload":
             return abs(float(error_value)) <= abs(float(tolerance))
         if self._current_sweep_freezes_live_stiffness():
-            if basis == HSW_BASIS_STRESS_MPA:
-                hold_tolerance = max(abs(float(tolerance)), SERVO_CURRENT_SWEEP_REVERSAL_HOLD_STRESS_MPA)
-            elif basis == HSW_BASIS_LOAD_G:
-                hold_load_g = load_g_from_stress_mpa(
-                    SERVO_CURRENT_SWEEP_REVERSAL_HOLD_STRESS_MPA,
-                    float(self.spin_diameter.value()),
-                )
-                hold_tolerance = max(
-                    abs(float(tolerance)),
-                    0.0 if hold_load_g is None else abs(float(hold_load_g)),
-                )
-            else:
-                hold_tolerance = abs(float(tolerance))
-            return abs(float(error_value)) <= hold_tolerance
+            return abs(float(error_value)) <= abs(float(tolerance))
         return abs(float(error_value)) <= self._reversal_acceptance_tolerance(
             basis,
             tolerance,
@@ -7477,6 +7581,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_value_by_key.pop(seek_key, None)
         self._seek_last_time_by_key.pop(seek_key, None)
         self._seek_last_scale_timestamp_by_key.pop(seek_key, None)
+        self._seek_post_move_sample_count_by_key.pop(seek_key, None)
         self._seek_last_effective_position_by_key.pop(seek_key, None)
         self._seek_no_response_count_by_key.pop(seek_key, None)
         self._seek_travel_by_key.pop(seek_key, None)
@@ -7685,6 +7790,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._motor_step_mm(),
                 min(abs(nudge_mm), self._current_sweep_max_correction_mm()),
             )
+        if self._automation_step_note == "setup_preload" and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return max(self._motor_step_mm(), abs(float(nudge_mm)))
         speed_limited_step = self._seek_speed_limited_step_mm(basis, speed_mm_s)
         return max(self._motor_step_mm(), min(abs(nudge_mm), speed_limited_step))
 
@@ -7727,7 +7834,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if self._end_zero_fallback_armed:
             return False
-        if self._is_current_sweep_mode(self._automation_name) and self._automation_phase == "target_ramp":
+        if self._is_current_sweep_mode(self._automation_name) and self._automation_phase != "current":
             return False
         if self._is_calibration_mode(self._automation_name) and self._automation_step_note != "setup_preload":
             return False
@@ -7791,6 +7898,54 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
         return not self._seek_supports_cruise_feedback(basis)
+
+    def _seek_required_post_move_samples(
+        self,
+        basis: str,
+        error_value: float,
+        tolerance: float,
+        *,
+        seek_key: tuple[str, int, float],
+    ) -> int:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return 0
+        if self._seek_supports_cruise_feedback(basis):
+            return 0
+        sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        if sensitivity is None or not math.isfinite(float(sensitivity)) or abs(float(sensitivity)) <= 0.0:
+            return 1
+        step_value = abs(float(sensitivity)) * self._motor_step_mm()
+        very_near_value = max(abs(float(tolerance)) * 3.0, step_value * 2.0)
+        near_cap = self._current_sweep_basis_value_from_stress_cap(
+            basis,
+            SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA,
+        )
+        if near_cap is not None:
+            very_near_value = max(very_near_value, abs(float(near_cap)))
+        if abs(float(error_value)) <= very_near_value:
+            return 2
+        return 1
+
+    def _seek_wait_for_required_post_move_samples(
+        self,
+        seek_key: tuple[str, int, float],
+        required_samples: int,
+    ) -> bool:
+        if required_samples <= 1:
+            return False
+        latest_s = self._latest_scale_sample_time_s()
+        if latest_s is None:
+            return True
+        count = self._seek_post_move_sample_count_by_key.get(seek_key, 0)
+        was_short = count < required_samples
+        clock_key = seek_key[0], seek_key[1]
+        last_s = self._seek_last_scale_timestamp_by_clock.get(clock_key)
+        if last_s is None or latest_s > float(last_s) + 1e-9:
+            count = min(required_samples, count + 1)
+            self._seek_post_move_sample_count_by_key[seek_key] = count
+            self._seek_last_scale_timestamp_by_key[seek_key] = latest_s
+            self._seek_last_scale_timestamp_by_clock[clock_key] = latest_s
+        return was_short
 
     def _setup_preload_overload_exceeded(
         self,
@@ -8132,6 +8287,35 @@ class MainWindow(QtWidgets.QMainWindow):
             tolerance,
             seek_key=seek_key,
         )
+        if (
+            require_after_last_move
+            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and self._last_motion_command_time_s is not None
+        ):
+            required_samples = self._seek_required_post_move_samples(
+                basis,
+                delta_value,
+                effective_tolerance,
+                seek_key=seek_key,
+            )
+            if self._seek_wait_for_required_post_move_samples(seek_key, required_samples):
+                self._log_waiting_for_feedback(
+                    f"Waiting for {required_samples} fresh scale samples before the next fine correction."
+                )
+                self._write_control_trace(
+                    decision="wait",
+                    basis=basis,
+                    target_value=target_value,
+                    current_value=current_value,
+                    error_value=delta_value,
+                    tolerance=effective_tolerance,
+                    sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                    required_fresh_samples=required_samples,
+                    post_move_sample_count=self._seek_post_move_sample_count_by_key.get(seek_key, 0),
+                    result="waiting",
+                    reason=f"{required_samples}_fresh_scale_samples",
+                )
+                return False
         self._update_setup_preload_engagement(seek_key, basis, current_value)
         if self._setup_preload_overload_exceeded(basis, target_value, current_value, effective_tolerance):
             self._stop_for_setup_preload_overload(basis, target_value, current_value)
@@ -8203,6 +8387,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._setup_slack_speed_mm_s(),
                 ),
             )
+            slack_cap_mm = self._setup_preload_max_slack_takeup_step_mm(basis, seek_key=seek_key)
+            if slack_cap_mm is not None:
+                nudge_mm = min(nudge_mm, slack_cap_mm)
         else:
             nudge_mm = self._predictive_seek_step_mm(
                 basis,
@@ -8293,7 +8480,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     result="reversal_hold",
                 )
                 return True
-            if self._current_sweep_freezes_live_stiffness():
+            if self._current_sweep_freezes_live_stiffness() or (
+                self._automation_step_note == "setup_preload"
+                and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            ):
                 sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
                 stress_cap_mm = (
                     None
@@ -8332,6 +8522,12 @@ class MainWindow(QtWidgets.QMainWindow):
         speed_mm_s = preliminary_speed_mm_s
         nudge_mm = self._seek_command_step_mm(nudge_mm, speed_mm_s, basis=basis, cruise_mode=cruise_mode)
         backlash_takeup_mm = self._seek_backlash_takeup_mm(movement_direction)
+        if (
+            backlash_takeup_mm > 0.0
+            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and nudge_mm <= self._motor_step_mm() + 1e-12
+        ):
+            backlash_takeup_mm = 0.0
         if not self._reverse_correction_is_worthwhile(
             basis,
             delta_value,
@@ -8386,6 +8582,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if latest_scale_sample_time_s is not None:
                 self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
                 self._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = latest_scale_sample_time_s
+            self._seek_post_move_sample_count_by_key[seek_key] = 0
             self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
             self._seek_travel_by_key[seek_key] = (
                 self._seek_travel_by_key.get(seek_key, 0.0) + abs(backlash_takeup_mm)
@@ -8401,6 +8598,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 correction_mm=0.0,
                 backlash_mm=backlash_takeup_mm,
                 command_speed_mm_s=command_speed_mm_s,
+                required_fresh_samples=self._seek_required_post_move_samples(
+                    basis,
+                    delta_value,
+                    effective_tolerance,
+                    seek_key=seek_key,
+                ),
+                post_move_sample_count=0,
                 target_mm=target_mm,
                 effective_target_mm=effective_base_position_mm,
                 result="move_sent",
@@ -8438,6 +8642,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 correction_mm=nudge_mm,
                 backlash_mm=backlash_takeup_mm,
                 command_speed_mm_s=command_speed_mm_s,
+                required_fresh_samples=self._seek_required_post_move_samples(
+                    basis,
+                    delta_value,
+                    effective_tolerance,
+                    seek_key=seek_key,
+                ),
+                post_move_sample_count=0,
                 target_mm=target_mm,
                 effective_target_mm=effective_target_mm,
                 result="move_blocked",
@@ -8454,6 +8665,13 @@ class MainWindow(QtWidgets.QMainWindow):
             correction_mm=nudge_mm,
             backlash_mm=backlash_takeup_mm,
             command_speed_mm_s=command_speed_mm_s,
+            required_fresh_samples=self._seek_required_post_move_samples(
+                basis,
+                delta_value,
+                effective_tolerance,
+                seek_key=seek_key,
+            ),
+            post_move_sample_count=0,
             target_mm=target_mm,
             effective_target_mm=effective_target_mm,
             result="move_sent",
@@ -8466,6 +8684,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if latest_scale_sample_time_s is not None:
             self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
             self._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = latest_scale_sample_time_s
+        self._seek_post_move_sample_count_by_key[seek_key] = 0
         self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
         self._seek_travel_by_key[seek_key] = (
             self._seek_travel_by_key.get(seek_key, 0.0) + abs(nudge_mm + backlash_takeup_mm)
@@ -10085,6 +10304,8 @@ class MainWindow(QtWidgets.QMainWindow):
         correction_mm: float | None = None,
         backlash_mm: float | None = None,
         command_speed_mm_s: float | None = None,
+        required_fresh_samples: int | None = None,
+        post_move_sample_count: int | None = None,
         target_mm: float | None = None,
         effective_target_mm: float | None = None,
         result: str = "",
@@ -10123,9 +10344,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "error_value": _number(error_value),
                 "tolerance": _number(tolerance),
                 "sensitivity_per_mm": _number(sensitivity_per_mm),
+                "motor_step_mm": _number(self._motor_step_mm()),
                 "correction_mm": _number(correction_mm),
                 "backlash_mm": _number(backlash_mm),
                 "command_speed_mm_s": _number(command_speed_mm_s),
+                "required_fresh_samples": "" if required_fresh_samples is None else int(required_fresh_samples),
+                "post_move_sample_count": "" if post_move_sample_count is None else int(post_move_sample_count),
                 "target_mm": _number(target_mm),
                 "effective_target_mm": _number(effective_target_mm),
                 "result": result,
@@ -12182,11 +12406,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         try:
             self._refresh_tic_status()
-            zero_position_mm = (
-                float(self._setup_zero_position_mm)
-                if self._setup_zero_position_mm is not None
-                else float(self._current_position_mm)
-            )
+            fitted_zero_position_mm = self._fit_setup_unload_zero_position_mm()
+            if fitted_zero_position_mm is not None:
+                zero_position_mm = fitted_zero_position_mm
+                self._setup_zero_position_mm = zero_position_mm
+            else:
+                zero_position_mm = (
+                    float(self._setup_zero_position_mm)
+                    if self._setup_zero_position_mm is not None
+                    else float(self._current_position_mm)
+                )
             l0_mm = self._apply_preload_length_result(
                 measured_length_mm=self._setup_measured_length_mm,
                 preload_position_mm=self._setup_preload_position_mm,
