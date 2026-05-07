@@ -729,7 +729,7 @@ def test_setup_zero_plateau_fallback_updates_reference_and_returns_to_first_plat
     window.check_tension_load_positive.setChecked(True)
     window.spin_zero_load_scale_g.setValue(21.2)
     window.spin_setup_zero_tolerance_g.setValue(0.02)
-    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_steps_per_mm.setValue(800.0)
     window._automation_step_note = "setup_return_zero"
     window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
     window._automation_phase = "seek"
@@ -737,7 +737,7 @@ def test_setup_zero_plateau_fallback_updates_reference_and_returns_to_first_plat
     window._setup_return_zero_start_point_index = 0
     window._length_setup_start_monotonic = time.monotonic()
 
-    for index, position_mm in enumerate([-1.0, -1.2, -1.4, -1.6, -1.8, -2.0]):
+    for index, position_mm in enumerate([7.000, 7.012, 7.024, 7.036, 7.048, 7.060]):
         window._latest_scale_value_g = 21.170 + (0.0005 if index % 2 else 0.0)
         window._current_position_mm = position_mm
         window._effective_position_mm = position_mm
@@ -745,8 +745,8 @@ def test_setup_zero_plateau_fallback_updates_reference_and_returns_to_first_plat
         window._length_setup_points[-1].elapsed_s = index * 0.4
 
     window._latest_scale_value_g = 21.17
-    window._current_position_mm = -2.2
-    window._effective_position_mm = -2.2
+    window._current_position_mm = 7.072
+    window._effective_position_mm = 7.072
 
     try:
         reached = window._seek_distribution_target(
@@ -758,9 +758,9 @@ def test_setup_zero_plateau_fallback_updates_reference_and_returns_to_first_plat
         assert reached is False
         assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
         assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
-        assert targets == [pytest.approx(-1.0)]
-        assert window._setup_zero_fallback_return_position_mm == pytest.approx(-1.0)
-        assert window._setup_zero_position_mm == pytest.approx(-1.0)
+        assert targets == [pytest.approx(7.000)]
+        assert window._setup_zero_fallback_return_position_mm == pytest.approx(7.000)
+        assert window._setup_zero_position_mm == pytest.approx(7.000)
         assert "zero-load plateau" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -847,7 +847,7 @@ def test_setup_zero_plateau_fallback_waits_for_stable_plateau_time(
 
         assert reached is False
         assert window._zero_load_scale_reference_g() == pytest.approx(21.2)
-        assert targets
+        assert targets != [pytest.approx(7.000)]
         assert "zero-load plateau" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -890,9 +890,9 @@ def test_setup_zero_plateau_fallback_scales_travel_with_wire_length(
         )
 
         assert reached is False
-        assert window._zero_load_scale_reference_g() == pytest.approx(21.2)
-        assert targets
-        assert "zero-load plateau" not in window.log_output.toPlainText()
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
+        assert targets == [pytest.approx(7.000)]
+        assert "zero-load plateau" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -927,7 +927,7 @@ def test_setup_zero_plateau_fallback_waits_until_return_position_is_reached(
     window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
     window._automation_phase = "seek"
     window._setup_zero_fallback_return_position_mm = -1.0
-    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_steps_per_mm.setValue(800.0)
     window._latest_scale_value_g = 21.17
     window._latest_scale_timestamp = time.time()
     window.spin_zero_load_scale_g.setValue(21.17)
@@ -967,7 +967,7 @@ def test_current_sweep_final_zero_plateau_fallback_accepts_near_zero_load(
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_zero_load_scale_g.setValue(21.2)
-    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_steps_per_mm.setValue(800.0)
     window.spin_diameter.setValue(0.0191)
     window._automation_active = True
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
@@ -980,7 +980,7 @@ def test_current_sweep_final_zero_plateau_fallback_accepts_near_zero_load(
     window._end_zero_fallback_start_point_index = 0
     window._session_start_monotonic = time.monotonic()
 
-    for index, position_mm in enumerate([-1.0, -1.2, -1.4, -1.6, -1.8, -2.0]):
+    for index, position_mm in enumerate([7.000, 7.012, 7.024, 7.036, 7.048, 7.060]):
         raw_g = 21.170 + (0.0005 if index % 2 else 0.0)
         window._latest_scale_value_g = raw_g
         window._latest_scale_timestamp = time.time()
@@ -997,8 +997,8 @@ def test_current_sweep_final_zero_plateau_fallback_accepts_near_zero_load(
 
     window._latest_scale_value_g = 21.17
     window._latest_scale_timestamp = time.time()
-    window._current_position_mm = -2.2
-    window._effective_position_mm = -2.2
+    window._current_position_mm = 7.072
+    window._effective_position_mm = 7.072
 
     try:
         reached = window._seek_distribution_target(
@@ -1010,8 +1010,8 @@ def test_current_sweep_final_zero_plateau_fallback_accepts_near_zero_load(
         assert reached is False
         assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
         assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
-        assert targets == [pytest.approx(-1.0)]
-        assert window._end_zero_fallback_return_position_mm == pytest.approx(-1.0)
+        assert targets == [pytest.approx(7.000)]
+        assert window._end_zero_fallback_return_position_mm == pytest.approx(7.000)
         assert "zero-load plateau" in window.log_output.toPlainText()
     finally:
         window._session_active = False
@@ -1033,7 +1033,7 @@ def test_recovery_load_zero_plateau_fallback_accepts_near_zero_load(
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_zero_load_scale_g.setValue(21.2)
-    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_steps_per_mm.setValue(800.0)
     window._automation_active = True
     window._automation_name = mini_dma_mod.RECOVERY_LOAD
     window._automation_phase = "recover"
@@ -1042,8 +1042,9 @@ def test_recovery_load_zero_plateau_fallback_accepts_near_zero_load(
     window._end_zero_fallback_armed = True
     window._end_zero_fallback_start_point_index = 0
     window._recovery_start_monotonic = time.monotonic()
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
 
-    for index, position_mm in enumerate([-1.0, -1.2, -1.4, -1.6, -1.8, -2.0]):
+    for index, position_mm in enumerate([7.000, 7.012, 7.024, 7.036, 7.048, 7.060]):
         window._latest_scale_value_g = 21.170 + (0.0005 if index % 2 else 0.0)
         window._latest_scale_timestamp = time.time()
         window._current_position_mm = position_mm
@@ -1053,8 +1054,8 @@ def test_recovery_load_zero_plateau_fallback_accepts_near_zero_load(
 
     window._latest_scale_value_g = 21.17
     window._latest_scale_timestamp = time.time()
-    window._current_position_mm = -2.2
-    window._effective_position_mm = -2.2
+    window._current_position_mm = 7.072
+    window._effective_position_mm = 7.072
 
     try:
         reached = window._seek_distribution_target(
@@ -1066,9 +1067,45 @@ def test_recovery_load_zero_plateau_fallback_accepts_near_zero_load(
         assert reached is False
         assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
         assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
-        assert targets == [pytest.approx(-1.0)]
-        assert window._end_zero_fallback_return_position_mm == pytest.approx(-1.0)
+        assert targets == [pytest.approx(7.000)]
+        assert window._end_zero_fallback_return_position_mm == pytest.approx(7.000)
     finally:
+        _close_test_window(window)
+
+
+def test_recovery_plot_shows_load_and_displacement_legend(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    dialog = mini_dma_mod.QtWidgets.QDialog(window)
+    qtbot.addWidget(dialog)
+    window._recovery_plot_dialog = dialog
+    window._recovery_figure = mini_dma_mod.Figure(figsize=(4.0, 3.0))
+    window._recovery_canvas = window.canvas
+    window._recovery_points = [
+        window._capture_measurement_point(
+            elapsed_s=0.0,
+            position_mm=0.0,
+            effective_position_mm=0.0,
+            raw_load_g=1.0,
+            load_g=1.0,
+        ),
+        window._capture_measurement_point(
+            elapsed_s=1.0,
+            position_mm=-0.1,
+            effective_position_mm=-0.1,
+            raw_load_g=0.1,
+            load_g=0.1,
+        ),
+    ]
+
+    try:
+        dialog.show()
+        window._refresh_recovery_plot()
+
+        legend = window._recovery_figure.axes[0].get_legend()
+        assert legend is not None
+        assert [text.get_text() for text in legend.get_texts()] == ["load", "displacement"]
+    finally:
+        dialog.close()
         _close_test_window(window)
 
 
@@ -6006,7 +6043,7 @@ def test_current_sweep_overshoot_shrinks_correction_to_target_space_step(
         _close_test_window(window)
 
 
-def test_current_sweep_reversal_takes_up_backlash_before_stress_correction(
+def test_current_sweep_reversal_uses_correction_step_without_predictive_backlash(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -6076,11 +6113,77 @@ def test_current_sweep_reversal_takes_up_backlash_before_stress_correction(
         assert reached is False
         assert moves
         target_mm, effective_mm, speed_mm_s = moves[-1]
-        assert abs(target_mm - 6.7275) == pytest.approx(0.02)
-        assert effective_mm == pytest.approx(6.7275)
+        correction_mm = abs(target_mm - 6.7275)
+        assert correction_mm <= 1.0 / 113.0 + 1e-9
+        assert effective_mm == pytest.approx(target_mm)
         assert speed_mm_s is not None
         assert speed_mm_s >= 0.05
-        assert "backlash take-up" in window.log_output.toPlainText()
+        assert "backlash take-up" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_near_target_reversal_does_not_send_backlash_only_move(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        window._last_move_target_mm = target_mm
+        window._last_motion_command_time_s = time.time()
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0137)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(61.767)
+    window.spin_backlash_mm.setValue(0.02)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        305.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = 3.0
+    window._last_move_direction = 1.0
+    window._current_position_mm = 6.94
+    window._effective_position_mm = 6.94
+    window._last_move_target_mm = 6.94
+    window._last_effective_move_target_mm = 6.94
+    window._latest_scale_timestamp = time.time()
+    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(
+        54.0,
+        window.spin_diameter.value(),
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert moves
+        target_mm, effective_mm = moves[-1]
+        assert abs(target_mm - 6.94) <= 1.0 / 305.0 + 1e-9
+        assert effective_mm == pytest.approx(target_mm)
+        assert "backlash take-up" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 

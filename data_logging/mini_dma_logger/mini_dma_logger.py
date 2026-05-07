@@ -154,8 +154,8 @@ DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 SETUP_ZERO_FALLBACK_MIN_POINTS = 4
 SETUP_ZERO_FALLBACK_MIN_TIME_S = 0.8
-SETUP_ZERO_FALLBACK_MIN_STRAIN_PCT = 0.25
-SETUP_ZERO_FALLBACK_MIN_MOTOR_STEPS = 6.0
+SETUP_ZERO_FALLBACK_MIN_STRAIN_PCT = 0.05
+SETUP_ZERO_FALLBACK_MIN_MOTOR_STEPS = 4.0
 SETUP_ZERO_FALLBACK_RAW_SPAN_G = 0.012
 SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
 SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
@@ -7644,7 +7644,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return abs(float(error_value)) > abs(float(tolerance)) + reversal_cost
 
     def _use_backlash_compensation_for_current_recipe(self) -> bool:
-        return not self._is_calibration_mode(self._automation_name)
+        if self._is_calibration_mode(self._automation_name):
+            return False
+        if self._is_current_sweep_mode(self._automation_name):
+            return False
+        return True
 
     def _reversal_acceptance_tolerance(
         self,
@@ -11435,12 +11439,36 @@ class MainWindow(QtWidgets.QMainWindow):
                 spine.set_color(theme["text_rgb"])
             plot_axis.tick_params(colors=theme["text_rgb"])
             plot_axis.yaxis.label.set_color(theme["text_rgb"])
-            plot_axis.xaxis.label.set_color(theme["text_rgb"])
+        plot_axis.xaxis.label.set_color(theme["text_rgb"])
         points = self._recovery_points
         if points:
             x_values = [point.elapsed_s for point in points]
-            axis.plot(x_values, [point.load_g for point in points], color="#38bdf8", marker="o", markersize=3)
-            twin.plot(x_values, [point.position_mm for point in points], color="#60a5fa", marker="s", markersize=3)
+            load_line = axis.plot(
+                x_values,
+                [point.load_g for point in points],
+                color="#38bdf8",
+                marker="o",
+                markersize=3,
+                label="load",
+            )[0]
+            displacement_line = twin.plot(
+                x_values,
+                [point.position_mm for point in points],
+                color="#60a5fa",
+                marker="s",
+                markersize=3,
+                label="displacement",
+            )[0]
+            legend = axis.legend(
+                [load_line, displacement_line],
+                ["load", "displacement"],
+                loc="best",
+                fontsize=8,
+                facecolor=theme["axes_rgb"],
+                edgecolor=theme["text_rgb"],
+            )
+            for text in legend.get_texts():
+                text.set_color(theme["text_rgb"])
         else:
             axis.text(
                 0.5,
