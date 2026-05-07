@@ -268,6 +268,7 @@ FMR_ORIGIN_COLUMN = "FMR graphs (Origin)"
 RVT_FILE_COLUMN = "R vs T files"
 RVT_GRAPH_COLUMN = "R vs T graphs"
 RVT_ORIGIN_COLUMN = "R vs T graphs (Origin)"
+RVT_RESIDUAL_ORIGIN_COLUMN = "R vs T residual graphs (Origin)"
 RVT_POINT_COUNT_COLUMN = "R vs T points"
 RVT_TEMPERATURE_RANGE_COLUMN = "R vs T temperature range (deg C)"
 RVT_RESISTANCE_RANGE_COLUMN = "R vs T resistance range (Ohm)"
@@ -301,6 +302,7 @@ ORIGIN_FIGURE_COLUMNS = tuple(
     if column.startswith("Figure") and "(Origin)" in column
 ) + (
     RVT_ORIGIN_COLUMN,
+    RVT_RESIDUAL_ORIGIN_COLUMN,
     VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
     VSM_HYSTERESIS_ORIGIN_COLUMN,
     DMA_ISOSTRESS_ORIGIN_COLUMN,
@@ -4333,6 +4335,7 @@ def export_pyplot_origin_artifacts_for_paths(
     descriptor_prefix: str,
     display_prefix: str,
     log: Optional[logging.Logger] = None,
+    plot_mode: str | None = None,
 ) -> List[OriginArtifact]:
     """Generate PyPlot graphs for paths and save them as Origin graph artifacts."""
 
@@ -4382,10 +4385,6 @@ def export_pyplot_origin_artifacts_for_paths(
 
         plugin_getter = getattr(window, "_plugin_instance_for_name", None)
         plugin = plugin_getter(plugin_name) if callable(plugin_getter) else None
-        # Word reports use the VSM plugin's PyPlot/Origin path, but force a
-        # report-safe single-axis graph. The interactive dual-axis template is
-        # useful in PyPlot, but its linked secondary layer renders misplaced tick
-        # labels in Word OLE/EMF previews.
         use_live_vsm_origin_export = True
         if (
             use_live_vsm_origin_export
@@ -4410,10 +4409,9 @@ def export_pyplot_origin_artifacts_for_paths(
                 "show_smoothed_derivative",
                 "show_overlay_derivative",
                 "show_smoothed_plot",
-                "origin_single_axis",
             ):
                 try:
-                    setattr(processor, attr, attr == "origin_single_axis")
+                    setattr(processor, attr, False)
                 except Exception:
                     pass
             try:
@@ -4507,7 +4505,10 @@ def export_pyplot_origin_artifacts_for_paths(
                 )
             return artifacts
 
-        generator = getattr(window, "automation_generate", None)
+        if str(plugin_name).strip().casefold() == "r vs t" and str(plot_mode or "").strip().casefold() == "residual":
+            generator = getattr(plugin, "generate_residuals", None)
+        else:
+            generator = getattr(window, "automation_generate", None)
         if not callable(generator):
             raise RuntimeError("PyPlot generate automation is unavailable.")
         generator()
@@ -4648,6 +4649,7 @@ _WORD_REPORT_LABELS: Dict[str, str] = {
     RVT_FILE_COLUMN: "R vs T source files",
     RVT_GRAPH_COLUMN: "R vs T graphs",
     RVT_ORIGIN_COLUMN: "R vs T graphs (Origin)",
+    RVT_RESIDUAL_ORIGIN_COLUMN: "R vs T residual graphs (Origin)",
     VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN: "VSM temperature scan graphs (Origin)",
     VSM_HYSTERESIS_ORIGIN_COLUMN: "VSM hysteresis graphs (Origin)",
     DMA_ISOSTRESS_ORIGIN_COLUMN: "DMA iso-stress graphs (Origin)",
@@ -4742,7 +4744,7 @@ _WORD_GRAPH_SECTIONS: Tuple[
     ...,
 ] = (
     ("Current annealing", _CURRENT_ANNEALING_ORIGIN_COLUMNS, FIGURE_COLUMNS),
-    ("R vs T", (RVT_ORIGIN_COLUMN,), (RVT_GRAPH_COLUMN,)),
+    ("R vs T", (RVT_ORIGIN_COLUMN, RVT_RESIDUAL_ORIGIN_COLUMN), (RVT_GRAPH_COLUMN,)),
     ("VSM temperature scan", (VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,), (VSM_TEMPERATURE_SCAN_COLUMN,)),
     ("VSM hysteresis loops", (VSM_HYSTERESIS_ORIGIN_COLUMN,), (VSM_HYSTERESIS_COLUMN,)),
     ("DMA iso-stress", (DMA_ISOSTRESS_ORIGIN_COLUMN,), (DMA_ISOSTRESS_COLUMN,)),
@@ -4885,6 +4887,10 @@ def _word_paragraph(
     return f"<w:p>{ppr}{bookmark_start}{_word_run(text, bold=bold, size=size)}{bookmark_end}</w:p>"
 
 
+def _word_page_break() -> str:
+    return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+
+
 def _word_table(rows: Sequence[Tuple[str, str]]) -> str:
     if not rows:
         return ""
@@ -4932,30 +4938,59 @@ def _word_microwire_data_table(rows: Sequence[Tuple[str, Sequence[str]]]) -> str
         '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
         '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
     )
+    def _cell(text: str, *, label: bool = False, width: int = 2100) -> str:
+        shading = '<w:shd w:fill="F3F4F6"/>' if label else ""
+        return (
+            '<w:tc><w:tcPr>'
+            f'<w:tcW w:w="{int(width)}" w:type="dxa"/>{shading}</w:tcPr>'
+            f'{_word_paragraph(text, bold=label, size=16, spacing_after=0)}</w:tc>'
+        )
+
     table_rows: List[str] = []
+    pending_pairs: List[Tuple[str, str]] = []
+
+    def _flush_pairs() -> None:
+        nonlocal pending_pairs
+        while pending_pairs:
+            pairs = pending_pairs[:2]
+            pending_pairs = pending_pairs[2:]
+            cells = []
+            for label, value in pairs:
+                cells.append(_cell(label, label=True, width=1900))
+                cells.append(_cell(value, width=2500))
+            while len(cells) < 4:
+                cells.append(_cell("", label=True, width=1900))
+                cells.append(_cell("", width=2500))
+            table_rows.append(f"<w:tr>{''.join(cells)}</w:tr>")
+
     for label, raw_values in rows:
         values = [str(value) for value in list(raw_values)[:6]]
         if not values:
             values = [""]
+        if len(values) == 1:
+            pending_pairs.append((label, values[0]))
+            continue
+        _flush_pairs()
         value_width = max(1100, int(6200 / len(values)))
         label_cell = (
             '<w:tc><w:tcPr><w:tcW w:w="2600" w:type="dxa"/>'
             '<w:shd w:fill="F3F4F6"/></w:tcPr>'
-            f'{_word_paragraph(label, bold=True, spacing_after=0)}</w:tc>'
+            f'{_word_paragraph(label, bold=True, size=16, spacing_after=0)}</w:tc>'
         )
         value_cells = "".join(
             '<w:tc><w:tcPr>'
             f'<w:tcW w:w="{value_width}" w:type="dxa"/></w:tcPr>'
-            f'{_word_paragraph(value, spacing_after=0)}</w:tc>'
+            f'{_word_paragraph(value, size=16, spacing_after=0)}</w:tc>'
             for value in values
         )
         table_rows.append(f"<w:tr>{label_cell}{value_cells}</w:tr>")
+    _flush_pairs()
     return (
         "<w:tbl>"
         '<w:tblPr><w:tblW w:w="0" w:type="auto"/>'
         f"<w:tblBorders>{border}</w:tblBorders>"
-        '<w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="90" w:type="dxa"/>'
-        '<w:bottom w:w="90" w:type="dxa"/><w:right w:w="90" w:type="dxa"/></w:tblCellMar>'
+        '<w:tblCellMar><w:top w:w="35" w:type="dxa"/><w:left w:w="45" w:type="dxa"/>'
+        '<w:bottom w:w="35" w:type="dxa"/><w:right w:w="45" w:type="dxa"/></w:tblCellMar>'
         "</w:tblPr>"
         f"{''.join(table_rows)}"
         "</w:tbl>"
@@ -4991,7 +5026,7 @@ def _word_microwire_data_section(row: pd.Series) -> str:
         if "file" in lowered or "path" in lowered or "image" in lowered:
             continue
         rows.append((_word_label(column_text), _word_format_value_cells(row.get(column))))
-    parts = [_word_paragraph("Microwire data", bold=True, size=28, spacing_after=120, style="Heading1")]
+    parts = [_word_paragraph("Microwire data", bold=True, size=24, spacing_after=70, style="Heading1")]
     if rows:
         parts.append(_word_microwire_data_table(rows))
     else:
@@ -5019,6 +5054,7 @@ def _word_microscope_section(
     bookmark_start: int,
 ) -> Tuple[str, List[WordPictureInsertion], int]:
     parts = [
+        _word_page_break(),
         _word_paragraph(
             "Microscope and dimensions",
             bold=True,
@@ -5111,6 +5147,7 @@ def _word_graph_sections(
     insertions: List[WordOleInsertion] = []
     bookmark_id = bookmark_start
     for title, origin_columns, reference_columns in _WORD_GRAPH_SECTIONS:
+        parts.append(_word_page_break())
         parts.append(_word_paragraph(title, bold=True, size=28, spacing_after=120, style="Heading1"))
         section_has_content = False
         section_has_origin_descriptors = False
@@ -5270,7 +5307,7 @@ def _write_word_docx(path: Path, document_xml: str) -> None:
         '<w:style w:type="paragraph" w:styleId="Heading1">'
         '<w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
         '<w:qFormat/><w:pPr><w:keepNext/><w:outlineLvl w:val="0"/>'
-        '<w:spacing w:before="180" w:after="120"/></w:pPr>'
+        '<w:spacing w:before="80" w:after="90"/></w:pPr>'
         '<w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style>'
         '<w:style w:type="paragraph" w:styleId="Heading2">'
         '<w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
@@ -7761,6 +7798,7 @@ __all__ = [
     "RVT_FILE_COLUMN",
     "RVT_GRAPH_COLUMN",
     "RVT_ORIGIN_COLUMN",
+    "RVT_RESIDUAL_ORIGIN_COLUMN",
     "RVT_POINT_COUNT_COLUMN",
     "RVT_TEMPERATURE_RANGE_COLUMN",
     "RVT_RESISTANCE_RANGE_COLUMN",

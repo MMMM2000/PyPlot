@@ -1076,6 +1076,7 @@ def _load_rvst_word_report_frame(source_path: Path, sample_override: object, out
         RVT_FILE_COLUMN,
         RVT_GRAPH_COLUMN,
         RVT_ORIGIN_COLUMN,
+        RVT_RESIDUAL_ORIGIN_COLUMN,
         RVT_POINT_COUNT_COLUMN,
         RVT_RESISTANCE_RANGE_COLUMN,
         RVT_TEMPERATURE_RANGE_COLUMN,
@@ -1134,6 +1135,7 @@ def _export_pyplot_origin_artifacts_for_paths(
     output_dir: Path,
     descriptor_prefix: str,
     display_prefix: str,
+    plot_mode: str | None = None,
 ) -> list[object]:
     from microwire_data_builder.core import export_pyplot_origin_artifacts_for_paths
 
@@ -1145,6 +1147,7 @@ def _export_pyplot_origin_artifacts_for_paths(
             descriptor_prefix=descriptor_prefix,
             display_prefix=display_prefix,
             log=LOGGER,
+            plot_mode=plot_mode,
         )
     )
 
@@ -1414,6 +1417,7 @@ def _load_project_word_report_frame(
         RVT_FILE_COLUMN,
         RVT_GRAPH_COLUMN,
         RVT_ORIGIN_COLUMN,
+        RVT_RESIDUAL_ORIGIN_COLUMN,
         RVT_POINT_COUNT_COLUMN,
         RVT_RESISTANCE_RANGE_COLUMN,
         RVT_TEMPERATURE_RANGE_COLUMN,
@@ -1637,6 +1641,17 @@ def _load_project_word_report_frame(
                         descriptor_prefix=prefix,
                         display_prefix=display_prefix,
                     )
+                    if section_name == "rvt":
+                        artifacts.extend(
+                            _export_pyplot_origin_artifacts_for_paths(
+                                paths=source_paths,
+                                plugin_name=plugin_name,
+                                output_dir=output_dir,
+                                descriptor_prefix=f"{prefix}_residual",
+                                display_prefix=f"{display_prefix} residual",
+                                plot_mode="residual",
+                            )
+                        )
                 except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
                     LOGGER.warning("%s Origin object generation skipped for %s: %s", display_prefix, sample_title, exc)
                     artifacts = []
@@ -1647,7 +1662,23 @@ def _load_project_word_report_frame(
                     descriptors.append(str(descriptor))
                     origin_artifacts[str(descriptor)] = artifact
                 if descriptors:
-                    frame.at[index, origin_column] = descriptors if len(descriptors) > 1 else descriptors[0]
+                    if section_name == "rvt":
+                        raw_descriptors = [
+                            descriptor
+                            for descriptor in descriptors
+                            if "residual" not in descriptor.casefold()
+                        ]
+                        residual_descriptors = [
+                            descriptor
+                            for descriptor in descriptors
+                            if "residual" in descriptor.casefold()
+                        ]
+                        if raw_descriptors:
+                            frame.at[index, origin_column] = raw_descriptors if len(raw_descriptors) > 1 else raw_descriptors[0]
+                        if residual_descriptors:
+                            frame.at[index, RVT_RESIDUAL_ORIGIN_COLUMN] = residual_descriptors if len(residual_descriptors) > 1 else residual_descriptors[0]
+                    else:
+                        frame.at[index, origin_column] = descriptors if len(descriptors) > 1 else descriptors[0]
 
     rvt_paths = []
     seen_rvt_paths: set[Path] = set()
@@ -1715,9 +1746,44 @@ def _load_project_word_report_frame(
                     rvt_origin_descriptors.append(artifact.descriptor)
                     origin_artifacts[artifact.descriptor] = artifact
                     frame.at[index, RVT_GRAPH_COLUMN] = artifact.display_text or artifact.descriptor
+        rvt_residual_origin_descriptors: list[str] = []
+        if include_origin:
+            for path in matching_rvt:
+                title = " ".join(part for part in (str(composition or ""), str(microwire or "")) if part).strip()
+                try:
+                    residual_artifacts = _export_pyplot_origin_artifacts_for_paths(
+                        paths=[path],
+                        plugin_name="R vs T",
+                        output_dir=output_dir,
+                        descriptor_prefix=_safe_plot_stem(
+                            "_".join(
+                                part
+                                for part in (
+                                    title or path.stem,
+                                    "r_vs_t_residual",
+                                    path.stem,
+                                )
+                                if part
+                            )
+                        ),
+                        display_prefix=f"R vs T residual Origin graph: {title or path.stem}",
+                        plot_mode="residual",
+                    )
+                except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
+                    LOGGER.warning("R vs T residual Origin object generation skipped for %s: %s", path, exc)
+                    residual_artifacts = []
+                for artifact in residual_artifacts:
+                    rvt_residual_origin_descriptors.append(artifact.descriptor)
+                    origin_artifacts[artifact.descriptor] = artifact
         if rvt_origin_descriptors:
             frame.at[index, RVT_ORIGIN_COLUMN] = (
                 rvt_origin_descriptors if len(rvt_origin_descriptors) > 1 else rvt_origin_descriptors[0]
+            )
+        if rvt_residual_origin_descriptors:
+            frame.at[index, RVT_RESIDUAL_ORIGIN_COLUMN] = (
+                rvt_residual_origin_descriptors
+                if len(rvt_residual_origin_descriptors) > 1
+                else rvt_residual_origin_descriptors[0]
             )
 
     return frame.reset_index(drop=True), origin_artifacts

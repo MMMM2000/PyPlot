@@ -447,12 +447,14 @@ def test_microwire_word_report_project_exports_rvst_through_pyplot(
             (
                 str(kwargs["plugin_name"]),
                 [Path(path) for path in kwargs["paths"]],  # type: ignore[index]
+                str(kwargs.get("plot_mode") or "raw"),
             )
         )
+        descriptor = "rvst_residual.oggu" if kwargs.get("plot_mode") == "residual" else "rvst.oggu"
         return [
             argparse.Namespace(
-                descriptor="rvst.oggu",
-                display_text="R vs T from PyPlot",
+                descriptor=descriptor,
+                display_text="R vs T residual from PyPlot" if kwargs.get("plot_mode") == "residual" else "R vs T from PyPlot",
             )
         ]
 
@@ -472,9 +474,11 @@ def test_microwire_word_report_project_exports_rvst_through_pyplot(
         tmp_path / "reports",
     )
 
-    assert captured == [("R vs T", [rvt_path])]
+    assert captured == [("R vs T", [rvt_path], "raw"), ("R vs T", [rvt_path], "residual")]
     assert origin_artifacts["rvst.oggu"].display_text == "R vs T from PyPlot"
+    assert origin_artifacts["rvst_residual.oggu"].display_text == "R vs T residual from PyPlot"
     assert frame.iloc[0]["R vs T graphs (Origin)"] == "rvst.oggu"
+    assert frame.iloc[0]["R vs T residual graphs (Origin)"] == "rvst_residual.oggu"
 
 
 def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(

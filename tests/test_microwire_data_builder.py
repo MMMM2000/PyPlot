@@ -3994,9 +3994,23 @@ def test_word_report_microwire_data_table_only_expands_multi_value_rows() -> Non
 
     rows = re.findall(r"<w:tr>(.*?)</w:tr>", table_xml)
     assert len(rows) == 3
-    assert rows[0].count("<w:tc>") == 2
+    assert rows[0].count("<w:tc>") == 4
     assert rows[1].count("<w:tc>") == 4
-    assert rows[2].count("<w:tc>") == 2
+    assert rows[2].count("<w:tc>") == 4
+    assert "Composition" in rows[0]
+    assert "As (" in rows[2]
+
+
+def test_word_report_sections_start_on_new_pages() -> None:
+    xml, _origin_insertions, _picture_insertions = core._word_document_xml(
+        pd.Series({"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}),
+        0,
+        {},
+        {},
+    )
+
+    assert xml.count('w:type="page"') >= 8
+    assert xml.index("Microwire data") < xml.index('w:type="page"') < xml.index("Microscope and dimensions")
 
 
 def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(

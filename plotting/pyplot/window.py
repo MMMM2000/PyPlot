@@ -6371,6 +6371,122 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 except Exception:
                     continue
 
+    @staticmethod
+    def _fit_origin_axis_affine(primary: pd.Series, secondary: pd.Series) -> tuple[float, float] | None:
+        x = pd.to_numeric(primary, errors="coerce").to_numpy(dtype=float)
+        y = pd.to_numeric(secondary, errors="coerce").to_numpy(dtype=float)
+        count = min(x.size, y.size)
+        if count < 2:
+            return None
+        x = x[:count]
+        y = y[:count]
+        mask = np.isfinite(x) & np.isfinite(y)
+        if int(mask.sum()) < 2:
+            return None
+        x = x[mask]
+        y = y[mask]
+        if float(np.nanmax(x) - np.nanmin(x)) <= 1e-12:
+            return None
+        try:
+            slope, intercept = np.polyfit(x, y, 1)
+        except Exception:
+            return None
+        if not (math.isfinite(float(slope)) and math.isfinite(float(intercept))):
+            return None
+        if math.isclose(float(slope), 0.0, abs_tol=1e-12):
+            return None
+        return float(slope), float(intercept)
+
+    def _origin_layer_axis_links(
+        self,
+        frame: pd.DataFrame,
+        worksheet: WorksheetData,
+        columns: list[str],
+        layer_groups: list[tuple[Any, str, str, list[tuple[int, int]], bool]],
+    ) -> dict[int, tuple[tuple[float, float] | None, tuple[float, float] | None]]:
+        if len(layer_groups) < 2:
+            return {}
+        primary_pairs = layer_groups[0][3]
+        primary_by_label: dict[str, tuple[int, int]] = {}
+        for x_index, y_index in primary_pairs:
+            if not (0 <= x_index < len(columns) and 0 <= y_index < len(columns)):
+                continue
+            label = self._origin_plot_label(worksheet, y_index).strip().casefold()
+            if label:
+                primary_by_label.setdefault(label, (x_index, y_index))
+        links: dict[int, tuple[tuple[float, float] | None, tuple[float, float] | None]] = {}
+        for group_index, (_target_layer, _x_title, _y_title, group_pairs, _show_top_x) in enumerate(layer_groups[1:], start=1):
+            x_link: tuple[float, float] | None = None
+            y_link: tuple[float, float] | None = None
+            for x_index, y_index in group_pairs:
+                if not (0 <= x_index < len(columns) and 0 <= y_index < len(columns)):
+                    continue
+                label = self._origin_plot_label(worksheet, y_index).strip().casefold()
+                primary_pair = primary_by_label.get(label)
+                if primary_pair is None:
+                    continue
+                primary_x, primary_y = primary_pair
+                x_link = self._fit_origin_axis_affine(frame[columns[primary_x]], frame[columns[x_index]])
+                y_link = self._fit_origin_axis_affine(frame[columns[primary_y]], frame[columns[y_index]])
+                if x_link is not None or y_link is not None:
+                    break
+            if x_link is not None or y_link is not None:
+                links[group_index] = (x_link, y_link)
+        return links
+
+    def _apply_origin_layer_axis_links(
+        self,
+        layer_groups: list[tuple[Any, str, str, list[tuple[int, int]], bool]],
+        layer_axis_links: dict[int, tuple[tuple[float, float] | None, tuple[float, float] | None]],
+    ) -> None:
+        if not layer_axis_links or not layer_groups:
+            return
+        primary_layer = layer_groups[0][0]
+        get_float = getattr(primary_layer, "get_float", None)
+        if not callable(get_float):
+            return
+        try:
+            primary_x_from = float(get_float("x.from"))
+            primary_x_to = float(get_float("x.to"))
+            primary_y_from = float(get_float("y.from"))
+            primary_y_to = float(get_float("y.to"))
+        except Exception:
+            return
+        for group_index, (target_layer, _x_title, _y_title, _group_pairs, _show_top_x) in enumerate(layer_groups[1:], start=1):
+            x_link, y_link = layer_axis_links.get(group_index, (None, None))
+            set_float = getattr(target_layer, "set_float", None)
+            if callable(set_float):
+                if x_link is not None:
+                    slope, intercept = x_link
+                    for key, value in (
+                        ("x.from", (primary_x_from * slope) + intercept),
+                        ("x.to", (primary_x_to * slope) + intercept),
+                    ):
+                        try:
+                            set_float(key, float(value))
+                        except Exception:
+                            pass
+                if y_link is not None:
+                    slope, intercept = y_link
+                    for key, value in (
+                        ("y.from", (primary_y_from * slope) + intercept),
+                        ("y.to", (primary_y_to * slope) + intercept),
+                    ):
+                        try:
+                            set_float(key, float(value))
+                        except Exception:
+                            pass
+            lt_exec = getattr(target_layer, "lt_exec", None)
+            if callable(lt_exec):
+                if x_link is not None:
+                    slope, intercept = x_link
+                    self._origin_lt_exec(lt_exec, f"layer.x.from={(primary_x_from * slope) + intercept:.12g};")
+                    self._origin_lt_exec(lt_exec, f"layer.x.to={(primary_x_to * slope) + intercept:.12g};")
+                if y_link is not None:
+                    slope, intercept = y_link
+                    self._origin_lt_exec(lt_exec, f"layer.y.from={(primary_y_from * slope) + intercept:.12g};")
+                    self._origin_lt_exec(lt_exec, f"layer.y.to={(primary_y_to * slope) + intercept:.12g};")
+
     def _plot_origin_worksheet(
         self,
         origin_any: Any,
@@ -6480,6 +6596,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     show_top_x,
                 )
             )
+        layer_axis_links = self._origin_layer_axis_links(frame, worksheet, columns, layer_groups)
         plotted_any = False
         seen_plot_labels: set[str] = set()
         primary_group_labels: set[str] = set()
@@ -6603,6 +6720,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 lt_exec = getattr(target_layer, "lt_exec", None)
                 if callable(lt_exec):
                     self._origin_lt_exec(lt_exec, "rescale;")
+        self._apply_origin_layer_axis_links(layer_groups, layer_axis_links)
         for plot_obj in duplicate_overlay_plots:
             self._set_origin_plot_visible(plot_obj, False)
         for target_layer, _group_x_title, _group_y_title, _group_pairs, show_top_x in layer_groups:

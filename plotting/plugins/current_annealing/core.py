@@ -350,6 +350,48 @@ def _set_graph_title(
     _ = applied
 
 
+def _place_current_annealing_title(layer: Any, text: str) -> None:
+    label_method = getattr(layer, "label", None)
+    title_label = None
+    if callable(label_method):
+        try:
+            title_label = label_method("Title")
+        except Exception:
+            title_label = None
+    if title_label is None:
+        return
+    try:
+        title_label.text = text
+    except Exception:
+        pass
+    _set_visibility(title_label, True)
+    _set_text_size(title_label, TITLE_SIZE)
+    get_float = getattr(layer, "get_float", None)
+    set_float = getattr(title_label, "set_float", None)
+    if not callable(get_float) or not callable(set_float):
+        return
+    try:
+        x_from = float(get_float("x.from"))
+        x_to = float(get_float("x.to"))
+        y_from = float(get_float("y.from"))
+        y_to = float(get_float("y.to"))
+    except Exception:
+        return
+    if not all(math.isfinite(value) for value in (x_from, x_to, y_from, y_to)):
+        return
+    y_span = y_to - y_from
+    if y_span <= 0:
+        return
+    for key, value in (
+        ("x", (x_from + x_to) / 2.0),
+        ("y", y_to + (y_span * 0.08)),
+    ):
+        try:
+            set_float(key, float(value))
+        except Exception:
+            pass
+
+
 def _assign_long_name(target: Any | None, name: str) -> None:
     if target is None:
         return
@@ -1058,6 +1100,8 @@ def plot_one_origin(
     hide_origin_workbook(origin_any, workbook, graph)
 
     _apply_origin_readability(layer, graph)
+    _set_graph_title(layer, display_label, graph=graph, origin_any=origin_any)
+    _place_current_annealing_title(layer, display_label)
 
     if return_handles:
         handles["graph"] = graph

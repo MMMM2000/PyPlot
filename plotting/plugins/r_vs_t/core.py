@@ -353,8 +353,8 @@ def plot_residuals_one(
         )
 
     ax.axhline(0.0, color="#475569", linestyle="--", linewidth=1.0, alpha=0.8)
-    ax.set_xlabel("Temperature [Â°C]", fontsize=AXIS_LABEL_SIZE)
-    ax.set_ylabel("Residual [Î©]", fontsize=AXIS_LABEL_SIZE)
+    ax.set_xlabel("Temperature [°C]", fontsize=AXIS_LABEL_SIZE)
+    ax.set_ylabel("Residual [Ω]", fontsize=AXIS_LABEL_SIZE)
     ax.set_title(f"{title} residual", fontsize=TITLE_SIZE, pad=10)
     ax.grid(True, ls="--", alpha=0.3)
     if SHOW_LEGEND and legend_handles:
