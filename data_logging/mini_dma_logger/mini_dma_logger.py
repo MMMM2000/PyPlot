@@ -266,16 +266,19 @@ SERVO_LIVE_STIFFNESS_ALPHA = 0.35
 SERVO_NOISE_SIGMA = 3.0
 SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S = 1.5
 SERVO_CURRENT_SWEEP_RATE_GAIN = 1.2
-SERVO_CURRENT_SWEEP_DEFAULTS_VERSION = 2
+SERVO_CURRENT_SWEEP_DEFAULTS_VERSION = 3
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S = 15.0
 SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA = 10.0
-SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA = 20.0
+SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA = 30.0
 SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA = 5.0
 SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_REVERSAL_HOLD_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_MIN_COMMAND_SPEED_MM_S = 0.05
+SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION = 0.20
+SERVO_CURRENT_SWEEP_DYNAMIC_MAX_FRACTION = 0.60
+SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA = 25.0
 SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA = 1.0
@@ -3772,9 +3775,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_max_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA)
         self.spin_current_sweep_max_correction_stress_mpa.setSuffix(" MPa")
         self.spin_current_sweep_max_correction_stress_mpa.setToolTip(
-            "Largest planned stress-equivalent correction used for far-from-target current-sweep recovery."
+            "Absolute stress-equivalent safety rail for one current-sweep servo correction while current is moving."
         )
-        current_sweep_form.addRow("Far correction cap", self.spin_current_sweep_max_correction_stress_mpa)
+        current_sweep_form.addRow("Sweep hard cap", self.spin_current_sweep_max_correction_stress_mpa)
         self.spin_current_sweep_hold_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_hold_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_hold_correction_stress_mpa.setRange(0.001, 100000.0)
@@ -3783,27 +3786,28 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.spin_current_sweep_hold_correction_stress_mpa.setSuffix(" MPa")
         self.spin_current_sweep_hold_correction_stress_mpa.setToolTip(
-            "Largest planned stress-equivalent correction while current is paused by target hold."
+            "Absolute stress-equivalent safety rail for one servo correction while current is paused for target recovery."
         )
-        current_sweep_form.addRow("Hold correction cap", self.spin_current_sweep_hold_correction_stress_mpa)
+        current_sweep_form.addRow("Hold hard cap", self.spin_current_sweep_hold_correction_stress_mpa)
         self.spin_current_sweep_mid_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_mid_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_mid_correction_stress_mpa.setRange(0.001, 100000.0)
         self.spin_current_sweep_mid_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA)
         self.spin_current_sweep_mid_correction_stress_mpa.setSuffix(" MPa")
         self.spin_current_sweep_mid_correction_stress_mpa.setToolTip(
-            "Intermediate planned stress-equivalent correction cap as the servo approaches the target."
+            "Legacy medium-error correction cap kept for older saved settings."
         )
         current_sweep_form.addRow("Mid correction cap", self.spin_current_sweep_mid_correction_stress_mpa)
+        self._hide_form_row(current_sweep_form, self.spin_current_sweep_mid_correction_stress_mpa)
         self.spin_current_sweep_near_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_near_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_near_correction_stress_mpa.setRange(0.001, 100000.0)
         self.spin_current_sweep_near_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA)
         self.spin_current_sweep_near_correction_stress_mpa.setSuffix(" MPa")
         self.spin_current_sweep_near_correction_stress_mpa.setToolTip(
-            "Near-target stress-equivalent correction cap before the servo shrinks to single motor steps."
+            "Stress-equivalent near-target band. Inside this band, the controller only sends one motor step."
         )
-        current_sweep_form.addRow("Near correction cap", self.spin_current_sweep_near_correction_stress_mpa)
+        current_sweep_form.addRow("Near step band", self.spin_current_sweep_near_correction_stress_mpa)
         self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
         self.check_current_sweep_return_target.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_return_target)
@@ -3912,6 +3916,7 @@ class MainWindow(QtWidgets.QMainWindow):
         current_sweep_form.addRow("", self.check_current_sweep_first_overheating)
         self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
         self.check_current_sweep_reverse_current.setChecked(True)
+        self.check_current_sweep_reverse_current.setVisible(False)
         current_sweep_form.addRow("", self.check_current_sweep_reverse_current)
         self.spin_current_sweep_tolerance = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_tolerance.setDecimals(4)
@@ -7013,21 +7018,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if error_value is not None and math.isfinite(float(error_value)):
             error_abs = abs(float(error_value))
             near_mpa = self._current_sweep_near_correction_stress_mpa()
-            mid_mpa = self._current_sweep_mid_correction_stress_mpa()
             near_cap = _basis_cap_from_stress(near_mpa)
-            mid_cap = _basis_cap_from_stress(mid_mpa)
             max_cap = _basis_cap_from_stress(cap_mpa)
             near_threshold = 0.0 if near_cap is None else near_cap
-            mid_threshold = 0.0 if mid_cap is None else mid_cap
-            max_threshold = 0.0 if max_cap is None else max_cap
             if near_threshold > 0.0 and error_abs <= near_threshold:
                 return self._motor_step_mm()
-            elif cap_mpa <= near_mpa:
-                pass
-            elif mid_threshold > 0.0 and error_abs <= mid_threshold * 2.0:
-                cap_mpa = near_mpa
-            elif max_threshold > 0.0 and error_abs <= max_threshold * 2.5:
-                cap_mpa = mid_mpa
+            if max_cap is not None and max_cap > 0.0:
+                error_over_near = max(0.0, error_abs - near_threshold)
+                scale = max(1e-9, SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA)
+                fraction = SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION + (
+                    SERVO_CURRENT_SWEEP_DYNAMIC_MAX_FRACTION - SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION
+                ) * (1.0 - math.exp(-error_over_near / scale))
+                cap_value = min(max_cap, max(near_threshold, error_abs * fraction))
+                return max(self._motor_step_mm(), cap_value / sensitivity)
         elif self._current_sweep_freezes_live_stiffness() and self._automation_phase != "target_ramp":
             cap_mpa = self._current_sweep_near_correction_stress_mpa()
         cap_value = _basis_cap_from_stress(cap_mpa)
@@ -9077,8 +9080,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{_format_compact_number(self.spin_current_sweep_start_mA.value(), decimals=2)} to "
                 f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)}."
             )
-            if self.check_current_sweep_reverse_current.isChecked():
-                summary += " Current returns at each plateau."
+            summary += " Current returns at each plateau."
             if self.check_current_sweep_return_target.isChecked():
                 summary += " Target returns to start."
             summary += (
@@ -10361,7 +10363,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
                 "current_ramp_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
                 "first_overheating_repeat": self.check_current_sweep_first_overheating.isChecked(),
-                "reverse_current": self.check_current_sweep_reverse_current.isChecked(),
+                "reverse_current": True,
                 "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
                 "tolerance_mode": "automatic",
                 "dynamic_balance_max_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
@@ -12256,10 +12258,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 previous_target = target
                 sweep_ranges = [(current_start, current_end)]
-                reverse_current = (
-                    self.check_current_sweep_reverse_current.isChecked()
-                    and abs(current_end - current_start) > 1e-12
-                )
+                reverse_current = abs(current_end - current_start) > 1e-12
                 if reverse_current:
                     sweep_ranges.append((current_end, current_start))
                 repeat_count = 2 if first_overheating_repeat and plateau_index == 1 else 1

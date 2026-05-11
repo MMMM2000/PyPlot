@@ -318,7 +318,7 @@ This means:
 
 By default the current ramp itself stays static, because transition temperature and thermal history can depend on the commanded current-ramp rate. When the optional current-ramp hold is enabled, Mini DMA holds the present current setpoint when a short filtered load/stress signal shows a persistent absolute target error. The same rule is used while current is rising and falling: if stress/load runs too far above or below the target, the current ramp pauses while displacement catches up. The pause/resume bands are expanded by recent balance noise and by a small MPa-equivalent floor, so ordinary annealing fluctuations do not trigger a hold by themselves. While held, the displacement servo keeps correcting, and the current ramp resumes after the filtered signal returns inside the resume band. The ramp clock is shifted by the hold duration, so resuming does not jump to the current that wall-clock time would otherwise imply. There is no maximum hold-time stop; wire-break/current faults are handled by their own protection paths. If the sample response is consistently too fast for the servo to track, lowering the fixed current ramp rate is still the cleaner first adjustment.
 
-The `First overheating` option changes only the recipe sequence: the first target's current sweep is repeated once before Mini DMA advances to later target loads/stresses/strains. This is intended for wires whose very first heating has a higher transformation temperature than later heating/cooling cycles. With reverse-current enabled, the first target runs up/down/up/down; later targets keep the normal configured sweep pattern.
+The current sweep always returns current to the start current at each target, so each target records a heating and cooling leg. The `First overheating` option changes only the recipe sequence: the first target's current sweep is repeated once before Mini DMA advances to later target loads/stresses/strains. This is intended for wires whose very first heating has a higher transformation temperature than later heating/cooling cycles. With `First overheating` enabled, the first target runs up/down/up/down; later targets run the normal up/down pair.
 
 The dashboard header displays the most recent commanded speed in fixed-width cells:
 
@@ -367,19 +367,17 @@ Before force starts responding, Mini DMA uses the setup slack take-up speed in `
 
 Current-sweep target ramps start in conservative gated feedback for load/stress control. Mini DMA sends one correction, waits for fresh post-move scale feedback, and only then decides the next correction. It does not update stiffness during the current sweep. Direction reversals in current-sweep load/stress control do not prepend the configured backlash distance; the controller sends the requested correction step, then uses the following scale response to decide whether the move was specimen motion or mostly backlash. This keeps a `1 MPa` or one-motor-step correction from being dominated by a saved `0.02 mm` backlash value.
 
-For iso-load and iso-stress current sweeps, "dynamic speed control" means dynamic average correction speed. The most important controlled quantity is the step size, not the motor's instantaneous Tic speed. Mini DMA first predicts the mechanical correction from the frozen setup/calibration stiffness, then caps that correction by target-space error:
+For iso-load and iso-stress current sweeps, "dynamic speed control" means dynamic average correction speed. The most important controlled quantity is the step size, not the motor's instantaneous Tic speed. Mini DMA first predicts the mechanical correction from the frozen setup/calibration stiffness, then caps that correction by a smooth fraction of the current target-space error:
 
-| Error region | Planned correction cap |
-| --- | ---: |
-| Target-ramp acquisition far from target | up to `10 MPa` equivalent |
-| Target-ramp acquisition mid range | up to `5 MPa` equivalent |
-| Large current-sweep recovery error | up to `10 MPa` equivalent |
-| Large paused-current recovery error | up to `20 MPa` equivalent |
-| Medium current-sweep recovery error | up to `5 MPa` equivalent |
-| Settle or near target | up to `1 MPa` equivalent |
-| Inside the near-target band | one motor step |
+```text
+if abs(error) <= near_step_band:
+    planned_correction = one_motor_step
+else:
+    fraction = 20% -> 60%, increasing smoothly with error size
+    planned_correction = min(abs(error) * fraction, active_hard_cap)
+```
 
-For load-control sweeps, the same caps are converted from MPa to grams using the current wire diameter. The specimen correction is still clipped by the configured maximum correction strain percentage. This makes the controller progressively shrink real correction distance as it approaches target, so the average motion slows down even when the Tic command speed remains reasonably fast.
+The active hard cap is the visible sweep hard cap while the current ramp is moving, and the hold hard cap while the current ramp is paused for target recovery. The hard cap remains an absolute safety rail; the smooth error fraction normally determines the requested correction. For load-control sweeps, the same MPa-equivalent values are converted to grams using the current wire diameter. The specimen correction is still clipped by the configured maximum correction strain percentage. This makes the controller progressively shrink real correction distance as it approaches target without abrupt far/mid/near bucket changes, so the average motion slows down even when the Tic command speed remains reasonably fast.
 
 The Tic command speed is kept practical for these small corrections. During current-sweep balancing, Mini DMA will not deliberately creep below about `0.05 mm/s` unless the stage speed cap itself is lower. The balance feedback is normally the bottleneck, so a tiny correction should finish quickly and then wait for the next fresh scale reply instead of spending seconds moving slowly.
 

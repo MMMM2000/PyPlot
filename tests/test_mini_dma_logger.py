@@ -3409,6 +3409,7 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is False
         assert window.check_current_sweep_first_overheating.isHidden() is False
+        assert window.check_current_sweep_reverse_current.isHidden() is True
         assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(
             mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
         )
@@ -3644,6 +3645,30 @@ def test_current_sweep_first_overheating_repeats_first_target_cycle(tmp_path: Pa
         ]
         assert len(later_sweeps) == 6
         assert "first overheating enabled" in summary.lower()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_always_returns_current_to_start(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
+        window.check_current_sweep_reverse_current.setChecked(False)
+
+        steps, _summary, _interval_ms = window._build_automation_recipe()
+
+        current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
+
+        assert len(current_sweep_steps) == 8
+        assert [(step.current_start_mA, step.current_end_mA) for step in current_sweep_steps[:2]] == [
+            (1.0, 3.0),
+            (3.0, 1.0),
+        ]
+        assert all(step.current_end_mA == pytest.approx(1.0) for step in current_sweep_steps[1::2])
     finally:
         _close_test_window(window)
 
@@ -6319,8 +6344,7 @@ def test_current_sweep_overshoot_shrinks_correction_to_target_space_step(
         assert reached is False
         assert moves
         correction_mm = abs(moves[-1][0] - 6.7275)
-        one_mpa_mm = 1.0 / 113.0
-        assert correction_mm <= one_mpa_mm + 1e-9
+        assert correction_mm == pytest.approx(1.565 / 113.0, abs=0.001 / 113.0)
         assert moves[-1][1] is not None
         assert moves[-1][1] >= 0.05
     finally:
@@ -6398,7 +6422,7 @@ def test_current_sweep_reversal_uses_correction_step_without_predictive_backlash
         assert moves
         target_mm, effective_mm, speed_mm_s = moves[-1]
         correction_mm = abs(target_mm - 6.7275)
-        assert correction_mm <= 1.0 / 113.0 + 1e-9
+        assert correction_mm == pytest.approx(1.565 / 113.0, abs=0.001 / 113.0)
         assert effective_mm == pytest.approx(target_mm)
         assert speed_mm_s is not None
         assert speed_mm_s >= 0.05
@@ -6611,6 +6635,27 @@ def test_current_sweep_hold_uses_gated_small_stress_correction(
         assert effective_mm is not None
         correction_mm = abs(effective_mm - 6.7)
         assert correction_mm <= (5.0 / 224.502066) + 1e-9
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_uses_smooth_dynamic_stress_cap(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_current_sweep_near_correction_stress_mpa.setValue(1.0)
+        window.spin_current_sweep_mid_correction_stress_mpa.setValue(5.0)
+        window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
+        window._automation_phase = "current_hold"
+
+        correction_mm = window._current_sweep_max_stress_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            sensitivity_per_mm=200.0,
+            error_value=40.0,
+        )
+
+        assert correction_mm is not None
+        assert correction_mm * 200.0 == pytest.approx(20.64, abs=0.01)
     finally:
         _close_test_window(window)
 
@@ -7082,7 +7127,7 @@ def test_current_sweep_hold_phase_uses_faster_recovery_cap(
             seek_key=seek_key,
         )
 
-        assert hold_error_step == pytest.approx(20.0 / sensitivity)
+        assert hold_error_step == pytest.approx(30.0 / sensitivity)
     finally:
         _close_test_window(window)
 
