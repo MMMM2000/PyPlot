@@ -318,6 +318,8 @@ This means:
 
 By default the current ramp itself stays static, because transition temperature and thermal history can depend on the commanded current-ramp rate. When the optional current-ramp hold is enabled, Mini DMA holds the present current setpoint when a short filtered load/stress signal shows a persistent absolute target error. The same rule is used while current is rising and falling: if stress/load runs too far above or below the target, the current ramp pauses while displacement catches up. The pause/resume bands are expanded by recent balance noise and by a small MPa-equivalent floor, so ordinary annealing fluctuations do not trigger a hold by themselves. While held, the displacement servo keeps correcting, and the current ramp resumes after the filtered signal returns inside the resume band. The ramp clock is shifted by the hold duration, so resuming does not jump to the current that wall-clock time would otherwise imply. There is no maximum hold-time stop; wire-break/current faults are handled by their own protection paths. If the sample response is consistently too fast for the servo to track, lowering the fixed current ramp rate is still the cleaner first adjustment.
 
+The `First overheating` option changes only the recipe sequence: the first target's current sweep is repeated once before Mini DMA advances to later target loads/stresses/strains. This is intended for wires whose very first heating has a higher transformation temperature than later heating/cooling cycles. With reverse-current enabled, the first target runs up/down/up/down; later targets keep the normal configured sweep pattern.
+
 The dashboard header displays the most recent commanded speed in fixed-width cells:
 
 ```text

@@ -76,3 +76,4 @@
 - Mini DMA current-sweep settle after each current ramp is now time-bounded instead of waiting forever for noisy annealing feedback, current hold uses the same absolute load/stress error on current-up and current-down ramps, and paused-current recovery can use a larger `20 MPa` equivalent correction cap while the current ramp is held.
 - Mini DMA current-sweep recipes now expose the stress correction caps and current-hold filter/noise bands in the UI, show a concise current-task summary, and use a more compact dashboard header with native-font live values.
 - Mini DMA current hold no longer has a maximum pause-time stop, and the dashboard header now uses a tighter 3-column live-value grid so the plot area fits better on narrower screens.
+- Mini DMA current-sweep recipes now include a `First overheating` option that repeats the first target's current sweep once before continuing to later targets.

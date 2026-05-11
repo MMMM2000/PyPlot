@@ -3408,6 +3408,7 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is False
+        assert window.check_current_sweep_first_overheating.isHidden() is False
         assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(
             mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
         )
@@ -3610,6 +3611,39 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
         assert "control every 250 ms" in summary
         assert "log every 500 ms" in summary
         assert "mA/s" in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_first_overheating_repeats_first_target_cycle(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
+        window.check_current_sweep_first_overheating.setChecked(True)
+
+        steps, summary, _interval_ms = window._build_automation_recipe()
+
+        current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
+        first_target_sweeps = [
+            step for step in current_sweep_steps if step.target_value is not None and abs(step.target_value) < 1e-12
+        ]
+        later_sweeps = [
+            step for step in current_sweep_steps if step.target_value is not None and abs(step.target_value) >= 1e-12
+        ]
+
+        assert len(current_sweep_steps) == 10
+        assert [(step.current_start_mA, step.current_end_mA) for step in first_target_sweeps] == [
+            (1.0, 3.0),
+            (3.0, 1.0),
+            (1.0, 3.0),
+            (3.0, 1.0),
+        ]
+        assert len(later_sweeps) == 6
+        assert "first overheating enabled" in summary.lower()
     finally:
         _close_test_window(window)
 

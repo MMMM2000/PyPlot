@@ -3900,6 +3900,16 @@ class MainWindow(QtWidgets.QMainWindow):
             "Minimum MPa-equivalent band used before current hold can resume the current ramp."
         )
         current_sweep_form.addRow("Minimum resume band", self.spin_current_sweep_hold_min_resume_stress_mpa)
+        self.check_current_sweep_first_overheating = QtWidgets.QCheckBox(
+            "First overheating: repeat first target current sweep",
+            automation_box,
+        )
+        self.check_current_sweep_first_overheating.setChecked(False)
+        self.check_current_sweep_first_overheating.setToolTip(
+            "Repeat the current sweep at the first target once before continuing to later targets. "
+            "Use this when the first heating has a higher transformation temperature than later cycles."
+        )
+        current_sweep_form.addRow("", self.check_current_sweep_first_overheating)
         self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
         self.check_current_sweep_reverse_current.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_reverse_current)
@@ -4366,6 +4376,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_distribution_return_sweep.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_return_target.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_hold_on_error.toggled.connect(self._update_recipe_mode_ui)
+        self.check_current_sweep_first_overheating.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_reverse_current.toggled.connect(self._update_recipe_mode_ui)
         self.check_zero_on_preload.toggled.connect(self._refresh_live_labels)
         self.spin_preload_threshold_g.valueChanged.connect(self._refresh_live_labels)
@@ -10349,6 +10360,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_hold_noise_sigma": self._current_sweep_hold_noise_sigma(),
                 "current_ramp_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
                 "current_ramp_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
+                "first_overheating_repeat": self.check_current_sweep_first_overheating.isChecked(),
                 "reverse_current": self.check_current_sweep_reverse_current.isChecked(),
                 "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
                 "tolerance_mode": "automatic",
@@ -12208,6 +12220,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current_end = float(self.spin_current_sweep_end_mA.value())
             current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
             current_hold_enabled = self.check_current_sweep_hold_on_error.isChecked()
+            first_overheating_repeat = self.check_current_sweep_first_overheating.isChecked()
             current_hold_pause_factor = float(self.spin_current_sweep_hold_pause_factor.value())
             current_hold_resume_factor = min(
                 current_hold_pause_factor,
@@ -12243,24 +12256,40 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 previous_target = target
                 sweep_ranges = [(current_start, current_end)]
-                if self.check_current_sweep_reverse_current.isChecked() and abs(current_end - current_start) > 1e-12:
+                reverse_current = (
+                    self.check_current_sweep_reverse_current.isChecked()
+                    and abs(current_end - current_start) > 1e-12
+                )
+                if reverse_current:
                     sweep_ranges.append((current_end, current_start))
-                for sweep_start_mA, sweep_end_mA in sweep_ranges:
-                    steps.append(
-                        AutomationStep(
-                            "sweep_current",
-                            target_value=target,
-                            basis=basis,
-                            current_start_mA=sweep_start_mA,
-                            current_end_mA=sweep_end_mA,
-                            current_ramp_rate_mA_s=current_ramp_rate,
-                            current_hold_enabled=current_hold_enabled,
-                            current_hold_pause_tolerance_factor=current_hold_pause_factor,
-                            current_hold_resume_tolerance_factor=current_hold_resume_factor,
-                            current_hold_resume_stable_s=current_hold_resume_stable_s,
-                            note=str(plateau_index),
+                repeat_count = 2 if first_overheating_repeat and plateau_index == 1 else 1
+                for repeat_index in range(repeat_count):
+                    if repeat_index > 0 and not reverse_current and abs(current_end - current_start) > 1e-12:
+                        steps.append(
+                            AutomationStep(
+                                "set_current",
+                                target_value=target,
+                                basis=basis,
+                                current_mA=current_start,
+                                note=str(plateau_index),
+                            )
                         )
-                    )
+                    for sweep_start_mA, sweep_end_mA in sweep_ranges:
+                        steps.append(
+                            AutomationStep(
+                                "sweep_current",
+                                target_value=target,
+                                basis=basis,
+                                current_start_mA=sweep_start_mA,
+                                current_end_mA=sweep_end_mA,
+                                current_ramp_rate_mA_s=current_ramp_rate,
+                                current_hold_enabled=current_hold_enabled,
+                                current_hold_pause_tolerance_factor=current_hold_pause_factor,
+                                current_hold_resume_tolerance_factor=current_hold_resume_factor,
+                                current_hold_resume_stable_s=current_hold_resume_stable_s,
+                                note=str(plateau_index),
+                            )
+                        )
                 if settle_s > 0.0:
                     steps.append(
                         AutomationStep(
@@ -12314,6 +12343,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"resume inside {current_hold_resume_factor:.2f}x for "
                     f"{current_hold_resume_stable_s:.2f} s."
                 )
+            if first_overheating_repeat:
+                summary += " First overheating enabled: repeat the first target current sweep once."
             setup_load_g = load_g_from_stress_mpa(
                 float(self.spin_setup_preload_stress_mpa.value()),
                 float(self.spin_diameter.value()),
@@ -13627,6 +13658,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "current_sweep_hold_min_resume_stress_mpa",
             self.spin_current_sweep_hold_min_resume_stress_mpa.value(),
         )
+        self.settings.setValue(
+            "current_sweep_first_overheating",
+            self.check_current_sweep_first_overheating.isChecked(),
+        )
         self.settings.setValue("current_sweep_reverse_current", self.check_current_sweep_reverse_current.isChecked())
         self.settings.setValue("current_sweep_tolerance", self.spin_current_sweep_tolerance.value())
         self.settings.setValue("current_sweep_nudge_mm", self.spin_current_sweep_nudge_mm.value())
@@ -14211,6 +14246,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                 ),
             )
+        )
+        self.check_current_sweep_first_overheating.setChecked(
+            bool(self.settings.value("current_sweep_first_overheating", False, type=bool))
         )
         self.check_current_sweep_reverse_current.setChecked(
             bool(self.settings.value("current_sweep_reverse_current", True, type=bool))
