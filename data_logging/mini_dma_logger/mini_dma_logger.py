@@ -266,7 +266,7 @@ SERVO_LIVE_STIFFNESS_ALPHA = 0.35
 SERVO_NOISE_SIGMA = 3.0
 SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S = 1.5
 SERVO_CURRENT_SWEEP_RATE_GAIN = 1.2
-SERVO_CURRENT_SWEEP_DEFAULTS_VERSION = 3
+SERVO_CURRENT_SWEEP_DEFAULTS_VERSION = 4
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S = 15.0
 SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S = 5.0
@@ -2484,6 +2484,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if label is not None:
             label.setVisible(False)
 
+    def _set_form_row_visible(
+        self,
+        form: QtWidgets.QFormLayout,
+        field: QtWidgets.QWidget,
+        visible: bool,
+    ) -> None:
+        field.setVisible(visible)
+        label = form.labelForField(field)
+        if label is not None:
+            label.setVisible(visible)
+
     def _build_dashboard_value_cell(
         self,
         parent: QtWidgets.QWidget,
@@ -3755,6 +3766,15 @@ class MainWindow(QtWidgets.QMainWindow):
             "Absolute motor speed ceiling for target ramps and dynamic iso-load/iso-stress/iso-strain balancing."
         )
         current_sweep_form.addRow("Stage speed cap", self.spin_current_sweep_target_speed_mm_s)
+        self.button_current_sweep_advanced_controls = QtWidgets.QToolButton(automation_box)
+        self.button_current_sweep_advanced_controls.setText("Show advanced current-sweep controls")
+        self.button_current_sweep_advanced_controls.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.button_current_sweep_advanced_controls.setCheckable(True)
+        self.button_current_sweep_advanced_controls.setChecked(False)
+        self.button_current_sweep_advanced_controls.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        current_sweep_form.addRow("", self.button_current_sweep_advanced_controls)
         self.spin_current_sweep_max_correction_strain_pct = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_max_correction_strain_pct.setDecimals(3)
         self.spin_current_sweep_max_correction_strain_pct.setRange(0.001, 100.0)
@@ -3912,6 +3932,36 @@ class MainWindow(QtWidgets.QMainWindow):
             "Minimum MPa-equivalent band used before current hold can resume the current ramp."
         )
         current_sweep_form.addRow("Minimum resume band", self.spin_current_sweep_hold_min_resume_stress_mpa)
+        self._current_sweep_advanced_control_widgets = [
+            self.spin_current_sweep_target_speed_mm_s,
+            self.spin_current_sweep_max_correction_strain_pct,
+            self.spin_current_sweep_correction_rate_pct_s,
+            self.spin_current_sweep_max_correction_stress_mpa,
+            self.spin_current_sweep_hold_correction_stress_mpa,
+            self.spin_current_sweep_near_correction_stress_mpa,
+            self.spin_current_sweep_hold_pause_factor,
+            self.spin_current_sweep_hold_resume_factor,
+            self.spin_current_sweep_hold_resume_stable_s,
+            self.spin_current_sweep_hold_filter_window_s,
+            self.spin_current_sweep_hold_noise_sigma,
+            self.spin_current_sweep_hold_min_pause_stress_mpa,
+            self.spin_current_sweep_hold_min_resume_stress_mpa,
+        ]
+
+        def _toggle_current_sweep_advanced_controls(checked: bool) -> None:
+            self.button_current_sweep_advanced_controls.setArrowType(
+                QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow
+            )
+            self.button_current_sweep_advanced_controls.setText(
+                "Hide advanced current-sweep controls" if checked else "Show advanced current-sweep controls"
+            )
+            for advanced_widget in self._current_sweep_advanced_control_widgets:
+                self._set_form_row_visible(current_sweep_form, advanced_widget, checked)
+
+        self.button_current_sweep_advanced_controls.toggled.connect(
+            _toggle_current_sweep_advanced_controls
+        )
+        _toggle_current_sweep_advanced_controls(False)
         self.check_current_sweep_first_overheating = QtWidgets.QCheckBox(
             "First overheating: repeat first target current sweep",
             automation_box,
@@ -9523,6 +9573,21 @@ class MainWindow(QtWidgets.QMainWindow):
         button.released.connect(lambda: self._stop_manual_jog())
         button.clicked.connect(lambda: self._handle_manual_jog_button_clicked(direction_getter()))
 
+    def _prepare_manual_jog_press(self) -> None:
+        previous_motor_power_ok = self._tic_motor_power_ok
+        try:
+            refreshed = self._refresh_tic_status()
+        except Exception:
+            refreshed = False
+        if not refreshed and previous_motor_power_ok is None:
+            self._tic_motor_power_ok = None
+        if self._has_unconfirmed_motion_command():
+            return
+        self._manual_jog_uses_last_target = False
+        self._last_move_target_mm = self._current_position_mm
+        self._effective_position_mm = self._current_position_mm
+        self._last_effective_move_target_mm = self._effective_position_mm
+
     def _jog_relative(self, direction: float, *, force_step: bool = False) -> bool:
         direction = -1.0 if direction < 0.0 else 1.0
         now_s = time.monotonic()
@@ -9554,6 +9619,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._move_to_position_mm(base_mm + distance_mm, manual_jog=True)
 
     def _start_manual_jog(self, direction: float) -> None:
+        self._prepare_manual_jog_press()
         self._manual_jog_direction = -1.0 if direction < 0.0 else 1.0
         self._manual_jog_last_tick_s = time.monotonic()
         self._manual_jog_pending_mm = 0.0
@@ -14127,16 +14193,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 ),
             )
         )
-        self.spin_current_sweep_hold_correction_stress_mpa.setValue(
-            max(
-                0.001,
-                float(
-                    self.settings.value(
-                        "current_sweep_hold_correction_stress_mpa",
-                        SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA,
-                    )
-                ),
+        saved_current_sweep_hold_cap = float(
+            self.settings.value(
+                "current_sweep_hold_correction_stress_mpa",
+                SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA,
             )
+        )
+        if (
+            current_sweep_servo_defaults_version < SERVO_CURRENT_SWEEP_DEFAULTS_VERSION
+            and math.isclose(saved_current_sweep_hold_cap, 20.0, rel_tol=1e-9, abs_tol=1e-9)
+        ):
+            saved_current_sweep_hold_cap = SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
+        self.spin_current_sweep_hold_correction_stress_mpa.setValue(
+            max(0.001, saved_current_sweep_hold_cap)
         )
         self.spin_current_sweep_mid_correction_stress_mpa.setValue(
             max(

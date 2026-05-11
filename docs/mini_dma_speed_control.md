@@ -266,13 +266,15 @@ Inside tolerance, the target is reached and no correction is sent.
 
 ## Current-Sweep Servo Hold
 
-During iso-load, iso-stress, and iso-strain current sweeps, the motor must keep balancing while current changes the sample. This is not a fixed correction-step controller anymore. The visible settings are:
+During iso-load, iso-stress, and iso-strain current sweeps, the motor must keep balancing while current changes the sample. This is not a fixed correction-step controller anymore. The main visible settings are:
 
 ```text
 Stage speed cap = absolute max motor speed
 Correction strain cap = maximum specimen strain change per predictive move
 Correction strain-rate cap = maximum correction speed in %/s
 ```
+
+Less frequently changed caps, hold bands, and filter settings are available behind the current-sweep advanced-control expander. They stay visible on demand, but the normal recipe page does not show every tuning rail by default.
 
 The correction distance is predictive, but capped by both strain and planned stress change instead of by the scale feedback interval. With the default `5%` strain cap, a `30.56 mm` wire can receive up to about `1.53 mm` of predicted correction in one move. A `10 mm` wire would cap the same correction at `0.50 mm`, so the aggressiveness scales with specimen length instead of absolute stage travel. The additional stress cap defaults to `10 MPa` per correction for stress/load current-sweep control, so a long or soft-looking wire cannot turn one bad stiffness estimate into a very large target jump.
 
@@ -377,7 +379,7 @@ else:
     planned_correction = min(abs(error) * fraction, active_hard_cap)
 ```
 
-The active hard cap is the visible sweep hard cap while the current ramp is moving, and the hold hard cap while the current ramp is paused for target recovery. The hard cap remains an absolute safety rail; the smooth error fraction normally determines the requested correction. For load-control sweeps, the same MPa-equivalent values are converted to grams using the current wire diameter. The specimen correction is still clipped by the configured maximum correction strain percentage. This makes the controller progressively shrink real correction distance as it approaches target without abrupt far/mid/near bucket changes, so the average motion slows down even when the Tic command speed remains reasonably fast.
+The active hard cap is the visible sweep hard cap while the current ramp is moving, and the hold hard cap while the current ramp is paused for target recovery. The hold hard cap defaults to `30 MPa`; older saved profiles that still contain the previous default `20 MPa` are migrated to `30 MPa`, while custom values are preserved. The hard cap remains an absolute safety rail; the smooth error fraction normally determines the requested correction. For load-control sweeps, the same MPa-equivalent values are converted to grams using the current wire diameter. The specimen correction is still clipped by the configured maximum correction strain percentage. This makes the controller progressively shrink real correction distance as it approaches target without abrupt far/mid/near bucket changes, so the average motion slows down even when the Tic command speed remains reasonably fast.
 
 The Tic command speed is kept practical for these small corrections. During current-sweep balancing, Mini DMA will not deliberately creep below about `0.05 mm/s` unless the stage speed cap itself is lower. The balance feedback is normally the bottleneck, so a tiny correction should finish quickly and then wait for the next fresh scale reply instead of spending seconds moving slowly.
 

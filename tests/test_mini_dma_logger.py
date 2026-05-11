@@ -1787,6 +1787,47 @@ def test_manual_jog_repeats_from_last_commanded_target(
         _close_test_window(window)
 
 
+def test_manual_jog_press_resyncs_stale_previous_target(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    times = iter([0.0, 0.1])
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(times))
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
+    window._refresh_tic_status = lambda: None  # type: ignore[method-assign]
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_jog_mm.setValue(0.1)
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window._last_move_target_mm = 3.4
+    window._last_effective_move_target_mm = 3.4
+    window._last_motion_command_time_s = None
+    window._last_tic_status_time_s = time.time()
+    window._manual_jog_uses_last_target = True
+
+    try:
+        window._start_manual_jog(-1.0)
+        window._stop_manual_jog()
+        window._handle_manual_jog_button_clicked(-1.0)
+        _wait_for_tic_commands(window)
+
+        assert controller.targets == [-10]
+    finally:
+        _close_test_window(window)
+
+
 def test_held_manual_jog_advances_by_configured_linear_speed(
     tmp_path: Path,
     qtbot,
@@ -3405,6 +3446,11 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
 
         assert window.spin_current_sweep_nudge_mm.isHidden() is True
         assert window.spin_current_sweep_balance_speed_mm_s.isHidden() is True
+        assert window.button_current_sweep_advanced_controls.isHidden() is False
+        assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is True
+        assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is True
+        assert window.spin_current_sweep_hold_filter_window_s.isHidden() is True
+        window.button_current_sweep_advanced_controls.setChecked(True)
         assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is False
@@ -8161,6 +8207,23 @@ def test_auto_detect_tic_sets_path_and_serial(tmp_path: Path, qtbot, monkeypatch
         assert window.edit_tic_serial.text() == "00501366"
     finally:
         _close_test_window(window)
+
+
+def test_current_sweep_saved_20_mpa_hold_cap_migrates_to_30_mpa(tmp_path: Path, qtbot) -> None:
+    settings = _test_settings()
+    snapshot = _snapshot_settings()
+    settings.clear()
+    settings.setValue("current_sweep_servo_defaults_version", 3)
+    settings.setValue("current_sweep_hold_correction_stress_mpa", 20.0)
+    settings.sync()
+
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
+
+    try:
+        assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(30.0)
+    finally:
+        _close_test_window(window)
+        _restore_settings(snapshot)
 
 
 def test_apply_name_fields_uses_display_wire_and_file_safe_wire_token(tmp_path: Path, qtbot) -> None:
