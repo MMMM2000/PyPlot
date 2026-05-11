@@ -3416,6 +3416,8 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.check_hardware_tare_on_start.isHidden() is False
         assert window.button_scale_connect.text() in {"Connect scale", "Disconnect scale"}
         assert window.button_scale_tare.text() == "Capture zero-load"
+        assert window.button_scale_hardware_tare.text() == "Tare scale"
+        assert window.button_scale_hardware_tare.isHidden() is False
         assert window.button_advanced_software_tare.isVisible() is False
     finally:
         _close_test_window(window)

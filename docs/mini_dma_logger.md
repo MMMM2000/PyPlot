@@ -110,6 +110,7 @@ Current intended hardware stack:
 - automatic scale-port detection based on a live G&G serial response
 - scale probe / diagnostics
 - one normal `Capture zero-load` action that records the current real balance reading as the `0 g` applied-load reference without changing the scale display
+- an occasional-use `Tare scale` action in the Hardware tab that sends the physical balance tare command and resets Mini DMA's zero-load reference to `0 g`
 - optional session-start capture of the zero-load reference, for use only when the current raw balance reading is definitely unloaded
 - applied tensile load is displayed and logged as the positive tensile magnitude in `Load` / `load_g` using `zero-load scale reading - current scale reading` for the current hanging-weight rig; signed raw balance remains available as `raw_load_g` for diagnostics
 - the current G&G request/response scale on `COM6` at `9600` baud does not stream passively; it replies to `ESC+p` at about 5 Hz, so request-mode scale polling defaults to 250 ms and feeds a rolling signal buffer
@@ -118,7 +119,7 @@ Current intended hardware stack:
 - setup and recovery popups plot live UI-refresh samples when fresh scale replies arrive; recovery explicitly restarts that UI timer after a stopped session so displacement and load remain visible during manual return-to-zero moves
 - tensile displacement uses its own motion-direction setting; the current rig defaults to negative raw Tic travel as positive tensile displacement, so the app can show/log positive `position_mm` while preserving raw Tic position as `raw_position_mm`
 - `raw_position_mm` is the commanded/confirmed Tic motor coordinate; `position_mm` and `strain_pct` are specimen displacement/strain and exclude configured backlash take-up travel during direction reversals
-- physical remote tare and software tare are kept only in advanced hardware diagnostics because the normal workflow should leave the balance showing real grams
+- software tare is kept only in advanced hardware diagnostics because the normal workflow should leave Mini DMA using either the real scale reading plus `Capture zero-load`, or the explicit physical `Tare scale` command when the balance display itself needs re-zeroing
 
 ### Calibration Workflow
 

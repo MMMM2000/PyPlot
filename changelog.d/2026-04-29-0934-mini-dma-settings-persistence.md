@@ -78,3 +78,4 @@
 - Mini DMA current hold no longer has a maximum pause-time stop, and the dashboard header now uses a tighter 3-column live-value grid so the plot area fits better on narrower screens.
 - Mini DMA current-sweep recipes now include a `First overheating` option that repeats the first target's current sweep once before continuing to later targets.
 - Mini DMA current-sweep load/stress corrections now use a smooth dynamic error-fraction cap with visible sweep/hold hard rails, and current sweeps always include the return-to-start-current leg at each target.
+- Mini DMA now exposes an occasional-use `Tare scale` button in the normal Hardware scale controls for balances whose front-panel tare is unavailable while connected.

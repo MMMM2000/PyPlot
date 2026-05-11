@@ -2603,17 +2603,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_scale_connect = QtWidgets.QPushButton("Connect scale", scale_box)
         self.button_scale_connect.clicked.connect(self._toggle_scale_connection)
         scale_action_row.addWidget(self.button_scale_connect)
+        scale_form.addRow("", scale_action_row)
+        scale_zero_row = QtWidgets.QHBoxLayout()
         self.button_scale_tare = QtWidgets.QPushButton("Capture zero-load", scale_box)
         self.button_scale_tare.setToolTip("Use the current real scale reading as the 0 g applied-load reference.")
         self.button_scale_tare.clicked.connect(self._capture_zero_load_scale_reference)
-        scale_action_row.addWidget(self.button_scale_tare)
-        scale_form.addRow("", scale_action_row)
+        scale_zero_row.addWidget(self.button_scale_tare)
+        self.button_scale_hardware_tare = QtWidgets.QPushButton("Tare scale", scale_box)
+        self.button_scale_hardware_tare.setToolTip(
+            "Occasional use. Sends the physical tare command to the balance and resets Mini DMA's zero-load reference to 0 g."
+        )
+        self.button_scale_hardware_tare.clicked.connect(self._tare_scale_hardware)
+        scale_zero_row.addWidget(self.button_scale_hardware_tare)
+        scale_form.addRow("", scale_zero_row)
 
         self.label_scale_value = QtWidgets.QLabel("Latest load: 0.000 g", scale_box)
         self.label_scale_value.setWordWrap(True)
         scale_form.addRow("", self.label_scale_value)
         scale_help = QtWidgets.QLabel(
-            "Use Auto-detect after reconnecting USB devices. Leave the balance showing real grams; Mini DMA converts the zero-load reference to applied wire load.",
+            "Use Auto-detect after reconnecting USB devices. Usually leave the balance showing real grams and use Capture zero-load; use Tare scale only when the physical balance needs to be re-zeroed.",
             scale_box,
         )
         scale_help.setWordWrap(True)
