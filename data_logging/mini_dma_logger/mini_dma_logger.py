@@ -283,7 +283,6 @@ SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA = 3.0
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
-CURRENT_SWEEP_HOLD_MAX_S = 30.0
 SERVO_FULL_SPEED_ERROR_RATIO = 8.0
 SERVO_CRUISE_FEEDBACK_SAFETY_FACTOR = 1.25
 SERVO_MOTION_SETTLE_AFTER_MOVE_S = 0.05
@@ -817,7 +816,6 @@ class AutomationStep:
     current_hold_pause_tolerance_factor: float | None = None
     current_hold_resume_tolerance_factor: float | None = None
     current_hold_resume_stable_s: float | None = None
-    current_hold_max_s: float | None = None
     duration_s: float | None = None
     note: str = ""
 
@@ -2545,8 +2543,8 @@ class MainWindow(QtWidgets.QMainWindow):
         control_scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
         control_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         control_scroll.horizontalScrollBar().setFixedHeight(0)
-        control_scroll.setMinimumWidth(500)
-        control_scroll.setMaximumWidth(620)
+        control_scroll.setMinimumWidth(420)
+        control_scroll.setMaximumWidth(560)
         control_panel = QtWidgets.QWidget(control_scroll)
         control_panel.setMinimumWidth(0)
         control_panel.setSizePolicy(
@@ -3866,15 +3864,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "Require the target error to stay inside the resume band for this long before current ramping resumes."
         )
         current_sweep_form.addRow("Resume stable time", self.spin_current_sweep_hold_resume_stable_s)
-        self.spin_current_sweep_hold_max_s = CompactDoubleSpinBox(automation_box)
-        self.spin_current_sweep_hold_max_s.setDecimals(1)
-        self.spin_current_sweep_hold_max_s.setRange(0.0, 3600.0)
-        self.spin_current_sweep_hold_max_s.setValue(CURRENT_SWEEP_HOLD_MAX_S)
-        self.spin_current_sweep_hold_max_s.setSuffix(" s")
-        self.spin_current_sweep_hold_max_s.setToolTip(
-            "Maximum time to hold one current-ramp step before stopping the recipe. Set 0 to disable the limit."
-        )
-        current_sweep_form.addRow("Maximum pause time", self.spin_current_sweep_hold_max_s)
         self.spin_current_sweep_hold_filter_window_s = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_hold_filter_window_s.setDecimals(2)
         self.spin_current_sweep_hold_filter_window_s.setRange(0.1, 60.0)
@@ -4144,21 +4133,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dashboard_status_box = QtWidgets.QFrame(hero_box)
         status_layout = QtWidgets.QGridLayout(self.dashboard_status_box)
         status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setHorizontalSpacing(8)
-        status_layout.setVerticalSpacing(6)
+        status_layout.setHorizontalSpacing(6)
+        status_layout.setVerticalSpacing(1)
         status_cells = (
-            ("load_g", "Load", 96),
-            ("stress_mpa", "Stress", 104),
-            ("strain_pct", "Strain", 96),
-            ("speed_mm_s", "Speed", 116),
-            ("scale", "Scale", 112),
-            ("motor", "Motor", 126),
-            ("supply", "Supply", 128),
-            ("task", "Task", 220),
+            ("load_g", "Load", 86),
+            ("stress_mpa", "Stress", 92),
+            ("strain_pct", "Strain", 88),
+            ("speed_mm_s", "Speed", 96),
+            ("scale", "Scale", 98),
+            ("motor", "Motor", 108),
+            ("supply", "Supply", 112),
+            ("task", "Task", 150),
         )
         for index, (key, title, min_width) in enumerate(status_cells):
-            row = index // 4
-            column = index % 4
+            row = index // 3
+            column = index % 3
             status_layout.addWidget(
                 self._build_dashboard_value_cell(
                     self.dashboard_status_box,
@@ -4279,7 +4268,7 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.addWidget(plot_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([520, 1280])
+        splitter.setSizes([460, 1380])
 
         for widget in (
             self.edit_name_composition,
@@ -4356,7 +4345,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_hold_pause_factor,
             self.spin_current_sweep_hold_resume_factor,
             self.spin_current_sweep_hold_resume_stable_s,
-            self.spin_current_sweep_hold_max_s,
             self.spin_current_sweep_hold_filter_window_s,
             self.spin_current_sweep_hold_noise_sigma,
             self.spin_current_sweep_hold_min_pause_stress_mpa,
@@ -10357,7 +10345,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_hold_pause_factor": float(self.spin_current_sweep_hold_pause_factor.value()),
                 "current_ramp_hold_resume_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
                 "current_ramp_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
-                "current_ramp_hold_max_s": float(self.spin_current_sweep_hold_max_s.value()),
                 "current_ramp_hold_filter_window_s": self._current_sweep_hold_filter_window_s(),
                 "current_ramp_hold_noise_sigma": self._current_sweep_hold_noise_sigma(),
                 "current_ramp_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
@@ -12227,7 +12214,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 float(self.spin_current_sweep_hold_resume_factor.value()),
             )
             current_hold_resume_stable_s = float(self.spin_current_sweep_hold_resume_stable_s.value())
-            current_hold_max_s = float(self.spin_current_sweep_hold_max_s.value())
             settle_s = float(self.spin_current_sweep_settle_s.value())
             if target_ramp_rate <= 0.0:
                 raise ValueError("Set a non-zero target ramp rate.")
@@ -12272,7 +12258,6 @@ class MainWindow(QtWidgets.QMainWindow):
                             current_hold_pause_tolerance_factor=current_hold_pause_factor,
                             current_hold_resume_tolerance_factor=current_hold_resume_factor,
                             current_hold_resume_stable_s=current_hold_resume_stable_s,
-                            current_hold_max_s=current_hold_max_s,
                             note=str(plateau_index),
                         )
                     )
@@ -12524,20 +12509,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not holding:
             return False, False
 
-        max_hold_s = self._current_sweep_hold_setting(
-            step.current_hold_max_s,
-            self.spin_current_sweep_hold_max_s,
-            CURRENT_SWEEP_HOLD_MAX_S,
-        )
         held_s = max(0.0, now_s - self._current_sweep_ramp_hold_started_s)
-        if max_hold_s > 0.0 and held_s > max_hold_s:
-            self._log(
-                "Recipe stopped because the current ramp was held for "
-                f"{held_s:.2f} s without recovering inside the resume band."
-            )
-            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-            return True, True
-
         if resume_error <= resume_band:
             if self._current_sweep_ramp_hold_in_band_since_s is None:
                 self._current_sweep_ramp_hold_in_band_since_s = now_s
@@ -13639,7 +13611,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "current_sweep_hold_resume_stable_s",
             self.spin_current_sweep_hold_resume_stable_s.value(),
         )
-        self.settings.setValue("current_sweep_hold_max_s", self.spin_current_sweep_hold_max_s.value())
         self.settings.setValue(
             "current_sweep_hold_filter_window_s",
             self.spin_current_sweep_hold_filter_window_s.value(),
@@ -14193,17 +14164,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.settings.value(
                         "current_sweep_hold_resume_stable_s",
                         CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
-                    )
-                ),
-            )
-        )
-        self.spin_current_sweep_hold_max_s.setValue(
-            max(
-                0.0,
-                float(
-                    self.settings.value(
-                        "current_sweep_hold_max_s",
-                        CURRENT_SWEEP_HOLD_MAX_S,
                     )
                 ),
             )

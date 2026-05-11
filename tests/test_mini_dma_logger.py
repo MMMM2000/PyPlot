@@ -3740,7 +3740,6 @@ def test_current_sweep_holds_current_ramp_when_target_error_is_too_large(
         current_hold_pause_tolerance_factor=2.0,
         current_hold_resume_tolerance_factor=1.0,
         current_hold_resume_stable_s=0.0,
-        current_hold_max_s=30.0,
     )
 
     try:
@@ -3781,6 +3780,42 @@ def test_current_sweep_hold_uses_absolute_stress_error_on_current_up_ramp(
         assert holding is True
         assert stopped is False
         assert window._current_sweep_ramp_hold_step_index == 4
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_has_no_timeout_stop(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._current_sweep_ramp_hold_step_index = 4
+    window._current_sweep_ramp_hold_started_s = 100.0
+    window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (20.0, 20.0, 0.25, 0.0)
+    )
+    stop_calls: list[dict[str, object]] = []
+    window._stop_auto_ramp = lambda **kwargs: stop_calls.append(kwargs)  # type: ignore[method-assign]
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=5.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+    )
+
+    try:
+        holding, stopped = window._update_current_sweep_ramp_hold(step, 4, now_s=10000.0)
+
+        assert holding is True
+        assert stopped is False
+        assert stop_calls == []
+        assert "recipe stopped because the current ramp was held" not in window.log_output.toPlainText().lower()
     finally:
         _close_test_window(window)
 
@@ -3911,7 +3946,6 @@ def test_current_sweep_ramp_resumes_without_wall_clock_current_jump(
         current_hold_pause_tolerance_factor=2.0,
         current_hold_resume_tolerance_factor=1.0,
         current_hold_resume_stable_s=0.0,
-        current_hold_max_s=30.0,
     )
 
     try:
@@ -5702,6 +5736,12 @@ def test_dashboard_uses_compact_live_value_cells_without_overview(tmp_path: Path
         assert "task" in window._dashboard_value_labels
         assert window._dashboard_value_labels["task"].wordWrap()
         assert window.dashboard_status_box.parentWidget() is window.dashboard_header
+        positions = [
+            window.dashboard_status_box.layout().getItemPosition(index)[:2]
+            for index in range(window.dashboard_status_box.layout().count())
+        ]
+        assert max(row for row, _column in positions) == 2
+        assert max(column for _row, column in positions) == 2
         width = window._dashboard_value_labels["speed_mm_s"].minimumWidth()
         assert 54 <= width <= 90
         assert not window._dashboard_value_labels["speed_mm_s"].font().fixedPitch()
