@@ -3374,6 +3374,90 @@ def test_length_setup_timer_records_prompt_samples(tmp_path: Path, qtbot) -> Non
         _close_test_window(window)
 
 
+def test_ui_refresh_adds_live_plot_sample_without_logging_or_supply_io(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
+    window._refresh_supply_snapshot = lambda: pytest.fail("live plot refresh must not query the supply")  # type: ignore[method-assign]
+    plot_refreshes: list[bool] = []
+    window._refresh_plots = lambda: plot_refreshes.append(True)  # type: ignore[method-assign]
+
+    try:
+        window._session_active = True
+        window._session_logging_enabled = True
+        window._session_start_monotonic = 90.0
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_tension_load_positive.setChecked(True)
+        window._latest_scale_value_g = 21.0
+        window._latest_scale_timestamp = 123.0
+        window._current_position_mm = -0.4
+        window._effective_position_mm = -0.4
+        window._position_reference_mm = 0.0
+        window._supply_last_setpoint_mA = 50.0
+        window._supply_snapshot = {
+            "current_mA": 49.0,
+            "voltage_V": 2.45,
+            "resistance_ohm": 50.0,
+            "power_W": 0.120,
+        }
+
+        window._handle_ui_refresh_timer()
+        window._handle_ui_refresh_timer()
+
+        assert len(window._live_plot_points) == 1
+        assert window._session_points == []
+        assert plot_refreshes == [True]
+        point = window._live_plot_points[0]
+        assert point.elapsed_s == pytest.approx(10.0)
+        assert point.load_g == pytest.approx(0.2)
+        assert point.current_measured_mA == pytest.approx(49.0)
+        assert point.resistance_ohm == pytest.approx(50.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_display_plot_points_include_live_samples_between_logged_rows(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _point(elapsed_s: float, position_mm: float, load_g: float) -> mini_dma_mod.MeasurementPoint:
+        return mini_dma_mod.MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc="2026-05-11 00:00:00",
+            raw_position_mm=position_mm,
+            position_mm=position_mm,
+            raw_load_g=load_g,
+            load_g=load_g,
+            preload_state=mini_dma_mod.PRELOAD_DISABLED,
+            strain_pct=None,
+            stress_mpa=None,
+            current_set_mA=None,
+            current_measured_mA=None,
+            voltage_V=None,
+            resistance_ohm=None,
+            power_W=None,
+            automation_phase="current",
+            automation_basis=None,
+            automation_target_value=None,
+            plateau_index=None,
+            plateau_label=None,
+        )
+
+    logged = _point(elapsed_s=1.0, position_mm=0.1, load_g=0.1)
+    live = _point(elapsed_s=1.5, position_mm=0.2, load_g=0.2)
+
+    try:
+        window._session_points = [logged]
+        window._live_plot_points = [live]
+
+        assert window._display_plot_points() == [logged, live]
+    finally:
+        _close_test_window(window)
+
+
 def test_length_setup_dialog_has_local_pause_stop_and_progress(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 

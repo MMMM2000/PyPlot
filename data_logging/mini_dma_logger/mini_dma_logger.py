@@ -151,6 +151,7 @@ DEFAULT_CONTROL_INTERVAL_MS = 50
 DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
+LIVE_PLOT_MAX_POINTS = 3000
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 SETUP_ZERO_FALLBACK_MIN_POINTS = 4
 SETUP_ZERO_FALLBACK_MIN_TIME_S = 0.8
@@ -2164,6 +2165,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_stiffness_value_by_basis: dict[str, float] = {}
         self._seek_last_stiffness_position_by_basis: dict[str, float] = {}
         self._session_points: list[MeasurementPoint] = []
+        self._live_plot_points: list[MeasurementPoint] = []
+        self._last_live_plot_scale_timestamp: float | None = None
         self._session_active = False
         self._session_start_monotonic = 0.0
         self._session_created_utc: str | None = None
@@ -10575,6 +10578,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._preload_trigger_elapsed_s = None
         self._session_points = []
+        self._live_plot_points = []
+        self._last_live_plot_scale_timestamp = None
         self._session_active = True
         self._session_logging_enabled = bool(enable_logging)
         self._session_start_monotonic = time.monotonic()
@@ -10623,6 +10628,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preload_reference_armed = False
         self._preload_trigger_elapsed_s = None
         self._session_points = []
+        self._live_plot_points = []
+        self._last_live_plot_scale_timestamp = None
         self._session_logging_enabled = True
         self._session_start_monotonic = time.monotonic()
         self._session_start_wall_s = time.time()
@@ -10674,6 +10681,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
         self._clear_run_zero_load_scale_reference()
+        self._live_plot_points = []
+        self._last_live_plot_scale_timestamp = None
         self._refresh_live_labels()
 
     def _write_control_trace(
@@ -10869,6 +10878,61 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_sample_rate_hz=None if load_summary is None else load_summary.sample_rate_hz,
         )
 
+    def _capture_live_plot_point(self) -> MeasurementPoint | None:
+        if self._latest_scale_timestamp is None:
+            return None
+        elapsed_s = max(0.0, time.monotonic() - self._session_start_monotonic)
+        raw_load_g = float(self._latest_scale_value_g)
+        load_g = self._current_effective_load_g()
+        position_mm = self._measurement_position_mm()
+        effective_position_mm = self._measurement_effective_position_mm()
+        specimen_position_mm = effective_position_mm
+        preload_state = self._current_preload_state(load_g)
+        strain = None
+        stress = None
+        if preload_state != PRELOAD_PENDING:
+            strain = self._strain_percent_for_position(specimen_position_mm)
+            stress = stress_mpa_from_load_g(load_g, float(self.spin_diameter.value()))
+        tensile_displacement_mm = self._tensile_displacement_mm(specimen_position_mm)
+        current_set_mA = self._supply_last_setpoint_mA
+        current_measured_mA = self._supply_snapshot.get("current_mA")
+        resistance_ohm = self._supply_snapshot.get("resistance_ohm")
+        if (
+            current_set_mA is None
+            or abs(current_set_mA) < MIN_RESISTANCE_CURRENT_MA
+            or current_measured_mA is None
+            or abs(current_measured_mA) < MIN_RESISTANCE_CURRENT_MA
+        ):
+            resistance_ohm = None
+        return MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc=_utc_timestamp(),
+            raw_position_mm=position_mm,
+            position_mm=tensile_displacement_mm,
+            raw_load_g=raw_load_g,
+            load_g=load_g,
+            preload_state=preload_state,
+            strain_pct=strain,
+            stress_mpa=stress,
+            current_set_mA=current_set_mA,
+            current_measured_mA=current_measured_mA,
+            voltage_V=self._supply_snapshot.get("voltage_V"),
+            resistance_ohm=resistance_ohm,
+            power_W=self._supply_snapshot.get("power_W"),
+            automation_phase=self._automation_phase,
+            automation_basis=self._automation_basis,
+            automation_target_value=self._automation_target_value,
+            plateau_index=self._automation_plateau_index,
+            plateau_label=self._automation_plateau_label,
+            load_raw_last_g=raw_load_g,
+            load_mean_g=load_g,
+            load_std_g=None,
+            load_min_g=load_g,
+            load_max_g=load_g,
+            load_sample_count=1,
+            scale_sample_rate_hz=self._scale_signal_buffer.sample_rate_hz(now_s=time.time()),
+        )
+
     def _scale_summary_for_record(self, *, now_s: float) -> ScaleIntervalSummary:
         since_s = self._last_session_log_timestamp_s
         if since_s is None and self._session_start_wall_s > 0.0:
@@ -10939,6 +11003,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._session_active:
             return False
         self._session_points.append(point)
+        self._live_plot_points = [
+            live_point
+            for live_point in self._live_plot_points
+            if live_point.elapsed_s < point.elapsed_s
+            and not math.isclose(live_point.elapsed_s, point.elapsed_s, rel_tol=0.0, abs_tol=1e-6)
+        ]
         self._write_point(point)
         self._last_session_log_timestamp_s = record_wall_s
         self._write_session_metadata()
@@ -13294,7 +13364,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ui_refresh_timer.stop()
             return
         self._record_live_dialog_samples_from_ui_refresh()
+        self._record_live_plot_sample_from_ui_refresh()
         self._refresh_live_labels()
+
+    def _record_live_plot_sample_from_ui_refresh(self) -> None:
+        if (
+            not self._session_active
+            or self._latest_scale_timestamp is None
+            or self._last_live_plot_scale_timestamp == self._latest_scale_timestamp
+        ):
+            return
+        point = self._capture_live_plot_point()
+        if point is None:
+            return
+        self._live_plot_points.append(point)
+        if len(self._live_plot_points) > LIVE_PLOT_MAX_POINTS:
+            self._live_plot_points = self._live_plot_points[-LIVE_PLOT_MAX_POINTS:]
+        self._last_live_plot_scale_timestamp = self._latest_scale_timestamp
+        self._refresh_plots()
 
     def _record_live_dialog_samples_from_ui_refresh(self) -> None:
         if self._latest_scale_timestamp is None:
@@ -13436,6 +13523,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.figure.clear()
         self.figure.set_facecolor(theme["figure_rgb"])
         grid = self.figure.add_gridspec(2, 2, hspace=0.46, wspace=0.34)
+        display_points = self._display_plot_points()
         active_tiles = [tile for tile in self._plot_tiles if tile.visible.isChecked()]
         if not active_tiles:
             active_tiles = list(self._plot_tiles[:1])
@@ -13463,7 +13551,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             left_pairs = [
                 (x_channel.getter(point), y_left_channel.getter(point))
-                for point in self._session_points
+                for point in display_points
             ]
             left_pairs = [(x_value, y_value) for x_value, y_value in left_pairs if x_value is not None and y_value is not None]
             if left_pairs:
@@ -13496,7 +13584,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 twin.set_ylabel(y_right_channel.label, fontsize=8, labelpad=3)
                 right_pairs = [
                     (x_channel.getter(point), y_right_channel.getter(point))
-                    for point in self._session_points
+                    for point in display_points
                 ]
                 right_pairs = [
                     (x_value, y_value)
@@ -13517,6 +13605,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.canvas is not None:
             self.canvas.draw_idle()
         self._refresh_recovery_plot()
+
+    def _display_plot_points(self) -> list[MeasurementPoint]:
+        if not self._live_plot_points:
+            return list(self._session_points)
+        points = list(self._session_points) + list(self._live_plot_points)
+        points.sort(key=lambda point: point.elapsed_s)
+        if len(points) > LIVE_PLOT_MAX_POINTS:
+            points = points[-LIVE_PLOT_MAX_POINTS:]
+        return points
 
     def _choose_log_dir(self) -> None:
         start_dir = self.edit_log_dir.text().strip() or _default_download_dir()
