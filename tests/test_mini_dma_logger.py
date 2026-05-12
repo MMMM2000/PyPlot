@@ -3531,10 +3531,15 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.spin_current_sweep_nudge_mm.isHidden() is True
         assert window.spin_current_sweep_balance_speed_mm_s.isHidden() is True
         assert window.button_current_sweep_advanced_controls.isHidden() is False
+        assert window.button_current_sweep_advanced_controls.text() == "Advanced speeds/caps"
+        assert window.button_current_sweep_advanced_controls.minimumWidth() >= 220
         assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is True
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is True
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is True
         window.button_current_sweep_advanced_controls.setChecked(True)
+        assert window.button_current_sweep_advanced_controls.text() == "Hide advanced speeds/caps"
+        assert window.spin_current_sweep_max_correction_stress_mpa.minimumWidth() >= 96
+        assert window.spin_current_sweep_hold_filter_window_s.minimumWidth() >= 96
         assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is False
@@ -3549,6 +3554,12 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.button_scale_hardware_tare.text() == "Tare scale"
         assert window.button_scale_hardware_tare.isHidden() is False
         assert window.button_advanced_software_tare.isVisible() is False
+        assert window.button_save_recipe.text() == "Save recipe"
+        assert window.button_load_recipe.text() == "Load recipe"
+        assert window.button_start_recipe.text() == "Start recipe"
+        assert window.button_start_recipe.parent() is window.recipe_action_footer
+        assert window.recipe_progress.parent() is window.recipe_action_footer
+        assert window.label_current_task.parent() is window.recipe_action_footer
     finally:
         _close_test_window(window)
 
@@ -4666,6 +4677,7 @@ def test_native_tic_usb_controller_sends_control_transfers(monkeypatch: pytest.M
     controller.set_target_position(-42, max_speed=12345)
     controller.set_target_velocity(250)
     controller.set_current_position(0)
+    controller.set_current_limit_mA(500)
     controller.halt_and_hold()
 
     assert transfers == [
@@ -4679,6 +4691,7 @@ def test_native_tic_usb_controller_sends_control_transfers(monkeypatch: pytest.M
         (0x40, 0x83, 0, 0, None),
         (0x40, 0xE3, 250, 0, None),
         (0x40, 0xEC, 0, 0, None),
+        (0x40, 0x91, 4, 0, None),
         (0x40, 0x89, 0, 0, None),
     ]
 
@@ -4738,9 +4751,14 @@ def test_tic_controller_prefers_native_usb_when_requested(monkeypatch: pytest.Mo
         def __init__(self, *, device_serial: str = "") -> None:
             self.device_serial = device_serial
             self.targets: list[tuple[int, int | None]] = []
+            self.current_limits: list[float] = []
 
         def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
             self.targets.append((position_steps, max_speed))
+
+        def set_current_limit_mA(self, target_mA: float) -> int:
+            self.current_limits.append(target_mA)
+            return 343
 
     created: list[_FakeNative] = []
 
@@ -4757,10 +4775,13 @@ def test_tic_controller_prefers_native_usb_when_requested(monkeypatch: pytest.Mo
         prefer_native_usb=True,
     )
     controller.set_target_position(42, max_speed=123)
+    applied_current_limit = controller.set_current_limit_mA(343)
 
     assert len(created) == 1
     assert created[0].device_serial == "00501366"
     assert created[0].targets == [(42, 123)]
+    assert created[0].current_limits == [343]
+    assert applied_current_limit == 343
 
 
 def test_tic_controller_auto_falls_back_to_ticcmd_when_native_usb_unavailable(
@@ -7644,6 +7665,13 @@ def test_tic_current_limit_keeps_cool_bench_default() -> None:
     assert controller.commands == [("--current", "343")]
 
 
+def test_tic_current_limit_uses_t500_safe_step_at_or_below_target() -> None:
+    assert mini_dma_mod.safe_tic_current_limit_mA(343) == 343
+    assert mini_dma_mod.safe_tic_current_limit_mA(400) == 343
+    assert mini_dma_mod.safe_tic_current_limit_mA(500) == 495
+    assert mini_dma_mod.tic_t500_current_limit_code(500) == 4
+
+
 def test_current_sweep_recipe_filename_is_concise_and_descriptive(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -7801,6 +7829,49 @@ def test_recipe_preflight_blocks_start_when_tic_current_limit_fails(
         assert ok is False
         assert "Tic current limit could not be set" in window.log_output.toPlainText()
         assert warnings and "Tic current limit could not be set" in warnings[-1]
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_preflight_allows_existing_tic_current_limit_when_write_handle_is_busy(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _BusyTic:
+        def set_current_limit_mA(self, _target_mA: float) -> int:
+            raise RuntimeError(
+                "Failed to open generic handle. Access is denied. "
+                "Windows error code 0x5."
+            )
+
+    try:
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "warning",
+            lambda _parent, _title, message: warnings.append(str(message)),
+        )
+        window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._build_tic_controller = lambda: _BusyTic()  # type: ignore[method-assign]
+        window._tic_status_text = "\n".join(
+            [
+                "VIN voltage: 12.00 V",
+                "Step mode: 1/8 step",
+                "Current limit: 343 mA",
+                "Errors currently stopping the motor: None",
+            ]
+        )
+
+        ok = window._preflight_recipe_hardware([mini_dma_mod.AutomationStep("move", target_mm=0.0)])
+
+        assert ok is True
+        assert not warnings
+        assert "Tic current limit already 343 mA" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 

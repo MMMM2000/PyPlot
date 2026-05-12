@@ -139,6 +139,7 @@ TIC_CMD_EXIT_SAFE_START = 0x83
 TIC_CMD_ENERGIZE = 0x85
 TIC_CMD_HALT_AND_HOLD = 0x89
 TIC_CMD_RESET_COMMAND_TIMEOUT = 0x8C
+TIC_CMD_SET_CURRENT_LIMIT = 0x91
 TIC_CMD_GET_VARIABLES = 0xA1
 TIC_CMD_SET_TARGET_POSITION = 0xE0
 TIC_CMD_SET_TARGET_VELOCITY = 0xE3
@@ -232,6 +233,41 @@ DEFAULT_STEPS_PER_MM = 800.0
 DEFAULT_TIC_CURRENT_LIMIT_MA = 343
 DEFAULT_MOTOR_SUPPLY_CURRENT_LIMIT_A = 0.5
 TIC_CURRENT_LIMIT_STEP_MA = 1
+TIC_T500_CURRENT_LIMITS_MA: tuple[int, ...] = (
+    0,
+    1,
+    174,
+    343,
+    495,
+    634,
+    762,
+    880,
+    990,
+    1092,
+    1189,
+    1281,
+    1368,
+    1452,
+    1532,
+    1611,
+    1687,
+    1762,
+    1835,
+    1909,
+    1982,
+    2056,
+    2131,
+    2207,
+    2285,
+    2366,
+    2451,
+    2540,
+    2634,
+    2734,
+    2843,
+    2962,
+    3093,
+)
 TIC_STEP_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Full step", "full"),
     ("1/2 step", "2"),
@@ -531,6 +567,13 @@ def _extract_first_int(text: str) -> int | None:
         return None
 
 
+def _extract_tic_current_limit_mA(status_text: str | None) -> int | None:
+    value = _extract_status_value(status_text or "", "Current limit")
+    if value is None:
+        return None
+    return _extract_first_int(value)
+
+
 def normalize_tic_step_mode(step_mode: object) -> str | None:
     text = str(step_mode or "").strip().lower()
     if not text:
@@ -580,8 +623,18 @@ def _tic_step_mode_label(step_mode: object) -> str:
 
 def safe_tic_current_limit_mA(target_mA: float) -> int:
     target = max(0.0, float(target_mA))
-    safe_value = int(math.floor(target / TIC_CURRENT_LIMIT_STEP_MA) * TIC_CURRENT_LIMIT_STEP_MA)
-    return max(0, safe_value)
+    safe_value = 0
+    for candidate in TIC_T500_CURRENT_LIMITS_MA:
+        if candidate <= target:
+            safe_value = candidate
+        else:
+            break
+    return safe_value
+
+
+def tic_t500_current_limit_code(target_mA: float) -> int:
+    safe_value = safe_tic_current_limit_mA(target_mA)
+    return TIC_T500_CURRENT_LIMITS_MA.index(safe_value)
 
 
 def apply_tic_current_limit_mA(controller: object, target_mA: float) -> int:
@@ -1250,6 +1303,7 @@ class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
         super().__init__(parent)
         self.setKeyboardTracking(False)
         self.setCorrectionMode(QtWidgets.QAbstractSpinBox.CorrectionMode.CorrectToNearestValue)
+        self.setMinimumWidth(96)
 
     def textFromValue(self, value: float) -> str:  # type: ignore[override]
         return _format_compact_number(value, decimals=self.decimals())
@@ -1550,6 +1604,16 @@ class NativeTicUsbController:
             timeout=self.timeout_ms,
         )
 
+    def _command_7bit(self, command: int, value: int) -> None:
+        self._device.ctrl_transfer(
+            TIC_USB_REQUEST_OUT,
+            command,
+            int(value) & 0x7F,
+            0,
+            None,
+            timeout=self.timeout_ms,
+        )
+
     def _command_u32(self, command: int, value: int) -> None:
         value_low, value_high = _tic_usb_command_argument(value)
         self._device.ctrl_transfer(
@@ -1580,6 +1644,11 @@ class NativeTicUsbController:
 
     def set_current_position(self, position_steps: int) -> None:
         self._command_u32(TIC_CMD_HALT_AND_SET_POSITION, int(position_steps))
+
+    def set_current_limit_mA(self, target_mA: float) -> int:
+        safe_value = safe_tic_current_limit_mA(target_mA)
+        self._command_7bit(TIC_CMD_SET_CURRENT_LIMIT, tic_t500_current_limit_code(target_mA))
+        return safe_value
 
     def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
         self._quick_command(TIC_CMD_ENERGIZE)
@@ -1745,6 +1814,9 @@ class TicController:
         self.run("--step-mode", normalized)
 
     def set_current_limit_mA(self, target_mA: float) -> int:
+        native = self._native_controller()
+        if native is not None:
+            return native.set_current_limit_mA(target_mA)
         return apply_tic_current_limit_mA(self, target_mA)
 
     def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
@@ -2495,9 +2567,10 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+        spinbox.setMinimumWidth(max(spinbox.minimumWidth(), 108))
         layout.addWidget(spinbox, stretch=1)
         label = QtWidgets.QLabel("-", row)
-        label.setMinimumWidth(135)
+        label.setMinimumWidth(88)
         label.setStyleSheet("color: palette(text);")
         layout.addWidget(label)
         return row, label
@@ -2575,14 +2648,30 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.setChildrenCollapsible(False)
         root.addWidget(splitter, 1)
 
-        control_scroll = QtWidgets.QScrollArea(splitter)
+        control_column = QtWidgets.QWidget(splitter)
+        control_column.setMinimumWidth(500)
+        control_column.setMaximumWidth(680)
+        control_column_layout = QtWidgets.QVBoxLayout(control_column)
+        control_column_layout.setContentsMargins(0, 0, 0, 0)
+        control_column_layout.setSpacing(6)
+
+        control_scroll = QtWidgets.QScrollArea(control_column)
         self._control_scroll_area = control_scroll
         control_scroll.setWidgetResizable(True)
         control_scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
         control_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         control_scroll.horizontalScrollBar().setFixedHeight(0)
-        control_scroll.setMinimumWidth(420)
-        control_scroll.setMaximumWidth(560)
+        control_scroll.setMinimumWidth(500)
+        control_scroll.setMaximumWidth(680)
+        control_column_layout.addWidget(control_scroll, stretch=1)
+
+        self.recipe_action_footer = QtWidgets.QFrame(control_column)
+        self.recipe_action_footer.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.recipe_action_footer_layout = QtWidgets.QVBoxLayout(self.recipe_action_footer)
+        self.recipe_action_footer_layout.setContentsMargins(8, 8, 8, 8)
+        self.recipe_action_footer_layout.setSpacing(6)
+        control_column_layout.addWidget(self.recipe_action_footer)
+
         control_panel = QtWidgets.QWidget(control_scroll)
         control_panel.setMinimumWidth(0)
         control_panel.setSizePolicy(
@@ -3379,6 +3468,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_recipe_mode.addItem("Iso-strain current sweep", CURRENT_SWEEP_STRAIN)
         self.combo_recipe_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
         automation_form.addRow("Recipe type", self.combo_recipe_mode)
+        recipe_file_row = QtWidgets.QHBoxLayout()
+        self.button_save_recipe = QtWidgets.QPushButton("Save recipe", automation_box)
+        self.button_save_recipe.clicked.connect(self._save_recipe_dialog)
+        self.button_save_recipe.setMinimumWidth(120)
+        recipe_file_row.addWidget(self.button_save_recipe, stretch=1)
+        self.button_load_recipe = QtWidgets.QPushButton("Load recipe", automation_box)
+        self.button_load_recipe.clicked.connect(self._load_recipe_dialog)
+        self.button_load_recipe.setMinimumWidth(120)
+        recipe_file_row.addWidget(self.button_load_recipe, stretch=1)
+        automation_form.addRow("Recipe file", recipe_file_row)
 
         self.strain_setup_box = self._group_box("Zero-load and length setup")
         strain_setup_form = QtWidgets.QFormLayout(self.strain_setup_box)
@@ -3748,6 +3847,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         current_sweep_page = QtWidgets.QWidget(self.recipe_stack)
         current_sweep_form = QtWidgets.QFormLayout(current_sweep_page)
+        current_sweep_form.setProperty("_mini_dma_keep_rows_unwrapped", True)
+        current_sweep_form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.DontWrapRows)
         self.combo_current_sweep_basis = QtWidgets.QComboBox(automation_box)
         for basis_key in (HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT):
             self.combo_current_sweep_basis.addItem(HSW_BASIS_LABELS[basis_key], basis_key)
@@ -3808,13 +3909,21 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         current_sweep_form.addRow("Stage speed cap", self.spin_current_sweep_target_speed_mm_s)
         self.button_current_sweep_advanced_controls = QtWidgets.QToolButton(automation_box)
-        self.button_current_sweep_advanced_controls.setText("Show advanced current-sweep controls")
+        self.button_current_sweep_advanced_controls.setText("Advanced speeds/caps")
+        self.button_current_sweep_advanced_controls.setToolTip(
+            "Show or hide advanced current-sweep speed, correction-cap, and hold-band settings."
+        )
         self.button_current_sweep_advanced_controls.setToolButtonStyle(
             QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
         )
         self.button_current_sweep_advanced_controls.setCheckable(True)
         self.button_current_sweep_advanced_controls.setChecked(False)
         self.button_current_sweep_advanced_controls.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.button_current_sweep_advanced_controls.setMinimumWidth(240)
+        self.button_current_sweep_advanced_controls.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         current_sweep_form.addRow("", self.button_current_sweep_advanced_controls)
         self.spin_current_sweep_max_correction_strain_pct = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_max_correction_strain_pct.setDecimals(3)
@@ -3994,7 +4103,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow
             )
             self.button_current_sweep_advanced_controls.setText(
-                "Hide advanced current-sweep controls" if checked else "Show advanced current-sweep controls"
+                "Hide advanced speeds/caps" if checked else "Advanced speeds/caps"
             )
             for advanced_widget in self._current_sweep_advanced_control_widgets:
                 self._set_form_row_visible(current_sweep_form, advanced_widget, checked)
@@ -4089,13 +4198,6 @@ class MainWindow(QtWidgets.QMainWindow):
         current_log_interval_label = current_sweep_form.labelForField(self.spin_current_sweep_log_interval)
         if current_log_interval_label is not None:
             current_log_interval_label.setVisible(False)
-        current_sweep_hint = QtWidgets.QLabel(
-            "This recipe holds the selected target with dynamic stage-speed balancing while ramping current; control can run faster than logged recipe rows.",
-            current_sweep_page,
-        )
-        current_sweep_hint.setWordWrap(True)
-        current_sweep_hint.setStyleSheet("color: palette(mid);")
-        current_sweep_form.addRow("", current_sweep_hint)
         self.recipe_stack.addWidget(current_sweep_page)
 
         automation_form.addRow("", self.recipe_stack)
@@ -4109,39 +4211,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_recipe_summary.setVisible(False)
         self.label_recipe_estimate = QtWidgets.QLabel("Estimated points: - | Estimated duration: -")
         self.label_recipe_estimate.setWordWrap(True)
-        automation_form.addRow("", self.label_recipe_estimate)
-        self.recipe_progress = QtWidgets.QProgressBar(automation_box)
+        self.recipe_progress = QtWidgets.QProgressBar(self.recipe_action_footer)
         self.recipe_progress.setRange(0, 100)
         self.recipe_progress.setValue(0)
         self.recipe_progress.setTextVisible(True)
         self.recipe_progress.setFormat("Recipe progress: idle")
-        automation_form.addRow("", self.recipe_progress)
-        self.label_current_task = QtWidgets.QLabel("Current task: idle", automation_box)
+        self.label_current_task = QtWidgets.QLabel("Current task: idle", self.recipe_action_footer)
         self.label_current_task.setWordWrap(True)
         task_font = self.label_current_task.font()
         task_font.setBold(True)
         self.label_current_task.setFont(task_font)
         self.label_current_task.setStyleSheet("color: palette(text);")
-        automation_form.addRow("Current task", self.label_current_task)
 
+        recipe_actions_title = QtWidgets.QLabel("Recipe controls", self.recipe_action_footer)
+        recipe_actions_title_font = recipe_actions_title.font()
+        recipe_actions_title_font.setBold(True)
+        recipe_actions_title.setFont(recipe_actions_title_font)
+        self.recipe_action_footer_layout.addWidget(recipe_actions_title)
+        self.recipe_action_footer_layout.addWidget(self.label_recipe_estimate)
+        self.recipe_action_footer_layout.addWidget(self.recipe_progress)
+        self.recipe_action_footer_layout.addWidget(self.label_current_task)
         ramp_buttons = QtWidgets.QHBoxLayout()
-        self.button_start_recipe = QtWidgets.QPushButton("Start recipe (auto-connect)", automation_box)
+        ramp_buttons.setSpacing(6)
+        self.button_start_recipe = QtWidgets.QPushButton("Start recipe", self.recipe_action_footer)
         self.button_start_recipe.clicked.connect(self._start_auto_ramp)
-        ramp_buttons.addWidget(self.button_start_recipe)
-        save_recipe_button = QtWidgets.QPushButton("Save recipe", automation_box)
-        save_recipe_button.clicked.connect(self._save_recipe_dialog)
-        ramp_buttons.addWidget(save_recipe_button)
-        load_recipe_button = QtWidgets.QPushButton("Load recipe", automation_box)
-        load_recipe_button.clicked.connect(self._load_recipe_dialog)
-        ramp_buttons.addWidget(load_recipe_button)
-        self.button_pause_recipe = QtWidgets.QPushButton("Pause recipe", automation_box)
+        self.button_start_recipe.setMinimumWidth(110)
+        ramp_buttons.addWidget(self.button_start_recipe, stretch=1)
+        self.button_pause_recipe = QtWidgets.QPushButton("Pause", self.recipe_action_footer)
         self.button_pause_recipe.clicked.connect(self._toggle_recipe_pause)
         self.button_pause_recipe.setEnabled(False)
-        ramp_buttons.addWidget(self.button_pause_recipe)
-        self.button_stop_recipe = QtWidgets.QPushButton("Stop recipe", automation_box)
+        self.button_pause_recipe.setMinimumWidth(82)
+        ramp_buttons.addWidget(self.button_pause_recipe, stretch=1)
+        self.button_stop_recipe = QtWidgets.QPushButton("Stop", self.recipe_action_footer)
         self.button_stop_recipe.clicked.connect(self._stop_recipe_from_button)
-        ramp_buttons.addWidget(self.button_stop_recipe)
-        automation_form.addRow("", ramp_buttons)
+        self.button_stop_recipe.setMinimumWidth(82)
+        ramp_buttons.addWidget(self.button_stop_recipe, stretch=1)
+        self.recipe_action_footer_layout.addLayout(ramp_buttons)
         experiment_layout.addWidget(automation_box)
 
         manual_box = self._group_box("Manual Actions")
@@ -4205,7 +4310,7 @@ class MainWindow(QtWidgets.QMainWindow):
         tabs.setCurrentWidget(experiment_tab)
 
         controls.addStretch(1)
-        splitter.addWidget(control_scroll)
+        splitter.addWidget(control_column)
 
         plot_panel = QtWidgets.QWidget(splitter)
         plot_layout = QtWidgets.QVBoxLayout(plot_panel)
@@ -4535,10 +4640,27 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._make_layout_width_friendly(root.layout())
         for widget in root.findChildren(QtWidgets.QWidget):
-            widget.setMinimumWidth(0)
+            if not isinstance(
+                widget,
+                (
+                    QtWidgets.QAbstractSpinBox,
+                    QtWidgets.QPushButton,
+                    QtWidgets.QToolButton,
+                ),
+            ):
+                widget.setMinimumWidth(0)
             policy = widget.sizePolicy()
             if isinstance(widget, QtWidgets.QLabel):
                 widget.setWordWrap(True)
+            if isinstance(widget, QtWidgets.QAbstractSpinBox):
+                widget.setMinimumWidth(max(widget.minimumWidth(), 96))
+                widget.lineEdit().setMinimumWidth(72)
+            if isinstance(widget, QtWidgets.QToolButton):
+                widget.setMinimumWidth(max(widget.minimumWidth(), 220))
+                widget.setSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                    policy.verticalPolicy(),
+                )
             if isinstance(widget, QtWidgets.QComboBox):
                 widget.setMinimumContentsLength(0)
                 widget.setSizeAdjustPolicy(
@@ -4566,7 +4688,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if isinstance(layout, QtWidgets.QFormLayout):
             layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-            layout.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+            if bool(layout.property("_mini_dma_keep_rows_unwrapped")):
+                layout.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.DontWrapRows)
+            else:
+                layout.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
         for index in range(layout.count()):
             item = layout.itemAt(index)
             if item is None:
@@ -11299,6 +11424,13 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 applied_mA = apply_tic_current_limit_mA(controller, target_mA)
         except Exception as exc:
+            reported_mA = _extract_tic_current_limit_mA(self._tic_status_text)
+            if reported_mA == safe_mA:
+                return (
+                    True,
+                    f"PASS: Tic current limit already {safe_mA} mA "
+                    f"(write skipped because the controller handle was busy: {exc}).",
+                )
             return False, f"FAIL: Tic current limit could not be set ({exc})."
         if applied_mA != safe_mA:
             return False, f"FAIL: Tic current limit returned {applied_mA} mA, expected {safe_mA} mA."
