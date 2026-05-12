@@ -185,7 +185,7 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "label": "HMP4030 (original)",
         "start_current_mA": 1.0,
         "min_start_current_mA": 1.0,
-        "max_voltage": 30.0,
+        "max_voltage": 32.05,
         "channel_select": 3,
         "reset_on_start": True,
         "voltage_first": False,
@@ -229,6 +229,9 @@ MOTOR_DEFAULTS_VERSION = 3
 DEFAULT_FULL_STEPS_PER_MM = 100.0
 DEFAULT_TIC_STEP_MODE = "8"
 DEFAULT_STEPS_PER_MM = 800.0
+DEFAULT_TIC_CURRENT_LIMIT_MA = 343
+DEFAULT_MOTOR_SUPPLY_CURRENT_LIMIT_A = 0.4
+TIC_CURRENT_LIMIT_STEP_MA = 1
 TIC_STEP_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Full step", "full"),
     ("1/2 step", "2"),
@@ -573,6 +576,21 @@ def _tic_step_mode_label(step_mode: object) -> str:
         if value == normalized:
             return label
     return str(step_mode)
+
+
+def safe_tic_current_limit_mA(target_mA: float) -> int:
+    target = max(0.0, float(target_mA))
+    safe_value = int(math.floor(target / TIC_CURRENT_LIMIT_STEP_MA) * TIC_CURRENT_LIMIT_STEP_MA)
+    return max(0, safe_value)
+
+
+def apply_tic_current_limit_mA(controller: object, target_mA: float) -> int:
+    safe_value = safe_tic_current_limit_mA(target_mA)
+    run = getattr(controller, "run", None)
+    if not callable(run):
+        raise RuntimeError("Tic current limit requires ticcmd transport.")
+    run("--current", str(safe_value))
+    return safe_value
 
 
 def _parse_tic_list_output(text: str) -> list[tuple[str, str]]:
@@ -1726,6 +1744,9 @@ class TicController:
             raise ValueError(f"Unsupported Tic step mode: {step_mode!r}")
         self.run("--step-mode", normalized)
 
+    def set_current_limit_mA(self, target_mA: float) -> int:
+        return apply_tic_current_limit_mA(self, target_mA)
+
     def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
         native = self._native_controller()
         if native is not None:
@@ -2858,6 +2879,16 @@ class MainWindow(QtWidgets.QMainWindow):
         step_mode_row.addWidget(self.button_apply_tic_step_mode)
         motion_advanced_form.addRow("Tic step mode", step_mode_row)
 
+        self.spin_tic_current_limit_mA = QtWidgets.QSpinBox(motion_advanced_box)
+        self.spin_tic_current_limit_mA.setRange(0, 3000)
+        self.spin_tic_current_limit_mA.setSingleStep(TIC_CURRENT_LIMIT_STEP_MA)
+        self.spin_tic_current_limit_mA.setValue(DEFAULT_TIC_CURRENT_LIMIT_MA)
+        self.spin_tic_current_limit_mA.setSuffix(" mA")
+        self.spin_tic_current_limit_mA.setToolTip(
+            "Tic motor winding current limit. This is separate from the HMP motor-supply rail current limit."
+        )
+        motion_advanced_form.addRow("Tic motor current limit", self.spin_tic_current_limit_mA)
+
         self.spin_steps_per_mm = CompactDoubleSpinBox(motion_advanced_box)
         self.spin_steps_per_mm.setDecimals(3)
         self.spin_steps_per_mm.setRange(1.0, 100000.0)
@@ -3044,7 +3075,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_supply_voltage_limit = CompactDoubleSpinBox(supply_box)
         self.spin_supply_voltage_limit.setDecimals(2)
         self.spin_supply_voltage_limit.setRange(0.0, 1000.0)
-        self.spin_supply_voltage_limit.setValue(30.0)
+        self.spin_supply_voltage_limit.setValue(float(SUPPLY_PROFILES["hmp4030"]["max_voltage"]))
         self.spin_supply_voltage_limit.setSuffix(" V")
         supply_form.addRow("Voltage limit", self.spin_supply_voltage_limit)
 
@@ -3122,15 +3153,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_motor_supply_channel = QtWidgets.QComboBox(supply_box)
         self.combo_motor_supply_channel.addItem("CH1", 1)
         self.combo_motor_supply_channel.addItem("CH2", 2)
+        self.combo_motor_supply_channel.setCurrentIndex(self.combo_motor_supply_channel.findData(2))
         self.spin_motor_supply_voltage = CompactDoubleSpinBox(supply_box)
         self.spin_motor_supply_voltage.setDecimals(2)
-        self.spin_motor_supply_voltage.setRange(0.0, 32.0)
+        self.spin_motor_supply_voltage.setRange(0.0, 32.05)
         self.spin_motor_supply_voltage.setValue(12.0)
         self.spin_motor_supply_voltage.setSuffix(" V")
         self.spin_motor_supply_current_limit = CompactDoubleSpinBox(supply_box)
         self.spin_motor_supply_current_limit.setDecimals(3)
         self.spin_motor_supply_current_limit.setRange(0.01, 10.0)
-        self.spin_motor_supply_current_limit.setValue(1.0)
+        self.spin_motor_supply_current_limit.setValue(DEFAULT_MOTOR_SUPPLY_CURRENT_LIMIT_A)
         self.spin_motor_supply_current_limit.setSuffix(" A")
         motor_supply_row.addWidget(self.combo_motor_supply_channel)
         motor_supply_row.addWidget(self.spin_motor_supply_voltage)
@@ -3144,6 +3176,12 @@ class MainWindow(QtWidgets.QMainWindow):
         motor_supply_off_button.clicked.connect(self._disable_motor_supply_output)
         motor_supply_buttons.addWidget(motor_supply_off_button)
         supply_form.addRow("", motor_supply_buttons)
+        self.button_provision_bench = QtWidgets.QPushButton("Provision bench hardware", supply_box)
+        self.button_provision_bench.clicked.connect(self._provision_bench_hardware)
+        supply_form.addRow("", self.button_provision_bench)
+        self.label_hardware_provisioning_status = QtWidgets.QLabel("Bench provisioning has not run yet.", supply_box)
+        self.label_hardware_provisioning_status.setWordWrap(True)
+        supply_form.addRow("", self.label_hardware_provisioning_status)
         hardware_layout.addWidget(supply_box)
 
         hardware_layout.addStretch(1)
@@ -4090,6 +4128,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_start_recipe = QtWidgets.QPushButton("Start recipe (auto-connect)", automation_box)
         self.button_start_recipe.clicked.connect(self._start_auto_ramp)
         ramp_buttons.addWidget(self.button_start_recipe)
+        save_recipe_button = QtWidgets.QPushButton("Save recipe", automation_box)
+        save_recipe_button.clicked.connect(self._save_recipe_dialog)
+        ramp_buttons.addWidget(save_recipe_button)
+        load_recipe_button = QtWidgets.QPushButton("Load recipe", automation_box)
+        load_recipe_button.clicked.connect(self._load_recipe_dialog)
+        ramp_buttons.addWidget(load_recipe_button)
         self.button_pause_recipe = QtWidgets.QPushButton("Pause recipe", automation_box)
         self.button_pause_recipe.clicked.connect(self._toggle_recipe_pause)
         self.button_pause_recipe.setEnabled(False)
@@ -5056,7 +5100,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_supply_profile_defaults(self) -> None:
         profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         profile = SUPPLY_PROFILES.get(profile_id, SUPPLY_PROFILES["hmp4030"])
-        self.spin_supply_voltage_limit.setValue(float(profile.get("max_voltage", 30.0)))
+        self.spin_supply_voltage_limit.setValue(float(profile.get("max_voltage", 32.05)))
         self.spin_supply_manual_current.setValue(float(profile.get("start_current_mA", 1.0)))
 
     def _connect_supply(self, checked: bool = False, *, show_errors: bool = True) -> bool:
@@ -5222,6 +5266,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_active:
             self._stop_auto_ramp(log_completion=False)
             messages.append("recipe stopped")
+
+        try:
+            motor_off = self._disable_motor_supply_output()
+            if motor_off:
+                messages.append("motor supply off")
+            else:
+                messages.append("motor supply already off/unavailable")
+        except Exception as exc:
+            messages.append(f"motor-supply-off failed: {exc}")
+            self._log(f"Emergency stop could not disable motor supply output: {exc}")
 
         try:
             self._disable_supply_output()
@@ -11217,6 +11271,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V). "
                 "Turn on the motor supply, or enable the HMP motor-supply channel option and run Check motor again."
             )
+        if not issues and self._recipe_requires_tic(steps):
+            tic_limit_ok, tic_limit_message = self._apply_tic_current_limit()
+            self._log(f"Recipe preflight: {tic_limit_message}")
+            if not tic_limit_ok:
+                issues.append(tic_limit_message.replace("FAIL: ", "", 1))
         if self._recipe_requires_scale(steps) and not self._ensure_scale_ready_for_recipe():
             issues.append(
                 "Scale is not connected. Use Auto-detect scale, then verify the zero-load reference, "
@@ -11228,6 +11287,272 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(message.replace("\n", " "))
         QtWidgets.QMessageBox.warning(self, APP_NAME, message)
         return False
+
+    def _apply_tic_current_limit(self) -> tuple[bool, str]:
+        target_mA = float(self.spin_tic_current_limit_mA.value())
+        safe_mA = safe_tic_current_limit_mA(target_mA)
+        try:
+            controller = self._build_tic_controller()
+            method = getattr(controller, "set_current_limit_mA", None)
+            if callable(method):
+                applied_mA = int(method(target_mA))
+            else:
+                applied_mA = apply_tic_current_limit_mA(controller, target_mA)
+        except Exception as exc:
+            return False, f"FAIL: Tic current limit could not be set ({exc})."
+        if applied_mA != safe_mA:
+            return False, f"FAIL: Tic current limit returned {applied_mA} mA, expected {safe_mA} mA."
+        return True, f"PASS: Tic current limit {applied_mA} mA."
+
+    def _provision_bench_hardware(self, _checked: bool = False) -> bool:
+        statuses: list[str] = []
+        ok = True
+
+        if not self._ensure_supply_ready_for_recipe():
+            statuses.append("FAIL: HMP4030 supply is not connected.")
+            ok = False
+        else:
+            try:
+                if self._supply_controller is None:
+                    raise RuntimeError("supply controller is missing after connect")
+                channel = self._motor_supply_channel()
+                voltage = float(self.spin_motor_supply_voltage.value())
+                current_limit = float(self.spin_motor_supply_current_limit.value())
+                self._supply_controller.configure_channel(
+                    channel=channel,
+                    voltage_v=voltage,
+                    current_a=current_limit,
+                    output_on=True,
+                )
+                self._supply_controller.select_channel()
+                statuses.append(
+                    f"PASS: Motor supply CH{channel} set to "
+                    f"{_format_compact_number(voltage, decimals=2)} V / "
+                    f"{_format_compact_number(current_limit, decimals=3)} A."
+                )
+            except Exception as exc:
+                statuses.append(f"FAIL: Motor supply channel setup failed ({exc}).")
+                ok = False
+            statuses.append(f"PASS: Current-sweep supply channel CH{SUPPLY_PROFILES['hmp4030']['channel_select']} selected.")
+
+        if not self._ensure_scale_ready_for_recipe():
+            statuses.append("FAIL: Scale did not connect/respond with the selected preset.")
+            ok = False
+        else:
+            statuses.append("PASS: Scale serial preset connected/responding.")
+
+        tic_ok, tic_message = self._apply_tic_current_limit()
+        statuses.append(tic_message)
+        ok = ok and tic_ok
+        if not self._ensure_tic_ready_for_recipe():
+            statuses.append("FAIL: Tic status/VIN check failed.")
+            ok = False
+        else:
+            statuses.append("PASS: Tic status/VIN check passed.")
+
+        status_text = "\n".join(statuses)
+        self.label_hardware_provisioning_status.setText(status_text)
+        for line in statuses:
+            self._log(f"Bench provisioning: {line}")
+        return ok
+
+    def _recipe_number_token(self, value: float, *, decimals: int = 3) -> str:
+        text = _format_compact_number(float(value), decimals=decimals)
+        return text.replace(".", "p").replace("-", "m")
+
+    def _suggest_recipe_filename(self) -> str:
+        mode = str(self.combo_recipe_mode.currentData() or "recipe")
+        if mode == CURRENT_SWEEP_STRESS:
+            prefix = "iso-stress"
+            target_unit = "MPa"
+        elif mode == CURRENT_SWEEP_LOAD:
+            prefix = "iso-load"
+            target_unit = "g"
+        elif mode == CURRENT_SWEEP_STRAIN:
+            prefix = "iso-strain"
+            target_unit = "pct"
+        else:
+            prefix = re.sub(r"[^a-z0-9]+", "-", mode.lower()).strip("-") or "recipe"
+            return f"{prefix}.recipe.json"
+        setup = self._recipe_number_token(self.spin_setup_preload_stress_mpa.value())
+        target_start = self._recipe_number_token(self.spin_current_sweep_target_start.value())
+        target_end = self._recipe_number_token(self.spin_current_sweep_target_end.value())
+        target_step = self._recipe_number_token(self.spin_current_sweep_target_step.value())
+        current_start = self._recipe_number_token(self.spin_current_sweep_start_mA.value())
+        current_end = self._recipe_number_token(self.spin_current_sweep_end_mA.value())
+        current_rate = self._recipe_number_token(self.spin_current_sweep_step_mA.value())
+        flags: list[str] = []
+        if self.check_current_sweep_hold_on_error.isChecked():
+            flags.append("hold")
+        if self.check_current_sweep_first_overheating.isChecked():
+            flags.append("firstheat")
+        flag_text = "" if not flags else "_" + "_".join(flags)
+        return (
+            f"{prefix}_setup{setup}MPa_target{target_start}-{target_end}x{target_step}{target_unit}_"
+            f"current{current_start}-{current_end}mA_{current_rate}mAps{flag_text}.recipe.json"
+        )
+
+    def _current_recipe_payload(self) -> dict[str, Any]:
+        mode = str(self.combo_recipe_mode.currentData() or "ramp")
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "app": APP_NAME,
+            "recipe": {
+                "mode": mode,
+                "setup": {
+                    "preload_stress_mpa": float(self.spin_setup_preload_stress_mpa.value()),
+                    "preload_duration_s": float(self.spin_setup_preload_duration_s.value()),
+                    "return_duration_s": float(self.spin_setup_return_duration_s.value()),
+                    "slack_speed_strain_pct_s": float(self.spin_setup_slack_speed_strain_pct_s.value()),
+                    "preload_tolerance_mpa": float(self.spin_setup_preload_tolerance_mpa.value()),
+                    "zero_tolerance_g": float(self.spin_setup_zero_tolerance_g.value()),
+                },
+                "timing": {
+                    "control_interval_ms": int(self._control_interval_ms()),
+                    "log_interval_ms": int(self._log_interval_ms()),
+                },
+            },
+        }
+        if self._is_current_sweep_mode(mode):
+            payload["recipe"]["current_sweep"] = {
+                "basis": self._current_sweep_basis(),
+                "target_start": float(self.spin_current_sweep_target_start.value()),
+                "target_end": float(self.spin_current_sweep_target_end.value()),
+                "target_step": float(self.spin_current_sweep_target_step.value()),
+                "target_ramp_rate": float(self.spin_current_sweep_target_ramp_rate.value()),
+                "target_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
+                "current_start_mA": float(self.spin_current_sweep_start_mA.value()),
+                "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
+                "current_ramp_rate_mA_s": float(self.spin_current_sweep_step_mA.value()),
+                "hold_on_error": bool(self.check_current_sweep_hold_on_error.isChecked()),
+                "hold_pause_factor": float(self.spin_current_sweep_hold_pause_factor.value()),
+                "hold_resume_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
+                "hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
+                "hold_filter_window_s": float(self.spin_current_sweep_hold_filter_window_s.value()),
+                "hold_noise_sigma": float(self.spin_current_sweep_hold_noise_sigma.value()),
+                "hold_min_pause_stress_mpa": float(self.spin_current_sweep_hold_min_pause_stress_mpa.value()),
+                "hold_min_resume_stress_mpa": float(self.spin_current_sweep_hold_min_resume_stress_mpa.value()),
+                "max_correction_strain_pct": float(self.spin_current_sweep_max_correction_strain_pct.value()),
+                "correction_rate_pct_s": float(self.spin_current_sweep_correction_rate_pct_s.value()),
+                "max_correction_stress_mpa": float(self.spin_current_sweep_max_correction_stress_mpa.value()),
+                "hold_correction_stress_mpa": float(self.spin_current_sweep_hold_correction_stress_mpa.value()),
+                "mid_correction_stress_mpa": float(self.spin_current_sweep_mid_correction_stress_mpa.value()),
+                "near_correction_stress_mpa": float(self.spin_current_sweep_near_correction_stress_mpa.value()),
+                "return_target": bool(self.check_current_sweep_return_target.isChecked()),
+                "first_overheating": bool(self.check_current_sweep_first_overheating.isChecked()),
+                "reverse_current": bool(self.check_current_sweep_reverse_current.isChecked()),
+                "tolerance": float(self.spin_current_sweep_tolerance.value()),
+                "nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
+                "balance_speed_mm_s": float(self.spin_current_sweep_balance_speed_mm_s.value()),
+                "max_seek_mm": float(self.spin_current_sweep_max_seek_mm.value()),
+                "settle_s": float(self.spin_current_sweep_settle_s.value()),
+            }
+        return payload
+
+    def _apply_recipe_payload(self, payload: Mapping[str, Any]) -> None:
+        recipe = payload.get("recipe")
+        if not isinstance(recipe, Mapping):
+            raise ValueError("Recipe file is missing the recipe object.")
+        mode = str(recipe.get("mode", ""))
+        mode_index = self.combo_recipe_mode.findData(mode)
+        if mode_index < 0:
+            raise ValueError(f"Unsupported recipe mode: {mode or '<missing>'}")
+        self.combo_recipe_mode.setCurrentIndex(mode_index)
+        setup = recipe.get("setup")
+        if isinstance(setup, Mapping):
+            self.spin_setup_preload_stress_mpa.setValue(float(setup.get("preload_stress_mpa", self.spin_setup_preload_stress_mpa.value())))
+            self.spin_setup_preload_duration_s.setValue(float(setup.get("preload_duration_s", self.spin_setup_preload_duration_s.value())))
+            self.spin_setup_return_duration_s.setValue(float(setup.get("return_duration_s", self.spin_setup_return_duration_s.value())))
+            self.spin_setup_slack_speed_strain_pct_s.setValue(float(setup.get("slack_speed_strain_pct_s", self.spin_setup_slack_speed_strain_pct_s.value())))
+            self.spin_setup_preload_tolerance_mpa.setValue(float(setup.get("preload_tolerance_mpa", self.spin_setup_preload_tolerance_mpa.value())))
+            self.spin_setup_zero_tolerance_g.setValue(float(setup.get("zero_tolerance_g", self.spin_setup_zero_tolerance_g.value())))
+        timing = recipe.get("timing")
+        if isinstance(timing, Mapping):
+            self.spin_control_interval.setValue(int(timing.get("control_interval_ms", self.spin_control_interval.value())))
+            self.spin_log_interval.setValue(int(timing.get("log_interval_ms", self.spin_log_interval.value())))
+        current_sweep = recipe.get("current_sweep")
+        if isinstance(current_sweep, Mapping):
+            basis = str(current_sweep.get("basis", self._current_sweep_basis()))
+            basis_mode = self._current_sweep_mode_for_basis(basis)
+            basis_index = self.combo_recipe_mode.findData(basis_mode)
+            if basis_index >= 0:
+                self.combo_recipe_mode.setCurrentIndex(basis_index)
+            self.spin_current_sweep_target_start.setValue(float(current_sweep.get("target_start", self.spin_current_sweep_target_start.value())))
+            self.spin_current_sweep_target_end.setValue(float(current_sweep.get("target_end", self.spin_current_sweep_target_end.value())))
+            self.spin_current_sweep_target_step.setValue(float(current_sweep.get("target_step", self.spin_current_sweep_target_step.value())))
+            self.spin_current_sweep_target_ramp_rate.setValue(float(current_sweep.get("target_ramp_rate", self.spin_current_sweep_target_ramp_rate.value())))
+            self.spin_current_sweep_target_speed_mm_s.setValue(float(current_sweep.get("target_speed_mm_s", self.spin_current_sweep_target_speed_mm_s.value())))
+            self.spin_current_sweep_start_mA.setValue(float(current_sweep.get("current_start_mA", self.spin_current_sweep_start_mA.value())))
+            self.spin_current_sweep_end_mA.setValue(float(current_sweep.get("current_end_mA", self.spin_current_sweep_end_mA.value())))
+            self.spin_current_sweep_step_mA.setValue(float(current_sweep.get("current_ramp_rate_mA_s", self.spin_current_sweep_step_mA.value())))
+            self.check_current_sweep_hold_on_error.setChecked(bool(current_sweep.get("hold_on_error", self.check_current_sweep_hold_on_error.isChecked())))
+            self.spin_current_sweep_hold_pause_factor.setValue(float(current_sweep.get("hold_pause_factor", self.spin_current_sweep_hold_pause_factor.value())))
+            self.spin_current_sweep_hold_resume_factor.setValue(float(current_sweep.get("hold_resume_factor", self.spin_current_sweep_hold_resume_factor.value())))
+            self.spin_current_sweep_hold_resume_stable_s.setValue(float(current_sweep.get("hold_resume_stable_s", self.spin_current_sweep_hold_resume_stable_s.value())))
+            self.spin_current_sweep_hold_filter_window_s.setValue(float(current_sweep.get("hold_filter_window_s", self.spin_current_sweep_hold_filter_window_s.value())))
+            self.spin_current_sweep_hold_noise_sigma.setValue(float(current_sweep.get("hold_noise_sigma", self.spin_current_sweep_hold_noise_sigma.value())))
+            self.spin_current_sweep_hold_min_pause_stress_mpa.setValue(float(current_sweep.get("hold_min_pause_stress_mpa", self.spin_current_sweep_hold_min_pause_stress_mpa.value())))
+            self.spin_current_sweep_hold_min_resume_stress_mpa.setValue(float(current_sweep.get("hold_min_resume_stress_mpa", self.spin_current_sweep_hold_min_resume_stress_mpa.value())))
+            self.spin_current_sweep_max_correction_strain_pct.setValue(float(current_sweep.get("max_correction_strain_pct", self.spin_current_sweep_max_correction_strain_pct.value())))
+            self.spin_current_sweep_correction_rate_pct_s.setValue(float(current_sweep.get("correction_rate_pct_s", self.spin_current_sweep_correction_rate_pct_s.value())))
+            self.spin_current_sweep_max_correction_stress_mpa.setValue(float(current_sweep.get("max_correction_stress_mpa", self.spin_current_sweep_max_correction_stress_mpa.value())))
+            self.spin_current_sweep_hold_correction_stress_mpa.setValue(float(current_sweep.get("hold_correction_stress_mpa", self.spin_current_sweep_hold_correction_stress_mpa.value())))
+            self.spin_current_sweep_mid_correction_stress_mpa.setValue(float(current_sweep.get("mid_correction_stress_mpa", self.spin_current_sweep_mid_correction_stress_mpa.value())))
+            self.spin_current_sweep_near_correction_stress_mpa.setValue(float(current_sweep.get("near_correction_stress_mpa", self.spin_current_sweep_near_correction_stress_mpa.value())))
+            self.check_current_sweep_return_target.setChecked(bool(current_sweep.get("return_target", self.check_current_sweep_return_target.isChecked())))
+            self.check_current_sweep_first_overheating.setChecked(bool(current_sweep.get("first_overheating", self.check_current_sweep_first_overheating.isChecked())))
+            self.check_current_sweep_reverse_current.setChecked(bool(current_sweep.get("reverse_current", self.check_current_sweep_reverse_current.isChecked())))
+            self.spin_current_sweep_tolerance.setValue(float(current_sweep.get("tolerance", self.spin_current_sweep_tolerance.value())))
+            self.spin_current_sweep_nudge_mm.setValue(float(current_sweep.get("nudge_mm", self.spin_current_sweep_nudge_mm.value())))
+            self.spin_current_sweep_balance_speed_mm_s.setValue(float(current_sweep.get("balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())))
+            self.spin_current_sweep_max_seek_mm.setValue(float(current_sweep.get("max_seek_mm", self.spin_current_sweep_max_seek_mm.value())))
+            self.spin_current_sweep_settle_s.setValue(float(current_sweep.get("settle_s", self.spin_current_sweep_settle_s.value())))
+        self._update_recipe_mode_ui()
+
+    def _save_recipe_to_path(self, path: str | Path) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(self._current_recipe_payload(), indent=2, sort_keys=True), encoding="utf-8")
+        self._log(f"Saved recipe to {target}.")
+
+    def _load_recipe_from_path(self, path: str | Path) -> None:
+        source = Path(path)
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            raise ValueError("Recipe file must contain a JSON object.")
+        self._apply_recipe_payload(payload)
+        self._log(f"Loaded recipe from {source}: {self._suggest_recipe_filename()}.")
+
+    def _save_recipe_dialog(self) -> None:
+        start_dir = Path(self.edit_log_dir.text().strip() or _default_download_dir())
+        path, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Mini DMA recipe",
+            str(start_dir / self._suggest_recipe_filename()),
+            "Mini DMA recipe (*.recipe.json);;JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self._save_recipe_to_path(path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to save recipe: {exc}")
+
+    def _load_recipe_dialog(self) -> None:
+        start_dir = self.edit_log_dir.text().strip() or _default_download_dir()
+        path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load Mini DMA recipe",
+            start_dir,
+            "Mini DMA recipe (*.recipe.json);;JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self._load_recipe_from_path(path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to load recipe: {exc}")
 
     def _automation_target_text(self, basis: str | None, target_value: float | None) -> str:
         if basis is None or target_value is None:
@@ -13663,6 +13988,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("ticcmd_path", self.edit_ticcmd_path.text())
         self.settings.setValue("tic_native_usb_preferred", self.check_tic_native_usb.isChecked())
         self.settings.setValue("tic_serial", self.edit_tic_serial.text())
+        self.settings.setValue("tic_current_limit_mA", self.spin_tic_current_limit_mA.value())
         self.settings.setValue("tic_status_interval_ms", self._tic_status_interval_ms())
         self.settings.setValue("tic_keepalive_interval_ms", self._tic_keepalive_interval_ms())
         self.settings.setValue("full_steps_per_mm", self.spin_full_steps_per_mm.value())
@@ -13873,7 +14199,9 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_profile_index = self.combo_supply_profile.findData(supply_profile)
         if supply_profile_index >= 0:
             self.combo_supply_profile.setCurrentIndex(supply_profile_index)
-        self.spin_supply_voltage_limit.setValue(float(self.settings.value("supply_voltage_limit_v", 30.0)))
+        self.spin_supply_voltage_limit.setValue(
+            float(self.settings.value("supply_voltage_limit_v", SUPPLY_PROFILES["hmp4030"]["max_voltage"]))
+        )
         self.spin_supply_manual_current.setValue(float(self.settings.value("supply_manual_current_mA", 1.0)))
         self.check_continuity_monitor.setChecked(
             bool(self.settings.value("continuity_monitor_enabled", True, type=bool))
@@ -13882,13 +14210,13 @@ class MainWindow(QtWidgets.QMainWindow):
             float(self.settings.value("continuity_current_mA", CONTINUITY_CURRENT_DEFAULT_MA))
         )
         self.check_motor_supply_power.setChecked(bool(self.settings.value("motor_supply_enabled", False, type=bool)))
-        motor_channel = int(self.settings.value("motor_supply_channel", 1))
+        motor_channel = int(self.settings.value("motor_supply_channel", 2))
         motor_channel_index = self.combo_motor_supply_channel.findData(motor_channel)
         if motor_channel_index >= 0:
             self.combo_motor_supply_channel.setCurrentIndex(motor_channel_index)
         self.spin_motor_supply_voltage.setValue(float(self.settings.value("motor_supply_voltage_v", 12.0)))
         self.spin_motor_supply_current_limit.setValue(
-            float(self.settings.value("motor_supply_current_limit_a", 1.0))
+            float(self.settings.value("motor_supply_current_limit_a", DEFAULT_MOTOR_SUPPLY_CURRENT_LIMIT_A))
         )
         saved_ticcmd = self.settings.value("ticcmd_path", "ticcmd", type=str)
         discovered_ticcmd = _find_ticcmd()
@@ -13910,6 +14238,9 @@ class MainWindow(QtWidgets.QMainWindow):
             bool(self.settings.value("tic_native_usb_preferred", True, type=bool))
         )
         self.edit_tic_serial.setText(self.settings.value("tic_serial", "", type=str))
+        self.spin_tic_current_limit_mA.setValue(
+            int(float(self.settings.value("tic_current_limit_mA", DEFAULT_TIC_CURRENT_LIMIT_MA)))
+        )
         self.spin_tic_status_interval.setValue(
             int(self.settings.value("tic_status_interval_ms", DEFAULT_TIC_STATUS_INTERVAL_MS))
         )

@@ -5399,12 +5399,20 @@ def test_emergency_stop_turns_off_current_halts_tic_and_stops_session(tmp_path: 
     class _FakeSupply:
         def __init__(self) -> None:
             self.off_count = 0
+            self.configured: list[tuple[int, float, float, bool]] = []
+            self.selected: list[int | None] = []
 
         def is_connected(self) -> bool:
             return True
 
         def disconnect(self) -> None:
             return None
+
+        def configure_channel(self, *, channel: int, voltage_v: float, current_a: float, output_on: bool) -> None:
+            self.configured.append((channel, voltage_v, current_a, output_on))
+
+        def select_channel(self, channel: int | None = None) -> None:
+            self.selected.append(channel)
 
         def output_off(self) -> None:
             self.off_count += 1
@@ -5442,6 +5450,7 @@ def test_emergency_stop_turns_off_current_halts_tic_and_stops_session(tmp_path: 
         window._emergency_stop()
 
         assert supply.off_count >= 1
+        assert (2, 12.0, 0.4, False) in supply.configured
         assert tic.halted is True
         assert window._supply_output_enabled is False
         assert window._supply_last_setpoint_mA == pytest.approx(0.0)
@@ -7599,6 +7608,199 @@ def test_motor_supply_channel_is_enabled_before_recipe_tic_preflight(tmp_path: P
         assert ok is True
         assert supply.configured == [(2, 12.0, 1.5, True)]
         assert supply.selected_anneal == 1
+    finally:
+        _close_test_window(window)
+
+
+def test_hmp4030_defaults_use_real_voltage_limit_and_kosice_channels(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert mini_dma_mod.SUPPLY_PROFILES["hmp4030"]["max_voltage"] == pytest.approx(32.05)
+        assert mini_dma_mod.SUPPLY_PROFILES["hmp4030"]["channel_select"] == 3
+        assert window.spin_supply_voltage_limit.value() == pytest.approx(32.05)
+        assert window.combo_motor_supply_channel.currentData() == 2
+        assert window.spin_motor_supply_voltage.value() == pytest.approx(12.0)
+        assert window.spin_motor_supply_current_limit.value() == pytest.approx(0.4)
+        assert window.spin_tic_current_limit_mA.value() == 343
+    finally:
+        _close_test_window(window)
+
+
+def test_tic_current_limit_keeps_cool_bench_default() -> None:
+    class _FakeTicController:
+        def __init__(self) -> None:
+            self.commands: list[tuple[str, ...]] = []
+
+        def run(self, *args: str, timeout_s: float = 5.0) -> str:
+            self.commands.append(args)
+            return ""
+
+    controller = _FakeTicController()
+
+    applied = mini_dma_mod.apply_tic_current_limit_mA(controller, mini_dma_mod.DEFAULT_TIC_CURRENT_LIMIT_MA)
+
+    assert applied == 343
+    assert controller.commands == [("--current", "343")]
+
+
+def test_current_sweep_recipe_filename_is_concise_and_descriptive(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window.spin_setup_preload_stress_mpa.setValue(20.0)
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(500.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(80.0)
+        window.spin_current_sweep_step_mA.setValue(1.0)
+        window.check_current_sweep_hold_on_error.setChecked(True)
+        window.check_current_sweep_first_overheating.setChecked(True)
+
+        assert window._suggest_recipe_filename() == (
+            "iso-stress_setup20MPa_target50-500x50MPa_current1-80mA_1mAps_hold_firstheat.recipe.json"
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    recipe_path = tmp_path / "iso-stress_setup20MPa_target50-500x50MPa_current1-80mA_1mAps_hold.recipe.json"
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window.spin_setup_preload_stress_mpa.setValue(20.0)
+        window.spin_setup_preload_duration_s.setValue(10.0)
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(500.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_target_ramp_rate.setValue(2.0)
+        window.spin_current_sweep_target_speed_mm_s.setValue(4.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(80.0)
+        window.spin_current_sweep_step_mA.setValue(1.0)
+        window.check_current_sweep_hold_on_error.setChecked(True)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
+
+        window._save_recipe_to_path(recipe_path)
+        payload = json.loads(recipe_path.read_text(encoding="utf-8"))
+        assert payload["schema_version"] == 1
+        assert payload["recipe"]["mode"] == mini_dma_mod.CURRENT_SWEEP_STRESS
+
+        window.spin_setup_preload_stress_mpa.setValue(5.0)
+        window.spin_current_sweep_target_end.setValue(25.0)
+        window.spin_current_sweep_end_mA.setValue(5.0)
+        window.check_current_sweep_hold_on_error.setChecked(False)
+        window.check_current_sweep_first_overheating.setChecked(False)
+
+        window._load_recipe_from_path(recipe_path)
+
+        assert window.combo_recipe_mode.currentData() == mini_dma_mod.CURRENT_SWEEP_STRESS
+        assert window.spin_setup_preload_stress_mpa.value() == pytest.approx(20.0)
+        assert window.spin_current_sweep_target_end.value() == pytest.approx(500.0)
+        assert window.spin_current_sweep_end_mA.value() == pytest.approx(80.0)
+        assert window.check_current_sweep_hold_on_error.isChecked() is True
+        assert window.check_current_sweep_first_overheating.isChecked() is True
+        assert "Loaded recipe" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        def __init__(self) -> None:
+            self.configured: list[tuple[int, float, float, bool]] = []
+            self.selected = 0
+
+        def is_connected(self) -> bool:
+            return True
+
+        def configure_channel(self, *, channel: int, voltage_v: float, current_a: float, output_on: bool) -> None:
+            self.configured.append((channel, voltage_v, current_a, output_on))
+
+        def select_channel(self, channel: int | None = None) -> None:
+            self.selected = 3 if channel is None else channel
+
+        def disconnect(self) -> None:
+            return None
+
+    class _FakeTic:
+        def __init__(self) -> None:
+            self.current_limits: list[float] = []
+            self.step_modes: list[str] = []
+
+        def set_step_mode(self, step_mode: str) -> None:
+            self.step_modes.append(step_mode)
+
+        def run(self, *args: str, timeout_s: float = 5.0) -> str:
+            if args and args[0] == "--current":
+                self.current_limits.append(float(args[1]))
+            return ""
+
+        def get_status(self) -> str:
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Step mode: 1/8 step",
+                    "Current limit: 343 mA",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
+
+    supply = _FakeSupply()
+    tic = _FakeTic()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+    window._refresh_tic_status = lambda: setattr(window, "_tic_status_text", tic.get_status()) or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+
+    try:
+        ok = window._provision_bench_hardware()
+
+        assert ok is True
+        assert supply.configured == [(2, 12.0, 0.4, True)]
+        assert supply.selected == 3
+        assert tic.current_limits == [343.0]
+        assert "PASS: Motor supply CH2" in window.label_hardware_provisioning_status.text()
+        assert "PASS: Tic current limit 343 mA" in window.label_hardware_provisioning_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_preflight_blocks_start_when_tic_current_limit_fails(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "warning",
+            lambda _parent, _title, message: warnings.append(str(message)),
+        )
+        window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._apply_tic_current_limit = lambda: (False, "FAIL: Tic current limit could not be set.")  # type: ignore[method-assign]
+
+        ok = window._preflight_recipe_hardware([mini_dma_mod.AutomationStep("move", target_mm=0.0)])
+
+        assert ok is False
+        assert "Tic current limit could not be set" in window.log_output.toPlainText()
+        assert warnings and "Tic current limit could not be set" in warnings[-1]
     finally:
         _close_test_window(window)
 

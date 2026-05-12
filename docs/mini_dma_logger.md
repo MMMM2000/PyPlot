@@ -52,6 +52,8 @@ Current intended hardware stack:
 - an always-visible `EMERGENCY STOP` button in the dashboard header stops the active recipe/session, halts the Tic motor, and turns the supply output off
 - the dashboard header shows fixed-width live cells for session state, load/stress/strain, command speed in `mm/s`, `g/s`, `MPa/s`, `%/s`, and hardware status, so changing numbers no longer shift the layout
 - recipe start runs a preflight that auto-detects/connects required scale and supply hardware before creating run files, and reports all missing devices together
+- the Hardware tab includes a `Provision bench hardware` action for Košice-style setup: it verifies/connects the scale, configures the HMP motor-supply channel separately from the current-sweep channel, applies the Tic motor current limit, and reports pass/fail status lines before a recipe is run
+- current recipes can be saved and loaded as `.recipe.json` files; the filename is descriptive for humans, but the JSON file carries the schema version, recipe mode, setup, timing, current-sweep targets, hold/correction caps, first-overheating, and return settings
 - the Recipe tab shows the current sample name and wire diameter at the top so the operator can catch stale sample identity or geometry before starting a run
 - if output for the same base name already exists, session start can save the repeat measurement in the next `_run02`, `_run03`, ... run folder instead of replacing the original run
 - long recipe estimates switch from seconds to minutes/hours and the recipe panel includes a live progress bar
@@ -143,7 +145,8 @@ Current intended hardware stack:
 - live current / voltage / resistance / power channels
 - optional continuity monitor applies a small current during automated measurements, including mandatory setup before a current-sweep recipe, so an open circuit at the voltage limit can stop the run instead of letting the stage keep seeking a broken wire
 - recipe-owned current workflows instead of a separate hardware-tab heating program
-- HMP4030 users can optionally assign CH1 or CH2 as the motor-supply channel; recipe preflight turns that channel on before checking Tic VIN, while current annealing remains on the configured annealing channel
+- HMP4030 users can optionally assign CH1 or CH2 as the motor-supply channel; the default copied-bench setup uses CH2 at 12 V / 0.4 A for motor power and CH3 for current annealing, recipe preflight turns the motor channel on before checking Tic VIN, and the current-sweep voltage limit defaults to 32.05 V
+- Mini DMA exposes the Tic motor winding current limit separately from the HMP motor-supply rail limit; recipe preflight applies the Tic limit and blocks recipe start if that controller setting cannot be applied
 - HMP4030 current commands are treated as 0.2 mA-resolution setpoints below 1 A, so a `1 mA/s` ramp can update in smaller timed increments while avoiding unsupported command precision
 - the main tabs are organized as `Recipe`, `Sample`, and lower-priority `Hardware`, so scale/motor/power-supply setup does not dominate routine use
 - iso-load, iso-stress, and iso-strain current sweeps own both the target ramp and current ramp directly, advance current from elapsed time, and are shown as separate recipe modes; the progress bar estimates timed target/current-ramp ticks instead of only counting visible recipe rows
