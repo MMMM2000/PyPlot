@@ -1303,7 +1303,7 @@ class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
         super().__init__(parent)
         self.setKeyboardTracking(False)
         self.setCorrectionMode(QtWidgets.QAbstractSpinBox.CorrectionMode.CorrectToNearestValue)
-        self.setMinimumWidth(96)
+        self.setMinimumWidth(130)
 
     def textFromValue(self, value: float) -> str:  # type: ignore[override]
         return _format_compact_number(value, decimals=self.decimals())
@@ -2567,7 +2567,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        spinbox.setMinimumWidth(max(spinbox.minimumWidth(), 108))
+        spinbox.setMinimumWidth(max(spinbox.minimumWidth(), 130))
         layout.addWidget(spinbox, stretch=1)
         label = QtWidgets.QLabel("-", row)
         label.setMinimumWidth(88)
@@ -2649,8 +2649,8 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addWidget(splitter, 1)
 
         control_column = QtWidgets.QWidget(splitter)
-        control_column.setMinimumWidth(500)
-        control_column.setMaximumWidth(680)
+        control_column.setMinimumWidth(560)
+        control_column.setMaximumWidth(720)
         control_column_layout = QtWidgets.QVBoxLayout(control_column)
         control_column_layout.setContentsMargins(0, 0, 0, 0)
         control_column_layout.setSpacing(6)
@@ -2661,8 +2661,8 @@ class MainWindow(QtWidgets.QMainWindow):
         control_scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
         control_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         control_scroll.horizontalScrollBar().setFixedHeight(0)
-        control_scroll.setMinimumWidth(500)
-        control_scroll.setMaximumWidth(680)
+        control_scroll.setMinimumWidth(560)
+        control_scroll.setMaximumWidth(720)
         control_column_layout.addWidget(control_scroll, stretch=1)
 
         self.recipe_action_footer = QtWidgets.QFrame(control_column)
@@ -3924,7 +3924,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        current_sweep_form.addRow("", self.button_current_sweep_advanced_controls)
+        current_sweep_form.addRow(self.button_current_sweep_advanced_controls)
         self.spin_current_sweep_max_correction_strain_pct = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_max_correction_strain_pct.setDecimals(3)
         self.spin_current_sweep_max_correction_strain_pct.setRange(0.001, 100.0)
@@ -3935,7 +3935,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_max_correction_strain_pct.setToolTip(
             "Maximum specimen-strain change allowed in one predictive servo correction."
         )
-        current_sweep_form.addRow("Correction strain cap", self.spin_current_sweep_max_correction_strain_pct)
+        current_sweep_form.addRow("Corr. strain", self.spin_current_sweep_max_correction_strain_pct)
         self.spin_current_sweep_correction_rate_pct_s = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_correction_rate_pct_s.setDecimals(3)
         self.spin_current_sweep_correction_rate_pct_s.setRange(0.001, 1000.0)
@@ -3946,7 +3946,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_correction_rate_pct_s.setToolTip(
             "Specimen-strain-rate ceiling for dynamic servo corrections; still limited by the stage speed cap."
         )
-        current_sweep_form.addRow("Correction strain-rate cap", self.spin_current_sweep_correction_rate_pct_s)
+        current_sweep_form.addRow("Corr. rate", self.spin_current_sweep_correction_rate_pct_s)
         self.spin_current_sweep_max_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_max_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_max_correction_stress_mpa.setRange(0.001, 100000.0)
@@ -3955,7 +3955,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_max_correction_stress_mpa.setToolTip(
             "Absolute stress-equivalent safety rail for one current-sweep servo correction while current is moving."
         )
-        current_sweep_form.addRow("Sweep hard cap", self.spin_current_sweep_max_correction_stress_mpa)
+        current_sweep_form.addRow("Sweep cap", self.spin_current_sweep_max_correction_stress_mpa)
         self.spin_current_sweep_hold_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_hold_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_hold_correction_stress_mpa.setRange(0.001, 100000.0)
@@ -3966,7 +3966,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_correction_stress_mpa.setToolTip(
             "Absolute stress-equivalent safety rail for one servo correction while current is paused for target recovery."
         )
-        current_sweep_form.addRow("Hold hard cap", self.spin_current_sweep_hold_correction_stress_mpa)
+        current_sweep_form.addRow("Hold cap", self.spin_current_sweep_hold_correction_stress_mpa)
         self.spin_current_sweep_mid_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_mid_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_mid_correction_stress_mpa.setRange(0.001, 100000.0)
@@ -3985,7 +3985,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_near_correction_stress_mpa.setToolTip(
             "Stress-equivalent near-target band. Inside this band, the controller only sends one motor step."
         )
-        current_sweep_form.addRow("Near step band", self.spin_current_sweep_near_correction_stress_mpa)
+        current_sweep_form.addRow("Near band", self.spin_current_sweep_near_correction_stress_mpa)
         self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
         self.check_current_sweep_return_target.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_return_target)
@@ -4027,7 +4027,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_pause_factor.setToolTip(
             "Pause the current ramp when target error exceeds this multiple of the hold tolerance."
         )
-        current_sweep_form.addRow("Pause error band", self.spin_current_sweep_hold_pause_factor)
+        current_sweep_form.addRow("Pause band", self.spin_current_sweep_hold_pause_factor)
         self.spin_current_sweep_hold_resume_factor = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_hold_resume_factor.setDecimals(2)
         self.spin_current_sweep_hold_resume_factor.setRange(0.1, 1000.0)
@@ -4036,7 +4036,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_resume_factor.setToolTip(
             "Resume the current ramp once target error is inside this multiple of the hold tolerance."
         )
-        current_sweep_form.addRow("Resume error band", self.spin_current_sweep_hold_resume_factor)
+        current_sweep_form.addRow("Resume band", self.spin_current_sweep_hold_resume_factor)
         self.spin_current_sweep_hold_resume_stable_s = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_hold_resume_stable_s.setDecimals(2)
         self.spin_current_sweep_hold_resume_stable_s.setRange(0.0, 600.0)
@@ -4045,7 +4045,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_resume_stable_s.setToolTip(
             "Require the target error to stay inside the resume band for this long before current ramping resumes."
         )
-        current_sweep_form.addRow("Resume stable time", self.spin_current_sweep_hold_resume_stable_s)
+        current_sweep_form.addRow("Resume time", self.spin_current_sweep_hold_resume_stable_s)
         self.spin_current_sweep_hold_filter_window_s = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_hold_filter_window_s.setDecimals(2)
         self.spin_current_sweep_hold_filter_window_s.setRange(0.1, 60.0)
@@ -4054,7 +4054,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_filter_window_s.setToolTip(
             "Scale averaging window used for current-hold pause/resume decisions."
         )
-        current_sweep_form.addRow("Hold filter window", self.spin_current_sweep_hold_filter_window_s)
+        current_sweep_form.addRow("Filter window", self.spin_current_sweep_hold_filter_window_s)
         self.spin_current_sweep_hold_noise_sigma = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_hold_noise_sigma.setDecimals(2)
         self.spin_current_sweep_hold_noise_sigma.setRange(0.0, 100.0)
@@ -4063,7 +4063,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_noise_sigma.setToolTip(
             "Recent scale-noise multiplier added to the current-hold pause/resume bands."
         )
-        current_sweep_form.addRow("Hold noise band", self.spin_current_sweep_hold_noise_sigma)
+        current_sweep_form.addRow("Noise band", self.spin_current_sweep_hold_noise_sigma)
         self.spin_current_sweep_hold_min_pause_stress_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_hold_min_pause_stress_mpa.setDecimals(2)
         self.spin_current_sweep_hold_min_pause_stress_mpa.setRange(0.0, 100000.0)
@@ -4072,7 +4072,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_min_pause_stress_mpa.setToolTip(
             "Minimum MPa-equivalent error required before current hold can start."
         )
-        current_sweep_form.addRow("Minimum pause band", self.spin_current_sweep_hold_min_pause_stress_mpa)
+        current_sweep_form.addRow("Min pause", self.spin_current_sweep_hold_min_pause_stress_mpa)
         self.spin_current_sweep_hold_min_resume_stress_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_hold_min_resume_stress_mpa.setDecimals(2)
         self.spin_current_sweep_hold_min_resume_stress_mpa.setRange(0.0, 100000.0)
@@ -4081,7 +4081,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_min_resume_stress_mpa.setToolTip(
             "Minimum MPa-equivalent band used before current hold can resume the current ramp."
         )
-        current_sweep_form.addRow("Minimum resume band", self.spin_current_sweep_hold_min_resume_stress_mpa)
+        current_sweep_form.addRow("Min resume", self.spin_current_sweep_hold_min_resume_stress_mpa)
         self._current_sweep_advanced_control_widgets = [
             self.spin_current_sweep_target_speed_mm_s,
             self.spin_current_sweep_max_correction_strain_pct,
@@ -4113,7 +4113,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         _toggle_current_sweep_advanced_controls(False)
         self.check_current_sweep_first_overheating = QtWidgets.QCheckBox(
-            "First overheating: repeat first target current sweep",
+            "First overheating: repeat first target",
             automation_box,
         )
         self.check_current_sweep_first_overheating.setChecked(False)
@@ -4211,6 +4211,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_recipe_summary.setVisible(False)
         self.label_recipe_estimate = QtWidgets.QLabel("Estimated points: - | Estimated duration: -")
         self.label_recipe_estimate.setWordWrap(True)
+        self.label_recipe_estimate.setVisible(False)
         self.recipe_progress = QtWidgets.QProgressBar(self.recipe_action_footer)
         self.recipe_progress.setRange(0, 100)
         self.recipe_progress.setValue(0)
@@ -4222,15 +4223,9 @@ class MainWindow(QtWidgets.QMainWindow):
         task_font.setBold(True)
         self.label_current_task.setFont(task_font)
         self.label_current_task.setStyleSheet("color: palette(text);")
+        self.label_current_task.setVisible(False)
 
-        recipe_actions_title = QtWidgets.QLabel("Recipe controls", self.recipe_action_footer)
-        recipe_actions_title_font = recipe_actions_title.font()
-        recipe_actions_title_font.setBold(True)
-        recipe_actions_title.setFont(recipe_actions_title_font)
-        self.recipe_action_footer_layout.addWidget(recipe_actions_title)
-        self.recipe_action_footer_layout.addWidget(self.label_recipe_estimate)
         self.recipe_action_footer_layout.addWidget(self.recipe_progress)
-        self.recipe_action_footer_layout.addWidget(self.label_current_task)
         ramp_buttons = QtWidgets.QHBoxLayout()
         ramp_buttons.setSpacing(6)
         self.button_start_recipe = QtWidgets.QPushButton("Start recipe", self.recipe_action_footer)
@@ -4653,8 +4648,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if isinstance(widget, QtWidgets.QLabel):
                 widget.setWordWrap(True)
             if isinstance(widget, QtWidgets.QAbstractSpinBox):
-                widget.setMinimumWidth(max(widget.minimumWidth(), 96))
-                widget.lineEdit().setMinimumWidth(72)
+                widget.setMinimumWidth(max(widget.minimumWidth(), 130))
+                widget.lineEdit().setMinimumWidth(96)
             if isinstance(widget, QtWidgets.QToolButton):
                 widget.setMinimumWidth(max(widget.minimumWidth(), 220))
                 widget.setSizePolicy(
@@ -9381,18 +9376,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_recipe_estimate.setText(
                 f"Estimated points: {record_points} | Estimated duration: {_format_duration(duration_s)}"
             )
+            self._recipe_idle_progress_text = (
+                f"Estimated: {record_points} pts | {_format_duration(duration_s)}"
+            )
             if not self._automation_active:
                 self._automation_total_steps = tick_count
                 self.recipe_progress.setRange(0, max(1, tick_count))
                 self.recipe_progress.setValue(0)
-                self.recipe_progress.setFormat("Recipe progress: idle")
+                self.recipe_progress.setFormat(self._recipe_idle_progress_text)
         except Exception:
             self._recipe_estimated_points = 0
             self.label_recipe_estimate.setText("Estimated points: - | Estimated duration: -")
+            self._recipe_idle_progress_text = "Recipe estimate unavailable"
             if not self._automation_active:
                 self.recipe_progress.setRange(0, 100)
                 self.recipe_progress.setValue(0)
-                self.recipe_progress.setFormat("Recipe progress: unavailable")
+                self.recipe_progress.setFormat(self._recipe_idle_progress_text)
 
     def _scheduled_log_point_count(self, *, duration_s: float, control_interval_s: float) -> int:
         effective_log_interval_s = max(control_interval_s, self._current_sweep_log_interval_ms() / 1000.0)
@@ -11795,7 +11794,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._automation_progress_started_s = 0.0
             self._automation_progress_last_format_update_s = 0.0
-            self.recipe_progress.setFormat("Recipe progress: idle")
+            self.recipe_progress.setFormat(getattr(self, "_recipe_idle_progress_text", "Recipe progress: idle"))
         self._update_current_task_display()
         self._update_length_setup_progress(value=value, total=total, complete=complete, percent=percent)
 

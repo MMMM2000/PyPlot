@@ -2070,7 +2070,8 @@ def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtb
         assert "Estimated duration: 8.3 min" in window.label_recipe_estimate.text()
         assert window.recipe_progress.maximum() > 100
         assert window.recipe_progress.value() == 0
-        assert "idle" in window.recipe_progress.format()
+        assert "Estimated:" in window.recipe_progress.format()
+        assert "8.3 min" in window.recipe_progress.format()
     finally:
         _close_test_window(window)
 
@@ -3538,12 +3539,14 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is True
         window.button_current_sweep_advanced_controls.setChecked(True)
         assert window.button_current_sweep_advanced_controls.text() == "Hide advanced speeds/caps"
-        assert window.spin_current_sweep_max_correction_stress_mpa.minimumWidth() >= 96
-        assert window.spin_current_sweep_hold_filter_window_s.minimumWidth() >= 96
+        assert window.button_current_sweep_advanced_controls.isHidden() is False
+        assert window.spin_current_sweep_max_correction_stress_mpa.minimumWidth() >= 130
+        assert window.spin_current_sweep_hold_filter_window_s.minimumWidth() >= 130
         assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is False
         assert window.check_current_sweep_first_overheating.isHidden() is False
+        assert window.check_current_sweep_first_overheating.text() == "First overheating: repeat first target"
         assert window.check_current_sweep_reverse_current.isHidden() is True
         assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(
             mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
@@ -3560,6 +3563,8 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.button_start_recipe.parent() is window.recipe_action_footer
         assert window.recipe_progress.parent() is window.recipe_action_footer
         assert window.label_current_task.parent() is window.recipe_action_footer
+        assert window.label_current_task.isVisible() is False
+        assert window.label_recipe_estimate.isVisible() is False
     finally:
         _close_test_window(window)
 
