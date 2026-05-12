@@ -21,6 +21,9 @@
 - When the worktree is clean and the tracked branch can fast-forward, update with `git pull --ff-only`.
 - If there are local changes, no upstream branch, or the update would require merge/rebase, do not force a sync. State the situation and continue when the user intentionally created or selected the current branch.
 
+## Delegation And Subagents
+- The user gives standing project-level permission to use subagents whenever useful.
+
 ## Changelog
 - Keep `CHANGELOG.md` as the canonical release history on `main`.
 - In feature branches/worktrees, add a changelog fragment under `changelog.d/` instead of editing `CHANGELOG.md` directly.
