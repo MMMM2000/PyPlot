@@ -28,6 +28,7 @@ class MiniDmaPlugin(PyPlotPlugin):
         self._runs: list[core.MiniDmaRun] = []
         self._plot_tabs: list[QtWidgets.QWidget] = []
         self._summary_label: QtWidgets.QLabel | None = None
+        self._zero_minimum_strain_checkbox: QtWidgets.QCheckBox | None = None
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
         container = QtWidgets.QWidget(self.host)
@@ -62,6 +63,13 @@ class MiniDmaPlugin(PyPlotPlugin):
         )
         note.setWordWrap(True)
         section_layout.addWidget(note)
+        zero_minimum = QtWidgets.QCheckBox("Set each strain trace minimum to 0")
+        zero_minimum.setToolTip(
+            "Re-zero each strain-current curve by subtracting that curve's minimum strain. "
+            "Useful for comparing transition shape with DMA plots whose lowest strain is shown as 0."
+        )
+        section_layout.addWidget(zero_minimum)
+        self._zero_minimum_strain_checkbox = zero_minimum
         layout.addWidget(section)
         layout.addStretch(1)
 
@@ -122,11 +130,22 @@ class MiniDmaPlugin(PyPlotPlugin):
 
         self.clear_plot_tabs(self._plot_tabs)
         plots_created = 0
+        zero_minimum_strain = bool(
+            self._zero_minimum_strain_checkbox is not None
+            and self._zero_minimum_strain_checkbox.isChecked()
+        )
         for run in self._runs:
-            for plot_kind, figure_factory in (
-                ("strain_current", core.make_strain_current_figure),
+            plot_specs = (
+                (
+                    "strain_current",
+                    lambda current_run: core.make_strain_current_figure(
+                        current_run,
+                        zero_minimum_strain=zero_minimum_strain,
+                    ),
+                ),
                 ("resistance_current", core.make_resistance_current_figure),
-            ):
+            )
+            for plot_kind, figure_factory in plot_specs:
                 try:
                     figure = figure_factory(run)
                 except Exception as exc:
@@ -222,6 +241,14 @@ class MiniDmaPlugin(PyPlotPlugin):
                 "source_file": str(run.measurement_path),
                 "plot_kind": plot_kind,
                 "sample_name": run.sample_name,
+                "zero_minimum_strain": (
+                    bool(
+                        self._zero_minimum_strain_checkbox is not None
+                        and self._zero_minimum_strain_checkbox.isChecked()
+                    )
+                    if plot_kind == "strain_current"
+                    else False
+                ),
             },
         )
         suffix = "Strain" if plot_kind == "strain_current" else "Resistance"

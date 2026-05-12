@@ -57,6 +57,20 @@ def test_make_figures_create_one_line_per_target() -> None:
         plt.close(resistance_fig)
 
 
+def test_strain_current_figure_can_zero_each_trace_minimum() -> None:
+    run = core.load_run(SAMPLE_RUN)
+
+    fig = core.make_strain_current_figure(run, zero_minimum_strain=True)
+    try:
+        ax = fig.axes[0]
+        assert ax.get_ylabel() == "Strain relative to trace minimum [%]"
+        assert len(ax.lines) == 9
+        for line in ax.lines:
+            assert min(line.get_ydata()) == pytest.approx(0.0)
+    finally:
+        plt.close(fig)
+
+
 def test_build_plot_frame_pairs_current_with_requested_y_column() -> None:
     run = core.load_run(SAMPLE_RUN)
     frame = core.build_plot_frame(run, y_column="strain_pct")

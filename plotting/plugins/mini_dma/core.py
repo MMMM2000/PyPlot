@@ -107,12 +107,17 @@ def current_sweep_groups(frame: pd.DataFrame) -> list[tuple[float, pd.DataFrame]
     return groups
 
 
-def make_strain_current_figure(run: MiniDmaRun) -> Figure:
+def make_strain_current_figure(run: MiniDmaRun, *, zero_minimum_strain: bool = False) -> Figure:
     return _make_current_figure(
         run,
         y_column="strain_pct",
-        y_label="Strain [%]",
+        y_label=(
+            "Strain relative to trace minimum [%]"
+            if zero_minimum_strain
+            else "Strain [%]"
+        ),
         title_suffix="Strain vs Current",
+        zero_minimum_y=zero_minimum_strain,
     )
 
 
@@ -133,6 +138,7 @@ def _make_current_figure(
     y_label: str,
     title_suffix: str,
     filter_resistance_outliers: bool = False,
+    zero_minimum_y: bool = False,
 ) -> Figure:
     groups = current_sweep_groups(run.frame)
     if not groups:
@@ -145,9 +151,12 @@ def _make_current_figure(
             group = _drop_resistance_outliers(group)
         if len(group) < MIN_POINTS_PER_TARGET:
             continue
+        y_values = group[y_column].to_numpy(dtype=float)
+        if zero_minimum_y and len(y_values):
+            y_values = y_values - y_values.min()
         ax.plot(
             group["current_mA"].to_numpy(dtype=float),
-            group[y_column].to_numpy(dtype=float),
+            y_values,
             label=_format_target_label(target),
             linewidth=1.4,
         )
