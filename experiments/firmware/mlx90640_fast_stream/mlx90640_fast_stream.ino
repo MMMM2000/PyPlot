@@ -5,6 +5,19 @@ Adafruit_MLX90640 mlx;
 float frame[32 * 24];
 
 constexpr uint32_t SERIAL_BAUD = 921600;
+#ifndef MLX_I2C_CLOCK
+#define MLX_I2C_CLOCK 400000
+#endif
+#ifndef MLX_MODE
+#define MLX_MODE MLX90640_CHESS
+#endif
+#ifndef MLX_RESOLUTION
+#define MLX_RESOLUTION MLX90640_ADC_18BIT
+#endif
+#ifndef MLX_REFRESH_RATE
+#define MLX_REFRESH_RATE MLX90640_4_HZ
+#endif
+
 constexpr uint8_t FRAME_WIDTH = 32;
 constexpr uint8_t FRAME_HEIGHT = 24;
 constexpr uint16_t FRAME_PIXELS = FRAME_WIDTH * FRAME_HEIGHT;
@@ -76,7 +89,7 @@ void setup() {
   Wire.setSDA(PB9);  // Nucleo D14, I2C1 SDA
   Wire.setSCL(PB8);  // Nucleo D15, I2C1 SCL
   Wire.begin();
-  Wire.setClock(400000);
+  Wire.setClock(MLX_I2C_CLOCK);
 
   if (!mlx.begin(MLX90640_I2CADDR_DEFAULT, &Wire)) {
     Serial.println("MLX90640_FAST_ERROR_NOT_FOUND");
@@ -86,9 +99,9 @@ void setup() {
   }
   Serial.println("MLX90640_FAST_STREAM_BEGIN");
 
-  mlx.setMode(MLX90640_CHESS);
-  mlx.setResolution(MLX90640_ADC_18BIT);
-  mlx.setRefreshRate(MLX90640_4_HZ);
+  mlx.setMode(MLX_MODE);
+  mlx.setResolution(MLX_RESOLUTION);
+  mlx.setRefreshRate(MLX_REFRESH_RATE);
 }
 
 void loop() {
