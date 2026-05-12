@@ -5213,7 +5213,40 @@ def test_session_writes_raw_scale_sidecar_and_interval_summary(
         assert metadata["logging"]["log_interval_ms"] == 500
         assert metadata["logging"]["raw_scale_sidecar"] == "scale_raw.csv"
         assert metadata["logging"]["setup_csv"] == "setup.csv"
+        assert metadata["logging"]["ui_telemetry_csv"] == "ui_telemetry.csv"
         assert metadata["logging"]["raw_scale_sample_count"] == 3
+    finally:
+        _close_test_window(window)
+
+
+def test_session_writes_ui_refresh_telemetry(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("ui_telemetry_session")
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._session_ui_telemetry_path is not None
+        window._write_ui_telemetry_sample(
+            started_s=window._session_start_monotonic + 0.2,
+            finished_s=window._session_start_monotonic + 0.212,
+            previous_ui_s=window._session_start_monotonic,
+            scale_sample_changed=True,
+            dialog_sample_recorded=False,
+            dashboard_plot_refreshed=True,
+        )
+        window._stop_session()
+
+        rows = list(csv.DictReader((tmp_path / "ui_telemetry_session" / "ui_telemetry.csv").open(encoding="utf-8", newline="")))
+        metadata = json.loads((tmp_path / "ui_telemetry_session" / "metadata.json").read_text(encoding="utf-8"))
+
+        assert len(rows) == 1
+        assert rows[0]["target_interval_ms"] == str(window._ui_refresh_interval_ms())
+        assert rows[0]["actual_interval_ms"] == "200.000"
+        assert rows[0]["ui_fps"] == "5.000"
+        assert rows[0]["handler_duration_ms"] == "12.000"
+        assert rows[0]["scale_sample_changed"] == "1"
+        assert rows[0]["dashboard_plot_refreshed"] == "1"
+        assert metadata["logging"]["ui_telemetry_sample_count"] == 1
     finally:
         _close_test_window(window)
 

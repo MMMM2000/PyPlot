@@ -67,6 +67,7 @@ SESSION_RAW_SCALE_CSV = "scale_raw.csv"
 SESSION_CONTROL_TRACE_CSV = "control_trace.csv"
 SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
+SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
     "timestamp_utc",
@@ -90,6 +91,25 @@ CONTROL_TRACE_FIELDNAMES = [
     "effective_target_mm",
     "result",
     "reason",
+]
+UI_TELEMETRY_FIELDNAMES = [
+    "elapsed_s",
+    "timestamp_utc",
+    "target_interval_ms",
+    "actual_interval_ms",
+    "ui_fps",
+    "handler_duration_ms",
+    "automation_active",
+    "session_active",
+    "session_logging_enabled",
+    "length_setup_dialog_visible",
+    "recovery_dialog_visible",
+    "scale_sample_changed",
+    "dialog_sample_recorded",
+    "dashboard_plot_refreshed",
+    "latest_scale_age_s",
+    "session_points",
+    "live_plot_points",
 ]
 GRAVITY_MS2 = 9.80665
 LONG_NAMES = ("Displacement", "Load", "Strain", "Stress")
@@ -2270,6 +2290,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_writer: csv.DictWriter[str] | None = None
         self._session_control_trace_handle: Any = None
         self._session_control_trace_writer: csv.DictWriter[str] | None = None
+        self._session_ui_telemetry_handle: Any = None
+        self._session_ui_telemetry_writer: csv.DictWriter[str] | None = None
         self._session_setup_txt_handle: Any = None
         self._session_setup_csv_handle: Any = None
         self._session_setup_csv_writer: csv.DictWriter[str] | None = None
@@ -2278,12 +2300,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_json_path: Path | None = None
         self._session_raw_scale_path: Path | None = None
         self._session_control_trace_path: Path | None = None
+        self._session_ui_telemetry_path: Path | None = None
         self._session_setup_txt_path: Path | None = None
         self._session_setup_csv_path: Path | None = None
         self._session_start_wall_s = 0.0
         self._session_raw_scale_start_wall_s = 0.0
         self._last_session_log_timestamp_s: float | None = None
         self._session_raw_scale_count = 0
+        self._session_ui_telemetry_count = 0
+        self._ui_refresh_last_monotonic_s: float | None = None
         self._session_logging_enabled = True
         self._load_offset_g = 0.0
         self._position_reference_mm = 0.0
@@ -10311,8 +10336,11 @@ class MainWindow(QtWidgets.QMainWindow):
         Any,
         csv.DictWriter[str],
         Any,
+        csv.DictWriter[str],
+        Any,
         Any,
         csv.DictWriter[str],
+        Path,
         Path,
         Path,
         Path,
@@ -10332,6 +10360,8 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_csv_handle = setup_csv_path.open("w", encoding="utf-8", newline="")
         control_trace_path = txt_path.parent / SESSION_CONTROL_TRACE_CSV
         control_trace_handle = control_trace_path.open("w", encoding="utf-8", newline="")
+        ui_telemetry_path = txt_path.parent / SESSION_UI_TELEMETRY_CSV
+        ui_telemetry_handle = ui_telemetry_path.open("w", encoding="utf-8", newline="")
         txt_handle.write("\t".join(LONG_NAMES) + "\n")
         txt_handle.write("\t".join(UNITS) + "\n")
         txt_handle.write(f"# Created UTC\t{created_utc}\n")
@@ -10386,6 +10416,9 @@ class MainWindow(QtWidgets.QMainWindow):
         control_trace_writer = csv.DictWriter(control_trace_handle, fieldnames=CONTROL_TRACE_FIELDNAMES)
         control_trace_writer.writeheader()
         control_trace_handle.flush()
+        ui_telemetry_writer = csv.DictWriter(ui_telemetry_handle, fieldnames=UI_TELEMETRY_FIELDNAMES)
+        ui_telemetry_writer.writeheader()
+        ui_telemetry_handle.flush()
         return (
             txt_handle,
             csv_handle,
@@ -10394,6 +10427,8 @@ class MainWindow(QtWidgets.QMainWindow):
             raw_scale_writer,
             control_trace_handle,
             control_trace_writer,
+            ui_telemetry_handle,
+            ui_telemetry_writer,
             setup_txt_handle,
             setup_csv_handle,
             setup_writer,
@@ -10402,6 +10437,7 @@ class MainWindow(QtWidgets.QMainWindow):
             json_path,
             raw_scale_path,
             control_trace_path,
+            ui_telemetry_path,
             setup_txt_path,
             setup_csv_path,
         )
@@ -10531,10 +10567,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 "control_trace_csv": None
                 if self._session_control_trace_path is None
                 else self._session_control_trace_path.name,
+                "ui_telemetry_csv": None
+                if self._session_ui_telemetry_path is None
+                else self._session_ui_telemetry_path.name,
                 "setup_txt": None if self._session_setup_txt_path is None else self._session_setup_txt_path.name,
                 "setup_csv": None if self._session_setup_csv_path is None else self._session_setup_csv_path.name,
                 "raw_scale_sample_count": int(self._session_raw_scale_count),
                 "raw_scale_session_rate_hz": self._session_raw_scale_rate_hz(),
+                "ui_telemetry_sample_count": int(self._session_ui_telemetry_count),
             },
             "control": {
                 "control_interval_ms": self._control_interval_ms(),
@@ -10687,6 +10727,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 raw_scale_writer,
                 control_trace_handle,
                 control_trace_writer,
+                ui_telemetry_handle,
+                ui_telemetry_writer,
                 setup_txt_handle,
                 setup_csv_handle,
                 setup_csv_writer,
@@ -10695,6 +10737,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 json_path,
                 raw_scale_path,
                 control_trace_path,
+                ui_telemetry_path,
                 setup_txt_path,
                 setup_csv_path,
             ) = self._prepare_session_files(created_utc=created_utc)
@@ -10720,6 +10763,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 csv_handle,
                 raw_scale_handle,
                 control_trace_handle,
+                ui_telemetry_handle,
                 setup_txt_handle,
                 setup_csv_handle,
             ):
@@ -10733,6 +10777,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 json_path,
                 raw_scale_path,
                 control_trace_path,
+                ui_telemetry_path,
                 setup_txt_path,
                 setup_csv_path,
             ):
@@ -10765,6 +10810,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_start_wall_s = self._session_start_wall_s
         self._last_session_log_timestamp_s = self._session_start_wall_s
         self._session_raw_scale_count = 0
+        self._session_ui_telemetry_count = 0
+        self._ui_refresh_last_monotonic_s = None
         self._session_txt_handle = txt_handle
         self._session_csv_handle = csv_handle
         self._session_csv_writer = csv_writer
@@ -10772,6 +10819,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_writer = raw_scale_writer
         self._session_control_trace_handle = control_trace_handle
         self._session_control_trace_writer = control_trace_writer
+        self._session_ui_telemetry_handle = ui_telemetry_handle
+        self._session_ui_telemetry_writer = ui_telemetry_writer
         self._session_setup_txt_handle = setup_txt_handle
         self._session_setup_csv_handle = setup_csv_handle
         self._session_setup_csv_writer = setup_csv_writer
@@ -10780,6 +10829,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_json_path = json_path
         self._session_raw_scale_path = raw_scale_path
         self._session_control_trace_path = control_trace_path
+        self._session_ui_telemetry_path = ui_telemetry_path
         self._session_setup_txt_path = setup_txt_path
         self._session_setup_csv_path = setup_csv_path
         self.button_start_session.setEnabled(False)
@@ -10812,6 +10862,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_start_monotonic = time.monotonic()
         self._session_start_wall_s = time.time()
         self._last_session_log_timestamp_s = self._session_start_wall_s
+        self._ui_refresh_last_monotonic_s = None
         self._set_automation_context(phase="start")
         self._write_session_metadata()
         self._refresh_plots()
@@ -10840,6 +10891,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_control_trace_handle.close()
             self._session_control_trace_handle = None
         self._session_control_trace_writer = None
+        if self._session_ui_telemetry_handle is not None:
+            self._session_ui_telemetry_handle.close()
+            self._session_ui_telemetry_handle = None
+        self._session_ui_telemetry_writer = None
         if self._session_setup_txt_handle is not None:
             self._session_setup_txt_handle.close()
             self._session_setup_txt_handle = None
@@ -13819,44 +13874,121 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._automation_active and not self._session_active:
             self._ui_refresh_timer.stop()
             return
-        self._record_live_dialog_samples_from_ui_refresh()
-        self._record_live_plot_sample_from_ui_refresh()
+        started_s = time.monotonic()
+        previous_ui_s = self._ui_refresh_last_monotonic_s
+        previous_scale_timestamp = self._latest_scale_timestamp
+        self._ui_refresh_last_monotonic_s = started_s
+        dialog_sample_recorded = self._record_live_dialog_samples_from_ui_refresh()
+        dashboard_plot_refreshed = self._record_live_plot_sample_from_ui_refresh()
         self._refresh_live_labels()
+        finished_s = time.monotonic()
+        self._write_ui_telemetry_sample(
+            started_s=started_s,
+            finished_s=finished_s,
+            previous_ui_s=previous_ui_s,
+            scale_sample_changed=(
+                previous_scale_timestamp is not None
+                and self._latest_scale_timestamp is not None
+                and self._latest_scale_timestamp != previous_scale_timestamp
+            ),
+            dialog_sample_recorded=dialog_sample_recorded,
+            dashboard_plot_refreshed=dashboard_plot_refreshed,
+        )
 
-    def _record_live_plot_sample_from_ui_refresh(self) -> None:
+    def _setup_dialog_visible(self) -> bool:
+        return self._length_setup_dialog is not None and not self._length_setup_dialog.isHidden()
+
+    def _recovery_dialog_visible(self) -> bool:
+        return self._recovery_plot_dialog is not None and not self._recovery_plot_dialog.isHidden()
+
+    def _write_ui_telemetry_sample(
+        self,
+        *,
+        started_s: float,
+        finished_s: float,
+        previous_ui_s: float | None,
+        scale_sample_changed: bool,
+        dialog_sample_recorded: bool,
+        dashboard_plot_refreshed: bool,
+    ) -> None:
+        if (
+            not self._session_active
+            or self._session_ui_telemetry_writer is None
+            or self._session_ui_telemetry_handle is None
+        ):
+            return
+        actual_interval_ms = None if previous_ui_s is None else max(0.0, (started_s - previous_ui_s) * 1000.0)
+        ui_fps = None if not actual_interval_ms or actual_interval_ms <= 0.0 else 1000.0 / actual_interval_ms
+        scale_age_s = self._scale_reading_age_s()
+
+        def _number(value: float | None, *, decimals: int = 6) -> str:
+            if value is None or not math.isfinite(float(value)):
+                return ""
+            return f"{float(value):.{decimals}f}"
+
+        self._session_ui_telemetry_writer.writerow(
+            {
+                "elapsed_s": f"{max(0.0, started_s - self._session_start_monotonic):.6f}",
+                "timestamp_utc": _utc_timestamp(),
+                "target_interval_ms": int(self._ui_refresh_interval_ms()),
+                "actual_interval_ms": _number(actual_interval_ms, decimals=3),
+                "ui_fps": _number(ui_fps, decimals=3),
+                "handler_duration_ms": _number(max(0.0, (finished_s - started_s) * 1000.0), decimals=3),
+                "automation_active": int(bool(self._automation_active)),
+                "session_active": int(bool(self._session_active)),
+                "session_logging_enabled": int(bool(self._session_logging_enabled)),
+                "length_setup_dialog_visible": int(self._setup_dialog_visible()),
+                "recovery_dialog_visible": int(self._recovery_dialog_visible()),
+                "scale_sample_changed": int(bool(scale_sample_changed)),
+                "dialog_sample_recorded": int(bool(dialog_sample_recorded)),
+                "dashboard_plot_refreshed": int(bool(dashboard_plot_refreshed)),
+                "latest_scale_age_s": _number(scale_age_s, decimals=3),
+                "session_points": len(self._session_points),
+                "live_plot_points": len(self._live_plot_points),
+            }
+        )
+        self._session_ui_telemetry_count += 1
+        if self._session_ui_telemetry_count % 10 == 0:
+            self._session_ui_telemetry_handle.flush()
+
+    def _record_live_plot_sample_from_ui_refresh(self) -> bool:
         if (
             not self._session_active
             or self._latest_scale_timestamp is None
             or self._last_live_plot_scale_timestamp == self._latest_scale_timestamp
+            or self._setup_dialog_visible()
         ):
-            return
+            return False
         point = self._capture_live_plot_point()
         if point is None:
-            return
+            return False
         self._live_plot_points.append(point)
         if len(self._live_plot_points) > LIVE_PLOT_MAX_POINTS:
             self._live_plot_points = self._live_plot_points[-LIVE_PLOT_MAX_POINTS:]
         self._last_live_plot_scale_timestamp = self._latest_scale_timestamp
         self._refresh_plots()
+        return True
 
-    def _record_live_dialog_samples_from_ui_refresh(self) -> None:
+    def _record_live_dialog_samples_from_ui_refresh(self) -> bool:
+        recorded = False
         if self._latest_scale_timestamp is None:
-            return
+            return False
         if (
-            self._length_setup_dialog is not None
-            and not self._length_setup_dialog.isHidden()
+            self._setup_dialog_visible()
             and self._automation_active
             and self._length_setup_last_record_scale_timestamp != self._latest_scale_timestamp
         ):
             self._record_length_setup_point()
+            recorded = True
         if (
-            self._recovery_plot_dialog is not None
-            and not self._recovery_plot_dialog.isHidden()
+            self._recovery_dialog_visible()
             and self._automation_active
             and self._is_recovery_mode()
             and self._recovery_last_record_scale_timestamp != self._latest_scale_timestamp
         ):
             self._record_recovery_point()
+            recorded = True
+        return recorded
 
     def _refresh_live_labels(self) -> None:
         effective_load = self._current_effective_load_g()
@@ -13975,6 +14107,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_supply_live_label()
 
     def _refresh_plots(self) -> None:
+        if self._setup_dialog_visible():
+            return
         theme = self._plot_theme()
         self.figure.clear()
         self.figure.set_facecolor(theme["figure_rgb"])
