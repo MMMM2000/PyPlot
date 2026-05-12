@@ -292,6 +292,27 @@ def _should_force_light_text(color: Any) -> bool:
     return luminance < 0.6 and spread < 0.12
 
 
+def _normalize_export_color(color: Any) -> str:
+    """Return a stable hex color token for export metadata."""
+
+    if color is None:
+        return ""
+    candidate = color
+    if isinstance(candidate, np.ndarray):
+        if candidate.size == 0:
+            return ""
+        candidate = candidate[0]
+    if isinstance(candidate, (list, tuple)):
+        if not candidate:
+            return ""
+        if isinstance(candidate[0], (list, tuple, np.ndarray)):
+            candidate = candidate[0]
+    try:
+        return str(mcolors.to_hex(candidate, keep_alpha=False))
+    except Exception:
+        return ""
+
+
 def _sync_legend_text_colors(legend: Legend) -> None:
     """Apply text-follows-handle behaviour when requested."""
 
@@ -1325,6 +1346,7 @@ class _TabSeriesExportEntry:
     x_unit: str
     y_label: str
     y_unit: str
+    color: str = ""
     x_scale_factor: float = 1.0
     y_scale_factor: float = 1.0
 
@@ -1344,6 +1366,7 @@ class WorksheetColumnMeta:
     units: str = ""
     comments: str = ""
     formula: str = ""
+    plot_color: str = ""
 
 
 @dataclass
@@ -4704,20 +4727,47 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             f"Exported {len(series)} data series to {path}",
         )
 
-    def _plugin_uses_shared_plot_workbooks(self, plugin_name: str | None) -> bool:
+    def _plugin_instance_for_name(self, plugin_name: str | None) -> PyPlotPlugin | None:
         if not plugin_name:
-            return True
-        plugin = None
+            return None
         current_name = getattr(self, "_current_plotter_name", None)
         if isinstance(current_name, str) and current_name == plugin_name:
             plugin = getattr(self, "_current_plugin", None)
-        if plugin is None:
-            instances = getattr(self, "_plugin_instances", None)
-            if isinstance(instances, dict):
-                plugin = instances.get(plugin_name)
+            if isinstance(plugin, PyPlotPlugin):
+                return plugin
+        instances = getattr(self, "_plugin_instances", None)
+        if isinstance(instances, dict):
+            plugin = instances.get(plugin_name)
+            if isinstance(plugin, PyPlotPlugin):
+                return plugin
+        return None
+
+    def _plugin_uses_shared_plot_workbooks(self, plugin_name: str | None) -> bool:
+        if not plugin_name:
+            return True
+        plugin = self._plugin_instance_for_name(plugin_name)
         if plugin is None:
             return True
         return bool(getattr(plugin, "uses_shared_plot_workbooks", True))
+
+    def _origin_export_tabs_for_plugin(
+        self,
+        plugin_name: str | None,
+    ) -> set[QtWidgets.QWidget] | None:
+        plugin = self._plugin_instance_for_name(plugin_name)
+        if plugin is None:
+            return None
+        tab_provider = getattr(plugin, "origin_export_tabs", None)
+        if not callable(tab_provider):
+            return None
+        try:
+            tabs = tab_provider()
+        except Exception:
+            LOGGER.warning("Failed to resolve Origin export tabs for %s", plugin_name, exc_info=True)
+            return None
+        if tabs is None:
+            return None
+        return {tab for tab in tabs if isinstance(tab, QtWidgets.QWidget)}
 
     @staticmethod
     def _safe_series_token(text: str, *, fallback: str) -> str:
@@ -4848,6 +4898,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 x_label, x_unit, y_label, y_unit = self._axis_label_parts(line_axes)
                 x_factor = self._axis_value_factor(line_axes, axis_name="x")
                 y_factor = self._axis_value_factor(line_axes, axis_name="y")
+                color = _normalize_export_color(
+                    getattr(line_obj, "get_color", lambda: "")()
+                    if line_obj is not None
+                    else ""
+                )
                 entries.append(
                     _TabSeriesExportEntry(
                         label=label,
@@ -4857,6 +4912,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         x_unit=x_unit or default_x_unit,
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
+                        color=color,
                         x_scale_factor=x_factor,
                         y_scale_factor=y_factor,
                     )
@@ -4912,6 +4968,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         x_unit=x_unit or default_x_unit,
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
+                        color=_normalize_export_color(line.get_color()),
                         x_scale_factor=x_factor,
                         y_scale_factor=y_factor,
                     )
@@ -4949,6 +5006,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 x_vals, y_vals = self._paired_numeric_arrays(offsets[:, 0], offsets[:, 1])
                 if x_vals.size == 0 or y_vals.size == 0:
                     continue
+                collection_color = _normalize_export_color(
+                    getattr(collection, "get_edgecolor", lambda: "")()
+                )
+                if not collection_color:
+                    collection_color = _normalize_export_color(
+                        getattr(collection, "get_facecolor", lambda: "")()
+                    )
                 entries.append(
                     _TabSeriesExportEntry(
                         label=label,
@@ -4958,6 +5022,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         x_unit=x_unit or default_x_unit,
                         y_label=y_label or default_y or "Y",
                         y_unit=y_unit or default_y_unit,
+                        color=collection_color,
                         x_scale_factor=x_factor,
                         y_scale_factor=y_factor,
                     )
@@ -5058,6 +5123,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 long_name=entry.y_label or "Y",
                 units=entry.y_unit,
                 comments=label,
+                plot_color=entry.color,
             )
             axis_roles.extend(["X", "Y"])
 
@@ -5122,7 +5188,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
     def _shared_plot_workbooks_for_plugin(self, plugin_name: str | None) -> list[WorkbookData]:
         results: list[WorkbookData] = []
         seen: set[Hashable] = set()
+        export_tabs = self._origin_export_tabs_for_plugin(plugin_name)
         for tab, key in list(self._shared_plot_workbook_by_tab.items()):
+            if export_tabs is not None and tab not in export_tabs:
+                continue
             if self.tab_widget.indexOf(tab) < 0:
                 continue
             descriptor = self._tab_descriptors.get(tab)
@@ -5144,6 +5213,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         return results
 
     def _open_origin_shared(self) -> None:
+        suppress_dialogs = bool(getattr(self, "_automation_suppress_dialogs", False))
         plugin_name = getattr(self, "_current_plotter_name", None)
         plugin_token = plugin_name if isinstance(plugin_name, str) and plugin_name.strip() else None
         self._prune_shared_plot_workbooks()
@@ -5155,6 +5225,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 self._register_shared_plot_workbook_for_tab(tab, descriptor)
                 workbooks = self._shared_plot_workbooks_for_plugin(plugin_token)
         if not workbooks:
+            if suppress_dialogs:
+                raise RuntimeError("Plot at least one graph before exporting to Origin.")
             QtWidgets.QMessageBox.information(
                 self,
                 "Open in Origin",
@@ -5168,6 +5240,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 create_graphs=True,
             )
         except ModuleNotFoundError:
+            if suppress_dialogs:
+                raise
             QtWidgets.QMessageBox.warning(
                 self,
                 "Open in Origin",
@@ -5175,6 +5249,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             )
             return
         except Exception as exc:  # pragma: no cover - GUI error path
+            if suppress_dialogs:
+                raise
             QtWidgets.QMessageBox.critical(
                 self,
                 "Open in Origin",
@@ -5190,22 +5266,27 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 f"and created {plotted} graph{'s' if plotted != 1 else ''}."
             )
             self._append_log(message)
-            QtWidgets.QMessageBox.information(self, "Open in Origin", message)
+            if not suppress_dialogs:
+                QtWidgets.QMessageBox.information(self, "Open in Origin", message)
         else:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Open in Origin",
-                "No worksheet data was exported to Origin.",
-            )
+            if suppress_dialogs:
+                self._append_log("No worksheet data was exported to Origin.", level="error")
+            else:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Open in Origin",
+                    "No worksheet data was exported to Origin.",
+                )
 
         if errors:
             details = "\n".join(errors)
             self._append_log("Some Origin exports failed:\n" + details, level="error")
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Open in Origin",
-                "Some items could not be exported. Check the message log for details.",
-            )
+            if not suppress_dialogs:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Open in Origin",
+                    "Some items could not be exported. Check the message log for details.",
+                )
 
     def _open_origin_prompt(self) -> None:
         raise NotImplementedError
@@ -5904,6 +5985,19 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             label = str(column_name)
         return label
 
+    def _origin_plot_color(
+        self,
+        worksheet: WorksheetData,
+        y_index: int,
+    ) -> str:
+        columns = list(worksheet.dataframe.columns)
+        if y_index < 0 or y_index >= len(columns):
+            return ""
+        meta = worksheet.columns.get(columns[y_index])
+        if not isinstance(meta, WorksheetColumnMeta):
+            return ""
+        return str(meta.plot_color or "").strip()
+
     def _origin_graph_templates(self, origin_any: Any) -> list[str]:
         _ = origin_any
         templates: list[str] = ["ORIGIN", "line", "scatter"]
@@ -6105,14 +6199,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 if group_index == 0 and normalized:
                     primary_group_labels.add(normalized)
                 self._apply_origin_plot_label(plot_obj, worksheet, y_index, override_label=label)
-                color_key = normalized or f"group{group_index}:{x_index}:{y_index}"
-                color = color_by_label.get(color_key)
-                if color is None:
-                    color = ORIGIN_EXPORT_COLOR_CYCLE[
-                        next_color_index % len(ORIGIN_EXPORT_COLOR_CYCLE)
-                    ]
-                    color_by_label[color_key] = color
-                    next_color_index += 1
+                color = self._origin_plot_color(worksheet, y_index)
+                if not color:
+                    color_key = normalized or f"group{group_index}:{x_index}:{y_index}"
+                    color = color_by_label.get(color_key)
+                    if color is None:
+                        color = ORIGIN_EXPORT_COLOR_CYCLE[
+                            next_color_index % len(ORIGIN_EXPORT_COLOR_CYCLE)
+                        ]
+                        color_by_label[color_key] = color
+                        next_color_index += 1
                 self._apply_origin_plot_style(plot_obj, color=color)
                 if (
                     group_index > 0
@@ -18069,8 +18165,26 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         index = self.tab_widget.indexOf(tab)
         if index < 0:
             return
+        restore_maximized = bool(
+            getattr(self.tab_widget, "_global_maximized", False)
+            or getattr(self.tab_widget, "_fullscreen_lock", False)
+        )
         self._set_tab_visibility(tab, True)
         self.tab_widget.setCurrentIndex(index)
+        if restore_maximized or bool(
+            getattr(self.tab_widget, "_global_maximized", False)
+            or getattr(self.tab_widget, "_fullscreen_lock", False)
+        ):
+            subwindow_for = getattr(self.tab_widget, "_subwindow_for", None)
+            maximize_single = getattr(self.tab_widget, "_maximize_single", None)
+            maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
+            if callable(subwindow_for):
+                sub = subwindow_for(tab)
+                if sub is not None:
+                    if callable(maximize_single):
+                        maximize_single(sub)
+                    elif callable(maybe_maximize):
+                        maybe_maximize(sub)
         self._update_tab_buttons()
 
     def _tab_for_axes(self, axes: Any) -> QtWidgets.QWidget | None:
@@ -20229,6 +20343,14 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 else:
                     self._apply_global_window_state()
             else:
+                if (
+                    isinstance(source, _ManagedSubWindow)
+                    and self._is_live_subwindow(source)
+                    and not source_was_maximized
+                    and not self._fullscreen_lock
+                    and not self._global_maximized
+                ):
+                    return
                 if (
                     isinstance(source, _ManagedSubWindow)
                     and self._is_live_subwindow(source)

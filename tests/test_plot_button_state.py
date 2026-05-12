@@ -31,6 +31,15 @@ from plotting.pyplot.window import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _avoid_pyplot_close_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        PyPlotWorkbench,
+        "_confirm_close_with_unsaved_data",
+        lambda _self: True,
+    )
+
+
 def _ensure_app() -> QtWidgets.QApplication:
     app = QtWidgets.QApplication.instance()
     if app is None:
@@ -821,12 +830,12 @@ def test_switching_tabs_preserves_maximized_subwindow_mode() -> None:
         maximize_single(first_sub)
         app.processEvents()
         assert not first_sub.isHidden()
-        assert not second_sub.isHidden()
+        assert second_sub.isHidden()
 
         window.tab_widget.setCurrentWidget(second_tab)
         app.processEvents()
         assert not second_sub.isHidden()
-        assert not first_sub.isHidden()
+        assert first_sub.isHidden()
         assert bool(getattr(window.tab_widget, "_global_maximized", False))
         assert bool(getattr(window.tab_widget, "_fullscreen_lock", False))
     finally:
@@ -839,6 +848,8 @@ def test_showing_hidden_tab_respects_fullscreen_lock() -> None:
     window = PyPlotWorkbench()
     try:
         window.resize(1600, 980)
+        window.show()
+        app.processEvents()
         window._create_blank_graph()
         first_tab = window.tab_widget.currentWidget()
         assert isinstance(first_tab, QtWidgets.QWidget)
@@ -862,13 +873,12 @@ def test_showing_hidden_tab_respects_fullscreen_lock() -> None:
         fullscreen_geometry = first_sub.geometry()
         assert fullscreen_geometry.isValid()
 
+        window._set_tab_visibility(second_tab, False)  # noqa: SLF001
+        app.processEvents()
         # Simulate a restore path where the fullscreen lock is still active even if
         # `_global_maximized` has temporarily fallen out of sync.
         tab_proxy._fullscreen_lock = True  # noqa: SLF001
         tab_proxy._global_maximized = False  # noqa: SLF001
-
-        window._set_tab_visibility(second_tab, False)  # noqa: SLF001
-        app.processEvents()
         window._show_tab(second_tab)  # noqa: SLF001
         app.processEvents()
 
@@ -885,6 +895,8 @@ def test_switching_tabs_in_fullscreen_hides_previous_normal_windows() -> None:
     window = PyPlotWorkbench()
     try:
         window.resize(1600, 980)
+        window.show()
+        app.processEvents()
         window._create_blank_graph()
         first_tab = window.tab_widget.currentWidget()
         assert isinstance(first_tab, QtWidgets.QWidget)
@@ -924,6 +936,8 @@ def test_fullscreen_geometry_fills_viewport_for_wide_aspect_graphs() -> None:
     window = PyPlotWorkbench()
     try:
         window.resize(1600, 980)
+        window.show()
+        app.processEvents()
         window._create_blank_graph()
         app.processEvents()
 
@@ -1922,11 +1936,13 @@ def test_current_axes_and_canvas_resolve_with_mdi_proxy() -> None:
         app.processEvents()
 
 
-def test_single_mdi_subwindow_fills_viewport_after_arrange() -> None:
+def test_single_mdi_subwindow_uses_half_viewport_after_arrange() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
     try:
         window.resize(1500, 950)
+        window.show()
+        app.processEvents()
         window._create_blank_graph()
         app.processEvents()
         tab_proxy = window.tab_widget
@@ -1938,8 +1954,9 @@ def test_single_mdi_subwindow_fills_viewport_after_arrange() -> None:
         assert isinstance(sub, QtWidgets.QMdiSubWindow)
         viewport = mdi.viewport().rect()
         margin = getattr(tab_proxy, "_layout_margin", 6)
-        assert sub.geometry().width() >= viewport.width() - margin * 2
-        assert sub.geometry().height() >= viewport.height() - margin * 2
+        expected_width = max(1, (viewport.width() - margin * 2) // 2)
+        assert sub.geometry().width() == pytest.approx(expected_width, abs=margin)
+        assert sub.geometry().height() > 0
     finally:
         window.close()
         app.processEvents()

@@ -34,9 +34,9 @@ For requests such as:
 
 the current model is the wrong abstraction. We need a persistent session model instead of a fire-and-exit model.
 
-## Current State Summary
+## Pre-PR Current State Summary
 
-Relevant observed facts in the current codebase:
+Before PR #260, the relevant observed facts were:
 
 - `launcher.py --pyplot-plugin / --pyplot-import / --pyplot-plot` works as a one-shot automation wrapper.
 - `_execute_pyplot_automation_request(...)` constructs a real `PyPlotWorkbench`, performs actions, then closes it in `finally`.
@@ -51,6 +51,25 @@ Relevant observed facts in the current codebase:
   - active graph tab
   - whether the plugin is busy
   - what actions are currently available
+
+## Implementation Status After PR #260
+
+PR #260 implements the first durable live-session layer from this plan:
+
+- `launcher.py` now exposes `--pyplot-session-start`, `--pyplot-session-list`, `--pyplot-session-state`, `--pyplot-session-send`, and `--pyplot-session-close`.
+- Running sessions are registered with a local session id, auth token, host, port, process id, working directory, selected plugin, and protocol version.
+- `PyPlotWorkbench` now exposes a public automation API for plugin selection, imports, project load/save, plotting, graph tab activation, shared Origin export, figure creation, graph capture, window capture, and state inspection.
+- The live command bridge dispatches JSON commands onto the Qt GUI thread and returns structured success/error payloads.
+- Long-running commands can carry an extended timeout through the bridge, which is needed for cold Origin exports.
+- Automation-triggered shared Origin exports suppress blocking success dialogs while preserving the normal interactive dialogs for users.
+- The older one-shot automation path now routes through the same public workbench API instead of directly reaching into private helpers.
+
+The remaining work is mostly broader coverage rather than the first bridge:
+
+- richer plugin-specific commands for workflows like graph formatting, VSM visibility modes, and builder-specific controls
+- a more complete busy/progress model in `automation_get_state()`
+- stricter session cleanup/recovery for stale records and crashed processes
+- broader real-workflow tests against representative Praha folders and Origin exports
 
 ## Product Goal
 

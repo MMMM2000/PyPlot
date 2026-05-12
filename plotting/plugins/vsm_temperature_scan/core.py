@@ -1297,7 +1297,7 @@ class VSMTemperatureScanProcessor:
                 pass
 
         def _style_origin_layer(layer: Any, title: str) -> None:
-            """Apply consistent axes, disable speed mode, and mirror the title to the top X axis."""
+            """Apply consistent axes and disable speed mode without duplicating titles."""
 
             try:
                 layer.rescale()
@@ -1313,21 +1313,24 @@ class VSMTemperatureScanProcessor:
                 layer.lt_exec("layer -s 0;")
             except Exception:
                 pass
-            _set_origin_axis_title(layer, "x2", title)
             try:
                 axis_top = layer.axis("x2")
-                # Hide top tick labels while keeping the title visible.
+                try:
+                    axis_top.label.text = ""
+                except Exception:
+                    pass
+                # Hide top tick labels and keep the top axis title empty so Origin
+                # does not render a second overlapping title inside the plot area.
+                try:
+                    axis_top.title = ""
+                except Exception:
+                    pass
                 setattr(axis_top, "show_labels", False)
                 setattr(axis_top, "showLabels", False)
                 setattr(axis_top, "showlabels", False)
             except Exception:
                 try:
-                    safe_title = (
-                        _shared_escape_origin_text(title)
-                        if callable(_shared_escape_origin_text)
-                        else str(title).replace('"', "''")
-                    )
-                    layer.lt_exec(f'layer.x2.title$="{safe_title}"; layer.x2.showlabels=0;')
+                    layer.lt_exec('layer.x2.title$=""; layer.x2.showlabels=0;')
                 except Exception:
                     pass
 
