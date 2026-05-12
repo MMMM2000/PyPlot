@@ -5450,7 +5450,7 @@ def test_emergency_stop_turns_off_current_halts_tic_and_stops_session(tmp_path: 
         window._emergency_stop()
 
         assert supply.off_count >= 1
-        assert (2, 12.0, 0.4, False) in supply.configured
+        assert (2, 12.0, 0.5, False) in supply.configured
         assert tic.halted is True
         assert window._supply_output_enabled is False
         assert window._supply_last_setpoint_mA == pytest.approx(0.0)
@@ -7621,7 +7621,7 @@ def test_hmp4030_defaults_use_real_voltage_limit_and_kosice_channels(tmp_path: P
         assert window.spin_supply_voltage_limit.value() == pytest.approx(32.05)
         assert window.combo_motor_supply_channel.currentData() == 2
         assert window.spin_motor_supply_voltage.value() == pytest.approx(12.0)
-        assert window.spin_motor_supply_current_limit.value() == pytest.approx(0.4)
+        assert window.spin_motor_supply_current_limit.value() == pytest.approx(0.5)
         assert window.spin_tic_current_limit_mA.value() == 343
     finally:
         _close_test_window(window)
@@ -7768,7 +7768,7 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         ok = window._provision_bench_hardware()
 
         assert ok is True
-        assert supply.configured == [(2, 12.0, 0.4, True)]
+        assert supply.configured == [(2, 12.0, 0.5, True)]
         assert supply.selected == 3
         assert tic.current_limits == [343.0]
         assert "PASS: Motor supply CH2" in window.label_hardware_provisioning_status.text()

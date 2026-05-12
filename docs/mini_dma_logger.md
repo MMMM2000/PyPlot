@@ -145,7 +145,7 @@ Current intended hardware stack:
 - live current / voltage / resistance / power channels
 - optional continuity monitor applies a small current during automated measurements, including mandatory setup before a current-sweep recipe, so an open circuit at the voltage limit can stop the run instead of letting the stage keep seeking a broken wire
 - recipe-owned current workflows instead of a separate hardware-tab heating program
-- HMP4030 users can optionally assign CH1 or CH2 as the motor-supply channel; the default copied-bench setup uses CH2 at 12 V / 0.4 A for motor power and CH3 for current annealing, recipe preflight turns the motor channel on before checking Tic VIN, and the current-sweep voltage limit defaults to 32.05 V
+- HMP4030 users can optionally assign CH1 or CH2 as the motor-supply channel; the default copied-bench setup uses CH2 at 12 V / 0.5 A for motor power and CH3 for current annealing, recipe preflight turns the motor channel on before checking Tic VIN, and the current-sweep voltage limit defaults to 32.05 V
 - Mini DMA exposes the Tic motor winding current limit separately from the HMP motor-supply rail limit; recipe preflight applies the Tic limit and blocks recipe start if that controller setting cannot be applied
 - HMP4030 current commands are treated as 0.2 mA-resolution setpoints below 1 A, so a `1 mA/s` ramp can update in smaller timed increments while avoiding unsupported command precision
 - the main tabs are organized as `Recipe`, `Sample`, and lower-priority `Hardware`, so scale/motor/power-supply setup does not dominate routine use

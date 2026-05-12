@@ -15,12 +15,12 @@ This document is the canonical hardware reference for the current Mini DMA bench
 Mini DMA includes a bench-provisioning action for copying the setup to a second bench. The operator still has to connect the hardware correctly and choose/confirm ambiguous ports or channels, but the app should configure the normal Košice-style defaults from there:
 
 - HMP4030 current-sweep channel: `CH3`.
-- HMP4030 motor-supply channel: `CH2`, `12 V`, `0.4 A` rail-current limit.
+- HMP4030 motor-supply channel: `CH2`, `12 V`, `0.5 A` rail-current limit.
 - HMP4030 current-sweep voltage limit: `32.05 V`, matching the observed maximum rather than the older rounded `30 V` value.
 - Tic motor current limit: default `343 mA`, matching the bench setting that has enough torque for current experiments while keeping motor heating lower. Treat `500 mA/phase` as the motor-rating ceiling, not the deployment default.
 - Tic step mode: `1/8 step`, with `100 full steps/mm` and `800 Tic units/mm`.
 
-Keep the two current limits separate in UI, docs, and troubleshooting. The HMP motor-supply current limit protects the 12 V supply rail feeding the Tic; the current bench has run at `0.4 A` without ordinary power issues, so that is the copied-bench default. The Tic current limit controls the motor winding current and is the value that most directly affects motor heating and torque.
+Keep the two current limits separate in UI, docs, and troubleshooting. The HMP motor-supply current limit protects the 12 V supply rail feeding the Tic; the current bench mostly ran at `0.4 A`, but one long sweep showed Tic VIN sag while CH2 was configured that way, so the copied-bench default is `0.5 A`. The Tic current limit controls the motor winding current and is the value that most directly affects motor heating and torque.
 
 ## Balance Details
 
