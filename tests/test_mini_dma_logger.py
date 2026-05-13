@@ -2125,6 +2125,74 @@ def test_recipe_progress_shows_throttled_time_remaining(tmp_path: Path, qtbot) -
         _close_test_window(window)
 
 
+def test_current_sweep_estimate_includes_hold_allowance(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=20.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=0.0,
+            current_end_mA=60.0,
+            current_ramp_rate_mA_s=1.0,
+            current_hold_enabled=True,
+            current_hold_resume_stable_s=0.5,
+        )
+
+        points, ticks = window._estimate_recipe_points_and_ticks([step], 1000)
+
+        assert ticks == 75
+        assert points == 75
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_progress_uses_schedule_eta_at_start_instead_of_early_spike(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._automation_active = True
+        window._automation_total_steps = 3600
+        window._automation_completed_ticks = 1
+        window._automation_interval_ms = 500
+        window._automation_estimated_total_s = 1800.0
+        window._automation_progress_started_s = time.monotonic() - 300.0
+        window._automation_progress_last_format_update_s = 0.0
+
+        window._update_recipe_progress()
+
+        assert "remaining" in window.recipe_progress.format()
+        assert "25.0 min" in window.recipe_progress.format()
+        assert "h" not in window.recipe_progress.format()
+    finally:
+        _close_test_window(window)
+
+
+def test_live_eta_projects_learned_current_sweep_overhead(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=20.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=0.0,
+            current_end_mA=60.0,
+            current_ramp_rate_mA_s=1.0,
+            current_hold_enabled=True,
+        )
+        window._automation_steps = [step, step]
+        window._automation_index = 0
+        window._current_sweep_duration_overheads_s = [120.0]
+
+        learned_extra_s = window._learned_current_sweep_extra_remaining_s()
+
+        assert learned_extra_s == pytest.approx(210.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_current_task_summary_shows_current_sweep_phase(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window._automation_active = True

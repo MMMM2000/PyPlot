@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -346,6 +347,11 @@ SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA = 3.0
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
+CURRENT_SWEEP_HOLD_ESTIMATE_MIN_S = 10.0
+CURRENT_SWEEP_HOLD_ESTIMATE_FRACTION = 0.25
+CURRENT_SWEEP_HOLD_ESTIMATE_MAX_S = 60.0
+CURRENT_SWEEP_ETA_MEASURED_WEIGHT_START = 0.05
+CURRENT_SWEEP_ETA_MEASURED_WEIGHT_FULL = 0.25
 SERVO_FULL_SPEED_ERROR_RATIO = 8.0
 SERVO_CRUISE_FEEDBACK_SAFETY_FACTOR = 1.25
 SERVO_MOTION_SETTLE_AFTER_MOVE_S = 0.05
@@ -2349,8 +2355,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._paused_current_setpoint_mA: float | None = None
         self._recipe_origin_mm = 0.0
         self._recipe_estimated_points = 0
+        self._automation_estimated_total_s = 0.0
+        self._current_sweep_duration_overheads_s: list[float] = []
         self._active_current_sweep_step_index: int | None = None
         self._active_current_sweep_started_s = 0.0
+        self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA: float | None = None
         self._current_sweep_ramp_hold_step_index: int | None = None
         self._current_sweep_ramp_hold_started_s = 0.0
@@ -9557,16 +9566,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                 continue
             if step.action == "sweep_current" and step.current_start_mA is not None and step.current_end_mA is not None:
-                ramp_rate = max(1e-9, abs(float(step.current_ramp_rate_mA_s or self.spin_current_sweep_step_mA.value())))
-                duration_s = abs(
-                    self._quantize_supply_current_mA(float(step.current_end_mA))
-                    - self._quantize_supply_current_mA(float(step.current_start_mA))
-                ) / ramp_rate
-                sweep_ticks = max(1, int(math.ceil(duration_s / interval_s)))
+                duration_s = self._current_sweep_nominal_duration_s(step)
+                estimated_duration_s = duration_s + self._current_sweep_hold_estimate_s(step)
+                sweep_ticks = max(1, int(math.ceil(estimated_duration_s / interval_s)))
                 ticks += sweep_ticks
                 if logging_enabled:
                     points += self._scheduled_log_point_count(
-                        duration_s=duration_s,
+                        duration_s=estimated_duration_s,
                         control_interval_s=interval_s,
                     )
                 continue
@@ -9591,6 +9597,103 @@ class MainWindow(QtWidgets.QMainWindow):
             elif step.action == "seek_target":
                 points += 1
         return points, ticks
+
+    def _current_sweep_nominal_duration_s(self, step: AutomationStep) -> float:
+        if step.current_start_mA is None or step.current_end_mA is None:
+            return 0.0
+        ramp_rate = max(
+            1e-9,
+            abs(float(step.current_ramp_rate_mA_s or self.spin_current_sweep_step_mA.value())),
+        )
+        return abs(
+            self._quantize_supply_current_mA(float(step.current_end_mA))
+            - self._quantize_supply_current_mA(float(step.current_start_mA))
+        ) / ramp_rate
+
+    def _current_sweep_hold_estimate_s(self, step: AutomationStep) -> float:
+        if not step.current_hold_enabled:
+            return 0.0
+        nominal_s = self._current_sweep_nominal_duration_s(step)
+        stable_s = self._current_sweep_hold_setting(
+            step.current_hold_resume_stable_s,
+            self.spin_current_sweep_hold_resume_stable_s,
+            CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
+        )
+        return min(
+            CURRENT_SWEEP_HOLD_ESTIMATE_MAX_S,
+            max(
+                CURRENT_SWEEP_HOLD_ESTIMATE_MIN_S,
+                nominal_s * CURRENT_SWEEP_HOLD_ESTIMATE_FRACTION,
+                stable_s * 2.0,
+            ),
+        )
+
+    def _remaining_current_sweep_steps(self) -> list[AutomationStep]:
+        if not self._automation_steps:
+            return []
+        start_index = min(max(0, self._automation_index), len(self._automation_steps))
+        return [
+            step
+            for step in self._automation_steps[start_index:]
+            if step.action == "sweep_current" and step.current_start_mA is not None and step.current_end_mA is not None
+        ]
+
+    def _learned_current_sweep_extra_remaining_s(self) -> float:
+        if not self._current_sweep_duration_overheads_s:
+            return 0.0
+        remaining_steps = self._remaining_current_sweep_steps()
+        if not remaining_steps:
+            return 0.0
+        recent_overheads = self._current_sweep_duration_overheads_s[-4:]
+        learned_overhead_s = statistics.median(recent_overheads)
+        extra_s = 0.0
+        for step in remaining_steps:
+            extra_s += max(0.0, learned_overhead_s - self._current_sweep_hold_estimate_s(step))
+        return extra_s
+
+    def _record_current_sweep_duration(self, step: AutomationStep, *, finished_s: float) -> None:
+        if self._active_current_sweep_wall_started_s <= 0.0:
+            return
+        actual_s = max(0.0, finished_s - self._active_current_sweep_wall_started_s)
+        overhead_s = max(0.0, actual_s - self._current_sweep_nominal_duration_s(step))
+        self._current_sweep_duration_overheads_s.append(overhead_s)
+        if len(self._current_sweep_duration_overheads_s) > 12:
+            self._current_sweep_duration_overheads_s = self._current_sweep_duration_overheads_s[-12:]
+
+    def _estimated_recipe_remaining_s(self, *, value: int, total: int, elapsed_s: float) -> float | None:
+        if total <= 0 or value >= total:
+            return 0.0
+        measured_remaining_s = None
+        if value > 0 and elapsed_s > 0.0:
+            measured_remaining_s = ((total - value) * elapsed_s) / max(1, value)
+        if (
+            self._automation_estimated_total_s <= 0.0
+            and not self._current_sweep_duration_overheads_s
+            and not self._remaining_current_sweep_steps()
+        ):
+            return measured_remaining_s
+        interval_s = max(0.001, float(self._automation_interval_ms) / 1000.0)
+        scheduled_remaining_s = max(0.0, (total - value) * interval_s)
+        if self._automation_estimated_total_s > 0.0:
+            scheduled_remaining_s = min(
+                scheduled_remaining_s,
+                max(0.0, self._automation_estimated_total_s - elapsed_s),
+            )
+        scheduled_remaining_s += self._learned_current_sweep_extra_remaining_s()
+        if value <= 0 or elapsed_s <= 0.0:
+            return scheduled_remaining_s
+
+        progress_fraction = max(0.0, min(1.0, value / max(1, total)))
+        if progress_fraction <= CURRENT_SWEEP_ETA_MEASURED_WEIGHT_START:
+            measured_weight = 0.0
+        elif progress_fraction >= CURRENT_SWEEP_ETA_MEASURED_WEIGHT_FULL:
+            measured_weight = 1.0
+        else:
+            measured_weight = (
+                (progress_fraction - CURRENT_SWEEP_ETA_MEASURED_WEIGHT_START)
+                / (CURRENT_SWEEP_ETA_MEASURED_WEIGHT_FULL - CURRENT_SWEEP_ETA_MEASURED_WEIGHT_START)
+            )
+        return scheduled_remaining_s * (1.0 - measured_weight) + measured_remaining_s * measured_weight
 
     def _warn_if_scale_is_silent(self) -> None:
         if self._scale_thread is None or self._scale_no_data_hint_emitted:
@@ -11842,8 +11945,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._automation_progress_last_format_update_s = now_s
                 progress_text = f"Recipe progress: {percent}% ({value}/{total})"
                 elapsed_s = max(0.0, now_s - self._automation_progress_started_s)
-                if value > 0 and elapsed_s > 0.0 and value < total:
-                    remaining_s = ((total - value) * elapsed_s) / value
+                if value < total:
+                    remaining_s = self._estimated_recipe_remaining_s(
+                        value=value,
+                        total=total,
+                        elapsed_s=elapsed_s,
+                    )
+                else:
+                    remaining_s = None
+                if remaining_s is not None and remaining_s > 0.0:
                     progress_text += f", {_format_duration(remaining_s)} remaining"
                 self.recipe_progress.setFormat(progress_text)
         else:
@@ -11944,6 +12054,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_completed_ticks = min(self._automation_index, self._automation_total_steps)
         self._automation_progress_started_s = time.monotonic()
         self._automation_progress_last_format_update_s = 0.0
+        self._automation_estimated_total_s = max(
+            0.0,
+            float(self._automation_total_steps) * max(0.001, float(state.interval_ms) / 1000.0),
+        )
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = int(state.interval_ms)
@@ -11956,6 +12070,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_recipe_current_mA(float(state.current_setpoint_mA))
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
+        self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
         self._clear_current_sweep_ramp_hold()
         self._active_target_ramp_step_index = None
@@ -12009,6 +12124,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_commanded_speed_mm_s = 0.0
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
+        self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
         self._clear_current_sweep_ramp_hold()
         self._active_target_ramp_step_index = None
@@ -12054,6 +12170,11 @@ class MainWindow(QtWidgets.QMainWindow):
             interval_ms,
         )
         self._automation_completed_ticks = 0
+        self._automation_estimated_total_s = max(
+            0.0,
+            float(self._automation_total_steps) * max(0.001, float(interval_ms) / 1000.0),
+        )
+        self._current_sweep_duration_overheads_s = []
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = interval_ms
@@ -12499,6 +12620,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_preload_engaged_seek_keys.clear()
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
+        self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
         self._clear_current_sweep_ramp_hold()
         self._active_target_ramp_step_index = None
@@ -13260,9 +13382,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
 
         if setpoint_mA <= target_mA + 1e-12:
+            self._record_current_sweep_duration(step, finished_s=time.monotonic())
             self._clear_current_sweep_voltage_limit()
             self._active_current_sweep_step_index = None
             self._active_current_sweep_started_s = 0.0
+            self._active_current_sweep_wall_started_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
             self._clear_current_sweep_ramp_hold()
             return True
@@ -13284,8 +13408,10 @@ class MainWindow(QtWidgets.QMainWindow):
         direction = 1.0 if end_mA >= start_mA else -1.0
 
         if self._active_current_sweep_step_index != step_index:
+            now_s = time.monotonic()
             self._active_current_sweep_step_index = step_index
-            self._active_current_sweep_started_s = time.monotonic()
+            self._active_current_sweep_started_s = now_s
+            self._active_current_sweep_wall_started_s = now_s
             self._active_current_sweep_last_setpoint_mA = None
             self._clear_current_sweep_ramp_hold()
             if not self._set_recipe_current_mA(start_mA, measure_after=False):
@@ -13358,8 +13484,10 @@ class MainWindow(QtWidgets.QMainWindow):
         duration_s = abs(end_mA - start_mA) / ramp_rate_mA_s
         finished = elapsed_s >= duration_s and abs((self._active_current_sweep_last_setpoint_mA or setpoint_mA) - end_mA) < 1e-9
         if finished:
+            self._record_current_sweep_duration(step, finished_s=now_s)
             self._active_current_sweep_step_index = None
             self._active_current_sweep_started_s = 0.0
+            self._active_current_sweep_wall_started_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
             self._clear_current_sweep_ramp_hold()
             return True
