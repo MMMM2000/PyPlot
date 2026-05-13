@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import queue
 import struct
 import time
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from typing import Iterable
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from experiments.mlx90640_calibration import MLX90640Calibration
 from plotting.shared.theme import ensure_app_theme
 from plotting.shared.utils import install_standard_menu
 
@@ -30,9 +32,19 @@ BINARY_MAGIC = b"MLX4"
 BINARY_VERSION = 1
 BINARY_HEADER = struct.Struct("<4sBBBBIIh")
 BINARY_PACKET_SIZE = BINARY_HEADER.size + (FRAME_PIXELS * 2) + 2
+RAW_MAGIC = b"MLXR"
+EEPROM_MAGIC = b"MLXE"
+RAW_VERSION = 1
+RAW_HEADER = struct.Struct("<4sBBHIIIHHI")
+RAW_FRAME_WORDS = 832
+RAW_PAYLOAD_BYTES = RAW_FRAME_WORDS * 2
+RAW_PACKET_SIZE = RAW_HEADER.size + RAW_PAYLOAD_BYTES + 2
+EEPROM_PACKET_SIZE = RAW_PACKET_SIZE
 BINARY_TEXT = "text"
 BINARY_FAST = "binary"
+CUBE_RAW = "cube_raw"
 BAUD_RATES = (115200, 230400, 460800, 921600, 1000000, 2000000)
+REFRESH_RATES = ((16, 5), (32, 6), (64, 7))
 
 
 @dataclass(frozen=True)
@@ -42,6 +54,13 @@ class ThermalFrame:
     elapsed_ms: int | None
     ambient_c: float | None
     values: tuple[float, ...]
+    unit: str = "C"
+    raw_read_us: int | None = None
+    sequence: int | None = None
+    flags: int = 0
+    raw_words: tuple[int, ...] = ()
+    status: int = 0
+    control: int = 0
 
     @property
     def minimum_c(self) -> float:
@@ -176,6 +195,97 @@ def parse_binary_frame(packet: bytes) -> ThermalFrame | None:
     return ThermalFrame(int(elapsed_ms), ambient_c, values)
 
 
+def parse_raw_cube_frame(packet: bytes) -> ThermalFrame | None:
+    """Parse one STM32Cube ``MLXR`` raw frame-RAM packet."""
+
+    if len(packet) != RAW_PACKET_SIZE:
+        return None
+    expected_checksum = int.from_bytes(packet[-2:], "little", signed=False)
+    actual_checksum = sum(packet[:-2]) & 0xFFFF
+    if expected_checksum != actual_checksum:
+        return None
+    try:
+        (
+            magic,
+            version,
+            flags,
+            words,
+            sequence,
+            elapsed_ms,
+            read_us,
+            status,
+            control,
+            payload_len,
+        ) = RAW_HEADER.unpack_from(packet, 0)
+    except struct.error:
+        return None
+    if (
+        magic != RAW_MAGIC
+        or version != RAW_VERSION
+        or words != RAW_FRAME_WORDS
+        or payload_len != RAW_PAYLOAD_BYTES
+    ):
+        return None
+
+    values_offset = RAW_HEADER.size
+    try:
+        # MLX90640 RAM words arrive most-significant byte first. The first 768
+        # words are pixel RAM; the rest are auxiliary sensor registers.
+        raw_values = struct.unpack_from(f">{FRAME_PIXELS}h", packet, values_offset)
+        raw_words = struct.unpack_from(f">{RAW_FRAME_WORDS}H", packet, values_offset)
+    except struct.error:
+        return None
+    return ThermalFrame(
+        int(elapsed_ms),
+        None,
+        tuple(float(value) for value in raw_values),
+        "raw",
+        int(read_us),
+        int(sequence),
+        int(flags),
+        tuple(int(value) for value in raw_words),
+        int(status),
+        int(control),
+    )
+
+
+def parse_cube_eeprom_packet(packet: bytes) -> tuple[int, ...] | None:
+    """Parse one STM32Cube ``MLXE`` EEPROM calibration packet."""
+
+    if len(packet) != RAW_PACKET_SIZE:
+        return None
+    expected_checksum = int.from_bytes(packet[-2:], "little", signed=False)
+    actual_checksum = sum(packet[:-2]) & 0xFFFF
+    if expected_checksum != actual_checksum:
+        return None
+    try:
+        (
+            magic,
+            version,
+            _flags,
+            words,
+            _sequence,
+            _elapsed_ms,
+            _read_us,
+            _status,
+            _control,
+            payload_len,
+        ) = RAW_HEADER.unpack_from(packet, 0)
+    except struct.error:
+        return None
+    if (
+        magic != EEPROM_MAGIC
+        or version != RAW_VERSION
+        or words != RAW_FRAME_WORDS
+        or payload_len != RAW_PAYLOAD_BYTES
+    ):
+        return None
+    try:
+        return tuple(int(value) for value in struct.unpack_from(f">{RAW_FRAME_WORDS}H", packet, RAW_HEADER.size))
+    except struct.error:
+        return None
+
+
 def pop_binary_frames(buffer: bytearray) -> list[ThermalFrame]:
     """Extract all complete binary frames from ``buffer`` in-place."""
 
@@ -197,6 +307,45 @@ def pop_binary_frames(buffer: bytearray) -> list[ThermalFrame]:
             continue
         frames.append(frame)
         del buffer[:BINARY_PACKET_SIZE]
+
+
+def pop_cube_packets(buffer: bytearray) -> tuple[list[tuple[int, ...]], list[ThermalFrame]]:
+    """Extract STM32Cube EEPROM and raw frame packets from ``buffer`` in-place."""
+
+    eeprom_packets: list[tuple[int, ...]] = []
+    frames: list[ThermalFrame] = []
+    while True:
+        starts = [index for index in (buffer.find(RAW_MAGIC), buffer.find(EEPROM_MAGIC)) if index >= 0]
+        start = min(starts) if starts else -1
+        if start < 0:
+            if len(buffer) > len(RAW_MAGIC):
+                del buffer[:-len(RAW_MAGIC)]
+            return eeprom_packets, frames
+        if start:
+            del buffer[:start]
+        if len(buffer) < RAW_PACKET_SIZE:
+            return eeprom_packets, frames
+        packet = bytes(buffer[:RAW_PACKET_SIZE])
+        if packet.startswith(EEPROM_MAGIC):
+            eeprom_words = parse_cube_eeprom_packet(packet)
+            if eeprom_words is None:
+                del buffer[0]
+                continue
+            eeprom_packets.append(eeprom_words)
+        else:
+            frame = parse_raw_cube_frame(packet)
+            if frame is None:
+                del buffer[0]
+                continue
+            frames.append(frame)
+        del buffer[:RAW_PACKET_SIZE]
+
+
+def pop_raw_cube_frames(buffer: bytearray) -> list[ThermalFrame]:
+    """Extract all complete STM32Cube raw frames from ``buffer`` in-place."""
+
+    _eeprom_packets, frames = pop_cube_packets(buffer)
+    return frames
 
 
 def _parse_int(text: str) -> int | None:
@@ -264,11 +413,13 @@ class ThermalSerialWorker(QtCore.QObject):
     status_changed = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal()
 
-    def __init__(self, port_name: str, baudrate: int, protocol: str) -> None:
+    def __init__(self, port_name: str, baudrate: int, protocol: str, refresh_code: int = 5) -> None:
         super().__init__()
         self.port_name = port_name
         self.baudrate = int(baudrate)
         self.protocol = protocol
+        self.refresh_code = int(refresh_code)
+        self._refresh_requests: queue.SimpleQueue[int] = queue.SimpleQueue()
         self._stop = Event()
 
     @QtCore.pyqtSlot()
@@ -287,7 +438,7 @@ class ThermalSerialWorker(QtCore.QObject):
                 self.status_changed.emit(
                     f"Connected to {self.port_name} at {self.baudrate} baud."
                 )
-                if self.protocol == BINARY_FAST:
+                if self.protocol in {BINARY_FAST, CUBE_RAW}:
                     self._run_binary(port)
                 else:
                     self._run_text(port)
@@ -325,18 +476,111 @@ class ThermalSerialWorker(QtCore.QObject):
 
     def _run_binary(self, port: object) -> None:
         buffer = bytearray()
+        calibrator: MLX90640Calibration | None = None
+        celsius_values: list[float] | None = None
+        if self.protocol == CUBE_RAW:
+            self._write_refresh_code(port, self.refresh_code)
         while not self._stop.is_set():
+            if self.protocol == CUBE_RAW:
+                self._send_pending_refresh_requests(port)
             chunk = port.read(4096)
             if not chunk:
                 continue
             buffer.extend(chunk)
-            for frame in pop_binary_frames(buffer):
+            if self.protocol == CUBE_RAW:
+                eeprom_packets, frames = pop_cube_packets(buffer)
+                for eeprom_words in eeprom_packets:
+                    try:
+                        calibrator = MLX90640Calibration(eeprom_words)
+                        celsius_values = None
+                        self.status_changed.emit("Loaded MLX90640 EEPROM calibration.")
+                    except Exception as exc:
+                        calibrator = None
+                        celsius_values = None
+                        self.status_changed.emit(f"Skipped invalid MLX90640 calibration: {exc}")
+                packet_size = RAW_PACKET_SIZE
+            else:
+                frames = pop_binary_frames(buffer)
+                packet_size = BINARY_PACKET_SIZE
+            for frame in frames:
+                if self.protocol == CUBE_RAW and calibrator is not None:
+                    converted, celsius_values = self._convert_raw_frame(
+                        frame,
+                        calibrator,
+                        celsius_values,
+                    )
+                    if converted is not None:
+                        self.frame_ready.emit(converted)
+                    continue
                 self.frame_ready.emit(frame)
-            if len(buffer) > BINARY_PACKET_SIZE * 4:
-                del buffer[:-BINARY_PACKET_SIZE]
+            if len(buffer) > packet_size * 4:
+                del buffer[:-packet_size]
+
+    def _convert_raw_frame(
+        self,
+        frame: ThermalFrame,
+        calibrator: MLX90640Calibration,
+        previous_values: list[float] | None,
+    ) -> tuple[ThermalFrame | None, list[float] | None]:
+        try:
+            subpage_values = calibrator.calculate_to(frame.raw_words, frame.control, frame.status)
+            ambient_c = calibrator.ambient_c(frame.raw_words, frame.control, frame.status)
+        except Exception as exc:
+            self.status_changed.emit(f"Skipped Celsius conversion: {exc}")
+            return frame, previous_values
+        if not (-60.0 <= ambient_c <= 125.0):
+            self.status_changed.emit(
+                f"Skipped Celsius conversion: invalid ambient {ambient_c:.2f} C."
+            )
+            return frame, previous_values
+
+        values = [math.nan] * FRAME_PIXELS if previous_values is None else list(previous_values)
+        for index, value in enumerate(subpage_values):
+            if math.isfinite(value):
+                values[index] = value
+        if any(not math.isfinite(value) for value in values):
+            return None, values
+        if min(values) < -100.0 or max(values) > 500.0:
+            self.status_changed.emit("Skipped Celsius conversion: calibrated pixels are out of range.")
+            return frame, previous_values
+        return ThermalFrame(
+            frame.elapsed_ms,
+            ambient_c,
+            tuple(values),
+            "C",
+            frame.raw_read_us,
+            frame.sequence,
+            frame.flags,
+            frame.raw_words,
+            frame.status,
+            frame.control,
+        ), values
 
     def stop(self) -> None:
         self._stop.set()
+
+    def request_refresh_code(self, refresh_code: int) -> None:
+        self._refresh_requests.put(int(refresh_code))
+
+    def _send_pending_refresh_requests(self, port: object) -> None:
+        latest: int | None = None
+        while True:
+            try:
+                latest = self._refresh_requests.get_nowait()
+            except queue.Empty:
+                break
+        if latest is not None:
+            self.refresh_code = latest
+            self._write_refresh_code(port, latest)
+
+    def _write_refresh_code(self, port: object, refresh_code: int) -> None:
+        if refresh_code not in {5, 6, 7}:
+            return
+        try:
+            port.write(f"{refresh_code}\n".encode("ascii"))
+            self.status_changed.emit(f"Requested MLX90640 refresh code {refresh_code}.")
+        except Exception as exc:
+            self.status_changed.emit(f"Could not send refresh-rate command: {exc}")
 
 
 class ThermalCameraViewer(QtWidgets.QWidget):
@@ -379,13 +623,20 @@ class ThermalCameraViewer(QtWidgets.QWidget):
             self.baud_combo.addItem(str(baudrate), baudrate)
         self.baud_combo.setCurrentIndex(self.baud_combo.findData(921600))
         self.protocol_combo = QtWidgets.QComboBox()
-        self.protocol_combo.addItem("Binary fast", BINARY_FAST)
+        self.protocol_combo.addItem("Cube raw", CUBE_RAW)
+        self.protocol_combo.addItem("Arduino binary", BINARY_FAST)
         self.protocol_combo.addItem("Text frame dump", BINARY_TEXT)
+        self.refresh_rate_combo = QtWidgets.QComboBox()
+        for label_hz, code in REFRESH_RATES:
+            suffix = "" if label_hz == 16 else " experimental"
+            self.refresh_rate_combo.addItem(f"{label_hz} Hz{suffix}", code)
         controls.addWidget(QtWidgets.QLabel("Port"))
         controls.addWidget(self.port_combo, 1)
         controls.addWidget(self.refresh_button)
         controls.addWidget(QtWidgets.QLabel("Protocol"))
         controls.addWidget(self.protocol_combo)
+        controls.addWidget(QtWidgets.QLabel("Rate"))
+        controls.addWidget(self.refresh_rate_combo)
         controls.addWidget(QtWidgets.QLabel("Baud"))
         controls.addWidget(self.baud_combo)
         controls.addWidget(self.connect_button)
@@ -421,12 +672,13 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         root.addWidget(self.image_label, 1)
 
         self.status_label = QtWidgets.QLabel(
-            "Connect to the Nucleo fast binary firmware on COM10 at 921600 baud."
+            "Connect to the Cube raw firmware on COM10 at 2000000 baud."
         )
         root.addWidget(self.status_label)
 
         self.refresh_button.clicked.connect(self.refresh_ports)
         self.protocol_combo.currentIndexChanged.connect(self._protocol_changed)
+        self.refresh_rate_combo.currentIndexChanged.connect(self._refresh_rate_changed)
         self.connect_button.clicked.connect(self._toggle_connection)
         self.export_button.clicked.connect(self._export_frame)
         self.auto_scale_cb.toggled.connect(self._update_scale_controls)
@@ -441,10 +693,18 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         )
 
     def _load_settings(self) -> None:
-        protocol = self.settings.value("protocol", BINARY_FAST, type=str)
+        protocol = self.settings.value("protocol", CUBE_RAW, type=str)
         index = self.protocol_combo.findData(protocol)
         self.protocol_combo.setCurrentIndex(max(0, index))
-        self._set_baudrate(self.settings.value("baudrate", 921600, type=int))
+        baudrate = self.settings.value("baudrate", 2000000, type=int)
+        if protocol == BINARY_FAST and baudrate == 921600:
+            protocol = CUBE_RAW
+            index = self.protocol_combo.findData(protocol)
+            self.protocol_combo.setCurrentIndex(max(0, index))
+            baudrate = 2000000
+        self._set_baudrate(baudrate)
+        refresh_code = self.settings.value("refresh_code", 5, type=int)
+        self._set_refresh_code(refresh_code)
         self.auto_scale_cb.setChecked(self.settings.value("auto_scale", True, type=bool))
         self.min_spin.setValue(self.settings.value("fixed_min_c", 20.0, type=float))
         self.max_spin.setValue(self.settings.value("fixed_max_c", 80.0, type=float))
@@ -453,6 +713,7 @@ class ThermalCameraViewer(QtWidgets.QWidget):
     def _save_settings(self) -> None:
         self.settings.setValue("baudrate", self._baudrate())
         self.settings.setValue("protocol", self.protocol_combo.currentData() or BINARY_FAST)
+        self.settings.setValue("refresh_code", self._refresh_code())
         self.settings.setValue("auto_scale", self.auto_scale_cb.isChecked())
         self.settings.setValue("fixed_min_c", self.min_spin.value())
         self.settings.setValue("fixed_max_c", self.max_spin.value())
@@ -462,19 +723,37 @@ class ThermalCameraViewer(QtWidgets.QWidget):
 
     def _protocol_changed(self) -> None:
         protocol = self.protocol_combo.currentData()
-        if protocol == BINARY_FAST and self._baudrate() == 115200:
+        if protocol == CUBE_RAW:
+            self._set_baudrate(2000000)
+        elif protocol == BINARY_FAST and self._baudrate() == 115200:
             self._set_baudrate(921600)
-        elif protocol == BINARY_TEXT and self._baudrate() == 921600:
+        elif protocol == BINARY_TEXT and self._baudrate() != 115200:
             self._set_baudrate(115200)
+        self.refresh_rate_combo.setEnabled(protocol == CUBE_RAW)
+
+    def _refresh_rate_changed(self) -> None:
+        self.settings.setValue("refresh_code", self._refresh_code())
+        if self._worker is not None:
+            self._worker.request_refresh_code(self._refresh_code())
+
+    def _refresh_code(self) -> int:
+        refresh_code = self.refresh_rate_combo.currentData()
+        return int(refresh_code) if isinstance(refresh_code, int) else 5
+
+    def _set_refresh_code(self, refresh_code: int) -> None:
+        index = self.refresh_rate_combo.findData(int(refresh_code))
+        if index < 0:
+            index = self.refresh_rate_combo.findData(5)
+        self.refresh_rate_combo.setCurrentIndex(max(0, index))
 
     def _baudrate(self) -> int:
         baudrate = self.baud_combo.currentData()
-        return int(baudrate) if isinstance(baudrate, int) else 921600
+        return int(baudrate) if isinstance(baudrate, int) else 2000000
 
     def _set_baudrate(self, baudrate: int) -> None:
         index = self.baud_combo.findData(int(baudrate))
         if index < 0:
-            index = self.baud_combo.findData(921600)
+            index = self.baud_combo.findData(2000000)
         self.baud_combo.setCurrentIndex(max(0, index))
 
     def refresh_ports(self) -> None:
@@ -515,6 +794,7 @@ class ThermalCameraViewer(QtWidgets.QWidget):
             port,
             self._baudrate(),
             protocol if isinstance(protocol, str) else BINARY_FAST,
+            self._refresh_code(),
         )
         self._fps_tracker.reset()
         self._worker.moveToThread(self._thread)
@@ -529,6 +809,7 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         self.connect_button.setText("Disconnect")
         self.port_combo.setEnabled(False)
         self.protocol_combo.setEnabled(False)
+        self.refresh_rate_combo.setEnabled(protocol == CUBE_RAW)
         self.baud_combo.setEnabled(False)
         self.refresh_button.setEnabled(False)
 
@@ -545,6 +826,7 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         self.connect_button.setText("Connect")
         self.port_combo.setEnabled(True)
         self.protocol_combo.setEnabled(True)
+        self.refresh_rate_combo.setEnabled(self.protocol_combo.currentData() == CUBE_RAW)
         self.baud_combo.setEnabled(True)
         self.refresh_button.setEnabled(True)
 
@@ -555,6 +837,7 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         self.connect_button.setText("Connect")
         self.port_combo.setEnabled(True)
         self.protocol_combo.setEnabled(True)
+        self.refresh_rate_combo.setEnabled(self.protocol_combo.currentData() == CUBE_RAW)
         self.baud_combo.setEnabled(True)
         self.refresh_button.setEnabled(True)
 
@@ -575,9 +858,11 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         self.image_label.setPixmap(pixmap)
         fps = self._fps_tracker.fps
         ambient = "--" if frame.ambient_c is None else f"{frame.ambient_c:.2f} C"
+        read_time = "" if frame.raw_read_us is None else f" | Read {frame.raw_read_us / 1000.0:.2f} ms"
         self.stats_label.setText(
-            f"Min {frame.minimum_c:.2f} C | Mean {frame.mean_c:.2f} C | "
-            f"Max {frame.maximum_c:.2f} C | Ambient {ambient} | {fps:.2f} fps"
+            f"Min {frame.minimum_c:.2f} {frame.unit} | Mean {frame.mean_c:.2f} {frame.unit} | "
+            f"Max {frame.maximum_c:.2f} {frame.unit} | Ambient {ambient} | {fps:.2f} fps"
+            f"{read_time}"
         )
 
     def _update_scale_controls(self) -> None:
@@ -637,10 +922,16 @@ __all__ = [
     "ThermalCameraViewer",
     "ThermalFrame",
     "FrameRateTracker",
+    "EEPROM_MAGIC",
+    "EEPROM_PACKET_SIZE",
     "main",
     "parse_binary_frame",
+    "parse_cube_eeprom_packet",
+    "parse_raw_cube_frame",
     "parse_frame_lines",
     "pop_binary_frames",
+    "pop_cube_packets",
+    "pop_raw_cube_frames",
     "render_frame_pixmap",
 ]
 
