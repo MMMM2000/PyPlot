@@ -57,16 +57,25 @@ def test_make_figures_create_one_line_per_target() -> None:
         plt.close(resistance_fig)
 
 
-def test_strain_current_figure_can_zero_each_trace_minimum() -> None:
+def test_strain_current_figure_can_use_each_trace_minimum_as_l0() -> None:
     run = core.load_run(SAMPLE_RUN)
 
     fig = core.make_strain_current_figure(run, zero_minimum_strain=True)
     try:
         ax = fig.axes[0]
-        assert ax.get_ylabel() == "Strain relative to trace minimum [%]"
+        assert ax.get_ylabel() == "Strain from trace-minimum length [%]"
         assert len(ax.lines) == 9
-        for line in ax.lines:
+        groups = core.current_sweep_groups(run.frame)
+        for line, (_target, group) in zip(ax.lines, groups, strict=True):
             assert min(line.get_ydata()) == pytest.approx(0.0)
+            expected = core.strain_from_trace_minimum_length(run, group)
+            assert line.get_ydata() == pytest.approx(expected.to_numpy(dtype=float))
+
+        first_target, first_group = groups[0]
+        assert first_target == pytest.approx(50.0)
+        shifted = first_group["strain_pct"] - first_group["strain_pct"].min()
+        recalculated = core.strain_from_trace_minimum_length(run, first_group)
+        assert recalculated.max() != pytest.approx(shifted.max())
     finally:
         plt.close(fig)
 

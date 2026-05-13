@@ -28,6 +28,7 @@ class MiniDmaRun:
     measurement_path: Path
     frame: pd.DataFrame
     sample_name: str
+    initial_length_mm: float | None = None
 
 
 def resolve_measurement_path(path: Path) -> Path:
@@ -62,6 +63,7 @@ def load_run(path: Path) -> MiniDmaRun:
         "resistance_ohm",
         "current_set_mA",
         "current_measured_mA",
+        "position_mm",
     ):
         if column in cleaned.columns:
             cleaned[column] = pd.to_numeric(cleaned[column], errors="coerce")
@@ -72,6 +74,7 @@ def load_run(path: Path) -> MiniDmaRun:
     if cleaned.empty:
         raise ValueError("No usable Mini DMA current-sweep rows found.")
 
+    metadata = _metadata_for_run(measurement_path)
     sample_name = _sample_name_for_run(measurement_path)
     run_path = measurement_path.parent
     return MiniDmaRun(
@@ -79,6 +82,7 @@ def load_run(path: Path) -> MiniDmaRun:
         measurement_path=measurement_path,
         frame=cleaned.reset_index(drop=True),
         sample_name=sample_name,
+        initial_length_mm=_initial_length_from_metadata(metadata),
     )
 
 
@@ -112,7 +116,7 @@ def make_strain_current_figure(run: MiniDmaRun, *, zero_minimum_strain: bool = F
         run,
         y_column="strain_pct",
         y_label=(
-            "Strain relative to trace minimum [%]"
+            "Strain from trace-minimum length [%]"
             if zero_minimum_strain
             else "Strain [%]"
         ),
@@ -153,7 +157,7 @@ def _make_current_figure(
             continue
         y_values = group[y_column].to_numpy(dtype=float)
         if zero_minimum_y and len(y_values):
-            y_values = y_values - y_values.min()
+            y_values = _strain_from_trace_minimum_length(run, group)
         ax.plot(
             group["current_mA"].to_numpy(dtype=float),
             y_values,
@@ -181,6 +185,10 @@ def build_plot_frame(run: MiniDmaRun, *, y_column: str) -> pd.DataFrame:
     return pd.DataFrame(columns)
 
 
+def strain_from_trace_minimum_length(run: MiniDmaRun, group: pd.DataFrame) -> pd.Series:
+    return pd.Series(_strain_from_trace_minimum_length(run, group), index=group.index)
+
+
 def _drop_resistance_outliers(group: pd.DataFrame) -> pd.DataFrame:
     if "resistance_ohm" not in group or len(group) < 6:
         return group
@@ -199,6 +207,26 @@ def _drop_resistance_outliers(group: pd.DataFrame) -> pd.DataFrame:
     return filtered.reset_index(drop=True)
 
 
+def _strain_from_trace_minimum_length(run: MiniDmaRun, group: pd.DataFrame) -> pd.Series:
+    """Recalculate strain with each curve's shortest measured length as l0."""
+    if "position_mm" in group.columns and run.initial_length_mm is not None:
+        position = pd.to_numeric(group["position_mm"], errors="coerce")
+        if position.notna().any():
+            length_mm = run.initial_length_mm + position
+            l0_mm = float(length_mm.min(skipna=True))
+            if pd.notna(l0_mm) and l0_mm > 0.0:
+                return (length_mm - l0_mm) / l0_mm * 100.0
+
+    strain_pct = pd.to_numeric(group["strain_pct"], errors="coerce")
+    if run.initial_length_mm is not None and strain_pct.notna().any():
+        length_mm = run.initial_length_mm * (1.0 + strain_pct / 100.0)
+        l0_mm = float(length_mm.min(skipna=True))
+        if pd.notna(l0_mm) and l0_mm > 0.0:
+            return (length_mm - l0_mm) / l0_mm * 100.0
+
+    return strain_pct - strain_pct.min(skipna=True)
+
+
 def _choose_current_column(frame: pd.DataFrame) -> str | None:
     for column in CURRENT_COLUMNS:
         if column not in frame.columns:
@@ -209,16 +237,31 @@ def _choose_current_column(frame: pd.DataFrame) -> str | None:
     return None
 
 
-def _sample_name_for_run(measurement_path: Path) -> str:
+def _metadata_for_run(measurement_path: Path) -> dict[str, object]:
     metadata_path = measurement_path.with_name("metadata.json")
-    if metadata_path.exists():
-        try:
-            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except Exception:
-            payload = {}
-        name = payload.get("sample_name") if isinstance(payload, dict) else None
-        if isinstance(name, str) and name.strip():
-            return name.strip().replace("/", "_")
+    if not metadata_path.exists():
+        return {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _initial_length_from_metadata(payload: dict[str, object]) -> float | None:
+    value = payload.get("initial_length_mm")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0.0 else None
+
+
+def _sample_name_for_run(measurement_path: Path) -> str:
+    payload = _metadata_for_run(measurement_path)
+    name = payload.get("sample_name")
+    if isinstance(name, str) and name.strip():
+        return name.strip().replace("/", "_")
     return measurement_path.parent.name
 
 

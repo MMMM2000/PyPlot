@@ -63,10 +63,10 @@ class MiniDmaPlugin(PyPlotPlugin):
         )
         note.setWordWrap(True)
         section_layout.addWidget(note)
-        zero_minimum = QtWidgets.QCheckBox("Set each strain trace minimum to 0")
+        zero_minimum = QtWidgets.QCheckBox("Use each trace minimum as strain l0")
         zero_minimum.setToolTip(
-            "Re-zero each strain-current curve by subtracting that curve's minimum strain. "
-            "Useful for comparing transition shape with DMA plots whose lowest strain is shown as 0."
+            "Recalculate each strain-current curve using the shortest measured length in that trace "
+            "as l0, so its lowest point is physically treated as 0 strain."
         )
         section_layout.addWidget(zero_minimum)
         self._zero_minimum_strain_checkbox = zero_minimum
