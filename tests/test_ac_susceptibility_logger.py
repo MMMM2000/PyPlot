@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from data_logging.ac_susceptibility_logger import lcr6000
+from data_logging.ac_susceptibility_logger import sweep
 
 ac_logger = pytest.importorskip(
     "data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
@@ -41,6 +42,197 @@ def test_build_settings_plan_crosses_frequency_and_level() -> None:
     assert [item.level_value for item in plan] == [0.1, 0.3, 0.1, 0.3]
     assert all(item.function == "Ls-Q" for item in plan)
     assert all(item.monitor2 == "IAC" for item in plan)
+
+
+def test_build_ac_settings_plan_crosses_models_frequency_and_level() -> None:
+    plan = sweep.build_ac_settings_plan(
+        models=["ls-rs", "Lp-Rp"],
+        frequencies_hz=[1000.0, 10000.0],
+        levels=[0.1, 0.3],
+        level_mode="voltage",
+        monitor1="z",
+        monitor2="iac",
+        aperture="fast",
+    )
+
+    assert len(plan) == 8
+    assert [(item.function, item.frequency_hz, item.level_value) for item in plan[:4]] == [
+        ("Ls-Rs", 1000.0, 0.1),
+        ("Ls-Rs", 1000.0, 0.3),
+        ("Ls-Rs", 10000.0, 0.1),
+        ("Ls-Rs", 10000.0, 0.3),
+    ]
+    assert all(item.function == "Lp-Rp" for item in plan[4:])
+
+
+def test_build_current_loop_points_supports_up_down_without_duplicate_peak() -> None:
+    points = sweep.build_current_loop_points(
+        start_mA=20.0,
+        stop_mA=80.0,
+        step_mA=30.0,
+        direction_mode="up-down",
+    )
+
+    assert [(point.current_a, point.direction) for point in points] == [
+        (0.02, "up"),
+        (0.05, "up"),
+        (0.08, "up"),
+        (0.05, "down"),
+        (0.02, "down"),
+    ]
+
+
+def test_estimate_sweep_totals_counts_repeats_and_dwell() -> None:
+    estimate = sweep.estimate_sweep(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1), lcr6000.Lcr6000Settings(10000.0, 0.1)],
+        current_points=[
+            sweep.CurrentLoopPoint(0.02, "up"),
+            sweep.CurrentLoopPoint(0.04, "up"),
+            sweep.CurrentLoopPoint(0.02, "down"),
+        ],
+        repeats=3,
+        dwell_s=2.0,
+    )
+
+    assert estimate.total_measurements == 18
+    assert estimate.estimated_seconds == pytest.approx(36.0)
+
+
+def test_write_sweep_metadata_and_row_flushes_incrementally(tmp_path: Path) -> None:
+    path = tmp_path / "overnight.tsv"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+    )
+    reading = lcr6000.Lcr6000Reading(
+        timestamp_utc="2026-05-13T10:00:00.000+00:00",
+        raw="+1.0,+2.0,+0.0,+0.0,OK",
+        primary=1.0,
+        secondary=2.0,
+        monitor1=0.0,
+        monitor2=0.0,
+        comparator="OK",
+    )
+    writer = sweep.AcSweepTsvWriter(path, config)
+
+    writer.write_metadata()
+    writer.write_row(
+        sweep.AcSweepRow(
+            timestamp_utc="2026-05-13T10:00:01.000+00:00",
+            elapsed_s=1.5,
+            setting_index=1,
+            total_settings=1,
+            setting=config.lcr_settings[0],
+            current_point=config.current_points[0],
+            repeat_index=1,
+            lcr_reading=reading,
+            psu_measurement=sweep.PowerSupplyMeasurement(current_actual_a=0.0198, voltage_actual_v=1.2, status="OK"),
+            psu_backend="owon_spe6102",
+            psu_resource="COM7",
+        )
+    )
+    writer.close()
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "# AC susceptibility sweep"
+    assert "psu_backend=owon_spe6102" in lines[1]
+    assert lines[-2] == sweep.SWEEP_HEADER_LINE
+    assert lines[-1].split("\t") == [
+        "2026-05-13T10:00:01.000+00:00",
+        "1.5",
+        "1",
+        "1",
+        "Ls-Rs",
+        "1000",
+        "voltage",
+        "0.1",
+        "0.02",
+        "0.0198",
+        "1.2",
+        "up",
+        "1",
+        "1",
+        "2",
+        "0",
+        "0",
+        "OK",
+        "+1.0,+2.0,+0.0,+0.0,OK",
+        "owon_spe6102",
+        "COM7",
+        "OK",
+        "",
+    ]
+
+
+def test_run_ac_sweep_uses_owon_backend_and_safe_shutdown_on_lcr_failure(tmp_path: Path) -> None:
+    class FakeLcr:
+        def __init__(self) -> None:
+            self.configured: list[lcr6000.Lcr6000Settings] = []
+
+        def configure(self, setting: lcr6000.Lcr6000Settings) -> None:
+            self.configured.append(setting)
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            raise RuntimeError("empty LCR response")
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def __init__(self) -> None:
+            self.events: list[object] = []
+
+        def connect(self) -> None:
+            self.events.append("connect")
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            self.events.append(("initialize", voltage_limit_v))
+
+        def set_current(self, current_a: float) -> None:
+            self.events.append(("current", current_a))
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            self.events.append("measure")
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.0, status="OK")
+
+        def output_off(self) -> None:
+            self.events.append("off")
+
+        def close(self) -> None:
+            self.events.append("close")
+
+    psu = FakePsu()
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+    )
+
+    with pytest.raises(RuntimeError, match="empty LCR response"):
+        sweep.run_ac_sweep(
+            config=config,
+            lcr=FakeLcr(),
+            psu=psu,
+            output_path=tmp_path / "failed.tsv",
+            sleep=lambda _seconds: None,
+        )
+
+    assert psu.events == [
+        "connect",
+        ("initialize", 5.0),
+        ("current", 0.02),
+        "off",
+        "close",
+    ]
 
 
 def test_commands_for_settings_use_lcr6000_scpi_spellings() -> None:

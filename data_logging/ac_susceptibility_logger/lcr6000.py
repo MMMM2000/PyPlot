@@ -92,7 +92,7 @@ class Lcr6000Settings:
     frequency_hz: float
     level_value: float
     level_mode: str = "voltage"
-    function: str = "Ls-Q"
+    function: str = "Ls-Rs"
     monitor1: str = "Z"
     monitor2: str = "IAC"
     aperture: str = "FAST"

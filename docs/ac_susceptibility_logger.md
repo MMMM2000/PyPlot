@@ -51,12 +51,19 @@ Quick probe after driver installation:
 .\.venv\Scripts\python.exe scripts\probe_lcr6000.py COM7 --configure --fetch
 ```
 
-## Measurement Plan
+## Measurement Modes
 
-The logger builds a frequency-by-level matrix from the LCR panel. With **One
-current sweep per AC setting** enabled, it sets the current annealing loop count
-to the number of generated AC settings, enables reverse-to-zero, and advances
-the LCR setting after each completed current sweep.
+The logger has two current-measurement paths:
+
+- **Run AC sweep** is the overnight mode. It builds a selected model x
+  frequency x level matrix, then runs the configured current loop at every LCR
+  setting. It writes a timestamped `*_ac_sweep_YYYYMMDD_HHMMSS.tsv` file
+  incrementally after every LCR read.
+- The inherited **Start annealing process** path remains available for the
+  older current-annealing-style workflow. With **One current sweep per AC
+  setting** enabled, it sets the current annealing loop count to the number of
+  generated AC settings, enables reverse-to-zero, and advances the LCR setting
+  after each completed current sweep.
 
 Use **Measure baseline** for an LCR-only baseline before a real current sweep.
 It does not talk to the power supply. It runs the current frequency-by-level
@@ -66,17 +73,48 @@ empty fixture/coil readings and, optionally, wire-in-fixture/no-current
 readings. This is baseline context for relative comparisons, not absolute
 susceptibility calibration.
 
-Suggested first-pass settings for finding a strong transition signal:
+Suggested first-pass settings for the 1 cm, roughly 1 mm coil around a
+Ni50Fe27Ga23 microwire:
 
-- LCR function: `Ls-Q`
+- LCR model: `Ls-Rs`
+- Optional diagnostic model: `Lp-Rp`
 - Monitor 1: `Z`
 - Monitor 2: `IAC`
 - Frequencies: `100, 1k, 10k, 100k`
 - Voltage levels: `0.1, 0.3, 1.0`
 - Aperture: `FAST` for searching, `MED` or `SLOW` after the best region is known
+- Current loop: start conservatively, for example `20 mA -> 80 mA -> 20 mA`
 
 For each wire, run a conservative low-current sweep first to confirm the coil,
 wire, and supply wiring behave normally before trying the full transition range.
+
+The `-Q` LCR modes are not required for the normal experiment. `Ls-Rs` and
+`Lp-Rp` log the equivalent inductance and resistance directly; Q can be derived
+later from the logged L/R/frequency values if needed.
+
+## Overnight Sweep Output
+
+Each AC sweep row includes:
+
+```text
+timestamp, elapsed_s, setting index/count, LCR model, frequency, level,
+current_set_a, current_actual_a, voltage_actual_v, direction, repeat,
+LCR primary/secondary/monitors/status/raw, PSU backend/resource/status/error
+```
+
+The writer flushes every row so a long unattended run still leaves partial data
+if the PC, meter, or supply stops responding.
+
+## Power Supply Backends
+
+The AC sweep can use either the existing HMP4030-style SCPI path or an OWON
+SPE6102-style backend. Select the backend, serial port, baud rate, and voltage
+limit in the AC panel before pressing **Run AC sweep**.
+
+The sweep engine treats the supply generically: connect, initialize with a
+voltage limit, set current, read actual voltage/current when available, then
+turn output off on normal completion, user stop, or error. Baseline measurement
+does not create or command a power-supply backend.
 
 ## Literature Cues
 

@@ -14,12 +14,16 @@ git checkout codex/add-ac-susceptibility-logger
 Important files:
 
 - `data_logging/ac_susceptibility_logger/lcr6000.py` - GW Instek LCR-6000 serial protocol helper.
+- `data_logging/ac_susceptibility_logger/sweep.py` - model/frequency/level/current-loop sweep planning, TSV writing, and SCPI current-source backend.
 - `data_logging/ac_susceptibility_logger/ac_susceptibility_logger.py` - new logger UI that reuses the current annealing logger and appends LCR data.
 - `scripts/probe_lcr6000.py` - small command-line probe for the meter.
 - `docs/ac_susceptibility_logger.md` - user-facing logger notes.
 - `tests/test_ac_susceptibility_logger.py` - parser/command tests for the LCR helper.
 
 The logger is registered in `launcher.py` as **AC Susceptibility Logger**.
+The current worktree continues the original PR work with a dedicated overnight
+AC sweep mode, `Ls-Rs` as the default model, optional `Lp-Rp`, and selectable
+HMP4030/OWON SPE6102-style current-source backends.
 
 ## Hardware Identified
 
@@ -200,7 +204,7 @@ The AC panel adds:
 - Frequency list, e.g. `100, 1k, 10k, 100k`.
 - AC level list, e.g. `0.1, 0.3, 1.0`.
 - Level mode: voltage or current. Voltage mode is the tested path.
-- LCR function, default `Ls-Q`.
+- LCR model selection, default `Ls-Rs`, optional `Lp-Rp`.
 - Monitor 1 and 2, default `Z` and `IAC`.
 - Aperture, default `FAST`.
 - **One current sweep per AC setting**. When enabled, the logger sets loop count
@@ -208,6 +212,10 @@ The AC panel adds:
 - **Measure baseline**. Runs the LCR frequency-by-level matrix without using
   the current annealing power-supply path and saves a timestamped
   `*_baseline_YYYYMMDD_HHMMSS.tsv` file next to the selected log file.
+- **Run AC sweep**. Runs a selected model x frequency x level matrix with a
+  configurable current loop, dwell, and repeat count. It writes a timestamped
+  `*_ac_sweep_YYYYMMDD_HHMMSS.tsv` file incrementally and turns the selected
+  PSU backend output off on stop or failure.
 
 Log rows keep the first three current annealing columns:
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import math
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -31,6 +32,7 @@ from .lcr6000 import (
     commands_for_settings,
     parse_numeric_list,
 )
+from . import sweep
 
 
 HEADER_LINE = (
@@ -58,11 +60,15 @@ class MainWindow(CurrentAnnealingWindow):
         self._lcr_plan_index = 0
         self._lcr_last_reading: Lcr6000Reading | None = None
         self._lcr_last_error = ""
+        self._ac_sweep_running = False
+        self._ac_sweep_stop_requested = False
         super().__init__()
         self.setWindowTitle("AC Susceptibility Logger")
         self._install_lcr_controls()
         self._load_lcr_settings()
         self.populate_lcr_ports()
+        self.populate_ac_psu_ports()
+        self._update_ac_sweep_estimate()
         self._set_default_log_name()
 
     def _set_default_log_name(self) -> None:
@@ -104,6 +110,9 @@ class MainWindow(CurrentAnnealingWindow):
         self.comboBox_lcr_level_mode.addItem("Current", "current")
         self.comboBox_lcr_function = QtWidgets.QComboBox(group)
         self.comboBox_lcr_function.addItems(list(SUPPORTED_FUNCTIONS))
+        self.checkBox_lcr_model_lsrs = QtWidgets.QCheckBox("Ls-Rs", group)
+        self.checkBox_lcr_model_lprp = QtWidgets.QCheckBox("Lp-Rp", group)
+        self.checkBox_lcr_model_lsrs.setChecked(True)
         self.comboBox_lcr_monitor1 = QtWidgets.QComboBox(group)
         self.comboBox_lcr_monitor1.addItems(list(SUPPORTED_MONITORS))
         self.comboBox_lcr_monitor2 = QtWidgets.QComboBox(group)
@@ -117,6 +126,48 @@ class MainWindow(CurrentAnnealingWindow):
         self.spinBox_lcr_baseline_repeats.setRange(1, 100)
         self.spinBox_lcr_baseline_repeats.setValue(3)
         self.pushButton_measure_lcr_baseline = QtWidgets.QPushButton("Measure baseline", group)
+        self.comboBox_ac_psu_backend = QtWidgets.QComboBox(group)
+        for backend_id, profile in sweep.POWER_SUPPLY_PROFILES.items():
+            self.comboBox_ac_psu_backend.addItem(str(profile.get("label", backend_id)), backend_id)
+        self.comboBox_ac_psu_port = QtWidgets.QComboBox(group)
+        self.pushButton_refresh_ac_psu_ports = QtWidgets.QPushButton("Refresh PSU", group)
+        self.comboBox_ac_psu_baud = QtWidgets.QComboBox(group)
+        self.comboBox_ac_psu_baud.addItems(["9600", "19200", "38400", "57600", "115200"])
+        self.comboBox_ac_psu_baud.setCurrentText("9600")
+        self.spinBox_ac_voltage_limit = QtWidgets.QDoubleSpinBox(group)
+        self.spinBox_ac_voltage_limit.setRange(0.1, 120.0)
+        self.spinBox_ac_voltage_limit.setDecimals(2)
+        self.spinBox_ac_voltage_limit.setValue(5.0)
+        self.spinBox_ac_current_start = QtWidgets.QDoubleSpinBox(group)
+        self.spinBox_ac_current_start.setRange(0.0, 10000.0)
+        self.spinBox_ac_current_start.setDecimals(3)
+        self.spinBox_ac_current_start.setSuffix(" mA")
+        self.spinBox_ac_current_start.setValue(20.0)
+        self.spinBox_ac_current_stop = QtWidgets.QDoubleSpinBox(group)
+        self.spinBox_ac_current_stop.setRange(0.0, 10000.0)
+        self.spinBox_ac_current_stop.setDecimals(3)
+        self.spinBox_ac_current_stop.setSuffix(" mA")
+        self.spinBox_ac_current_stop.setValue(80.0)
+        self.spinBox_ac_current_step = QtWidgets.QDoubleSpinBox(group)
+        self.spinBox_ac_current_step.setRange(0.001, 10000.0)
+        self.spinBox_ac_current_step.setDecimals(3)
+        self.spinBox_ac_current_step.setSuffix(" mA")
+        self.spinBox_ac_current_step.setValue(5.0)
+        self.comboBox_ac_direction = QtWidgets.QComboBox(group)
+        self.comboBox_ac_direction.addItem("Up and down", "up-down")
+        self.comboBox_ac_direction.addItem("Up only", "up")
+        self.comboBox_ac_direction.addItem("Down only", "down")
+        self.spinBox_ac_dwell = QtWidgets.QDoubleSpinBox(group)
+        self.spinBox_ac_dwell.setRange(0.0, 3600.0)
+        self.spinBox_ac_dwell.setDecimals(2)
+        self.spinBox_ac_dwell.setSuffix(" s")
+        self.spinBox_ac_dwell.setValue(1.0)
+        self.spinBox_ac_repeats = QtWidgets.QSpinBox(group)
+        self.spinBox_ac_repeats.setRange(1, 1000)
+        self.spinBox_ac_repeats.setValue(1)
+        self.label_ac_sweep_estimate = QtWidgets.QLabel("", group)
+        self.label_ac_sweep_estimate.setWordWrap(True)
+        self.pushButton_run_ac_sweep = QtWidgets.QPushButton("Run AC sweep", group)
 
         self.lineEdit_lcr_frequencies.setPlaceholderText("100, 1k, 10k, 100k")
         self.lineEdit_lcr_levels.setPlaceholderText("0.1, 0.3, 1.0")
@@ -129,17 +180,45 @@ class MainWindow(CurrentAnnealingWindow):
         grid.addWidget(self.comboBox_lcr_level_mode, 1, 3)
         grid.addWidget(QtWidgets.QLabel("Function:", group), 2, 0)
         grid.addWidget(self.comboBox_lcr_function, 2, 1)
-        grid.addWidget(QtWidgets.QLabel("Monitor 1:", group), 2, 2)
-        grid.addWidget(self.comboBox_lcr_monitor1, 2, 3)
-        grid.addWidget(QtWidgets.QLabel("Monitor 2:", group), 3, 0)
-        grid.addWidget(self.comboBox_lcr_monitor2, 3, 1)
-        grid.addWidget(QtWidgets.QLabel("Speed:", group), 3, 2)
-        grid.addWidget(self.comboBox_lcr_aperture, 3, 3)
-        grid.addWidget(self.checkBox_ac_plan_loops, 4, 0, 1, 3)
+        model_row = QtWidgets.QHBoxLayout()
+        model_row.addWidget(self.checkBox_lcr_model_lsrs)
+        model_row.addWidget(self.checkBox_lcr_model_lprp)
+        model_row.addStretch(1)
+        grid.addLayout(model_row, 2, 2, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("Monitor 1:", group), 3, 0)
+        grid.addWidget(self.comboBox_lcr_monitor1, 3, 1)
+        grid.addWidget(QtWidgets.QLabel("Monitor 2:", group), 3, 2)
+        grid.addWidget(self.comboBox_lcr_monitor2, 3, 3)
+        grid.addWidget(QtWidgets.QLabel("Speed:", group), 4, 0)
+        grid.addWidget(self.comboBox_lcr_aperture, 4, 1)
+        grid.addWidget(self.checkBox_ac_plan_loops, 4, 2)
         grid.addWidget(self.pushButton_apply_lcr_setting, 4, 3)
         grid.addWidget(QtWidgets.QLabel("Baseline repeats:", group), 5, 0)
         grid.addWidget(self.spinBox_lcr_baseline_repeats, 5, 1)
         grid.addWidget(self.pushButton_measure_lcr_baseline, 5, 2, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("PSU backend:", group), 6, 0)
+        grid.addWidget(self.comboBox_ac_psu_backend, 6, 1)
+        grid.addWidget(QtWidgets.QLabel("PSU port:", group), 6, 2)
+        grid.addWidget(self.comboBox_ac_psu_port, 6, 3)
+        grid.addWidget(self.pushButton_refresh_ac_psu_ports, 7, 3)
+        grid.addWidget(QtWidgets.QLabel("PSU baud:", group), 7, 0)
+        grid.addWidget(self.comboBox_ac_psu_baud, 7, 1)
+        grid.addWidget(QtWidgets.QLabel("Voltage limit:", group), 7, 2)
+        grid.addWidget(self.spinBox_ac_voltage_limit, 7, 3)
+        grid.addWidget(QtWidgets.QLabel("Current start:", group), 8, 0)
+        grid.addWidget(self.spinBox_ac_current_start, 8, 1)
+        grid.addWidget(QtWidgets.QLabel("Current stop:", group), 8, 2)
+        grid.addWidget(self.spinBox_ac_current_stop, 8, 3)
+        grid.addWidget(QtWidgets.QLabel("Current step:", group), 9, 0)
+        grid.addWidget(self.spinBox_ac_current_step, 9, 1)
+        grid.addWidget(QtWidgets.QLabel("Direction:", group), 9, 2)
+        grid.addWidget(self.comboBox_ac_direction, 9, 3)
+        grid.addWidget(QtWidgets.QLabel("Dwell:", group), 10, 0)
+        grid.addWidget(self.spinBox_ac_dwell, 10, 1)
+        grid.addWidget(QtWidgets.QLabel("Repeats:", group), 10, 2)
+        grid.addWidget(self.spinBox_ac_repeats, 10, 3)
+        grid.addWidget(self.label_ac_sweep_estimate, 11, 0, 1, 3)
+        grid.addWidget(self.pushButton_run_ac_sweep, 11, 3)
         outer.addLayout(grid)
 
         self.label_lcr_status = QtWidgets.QLabel("LCR not connected", group)
@@ -154,8 +233,11 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_identify_lcr.clicked.connect(self.handle_identify_lcr_clicked)
         self.pushButton_apply_lcr_setting.clicked.connect(self.handle_apply_lcr_setting_clicked)
         self.pushButton_measure_lcr_baseline.clicked.connect(self.handle_measure_lcr_baseline_clicked)
+        self.pushButton_refresh_ac_psu_ports.clicked.connect(self.populate_ac_psu_ports)
+        self.pushButton_run_ac_sweep.clicked.connect(self.handle_run_ac_sweep_clicked)
         for edit in (self.lineEdit_lcr_frequencies, self.lineEdit_lcr_levels):
             edit.editingFinished.connect(self._store_lcr_settings)
+            edit.editingFinished.connect(self._update_ac_sweep_estimate)
         for combo in (
             self.comboBox_lcr_level_mode,
             self.comboBox_lcr_function,
@@ -164,8 +246,29 @@ class MainWindow(CurrentAnnealingWindow):
             self.comboBox_lcr_aperture,
         ):
             combo.currentIndexChanged.connect(lambda *_args: self._store_lcr_settings())
+            combo.currentIndexChanged.connect(lambda *_args: self._update_ac_sweep_estimate())
         self.checkBox_ac_plan_loops.toggled.connect(lambda *_args: self._store_lcr_settings())
         self.spinBox_lcr_baseline_repeats.valueChanged.connect(lambda *_args: self._store_lcr_settings())
+        self.checkBox_lcr_model_lsrs.toggled.connect(lambda *_args: self._store_lcr_settings())
+        self.checkBox_lcr_model_lprp.toggled.connect(lambda *_args: self._store_lcr_settings())
+        self.checkBox_lcr_model_lsrs.toggled.connect(lambda *_args: self._update_ac_sweep_estimate())
+        self.checkBox_lcr_model_lprp.toggled.connect(lambda *_args: self._update_ac_sweep_estimate())
+        for widget in (
+            self.comboBox_ac_psu_backend,
+            self.comboBox_ac_psu_port,
+            self.comboBox_ac_psu_baud,
+            self.spinBox_ac_voltage_limit,
+            self.spinBox_ac_current_start,
+            self.spinBox_ac_current_stop,
+            self.spinBox_ac_current_step,
+            self.comboBox_ac_direction,
+            self.spinBox_ac_dwell,
+            self.spinBox_ac_repeats,
+        ):
+            signal = getattr(widget, "currentIndexChanged", None) or getattr(widget, "valueChanged", None)
+            if signal is not None:
+                signal.connect(lambda *_args: self._store_lcr_settings())
+                signal.connect(lambda *_args: self._update_ac_sweep_estimate())
 
     def _load_lcr_settings(self) -> None:
         self.lineEdit_lcr_frequencies.setText(
@@ -175,7 +278,11 @@ class MainWindow(CurrentAnnealingWindow):
             self.ac_settings.value("levels", "0.1, 0.3, 1.0", type=str)
         )
         self._set_combo_data(self.comboBox_lcr_level_mode, self.ac_settings.value("level_mode", "voltage", type=str))
-        self._set_combo_text(self.comboBox_lcr_function, self.ac_settings.value("function", "Ls-Q", type=str))
+        self._set_combo_text(self.comboBox_lcr_function, self.ac_settings.value("function", "Ls-Rs", type=str))
+        models = str(self.ac_settings.value("models", "Ls-Rs", type=str))
+        model_tokens = {token.strip().lower() for token in re.split(r"[,;\s]+", models) if token.strip()}
+        self.checkBox_lcr_model_lsrs.setChecked(not model_tokens or "ls-rs" in model_tokens)
+        self.checkBox_lcr_model_lprp.setChecked("lp-rp" in model_tokens)
         self._set_combo_text(self.comboBox_lcr_monitor1, self.ac_settings.value("monitor1", "Z", type=str))
         self._set_combo_text(self.comboBox_lcr_monitor2, self.ac_settings.value("monitor2", "IAC", type=str))
         self._set_combo_text(self.comboBox_lcr_aperture, self.ac_settings.value("aperture", "FAST", type=str))
@@ -186,6 +293,15 @@ class MainWindow(CurrentAnnealingWindow):
             self.spinBox_lcr_baseline_repeats.setValue(3)
         plan_loops = self.ac_settings.value("plan_loops", 1)
         self.checkBox_ac_plan_loops.setChecked(str(plan_loops).lower() not in {"0", "false", "no"})
+        self._set_combo_data(self.comboBox_ac_psu_backend, self.ac_settings.value("psu_backend", "owon_spe6102", type=str))
+        self._set_combo_text(self.comboBox_ac_psu_baud, self.ac_settings.value("psu_baud", "9600", type=str))
+        self._set_combo_data(self.comboBox_ac_direction, self.ac_settings.value("direction", "up-down", type=str))
+        self.spinBox_ac_voltage_limit.setValue(float(self.ac_settings.value("voltage_limit_v", 5.0)))
+        self.spinBox_ac_current_start.setValue(float(self.ac_settings.value("current_start_mA", 20.0)))
+        self.spinBox_ac_current_stop.setValue(float(self.ac_settings.value("current_stop_mA", 80.0)))
+        self.spinBox_ac_current_step.setValue(float(self.ac_settings.value("current_step_mA", 5.0)))
+        self.spinBox_ac_dwell.setValue(float(self.ac_settings.value("dwell_s", 1.0)))
+        self.spinBox_ac_repeats.setValue(max(1, int(self.ac_settings.value("sweep_repeats", 1))))
 
     @staticmethod
     def _set_combo_text(combo: QtWidgets.QComboBox, text: str) -> None:
@@ -204,11 +320,22 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("levels", self.lineEdit_lcr_levels.text())
         self.ac_settings.setValue("level_mode", self.comboBox_lcr_level_mode.currentData())
         self.ac_settings.setValue("function", self.comboBox_lcr_function.currentText())
+        self.ac_settings.setValue("models", ",".join(self._selected_lcr_models()))
         self.ac_settings.setValue("monitor1", self.comboBox_lcr_monitor1.currentText())
         self.ac_settings.setValue("monitor2", self.comboBox_lcr_monitor2.currentText())
         self.ac_settings.setValue("aperture", self.comboBox_lcr_aperture.currentText())
         self.ac_settings.setValue("plan_loops", int(self.checkBox_ac_plan_loops.isChecked()))
         self.ac_settings.setValue("baseline_repeats", int(self.spinBox_lcr_baseline_repeats.value()))
+        self.ac_settings.setValue("psu_backend", self.comboBox_ac_psu_backend.currentData())
+        self.ac_settings.setValue("psu_port", self.comboBox_ac_psu_port.currentData() or self.comboBox_ac_psu_port.currentText())
+        self.ac_settings.setValue("psu_baud", self.comboBox_ac_psu_baud.currentText())
+        self.ac_settings.setValue("voltage_limit_v", float(self.spinBox_ac_voltage_limit.value()))
+        self.ac_settings.setValue("current_start_mA", float(self.spinBox_ac_current_start.value()))
+        self.ac_settings.setValue("current_stop_mA", float(self.spinBox_ac_current_stop.value()))
+        self.ac_settings.setValue("current_step_mA", float(self.spinBox_ac_current_step.value()))
+        self.ac_settings.setValue("direction", self.comboBox_ac_direction.currentData())
+        self.ac_settings.setValue("dwell_s", float(self.spinBox_ac_dwell.value()))
+        self.ac_settings.setValue("sweep_repeats", int(self.spinBox_ac_repeats.value()))
 
     def populate_lcr_ports(self) -> None:
         self.comboBox_lcr_port.clear()
@@ -221,6 +348,20 @@ class MainWindow(CurrentAnnealingWindow):
             if port.is_lcr6000:
                 self.comboBox_lcr_port.setCurrentIndex(idx)
                 break
+
+    def populate_ac_psu_ports(self) -> None:
+        saved = self.ac_settings.value("psu_port", "", type=str)
+        self.comboBox_ac_psu_port.clear()
+        ports = sweep.available_power_supply_ports()
+        for label, device in ports:
+            self.comboBox_ac_psu_port.addItem(label, device)
+        if saved and self.comboBox_ac_psu_port.findData(saved) < 0:
+            self.comboBox_ac_psu_port.addItem(saved, saved)
+        if not ports and not saved:
+            self.comboBox_ac_psu_port.addItem("No serial ports found", "")
+        idx = self.comboBox_ac_psu_port.findData(saved)
+        if idx >= 0:
+            self.comboBox_ac_psu_port.setCurrentIndex(idx)
 
     def handle_connect_lcr_clicked(self) -> None:
         if self.lcr_meter is not None and self.lcr_meter.is_open:
@@ -262,6 +403,52 @@ class MainWindow(CurrentAnnealingWindow):
         self._lcr_plan_index = 0
         self._configure_lcr_for_current_index(show_errors=True)
 
+    def handle_run_ac_sweep_clicked(self) -> None:
+        if self._ac_sweep_running:
+            self._ac_sweep_stop_requested = True
+            self.label_lcr_status.setText("Stopping AC sweep after the current point...")
+            return
+        meter = self.lcr_meter
+        if meter is None or not meter.is_open:
+            QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
+            return
+        try:
+            config = self._build_ac_sweep_config()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Invalid AC sweep", str(exc))
+            return
+        psu = sweep.SerialScpiCurrentSource(
+            backend_id=config.psu_backend,
+            resource=config.psu_resource,
+            baudrate=int(self.comboBox_ac_psu_baud.currentText()),
+            voltage_limit_v=config.voltage_limit_v,
+        )
+        output_path = self._sweep_output_path()
+        self._ac_sweep_running = True
+        self._ac_sweep_stop_requested = False
+        self.pushButton_run_ac_sweep.setText("Stop AC sweep")
+        self.label_lcr_status.setText(f"Running AC sweep: {output_path}")
+        try:
+            sweep.run_ac_sweep(
+                config=config,
+                lcr=meter,
+                psu=psu,
+                output_path=output_path,
+                progress=self._handle_ac_sweep_progress,
+                stop_requested=lambda: self._ac_sweep_stop_requested,
+            )
+        except Exception as exc:
+            self._lcr_last_error = str(exc)
+            self.label_lcr_status.setText(f"AC sweep failed: {exc}")
+            QtWidgets.QMessageBox.warning(self, "AC sweep failed", str(exc))
+            return
+        finally:
+            self._ac_sweep_running = False
+            self._ac_sweep_stop_requested = False
+            self.pushButton_run_ac_sweep.setText("Run AC sweep")
+        self.label_lcr_status.setText(f"AC sweep saved: {output_path}")
+        QtWidgets.QMessageBox.information(self, "AC sweep saved", f"Saved AC sweep to:\n{output_path}")
+
     def handle_measure_lcr_baseline_clicked(self) -> None:
         meter = self.lcr_meter
         if meter is None or not meter.is_open:
@@ -293,18 +480,107 @@ class MainWindow(CurrentAnnealingWindow):
         quantity = "current" if level_mode == "current" else "generic"
         frequencies = parse_numeric_list(self.lineEdit_lcr_frequencies.text(), quantity="frequency")
         levels = parse_numeric_list(self.lineEdit_lcr_levels.text(), quantity=quantity)
-        self._lcr_plan = build_settings_plan(
-            frequencies,
-            levels,
-            level_mode=level_mode,
-            function=self.comboBox_lcr_function.currentText(),
-            monitor1=self.comboBox_lcr_monitor1.currentText(),
-            monitor2=self.comboBox_lcr_monitor2.currentText(),
-            aperture=self.comboBox_lcr_aperture.currentText(),
-        )
+        selected_models = self._selected_lcr_models()
+        if selected_models:
+            self._lcr_plan = sweep.build_ac_settings_plan(
+                models=selected_models,
+                frequencies_hz=frequencies,
+                levels=levels,
+                level_mode=level_mode,
+                monitor1=self.comboBox_lcr_monitor1.currentText(),
+                monitor2=self.comboBox_lcr_monitor2.currentText(),
+                aperture=self.comboBox_lcr_aperture.currentText(),
+            )
+        else:
+            self._lcr_plan = build_settings_plan(
+                frequencies,
+                levels,
+                level_mode=level_mode,
+                function=self.comboBox_lcr_function.currentText(),
+                monitor1=self.comboBox_lcr_monitor1.currentText(),
+                monitor2=self.comboBox_lcr_monitor2.currentText(),
+                aperture=self.comboBox_lcr_aperture.currentText(),
+            )
         if not self._lcr_plan:
             raise ValueError("No LCR settings were generated.")
         return self._lcr_plan
+
+    def _selected_lcr_models(self) -> list[str]:
+        models: list[str] = []
+        if getattr(self, "checkBox_lcr_model_lsrs", None) is not None and self.checkBox_lcr_model_lsrs.isChecked():
+            models.append("Ls-Rs")
+        if getattr(self, "checkBox_lcr_model_lprp", None) is not None and self.checkBox_lcr_model_lprp.isChecked():
+            models.append("Lp-Rp")
+        return models
+
+    def _build_ac_sweep_config(self) -> sweep.AcSweepConfig:
+        plan = self._prepare_lcr_plan()
+        current_points = sweep.build_current_loop_points(
+            start_mA=float(self.spinBox_ac_current_start.value()),
+            stop_mA=float(self.spinBox_ac_current_stop.value()),
+            step_mA=float(self.spinBox_ac_current_step.value()),
+            direction_mode=str(self.comboBox_ac_direction.currentData() or "up-down"),
+        )
+        psu_resource = str(self.comboBox_ac_psu_port.currentData() or "").strip()
+        if not psu_resource:
+            raise ValueError("Select the power-supply serial port first.")
+        return sweep.AcSweepConfig(
+            lcr_settings=plan,
+            current_points=current_points,
+            repeats=max(1, int(self.spinBox_ac_repeats.value())),
+            dwell_s=max(0.0, float(self.spinBox_ac_dwell.value())),
+            psu_backend=str(self.comboBox_ac_psu_backend.currentData() or "hmp4030"),
+            psu_resource=psu_resource,
+            voltage_limit_v=float(self.spinBox_ac_voltage_limit.value()),
+        )
+
+    def _update_ac_sweep_estimate(self) -> None:
+        try:
+            plan = self._prepare_lcr_plan()
+            current_points = sweep.build_current_loop_points(
+                start_mA=float(self.spinBox_ac_current_start.value()),
+                stop_mA=float(self.spinBox_ac_current_stop.value()),
+                step_mA=float(self.spinBox_ac_current_step.value()),
+                direction_mode=str(self.comboBox_ac_direction.currentData() or "up-down"),
+            )
+            estimate = sweep.estimate_sweep(
+                lcr_settings=plan,
+                current_points=current_points,
+                repeats=max(1, int(self.spinBox_ac_repeats.value())),
+                dwell_s=max(0.0, float(self.spinBox_ac_dwell.value())),
+            )
+        except Exception as exc:
+            self.label_ac_sweep_estimate.setText(f"Estimate unavailable: {exc}")
+            return
+        self.label_ac_sweep_estimate.setText(
+            f"{estimate.total_measurements} LCR reads, about "
+            f"{self._format_duration(estimate.estimated_seconds)} before communication overhead"
+        )
+
+    def _handle_ac_sweep_progress(self, row: sweep.AcSweepRow) -> None:
+        self.label_lcr_status.setText(
+            f"AC sweep {row.setting_index}/{row.total_settings}: "
+            f"{row.setting.function}, {row.setting.frequency_hz:g} Hz, "
+            f"{row.current_point.current_a * 1000:g} mA {row.current_point.direction}, "
+            f"repeat {row.repeat_index}"
+        )
+        QtWidgets.QApplication.processEvents()
+
+    def _sweep_output_path(self) -> Path:
+        log_path = Path(self.build_log_path())
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return log_path.with_name(f"{log_path.stem}_ac_sweep_{timestamp}.tsv")
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        seconds_int = max(0, int(round(seconds)))
+        hours, remainder = divmod(seconds_int, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours}h {minutes}m {secs}s"
+        if minutes:
+            return f"{minutes}m {secs}s"
+        return f"{secs}s"
 
     def _configure_lcr_for_current_index(self, *, show_errors: bool = False) -> bool:
         if not self._lcr_plan:
