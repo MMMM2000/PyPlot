@@ -39,9 +39,14 @@ RAW_HEADER = struct.Struct("<4sBBHIIIHHI")
 RAW_FRAME_WORDS = 832
 RAW_PIXEL_WORDS = FRAME_PIXELS
 RAW_AUX_WORDS = RAW_FRAME_WORDS - RAW_PIXEL_WORDS
-RAW_COMPACT_WORDS = (RAW_PIXEL_WORDS // 2) + RAW_AUX_WORDS
+RAW_REQUIRED_AUX_START = 768
+RAW_REQUIRED_AUX_END = 810
+RAW_REQUIRED_AUX_WORDS = RAW_REQUIRED_AUX_END - RAW_REQUIRED_AUX_START + 1
+RAW_COMPACT_WORDS = (RAW_PIXEL_WORDS // 2) + RAW_REQUIRED_AUX_WORDS
+RAW_LEGACY_COMPACT_WORDS = (RAW_PIXEL_WORDS // 2) + RAW_AUX_WORDS
 RAW_PAYLOAD_BYTES = RAW_FRAME_WORDS * 2
 RAW_COMPACT_PAYLOAD_BYTES = RAW_COMPACT_WORDS * 2
+RAW_LEGACY_COMPACT_PAYLOAD_BYTES = RAW_LEGACY_COMPACT_WORDS * 2
 RAW_PACKET_SIZE = RAW_HEADER.size + RAW_PAYLOAD_BYTES + 2
 EEPROM_PACKET_SIZE = RAW_PACKET_SIZE
 RAW_FLAG_SUBPAGE_1 = 0x01
@@ -234,8 +239,8 @@ def parse_raw_cube_frame(packet: bytes) -> ThermalFrame | None:
     if (
         magic != RAW_MAGIC
         or version != RAW_VERSION
-        or words not in {RAW_FRAME_WORDS, RAW_COMPACT_WORDS}
-        or payload_len not in {RAW_PAYLOAD_BYTES, RAW_COMPACT_PAYLOAD_BYTES}
+        or words not in {RAW_FRAME_WORDS, RAW_COMPACT_WORDS, RAW_LEGACY_COMPACT_WORDS}
+        or payload_len not in {RAW_PAYLOAD_BYTES, RAW_COMPACT_PAYLOAD_BYTES, RAW_LEGACY_COMPACT_PAYLOAD_BYTES}
         or len(packet) != RAW_HEADER.size + payload_len + 2
     ):
         return None
@@ -255,7 +260,12 @@ def parse_raw_cube_frame(packet: bytes) -> ThermalFrame | None:
             row_offset = row * FRAME_WIDTH
             raw_words_list[row_offset : row_offset + FRAME_WIDTH] = payload_words[cursor : cursor + FRAME_WIDTH]
             cursor += FRAME_WIDTH
-        raw_words_list[RAW_PIXEL_WORDS:RAW_FRAME_WORDS] = payload_words[cursor : cursor + RAW_AUX_WORDS]
+        if words == RAW_LEGACY_COMPACT_WORDS:
+            raw_words_list[RAW_PIXEL_WORDS:RAW_FRAME_WORDS] = payload_words[cursor : cursor + RAW_AUX_WORDS]
+        else:
+            raw_words_list[RAW_REQUIRED_AUX_START : RAW_REQUIRED_AUX_END + 1] = payload_words[
+                cursor : cursor + RAW_REQUIRED_AUX_WORDS
+            ]
         raw_words = tuple(raw_words_list)
     raw_values = tuple(_s16_word(value) for value in raw_words[:FRAME_PIXELS])
     return ThermalFrame(
@@ -352,11 +362,11 @@ def pop_cube_packets(buffer: bytearray) -> tuple[list[tuple[int, ...]], list[The
             magic, _version, _flags, words, *_rest, payload_len = RAW_HEADER.unpack_from(buffer, 0)
         except struct.error:
             return eeprom_packets, frames
-        if magic not in {RAW_MAGIC, EEPROM_MAGIC} or words not in {RAW_FRAME_WORDS, RAW_COMPACT_WORDS}:
+        if magic not in {RAW_MAGIC, EEPROM_MAGIC} or words not in {RAW_FRAME_WORDS, RAW_COMPACT_WORDS, RAW_LEGACY_COMPACT_WORDS}:
             del buffer[0]
             continue
         packet_size = RAW_HEADER.size + int(payload_len) + 2
-        if payload_len not in {RAW_PAYLOAD_BYTES, RAW_COMPACT_PAYLOAD_BYTES} or packet_size > RAW_PACKET_SIZE:
+        if payload_len not in {RAW_PAYLOAD_BYTES, RAW_COMPACT_PAYLOAD_BYTES, RAW_LEGACY_COMPACT_PAYLOAD_BYTES} or packet_size > RAW_PACKET_SIZE:
             del buffer[0]
             continue
         if len(buffer) < packet_size:

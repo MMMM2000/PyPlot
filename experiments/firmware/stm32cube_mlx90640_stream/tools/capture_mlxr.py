@@ -12,7 +12,8 @@ MAGIC = b"MLXR"
 HEADER = struct.Struct("<4sBBHIIIHHI")
 HEADER_SIZE = HEADER.size
 PAYLOAD_BYTES = 832 * 2
-COMPACT_PAYLOAD_BYTES = 448 * 2
+COMPACT_PAYLOAD_BYTES = 427 * 2
+LEGACY_COMPACT_PAYLOAD_BYTES = 448 * 2
 MAX_PACKET_SIZE = HEADER_SIZE + PAYLOAD_BYTES + 2
 
 
@@ -47,8 +48,8 @@ def pop_packets(buffer: bytearray) -> list[dict[str, int]]:
         packet_size = HEADER_SIZE + payload_len + 2
         if (
             version != 1
-            or words not in {832, 448}
-            or payload_len not in {PAYLOAD_BYTES, COMPACT_PAYLOAD_BYTES}
+            or words not in {832, 427, 448}
+            or payload_len not in {PAYLOAD_BYTES, COMPACT_PAYLOAD_BYTES, LEGACY_COMPACT_PAYLOAD_BYTES}
             or packet_size > MAX_PACKET_SIZE
         ):
             del buffer[0]

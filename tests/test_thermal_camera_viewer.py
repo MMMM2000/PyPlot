@@ -11,6 +11,8 @@ from experiments.thermal_camera_viewer import (
     RAW_HEADER,
     RAW_COMPACT_WORDS,
     RAW_COMPACT_PAYLOAD_BYTES,
+    RAW_REQUIRED_AUX_END,
+    RAW_REQUIRED_AUX_START,
     EEPROM_MAGIC,
     EEPROM_PACKET_SIZE,
     RAW_MAGIC,
@@ -200,7 +202,9 @@ def test_parse_compact_raw_cube_frame_maps_interleaved_rows() -> None:
     assert frame.raw_words[33] == 1
     assert frame.raw_words[95] == 0
     assert frame.raw_words[96] == 32
-    assert frame.raw_words[RAW_FRAME_WORDS - 1] == RAW_COMPACT_WORDS - 1
+    assert frame.raw_words[RAW_REQUIRED_AUX_START] == RAW_COMPACT_WORDS - (RAW_REQUIRED_AUX_END - RAW_REQUIRED_AUX_START + 1)
+    assert frame.raw_words[RAW_REQUIRED_AUX_END] == RAW_COMPACT_WORDS - 1
+    assert frame.raw_words[RAW_FRAME_WORDS - 1] == 0
 
 
 def test_parse_cube_eeprom_packet_returns_unsigned_words() -> None:

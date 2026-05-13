@@ -12,7 +12,9 @@
 #define MLX90640_DEVICE_ID1 0x2407U
 #define MLX90640_FRAME_WORDS 832U
 #define MLX90640_PIXEL_WORDS 768U
-#define MLX90640_AUX_WORDS 64U
+#define MLX90640_AUX_START_WORD 768U
+#define MLX90640_AUX_LAST_REQUIRED_WORD 810U
+#define MLX90640_AUX_REQUIRED_WORDS ((MLX90640_AUX_LAST_REQUIRED_WORD - MLX90640_AUX_START_WORD) + 1U)
 #define MLX90640_ROW_WORDS 32U
 #define MLX90640_ROWS 24U
 #define MLX90640_READ_CHUNK_WORDS 120U
@@ -24,6 +26,14 @@
 
 #ifndef MLX_I2C_TIMING
 #define MLX_I2C_TIMING 0x20D01132U
+#endif
+
+#ifndef MLX_I2C_ANALOG_FILTER
+#define MLX_I2C_ANALOG_FILTER 1U
+#endif
+
+#ifndef MLX_I2C_DIGITAL_FILTER
+#define MLX_I2C_DIGITAL_FILTER 0U
 #endif
 
 #ifndef MLX_UART_BAUD
@@ -46,7 +56,7 @@
 #define RAW_PACKET_VERSION 1U
 #define RAW_HEADER_BYTES 28U
 #define RAW_PAYLOAD_BYTES (MLX90640_FRAME_WORDS * 2U)
-#define RAW_COMPACT_WORDS ((MLX90640_PIXEL_WORDS / 2U) + MLX90640_AUX_WORDS)
+#define RAW_COMPACT_WORDS ((MLX90640_PIXEL_WORDS / 2U) + MLX90640_AUX_REQUIRED_WORDS)
 #define RAW_COMPACT_PAYLOAD_BYTES (RAW_COMPACT_WORDS * 2U)
 #define RAW_PACKET_BYTES (RAW_HEADER_BYTES + RAW_PAYLOAD_BYTES + 2U)
 #define RAW_FLAG_SUBPAGE_1 0x01U
@@ -76,7 +86,9 @@ static bool mlx_read_frame(uint16_t *status, uint16_t *control, uint32_t *read_u
 static void handle_uart_commands(void);
 static void send_raw_packet(uint16_t status, uint16_t control, uint32_t read_us);
 static void send_eeprom_packet(uint32_t read_us);
+static void uart_wait_ready(void);
 static void uart_write(const void *data, uint16_t size);
+static void uart_write_raw_packet(const void *data, uint16_t size);
 static void uart_write_text(const char *text);
 static void put_u8(uint16_t *offset, uint8_t value);
 static void put_u16(uint16_t *offset, uint16_t value);
@@ -114,9 +126,6 @@ int main(void)
         handle_uart_commands();
         if (mlx_read_frame(&status, &control, &read_us)) {
             send_raw_packet(status, control, read_us);
-            if ((sequence_number % 64U) == 0U && mlx_read_eeprom()) {
-                send_eeprom_packet(0);
-            }
             HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);
         }
     }
@@ -200,10 +209,10 @@ static void MX_I2C1_Init(void)
     if (HAL_I2C_Init(&hi2c1) != HAL_OK) {
         Error_Handler();
     }
-    if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK) {
+    if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, MLX_I2C_ANALOG_FILTER ? I2C_ANALOGFILTER_ENABLE : I2C_ANALOGFILTER_DISABLE) != HAL_OK) {
         Error_Handler();
     }
-    if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK) {
+    if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, MLX_I2C_DIGITAL_FILTER) != HAL_OK) {
         Error_Handler();
     }
 }
@@ -427,9 +436,9 @@ static HAL_StatusTypeDef mlx_read_interleaved_subpage(uint8_t subpage)
     }
 
     return mlx_read_words(
-        (uint16_t)(MLX90640_FRAME_RAM + MLX90640_PIXEL_WORDS),
-        MLX90640_AUX_WORDS,
-        &frame_payload[MLX90640_PIXEL_WORDS * 2U]);
+        (uint16_t)(MLX90640_FRAME_RAM + MLX90640_AUX_START_WORD),
+        MLX90640_AUX_REQUIRED_WORDS,
+        &frame_payload[MLX90640_AUX_START_WORD * 2U]);
 }
 
 static bool mlx_read_frame(uint16_t *status, uint16_t *control, uint32_t *read_us)
@@ -532,20 +541,39 @@ static void send_raw_packet(uint16_t status, uint16_t control, uint32_t read_us)
             packet[offset++] = frame_payload[row_offset + i];
         }
     }
-    for (uint16_t i = 0; i < MLX90640_AUX_WORDS * 2U; ++i) {
-        packet[offset++] = frame_payload[(MLX90640_PIXEL_WORDS * 2U) + i];
+    for (uint16_t i = 0; i < MLX90640_AUX_REQUIRED_WORDS * 2U; ++i) {
+        packet[offset++] = frame_payload[(MLX90640_AUX_START_WORD * 2U) + i];
     }
 
     for (uint16_t i = 0; i < offset; ++i) {
         checksum = (uint16_t)(checksum + packet[i]);
     }
     put_u16(&offset, checksum);
-    uart_write(packet, offset);
+    uart_write_raw_packet(packet, offset);
+}
+
+static void uart_wait_ready(void)
+{
+    uint32_t start = HAL_GetTick();
+    while (huart3.gState != HAL_UART_STATE_READY) {
+        if ((HAL_GetTick() - start) > 100U) {
+            break;
+        }
+    }
 }
 
 static void uart_write(const void *data, uint16_t size)
 {
+    uart_wait_ready();
     (void)HAL_UART_Transmit(&huart3, (uint8_t *)data, size, 100U);
+}
+
+static void uart_write_raw_packet(const void *data, uint16_t size)
+{
+    uart_wait_ready();
+    if (HAL_UART_Transmit_IT(&huart3, (uint8_t *)data, size) != HAL_OK) {
+        (void)HAL_UART_Transmit(&huart3, (uint8_t *)data, size, 100U);
+    }
 }
 
 static void uart_write_text(const char *text)
