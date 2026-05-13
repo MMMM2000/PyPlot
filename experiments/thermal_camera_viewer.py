@@ -37,9 +37,16 @@ EEPROM_MAGIC = b"MLXE"
 RAW_VERSION = 1
 RAW_HEADER = struct.Struct("<4sBBHIIIHHI")
 RAW_FRAME_WORDS = 832
+RAW_PIXEL_WORDS = FRAME_PIXELS
+RAW_AUX_WORDS = RAW_FRAME_WORDS - RAW_PIXEL_WORDS
+RAW_COMPACT_WORDS = (RAW_PIXEL_WORDS // 2) + RAW_AUX_WORDS
 RAW_PAYLOAD_BYTES = RAW_FRAME_WORDS * 2
+RAW_COMPACT_PAYLOAD_BYTES = RAW_COMPACT_WORDS * 2
 RAW_PACKET_SIZE = RAW_HEADER.size + RAW_PAYLOAD_BYTES + 2
 EEPROM_PACKET_SIZE = RAW_PACKET_SIZE
+RAW_FLAG_SUBPAGE_1 = 0x01
+RAW_FLAG_COMPACT = 0x40
+RAW_FLAG_OVERRUN = 0x80
 BINARY_TEXT = "text"
 BINARY_FAST = "binary"
 CUBE_RAW = "cube_raw"
@@ -195,10 +202,15 @@ def parse_binary_frame(packet: bytes) -> ThermalFrame | None:
     return ThermalFrame(int(elapsed_ms), ambient_c, values)
 
 
+def _s16_word(value: int) -> int:
+    value &= 0xFFFF
+    return value - 0x10000 if value & 0x8000 else value
+
+
 def parse_raw_cube_frame(packet: bytes) -> ThermalFrame | None:
     """Parse one STM32Cube ``MLXR`` raw frame-RAM packet."""
 
-    if len(packet) != RAW_PACKET_SIZE:
+    if len(packet) < RAW_HEADER.size + 2 or len(packet) > RAW_PACKET_SIZE:
         return None
     expected_checksum = int.from_bytes(packet[-2:], "little", signed=False)
     actual_checksum = sum(packet[:-2]) & 0xFFFF
@@ -222,19 +234,30 @@ def parse_raw_cube_frame(packet: bytes) -> ThermalFrame | None:
     if (
         magic != RAW_MAGIC
         or version != RAW_VERSION
-        or words != RAW_FRAME_WORDS
-        or payload_len != RAW_PAYLOAD_BYTES
+        or words not in {RAW_FRAME_WORDS, RAW_COMPACT_WORDS}
+        or payload_len not in {RAW_PAYLOAD_BYTES, RAW_COMPACT_PAYLOAD_BYTES}
+        or len(packet) != RAW_HEADER.size + payload_len + 2
     ):
         return None
 
     values_offset = RAW_HEADER.size
     try:
-        # MLX90640 RAM words arrive most-significant byte first. The first 768
-        # words are pixel RAM; the rest are auxiliary sensor registers.
-        raw_values = struct.unpack_from(f">{FRAME_PIXELS}h", packet, values_offset)
-        raw_words = struct.unpack_from(f">{RAW_FRAME_WORDS}H", packet, values_offset)
+        payload_words = struct.unpack_from(f">{words}H", packet, values_offset)
     except struct.error:
         return None
+    if words == RAW_FRAME_WORDS:
+        raw_words = tuple(int(value) for value in payload_words)
+    else:
+        raw_words_list = [0] * RAW_FRAME_WORDS
+        cursor = 0
+        subpage = int(flags & RAW_FLAG_SUBPAGE_1)
+        for row in range(subpage, FRAME_HEIGHT, 2):
+            row_offset = row * FRAME_WIDTH
+            raw_words_list[row_offset : row_offset + FRAME_WIDTH] = payload_words[cursor : cursor + FRAME_WIDTH]
+            cursor += FRAME_WIDTH
+        raw_words_list[RAW_PIXEL_WORDS:RAW_FRAME_WORDS] = payload_words[cursor : cursor + RAW_AUX_WORDS]
+        raw_words = tuple(raw_words_list)
+    raw_values = tuple(_s16_word(value) for value in raw_words[:FRAME_PIXELS])
     return ThermalFrame(
         int(elapsed_ms),
         None,
@@ -323,9 +346,22 @@ def pop_cube_packets(buffer: bytearray) -> tuple[list[tuple[int, ...]], list[The
             return eeprom_packets, frames
         if start:
             del buffer[:start]
-        if len(buffer) < RAW_PACKET_SIZE:
+        if len(buffer) < RAW_HEADER.size:
             return eeprom_packets, frames
-        packet = bytes(buffer[:RAW_PACKET_SIZE])
+        try:
+            magic, _version, _flags, words, *_rest, payload_len = RAW_HEADER.unpack_from(buffer, 0)
+        except struct.error:
+            return eeprom_packets, frames
+        if magic not in {RAW_MAGIC, EEPROM_MAGIC} or words not in {RAW_FRAME_WORDS, RAW_COMPACT_WORDS}:
+            del buffer[0]
+            continue
+        packet_size = RAW_HEADER.size + int(payload_len) + 2
+        if payload_len not in {RAW_PAYLOAD_BYTES, RAW_COMPACT_PAYLOAD_BYTES} or packet_size > RAW_PACKET_SIZE:
+            del buffer[0]
+            continue
+        if len(buffer) < packet_size:
+            return eeprom_packets, frames
+        packet = bytes(buffer[:packet_size])
         if packet.startswith(EEPROM_MAGIC):
             eeprom_words = parse_cube_eeprom_packet(packet)
             if eeprom_words is None:
@@ -338,7 +374,7 @@ def pop_cube_packets(buffer: bytearray) -> tuple[list[tuple[int, ...]], list[The
                 del buffer[0]
                 continue
             frames.append(frame)
-        del buffer[:RAW_PACKET_SIZE]
+        del buffer[:packet_size]
 
 
 def pop_raw_cube_frames(buffer: bytearray) -> list[ThermalFrame]:
@@ -628,7 +664,7 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         self.protocol_combo.addItem("Text frame dump", BINARY_TEXT)
         self.refresh_rate_combo = QtWidgets.QComboBox()
         for label_hz, code in REFRESH_RATES:
-            suffix = "" if label_hz == 16 else " experimental"
+            suffix = " experimental" if label_hz == 64 else ""
             self.refresh_rate_combo.addItem(f"{label_hz} Hz{suffix}", code)
         controls.addWidget(QtWidgets.QLabel("Port"))
         controls.addWidget(self.port_combo, 1)
@@ -859,10 +895,11 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         fps = self._fps_tracker.fps
         ambient = "--" if frame.ambient_c is None else f"{frame.ambient_c:.2f} C"
         read_time = "" if frame.raw_read_us is None else f" | Read {frame.raw_read_us / 1000.0:.2f} ms"
+        overrun = " | Overrun" if frame.flags & RAW_FLAG_OVERRUN else ""
         self.stats_label.setText(
             f"Min {frame.minimum_c:.2f} {frame.unit} | Mean {frame.mean_c:.2f} {frame.unit} | "
             f"Max {frame.maximum_c:.2f} {frame.unit} | Ambient {ambient} | {fps:.2f} fps"
-            f"{read_time}"
+            f"{read_time}{overrun}"
         )
 
     def _update_scale_controls(self) -> None:

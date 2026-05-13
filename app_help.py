@@ -109,7 +109,8 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                binary/text modes.
             2. Select the Nucleo serial port, normally `COM10`, use **Cube raw** at
                `2000000` baud for the STM32Cube firmware, choose the requested refresh
-               rate, and press **Connect**. Use
+               rate, and press **Connect**. The current 400 kHz I2C firmware is clean at
+               16 Hz and 32 Hz; 64 Hz remains experimental and may overrun. Use
                **Arduino binary** at `921600` baud or **Text frame dump** at `115200` baud only
                with the older Arduino firmware.
             3. The viewer reconstructs the 32 x 24 frame, scales it into a heatmap, and updates

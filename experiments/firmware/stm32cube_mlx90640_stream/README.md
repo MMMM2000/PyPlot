@@ -13,7 +13,7 @@ Default hardware assumptions:
 - Camera I2C: I2C1 on PB9 SDA / PB8 SCL, matching Arduino D14 / D15
 - Serial stream: USART3 on PD8 TX / PD9 RX, the ST-LINK virtual COM port
 - Sensor address: `0x33`
-- Sensor mode: chess mode, 16 Hz refresh, 17-bit ADC resolution
+- Sensor mode: interleaved mode, 16 Hz refresh, 17-bit ADC resolution
 - I2C timing: 400 kHz Fast Mode (`0x20D01132`)
 - UART baud: `2000000`
 
@@ -29,10 +29,13 @@ port while streaming:
 - `6` selects 32 Hz
 - `7` selects 64 Hz
 
-The viewer's rate dropdown sends those commands for Cube raw mode. Bench testing
-with valid 400 kHz I2C calibration showed 16 Hz is clean, while 32 Hz and 64 Hz
-both top out around 22 packets/s and report sensor overrun because each full
-frame-RAM read takes about 34.8 ms.
+The viewer's rate dropdown sends those commands for Cube raw mode. The firmware
+uses interleaved mode and reads only the current subpage rows plus auxiliary
+registers, then sends compact `MLXR` packets. The refresh command also clears
+the MLX90640 chess-mode bit so the sensor pattern matches the row-subpage read.
+Bench testing with valid 400 kHz I2C calibration showed 16 Hz and 32 Hz are
+clean, while 64 Hz is still overrun limited because the 400 kHz sensor read is
+the remaining ceiling.
 
 Measure the stream from the project root after flashing:
 
@@ -40,20 +43,24 @@ Measure the stream from the project root after flashing:
 .\.venv\Scripts\python.exe experiments\firmware\stm32cube_mlx90640_stream\tools\capture_mlxr.py COM10 --baud 2000000 --seconds 5
 ```
 
-Known-good bench result from the first Cube/HAL bring-up:
+Known-good bench result with interleaved subpage reads and compact packets:
 
-- 79 packets in 5 seconds at 16 Hz
-- 15.77 to 15.79 packets/s
+- 75 packets in 5 seconds at 16 Hz
+- 15.80 packets/s
 - 0 dropped sequence numbers
 - 0 overrun packets
 - subpages alternate evenly
-- frame RAM read time: about 34.8 ms at 400 kHz I2C, while still sustaining
-  15.77 packets/s on the bench
+- subpage row plus auxiliary read time: about 19.6 ms at 400 kHz I2C
 
 Experimental faster refresh results at 400 kHz I2C:
 
-- 32 Hz setting: about 22.45 packets/s, all packets flagged overrun
-- 64 Hz setting: about 22.24 packets/s, all packets flagged overrun
+- 32 Hz setting: about 31.08 packets/s, 0 overrun packets
+- 64 Hz setting: about 39.29 packets/s, all packets flagged overrun
+
+An experimental 1 MHz I2C build reached about 61.85 packets/s at the 64 Hz
+setting, but the EEPROM/ambient data was corrupted on the current bench wiring
+(ambient around `-231 C`), so the checked-in and flashed known-good build uses
+400 kHz.
 
 Build from this folder with STM32CubeCLT:
 

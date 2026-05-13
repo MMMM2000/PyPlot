@@ -11,6 +11,10 @@
 #define MLX90640_EEPROM 0x2400U
 #define MLX90640_DEVICE_ID1 0x2407U
 #define MLX90640_FRAME_WORDS 832U
+#define MLX90640_PIXEL_WORDS 768U
+#define MLX90640_AUX_WORDS 64U
+#define MLX90640_ROW_WORDS 32U
+#define MLX90640_ROWS 24U
 #define MLX90640_READ_CHUNK_WORDS 120U
 #define MLX90640_REFRESH_16_HZ 5U
 #define MLX90640_ADC_17BIT 1U
@@ -42,8 +46,11 @@
 #define RAW_PACKET_VERSION 1U
 #define RAW_HEADER_BYTES 28U
 #define RAW_PAYLOAD_BYTES (MLX90640_FRAME_WORDS * 2U)
+#define RAW_COMPACT_WORDS ((MLX90640_PIXEL_WORDS / 2U) + MLX90640_AUX_WORDS)
+#define RAW_COMPACT_PAYLOAD_BYTES (RAW_COMPACT_WORDS * 2U)
 #define RAW_PACKET_BYTES (RAW_HEADER_BYTES + RAW_PAYLOAD_BYTES + 2U)
 #define RAW_FLAG_SUBPAGE_1 0x01U
+#define RAW_FLAG_COMPACT 0x40U
 #define RAW_FLAG_OVERRUN 0x80U
 
 I2C_HandleTypeDef hi2c1;
@@ -63,6 +70,7 @@ static HAL_StatusTypeDef mlx_read_word(uint16_t address, uint16_t *value);
 static HAL_StatusTypeDef mlx_write_word(uint16_t address, uint16_t value);
 static bool mlx_configure(void);
 static bool mlx_set_refresh_rate(uint8_t refresh_rate);
+static HAL_StatusTypeDef mlx_read_interleaved_subpage(uint8_t subpage);
 static bool mlx_read_eeprom(void);
 static bool mlx_read_frame(uint16_t *status, uint16_t *control, uint32_t *read_us);
 static void handle_uart_commands(void);
@@ -365,9 +373,8 @@ static bool mlx_set_refresh_rate(uint8_t refresh_rate)
         return false;
     }
 
-    control &= (uint16_t)~((0x03U << 10) | (0x07U << 7));
+    control &= (uint16_t)~((0x03U << 10) | (0x07U << 7) | MLX90640_MODE_CHESS);
     control |= (uint16_t)(((MLX_ADC_RESOLUTION & 0x03U) << 10) | ((refresh_rate & 0x07U) << 7));
-    control |= MLX90640_MODE_CHESS;
 
     if (mlx_write_word(MLX90640_CONTROL_REG, control) != HAL_OK) {
         return false;
@@ -406,10 +413,30 @@ static bool mlx_read_eeprom(void)
     return true;
 }
 
+static HAL_StatusTypeDef mlx_read_interleaved_subpage(uint8_t subpage)
+{
+    for (uint16_t row = subpage; row < MLX90640_ROWS; row = (uint16_t)(row + 2U)) {
+        uint16_t row_offset = (uint16_t)(row * MLX90640_ROW_WORDS);
+        HAL_StatusTypeDef status = mlx_read_words(
+            (uint16_t)(MLX90640_FRAME_RAM + row_offset),
+            MLX90640_ROW_WORDS,
+            &frame_payload[row_offset * 2U]);
+        if (status != HAL_OK) {
+            return status;
+        }
+    }
+
+    return mlx_read_words(
+        (uint16_t)(MLX90640_FRAME_RAM + MLX90640_PIXEL_WORDS),
+        MLX90640_AUX_WORDS,
+        &frame_payload[MLX90640_PIXEL_WORDS * 2U]);
+}
+
 static bool mlx_read_frame(uint16_t *status, uint16_t *control, uint32_t *read_us)
 {
     uint16_t local_status = 0;
     uint32_t start_cycles = 0;
+    uint8_t subpage = 0;
 
     if (mlx_read_word(MLX90640_STATUS_REG, &local_status) != HAL_OK) {
         return false;
@@ -417,13 +444,14 @@ static bool mlx_read_frame(uint16_t *status, uint16_t *control, uint32_t *read_u
     if ((local_status & MLX90640_STATUS_DATA_READY) == 0U) {
         return false;
     }
+    subpage = (uint8_t)(local_status & 0x0001U);
 
     if (mlx_write_word(MLX90640_STATUS_REG, MLX90640_STATUS_CLEAR) != HAL_OK) {
         return false;
     }
 
     start_cycles = DWT->CYCCNT;
-    if (mlx_read_words(MLX90640_FRAME_RAM, MLX90640_FRAME_WORDS, frame_payload) != HAL_OK) {
+    if (mlx_read_interleaved_subpage(subpage) != HAL_OK) {
         return false;
     }
     *read_us = elapsed_us_since(start_cycles);
@@ -474,10 +502,12 @@ static void send_raw_packet(uint16_t status, uint16_t control, uint32_t read_us)
     uint16_t offset = 0;
     uint16_t checksum = 0;
     uint8_t flags = 0;
+    uint8_t subpage = (uint8_t)(status & 0x0001U);
 
-    if ((status & 0x0001U) != 0U) {
+    if (subpage != 0U) {
         flags |= RAW_FLAG_SUBPAGE_1;
     }
+    flags |= RAW_FLAG_COMPACT;
     if ((status & MLX90640_STATUS_DATA_READY) != 0U) {
         flags |= RAW_FLAG_OVERRUN;
     }
@@ -488,16 +518,22 @@ static void send_raw_packet(uint16_t status, uint16_t control, uint32_t read_us)
     put_u8(&offset, RAW_PACKET_MAGIC_3);
     put_u8(&offset, RAW_PACKET_VERSION);
     put_u8(&offset, flags);
-    put_u16(&offset, MLX90640_FRAME_WORDS);
+    put_u16(&offset, RAW_COMPACT_WORDS);
     put_u32(&offset, sequence_number++);
     put_u32(&offset, HAL_GetTick());
     put_u32(&offset, read_us);
     put_u16(&offset, status);
     put_u16(&offset, control);
-    put_u32(&offset, RAW_PAYLOAD_BYTES);
+    put_u32(&offset, RAW_COMPACT_PAYLOAD_BYTES);
 
-    for (uint16_t i = 0; i < RAW_PAYLOAD_BYTES; ++i) {
-        packet[offset++] = frame_payload[i];
+    for (uint16_t row = subpage; row < MLX90640_ROWS; row = (uint16_t)(row + 2U)) {
+        uint16_t row_offset = (uint16_t)(row * MLX90640_ROW_WORDS * 2U);
+        for (uint16_t i = 0; i < MLX90640_ROW_WORDS * 2U; ++i) {
+            packet[offset++] = frame_payload[row_offset + i];
+        }
+    }
+    for (uint16_t i = 0; i < MLX90640_AUX_WORDS * 2U; ++i) {
+        packet[offset++] = frame_payload[(MLX90640_PIXEL_WORDS * 2U) + i];
     }
 
     for (uint16_t i = 0; i < offset; ++i) {

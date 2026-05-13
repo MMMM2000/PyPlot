@@ -9,6 +9,8 @@ from experiments.thermal_camera_viewer import (
     FRAME_WIDTH,
     RAW_FRAME_WORDS,
     RAW_HEADER,
+    RAW_COMPACT_WORDS,
+    RAW_COMPACT_PAYLOAD_BYTES,
     EEPROM_MAGIC,
     EEPROM_PACKET_SIZE,
     RAW_MAGIC,
@@ -122,6 +124,31 @@ def _raw_cube_packet(*, elapsed_ms: int = 2468, read_us: int = 17520) -> bytes:
     return bytes(body)
 
 
+def _compact_raw_cube_packet(*, subpage: int = 1) -> bytes:
+    values = [index for index in range(RAW_COMPACT_WORDS)]
+    payload = bytearray()
+    for value in values:
+        payload.extend(int(value).to_bytes(2, "big", signed=False))
+    body = bytearray(
+        RAW_HEADER.pack(
+            RAW_MAGIC,
+            RAW_VERSION,
+            0x40 | subpage,
+            RAW_COMPACT_WORDS,
+            10,
+            1234,
+            9900,
+            subpage,
+            0x1000,
+            RAW_COMPACT_PAYLOAD_BYTES,
+        )
+    )
+    body.extend(payload)
+    checksum = sum(body) & 0xFFFF
+    body.extend(checksum.to_bytes(2, "little", signed=False))
+    return bytes(body)
+
+
 def _cube_eeprom_packet() -> bytes:
     values = [0x2400 + index for index in range(RAW_FRAME_WORDS)]
     payload = bytearray()
@@ -162,6 +189,18 @@ def test_parse_raw_cube_frame_returns_diagnostic_frame() -> None:
     assert len(frame.values) == FRAME_PIXELS
     assert frame.values[0] == -384.0
     assert frame.values[-1] == 383.0
+
+
+def test_parse_compact_raw_cube_frame_maps_interleaved_rows() -> None:
+    frame = parse_raw_cube_frame(_compact_raw_cube_packet(subpage=1))
+
+    assert frame is not None
+    assert frame.raw_words[0] == 0
+    assert frame.raw_words[32] == 0
+    assert frame.raw_words[33] == 1
+    assert frame.raw_words[95] == 0
+    assert frame.raw_words[96] == 32
+    assert frame.raw_words[RAW_FRAME_WORDS - 1] == RAW_COMPACT_WORDS - 1
 
 
 def test_parse_cube_eeprom_packet_returns_unsigned_words() -> None:
