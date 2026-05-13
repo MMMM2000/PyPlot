@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -154,6 +155,74 @@ def test_launcher_detects_pyplot_automation_flags() -> None:
         ]
     )
     assert launcher_module._is_pyplot_automation_requested(args) is True  # noqa: SLF001
+
+
+def test_launcher_detects_pyplot_session_flags() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(  # noqa: SLF001 - internal parser
+        [
+            "--pyplot-session-send",
+            "--pyplot-session-id",
+            "example-session",
+            "--pyplot-session-command-json",
+            '{"action":"state"}',
+        ]
+    )
+    assert launcher_module._is_pyplot_session_requested(args) is True  # noqa: SLF001
+
+
+def test_pyplot_session_command_payload_includes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent_payloads: list[dict[str, object]] = []
+    socket_timeouts: list[float] = []
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self._response_sent = False
+
+        def __enter__(self) -> "FakeSocket":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def settimeout(self, timeout: float) -> None:
+            socket_timeouts.append(timeout)
+
+        def sendall(self, raw: bytes) -> None:
+            sent_payloads.append(json.loads(raw.decode("utf-8")))
+
+        def recv(self, _size: int) -> bytes:
+            if self._response_sent:
+                return b""
+            self._response_sent = True
+            return b'{"status":"ok"}\n'
+
+    def fake_create_connection(address: tuple[str, int], timeout: float) -> FakeSocket:
+        assert address == ("127.0.0.1", 4567)
+        socket_timeouts.append(timeout)
+        return FakeSocket()
+
+    monkeypatch.setattr(
+        launcher_module,
+        "_get_session_record",
+        lambda _session_id: {"host": "127.0.0.1", "port": 4567, "token": "secret"},
+    )
+    monkeypatch.setattr(launcher_module.socket, "create_connection", fake_create_connection)
+
+    response = launcher_module._send_pyplot_session_command(  # noqa: SLF001
+        "session-id",
+        {"action": "open_origin"},
+        timeout_s=240.0,
+    )
+
+    assert response == {"status": "ok"}
+    assert sent_payloads == [
+        {
+            "token": "secret",
+            "command": {"action": "open_origin"},
+            "timeout_s": 240.0,
+        }
+    ]
+    assert socket_timeouts == [240.0, 240.0]
 
 
 def test_launcher_detects_microwire_eda_cli_flags() -> None:
@@ -611,6 +680,108 @@ def test_automation_recipe_can_capture_review_screenshots(tmp_path: Path) -> Non
     assert manifest["review_paths"]
     for exported in manifest["review_paths"]:
         assert Path(exported).exists()
+
+
+def test_live_pyplot_session_can_plot_capture_and_close(tmp_path: Path) -> None:
+    source = _write_hysteresis_source(tmp_path / "250C session.dat")
+    info_path = tmp_path / "session-info.json"
+    launcher_path = Path(launcher_module.__file__).resolve()
+    env = os.environ.copy()
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    env["PYTHONUNBUFFERED"] = "1"
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(launcher_path),
+            "--pyplot-session-start",
+            "--pyplot-plugin",
+            "Hysteresis Loops",
+            "--pyplot-session-info-file",
+            str(info_path),
+        ],
+        cwd=str(launcher_path.parent),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=creationflags,
+    )
+    try:
+        info: dict[str, object] | None = None
+        deadline = time.time() + 20.0
+        while time.time() < deadline:
+            if info_path.exists():
+                try:
+                    info = json.loads(info_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    info = None
+                if isinstance(info, dict) and info.get("session_id"):
+                    break
+            if process.poll() is not None:
+                break
+            time.sleep(0.2)
+        assert process.poll() is None, process.stderr.read() if process.stderr is not None else ""
+        assert isinstance(info, dict)
+        session_id = str(info["session_id"])
+
+        import_response = launcher_module._send_pyplot_session_command(  # noqa: SLF001
+            session_id,
+            {
+                "action": "import_paths",
+                "paths": [str(source)],
+            },
+        )
+        assert import_response["status"] == "ok"
+
+        generate_response = launcher_module._send_pyplot_session_command(  # noqa: SLF001
+            session_id,
+            {
+                "action": "generate",
+            },
+        )
+        assert generate_response["status"] == "ok"
+        assert generate_response["state"]["plugin"] == "Hysteresis Loops"
+        assert generate_response["state"]["tab_count"] >= 1
+
+        plot_path = tmp_path / "live-session-plot.png"
+        capture_response = launcher_module._send_pyplot_session_command(  # noqa: SLF001
+            session_id,
+            {
+                "action": "capture_current_plot",
+                "path": str(plot_path),
+            },
+        )
+        assert capture_response["status"] == "ok"
+        assert plot_path.exists()
+
+        state_response = launcher_module._send_pyplot_session_command(  # noqa: SLF001
+            session_id,
+            {
+                "action": "state",
+            },
+        )
+        assert state_response["status"] == "ok"
+        assert state_response["result"]["tab_count"] >= 1
+
+        close_response = launcher_module._send_pyplot_session_command(  # noqa: SLF001
+            session_id,
+            {
+                "action": "close",
+            },
+        )
+        assert close_response["status"] == "ok"
+        assert close_response["closing"] is True
+        process.wait(timeout=20)
+        assert process.returncode == 0
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
 
 
 def test_review_capture_collapses_extra_tabs_and_restores_visibility(tmp_path: Path) -> None:

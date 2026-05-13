@@ -4671,6 +4671,349 @@ class PyPlotWorkbench(PyPlotWindow):
         if ordered:
             self._remember_directory_from_paths(ordered)
 
+    # Public automation API --------------------------------------------
+    @staticmethod
+    def _automation_path_payload(paths: Iterable[Path]) -> list[str]:
+        payload: list[str] = []
+        for path in paths:
+            try:
+                payload.append(str(path.resolve()))
+            except Exception:
+                payload.append(str(path))
+        return payload
+
+    def _automation_flush_events(self, rounds: int = 4) -> None:
+        app = QtWidgets.QApplication.instance()
+        if not isinstance(app, QtWidgets.QApplication):
+            return
+        for _round in range(max(1, int(rounds))):
+            app.processEvents()
+
+    def automation_get_state(self) -> dict[str, Any]:
+        current_tab = self.tab_widget.currentWidget()
+        axes = self._current_axes()
+        current_title = ""
+        current_x = ""
+        current_y = ""
+        if axes is not None:
+            try:
+                current_title = str(axes.get_title() or "")
+            except Exception:
+                current_title = ""
+            try:
+                current_x = str(axes.get_xlabel() or "")
+            except Exception:
+                current_x = ""
+            try:
+                current_y = str(axes.get_ylabel() or "")
+            except Exception:
+                current_y = ""
+        visible_plot_tabs: list[str] = []
+        for index in range(self.tab_widget.count()):
+            try:
+                visible_plot_tabs.append(self.tab_widget.tabText(index))
+            except Exception:
+                continue
+        return {
+            "plugin": self._current_plotter_name,
+            "selected_paths": self._automation_path_payload(self._selected_paths()),
+            "worksheet_count": len(getattr(self, "_worksheets", {})),
+            "workbook_count": len(getattr(self, "_workbooks", {})),
+            "tab_count": int(self.tab_widget.count()),
+            "tab_labels": visible_plot_tabs,
+            "current_tab_label": self.tab_widget.tabText(self.tab_widget.currentIndex())
+            if self.tab_widget.currentIndex() >= 0
+            else "",
+            "current_title": current_title,
+            "current_x_label": current_x,
+            "current_y_label": current_y,
+            "graph_format_visible": bool(
+                isinstance(getattr(self, "_graph_format_dialog", None), QtWidgets.QDialog)
+                and self._graph_format_dialog.isVisible()  # type: ignore[attr-defined]
+            ),
+            "current_tab_has_axes": axes is not None,
+            "object_tree_top_level_count": int(
+                getattr(self, "object_tree", QtWidgets.QTreeWidget()).topLevelItemCount()
+            ),
+            "current_widget_has_descriptor": current_tab in getattr(self, "_tab_descriptors", {}),
+        }
+
+    def automation_select_plugin(self, plugin_name: str) -> dict[str, Any]:
+        candidate = str(plugin_name or "").strip()
+        if not candidate:
+            raise RuntimeError("PyPlot automation requires a non-empty plugin name.")
+        current = getattr(self, "_current_plotter_name", None)
+        if current == candidate and getattr(self, "_current_plugin", None) is not None:
+            return self.automation_get_state()
+        combo = getattr(self, "_plotter_combo", None)
+        if isinstance(combo, QtWidgets.QComboBox):
+            index = combo.findData(candidate)
+            if index < 0:
+                raise RuntimeError(f"PyPlot plugin '{candidate}' is not available in this session.")
+            combo.setCurrentIndex(index)
+        if getattr(self, "_current_plotter_name", None) != candidate:
+            self._apply_selected_plotter()
+        self._automation_flush_events()
+        if getattr(self, "_current_plotter_name", None) != candidate:
+            raise RuntimeError(f"Failed to activate PyPlot plugin '{candidate}'.")
+        return self.automation_get_state()
+
+    def automation_import_paths(self, paths: Iterable[str | Path]) -> dict[str, Any]:
+        path_list = [Path(path).expanduser() for path in paths]
+        self._import_paths(path_list)
+        self._automation_flush_events(rounds=6)
+        return self.automation_get_state()
+
+    def automation_load_project(self, path: str | Path) -> dict[str, Any]:
+        target = Path(path).expanduser()
+        self._load_project_from_path(target)
+        self._automation_flush_events(rounds=8)
+        if getattr(self, "_project_path", None) != target:
+            raise RuntimeError(f"Failed to load PyPlot project {target}")
+        return self.automation_get_state()
+
+    def automation_load_data(self) -> dict[str, Any]:
+        plugin = getattr(self, "_current_plugin", None)
+        if plugin is None:
+            raise RuntimeError("No active PyPlot plugin selected for load_data.")
+        plugin.load_data()
+        self._automation_flush_events(rounds=6)
+        return self.automation_get_state()
+
+    def automation_generate(self) -> dict[str, Any]:
+        plugin = getattr(self, "_current_plugin", None)
+        if plugin is None:
+            raise RuntimeError("No active PyPlot plugin selected for generate.")
+        plugin.generate()
+        self._automation_flush_events(rounds=8)
+        return self.automation_get_state()
+
+    def automation_open_graph_format(self) -> dict[str, Any]:
+        opener = getattr(self, "_open_graph_format_dialog", None)
+        if callable(opener):
+            opener()
+        self._automation_flush_events()
+        return self.automation_get_state()
+
+    def automation_open_origin(self) -> dict[str, Any]:
+        plugin = getattr(self, "_current_plugin", None)
+        if plugin is None:
+            raise RuntimeError("No active PyPlot plugin selected for Origin export.")
+        previous = bool(getattr(self, "_automation_suppress_dialogs", False))
+        self._automation_suppress_dialogs = True
+        try:
+            plugin.open_origin()
+        finally:
+            self._automation_suppress_dialogs = previous
+        self._automation_flush_events(rounds=6)
+        return self.automation_get_state()
+
+    def automation_invoke_plugin_action(self, action_name: str) -> dict[str, Any]:
+        plugin = getattr(self, "_current_plugin", None)
+        if plugin is None:
+            raise RuntimeError("No active PyPlot plugin selected for plugin action.")
+        method_name = str(action_name or "").strip()
+        if not method_name:
+            raise RuntimeError("Plugin action name must be a non-empty string.")
+        if method_name.startswith("_"):
+            raise RuntimeError("PyPlot automation does not allow private plugin actions.")
+        method = getattr(plugin, method_name, None)
+        if not callable(method):
+            raise RuntimeError(
+                f"PyPlot plugin '{self._current_plotter_name}' does not expose action '{method_name}'."
+            )
+        method()
+        self._automation_flush_events(rounds=6)
+        return self.automation_get_state()
+
+    def automation_activate_tab(
+        self,
+        *,
+        label: str | None = None,
+        index: int | None = None,
+    ) -> dict[str, Any]:
+        tab_index = -1
+        if index is not None:
+            tab_index = int(index)
+        elif isinstance(label, str) and label.strip():
+            token = label.strip()
+            for candidate_index in range(self.tab_widget.count()):
+                if self.tab_widget.tabText(candidate_index) == token:
+                    tab_index = candidate_index
+                    break
+        else:
+            raise RuntimeError("Tab activation requires either an index or a label.")
+        if tab_index < 0 or tab_index >= self.tab_widget.count():
+            raise RuntimeError("Requested tab is not available in this session.")
+        self.tab_widget.setCurrentIndex(tab_index)
+        self._automation_flush_events()
+        return self.automation_get_state()
+
+    def automation_save_project(self, path: str | Path) -> dict[str, Any]:
+        target = Path(path).expanduser()
+        if target.suffix.lower() != self.PROJECT_EXTENSION.lower():
+            target = target.with_suffix(self.PROJECT_EXTENSION)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._write_project_file(target)
+        self._automation_flush_events(rounds=4)
+        if getattr(self, "_project_path", None) != target or not target.exists():
+            raise RuntimeError(f"Failed to save PyPlot project to {target}")
+        return {
+            "saved_project": str(target.resolve()),
+            "state": self.automation_get_state(),
+        }
+
+    def automation_build_graph(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._automation_create_graph(payload)
+        self._automation_flush_events(rounds=6)
+        return self.automation_get_state()
+
+    def automation_create_figure(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._automation_create_figure(payload)
+        self._automation_flush_events(rounds=6)
+        return self.automation_get_state()
+
+    def automation_export_all_figures(
+        self,
+        *,
+        output_dir: str | Path,
+        fmt: str,
+        dpi: float | None = None,
+        transparent: bool = False,
+    ) -> dict[str, Any]:
+        export_paths = self._automation_export_all_figures(
+            output_dir=Path(output_dir).expanduser(),
+            fmt=fmt,
+            dpi=dpi,
+            transparent=transparent,
+        )
+        self._automation_flush_events(rounds=4)
+        return {
+            "paths": self._automation_path_payload(export_paths),
+            "state": self.automation_get_state(),
+        }
+
+    def automation_capture_window(self, path: str | Path) -> dict[str, Any]:
+        target = Path(path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._automation_flush_events(rounds=4)
+        if not self.grab().save(str(target)):
+            raise RuntimeError(f"Failed to save PyPlot screenshot to {target}")
+        return {
+            "path": str(target.resolve()),
+            "state": self.automation_get_state(),
+        }
+
+    def automation_capture_current_plot(self, path: str | Path) -> dict[str, Any]:
+        axes = self._current_axes()
+        if axes is None or getattr(axes, "figure", None) is None:
+            raise RuntimeError("No active plot is available for current_plot_image export.")
+        target = Path(path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        axes.figure.savefig(target, dpi=160)
+        self._automation_flush_events(rounds=2)
+        return {
+            "path": str(target.resolve()),
+            "state": self.automation_get_state(),
+        }
+
+    def automation_execute_command(self, command: dict[str, Any]) -> dict[str, Any]:
+        action = str(command.get("action") or "").strip()
+        if not action:
+            raise RuntimeError("PyPlot automation command must include a non-empty 'action'.")
+
+        result: dict[str, Any] | list[str] | str | None = None
+        if action == "state":
+            result = self.automation_get_state()
+        elif action == "select_plugin":
+            result = self.automation_select_plugin(str(command.get("plugin") or ""))
+        elif action == "import_paths":
+            paths = command.get("paths")
+            if not isinstance(paths, list):
+                raise RuntimeError("PyPlot automation action 'import_paths' requires a list 'paths'.")
+            result = self.automation_import_paths(paths)
+        elif action == "load_project":
+            result = self.automation_load_project(str(command.get("path") or ""))
+        elif action == "load_data":
+            result = self.automation_load_data()
+        elif action == "generate":
+            result = self.automation_generate()
+        elif action == "open_graph_format":
+            result = self.automation_open_graph_format()
+        elif action == "open_origin":
+            result = self.automation_open_origin()
+        elif action == "invoke_plugin_action":
+            result = self.automation_invoke_plugin_action(str(command.get("name") or ""))
+        elif action == "activate_tab":
+            label = command.get("label")
+            index = command.get("index")
+            result = self.automation_activate_tab(
+                label=str(label) if isinstance(label, str) else None,
+                index=int(index) if isinstance(index, int) else None,
+            )
+        elif action == "save_project":
+            result = self.automation_save_project(str(command.get("path") or ""))
+        elif action == "build_graph":
+            payload = command.get("payload")
+            if not isinstance(payload, dict):
+                raise RuntimeError("PyPlot automation action 'build_graph' requires an object 'payload'.")
+            result = self.automation_build_graph(payload)
+        elif action == "create_figure":
+            payload = command.get("payload")
+            if not isinstance(payload, dict):
+                raise RuntimeError("PyPlot automation action 'create_figure' requires an object 'payload'.")
+            result = self.automation_create_figure(payload)
+        elif action == "export_all_figures":
+            output_dir = command.get("output_dir")
+            fmt = command.get("format")
+            if not isinstance(output_dir, str) or not output_dir.strip():
+                raise RuntimeError(
+                    "PyPlot automation action 'export_all_figures' requires a non-empty string 'output_dir'."
+                )
+            if not isinstance(fmt, str) or not fmt.strip():
+                raise RuntimeError(
+                    "PyPlot automation action 'export_all_figures' requires a non-empty string 'format'."
+                )
+            dpi = command.get("dpi")
+            result = self.automation_export_all_figures(
+                output_dir=output_dir,
+                fmt=fmt,
+                dpi=float(dpi) if isinstance(dpi, (int, float)) else None,
+                transparent=bool(command.get("transparent", False)),
+            )
+        elif action == "capture_window":
+            result = self.automation_capture_window(str(command.get("path") or ""))
+        elif action == "capture_current_plot":
+            result = self.automation_capture_current_plot(str(command.get("path") or ""))
+        elif action == "close":
+            state = self.automation_get_state()
+            try:
+                clear_dirty = getattr(self, "_clear_project_dirty", None)
+                if callable(clear_dirty):
+                    clear_dirty()
+                self.close()
+            finally:
+                app = QtWidgets.QApplication.instance()
+                if isinstance(app, QtWidgets.QApplication):
+                    app.quit()
+            return {
+                "status": "ok",
+                "action": action,
+                "closing": True,
+                "state": state,
+            }
+        else:
+            raise RuntimeError(f"Unsupported PyPlot automation action '{action}'.")
+
+        response = {
+            "status": "ok",
+            "action": action,
+            "state": self.automation_get_state(),
+        }
+        if result is not None:
+            response["result"] = result
+        return response
+
 
 
     def _update_project_title(self) -> None:

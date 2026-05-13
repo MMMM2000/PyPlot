@@ -4,6 +4,7 @@ from typing import Any
 
 from plotting.shared.origin import (
     escape_origin_text,
+    origin_title_xy,
     set_origin_axis_title,
     set_origin_graph_title,
 )
@@ -36,6 +37,7 @@ class _Layer:
         self._axis = {"x": _Axis(), "y": _Axis(), "x2": _Axis(), "y2": _Axis()}
         self._title = _Label() if with_title_label else None
         self._yr = _Label()
+        self._xt = _Label()
         self.commands: list[str] = []
 
     def axis(self, name: str) -> Any:
@@ -44,6 +46,8 @@ class _Layer:
     def label(self, name: str) -> Any:
         if name in {"Title", "title", "py_title"}:
             return self._title
+        if name in {"xt", "XT", "Xt"}:
+            return self._xt
         if name in {"yr", "YR", "Yr"}:
             return self._yr
         return None
@@ -113,6 +117,21 @@ def test_set_origin_axis_title_clamps_right_label_position() -> None:
     assert layer.axis("y2").label.text == "Magnetization (50 Oe) [emu]"
     assert layer._yr.get_float("x") == 130.0
     assert "layer.y2.color = color(black);" in layer.commands
+
+
+def test_set_origin_axis_title_places_top_label_above_axis() -> None:
+    layer = _Layer()
+    set_origin_axis_title(layer, "x2", "Strain [%]")
+    assert layer.axis("x2").label.text == "Strain [%]"
+    assert layer._xt.get_float("x") == 5.0
+    assert layer._xt.get_float("y") == 102.0
+    assert layer._xt._ints.get("horzalign") == 1
+    assert "layer.x2.color = color(black);" in layer.commands
+
+
+def test_origin_title_xy_adds_extra_clearance_for_top_axis_exports() -> None:
+    layer = _Layer()
+    assert origin_title_xy(layer) == (5.0, 108.0)
 
 
 def test_set_origin_graph_title_sets_title_label_and_graph_names() -> None:

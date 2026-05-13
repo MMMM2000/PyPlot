@@ -151,6 +151,7 @@ DEFAULT_CONTROL_INTERVAL_MS = 50
 DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
+LIVE_PLOT_MAX_POINTS = 3000
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 SETUP_ZERO_FALLBACK_MIN_POINTS = 4
 SETUP_ZERO_FALLBACK_MIN_TIME_S = 0.8
@@ -266,16 +267,19 @@ SERVO_LIVE_STIFFNESS_ALPHA = 0.35
 SERVO_NOISE_SIGMA = 3.0
 SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S = 1.5
 SERVO_CURRENT_SWEEP_RATE_GAIN = 1.2
-SERVO_CURRENT_SWEEP_DEFAULTS_VERSION = 2
+SERVO_CURRENT_SWEEP_DEFAULTS_VERSION = 4
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S = 15.0
 SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA = 10.0
-SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA = 20.0
+SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA = 30.0
 SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA = 5.0
 SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_REVERSAL_HOLD_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_MIN_COMMAND_SPEED_MM_S = 0.05
+SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION = 0.20
+SERVO_CURRENT_SWEEP_DYNAMIC_MAX_FRACTION = 0.60
+SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA = 25.0
 SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA = 1.0
@@ -2161,6 +2165,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_stiffness_value_by_basis: dict[str, float] = {}
         self._seek_last_stiffness_position_by_basis: dict[str, float] = {}
         self._session_points: list[MeasurementPoint] = []
+        self._live_plot_points: list[MeasurementPoint] = []
+        self._last_live_plot_scale_timestamp: float | None = None
         self._session_active = False
         self._session_start_monotonic = 0.0
         self._session_created_utc: str | None = None
@@ -2481,6 +2487,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if label is not None:
             label.setVisible(False)
 
+    def _set_form_row_visible(
+        self,
+        form: QtWidgets.QFormLayout,
+        field: QtWidgets.QWidget,
+        visible: bool,
+    ) -> None:
+        field.setVisible(visible)
+        label = form.labelForField(field)
+        if label is not None:
+            label.setVisible(visible)
+
     def _build_dashboard_value_cell(
         self,
         parent: QtWidgets.QWidget,
@@ -2600,17 +2617,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_scale_connect = QtWidgets.QPushButton("Connect scale", scale_box)
         self.button_scale_connect.clicked.connect(self._toggle_scale_connection)
         scale_action_row.addWidget(self.button_scale_connect)
+        scale_form.addRow("", scale_action_row)
+        scale_zero_row = QtWidgets.QHBoxLayout()
         self.button_scale_tare = QtWidgets.QPushButton("Capture zero-load", scale_box)
         self.button_scale_tare.setToolTip("Use the current real scale reading as the 0 g applied-load reference.")
         self.button_scale_tare.clicked.connect(self._capture_zero_load_scale_reference)
-        scale_action_row.addWidget(self.button_scale_tare)
-        scale_form.addRow("", scale_action_row)
+        scale_zero_row.addWidget(self.button_scale_tare)
+        self.button_scale_hardware_tare = QtWidgets.QPushButton("Tare scale", scale_box)
+        self.button_scale_hardware_tare.setToolTip(
+            "Occasional use. Sends the physical tare command to the balance and resets Mini DMA's zero-load reference to 0 g."
+        )
+        self.button_scale_hardware_tare.clicked.connect(self._tare_scale_hardware)
+        scale_zero_row.addWidget(self.button_scale_hardware_tare)
+        scale_form.addRow("", scale_zero_row)
 
         self.label_scale_value = QtWidgets.QLabel("Latest load: 0.000 g", scale_box)
         self.label_scale_value.setWordWrap(True)
         scale_form.addRow("", self.label_scale_value)
         scale_help = QtWidgets.QLabel(
-            "Use Auto-detect after reconnecting USB devices. Leave the balance showing real grams; Mini DMA converts the zero-load reference to applied wire load.",
+            "Use Auto-detect after reconnecting USB devices. Usually leave the balance showing real grams and use Capture zero-load; use Tare scale only when the physical balance needs to be re-zeroed.",
             scale_box,
         )
         scale_help.setWordWrap(True)
@@ -3744,6 +3769,15 @@ class MainWindow(QtWidgets.QMainWindow):
             "Absolute motor speed ceiling for target ramps and dynamic iso-load/iso-stress/iso-strain balancing."
         )
         current_sweep_form.addRow("Stage speed cap", self.spin_current_sweep_target_speed_mm_s)
+        self.button_current_sweep_advanced_controls = QtWidgets.QToolButton(automation_box)
+        self.button_current_sweep_advanced_controls.setText("Show advanced current-sweep controls")
+        self.button_current_sweep_advanced_controls.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.button_current_sweep_advanced_controls.setCheckable(True)
+        self.button_current_sweep_advanced_controls.setChecked(False)
+        self.button_current_sweep_advanced_controls.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        current_sweep_form.addRow("", self.button_current_sweep_advanced_controls)
         self.spin_current_sweep_max_correction_strain_pct = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_max_correction_strain_pct.setDecimals(3)
         self.spin_current_sweep_max_correction_strain_pct.setRange(0.001, 100.0)
@@ -3772,9 +3806,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_max_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA)
         self.spin_current_sweep_max_correction_stress_mpa.setSuffix(" MPa")
         self.spin_current_sweep_max_correction_stress_mpa.setToolTip(
-            "Largest planned stress-equivalent correction used for far-from-target current-sweep recovery."
+            "Absolute stress-equivalent safety rail for one current-sweep servo correction while current is moving."
         )
-        current_sweep_form.addRow("Far correction cap", self.spin_current_sweep_max_correction_stress_mpa)
+        current_sweep_form.addRow("Sweep hard cap", self.spin_current_sweep_max_correction_stress_mpa)
         self.spin_current_sweep_hold_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_hold_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_hold_correction_stress_mpa.setRange(0.001, 100000.0)
@@ -3783,27 +3817,28 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.spin_current_sweep_hold_correction_stress_mpa.setSuffix(" MPa")
         self.spin_current_sweep_hold_correction_stress_mpa.setToolTip(
-            "Largest planned stress-equivalent correction while current is paused by target hold."
+            "Absolute stress-equivalent safety rail for one servo correction while current is paused for target recovery."
         )
-        current_sweep_form.addRow("Hold correction cap", self.spin_current_sweep_hold_correction_stress_mpa)
+        current_sweep_form.addRow("Hold hard cap", self.spin_current_sweep_hold_correction_stress_mpa)
         self.spin_current_sweep_mid_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_mid_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_mid_correction_stress_mpa.setRange(0.001, 100000.0)
         self.spin_current_sweep_mid_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA)
         self.spin_current_sweep_mid_correction_stress_mpa.setSuffix(" MPa")
         self.spin_current_sweep_mid_correction_stress_mpa.setToolTip(
-            "Intermediate planned stress-equivalent correction cap as the servo approaches the target."
+            "Legacy medium-error correction cap kept for older saved settings."
         )
         current_sweep_form.addRow("Mid correction cap", self.spin_current_sweep_mid_correction_stress_mpa)
+        self._hide_form_row(current_sweep_form, self.spin_current_sweep_mid_correction_stress_mpa)
         self.spin_current_sweep_near_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_near_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_near_correction_stress_mpa.setRange(0.001, 100000.0)
         self.spin_current_sweep_near_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA)
         self.spin_current_sweep_near_correction_stress_mpa.setSuffix(" MPa")
         self.spin_current_sweep_near_correction_stress_mpa.setToolTip(
-            "Near-target stress-equivalent correction cap before the servo shrinks to single motor steps."
+            "Stress-equivalent near-target band. Inside this band, the controller only sends one motor step."
         )
-        current_sweep_form.addRow("Near correction cap", self.spin_current_sweep_near_correction_stress_mpa)
+        current_sweep_form.addRow("Near step band", self.spin_current_sweep_near_correction_stress_mpa)
         self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
         self.check_current_sweep_return_target.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_return_target)
@@ -3900,6 +3935,36 @@ class MainWindow(QtWidgets.QMainWindow):
             "Minimum MPa-equivalent band used before current hold can resume the current ramp."
         )
         current_sweep_form.addRow("Minimum resume band", self.spin_current_sweep_hold_min_resume_stress_mpa)
+        self._current_sweep_advanced_control_widgets = [
+            self.spin_current_sweep_target_speed_mm_s,
+            self.spin_current_sweep_max_correction_strain_pct,
+            self.spin_current_sweep_correction_rate_pct_s,
+            self.spin_current_sweep_max_correction_stress_mpa,
+            self.spin_current_sweep_hold_correction_stress_mpa,
+            self.spin_current_sweep_near_correction_stress_mpa,
+            self.spin_current_sweep_hold_pause_factor,
+            self.spin_current_sweep_hold_resume_factor,
+            self.spin_current_sweep_hold_resume_stable_s,
+            self.spin_current_sweep_hold_filter_window_s,
+            self.spin_current_sweep_hold_noise_sigma,
+            self.spin_current_sweep_hold_min_pause_stress_mpa,
+            self.spin_current_sweep_hold_min_resume_stress_mpa,
+        ]
+
+        def _toggle_current_sweep_advanced_controls(checked: bool) -> None:
+            self.button_current_sweep_advanced_controls.setArrowType(
+                QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow
+            )
+            self.button_current_sweep_advanced_controls.setText(
+                "Hide advanced current-sweep controls" if checked else "Show advanced current-sweep controls"
+            )
+            for advanced_widget in self._current_sweep_advanced_control_widgets:
+                self._set_form_row_visible(current_sweep_form, advanced_widget, checked)
+
+        self.button_current_sweep_advanced_controls.toggled.connect(
+            _toggle_current_sweep_advanced_controls
+        )
+        _toggle_current_sweep_advanced_controls(False)
         self.check_current_sweep_first_overheating = QtWidgets.QCheckBox(
             "First overheating: repeat first target current sweep",
             automation_box,
@@ -3912,6 +3977,7 @@ class MainWindow(QtWidgets.QMainWindow):
         current_sweep_form.addRow("", self.check_current_sweep_first_overheating)
         self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
         self.check_current_sweep_reverse_current.setChecked(True)
+        self.check_current_sweep_reverse_current.setVisible(False)
         current_sweep_form.addRow("", self.check_current_sweep_reverse_current)
         self.spin_current_sweep_tolerance = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_tolerance.setDecimals(4)
@@ -7013,21 +7079,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if error_value is not None and math.isfinite(float(error_value)):
             error_abs = abs(float(error_value))
             near_mpa = self._current_sweep_near_correction_stress_mpa()
-            mid_mpa = self._current_sweep_mid_correction_stress_mpa()
             near_cap = _basis_cap_from_stress(near_mpa)
-            mid_cap = _basis_cap_from_stress(mid_mpa)
             max_cap = _basis_cap_from_stress(cap_mpa)
             near_threshold = 0.0 if near_cap is None else near_cap
-            mid_threshold = 0.0 if mid_cap is None else mid_cap
-            max_threshold = 0.0 if max_cap is None else max_cap
             if near_threshold > 0.0 and error_abs <= near_threshold:
                 return self._motor_step_mm()
-            elif cap_mpa <= near_mpa:
-                pass
-            elif mid_threshold > 0.0 and error_abs <= mid_threshold * 2.0:
-                cap_mpa = near_mpa
-            elif max_threshold > 0.0 and error_abs <= max_threshold * 2.5:
-                cap_mpa = mid_mpa
+            if max_cap is not None and max_cap > 0.0:
+                error_over_near = max(0.0, error_abs - near_threshold)
+                scale = max(1e-9, SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA)
+                fraction = SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION + (
+                    SERVO_CURRENT_SWEEP_DYNAMIC_MAX_FRACTION - SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION
+                ) * (1.0 - math.exp(-error_over_near / scale))
+                cap_value = min(max_cap, max(near_threshold, error_abs * fraction))
+                return max(self._motor_step_mm(), cap_value / sensitivity)
         elif self._current_sweep_freezes_live_stiffness() and self._automation_phase != "target_ramp":
             cap_mpa = self._current_sweep_near_correction_stress_mpa()
         cap_value = _basis_cap_from_stress(cap_mpa)
@@ -9077,8 +9141,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{_format_compact_number(self.spin_current_sweep_start_mA.value(), decimals=2)} to "
                 f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)}."
             )
-            if self.check_current_sweep_reverse_current.isChecked():
-                summary += " Current returns at each plateau."
+            summary += " Current returns at each plateau."
             if self.check_current_sweep_return_target.isChecked():
                 summary += " Target returns to start."
             summary += (
@@ -9513,6 +9576,21 @@ class MainWindow(QtWidgets.QMainWindow):
         button.released.connect(lambda: self._stop_manual_jog())
         button.clicked.connect(lambda: self._handle_manual_jog_button_clicked(direction_getter()))
 
+    def _prepare_manual_jog_press(self) -> None:
+        previous_motor_power_ok = self._tic_motor_power_ok
+        try:
+            refreshed = self._refresh_tic_status()
+        except Exception:
+            refreshed = False
+        if not refreshed and previous_motor_power_ok is None:
+            self._tic_motor_power_ok = None
+        if self._has_unconfirmed_motion_command():
+            return
+        self._manual_jog_uses_last_target = False
+        self._last_move_target_mm = self._current_position_mm
+        self._effective_position_mm = self._current_position_mm
+        self._last_effective_move_target_mm = self._effective_position_mm
+
     def _jog_relative(self, direction: float, *, force_step: bool = False) -> bool:
         direction = -1.0 if direction < 0.0 else 1.0
         now_s = time.monotonic()
@@ -9544,6 +9622,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._move_to_position_mm(base_mm + distance_mm, manual_jog=True)
 
     def _start_manual_jog(self, direction: float) -> None:
+        self._prepare_manual_jog_press()
         self._manual_jog_direction = -1.0 if direction < 0.0 else 1.0
         self._manual_jog_last_tick_s = time.monotonic()
         self._manual_jog_pending_mm = 0.0
@@ -10361,7 +10440,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
                 "current_ramp_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
                 "first_overheating_repeat": self.check_current_sweep_first_overheating.isChecked(),
-                "reverse_current": self.check_current_sweep_reverse_current.isChecked(),
+                "reverse_current": True,
                 "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
                 "tolerance_mode": "automatic",
                 "dynamic_balance_max_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
@@ -10499,6 +10578,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._preload_trigger_elapsed_s = None
         self._session_points = []
+        self._live_plot_points = []
+        self._last_live_plot_scale_timestamp = None
         self._session_active = True
         self._session_logging_enabled = bool(enable_logging)
         self._session_start_monotonic = time.monotonic()
@@ -10547,6 +10628,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preload_reference_armed = False
         self._preload_trigger_elapsed_s = None
         self._session_points = []
+        self._live_plot_points = []
+        self._last_live_plot_scale_timestamp = None
         self._session_logging_enabled = True
         self._session_start_monotonic = time.monotonic()
         self._session_start_wall_s = time.time()
@@ -10598,6 +10681,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
         self._clear_run_zero_load_scale_reference()
+        self._live_plot_points = []
+        self._last_live_plot_scale_timestamp = None
         self._refresh_live_labels()
 
     def _write_control_trace(
@@ -10793,6 +10878,61 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_sample_rate_hz=None if load_summary is None else load_summary.sample_rate_hz,
         )
 
+    def _capture_live_plot_point(self) -> MeasurementPoint | None:
+        if self._latest_scale_timestamp is None:
+            return None
+        elapsed_s = max(0.0, time.monotonic() - self._session_start_monotonic)
+        raw_load_g = float(self._latest_scale_value_g)
+        load_g = self._current_effective_load_g()
+        position_mm = self._measurement_position_mm()
+        effective_position_mm = self._measurement_effective_position_mm()
+        specimen_position_mm = effective_position_mm
+        preload_state = self._current_preload_state(load_g)
+        strain = None
+        stress = None
+        if preload_state != PRELOAD_PENDING:
+            strain = self._strain_percent_for_position(specimen_position_mm)
+            stress = stress_mpa_from_load_g(load_g, float(self.spin_diameter.value()))
+        tensile_displacement_mm = self._tensile_displacement_mm(specimen_position_mm)
+        current_set_mA = self._supply_last_setpoint_mA
+        current_measured_mA = self._supply_snapshot.get("current_mA")
+        resistance_ohm = self._supply_snapshot.get("resistance_ohm")
+        if (
+            current_set_mA is None
+            or abs(current_set_mA) < MIN_RESISTANCE_CURRENT_MA
+            or current_measured_mA is None
+            or abs(current_measured_mA) < MIN_RESISTANCE_CURRENT_MA
+        ):
+            resistance_ohm = None
+        return MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc=_utc_timestamp(),
+            raw_position_mm=position_mm,
+            position_mm=tensile_displacement_mm,
+            raw_load_g=raw_load_g,
+            load_g=load_g,
+            preload_state=preload_state,
+            strain_pct=strain,
+            stress_mpa=stress,
+            current_set_mA=current_set_mA,
+            current_measured_mA=current_measured_mA,
+            voltage_V=self._supply_snapshot.get("voltage_V"),
+            resistance_ohm=resistance_ohm,
+            power_W=self._supply_snapshot.get("power_W"),
+            automation_phase=self._automation_phase,
+            automation_basis=self._automation_basis,
+            automation_target_value=self._automation_target_value,
+            plateau_index=self._automation_plateau_index,
+            plateau_label=self._automation_plateau_label,
+            load_raw_last_g=raw_load_g,
+            load_mean_g=load_g,
+            load_std_g=None,
+            load_min_g=load_g,
+            load_max_g=load_g,
+            load_sample_count=1,
+            scale_sample_rate_hz=self._scale_signal_buffer.sample_rate_hz(now_s=time.time()),
+        )
+
     def _scale_summary_for_record(self, *, now_s: float) -> ScaleIntervalSummary:
         since_s = self._last_session_log_timestamp_s
         if since_s is None and self._session_start_wall_s > 0.0:
@@ -10863,6 +11003,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._session_active:
             return False
         self._session_points.append(point)
+        self._live_plot_points = [
+            live_point
+            for live_point in self._live_plot_points
+            if live_point.elapsed_s < point.elapsed_s
+            and not math.isclose(live_point.elapsed_s, point.elapsed_s, rel_tol=0.0, abs_tol=1e-6)
+        ]
         self._write_point(point)
         self._last_session_log_timestamp_s = record_wall_s
         self._write_session_metadata()
@@ -12256,10 +12402,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 previous_target = target
                 sweep_ranges = [(current_start, current_end)]
-                reverse_current = (
-                    self.check_current_sweep_reverse_current.isChecked()
-                    and abs(current_end - current_start) > 1e-12
-                )
+                reverse_current = abs(current_end - current_start) > 1e-12
                 if reverse_current:
                     sweep_ranges.append((current_end, current_start))
                 repeat_count = 2 if first_overheating_repeat and plateau_index == 1 else 1
@@ -13221,7 +13364,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ui_refresh_timer.stop()
             return
         self._record_live_dialog_samples_from_ui_refresh()
+        self._record_live_plot_sample_from_ui_refresh()
         self._refresh_live_labels()
+
+    def _record_live_plot_sample_from_ui_refresh(self) -> None:
+        if (
+            not self._session_active
+            or self._latest_scale_timestamp is None
+            or self._last_live_plot_scale_timestamp == self._latest_scale_timestamp
+        ):
+            return
+        point = self._capture_live_plot_point()
+        if point is None:
+            return
+        self._live_plot_points.append(point)
+        if len(self._live_plot_points) > LIVE_PLOT_MAX_POINTS:
+            self._live_plot_points = self._live_plot_points[-LIVE_PLOT_MAX_POINTS:]
+        self._last_live_plot_scale_timestamp = self._latest_scale_timestamp
+        self._refresh_plots()
 
     def _record_live_dialog_samples_from_ui_refresh(self) -> None:
         if self._latest_scale_timestamp is None:
@@ -13363,6 +13523,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.figure.clear()
         self.figure.set_facecolor(theme["figure_rgb"])
         grid = self.figure.add_gridspec(2, 2, hspace=0.46, wspace=0.34)
+        display_points = self._display_plot_points()
         active_tiles = [tile for tile in self._plot_tiles if tile.visible.isChecked()]
         if not active_tiles:
             active_tiles = list(self._plot_tiles[:1])
@@ -13390,7 +13551,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             left_pairs = [
                 (x_channel.getter(point), y_left_channel.getter(point))
-                for point in self._session_points
+                for point in display_points
             ]
             left_pairs = [(x_value, y_value) for x_value, y_value in left_pairs if x_value is not None and y_value is not None]
             if left_pairs:
@@ -13423,7 +13584,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 twin.set_ylabel(y_right_channel.label, fontsize=8, labelpad=3)
                 right_pairs = [
                     (x_channel.getter(point), y_right_channel.getter(point))
-                    for point in self._session_points
+                    for point in display_points
                 ]
                 right_pairs = [
                     (x_value, y_value)
@@ -13444,6 +13605,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.canvas is not None:
             self.canvas.draw_idle()
         self._refresh_recovery_plot()
+
+    def _display_plot_points(self) -> list[MeasurementPoint]:
+        if not self._live_plot_points:
+            return list(self._session_points)
+        points = list(self._session_points) + list(self._live_plot_points)
+        points.sort(key=lambda point: point.elapsed_s)
+        if len(points) > LIVE_PLOT_MAX_POINTS:
+            points = points[-LIVE_PLOT_MAX_POINTS:]
+        return points
 
     def _choose_log_dir(self) -> None:
         start_dir = self.edit_log_dir.text().strip() or _default_download_dir()
@@ -14120,16 +14290,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 ),
             )
         )
-        self.spin_current_sweep_hold_correction_stress_mpa.setValue(
-            max(
-                0.001,
-                float(
-                    self.settings.value(
-                        "current_sweep_hold_correction_stress_mpa",
-                        SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA,
-                    )
-                ),
+        saved_current_sweep_hold_cap = float(
+            self.settings.value(
+                "current_sweep_hold_correction_stress_mpa",
+                SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA,
             )
+        )
+        if (
+            current_sweep_servo_defaults_version < SERVO_CURRENT_SWEEP_DEFAULTS_VERSION
+            and math.isclose(saved_current_sweep_hold_cap, 20.0, rel_tol=1e-9, abs_tol=1e-9)
+        ):
+            saved_current_sweep_hold_cap = SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
+        self.spin_current_sweep_hold_correction_stress_mpa.setValue(
+            max(0.001, saved_current_sweep_hold_cap)
         )
         self.spin_current_sweep_mid_correction_stress_mpa.setValue(
             max(

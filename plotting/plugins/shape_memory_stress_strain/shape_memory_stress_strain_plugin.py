@@ -15,6 +15,7 @@ from . import core
 LAYOUT_SEPARATE_TABS = "separate_tabs"
 LAYOUT_DUAL_AXIS = "dual_axis_overlay"
 LAYOUT_MODE_SETTINGS_KEY = "shape_memory_stress_strain/layout_mode"
+DEFAULT_LAYOUT_MODE = LAYOUT_DUAL_AXIS
 
 
 @dataclass
@@ -171,10 +172,10 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
     def _stored_layout_mode(self) -> str:
         settings = getattr(self.host, "settings", None)
         if isinstance(settings, QtCore.QSettings):
-            stored = settings.value(LAYOUT_MODE_SETTINGS_KEY, LAYOUT_SEPARATE_TABS)
+            stored = settings.value(LAYOUT_MODE_SETTINGS_KEY, DEFAULT_LAYOUT_MODE)
             if isinstance(stored, str) and stored in {LAYOUT_SEPARATE_TABS, LAYOUT_DUAL_AXIS}:
                 return stored
-        return LAYOUT_SEPARATE_TABS
+        return DEFAULT_LAYOUT_MODE
 
     def _persist_layout_mode_setting(self, *_: object) -> None:
         mode = self._plot_layout_mode()
@@ -356,31 +357,15 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
             self.load_data()
         if not self._dataset:
             return
-        self.settings_widget()
-        combo = self._layout_mode_combo
-        if not isinstance(combo, QtWidgets.QComboBox):
-            super().open_origin()
-            return
-        original_index = combo.currentIndex()
-        original_mode = self._plot_layout_mode()
-        if original_mode != LAYOUT_DUAL_AXIS:
-            super().open_origin()
-            return
-        separate_index = combo.findData(LAYOUT_SEPARATE_TABS)
-        if separate_index < 0:
-            super().open_origin()
-            return
-        try:
-            combo.blockSignals(True)
-            combo.setCurrentIndex(separate_index)
-            combo.blockSignals(False)
-            self.generate()
-            super().open_origin()
-        finally:
-            combo.blockSignals(True)
-            combo.setCurrentIndex(original_index)
-            combo.blockSignals(False)
-            self.generate()
+        super().open_origin()
+
+    def origin_export_tabs(self) -> list[QtWidgets.QWidget] | None:  # type: ignore[override]
+        active_tabs = [
+            tab
+            for tab in self._plot_tabs
+            if isinstance(tab, QtWidgets.QWidget) and self.host.tab_widget.indexOf(tab) >= 0
+        ]
+        return active_tabs or None
 
     def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
         layout_mode = self._plot_layout_mode()

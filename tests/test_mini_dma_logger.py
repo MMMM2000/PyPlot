@@ -1787,6 +1787,47 @@ def test_manual_jog_repeats_from_last_commanded_target(
         _close_test_window(window)
 
 
+def test_manual_jog_press_resyncs_stale_previous_target(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    times = iter([0.0, 0.1])
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(times))
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
+    window._refresh_tic_status = lambda: None  # type: ignore[method-assign]
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_jog_mm.setValue(0.1)
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window._last_move_target_mm = 3.4
+    window._last_effective_move_target_mm = 3.4
+    window._last_motion_command_time_s = None
+    window._last_tic_status_time_s = time.time()
+    window._manual_jog_uses_last_target = True
+
+    try:
+        window._start_manual_jog(-1.0)
+        window._stop_manual_jog()
+        window._handle_manual_jog_button_clicked(-1.0)
+        _wait_for_tic_commands(window)
+
+        assert controller.targets == [-10]
+    finally:
+        _close_test_window(window)
+
+
 def test_held_manual_jog_advances_by_configured_linear_speed(
     tmp_path: Path,
     qtbot,
@@ -3333,6 +3374,90 @@ def test_length_setup_timer_records_prompt_samples(tmp_path: Path, qtbot) -> Non
         _close_test_window(window)
 
 
+def test_ui_refresh_adds_live_plot_sample_without_logging_or_supply_io(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
+    window._refresh_supply_snapshot = lambda: pytest.fail("live plot refresh must not query the supply")  # type: ignore[method-assign]
+    plot_refreshes: list[bool] = []
+    window._refresh_plots = lambda: plot_refreshes.append(True)  # type: ignore[method-assign]
+
+    try:
+        window._session_active = True
+        window._session_logging_enabled = True
+        window._session_start_monotonic = 90.0
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_tension_load_positive.setChecked(True)
+        window._latest_scale_value_g = 21.0
+        window._latest_scale_timestamp = 123.0
+        window._current_position_mm = -0.4
+        window._effective_position_mm = -0.4
+        window._position_reference_mm = 0.0
+        window._supply_last_setpoint_mA = 50.0
+        window._supply_snapshot = {
+            "current_mA": 49.0,
+            "voltage_V": 2.45,
+            "resistance_ohm": 50.0,
+            "power_W": 0.120,
+        }
+
+        window._handle_ui_refresh_timer()
+        window._handle_ui_refresh_timer()
+
+        assert len(window._live_plot_points) == 1
+        assert window._session_points == []
+        assert plot_refreshes == [True]
+        point = window._live_plot_points[0]
+        assert point.elapsed_s == pytest.approx(10.0)
+        assert point.load_g == pytest.approx(0.2)
+        assert point.current_measured_mA == pytest.approx(49.0)
+        assert point.resistance_ohm == pytest.approx(50.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_display_plot_points_include_live_samples_between_logged_rows(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _point(elapsed_s: float, position_mm: float, load_g: float) -> mini_dma_mod.MeasurementPoint:
+        return mini_dma_mod.MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc="2026-05-11 00:00:00",
+            raw_position_mm=position_mm,
+            position_mm=position_mm,
+            raw_load_g=load_g,
+            load_g=load_g,
+            preload_state=mini_dma_mod.PRELOAD_DISABLED,
+            strain_pct=None,
+            stress_mpa=None,
+            current_set_mA=None,
+            current_measured_mA=None,
+            voltage_V=None,
+            resistance_ohm=None,
+            power_W=None,
+            automation_phase="current",
+            automation_basis=None,
+            automation_target_value=None,
+            plateau_index=None,
+            plateau_label=None,
+        )
+
+    logged = _point(elapsed_s=1.0, position_mm=0.1, load_g=0.1)
+    live = _point(elapsed_s=1.5, position_mm=0.2, load_g=0.2)
+
+    try:
+        window._session_points = [logged]
+        window._live_plot_points = [live]
+
+        assert window._display_plot_points() == [logged, live]
+    finally:
+        _close_test_window(window)
+
+
 def test_length_setup_dialog_has_local_pause_stop_and_progress(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -3405,16 +3530,24 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
 
         assert window.spin_current_sweep_nudge_mm.isHidden() is True
         assert window.spin_current_sweep_balance_speed_mm_s.isHidden() is True
+        assert window.button_current_sweep_advanced_controls.isHidden() is False
+        assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is True
+        assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is True
+        assert window.spin_current_sweep_hold_filter_window_s.isHidden() is True
+        window.button_current_sweep_advanced_controls.setChecked(True)
         assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is False
         assert window.check_current_sweep_first_overheating.isHidden() is False
+        assert window.check_current_sweep_reverse_current.isHidden() is True
         assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(
             mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
         )
         assert window.check_hardware_tare_on_start.isHidden() is False
         assert window.button_scale_connect.text() in {"Connect scale", "Disconnect scale"}
         assert window.button_scale_tare.text() == "Capture zero-load"
+        assert window.button_scale_hardware_tare.text() == "Tare scale"
+        assert window.button_scale_hardware_tare.isHidden() is False
         assert window.button_advanced_software_tare.isVisible() is False
     finally:
         _close_test_window(window)
@@ -3644,6 +3777,30 @@ def test_current_sweep_first_overheating_repeats_first_target_cycle(tmp_path: Pa
         ]
         assert len(later_sweeps) == 6
         assert "first overheating enabled" in summary.lower()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_always_returns_current_to_start(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
+        window.check_current_sweep_reverse_current.setChecked(False)
+
+        steps, _summary, _interval_ms = window._build_automation_recipe()
+
+        current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
+
+        assert len(current_sweep_steps) == 8
+        assert [(step.current_start_mA, step.current_end_mA) for step in current_sweep_steps[:2]] == [
+            (1.0, 3.0),
+            (3.0, 1.0),
+        ]
+        assert all(step.current_end_mA == pytest.approx(1.0) for step in current_sweep_steps[1::2])
     finally:
         _close_test_window(window)
 
@@ -6319,8 +6476,7 @@ def test_current_sweep_overshoot_shrinks_correction_to_target_space_step(
         assert reached is False
         assert moves
         correction_mm = abs(moves[-1][0] - 6.7275)
-        one_mpa_mm = 1.0 / 113.0
-        assert correction_mm <= one_mpa_mm + 1e-9
+        assert correction_mm == pytest.approx(1.565 / 113.0, abs=0.001 / 113.0)
         assert moves[-1][1] is not None
         assert moves[-1][1] >= 0.05
     finally:
@@ -6398,7 +6554,7 @@ def test_current_sweep_reversal_uses_correction_step_without_predictive_backlash
         assert moves
         target_mm, effective_mm, speed_mm_s = moves[-1]
         correction_mm = abs(target_mm - 6.7275)
-        assert correction_mm <= 1.0 / 113.0 + 1e-9
+        assert correction_mm == pytest.approx(1.565 / 113.0, abs=0.001 / 113.0)
         assert effective_mm == pytest.approx(target_mm)
         assert speed_mm_s is not None
         assert speed_mm_s >= 0.05
@@ -6611,6 +6767,27 @@ def test_current_sweep_hold_uses_gated_small_stress_correction(
         assert effective_mm is not None
         correction_mm = abs(effective_mm - 6.7)
         assert correction_mm <= (5.0 / 224.502066) + 1e-9
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_uses_smooth_dynamic_stress_cap(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_current_sweep_near_correction_stress_mpa.setValue(1.0)
+        window.spin_current_sweep_mid_correction_stress_mpa.setValue(5.0)
+        window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
+        window._automation_phase = "current_hold"
+
+        correction_mm = window._current_sweep_max_stress_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            sensitivity_per_mm=200.0,
+            error_value=40.0,
+        )
+
+        assert correction_mm is not None
+        assert correction_mm * 200.0 == pytest.approx(20.64, abs=0.01)
     finally:
         _close_test_window(window)
 
@@ -7082,7 +7259,7 @@ def test_current_sweep_hold_phase_uses_faster_recovery_cap(
             seek_key=seek_key,
         )
 
-        assert hold_error_step == pytest.approx(20.0 / sensitivity)
+        assert hold_error_step == pytest.approx(30.0 / sensitivity)
     finally:
         _close_test_window(window)
 
@@ -8114,6 +8291,23 @@ def test_auto_detect_tic_sets_path_and_serial(tmp_path: Path, qtbot, monkeypatch
         assert window.edit_tic_serial.text() == "00501366"
     finally:
         _close_test_window(window)
+
+
+def test_current_sweep_saved_20_mpa_hold_cap_migrates_to_30_mpa(tmp_path: Path, qtbot) -> None:
+    settings = _test_settings()
+    snapshot = _snapshot_settings()
+    settings.clear()
+    settings.setValue("current_sweep_servo_defaults_version", 3)
+    settings.setValue("current_sweep_hold_correction_stress_mpa", 20.0)
+    settings.sync()
+
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
+
+    try:
+        assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(30.0)
+    finally:
+        _close_test_window(window)
+        _restore_settings(snapshot)
 
 
 def test_apply_name_fields_uses_display_wire_and_file_safe_wire_token(tmp_path: Path, qtbot) -> None:

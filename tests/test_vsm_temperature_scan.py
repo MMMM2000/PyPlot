@@ -306,6 +306,8 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
     assert any(cmd.startswith('title -s "') for cmd in graph.lt_commands)
     assert {"x", "y", "x2"}.issubset(set(layer.axis_calls))
     assert layer._axes["x"].label.text == "Temperature [°C]"
+    assert layer._axes["x2"].label.text == ""
+    assert layer._axes["x2"].title == ""
     assert "[emu]" in layer._axes["y"].label.text
     assert "\\l(" in layer._legend.text
     titles = [str(getattr(item, "title_meta", "") or "") for item in fake_origin.graphs]

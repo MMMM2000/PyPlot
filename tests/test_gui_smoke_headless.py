@@ -35,3 +35,4 @@ def test_pyplot_workbench_blank_graph_smoke_offscreen(qtbot) -> None:
     canvas = window._current_canvas()  # noqa: SLF001
     assert axes is not None
     assert isinstance(canvas, QtWidgets.QWidget)
+    window._clear_project_dirty()  # noqa: SLF001 - avoid close prompt in headless teardown

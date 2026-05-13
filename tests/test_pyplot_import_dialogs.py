@@ -247,6 +247,11 @@ def test_vsm_hysteresis_preserves_shared_window_handlers() -> None:
     window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
     try:
         expected = {
+            "_choose_files": PyPlotWorkbench._choose_files,
+            "_choose_folder": PyPlotWorkbench._choose_folder,
+            "_import_data_from_files": PyPlotWindow._import_data_from_files,
+            "_import_data_from_folder": PyPlotWindow._import_data_from_folder,
+            "_handle_manual_path_entry": PyPlotWorkbench._handle_manual_path_entry,
             "_generate_plots": PyPlotWorkbench._generate_plots,
             "_open_matplotlib_window": PyPlotWorkbench._open_matplotlib_window,
             "_save_current_graph": PyPlotWorkbench._save_current_graph,
@@ -266,6 +271,47 @@ def test_vsm_hysteresis_preserves_shared_window_handlers() -> None:
             assert callable(method)
             assert getattr(method, "__func__", None) is target
     finally:
+        window.close()
+        app.processEvents()
+
+
+def test_vsm_hysteresis_load_data_accepts_selected_directories(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="VSM Hysteresis Loops")
+    try:
+        source_dir = tmp_path / "vsm_hys_dir_only"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        source_file = source_dir / "202507101320-Hys-a140-T-30-00.VSM-Hys-Data"
+        source_file.write_text(
+            "\n".join(
+                [
+                    "@Section 0",
+                    "Column 0: Time since start, Time [s]",
+                    "Column 1: Applied Field, Applied Field [Oe]",
+                    "Column 2: Signal parallel with sample, Moment [emu]",
+                    "@@END Columns",
+                    "@@End of Header.",
+                    "@@Data",
+                    "New Section: Section 0:",
+                    "0.0 0.0 0.0",
+                    "1.0 5.0 0.2",
+                    "2.0 -5.0 -0.2",
+                    "@@END Data",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        window._commit_selected_paths([source_dir])  # noqa: SLF001 - test hook
+        plugin = window._current_plugin  # noqa: SLF001 - test hook
+        assert isinstance(plugin, PyPlotPlugin)
+
+        plugin.load_data()
+
+        assert len(window.measurements) > 0  # noqa: SLF001 - VSM measurements loaded
+        assert len(window._worksheets) > 0  # noqa: SLF001 - worksheet tree populated
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001 - avoid close prompt in headless tests
         window.close()
         app.processEvents()
 

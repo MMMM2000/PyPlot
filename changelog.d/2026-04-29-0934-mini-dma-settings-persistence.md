@@ -77,3 +77,7 @@
 - Mini DMA current-sweep recipes now expose the stress correction caps and current-hold filter/noise bands in the UI, show a concise current-task summary, and use a more compact dashboard header with native-font live values.
 - Mini DMA current hold no longer has a maximum pause-time stop, and the dashboard header now uses a tighter 3-column live-value grid so the plot area fits better on narrower screens.
 - Mini DMA current-sweep recipes now include a `First overheating` option that repeats the first target's current sweep once before continuing to later targets.
+- Mini DMA current-sweep load/stress corrections now use a smooth dynamic error-fraction cap with visible sweep/hold hard rails, and current sweeps always include the return-to-start-current leg at each target.
+- Mini DMA now exposes an occasional-use `Tare scale` button in the normal Hardware scale controls for balances whose front-panel tare is unavailable while connected.
+- Mini DMA current-sweep advanced caps, hold bands, and filter settings are now collapsed behind an expander by default, the hold hard cap default migrates from `20 MPa` to `30 MPa`, and manual jog presses resync from the live motor position when no move is pending so stale targets cannot flip a down jog upward.
+- Mini DMA dashboard graphs now append live UI-refresh samples between logged CSV rows, using already-known scale/motor/supply state so plots update smoothly without adding hardware reads.
