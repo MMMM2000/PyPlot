@@ -94,6 +94,10 @@ Point acquisition controls are named for the AC experiment:
 - The run estimate shows separate empty-coil baseline and microwire sweep
   durations using the selected settle time and a rough LCR-read allowance;
   real serial communication overhead can still add time.
+- During a run, the sticky progress bar reports completed reads and estimates
+  time remaining from the actual observed read rate. Empty-coil baseline
+  readings are also added to the live plots as 0 mA points so the dashboard
+  visibly updates before a microwire sweep is started.
 
 Every reading is saved as its own row. Averaging or baseline normalization can
 be done later from the raw TSV files.

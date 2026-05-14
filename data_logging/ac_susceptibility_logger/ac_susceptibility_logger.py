@@ -156,6 +156,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_sweep_stop_requested = False
         self._ac_progress_total = 0
         self._ac_progress_value = 0
+        self._ac_progress_started_monotonic = 0.0
         self._ac_lcr_scroll_area: QtWidgets.QScrollArea | None = None
         self._ac_plot_points: list[AcPlotPoint] = []
         self._plot_tiles: list[AcPlotTileWidgets] = []
@@ -1126,11 +1127,12 @@ class MainWindow(CurrentAnnealingWindow):
     def _reset_ac_progress(self, label: str, total: int) -> None:
         self._ac_progress_total = max(1, int(total))
         self._ac_progress_value = 0
+        self._ac_progress_started_monotonic = time.monotonic()
         progress = getattr(self, "progress_ac_run", None)
         if isinstance(progress, QtWidgets.QProgressBar):
             progress.setRange(0, self._ac_progress_total)
             progress.setValue(0)
-            progress.setFormat(f"{label}: 0% (0/{self._ac_progress_total})")
+            progress.setFormat(f"{label}: 0% (0/{self._ac_progress_total}), ETA calculating")
         QtWidgets.QApplication.processEvents()
 
     def _advance_ac_progress(self, label: str) -> None:
@@ -1146,7 +1148,20 @@ class MainWindow(CurrentAnnealingWindow):
         if isinstance(progress, QtWidgets.QProgressBar):
             progress.setRange(0, total)
             progress.setValue(self._ac_progress_value)
-            progress.setFormat(f"{label}: {percent}% ({self._ac_progress_value}/{total})")
+            progress.setFormat(self._progress_format(label, percent, self._ac_progress_value, total))
+
+    def _progress_format(self, label: str, percent: int, value: int, total: int) -> str:
+        try:
+            started = float(getattr(self, "_ac_progress_started_monotonic"))
+        except (AttributeError, RuntimeError):
+            started = 0.0
+        elapsed = max(0.0, time.monotonic() - started) if started > 0 else 0.0
+        if value <= 0 or elapsed <= 0:
+            eta = "calculating"
+        else:
+            remaining = max(0, total - value)
+            eta = self._format_duration((elapsed / value) * remaining)
+        return f"{label}: {percent}% ({value}/{total}), ETA {eta}"
 
     def _complete_ac_progress(self, label: str) -> None:
         total = max(1, self._ac_progress_total)
@@ -1256,10 +1271,7 @@ class MainWindow(CurrentAnnealingWindow):
 
     def _handle_ac_sweep_progress(self, row: sweep.AcSweepRow) -> None:
         self._advance_ac_progress("Microwire sweep")
-        self._ac_plot_points.append(self._plot_point_from_sweep_row(row))
-        if len(self._ac_plot_points) > 5000:
-            del self._ac_plot_points[:-5000]
-        self._refresh_ac_plots()
+        self._append_ac_plot_point(self._plot_point_from_sweep_row(row))
         self.label_lcr_status.setText(
             f"AC sweep {row.setting_index}/{row.total_settings}: "
             f"{row.setting.function}, {row.setting.frequency_hz:g} Hz, "
@@ -1279,6 +1291,34 @@ class MainWindow(CurrentAnnealingWindow):
             ls_h=ls_h,
             rs_ohm=rs_ohm,
         )
+
+    def _plot_point_from_baseline_reading(
+        self,
+        setting: Lcr6000Settings,
+        reading: Lcr6000Reading,
+        *,
+        elapsed_s: float,
+    ) -> AcPlotPoint:
+        ls_h, rs_ohm = self._lcr_ls_rs_values(setting, reading)
+        return AcPlotPoint(
+            elapsed_s=float(elapsed_s),
+            model=setting.function,
+            frequency_hz=float(setting.frequency_hz),
+            amplitude_v=float(setting.level_value if setting.level_mode == "voltage" else math.nan),
+            current_mA=0.0,
+            ls_h=ls_h,
+            rs_ohm=rs_ohm,
+        )
+
+    def _append_ac_plot_point(self, point: AcPlotPoint) -> None:
+        try:
+            points = getattr(self, "_ac_plot_points")
+        except (AttributeError, RuntimeError):
+            return
+        points.append(point)
+        if len(points) > 5000:
+            del points[:-5000]
+        self._refresh_ac_plots()
 
     @staticmethod
     def _lcr_ls_rs_values(setting: Lcr6000Settings, reading: Lcr6000Reading) -> tuple[float | None, float | None]:
@@ -1541,6 +1581,7 @@ class MainWindow(CurrentAnnealingWindow):
             raise RuntimeError("LCR meter is not connected")
         rows: list[list[str]] = []
         repeat_count = max(1, int(repeats))
+        started = time.monotonic()
         for setting_index, setting in enumerate(plan, start=1):
             meter.configure(setting)
             settle = max(0.0, float(settle_s))
@@ -1559,6 +1600,13 @@ class MainWindow(CurrentAnnealingWindow):
                     )
                 )
                 self._advance_ac_progress("Empty-coil baseline")
+                self._append_ac_plot_point(
+                    self._plot_point_from_baseline_reading(
+                        setting,
+                        reading,
+                        elapsed_s=time.monotonic() - started,
+                    )
+                )
                 QtWidgets.QApplication.processEvents()
         return rows
 

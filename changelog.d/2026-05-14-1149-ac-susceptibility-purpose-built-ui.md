@@ -7,3 +7,4 @@
 - Unified empty-coil baseline and microwire sweep acquisition around one `LCR readings/point` setting, defaulting to 10 reads, and added a sticky AC progress bar above the run buttons.
 - Updated the baseline and microwire time estimates so the shared repeated-read count affects both displayed durations.
 - Split AC susceptibility output directory and sweep-base persistence from the Current Annealing Logger settings.
+- Added live ETA text to the AC progress bar and plot empty-coil baseline reads as 0 mA live points so baseline runs show visible graph activity.

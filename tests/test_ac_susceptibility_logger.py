@@ -716,6 +716,14 @@ def test_ac_logger_uses_shared_reading_count_and_sticky_progress(
         estimate = window.label_ac_sweep_estimate.text()
         assert "Baseline: 40 LCR reads" in estimate
         assert "Microwire sweep: 120 LCR reads" in estimate
+        monkeypatch.setattr(ac_logger.time, "monotonic", lambda: 100.0)
+        window._reset_ac_progress("Empty-coil baseline", 100)
+        monkeypatch.setattr(ac_logger.time, "monotonic", lambda: 110.0)
+        window._ac_progress_value = 49
+        window._advance_ac_progress("Empty-coil baseline")
+        progress_text = window.progress_ac_run.format()
+        assert "ETA" in progress_text
+        assert "50/100" in progress_text
     finally:
         window.close()
         app.processEvents()
@@ -916,12 +924,17 @@ def test_ac_logger_collects_baseline_rows_without_power_supply() -> None:
     window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
     window.lcr_meter = meter
     window._lcr_last_error = ""
+    window._ac_plot_points = []
+    window._refresh_ac_plots = lambda: None  # type: ignore[method-assign]
 
     rows = window._collect_baseline_rows(plan, repeats=2)
 
     assert meter.configured == plan
     assert meter.fetch_count == 4
     assert [row[1:3] for row in rows] == [["1", "1"], ["1", "2"], ["2", "1"], ["2", "2"]]
+    assert len(window._ac_plot_points) == 4
+    assert {point.current_mA for point in window._ac_plot_points} == {0.0}
+    assert window._ac_plot_points[-1].frequency_hz == 1000.0
 
 
 def test_ac_logger_baseline_retries_empty_lcr_response() -> None:
