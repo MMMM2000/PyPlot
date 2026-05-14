@@ -92,6 +92,23 @@ The `-Q` LCR modes are not required for the normal experiment. `Ls-Rs` and
 `Lp-Rp` log the equivalent inductance and resistance directly; Q can be derived
 later from the logged L/R/frequency values if needed.
 
+## LCR-6200 Ranges
+
+The official LCR-6000 manual gives these ranges for the lab LCR-6200:
+
+- Frequency: continuous `10 Hz` to `200 kHz`.
+- Voltage excitation: `10.00 mV` to `2.00 V` RMS.
+- Current excitation: `100.0 uA` to `20.00 mA` RMS.
+- Front-panel voltage increment presets: `10 mV`, `100 mV`, `300 mV`,
+  `500 mV`, `1.00 V`, `1.50 V`, `2.00 V`.
+- Front-panel current increment presets: `100 uA`, `500 uA`, `1.00 mA`,
+  `5.00 mA`, `10.00 mA`, `20.00 mA`.
+
+The UI defaults use the voltage presets as a practical scan list, but the meter
+also accepts arbitrary in-range frequency and level values through remote
+commands. The logger validates against the LCR-6200 range before configuring
+the meter.
+
 ## Overnight Sweep Output
 
 Each AC sweep row includes:
@@ -110,6 +127,11 @@ if the PC, meter, or supply stops responding.
 The AC sweep can use either the existing HMP4030-style SCPI path or an OWON
 SPE6102-style backend. Select the backend, serial port, baud rate, and voltage
 limit in the AC panel before pressing **Run AC sweep**.
+
+Use **Auto setup** to refresh LCR ports, scan serial ports with the safe
+`*IDN?` query, ignore the LCR meter as a PSU candidate, and select a recognized
+HMP4030 or OWON SPE6102 backend automatically. The scan does not enable output
+or change current.
 
 The sweep engine treats the supply generically: connect, initialize with a
 voltage limit, set current, read actual voltage/current when available, then

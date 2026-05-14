@@ -25,6 +25,7 @@ from .lcr6000 import (
     Lcr6000Reading,
     Lcr6000Serial,
     Lcr6000Settings,
+    LCR_FRONT_PANEL_VOLTAGE_PRESETS_V,
     SUPPORTED_FUNCTIONS,
     SUPPORTED_MONITORS,
     available_serial_ports,
@@ -62,12 +63,14 @@ class MainWindow(CurrentAnnealingWindow):
         self._lcr_last_error = ""
         self._ac_sweep_running = False
         self._ac_sweep_stop_requested = False
+        self._ac_lcr_scroll_area: QtWidgets.QScrollArea | None = None
         super().__init__()
         self.setWindowTitle("AC Susceptibility Logger")
         self._install_lcr_controls()
         self._load_lcr_settings()
         self.populate_lcr_ports()
         self.populate_ac_psu_ports()
+        self.auto_detect_power_supply()
         self._update_ac_sweep_estimate()
         self._set_default_log_name()
 
@@ -95,11 +98,13 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_refresh_lcr_ports = QtWidgets.QPushButton("Refresh", group)
         self.pushButton_connect_lcr = QtWidgets.QPushButton("Connect LCR", group)
         self.pushButton_identify_lcr = QtWidgets.QPushButton("Identify", group)
+        self.pushButton_auto_setup = QtWidgets.QPushButton("Auto setup", group)
         row.addWidget(QtWidgets.QLabel("Port:", group))
         row.addWidget(self.comboBox_lcr_port, stretch=1)
         row.addWidget(self.pushButton_refresh_lcr_ports)
         row.addWidget(self.pushButton_connect_lcr)
         row.addWidget(self.pushButton_identify_lcr)
+        row.addWidget(self.pushButton_auto_setup)
         outer.addLayout(row)
 
         grid = QtWidgets.QGridLayout()
@@ -169,8 +174,8 @@ class MainWindow(CurrentAnnealingWindow):
         self.label_ac_sweep_estimate.setWordWrap(True)
         self.pushButton_run_ac_sweep = QtWidgets.QPushButton("Run AC sweep", group)
 
-        self.lineEdit_lcr_frequencies.setPlaceholderText("100, 1k, 10k, 100k")
-        self.lineEdit_lcr_levels.setPlaceholderText("0.1, 0.3, 1.0")
+        self.lineEdit_lcr_frequencies.setPlaceholderText("10, 20, 100, 1k, 2k, 10k, 100k, 200k")
+        self.lineEdit_lcr_levels.setPlaceholderText("0.01, 0.1, 0.3, 0.5, 1.0, 1.5, 2.0")
 
         grid.addWidget(QtWidgets.QLabel("Frequencies:", group), 0, 0)
         grid.addWidget(self.lineEdit_lcr_frequencies, 0, 1, 1, 3)
@@ -231,6 +236,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_refresh_lcr_ports.clicked.connect(self.populate_lcr_ports)
         self.pushButton_connect_lcr.clicked.connect(self.handle_connect_lcr_clicked)
         self.pushButton_identify_lcr.clicked.connect(self.handle_identify_lcr_clicked)
+        self.pushButton_auto_setup.clicked.connect(self.handle_auto_setup_clicked)
         self.pushButton_apply_lcr_setting.clicked.connect(self.handle_apply_lcr_setting_clicked)
         self.pushButton_measure_lcr_baseline.clicked.connect(self.handle_measure_lcr_baseline_clicked)
         self.pushButton_refresh_ac_psu_ports.clicked.connect(self.populate_ac_psu_ports)
@@ -269,13 +275,14 @@ class MainWindow(CurrentAnnealingWindow):
             if signal is not None:
                 signal.connect(lambda *_args: self._store_lcr_settings())
                 signal.connect(lambda *_args: self._update_ac_sweep_estimate())
+        self._install_ac_wheel_guard(group)
 
     def _load_lcr_settings(self) -> None:
         self.lineEdit_lcr_frequencies.setText(
-            self.ac_settings.value("frequencies", "100, 1k, 10k, 100k", type=str)
+            self.ac_settings.value("frequencies", "10, 20, 100, 1k, 2k, 10k, 100k, 200k", type=str)
         )
         self.lineEdit_lcr_levels.setText(
-            self.ac_settings.value("levels", "0.1, 0.3, 1.0", type=str)
+            self.ac_settings.value("levels", "0.01, 0.1, 0.3, 0.5, 1.0, 1.5, 2.0", type=str)
         )
         self._set_combo_data(self.comboBox_lcr_level_mode, self.ac_settings.value("level_mode", "voltage", type=str))
         self._set_combo_text(self.comboBox_lcr_function, self.ac_settings.value("function", "Ls-Rs", type=str))
@@ -362,6 +369,46 @@ class MainWindow(CurrentAnnealingWindow):
         idx = self.comboBox_ac_psu_port.findData(saved)
         if idx >= 0:
             self.comboBox_ac_psu_port.setCurrentIndex(idx)
+
+    def auto_detect_power_supply(self) -> list[sweep.PowerSupplyCandidate]:
+        candidates = sweep.detect_power_supply_candidates()
+        if not candidates:
+            return []
+        current_resource = str(self.comboBox_ac_psu_port.currentData() or "")
+        self.comboBox_ac_psu_port.clear()
+        for candidate in candidates:
+            self.comboBox_ac_psu_port.addItem(candidate.label, candidate.resource)
+        selected_index = 0
+        for idx, candidate in enumerate(candidates):
+            if candidate.resource == current_resource:
+                selected_index = idx
+                break
+        candidate = candidates[selected_index]
+        self.comboBox_ac_psu_port.setCurrentIndex(selected_index)
+        self._set_combo_data(self.comboBox_ac_psu_backend, candidate.backend_id)
+        self._set_combo_text(self.comboBox_ac_psu_baud, str(candidate.baudrate))
+        self.label_lcr_status.setText(f"Detected PSU: {candidate.idn} on {candidate.resource}")
+        self._store_lcr_settings()
+        return candidates
+
+    def handle_auto_setup_clicked(self) -> None:
+        self.populate_lcr_ports()
+        candidates = self.auto_detect_power_supply()
+        if not candidates:
+            self.populate_ac_psu_ports()
+            self.label_lcr_status.setText("Auto setup did not find a supported HMP/OWON power supply.")
+        else:
+            self.label_lcr_status.setText(
+                f"Auto setup selected {candidates[0].label} and LCR-6200-safe sweep defaults."
+            )
+        self.lineEdit_lcr_frequencies.setText("10, 20, 100, 1k, 2k, 10k, 100k, 200k")
+        self.lineEdit_lcr_levels.setText(
+            ", ".join(f"{value:g}" for value in LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
+        )
+        self.checkBox_lcr_model_lsrs.setChecked(True)
+        self.checkBox_lcr_model_lprp.setChecked(False)
+        self._store_lcr_settings()
+        self._update_ac_sweep_estimate()
 
     def handle_connect_lcr_clicked(self) -> None:
         if self.lcr_meter is not None and self.lcr_meter.is_open:
@@ -581,6 +628,53 @@ class MainWindow(CurrentAnnealingWindow):
         if minutes:
             return f"{minutes}m {secs}s"
         return f"{secs}s"
+
+    def _install_ac_wheel_guard(self, control_root: QtWidgets.QWidget) -> None:
+        self._ac_lcr_scroll_area = self._find_parent_scroll_area(control_root)
+        for widget in control_root.findChildren((QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox)):
+            widget.setProperty("_ac_wheel_guard", True)
+            widget.installEventFilter(self)
+            if isinstance(widget, QtWidgets.QAbstractSpinBox):
+                editor = widget.lineEdit()
+                editor.setProperty("_ac_wheel_guard", True)
+                editor.installEventFilter(self)
+
+    @staticmethod
+    def _find_parent_scroll_area(widget: QtWidgets.QWidget) -> QtWidgets.QScrollArea | None:
+        parent = widget.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QtWidgets.QScrollArea):
+                return parent
+            parent = parent.parentWidget()
+        return None
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if (
+            event.type() == QtCore.QEvent.Type.Wheel
+            and isinstance(watched, (QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox, QtWidgets.QLineEdit))
+            and watched.property("_ac_wheel_guard")
+        ):
+            if isinstance(watched, QtWidgets.QComboBox) and watched.view().isVisible():
+                return super().eventFilter(watched, event)
+            self._scroll_ac_panel_from_wheel(event)
+            return True
+        return super().eventFilter(watched, event)
+
+    def _scroll_ac_panel_from_wheel(self, event: QtCore.QEvent) -> None:
+        if not isinstance(event, QtGui.QWheelEvent):
+            event.ignore()
+            return
+        scroll_area = self._ac_lcr_scroll_area
+        if scroll_area is None:
+            event.ignore()
+            return
+        scrollbar = scroll_area.verticalScrollBar()
+        delta = event.pixelDelta().y()
+        if delta == 0:
+            delta = int(event.angleDelta().y() / 120 * scrollbar.singleStep() * 3)
+        if delta != 0:
+            scrollbar.setValue(scrollbar.value() - delta)
+        event.accept()
 
     def _configure_lcr_for_current_index(self, *, show_errors: bool = False) -> bool:
         if not self._lcr_plan:

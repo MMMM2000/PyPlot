@@ -25,6 +25,17 @@ LCR6000_VID = 0x2184
 LCR6000_PID = 0x005F
 DEFAULT_BAUDRATE = 115200
 DEFAULT_TIMEOUT_S = 1.5
+LCR_MODEL_FREQUENCY_LIMITS_HZ = {
+    "LCR-6300": (10.0, 300_000.0),
+    "LCR-6200": (10.0, 200_000.0),
+    "LCR-6100": (10.0, 100_000.0),
+    "LCR-6020": (10.0, 20_000.0),
+    "LCR-6002": (10.0, 2_000.0),
+}
+LCR_VOLTAGE_LEVEL_RANGE_V = (0.01, 2.0)
+LCR_CURRENT_LEVEL_RANGE_A = (100e-6, 20e-3)
+LCR_FRONT_PANEL_VOLTAGE_PRESETS_V = (0.01, 0.1, 0.3, 0.5, 1.0, 1.5, 2.0)
+LCR_FRONT_PANEL_CURRENT_PRESETS_A = (100e-6, 500e-6, 1e-3, 5e-3, 10e-3, 20e-3)
 
 SUPPORTED_FUNCTIONS = (
     "Ls-Q",
@@ -214,18 +225,46 @@ def build_settings_plan(
         for level in levels:
             if level <= 0:
                 raise ValueError("level must be positive")
-            plan.append(
-                Lcr6000Settings(
-                    frequency_hz=float(frequency),
-                    level_value=float(level),
-                    level_mode=mode,
-                    function=normalized_function,
-                    monitor1=normalized_monitor1,
-                    monitor2=normalized_monitor2,
-                    aperture=normalized_aperture,
-                )
+            setting = Lcr6000Settings(
+                frequency_hz=float(frequency),
+                level_value=float(level),
+                level_mode=mode,
+                function=normalized_function,
+                monitor1=normalized_monitor1,
+                monitor2=normalized_monitor2,
+                aperture=normalized_aperture,
             )
+            validate_settings(setting)
+            plan.append(setting)
     return plan
+
+
+def validate_settings(settings: Lcr6000Settings, *, model: str = "LCR-6200") -> None:
+    """Validate settings against the LCR-6000 manual ranges.
+
+    The LCR-6000 frequency setting is continuous inside each model's range. The
+    front panel has convenient increment presets, but remote commands may use
+    arbitrary in-range values with the instrument's resolution.
+    """
+
+    model_key = model.strip().upper()
+    min_hz, max_hz = LCR_MODEL_FREQUENCY_LIMITS_HZ.get(model_key, LCR_MODEL_FREQUENCY_LIMITS_HZ["LCR-6200"])
+    frequency = float(settings.frequency_hz)
+    if not (min_hz <= frequency <= max_hz):
+        if model_key == "LCR-6200":
+            raise ValueError("LCR-6200 frequency must be in the manual range 10 Hz to 200 kHz")
+        raise ValueError(f"{model_key} frequency must be in the manual range {min_hz:g} Hz to {max_hz:g} Hz")
+    level = float(settings.level_value)
+    if settings.level_mode == "voltage":
+        min_v, max_v = LCR_VOLTAGE_LEVEL_RANGE_V
+        if not (min_v <= level <= max_v):
+            raise ValueError("LCR voltage level must be in the manual range 10 mV to 2 V")
+    elif settings.level_mode == "current":
+        min_a, max_a = LCR_CURRENT_LEVEL_RANGE_A
+        if not (min_a <= level <= max_a):
+            raise ValueError("LCR current level must be in the manual range 100 uA to 20 mA")
+    else:
+        raise ValueError("level_mode must be 'voltage' or 'current'")
 
 
 def normalize_function(value: str) -> str:

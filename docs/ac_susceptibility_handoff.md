@@ -24,6 +24,9 @@ The logger is registered in `launcher.py` as **AC Susceptibility Logger**.
 The current worktree continues the original PR work with a dedicated overnight
 AC sweep mode, `Ls-Rs` as the default model, optional `Lp-Rp`, and selectable
 HMP4030/OWON SPE6102-style current-source backends.
+It also adds **Auto setup**, which refreshes the LCR serial port and uses a
+safe `*IDN?` scan to select recognized HMP4030/OWON supplies without enabling
+their outputs.
 
 ## Hardware Identified
 
@@ -129,6 +132,11 @@ With `Ls-Q`, monitor `Z`, and monitor `IAC`, interpret this as:
 The `AUX-NG,NG` status appeared during disconnected/no-sample tests. Treat it as
 a fixture/sample state warning, not a communication failure, if numeric values
 are still returned.
+
+For the LCR-6200 model, the manual range is continuous `10 Hz` to `200 kHz`.
+Voltage excitation is `10.00 mV` to `2.00 V` RMS, with front-panel increment
+presets `10 mV`, `100 mV`, `300 mV`, `500 mV`, `1.00 V`, `1.50 V`, and
+`2.00 V`. Current excitation is `100.0 uA` to `20.00 mA` RMS.
 
 ## Baseline Already Tested
 

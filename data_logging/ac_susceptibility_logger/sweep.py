@@ -75,6 +75,15 @@ class PowerSupplyMeasurement:
 
 
 @dataclass(frozen=True)
+class PowerSupplyCandidate:
+    label: str
+    resource: str
+    backend_id: str
+    baudrate: int
+    idn: str
+
+
+@dataclass(frozen=True)
 class AcSweepConfig:
     lcr_settings: Sequence[Lcr6000Settings]
     current_points: Sequence[CurrentLoopPoint]
@@ -495,6 +504,92 @@ def available_power_supply_ports() -> list[tuple[str, str]]:
         label = device if not description else f"{device} - {description}"
         ports.append((label, device))
     return ports
+
+
+def classify_power_supply_idn(idn: str) -> str | None:
+    upper = idn.upper()
+    if "LCR-" in upper or "LCR6000" in upper or "LCR-6000" in upper:
+        return None
+    if "HMP4030" in upper or "HAMEG" in upper or "ROHDE" in upper:
+        return "hmp4030"
+    if "OWON" in upper or "SPE6102" in upper or "SPE" in upper:
+        return "owon_spe6102"
+    return None
+
+
+def detect_power_supply_candidates(
+    *,
+    ports: Sequence[Any] | None = None,
+    serial_factory: Any | None = None,
+    baudrates: Sequence[int] = (9600, 115200),
+) -> list[PowerSupplyCandidate]:
+    if list_ports is None and ports is None:
+        return []
+    if serial is None and serial_factory is None:
+        return []
+    port_infos = list(ports if ports is not None else list_ports.comports())
+    serial_ctor = serial_factory if serial_factory is not None else serial.Serial
+    candidates: list[PowerSupplyCandidate] = []
+    for info in port_infos:
+        device = str(getattr(info, "device", info))
+        description = str(getattr(info, "description", "") or "")
+        if _description_looks_like_lcr(description):
+            continue
+        for baudrate in baudrates:
+            idn = _query_idn(device, int(baudrate), serial_ctor)
+            backend_id = classify_power_supply_idn(idn)
+            if backend_id is None:
+                continue
+            label = device if not description else f"{device} - {description}"
+            profile = POWER_SUPPLY_PROFILES.get(backend_id, {})
+            profile_label = str(profile.get("label", backend_id))
+            candidates.append(
+                PowerSupplyCandidate(
+                    label=f"{label} [{profile_label}]",
+                    resource=device,
+                    backend_id=backend_id,
+                    baudrate=int(baudrate),
+                    idn=idn.strip(),
+                )
+            )
+            break
+    return candidates
+
+
+def _description_looks_like_lcr(description: str) -> bool:
+    upper = description.upper()
+    return "LCR" in upper and "METER" in upper
+
+
+def _query_idn(device: str, baudrate: int, serial_ctor: Any) -> str:
+    for command in (b"*IDN?\n", b"*IDN?\r\n", b"*IDN?\r"):
+        port = None
+        try:
+            port = serial_ctor(device, baudrate=baudrate, timeout=0.35, write_timeout=0.35)
+            try:
+                port.rts = False
+                port.dtr = False
+            except Exception:
+                pass
+            time.sleep(0.03)
+            try:
+                port.reset_input_buffer()
+            except Exception:
+                pass
+            port.write(command)
+            port.flush()
+            reply = port.readline().decode("ascii", errors="ignore").strip()
+            if reply:
+                return reply
+        except Exception:
+            pass
+        finally:
+            if port is not None:
+                try:
+                    port.close()
+                except Exception:
+                    pass
+    return ""
 
 
 def _parse_first_float(text: str) -> float | None:

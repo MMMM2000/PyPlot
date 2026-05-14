@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from PyQt6 import QtCore, QtGui, QtWidgets
+
 from data_logging.ac_susceptibility_logger import lcr6000
 from data_logging.ac_susceptibility_logger import sweep
 
@@ -42,6 +44,40 @@ def test_build_settings_plan_crosses_frequency_and_level() -> None:
     assert [item.level_value for item in plan] == [0.1, 0.3, 0.1, 0.3]
     assert all(item.function == "Ls-Q" for item in plan)
     assert all(item.monitor2 == "IAC" for item in plan)
+
+
+def test_lcr6200_limits_accept_manual_frequency_and_voltage_ranges() -> None:
+    lcr6000.validate_settings(
+        lcr6000.Lcr6000Settings(
+            frequency_hz=200000.0,
+            level_value=2.0,
+            level_mode="voltage",
+            function="Ls-Rs",
+        ),
+        model="LCR-6200",
+    )
+
+    with pytest.raises(ValueError, match="10 Hz to 200 kHz"):
+        lcr6000.validate_settings(
+            lcr6000.Lcr6000Settings(
+                frequency_hz=200001.0,
+                level_value=0.1,
+                level_mode="voltage",
+                function="Ls-Rs",
+            ),
+            model="LCR-6200",
+        )
+
+    with pytest.raises(ValueError, match="10 mV to 2 V"):
+        lcr6000.validate_settings(
+            lcr6000.Lcr6000Settings(
+                frequency_hz=1000.0,
+                level_value=0.001,
+                level_mode="voltage",
+                function="Ls-Rs",
+            ),
+            model="LCR-6200",
+        )
 
 
 def test_build_ac_settings_plan_crosses_models_frequency_and_level() -> None:
@@ -96,6 +132,59 @@ def test_estimate_sweep_totals_counts_repeats_and_dwell() -> None:
 
     assert estimate.total_measurements == 18
     assert estimate.estimated_seconds == pytest.approx(36.0)
+
+
+def test_power_supply_idn_classification_detects_supported_backends() -> None:
+    assert sweep.classify_power_supply_idn("HAMEG,HMP4030,022982747,HW50020001/SW2.50") == "hmp4030"
+    assert sweep.classify_power_supply_idn("OWON,SPE6102,123456,V1.0") == "owon_spe6102"
+    assert sweep.classify_power_supply_idn("LCR-6200,REV E8.13,GEZ883931") is None
+
+
+def test_detect_power_supply_candidates_queries_ports_without_selecting_lcr() -> None:
+    class FakeInfo:
+        def __init__(self, device: str, description: str) -> None:
+            self.device = device
+            self.description = description
+
+    class FakeSerial:
+        replies = {
+            ("COM7", 9600): "OWON,SPE6102,123456,V1.0\n",
+            ("COM9", 115200): "LCR-6200,REV E8.13,GEZ883931\n",
+        }
+
+        def __init__(self, port: str, baudrate: int, timeout: float, write_timeout: float) -> None:
+            self.port = port
+            self.baudrate = baudrate
+            self.is_open = True
+            self.written: list[bytes] = []
+
+        def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+        def flush(self) -> None:
+            return None
+
+        def reset_input_buffer(self) -> None:
+            return None
+
+        def readline(self) -> bytes:
+            return self.replies.get((self.port, self.baudrate), "").encode("ascii")
+
+        def close(self) -> None:
+            self.is_open = False
+
+    candidates = sweep.detect_power_supply_candidates(
+        ports=[
+            FakeInfo("COM7", "USB Serial Port"),
+            FakeInfo("COM9", "LCR Meter Virtual COM Port"),
+        ],
+        serial_factory=FakeSerial,
+        baudrates=[9600, 115200],
+    )
+
+    assert [(item.resource, item.backend_id, item.baudrate) for item in candidates] == [
+        ("COM7", "owon_spe6102", 9600)
+    ]
 
 
 def test_write_sweep_metadata_and_row_flushes_incrementally(tmp_path: Path) -> None:
@@ -233,6 +322,46 @@ def test_run_ac_sweep_uses_owon_backend_and_safe_shutdown_on_lcr_failure(tmp_pat
         "off",
         "close",
     ]
+
+
+def _wheel_event(delta_y: int = -120) -> QtGui.QWheelEvent:
+    return QtGui.QWheelEvent(
+        QtCore.QPointF(10.0, 10.0),
+        QtCore.QPointF(10.0, 10.0),
+        QtCore.QPoint(0, 0),
+        QtCore.QPoint(0, delta_y),
+        QtCore.Qt.MouseButton.NoButton,
+        QtCore.Qt.KeyboardModifier.NoModifier,
+        QtCore.Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+
+
+def test_ac_logger_wheel_guard_scrolls_parent_without_changing_spinbox() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    scroll = QtWidgets.QScrollArea()
+    content = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(content)
+    spin = QtWidgets.QSpinBox(content)
+    spin.setRange(0, 10)
+    spin.setValue(5)
+    filler = QtWidgets.QWidget(content)
+    filler.setMinimumHeight(800)
+    layout.addWidget(spin)
+    layout.addWidget(filler)
+    scroll.setWidget(content)
+    scroll.resize(200, 120)
+    scroll.show()
+    app.processEvents()
+
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window._ac_lcr_scroll_area = scroll
+    spin.setProperty("_ac_wheel_guard", True)
+    start_scroll = scroll.verticalScrollBar().value()
+
+    assert window.eventFilter(spin, _wheel_event()) is True
+    assert spin.value() == 5
+    assert scroll.verticalScrollBar().value() > start_scroll
 
 
 def test_commands_for_settings_use_lcr6000_scpi_spellings() -> None:
