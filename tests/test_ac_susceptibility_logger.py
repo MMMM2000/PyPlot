@@ -364,6 +364,99 @@ def test_ac_logger_wheel_guard_scrolls_parent_without_changing_spinbox() -> None
     assert scroll.verticalScrollBar().value() > start_scroll
 
 
+def test_lcr_preset_lists_match_simplified_ac_workflow() -> None:
+    assert ac_logger.PRACTICAL_FREQUENCY_PRESETS_HZ == [
+        10.0,
+        20.0,
+        50.0,
+        100.0,
+        200.0,
+        500.0,
+        1000.0,
+        2000.0,
+        5000.0,
+        10000.0,
+        20000.0,
+        50000.0,
+        100000.0,
+        200000.0,
+    ]
+    assert ac_logger.LCR_FRONT_PANEL_VOLTAGE_PRESETS_V == [
+        0.01,
+        0.1,
+        0.3,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+    ]
+
+
+def test_ac_logger_uses_shared_owon_supply_defaults_for_sweep_config() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window.ac_settings = QtCore.QSettings("microwire", "ac_susceptibility_logger_test_shared_owon")
+    window.ac_settings.clear()
+    window._lcr_plan = []
+    window.ui = type("Ui", (), {})()
+    window.ui.comboBox_supply = QtWidgets.QComboBox()
+    window.ui.comboBox_supply.addItem("Owon SPE6102", "owon_spe6102")
+    window.ui.comboBox_port = QtWidgets.QComboBox()
+    window.ui.comboBox_port.addItem("COM7", "COM7")
+    window.ui.comboBox_baudrate = QtWidgets.QComboBox()
+    window.ui.comboBox_baudrate.addItem("9600")
+    window.spinBox_ac_voltage_limit = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_voltage_limit.setRange(0.1, 120.0)
+    window.spinBox_ac_voltage_limit.setValue(5.0)
+    window.spinBox_ac_current_start = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_current_start.setValue(20.0)
+    window.spinBox_ac_current_stop = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_current_stop.setValue(80.0)
+    window.spinBox_ac_current_step = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_current_step.setValue(20.0)
+    window.comboBox_ac_direction = QtWidgets.QComboBox()
+    window.comboBox_ac_direction.addItem("Up and down", "up-down")
+    window.spinBox_ac_dwell = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_dwell.setValue(0.5)
+    window.spinBox_ac_repeats = QtWidgets.QSpinBox()
+    window.spinBox_ac_repeats.setValue(2)
+    window._prepare_lcr_plan = lambda: [lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")]
+
+    window._sync_ac_psu_from_shared_controls()
+    config = window._build_ac_sweep_config()
+
+    assert config.psu_backend == "owon_spe6102"
+    assert config.psu_resource == "COM7"
+    assert window._selected_ac_psu_baudrate() == 9600
+    assert config.voltage_limit_v == pytest.approx(60.0)
+    app.processEvents()
+
+
+def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        assert window.ui.frame_process_settings.isHidden()
+        assert window.comboBox_lcr_function.isHidden()
+        assert window.checkBox_lcr_model_lsrs.isHidden()
+        assert window.checkBox_lcr_model_lprp.text() == "Also measure Lp-Rp"
+        assert window.checkBox_lcr_model_lprp.isChecked() is False
+        assert window.pushButton_measure_lcr_baseline.text() == "Measure empty-coil baseline"
+        assert window.pushButton_run_ac_sweep.text() == "Run microwire current sweep"
+        assert not hasattr(window, "comboBox_ac_psu_backend")
+        assert not hasattr(window, "comboBox_ac_psu_port")
+        assert not hasattr(window, "comboBox_ac_psu_baud")
+        assert "Instrument setup" in window.groupBox_lcr_settings.title()
+        assert "Experiment plan" in window.groupBox_ac_plan.title()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_commands_for_settings_use_lcr6000_scpi_spellings() -> None:
     settings = lcr6000.Lcr6000Settings(
         frequency_hz=1000.0,

@@ -1,12 +1,23 @@
 # AC Susceptibility Logger
 
-The AC Susceptibility Logger combines the existing current annealing ramp with a
-GW Instek LCR-6200/LCR-6000 series meter. The first three logfile columns remain
-compatible with current annealing plots:
+The AC Susceptibility Logger is a focused two-step tool for coil-based AC
+susceptibility runs with a GW Instek LCR-6200/LCR-6000 series meter and a DC
+current source:
+
+1. **Measure empty-coil baseline** with no microwire installed.
+2. **Run microwire current sweep** after inserting the wire, using the same LCR
+   frequency/amplitude settings while sweeping DC current up and back down.
+
+The older current-annealing controls are hidden in this logger so the normal
+workflow only shows instrument setup, the AC experiment plan, baseline, sweep,
+and stop actions.
 
 For the full hardware/code handoff, including driver setup, probe results,
 verified commands, and next experimental steps, see
 `docs/ac_susceptibility_handoff.md`.
+
+The legacy current-annealing-compatible logfile path still writes the first
+three columns as:
 
 ```text
 Current (mA)    Voltage (V)    Resistance (Ohm)
@@ -51,27 +62,20 @@ Quick probe after driver installation:
 .\.venv\Scripts\python.exe scripts\probe_lcr6000.py COM7 --configure --fetch
 ```
 
-## Measurement Modes
+## Measurement Workflow
 
-The logger has two current-measurement paths:
+Use **Measure empty-coil baseline** before mounting the microwire. Baseline
+runs the selected LCR model/frequency/amplitude matrix with the configured
+repeat count and writes a timestamped `*_baseline_YYYYMMDD_HHMMSS.tsv` file next
+to the selected log file. It does not enable, set, read, or otherwise command
+the power supply.
 
-- **Run AC sweep** is the overnight mode. It builds a selected model x
-  frequency x level matrix, then runs the configured current loop at every LCR
-  setting. It writes a timestamped `*_ac_sweep_YYYYMMDD_HHMMSS.tsv` file
-  incrementally after every LCR read.
-- The inherited **Start annealing process** path remains available for the
-  older current-annealing-style workflow. With **One current sweep per AC
-  setting** enabled, it sets the current annealing loop count to the number of
-  generated AC settings, enables reverse-to-zero, and advances the LCR setting
-  after each completed current sweep.
-
-Use **Measure baseline** for an LCR-only baseline before a real current sweep.
-It does not talk to the power supply. It runs the current frequency-by-level
-matrix with the configured repeat count and writes a timestamped
-`*_baseline_YYYYMMDD_HHMMSS.tsv` file next to the selected log file. Use it for
-empty fixture/coil readings and, optionally, wire-in-fixture/no-current
-readings. This is baseline context for relative comparisons, not absolute
-susceptibility calibration.
+Use **Run microwire current sweep** after inserting the microwire. The logger
+uses the same selected LCR settings, configures the LCR meter first, then runs
+the current loop at each AC setting. The default loop is up-down, for example
+`20 mA -> 80 mA -> 20 mA`. Sweep files are named
+`*_ac_sweep_YYYYMMDD_HHMMSS.tsv` and are flushed after every LCR read for
+overnight recovery.
 
 Suggested first-pass settings for the 1 cm, roughly 1 mm coil around a
 Ni50Fe27Ga23 microwire:
@@ -79,7 +83,6 @@ Ni50Fe27Ga23 microwire:
 - LCR model: `Ls-Rs`
 - Optional diagnostic model: `Lp-Rp`
 - Monitor 1: `Z`
-- Monitor 2: `IAC`
 - Frequencies: `100, 1k, 10k, 100k`
 - Voltage levels: `0.1, 0.3, 1.0`
 - Aperture: `FAST` for searching, `MED` or `SLOW` after the best region is known
@@ -88,9 +91,10 @@ Ni50Fe27Ga23 microwire:
 For each wire, run a conservative low-current sweep first to confirm the coil,
 wire, and supply wiring behave normally before trying the full transition range.
 
-The `-Q` LCR modes are not required for the normal experiment. `Ls-Rs` and
-`Lp-Rp` log the equivalent inductance and resistance directly; Q can be derived
-later from the logged L/R/frequency values if needed.
+`Ls-Rs` is the default and recommended normal mode. The UI exposes `Lp-Rp` only
+as an optional advanced diagnostic checkbox. The `-Q` modes are not part of the
+normal workflow; Q can be derived later from the logged L/R/frequency values if
+needed.
 
 ## LCR-6200 Ranges
 
@@ -104,10 +108,17 @@ The official LCR-6000 manual gives these ranges for the lab LCR-6200:
 - Front-panel current increment presets: `100 uA`, `500 uA`, `1.00 mA`,
   `5.00 mA`, `10.00 mA`, `20.00 mA`.
 
-The UI defaults use the voltage presets as a practical scan list, but the meter
-also accepts arbitrary in-range frequency and level values through remote
-commands. The logger validates against the LCR-6200 range before configuring
-the meter.
+The UI includes one-click preset selectors:
+
+- **Default subset**: `10, 20, 100, 1k, 2k, 10k, 100k, 200k Hz` and all voltage
+  presets.
+- **All practical frequencies**: `10, 20, 50, 100, 200, 500, 1k, 2k, 5k, 10k,
+  20k, 50k, 100k, 200k Hz`.
+- **All amplitudes**: `0.01, 0.1, 0.3, 0.5, 1.0, 1.5, 2.0 V`.
+
+Because the LCR-6200 frequency setting is continuous, "all frequencies" means
+the practical scan list above, not every possible value. The logger validates
+entered values against the LCR-6200 range before configuring the meter.
 
 ## Overnight Sweep Output
 
@@ -125,13 +136,17 @@ if the PC, meter, or supply stops responding.
 ## Power Supply Backends
 
 The AC sweep can use either the existing HMP4030-style SCPI path or an OWON
-SPE6102-style backend. Select the backend, serial port, baud rate, and voltage
-limit in the AC panel before pressing **Run AC sweep**.
+SPE6102-style backend. The AC panel reuses the shared top PSU controls for
+supply type, serial port, and baud rate instead of asking for the same PSU
+settings twice. If the shared supply is OWON SPE6102, the AC sweep selects the
+OWON backend automatically and defaults the voltage limit to `60 V`.
 
 Use **Auto setup** to refresh LCR ports, scan serial ports with the safe
 `*IDN?` query, ignore the LCR meter as a PSU candidate, and select a recognized
 HMP4030 or OWON SPE6102 backend automatically. The scan does not enable output
-or change current.
+or change current. If no supported PSU responds, the status text reports which
+ports were tried and leaves the shared top PSU controls available for manual
+selection.
 
 The sweep engine treats the supply generically: connect, initialize with a
 voltage limit, set current, read actual voltage/current when available, then
