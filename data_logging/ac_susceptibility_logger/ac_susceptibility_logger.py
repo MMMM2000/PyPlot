@@ -69,8 +69,26 @@ PRACTICAL_FREQUENCY_PRESETS_HZ = [
 
 DEFAULT_FREQUENCY_PRESETS_HZ = [10.0, 20.0, 100.0, 1000.0, 2000.0, 10000.0, 100000.0, 200000.0]
 LCR_FRONT_PANEL_VOLTAGE_PRESETS_V = list(_LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
-OWON_DEFAULT_VOLTAGE_LIMIT_V = 60.0
+OWON_DEFAULT_VOLTAGE_LIMIT_V = 62.0
 HMP_DEFAULT_VOLTAGE_LIMIT_V = 30.0
+
+
+class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    """Double spin box that keeps fractional input without fixed trailing zeros."""
+
+    def textFromValue(self, value: float) -> str:  # type: ignore[override]
+        return f"{float(value):.6g}"
+
+    def valueFromText(self, text: str) -> float:  # type: ignore[override]
+        cleaned = text
+        suffix = self.suffix()
+        if suffix and cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)]
+        cleaned = cleaned.strip().replace(",", ".")
+        try:
+            return float(cleaned)
+        except ValueError:
+            return float(self.value())
 
 
 class MainWindow(CurrentAnnealingWindow):
@@ -97,12 +115,96 @@ class MainWindow(CurrentAnnealingWindow):
         self._update_ac_sweep_estimate()
         self._set_default_log_name()
 
+    def init_graph_window(self):  # type: ignore[override]
+        super().init_graph_window()
+        container = getattr(getattr(self, "ui", None), "plot_container", None)
+        layout = container.layout() if isinstance(container, QtWidgets.QWidget) else None
+        if layout is not None and not hasattr(self, "comboBox_ac_plot_top"):
+            selector = QtWidgets.QWidget(container)
+            selector_layout = QtWidgets.QHBoxLayout(selector)
+            selector_layout.setContentsMargins(6, 4, 6, 4)
+            selector_layout.setSpacing(8)
+            self.comboBox_ac_plot_top = QtWidgets.QComboBox(selector)
+            self.comboBox_ac_plot_bottom = QtWidgets.QComboBox(selector)
+            plot_options = [
+                ("Rs vs current", "rs_current"),
+                ("Ls vs current", "ls_current"),
+                ("Rs vs frequency", "rs_frequency"),
+                ("Ls vs frequency", "ls_frequency"),
+            ]
+            for label, data in plot_options:
+                self.comboBox_ac_plot_top.addItem(label, data)
+                self.comboBox_ac_plot_bottom.addItem(label, data)
+            self._set_combo_data(self.comboBox_ac_plot_top, self.ac_settings.value("plot_top", "rs_current", type=str))
+            self._set_combo_data(
+                self.comboBox_ac_plot_bottom,
+                self.ac_settings.value("plot_bottom", "ls_current", type=str),
+            )
+            selector_layout.addWidget(QtWidgets.QLabel("Top plot:", selector))
+            selector_layout.addWidget(self.comboBox_ac_plot_top, 1)
+            selector_layout.addWidget(QtWidgets.QLabel("Bottom plot:", selector))
+            selector_layout.addWidget(self.comboBox_ac_plot_bottom, 1)
+            layout.insertWidget(0, selector)
+            self.comboBox_ac_plot_top.currentIndexChanged.connect(lambda *_args: self._handle_ac_plot_selection_changed())
+            self.comboBox_ac_plot_bottom.currentIndexChanged.connect(lambda *_args: self._handle_ac_plot_selection_changed())
+        self._apply_ac_plot_labels()
+
+    def _handle_ac_plot_selection_changed(self) -> None:
+        top = getattr(self, "comboBox_ac_plot_top", None)
+        bottom = getattr(self, "comboBox_ac_plot_bottom", None)
+        if isinstance(top, QtWidgets.QComboBox):
+            self.ac_settings.setValue("plot_top", top.currentData())
+        if isinstance(bottom, QtWidgets.QComboBox):
+            self.ac_settings.setValue("plot_bottom", bottom.currentData())
+        self._apply_ac_plot_labels()
+
+    def _apply_ac_plot_labels(self) -> None:
+        top = getattr(self, "comboBox_ac_plot_top", None)
+        bottom = getattr(self, "comboBox_ac_plot_bottom", None)
+        top_kind = top.currentData() if isinstance(top, QtWidgets.QComboBox) else "rs_current"
+        bottom_kind = bottom.currentData() if isinstance(bottom, QtWidgets.QComboBox) else "ls_current"
+        self._configure_ac_axis(getattr(self, "ax1", None), str(top_kind or "rs_current"))
+        self._configure_ac_axis(getattr(self, "ax2", None), str(bottom_kind or "ls_current"))
+        figure = getattr(self, "fig", None)
+        if figure is not None:
+            try:
+                figure.suptitle("AC susceptibility live view")
+            except Exception:
+                pass
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _configure_ac_axis(axis: Any, kind: str) -> None:
+        if axis is None:
+            return
+        if kind == "ls_current":
+            axis.set_title("Ls vs DC current")
+            axis.set_xlabel("DC current [mA]")
+            axis.set_ylabel("Ls [H]")
+        elif kind == "rs_frequency":
+            axis.set_title("Rs vs frequency")
+            axis.set_xlabel("Frequency [Hz]")
+            axis.set_ylabel("Rs [Ohm]")
+        elif kind == "ls_frequency":
+            axis.set_title("Ls vs frequency")
+            axis.set_xlabel("Frequency [Hz]")
+            axis.set_ylabel("Ls [H]")
+        else:
+            axis.set_title("Rs vs DC current")
+            axis.set_xlabel("DC current [mA]")
+            axis.set_ylabel("Rs [Ohm]")
+
     def _set_default_log_name(self) -> None:
         line_edit = getattr(self.ui, "lineEdit_log_file", None)
         if isinstance(line_edit, QtWidgets.QLineEdit):
             current = line_edit.text().strip()
-            if not current or current == "anneal_log":
-                line_edit.setText("ac_susceptibility_log")
+            if not current or current in {"anneal_log", "ac_susceptibility_log"}:
+                line_edit.setText("ac_susc_current_sweep")
                 self.sync_full_log_path()
 
     def _install_lcr_controls(self) -> None:
@@ -136,6 +238,12 @@ class MainWindow(CurrentAnnealingWindow):
         output_buttons.addWidget(getattr(self.ui, "pushButton_browse_dir"))
         output_grid.addLayout(output_buttons, 0, 2)
         output_grid.addWidget(getattr(self.ui, "label_log_file"), 1, 0)
+        log_file_label = getattr(self.ui, "label_log_file", None)
+        if isinstance(log_file_label, QtWidgets.QLabel):
+            log_file_label.setText("Sweep file base:")
+        extension_label = getattr(self.ui, "label_extension", None)
+        if isinstance(extension_label, QtWidgets.QLabel):
+            extension_label.setText("")
         file_row = QtWidgets.QHBoxLayout()
         file_row.setContentsMargins(0, 0, 0, 0)
         file_row.addWidget(getattr(self.ui, "lineEdit_log_file"), 1)
@@ -148,13 +256,15 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_refresh_lcr_ports = QtWidgets.QPushButton("Refresh", group)
         self.pushButton_connect_lcr = QtWidgets.QPushButton("Connect LCR", group)
         self.pushButton_identify_lcr = QtWidgets.QPushButton("Identify", group)
-        self.pushButton_auto_setup = QtWidgets.QPushButton("Auto setup", group)
+        self.pushButton_auto_setup = QtWidgets.QPushButton("Auto-detect instruments", group)
         row.addWidget(QtWidgets.QLabel("Port:", group))
         row.addWidget(self.comboBox_lcr_port, stretch=1)
         row.addWidget(self.pushButton_refresh_lcr_ports)
         row.addWidget(self.pushButton_connect_lcr)
         row.addWidget(self.pushButton_identify_lcr)
         row.addWidget(self.pushButton_auto_setup)
+        self.pushButton_refresh_lcr_ports.hide()
+        self.pushButton_identify_lcr.hide()
         outer.addLayout(row)
 
         grid = QtWidgets.QGridLayout()
@@ -194,22 +304,22 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_measure_lcr_baseline = QtWidgets.QPushButton("Measure empty-coil baseline", group)
         self.label_ac_psu_status = QtWidgets.QLabel("", group)
         self.label_ac_psu_status.setWordWrap(True)
-        self.spinBox_ac_voltage_limit = QtWidgets.QDoubleSpinBox(group)
+        self.spinBox_ac_voltage_limit = CompactDoubleSpinBox(group)
         self.spinBox_ac_voltage_limit.setRange(0.1, 120.0)
-        self.spinBox_ac_voltage_limit.setDecimals(2)
+        self.spinBox_ac_voltage_limit.setDecimals(3)
         self.spinBox_ac_voltage_limit.setSuffix(" V")
         self.spinBox_ac_voltage_limit.setValue(OWON_DEFAULT_VOLTAGE_LIMIT_V)
-        self.spinBox_ac_current_start = QtWidgets.QDoubleSpinBox(group)
+        self.spinBox_ac_current_start = CompactDoubleSpinBox(group)
         self.spinBox_ac_current_start.setRange(0.0, 10000.0)
         self.spinBox_ac_current_start.setDecimals(3)
         self.spinBox_ac_current_start.setSuffix(" mA")
         self.spinBox_ac_current_start.setValue(20.0)
-        self.spinBox_ac_current_stop = QtWidgets.QDoubleSpinBox(group)
+        self.spinBox_ac_current_stop = CompactDoubleSpinBox(group)
         self.spinBox_ac_current_stop.setRange(0.0, 10000.0)
         self.spinBox_ac_current_stop.setDecimals(3)
         self.spinBox_ac_current_stop.setSuffix(" mA")
         self.spinBox_ac_current_stop.setValue(80.0)
-        self.spinBox_ac_current_step = QtWidgets.QDoubleSpinBox(group)
+        self.spinBox_ac_current_step = CompactDoubleSpinBox(group)
         self.spinBox_ac_current_step.setRange(0.001, 10000.0)
         self.spinBox_ac_current_step.setDecimals(3)
         self.spinBox_ac_current_step.setSuffix(" mA")
@@ -218,11 +328,16 @@ class MainWindow(CurrentAnnealingWindow):
         self.comboBox_ac_direction.addItem("Up and down", "up-down")
         self.comboBox_ac_direction.addItem("Up only", "up")
         self.comboBox_ac_direction.addItem("Down only", "down")
-        self.spinBox_ac_dwell = QtWidgets.QDoubleSpinBox(group)
+        self.spinBox_ac_dwell = CompactDoubleSpinBox(group)
         self.spinBox_ac_dwell.setRange(0.0, 3600.0)
-        self.spinBox_ac_dwell.setDecimals(2)
+        self.spinBox_ac_dwell.setDecimals(3)
         self.spinBox_ac_dwell.setSuffix(" s")
         self.spinBox_ac_dwell.setValue(1.0)
+        self.spinBox_ac_read_interval = CompactDoubleSpinBox(group)
+        self.spinBox_ac_read_interval.setRange(0.0, 3600.0)
+        self.spinBox_ac_read_interval.setDecimals(3)
+        self.spinBox_ac_read_interval.setSuffix(" s")
+        self.spinBox_ac_read_interval.setValue(0.0)
         self.spinBox_ac_repeats = QtWidgets.QSpinBox(group)
         self.spinBox_ac_repeats.setRange(1, 1000)
         self.spinBox_ac_repeats.setValue(1)
@@ -268,28 +383,39 @@ class MainWindow(CurrentAnnealingWindow):
         plan_grid.setColumnStretch(3, 1)
         plan_grid.addWidget(QtWidgets.QLabel("PSU:", plan_group), 0, 0)
         plan_grid.addWidget(self.label_ac_psu_status, 0, 1, 1, 3)
-        plan_grid.addWidget(QtWidgets.QLabel("Voltage limit:", plan_group), 1, 0)
+        self.label_ac_voltage_limit = QtWidgets.QLabel("Voltage limit:", plan_group)
+        self.label_ac_baseline_readings = QtWidgets.QLabel("Baseline readings/setting:", plan_group)
+        self.label_ac_current_start = QtWidgets.QLabel("Current start:", plan_group)
+        self.label_ac_current_stop = QtWidgets.QLabel("Current stop:", plan_group)
+        self.label_ac_current_step = QtWidgets.QLabel("Current step:", plan_group)
+        self.label_ac_direction = QtWidgets.QLabel("Direction:", plan_group)
+        self.label_ac_settle_time = QtWidgets.QLabel("Settle time:", plan_group)
+        self.label_ac_readings_per_point = QtWidgets.QLabel("LCR readings/point:", plan_group)
+        self.label_ac_read_interval = QtWidgets.QLabel("Read interval:", plan_group)
+        plan_grid.addWidget(self.label_ac_voltage_limit, 1, 0)
         plan_grid.addWidget(self.spinBox_ac_voltage_limit, 1, 1)
-        plan_grid.addWidget(QtWidgets.QLabel("Baseline repeats:", plan_group), 1, 2)
+        plan_grid.addWidget(self.label_ac_baseline_readings, 1, 2)
         plan_grid.addWidget(self.spinBox_lcr_baseline_repeats, 1, 3)
-        plan_grid.addWidget(QtWidgets.QLabel("Current start:", plan_group), 2, 0)
+        plan_grid.addWidget(self.label_ac_current_start, 2, 0)
         plan_grid.addWidget(self.spinBox_ac_current_start, 2, 1)
-        plan_grid.addWidget(QtWidgets.QLabel("Current stop:", plan_group), 2, 2)
+        plan_grid.addWidget(self.label_ac_current_stop, 2, 2)
         plan_grid.addWidget(self.spinBox_ac_current_stop, 2, 3)
-        plan_grid.addWidget(QtWidgets.QLabel("Current step:", plan_group), 3, 0)
+        plan_grid.addWidget(self.label_ac_current_step, 3, 0)
         plan_grid.addWidget(self.spinBox_ac_current_step, 3, 1)
-        plan_grid.addWidget(QtWidgets.QLabel("Direction:", plan_group), 3, 2)
+        plan_grid.addWidget(self.label_ac_direction, 3, 2)
         plan_grid.addWidget(self.comboBox_ac_direction, 3, 3)
-        plan_grid.addWidget(QtWidgets.QLabel("Dwell:", plan_group), 4, 0)
+        plan_grid.addWidget(self.label_ac_settle_time, 4, 0)
         plan_grid.addWidget(self.spinBox_ac_dwell, 4, 1)
-        plan_grid.addWidget(QtWidgets.QLabel("Repeats/current:", plan_group), 4, 2)
+        plan_grid.addWidget(self.label_ac_readings_per_point, 4, 2)
         plan_grid.addWidget(self.spinBox_ac_repeats, 4, 3)
-        plan_grid.addWidget(self.label_ac_sweep_estimate, 5, 0, 1, 4)
+        plan_grid.addWidget(self.label_ac_read_interval, 5, 0)
+        plan_grid.addWidget(self.spinBox_ac_read_interval, 5, 1)
+        plan_grid.addWidget(self.label_ac_sweep_estimate, 6, 0, 1, 4)
         action_row = QtWidgets.QHBoxLayout()
         action_row.addWidget(self.pushButton_measure_lcr_baseline)
         action_row.addWidget(self.pushButton_run_ac_sweep)
         action_row.addWidget(self.pushButton_stop_ac_sweep)
-        plan_grid.addLayout(action_row, 6, 0, 1, 4)
+        plan_grid.addLayout(action_row, 7, 0, 1, 4)
         outer.addWidget(plan_group)
         self.groupBox_ac_plan = plan_group
 
@@ -343,6 +469,7 @@ class MainWindow(CurrentAnnealingWindow):
             self.spinBox_ac_current_step,
             self.comboBox_ac_direction,
             self.spinBox_ac_dwell,
+            self.spinBox_ac_read_interval,
             self.spinBox_ac_repeats,
         ):
             signal = getattr(widget, "currentIndexChanged", None) or getattr(widget, "valueChanged", None)
@@ -358,6 +485,22 @@ class MainWindow(CurrentAnnealingWindow):
         command_frame = getattr(self.ui, "frame_command_and_response", None)
         if isinstance(command_frame, QtWidgets.QWidget):
             command_frame.hide()
+        button_map: tuple[tuple[str, str, Any], ...] = (
+            ("pushButton_start_process", "Measure empty-coil baseline", self.handle_measure_lcr_baseline_clicked),
+            ("pushButton_show_history", "Run microwire current sweep", self.handle_run_ac_sweep_clicked),
+            ("pushButton_reverse_now", "Stop", self.handle_stop_ac_sweep_clicked),
+        )
+        for attr, text, slot in button_map:
+            button = getattr(self.ui, attr, None)
+            if not isinstance(button, QtWidgets.QPushButton):
+                continue
+            button.setText(text)
+            button.setEnabled(text != "Stop")
+            try:
+                button.clicked.disconnect()
+            except TypeError:
+                pass
+            button.clicked.connect(slot)
 
     def _load_lcr_settings(self) -> None:
         self.lineEdit_lcr_frequencies.setText(
@@ -387,6 +530,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.spinBox_ac_current_stop.setValue(float(self.ac_settings.value("current_stop_mA", 80.0)))
         self.spinBox_ac_current_step.setValue(float(self.ac_settings.value("current_step_mA", 5.0)))
         self.spinBox_ac_dwell.setValue(float(self.ac_settings.value("dwell_s", 1.0)))
+        self.spinBox_ac_read_interval.setValue(float(self.ac_settings.value("read_interval_s", 0.0)))
         self.spinBox_ac_repeats.setValue(max(1, int(self.ac_settings.value("sweep_repeats", 1))))
         voltage_limit = self.ac_settings.value("voltage_limit_v", None)
         if voltage_limit is None:
@@ -427,6 +571,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("current_step_mA", float(self.spinBox_ac_current_step.value()))
         self.ac_settings.setValue("direction", self.comboBox_ac_direction.currentData())
         self.ac_settings.setValue("dwell_s", float(self.spinBox_ac_dwell.value()))
+        self.ac_settings.setValue("read_interval_s", float(self.spinBox_ac_read_interval.value()))
         self.ac_settings.setValue("sweep_repeats", int(self.spinBox_ac_repeats.value()))
 
     def populate_lcr_ports(self) -> None:
@@ -561,6 +706,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_sweep_stop_requested = False
         self.pushButton_run_ac_sweep.setEnabled(False)
         self.pushButton_stop_ac_sweep.setEnabled(True)
+        self._set_sticky_action_state(running=True)
         self.label_lcr_status.setText(f"Running AC sweep: {output_path}")
         try:
             sweep.run_ac_sweep(
@@ -581,6 +727,7 @@ class MainWindow(CurrentAnnealingWindow):
             self._ac_sweep_stop_requested = False
             self.pushButton_run_ac_sweep.setEnabled(True)
             self.pushButton_stop_ac_sweep.setEnabled(False)
+            self._set_sticky_action_state(running=False)
         self.label_lcr_status.setText(f"AC sweep saved: {output_path}")
         QtWidgets.QMessageBox.information(self, "AC sweep saved", f"Saved AC sweep to:\n{output_path}")
 
@@ -602,7 +749,11 @@ class MainWindow(CurrentAnnealingWindow):
             self.label_lcr_status.setText(
                 f"Measuring baseline: {len(plan)} settings x {repeats} repeats"
             )
-            rows = self._collect_baseline_rows(plan, repeats=repeats)
+            rows = self._collect_baseline_rows(
+                plan,
+                repeats=repeats,
+                read_interval_s=max(0.0, float(self.spinBox_ac_read_interval.value())),
+            )
             self._write_baseline_file(path, plan, rows)
         except Exception as exc:
             self._lcr_last_error = str(exc)
@@ -613,6 +764,17 @@ class MainWindow(CurrentAnnealingWindow):
             self.pushButton_measure_lcr_baseline.setEnabled(True)
         self.label_lcr_status.setText(f"Baseline saved: {path}")
         QtWidgets.QMessageBox.information(self, "Baseline saved", f"Saved LCR baseline to:\n{path}")
+
+    def _set_sticky_action_state(self, *, running: bool) -> None:
+        start = getattr(self.ui, "pushButton_start_process", None)
+        sweep_button = getattr(self.ui, "pushButton_show_history", None)
+        stop = getattr(self.ui, "pushButton_reverse_now", None)
+        if isinstance(start, QtWidgets.QPushButton):
+            start.setEnabled(not running)
+        if isinstance(sweep_button, QtWidgets.QPushButton):
+            sweep_button.setEnabled(not running)
+        if isinstance(stop, QtWidgets.QPushButton):
+            stop.setEnabled(running)
 
     def _prepare_lcr_plan(self) -> list[Lcr6000Settings]:
         self._store_lcr_settings()
@@ -660,7 +822,17 @@ class MainWindow(CurrentAnnealingWindow):
             psu_backend=self._selected_ac_psu_backend(),
             psu_resource=psu_resource,
             voltage_limit_v=float(self.spinBox_ac_voltage_limit.value()),
+            read_interval_s=self._ac_read_interval_seconds(),
         )
+
+    def _ac_read_interval_seconds(self) -> float:
+        try:
+            spinbox = getattr(self, "spinBox_ac_read_interval")
+        except RuntimeError:
+            return 0.0
+        if isinstance(spinbox, QtWidgets.QDoubleSpinBox):
+            return max(0.0, float(spinbox.value()))
+        return 0.0
 
     def _update_ac_sweep_estimate(self) -> None:
         try:
@@ -676,6 +848,7 @@ class MainWindow(CurrentAnnealingWindow):
                 current_points=current_points,
                 repeats=max(1, int(self.spinBox_ac_repeats.value())),
                 dwell_s=max(0.0, float(self.spinBox_ac_dwell.value())),
+                read_interval_s=max(0.0, float(self.spinBox_ac_read_interval.value())),
             )
         except Exception as exc:
             self.label_ac_sweep_estimate.setText(f"Estimate unavailable: {exc}")
@@ -698,7 +871,10 @@ class MainWindow(CurrentAnnealingWindow):
     def _sweep_output_path(self) -> Path:
         log_path = Path(self.build_log_path())
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return log_path.with_name(f"{log_path.stem}_ac_sweep_{timestamp}.tsv")
+        stem = log_path.stem.strip() or "ac_susc_current_sweep"
+        if stem in {"anneal_log", "ac_susceptibility_log"}:
+            stem = "ac_susc_current_sweep"
+        return log_path.with_name(f"{stem}_{timestamp}.tsv")
 
     @staticmethod
     def _format_duration(seconds: float) -> str:
@@ -774,7 +950,7 @@ class MainWindow(CurrentAnnealingWindow):
         if (
             not math.isfinite(current_limit)
             or current_limit <= 0
-            or (backend == "owon_spe6102" and current_limit <= 5.0)
+            or (backend == "owon_spe6102" and (current_limit <= 5.0 or math.isclose(current_limit, 60.0)))
             or (backend != "owon_spe6102" and math.isclose(current_limit, OWON_DEFAULT_VOLTAGE_LIMIT_V))
         ):
             self.spinBox_ac_voltage_limit.setValue(default_limit)
@@ -932,13 +1108,14 @@ class MainWindow(CurrentAnnealingWindow):
     def _baseline_output_path(self) -> Path:
         log_path = Path(self.build_log_path())
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return log_path.with_name(f"{log_path.stem}_baseline_{timestamp}.tsv")
+        return log_path.with_name(f"ac_susc_empty_coil_baseline_{timestamp}.tsv")
 
     def _collect_baseline_rows(
         self,
         plan: Sequence[Lcr6000Settings],
         *,
         repeats: int,
+        read_interval_s: float = 0.0,
     ) -> list[list[str]]:
         meter = self.lcr_meter
         if meter is None or not meter.is_open:
@@ -960,6 +1137,9 @@ class MainWindow(CurrentAnnealingWindow):
                     )
                 )
                 QtWidgets.QApplication.processEvents()
+                interval = max(0.0, float(read_interval_s))
+                if interval and repeat_index < repeat_count:
+                    time.sleep(interval)
         return rows
 
     def _fetch_baseline_reading(self, *, attempts: int = 3) -> Lcr6000Reading:

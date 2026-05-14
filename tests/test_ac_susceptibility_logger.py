@@ -16,6 +16,24 @@ ac_logger = pytest.importorskip(
 )
 
 
+def _isolate_ac_qsettings(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    original = QtCore.QSettings
+    ini_format = original.Format.IniFormat
+    user_scope = original.Scope.UserScope
+
+    def factory(_organization: str, _application: str) -> QtCore.QSettings:
+        settings = original(
+            ini_format,
+            user_scope,
+            "microwire_tests",
+            name,
+        )
+        settings.clear()
+        return settings
+
+    monkeypatch.setattr(ac_logger.QtCore, "QSettings", factory)
+
+
 def test_parse_numeric_list_accepts_frequency_suffixes() -> None:
     assert lcr6000.parse_numeric_list("100, 1k, 2.5MHz", quantity="frequency") == pytest.approx(
         [100.0, 1000.0, 2_500_000.0]
@@ -428,12 +446,38 @@ def test_ac_logger_uses_shared_owon_supply_defaults_for_sweep_config() -> None:
     assert config.psu_backend == "owon_spe6102"
     assert config.psu_resource == "COM7"
     assert window._selected_ac_psu_baudrate() == 9600
-    assert config.voltage_limit_v == pytest.approx(60.0)
+    assert config.voltage_limit_v == pytest.approx(62.0)
+    app.processEvents()
+
+
+def test_ac_logger_upgrades_older_owon_voltage_limit_defaults() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window.ui = type("Ui", (), {})()
+    window.ui.comboBox_supply = QtWidgets.QComboBox()
+    window.ui.comboBox_supply.addItem("Owon SPE6102", "owon_spe6102")
+    window.ui.comboBox_port = QtWidgets.QComboBox()
+    window.ui.comboBox_port.addItem("COM7", "COM7")
+    window.ui.comboBox_baudrate = QtWidgets.QComboBox()
+    window.ui.comboBox_baudrate.addItem("9600")
+    window.label_ac_psu_status = QtWidgets.QLabel()
+    window.spinBox_ac_voltage_limit = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_voltage_limit.setRange(0.1, 120.0)
+
+    for old_default in (5.0, 60.0):
+        window.spinBox_ac_voltage_limit.setValue(old_default)
+        window._sync_ac_psu_from_shared_controls()
+        assert window.spinBox_ac_voltage_limit.value() == pytest.approx(62.0)
+
+    window.spinBox_ac_voltage_limit.setValue(48.0)
+    window._sync_ac_psu_from_shared_controls()
+    assert window.spinBox_ac_voltage_limit.value() == pytest.approx(48.0)
     app.processEvents()
 
 
 def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytest.MonkeyPatch) -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "simplified_window")
     monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
     monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
     monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
@@ -447,11 +491,103 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert window.checkBox_lcr_model_lprp.isChecked() is False
         assert window.pushButton_measure_lcr_baseline.text() == "Measure empty-coil baseline"
         assert window.pushButton_run_ac_sweep.text() == "Run microwire current sweep"
+        sticky_texts = {
+            window.ui.pushButton_start_process.text(),
+            window.ui.pushButton_show_history.text(),
+            window.ui.pushButton_reverse_now.text(),
+        }
+        assert sticky_texts == {"Measure empty-coil baseline", "Run microwire current sweep", "Stop"}
+        assert all("anneal" not in text.lower() for text in sticky_texts)
+        assert all("history" not in text.lower() for text in sticky_texts)
+        assert all("reverse" not in text.lower() for text in sticky_texts)
+        assert window.pushButton_auto_setup.text() == "Auto-detect instruments"
+        assert window.pushButton_identify_lcr.isHidden()
+        assert window.ui.label_log_file.text() == "Sweep file base:"
+        assert window.ui.label_extension.text() == ""
         assert not hasattr(window, "comboBox_ac_psu_backend")
         assert not hasattr(window, "comboBox_ac_psu_port")
         assert not hasattr(window, "comboBox_ac_psu_baud")
         assert "Instrument setup" in window.groupBox_lcr_settings.title()
         assert "Experiment plan" in window.groupBox_ac_plan.title()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_numeric_fields_and_acquisition_labels_are_concise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "numeric_fields")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        window.ui.comboBox_supply.setCurrentIndex(window.ui.comboBox_supply.findData("owon_spe6102"))
+        window.spinBox_ac_voltage_limit.setValue(5.0)
+        window._sync_ac_psu_from_shared_controls()
+        window.spinBox_ac_current_start.setValue(20.0)
+        window.spinBox_ac_current_step.setValue(5.0)
+        window.spinBox_ac_dwell.setValue(1.0)
+        assert window.spinBox_ac_voltage_limit.text() == "62 V"
+        assert window.spinBox_ac_current_start.text() == "20 mA"
+        assert window.spinBox_ac_current_step.text() == "5 mA"
+        assert window.spinBox_ac_dwell.text() == "1 s"
+        window.spinBox_ac_current_step.setValue(2.5)
+        window.spinBox_ac_dwell.setValue(0.5)
+        assert window.spinBox_ac_current_step.text() == "2.5 mA"
+        assert window.spinBox_ac_dwell.text() == "0.5 s"
+        assert window.label_ac_settle_time.text() == "Settle time:"
+        assert window.label_ac_readings_per_point.text() == "LCR readings/point:"
+        assert window.label_ac_baseline_readings.text() == "Baseline readings/setting:"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_default_output_names_are_ac_specific(tmp_path: Path) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window.ui = type("Ui", (), {})()
+    window.ui.lineEdit_log_dir = QtWidgets.QLineEdit(str(tmp_path))
+    window.ui.lineEdit_log_file = QtWidgets.QLineEdit("Ni50Fe27Ga23_20um")
+    window.ui.lineEdit_log_file_full = QtWidgets.QLineEdit()
+
+    baseline_name = window._baseline_output_path().name
+    assert baseline_name.startswith("ac_susc_empty_coil_baseline_")
+    assert "Ni50Fe27Ga23" not in baseline_name
+    assert baseline_name.endswith(".tsv")
+
+    window.ui.lineEdit_log_file.setText("")
+    window._set_default_log_name()
+    assert window.ui.lineEdit_log_file.text() == "ac_susc_current_sweep"
+    sweep_name = window._sweep_output_path().name
+    assert sweep_name.startswith("ac_susc_current_sweep_")
+    assert sweep_name.endswith(".tsv")
+    app.processEvents()
+
+
+def test_ac_logger_graph_defaults_are_ac_susceptibility_specific(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "graph_defaults")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        assert window.comboBox_ac_plot_top.currentData() == "rs_current"
+        assert window.comboBox_ac_plot_bottom.currentData() == "ls_current"
+        assert window.ax1.get_title() == "Rs vs DC current"
+        assert window.ax1.get_ylabel() == "Rs [Ohm]"
+        assert window.ax1.get_xlabel() == "DC current [mA]"
+        assert window.ax2.get_title() == "Ls vs DC current"
+        assert window.ax2.get_ylabel() == "Ls [H]"
+        assert window.ax2.get_xlabel() == "DC current [mA]"
     finally:
         window.close()
         app.processEvents()

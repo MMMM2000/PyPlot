@@ -8,9 +8,9 @@ current source:
 2. **Run microwire current sweep** after inserting the wire, using the same LCR
    frequency/amplitude settings while sweeping DC current up and back down.
 
-The older current-annealing controls are hidden in this logger so the normal
-workflow only shows instrument setup, the AC experiment plan, baseline, sweep,
-and stop actions.
+The older current-annealing controls are hidden or replaced in this logger so
+the normal workflow only shows instrument setup, the AC experiment plan,
+empty-coil baseline, microwire sweep, and stop actions.
 
 For the full hardware/code handoff, including driver setup, probe results,
 verified commands, and next experimental steps, see
@@ -66,16 +66,32 @@ Quick probe after driver installation:
 
 Use **Measure empty-coil baseline** before mounting the microwire. Baseline
 runs the selected LCR model/frequency/amplitude matrix with the configured
-repeat count and writes a timestamped `*_baseline_YYYYMMDD_HHMMSS.tsv` file next
-to the selected log file. It does not enable, set, read, or otherwise command
-the power supply.
+baseline readings per setting and writes a timestamped
+`ac_susc_empty_coil_baseline_YYYYMMDD_HHMMSS.tsv` file next to the selected log
+file. The filename intentionally does not include sample or microwire identity
+because no sample is installed. Baseline does not enable, set, read, or
+otherwise command the power supply.
 
 Use **Run microwire current sweep** after inserting the microwire. The logger
 uses the same selected LCR settings, configures the LCR meter first, then runs
 the current loop at each AC setting. The default loop is up-down, for example
-`20 mA -> 80 mA -> 20 mA`. Sweep files are named
-`*_ac_sweep_YYYYMMDD_HHMMSS.tsv` and are flushed after every LCR read for
-overnight recovery.
+`20 mA -> 80 mA -> 20 mA`. Include `0 mA` as the start current when a
+wire-installed no-current reference is needed; it is part of the microwire
+sweep rather than a separate baseline action. Sweep files use an AC-specific
+base such as `ac_susc_current_sweep_YYYYMMDD_HHMMSS.tsv` and are flushed after
+every LCR read for overnight recovery.
+
+Point acquisition controls are named for the AC experiment:
+
+- **Settle time** waits after changing the current or LCR setting.
+- **LCR readings/point** stores repeated LCR reads at the same
+  model/frequency/amplitude/current point.
+- **Read interval** optionally spaces those repeated reads.
+- **Baseline readings/setting** applies the same repeated-read idea to the
+  empty-coil baseline.
+
+Every reading is saved as its own row. Averaging or baseline normalization can
+be done later from the raw TSV files.
 
 Suggested first-pass settings for the 1 cm, roughly 1 mm coil around a
 Ni50Fe27Ga23 microwire:
@@ -139,7 +155,9 @@ The AC sweep can use either the existing HMP4030-style SCPI path or an OWON
 SPE6102-style backend. The AC panel reuses the shared top PSU controls for
 supply type, serial port, and baud rate instead of asking for the same PSU
 settings twice. If the shared supply is OWON SPE6102, the AC sweep selects the
-OWON backend automatically and defaults the voltage limit to `60 V`.
+OWON backend automatically and defaults the voltage limit to `62 V`. Older
+saved OWON defaults such as `5 V` or `60 V` are lifted to `62 V` when OWON is
+selected; non-OWON supplies keep their own lower defaults.
 
 Use **Auto setup** to refresh LCR ports, scan serial ports with the safe
 `*IDN?` query, ignore the LCR meter as a PSU candidate, and select a recognized
@@ -152,6 +170,17 @@ The sweep engine treats the supply generically: connect, initialize with a
 voltage limit, set current, read actual voltage/current when available, then
 turn output off on normal completion, user stop, or error. Baseline measurement
 does not create or command a power-supply backend.
+
+## Live Plots
+
+The right-side graph area is AC-specific. By default it shows:
+
+- `Rs vs DC current`
+- `Ls vs DC current`
+
+Each plot has a selector for switching to `Ls/Rs vs current` or
+`Ls/Rs vs frequency`. The labels use the measured equivalent-circuit quantities
+instead of inherited current-annealing resistance-history labels.
 
 ## Literature Cues
 
