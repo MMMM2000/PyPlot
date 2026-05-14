@@ -86,7 +86,6 @@ Point acquisition controls are named for the AC experiment:
 - **Settle time** waits after changing the current or LCR setting.
 - **LCR readings/point** stores repeated LCR reads at the same
   model/frequency/amplitude/current point.
-- **Read interval** optionally spaces those repeated reads.
 - **Baseline readings/setting** applies the same repeated-read idea to the
   empty-coil baseline.
 
@@ -159,12 +158,16 @@ OWON backend automatically and defaults the voltage limit to `62 V`. Older
 saved OWON defaults such as `5 V` or `60 V` are lifted to `62 V` when OWON is
 selected; non-OWON supplies keep their own lower defaults.
 
-Use **Auto setup** to refresh LCR ports, scan serial ports with the safe
+Use **Auto-detect instruments** to refresh LCR ports, scan serial ports with the safe
 `*IDN?` query, ignore the LCR meter as a PSU candidate, and select a recognized
 HMP4030 or OWON SPE6102 backend automatically. The scan does not enable output
 or change current. If no supported PSU responds, the status text reports which
 ports were tried and leaves the shared top PSU controls available for manual
 selection.
+
+The logger no longer runs PSU auto-detection during normal launch. This avoids
+waiting on serial ports that do not answer `*IDN?`; probing only happens when
+the operator explicitly asks for auto-detection.
 
 The sweep engine treats the supply generically: connect, initialize with a
 voltage limit, set current, read actual voltage/current when available, then
@@ -173,14 +176,18 @@ does not create or command a power-supply backend.
 
 ## Live Plots
 
-The right-side graph area is AC-specific. By default it shows:
+The right-side graph area follows the Mini DMA dashboard pattern: use
+**Configure plots** to choose which plot tiles are visible and what each tile
+uses for bottom X, left Y, and optional right Y.
+
+By default it shows:
 
 - `Rs vs DC current`
 - `Ls vs DC current`
 
-Each plot has a selector for switching to `Ls/Rs vs current` or
-`Ls/Rs vs frequency`. The labels use the measured equivalent-circuit quantities
-instead of inherited current-annealing resistance-history labels.
+Additional selectable channels include elapsed time, DC current, frequency,
+amplitude, `Rs`, and `Ls`. The plot renderer follows the Qt palette so dark
+mode labels, ticks, and titles remain readable.
 
 ## Literature Cues
 

@@ -149,7 +149,7 @@ def test_estimate_sweep_totals_counts_repeats_and_dwell() -> None:
     )
 
     assert estimate.total_measurements == 18
-    assert estimate.estimated_seconds == pytest.approx(36.0)
+    assert estimate.estimated_seconds == pytest.approx(12.0)
 
 
 def test_power_supply_idn_classification_detects_supported_backends() -> None:
@@ -485,6 +485,7 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
     window = ac_logger.MainWindow()
     try:
         assert window.ui.frame_process_settings.isHidden()
+        assert window.frame_ac_plan_actions.isHidden()
         assert window.comboBox_lcr_function.isHidden()
         assert window.checkBox_lcr_model_lsrs.isHidden()
         assert window.checkBox_lcr_model_lprp.text() == "Also measure Lp-Rp"
@@ -502,13 +503,16 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert all("reverse" not in text.lower() for text in sticky_texts)
         assert window.pushButton_auto_setup.text() == "Auto-detect instruments"
         assert window.pushButton_identify_lcr.isHidden()
-        assert window.ui.label_log_file.text() == "Sweep file base:"
-        assert window.ui.label_extension.text() == ""
+        assert window.ui.label_log_file.text() == "Microwire sweep base:"
+        assert window.ui.label_extension.text() == ".tsv"
+        assert "ac_susc_empty_coil_baseline" in window.label_ac_baseline_file.text()
         assert not hasattr(window, "comboBox_ac_psu_backend")
         assert not hasattr(window, "comboBox_ac_psu_port")
         assert not hasattr(window, "comboBox_ac_psu_baud")
         assert "Instrument setup" in window.groupBox_lcr_settings.title()
         assert "Experiment plan" in window.groupBox_ac_plan.title()
+        assert not hasattr(window, "label_ac_read_interval")
+        assert not hasattr(window, "spinBox_ac_read_interval")
     finally:
         window.close()
         app.processEvents()
@@ -542,6 +546,11 @@ def test_ac_logger_numeric_fields_and_acquisition_labels_are_concise(
         assert window.label_ac_settle_time.text() == "Settle time:"
         assert window.label_ac_readings_per_point.text() == "LCR readings/point:"
         assert window.label_ac_baseline_readings.text() == "Baseline readings/setting:"
+        assert "Baseline:" in window.label_ac_sweep_estimate.text()
+        before = window.label_ac_sweep_estimate.text()
+        window.spinBox_lcr_baseline_repeats.setValue(window.spinBox_lcr_baseline_repeats.value() + 1)
+        window._update_ac_sweep_estimate()
+        assert window.label_ac_sweep_estimate.text() != before
     finally:
         window.close()
         app.processEvents()
@@ -580,14 +589,42 @@ def test_ac_logger_graph_defaults_are_ac_susceptibility_specific(
 
     window = ac_logger.MainWindow()
     try:
-        assert window.comboBox_ac_plot_top.currentData() == "rs_current"
-        assert window.comboBox_ac_plot_bottom.currentData() == "ls_current"
-        assert window.ax1.get_title() == "Rs vs DC current"
-        assert window.ax1.get_ylabel() == "Rs [Ohm]"
-        assert window.ax1.get_xlabel() == "DC current [mA]"
-        assert window.ax2.get_title() == "Ls vs DC current"
-        assert window.ax2.get_ylabel() == "Ls [H]"
-        assert window.ax2.get_xlabel() == "DC current [mA]"
+        assert window.button_plot_setup.text() == "Configure plots"
+        assert len(window._plot_tiles) == 4
+        assert [tile.visible.isChecked() for tile in window._plot_tiles] == [True, True, False, False]
+        assert window._plot_tiles[0].x_combo.currentData() == "current_mA"
+        assert window._plot_tiles[0].y_left_combo.currentData() == "rs_ohm"
+        assert window._plot_tiles[1].x_combo.currentData() == "current_mA"
+        assert window._plot_tiles[1].y_left_combo.currentData() == "ls_h"
+        assert len(window.figure.axes) == 2
+        assert window.figure.axes[0].get_title() == "Rs vs DC current"
+        assert window.figure.axes[0].get_ylabel() == "Rs [Ohm]"
+        assert window.figure.axes[0].get_xlabel() == "DC current [mA]"
+        assert window.figure.axes[1].get_title() == "Ls vs DC current"
+        assert window.figure.axes[1].get_ylabel() == "Ls [H]"
+        assert window.figure.axes[1].get_xlabel() == "DC current [mA]"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_does_not_auto_detect_psu_during_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "startup_no_auto_detect")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    calls = {"detect": 0}
+
+    def _detect(*_args: object, **_kwargs: object) -> list[sweep.PowerSupplyCandidate]:
+        calls["detect"] += 1
+        return []
+
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", _detect)
+
+    window = ac_logger.MainWindow()
+    try:
+        assert calls["detect"] == 0
+        assert "from shared PSU controls" in window.label_ac_psu_status.text()
     finally:
         window.close()
         app.processEvents()

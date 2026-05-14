@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import math
 import os
@@ -9,7 +10,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Sequence, cast
+from typing import Any, Callable, Sequence, cast
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -91,6 +92,53 @@ class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
             return float(self.value())
 
 
+@dataclass
+class AcPlotPoint:
+    elapsed_s: float
+    model: str
+    frequency_hz: float
+    amplitude_v: float
+    current_mA: float
+    ls_h: float | None
+    rs_ohm: float | None
+
+
+@dataclass
+class AcPlotChannel:
+    key: str
+    label: str
+    color: str
+    getter: Callable[[AcPlotPoint], float | None]
+
+
+@dataclass
+class AcPlotTileWidgets:
+    visible: QtWidgets.QCheckBox
+    x_combo: QtWidgets.QComboBox
+    y_left_combo: QtWidgets.QComboBox
+    y_right_combo: QtWidgets.QComboBox
+
+
+class AcPlotConfigDialog(QtWidgets.QDialog):
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Configure AC plots")
+        self.setModal(False)
+        self.resize(880, 320)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        self.body_layout = QtWidgets.QVBoxLayout()
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self.body_layout, stretch=1)
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        close_button = QtWidgets.QPushButton("Close", self)
+        close_button.clicked.connect(self.close)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+
 class MainWindow(CurrentAnnealingWindow):
     """Current annealing logger extended with LCR-6200 measurements."""
 
@@ -104,6 +152,9 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_sweep_running = False
         self._ac_sweep_stop_requested = False
         self._ac_lcr_scroll_area: QtWidgets.QScrollArea | None = None
+        self._ac_plot_points: list[AcPlotPoint] = []
+        self._plot_tiles: list[AcPlotTileWidgets] = []
+        self.plot_config_dialog: AcPlotConfigDialog | None = None
         super().__init__()
         self.setWindowTitle("AC Susceptibility Logger")
         self._install_lcr_controls()
@@ -111,93 +162,282 @@ class MainWindow(CurrentAnnealingWindow):
         self._load_lcr_settings()
         self.populate_lcr_ports()
         self.populate_ac_psu_ports()
-        self.auto_detect_power_supply()
         self._update_ac_sweep_estimate()
         self._set_default_log_name()
 
     def init_graph_window(self):  # type: ignore[override]
         super().init_graph_window()
+        if hasattr(self, "fig"):
+            self.figure = self.fig
         container = getattr(getattr(self, "ui", None), "plot_container", None)
         layout = container.layout() if isinstance(container, QtWidgets.QWidget) else None
-        if layout is not None and not hasattr(self, "comboBox_ac_plot_top"):
-            selector = QtWidgets.QWidget(container)
-            selector_layout = QtWidgets.QHBoxLayout(selector)
-            selector_layout.setContentsMargins(6, 4, 6, 4)
-            selector_layout.setSpacing(8)
-            self.comboBox_ac_plot_top = QtWidgets.QComboBox(selector)
-            self.comboBox_ac_plot_bottom = QtWidgets.QComboBox(selector)
-            plot_options = [
-                ("Rs vs current", "rs_current"),
-                ("Ls vs current", "ls_current"),
-                ("Rs vs frequency", "rs_frequency"),
-                ("Ls vs frequency", "ls_frequency"),
-            ]
-            for label, data in plot_options:
-                self.comboBox_ac_plot_top.addItem(label, data)
-                self.comboBox_ac_plot_bottom.addItem(label, data)
-            self._set_combo_data(self.comboBox_ac_plot_top, self.ac_settings.value("plot_top", "rs_current", type=str))
-            self._set_combo_data(
-                self.comboBox_ac_plot_bottom,
-                self.ac_settings.value("plot_bottom", "ls_current", type=str),
+        if layout is not None:
+            self._install_ac_plot_dashboard(container, layout)
+        self._refresh_ac_plots()
+
+    def _install_ac_plot_dashboard(self, container: QtWidgets.QWidget, layout: QtWidgets.QLayout) -> None:
+        header = QtWidgets.QFrame(container)
+        header.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(10, 8, 10, 8)
+        header_layout.setSpacing(12)
+        title = QtWidgets.QLabel("AC susceptibility dashboard", header)
+        font = title.font()
+        font.setPointSize(max(font.pointSize(), 12))
+        font.setBold(True)
+        title.setFont(font)
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+        self.button_plot_setup = QtWidgets.QPushButton("Configure plots", header)
+        self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
+        header_layout.addWidget(self.button_plot_setup)
+        layout.insertWidget(0, header)
+
+        self.plot_config_dialog = AcPlotConfigDialog(self)
+        config_box = QtWidgets.QGroupBox("Plot Dashboard", self.plot_config_dialog)
+        config_layout = QtWidgets.QGridLayout(config_box)
+        config_layout.setContentsMargins(8, 8, 8, 8)
+        config_layout.setHorizontalSpacing(10)
+        config_layout.setVerticalSpacing(6)
+        preset_row = QtWidgets.QHBoxLayout()
+        current_preset = QtWidgets.QPushButton("Current preset", config_box)
+        current_preset.clicked.connect(lambda: self._apply_plot_preset("current"))
+        preset_row.addWidget(current_preset)
+        frequency_preset = QtWidgets.QPushButton("Frequency preset", config_box)
+        frequency_preset.clicked.connect(lambda: self._apply_plot_preset("frequency"))
+        preset_row.addWidget(frequency_preset)
+        preset_row.addStretch(1)
+        config_layout.addWidget(QtWidgets.QLabel("Presets", config_box), 0, 0)
+        config_layout.addLayout(preset_row, 0, 1, 1, 4)
+
+        for column, label in enumerate(("Tile", "Show", "Bottom X", "Left Y", "Right Y")):
+            config_layout.addWidget(QtWidgets.QLabel(label, config_box), 1, column)
+
+        self._plot_tiles = []
+        defaults = [
+            (True, "current_mA", "rs_ohm", ""),
+            (True, "current_mA", "ls_h", ""),
+            (False, "frequency_hz", "rs_ohm", ""),
+            (False, "frequency_hz", "ls_h", ""),
+        ]
+        for tile_index, (visible_default, x_default, y_default, right_default) in enumerate(defaults):
+            visible = QtWidgets.QCheckBox(config_box)
+            x_combo = QtWidgets.QComboBox(config_box)
+            y_left_combo = QtWidgets.QComboBox(config_box)
+            y_right_combo = QtWidgets.QComboBox(config_box)
+            for combo in (x_combo, y_left_combo):
+                for channel in self._plot_channels():
+                    combo.addItem(channel.label, channel.key)
+            y_right_combo.addItem("(none)", "")
+            for channel in self._plot_channels():
+                y_right_combo.addItem(channel.label, channel.key)
+            prefix = f"plot_tile_{tile_index}"
+            visible.setChecked(bool(self.ac_settings.value(f"{prefix}_visible", visible_default, type=bool)))
+            self._set_combo_data(x_combo, self.ac_settings.value(f"{prefix}_x", x_default, type=str))
+            self._set_combo_data(y_left_combo, self.ac_settings.value(f"{prefix}_y_left", y_default, type=str))
+            self._set_combo_data(y_right_combo, self.ac_settings.value(f"{prefix}_y_right", right_default, type=str))
+            for widget in (visible, x_combo, y_left_combo, y_right_combo):
+                signal = widget.toggled if isinstance(widget, QtWidgets.QCheckBox) else widget.currentIndexChanged
+                signal.connect(lambda *_args: self._handle_plot_config_changed())
+            config_layout.addWidget(QtWidgets.QLabel(f"Plot {tile_index + 1}", config_box), tile_index + 2, 0)
+            config_layout.addWidget(visible, tile_index + 2, 1)
+            config_layout.addWidget(x_combo, tile_index + 2, 2)
+            config_layout.addWidget(y_left_combo, tile_index + 2, 3)
+            config_layout.addWidget(y_right_combo, tile_index + 2, 4)
+            self._plot_tiles.append(
+                AcPlotTileWidgets(
+                    visible=visible,
+                    x_combo=x_combo,
+                    y_left_combo=y_left_combo,
+                    y_right_combo=y_right_combo,
+                )
             )
-            selector_layout.addWidget(QtWidgets.QLabel("Top plot:", selector))
-            selector_layout.addWidget(self.comboBox_ac_plot_top, 1)
-            selector_layout.addWidget(QtWidgets.QLabel("Bottom plot:", selector))
-            selector_layout.addWidget(self.comboBox_ac_plot_bottom, 1)
-            layout.insertWidget(0, selector)
-            self.comboBox_ac_plot_top.currentIndexChanged.connect(lambda *_args: self._handle_ac_plot_selection_changed())
-            self.comboBox_ac_plot_bottom.currentIndexChanged.connect(lambda *_args: self._handle_ac_plot_selection_changed())
-        self._apply_ac_plot_labels()
+        self.plot_config_dialog.body_layout.addWidget(config_box)
 
-    def _handle_ac_plot_selection_changed(self) -> None:
-        top = getattr(self, "comboBox_ac_plot_top", None)
-        bottom = getattr(self, "comboBox_ac_plot_bottom", None)
-        if isinstance(top, QtWidgets.QComboBox):
-            self.ac_settings.setValue("plot_top", top.currentData())
-        if isinstance(bottom, QtWidgets.QComboBox):
-            self.ac_settings.setValue("plot_bottom", bottom.currentData())
-        self._apply_ac_plot_labels()
+    def _plot_channels(self) -> list[AcPlotChannel]:
+        return [
+            AcPlotChannel("elapsed_s", "Elapsed time [s]", "#ef4444", lambda point: point.elapsed_s),
+            AcPlotChannel("current_mA", "DC current [mA]", "#f97316", lambda point: point.current_mA),
+            AcPlotChannel("frequency_hz", "Frequency [Hz]", "#60a5fa", lambda point: point.frequency_hz),
+            AcPlotChannel("amplitude_v", "Amplitude [V]", "#facc15", lambda point: point.amplitude_v),
+            AcPlotChannel("rs_ohm", "Rs [Ohm]", "#14b8a6", lambda point: point.rs_ohm),
+            AcPlotChannel("ls_h", "Ls [H]", "#a78bfa", lambda point: point.ls_h),
+        ]
 
-    def _apply_ac_plot_labels(self) -> None:
-        top = getattr(self, "comboBox_ac_plot_top", None)
-        bottom = getattr(self, "comboBox_ac_plot_bottom", None)
-        top_kind = top.currentData() if isinstance(top, QtWidgets.QComboBox) else "rs_current"
-        bottom_kind = bottom.currentData() if isinstance(bottom, QtWidgets.QComboBox) else "ls_current"
-        self._configure_ac_axis(getattr(self, "ax1", None), str(top_kind or "rs_current"))
-        self._configure_ac_axis(getattr(self, "ax2", None), str(bottom_kind or "ls_current"))
-        figure = getattr(self, "fig", None)
-        if figure is not None:
-            try:
-                figure.suptitle("AC susceptibility live view")
-            except Exception:
-                pass
-        canvas = getattr(self, "canvas", None)
-        if canvas is not None:
-            try:
-                canvas.draw_idle()
-            except Exception:
-                pass
+    def _plot_channel(self, key: str) -> AcPlotChannel | None:
+        for channel in self._plot_channels():
+            if channel.key == key:
+                return channel
+        return None
 
     @staticmethod
-    def _configure_ac_axis(axis: Any, kind: str) -> None:
-        if axis is None:
+    def _compact_plot_label(label: str) -> str:
+        return re.sub(r"\s*\[[^]]*\]", "", label).strip()
+
+    def _plot_title(
+        self,
+        x_channel: AcPlotChannel,
+        y_left_channel: AcPlotChannel,
+        y_right_channel: AcPlotChannel | None,
+    ) -> str:
+        left_label = self._compact_plot_label(y_left_channel.label)
+        x_label = self._compact_plot_label(x_channel.label)
+        if y_right_channel is None:
+            return f"{left_label} vs {x_label}"
+        right_label = self._compact_plot_label(y_right_channel.label)
+        return f"{left_label} + {right_label} vs {x_label}"
+
+    def _handle_plot_config_changed(self) -> None:
+        for index, tile in enumerate(self._plot_tiles):
+            prefix = f"plot_tile_{index}"
+            self.ac_settings.setValue(f"{prefix}_visible", tile.visible.isChecked())
+            self.ac_settings.setValue(f"{prefix}_x", tile.x_combo.currentData() or "current_mA")
+            self.ac_settings.setValue(f"{prefix}_y_left", tile.y_left_combo.currentData() or "rs_ohm")
+            self.ac_settings.setValue(f"{prefix}_y_right", tile.y_right_combo.currentData() or "")
+        self._refresh_ac_plots()
+
+    def _apply_plot_preset(self, preset: str) -> None:
+        presets = {
+            "current": [
+                (True, "current_mA", "rs_ohm", ""),
+                (True, "current_mA", "ls_h", ""),
+                (False, "frequency_hz", "rs_ohm", ""),
+                (False, "frequency_hz", "ls_h", ""),
+            ],
+            "frequency": [
+                (True, "frequency_hz", "rs_ohm", ""),
+                (True, "frequency_hz", "ls_h", ""),
+                (True, "amplitude_v", "rs_ohm", ""),
+                (True, "amplitude_v", "ls_h", ""),
+            ],
+        }
+        for tile, (visible, x_key, y_left, y_right) in zip(self._plot_tiles, presets.get(preset, presets["current"])):
+            tile.visible.setChecked(visible)
+            self._set_combo_data(tile.x_combo, x_key)
+            self._set_combo_data(tile.y_left_combo, y_left)
+            self._set_combo_data(tile.y_right_combo, y_right)
+        self._handle_plot_config_changed()
+
+    def _plot_theme(self) -> dict[str, Any]:
+        palette = self.palette()
+        app = QtWidgets.QApplication.instance()
+        style_hints = app.styleHints() if isinstance(app, QtWidgets.QApplication) else None
+        color_scheme = style_hints.colorScheme() if style_hints is not None else QtCore.Qt.ColorScheme.Light
+        window = palette.color(QtGui.QPalette.ColorRole.Window)
+        base = palette.color(QtGui.QPalette.ColorRole.Base)
+        text = palette.color(QtGui.QPalette.ColorRole.Text)
+        mid = palette.color(QtGui.QPalette.ColorRole.Mid)
+        grid = QtGui.QColor(mid)
+        grid.setAlpha(160 if color_scheme == QtCore.Qt.ColorScheme.Dark else 120)
+        return {
+            "figure_rgb": window.getRgbF()[:3],
+            "axes_rgb": base.getRgbF()[:3],
+            "text_rgb": text.getRgbF()[:3],
+            "grid_rgba": grid.getRgbF(),
+        }
+
+    def _show_plot_config_dialog(self) -> None:
+        if self.plot_config_dialog is None:
             return
-        if kind == "ls_current":
-            axis.set_title("Ls vs DC current")
-            axis.set_xlabel("DC current [mA]")
-            axis.set_ylabel("Ls [H]")
-        elif kind == "rs_frequency":
-            axis.set_title("Rs vs frequency")
-            axis.set_xlabel("Frequency [Hz]")
-            axis.set_ylabel("Rs [Ohm]")
-        elif kind == "ls_frequency":
-            axis.set_title("Ls vs frequency")
-            axis.set_xlabel("Frequency [Hz]")
-            axis.set_ylabel("Ls [H]")
-        else:
-            axis.set_title("Rs vs DC current")
-            axis.set_xlabel("DC current [mA]")
-            axis.set_ylabel("Rs [Ohm]")
+        if self.plot_config_dialog.isHidden():
+            self.plot_config_dialog.show()
+        self.plot_config_dialog.raise_()
+        self.plot_config_dialog.activateWindow()
+
+    def _refresh_ac_plots(self) -> None:
+        figure = getattr(self, "fig", None)
+        if figure is None:
+            return
+        theme = self._plot_theme()
+        figure.clear()
+        try:
+            figure.set_layout_engine(None)
+        except Exception:
+            pass
+        figure.set_facecolor(theme["figure_rgb"])
+        active_tiles = [tile for tile in self._plot_tiles if tile.visible.isChecked()]
+        if not active_tiles and self._plot_tiles:
+            active_tiles = list(self._plot_tiles[:1])
+        if not active_tiles:
+            canvas = getattr(self, "canvas", None)
+            if canvas is not None:
+                canvas.draw_idle()
+            return
+        grid = figure.add_gridspec(2, 2, hspace=0.50, wspace=0.34)
+        points = list(self._ac_plot_points[-5000:])
+        for tile_index, tile in enumerate(active_tiles[:4]):
+            row, column = divmod(tile_index, 2)
+            axis = figure.add_subplot(grid[row, column])
+            self._style_ac_axis(axis, theme)
+            x_channel = self._plot_channel(str(tile.x_combo.currentData() or "current_mA"))
+            y_left_channel = self._plot_channel(str(tile.y_left_combo.currentData() or "rs_ohm"))
+            y_right_channel = self._plot_channel(str(tile.y_right_combo.currentData() or ""))
+            if x_channel is None or y_left_channel is None:
+                continue
+            axis.set_xlabel(x_channel.label, fontsize=9, labelpad=4)
+            axis.set_ylabel(y_left_channel.label, fontsize=8, labelpad=3)
+            axis.set_title(self._plot_title(x_channel, y_left_channel, y_right_channel), fontsize=9, pad=8)
+            left_pairs = [
+                (x_channel.getter(point), y_left_channel.getter(point))
+                for point in points
+            ]
+            left_pairs = [(x_value, y_value) for x_value, y_value in left_pairs if x_value is not None and y_value is not None]
+            if left_pairs:
+                axis.plot(
+                    [x_value for x_value, _ in left_pairs],
+                    [y_value for _, y_value in left_pairs],
+                    color=y_left_channel.color,
+                    linewidth=1.7,
+                    marker="o",
+                    markersize=3.2,
+                )
+            else:
+                axis.text(
+                    0.5,
+                    0.5,
+                    "No AC data yet",
+                    ha="center",
+                    va="center",
+                    color=theme["text_rgb"],
+                    transform=axis.transAxes,
+                )
+            if y_right_channel is not None:
+                twin = axis.twinx()
+                self._style_ac_axis(twin, theme)
+                twin.set_ylabel(y_right_channel.label, fontsize=8, labelpad=3)
+                right_pairs = [
+                    (x_channel.getter(point), y_right_channel.getter(point))
+                    for point in points
+                ]
+                right_pairs = [
+                    (x_value, y_value)
+                    for x_value, y_value in right_pairs
+                    if x_value is not None and y_value is not None
+                ]
+                if right_pairs:
+                    twin.plot(
+                        [x_value for x_value, _ in right_pairs],
+                        [y_value for _, y_value in right_pairs],
+                        color=y_right_channel.color,
+                        linewidth=1.5,
+                        marker="s",
+                        markersize=3.0,
+                    )
+        figure.subplots_adjust(left=0.07, right=0.94, top=0.92, bottom=0.10, hspace=0.50, wspace=0.34)
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            canvas.draw_idle()
+
+    @staticmethod
+    def _style_ac_axis(axis: Any, theme: dict[str, Any]) -> None:
+        axis.set_facecolor(theme["axes_rgb"])
+        for spine in axis.spines.values():
+            spine.set_color(theme["text_rgb"])
+        axis.tick_params(colors=theme["text_rgb"])
+        axis.xaxis.label.set_color(theme["text_rgb"])
+        axis.yaxis.label.set_color(theme["text_rgb"])
+        axis.title.set_color(theme["text_rgb"])
+        axis.grid(True, color=theme["grid_rgba"], alpha=0.6)
 
     def _set_default_log_name(self) -> None:
         line_edit = getattr(self.ui, "lineEdit_log_file", None)
@@ -240,15 +480,21 @@ class MainWindow(CurrentAnnealingWindow):
         output_grid.addWidget(getattr(self.ui, "label_log_file"), 1, 0)
         log_file_label = getattr(self.ui, "label_log_file", None)
         if isinstance(log_file_label, QtWidgets.QLabel):
-            log_file_label.setText("Sweep file base:")
+            log_file_label.setText("Microwire sweep base:")
         extension_label = getattr(self.ui, "label_extension", None)
         if isinstance(extension_label, QtWidgets.QLabel):
-            extension_label.setText("")
+            extension_label.setText(".tsv")
         file_row = QtWidgets.QHBoxLayout()
         file_row.setContentsMargins(0, 0, 0, 0)
         file_row.addWidget(getattr(self.ui, "lineEdit_log_file"), 1)
         file_row.addWidget(getattr(self.ui, "label_extension"))
         output_grid.addLayout(file_row, 1, 1, 1, 2)
+        self.label_ac_baseline_file = QtWidgets.QLabel(
+            "Empty-coil baseline: ac_susc_empty_coil_baseline_<timestamp>.tsv",
+            output_group,
+        )
+        self.label_ac_baseline_file.setWordWrap(True)
+        output_grid.addWidget(self.label_ac_baseline_file, 2, 1, 1, 2)
         outer.addWidget(output_group)
 
         row = QtWidgets.QHBoxLayout()
@@ -333,11 +579,6 @@ class MainWindow(CurrentAnnealingWindow):
         self.spinBox_ac_dwell.setDecimals(3)
         self.spinBox_ac_dwell.setSuffix(" s")
         self.spinBox_ac_dwell.setValue(1.0)
-        self.spinBox_ac_read_interval = CompactDoubleSpinBox(group)
-        self.spinBox_ac_read_interval.setRange(0.0, 3600.0)
-        self.spinBox_ac_read_interval.setDecimals(3)
-        self.spinBox_ac_read_interval.setSuffix(" s")
-        self.spinBox_ac_read_interval.setValue(0.0)
         self.spinBox_ac_repeats = QtWidgets.QSpinBox(group)
         self.spinBox_ac_repeats.setRange(1, 1000)
         self.spinBox_ac_repeats.setValue(1)
@@ -391,7 +632,6 @@ class MainWindow(CurrentAnnealingWindow):
         self.label_ac_direction = QtWidgets.QLabel("Direction:", plan_group)
         self.label_ac_settle_time = QtWidgets.QLabel("Settle time:", plan_group)
         self.label_ac_readings_per_point = QtWidgets.QLabel("LCR readings/point:", plan_group)
-        self.label_ac_read_interval = QtWidgets.QLabel("Read interval:", plan_group)
         plan_grid.addWidget(self.label_ac_voltage_limit, 1, 0)
         plan_grid.addWidget(self.spinBox_ac_voltage_limit, 1, 1)
         plan_grid.addWidget(self.label_ac_baseline_readings, 1, 2)
@@ -408,14 +648,15 @@ class MainWindow(CurrentAnnealingWindow):
         plan_grid.addWidget(self.spinBox_ac_dwell, 4, 1)
         plan_grid.addWidget(self.label_ac_readings_per_point, 4, 2)
         plan_grid.addWidget(self.spinBox_ac_repeats, 4, 3)
-        plan_grid.addWidget(self.label_ac_read_interval, 5, 0)
-        plan_grid.addWidget(self.spinBox_ac_read_interval, 5, 1)
-        plan_grid.addWidget(self.label_ac_sweep_estimate, 6, 0, 1, 4)
+        plan_grid.addWidget(self.label_ac_sweep_estimate, 5, 0, 1, 4)
         action_row = QtWidgets.QHBoxLayout()
         action_row.addWidget(self.pushButton_measure_lcr_baseline)
         action_row.addWidget(self.pushButton_run_ac_sweep)
         action_row.addWidget(self.pushButton_stop_ac_sweep)
-        plan_grid.addLayout(action_row, 7, 0, 1, 4)
+        self.frame_ac_plan_actions = QtWidgets.QFrame(plan_group)
+        self.frame_ac_plan_actions.setLayout(action_row)
+        self.frame_ac_plan_actions.hide()
+        plan_grid.addWidget(self.frame_ac_plan_actions, 6, 0, 1, 4)
         outer.addWidget(plan_group)
         self.groupBox_ac_plan = plan_group
 
@@ -469,7 +710,6 @@ class MainWindow(CurrentAnnealingWindow):
             self.spinBox_ac_current_step,
             self.comboBox_ac_direction,
             self.spinBox_ac_dwell,
-            self.spinBox_ac_read_interval,
             self.spinBox_ac_repeats,
         ):
             signal = getattr(widget, "currentIndexChanged", None) or getattr(widget, "valueChanged", None)
@@ -530,7 +770,6 @@ class MainWindow(CurrentAnnealingWindow):
         self.spinBox_ac_current_stop.setValue(float(self.ac_settings.value("current_stop_mA", 80.0)))
         self.spinBox_ac_current_step.setValue(float(self.ac_settings.value("current_step_mA", 5.0)))
         self.spinBox_ac_dwell.setValue(float(self.ac_settings.value("dwell_s", 1.0)))
-        self.spinBox_ac_read_interval.setValue(float(self.ac_settings.value("read_interval_s", 0.0)))
         self.spinBox_ac_repeats.setValue(max(1, int(self.ac_settings.value("sweep_repeats", 1))))
         voltage_limit = self.ac_settings.value("voltage_limit_v", None)
         if voltage_limit is None:
@@ -571,7 +810,6 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("current_step_mA", float(self.spinBox_ac_current_step.value()))
         self.ac_settings.setValue("direction", self.comboBox_ac_direction.currentData())
         self.ac_settings.setValue("dwell_s", float(self.spinBox_ac_dwell.value()))
-        self.ac_settings.setValue("read_interval_s", float(self.spinBox_ac_read_interval.value()))
         self.ac_settings.setValue("sweep_repeats", int(self.spinBox_ac_repeats.value()))
 
     def populate_lcr_ports(self) -> None:
@@ -630,11 +868,11 @@ class MainWindow(CurrentAnnealingWindow):
             self.populate_ac_psu_ports()
             tried = ", ".join(device for _label, device in sweep.available_power_supply_ports()) or "no serial ports"
             self.label_lcr_status.setText(
-                f"Auto setup did not find a supported HMP/OWON power supply. Tried {tried}; select the PSU manually above if needed."
+                f"Auto-detect did not find a supported HMP/OWON power supply. Tried {tried}; select the PSU manually above if needed."
             )
         else:
             self.label_lcr_status.setText(
-                f"Auto setup selected {candidates[0].label} and LCR-6200-safe sweep defaults."
+                f"Auto-detect selected {candidates[0].label} and LCR-6200-safe sweep defaults."
             )
         self.apply_default_lcr_presets(store=False)
         self.checkBox_lcr_model_lsrs.setChecked(True)
@@ -752,7 +990,7 @@ class MainWindow(CurrentAnnealingWindow):
             rows = self._collect_baseline_rows(
                 plan,
                 repeats=repeats,
-                read_interval_s=max(0.0, float(self.spinBox_ac_read_interval.value())),
+                settle_s=max(0.0, float(self.spinBox_ac_dwell.value())),
             )
             self._write_baseline_file(path, plan, rows)
         except Exception as exc:
@@ -822,17 +1060,7 @@ class MainWindow(CurrentAnnealingWindow):
             psu_backend=self._selected_ac_psu_backend(),
             psu_resource=psu_resource,
             voltage_limit_v=float(self.spinBox_ac_voltage_limit.value()),
-            read_interval_s=self._ac_read_interval_seconds(),
         )
-
-    def _ac_read_interval_seconds(self) -> float:
-        try:
-            spinbox = getattr(self, "spinBox_ac_read_interval")
-        except RuntimeError:
-            return 0.0
-        if isinstance(spinbox, QtWidgets.QDoubleSpinBox):
-            return max(0.0, float(spinbox.value()))
-        return 0.0
 
     def _update_ac_sweep_estimate(self) -> None:
         try:
@@ -848,18 +1076,25 @@ class MainWindow(CurrentAnnealingWindow):
                 current_points=current_points,
                 repeats=max(1, int(self.spinBox_ac_repeats.value())),
                 dwell_s=max(0.0, float(self.spinBox_ac_dwell.value())),
-                read_interval_s=max(0.0, float(self.spinBox_ac_read_interval.value())),
             )
         except Exception as exc:
             self.label_ac_sweep_estimate.setText(f"Estimate unavailable: {exc}")
             return
+        baseline_repeats = max(1, int(self.spinBox_lcr_baseline_repeats.value()))
+        baseline_reads = len(plan) * baseline_repeats
+        baseline_seconds = len(plan) * max(0.0, float(self.spinBox_ac_dwell.value()))
         self.label_ac_sweep_estimate.setText(
-            f"{estimate.total_measurements} LCR reads, about "
+            f"Baseline: {baseline_reads} LCR reads, about {self._format_duration(baseline_seconds)}. "
+            f"Microwire sweep: {estimate.total_measurements} LCR reads, about "
             f"{self._format_duration(estimate.estimated_seconds)} before communication overhead"
         )
         self._refresh_ac_psu_status()
 
     def _handle_ac_sweep_progress(self, row: sweep.AcSweepRow) -> None:
+        self._ac_plot_points.append(self._plot_point_from_sweep_row(row))
+        if len(self._ac_plot_points) > 5000:
+            del self._ac_plot_points[:-5000]
+        self._refresh_ac_plots()
         self.label_lcr_status.setText(
             f"AC sweep {row.setting_index}/{row.total_settings}: "
             f"{row.setting.function}, {row.setting.frequency_hz:g} Hz, "
@@ -867,6 +1102,25 @@ class MainWindow(CurrentAnnealingWindow):
             f"repeat {row.repeat_index}"
         )
         QtWidgets.QApplication.processEvents()
+
+    def _plot_point_from_sweep_row(self, row: sweep.AcSweepRow) -> AcPlotPoint:
+        ls_h, rs_ohm = self._lcr_ls_rs_values(row.setting, row.lcr_reading)
+        return AcPlotPoint(
+            elapsed_s=float(row.elapsed_s),
+            model=row.setting.function,
+            frequency_hz=float(row.setting.frequency_hz),
+            amplitude_v=float(row.setting.level_value if row.setting.level_mode == "voltage" else math.nan),
+            current_mA=float(row.current_point.current_a) * 1000.0,
+            ls_h=ls_h,
+            rs_ohm=rs_ohm,
+        )
+
+    @staticmethod
+    def _lcr_ls_rs_values(setting: Lcr6000Settings, reading: Lcr6000Reading) -> tuple[float | None, float | None]:
+        function = setting.function.lower()
+        if "ls" in function or "lp" in function:
+            return reading.primary, reading.secondary
+        return reading.primary, reading.secondary
 
     def _sweep_output_path(self) -> Path:
         log_path = Path(self.build_log_path())
@@ -1115,7 +1369,7 @@ class MainWindow(CurrentAnnealingWindow):
         plan: Sequence[Lcr6000Settings],
         *,
         repeats: int,
-        read_interval_s: float = 0.0,
+        settle_s: float = 0.0,
     ) -> list[list[str]]:
         meter = self.lcr_meter
         if meter is None or not meter.is_open:
@@ -1124,6 +1378,9 @@ class MainWindow(CurrentAnnealingWindow):
         repeat_count = max(1, int(repeats))
         for setting_index, setting in enumerate(plan, start=1):
             meter.configure(setting)
+            settle = max(0.0, float(settle_s))
+            if settle:
+                time.sleep(settle)
             self._lcr_plan_index = setting_index - 1
             for repeat_index in range(1, repeat_count + 1):
                 reading = self._fetch_baseline_reading()
@@ -1137,9 +1394,6 @@ class MainWindow(CurrentAnnealingWindow):
                     )
                 )
                 QtWidgets.QApplication.processEvents()
-                interval = max(0.0, float(read_interval_s))
-                if interval and repeat_index < repeat_count:
-                    time.sleep(interval)
         return rows
 
     def _fetch_baseline_reading(self, *, attempts: int = 3) -> Lcr6000Reading:

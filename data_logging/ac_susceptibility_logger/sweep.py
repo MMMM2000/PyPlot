@@ -92,7 +92,6 @@ class AcSweepConfig:
     psu_backend: str
     psu_resource: str
     voltage_limit_v: float
-    read_interval_s: float = 0.0
     lcr_read_attempts: int = 3
 
 
@@ -220,20 +219,14 @@ def estimate_sweep(
     current_points: Sequence[CurrentLoopPoint],
     repeats: int,
     dwell_s: float,
-    read_interval_s: float = 0.0,
 ) -> SweepEstimate:
     repeat_count = max(1, int(repeats))
     total_measurements = len(lcr_settings) * len(current_points) * repeat_count
-    point_count = len(lcr_settings) * len(current_points)
-    interval_count = point_count * max(0, repeat_count - 1)
     return SweepEstimate(
         total_settings=len(lcr_settings),
         total_current_points=len(current_points),
         total_measurements=total_measurements,
-        estimated_seconds=(
-            total_measurements * max(0.0, float(dwell_s))
-            + interval_count * max(0.0, float(read_interval_s))
-        ),
+        estimated_seconds=len(lcr_settings) * len(current_points) * max(0.0, float(dwell_s)),
     )
 
 
@@ -253,7 +246,6 @@ class AcSweepTsvWriter:
             f"psu_resource={self.config.psu_resource} "
             f"voltage_limit_v={self.config.voltage_limit_v:g} "
             f"dwell_s={self.config.dwell_s:g} "
-            f"read_interval_s={self.config.read_interval_s:g} "
             f"repeats={max(1, int(self.config.repeats))}"
         )
         for index, setting in enumerate(self.config.lcr_settings, start=1):
@@ -360,9 +352,6 @@ def run_ac_sweep(
                     writer.write_row(row)
                     if progress is not None:
                         progress(row)
-                    interval = max(0.0, float(config.read_interval_s))
-                    if interval and repeat_index < max(1, int(config.repeats)):
-                        sleep(interval)
     finally:
         active_error = sys.exc_info()[1]
         shutdown_error: Exception | None = None
