@@ -149,7 +149,7 @@ def test_estimate_sweep_totals_counts_repeats_and_dwell() -> None:
     )
 
     assert estimate.total_measurements == 18
-    assert estimate.estimated_seconds == pytest.approx(12.0)
+    assert estimate.estimated_seconds == pytest.approx(15.6)
 
 
 def test_power_supply_idn_classification_detects_supported_backends() -> None:
@@ -545,10 +545,11 @@ def test_ac_logger_numeric_fields_and_acquisition_labels_are_concise(
         assert window.spinBox_ac_dwell.text() == "0.5 s"
         assert window.label_ac_settle_time.text() == "Settle time:"
         assert window.label_ac_readings_per_point.text() == "LCR readings/point:"
-        assert window.label_ac_baseline_readings.text() == "Baseline readings/setting:"
+        assert not hasattr(window, "label_ac_baseline_readings")
+        assert not hasattr(window, "spinBox_lcr_baseline_repeats")
         assert "Baseline:" in window.label_ac_sweep_estimate.text()
         before = window.label_ac_sweep_estimate.text()
-        window.spinBox_lcr_baseline_repeats.setValue(window.spinBox_lcr_baseline_repeats.value() + 1)
+        window.spinBox_ac_repeats.setValue(window.spinBox_ac_repeats.value() + 1)
         window._update_ac_sweep_estimate()
         assert window.label_ac_sweep_estimate.text() != before
     finally:
@@ -625,6 +626,41 @@ def test_ac_logger_does_not_auto_detect_psu_during_startup(monkeypatch: pytest.M
     try:
         assert calls["detect"] == 0
         assert "from shared PSU controls" in window.label_ac_psu_status.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_uses_shared_reading_count_and_sticky_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "shared_readings_progress")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        assert window.spinBox_ac_repeats.value() == 10
+        assert window.progress_ac_run.format() == "AC progress: idle"
+        sticky_frame = window.ui.pushButton_start_process.parentWidget()
+        sticky_parent_layout = sticky_frame.parentWidget().layout()
+        progress_index = sticky_parent_layout.indexOf(window.progress_ac_run)
+        sticky_index = sticky_parent_layout.indexOf(sticky_frame)
+        assert progress_index >= 0
+        assert sticky_index >= 0
+        assert progress_index < sticky_index
+        window.lineEdit_lcr_frequencies.setText("100, 1k")
+        window.lineEdit_lcr_levels.setText("0.1, 1")
+        window.spinBox_ac_repeats.setValue(10)
+        window.spinBox_ac_current_start.setValue(0.0)
+        window.spinBox_ac_current_stop.setValue(10.0)
+        window.spinBox_ac_current_step.setValue(10.0)
+        window._update_ac_sweep_estimate()
+        estimate = window.label_ac_sweep_estimate.text()
+        assert "Baseline: 40 LCR reads" in estimate
+        assert "Microwire sweep: 120 LCR reads" in estimate
     finally:
         window.close()
         app.processEvents()

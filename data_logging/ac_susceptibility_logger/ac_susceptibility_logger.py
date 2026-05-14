@@ -151,6 +151,8 @@ class MainWindow(CurrentAnnealingWindow):
         self._lcr_last_error = ""
         self._ac_sweep_running = False
         self._ac_sweep_stop_requested = False
+        self._ac_progress_total = 0
+        self._ac_progress_value = 0
         self._ac_lcr_scroll_area: QtWidgets.QScrollArea | None = None
         self._ac_plot_points: list[AcPlotPoint] = []
         self._plot_tiles: list[AcPlotTileWidgets] = []
@@ -159,6 +161,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.setWindowTitle("AC Susceptibility Logger")
         self._install_lcr_controls()
         self._simplify_inherited_ac_workflow()
+        self._install_ac_sticky_progress()
         self._load_lcr_settings()
         self.populate_lcr_ports()
         self.populate_ac_psu_ports()
@@ -544,9 +547,6 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_lcr_default_presets = QtWidgets.QPushButton("Default subset", group)
         self.pushButton_lcr_all_frequencies = QtWidgets.QPushButton("All practical frequencies", group)
         self.pushButton_lcr_all_levels = QtWidgets.QPushButton("All amplitudes", group)
-        self.spinBox_lcr_baseline_repeats = QtWidgets.QSpinBox(group)
-        self.spinBox_lcr_baseline_repeats.setRange(1, 100)
-        self.spinBox_lcr_baseline_repeats.setValue(3)
         self.pushButton_measure_lcr_baseline = QtWidgets.QPushButton("Measure empty-coil baseline", group)
         self.label_ac_psu_status = QtWidgets.QLabel("", group)
         self.label_ac_psu_status.setWordWrap(True)
@@ -581,7 +581,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.spinBox_ac_dwell.setValue(1.0)
         self.spinBox_ac_repeats = QtWidgets.QSpinBox(group)
         self.spinBox_ac_repeats.setRange(1, 1000)
-        self.spinBox_ac_repeats.setValue(1)
+        self.spinBox_ac_repeats.setValue(10)
         self.label_ac_sweep_estimate = QtWidgets.QLabel("", group)
         self.label_ac_sweep_estimate.setWordWrap(True)
         self.pushButton_run_ac_sweep = QtWidgets.QPushButton("Run microwire current sweep", group)
@@ -625,7 +625,6 @@ class MainWindow(CurrentAnnealingWindow):
         plan_grid.addWidget(QtWidgets.QLabel("PSU:", plan_group), 0, 0)
         plan_grid.addWidget(self.label_ac_psu_status, 0, 1, 1, 3)
         self.label_ac_voltage_limit = QtWidgets.QLabel("Voltage limit:", plan_group)
-        self.label_ac_baseline_readings = QtWidgets.QLabel("Baseline readings/setting:", plan_group)
         self.label_ac_current_start = QtWidgets.QLabel("Current start:", plan_group)
         self.label_ac_current_stop = QtWidgets.QLabel("Current stop:", plan_group)
         self.label_ac_current_step = QtWidgets.QLabel("Current step:", plan_group)
@@ -634,8 +633,8 @@ class MainWindow(CurrentAnnealingWindow):
         self.label_ac_readings_per_point = QtWidgets.QLabel("LCR readings/point:", plan_group)
         plan_grid.addWidget(self.label_ac_voltage_limit, 1, 0)
         plan_grid.addWidget(self.spinBox_ac_voltage_limit, 1, 1)
-        plan_grid.addWidget(self.label_ac_baseline_readings, 1, 2)
-        plan_grid.addWidget(self.spinBox_lcr_baseline_repeats, 1, 3)
+        plan_grid.addWidget(self.label_ac_readings_per_point, 1, 2)
+        plan_grid.addWidget(self.spinBox_ac_repeats, 1, 3)
         plan_grid.addWidget(self.label_ac_current_start, 2, 0)
         plan_grid.addWidget(self.spinBox_ac_current_start, 2, 1)
         plan_grid.addWidget(self.label_ac_current_stop, 2, 2)
@@ -646,8 +645,6 @@ class MainWindow(CurrentAnnealingWindow):
         plan_grid.addWidget(self.comboBox_ac_direction, 3, 3)
         plan_grid.addWidget(self.label_ac_settle_time, 4, 0)
         plan_grid.addWidget(self.spinBox_ac_dwell, 4, 1)
-        plan_grid.addWidget(self.label_ac_readings_per_point, 4, 2)
-        plan_grid.addWidget(self.spinBox_ac_repeats, 4, 3)
         plan_grid.addWidget(self.label_ac_sweep_estimate, 5, 0, 1, 4)
         action_row = QtWidgets.QHBoxLayout()
         action_row.addWidget(self.pushButton_measure_lcr_baseline)
@@ -698,7 +695,6 @@ class MainWindow(CurrentAnnealingWindow):
             combo.currentIndexChanged.connect(lambda *_args: self._store_lcr_settings())
             combo.currentIndexChanged.connect(lambda *_args: self._update_ac_sweep_estimate())
         self.checkBox_ac_plan_loops.toggled.connect(lambda *_args: self._store_lcr_settings())
-        self.spinBox_lcr_baseline_repeats.valueChanged.connect(lambda *_args: self._store_lcr_settings())
         self.checkBox_lcr_model_lsrs.toggled.connect(lambda *_args: self._store_lcr_settings())
         self.checkBox_lcr_model_lprp.toggled.connect(lambda *_args: self._store_lcr_settings())
         self.checkBox_lcr_model_lsrs.toggled.connect(lambda *_args: self._update_ac_sweep_estimate())
@@ -742,6 +738,24 @@ class MainWindow(CurrentAnnealingWindow):
                 pass
             button.clicked.connect(slot)
 
+    def _install_ac_sticky_progress(self) -> None:
+        start_button = getattr(self.ui, "pushButton_start_process", None)
+        button_frame = start_button.parentWidget() if isinstance(start_button, QtWidgets.QPushButton) else None
+        container = button_frame.parentWidget() if isinstance(button_frame, QtWidgets.QWidget) else None
+        layout = container.layout() if isinstance(container, QtWidgets.QWidget) else None
+        if layout is None or button_frame is None:
+            return
+        self.progress_ac_run = QtWidgets.QProgressBar(container)
+        self.progress_ac_run.setRange(0, 100)
+        self.progress_ac_run.setValue(0)
+        self.progress_ac_run.setTextVisible(True)
+        self.progress_ac_run.setFormat("AC progress: idle")
+        button_frame_index = layout.indexOf(button_frame)
+        if button_frame_index >= 0:
+            layout.insertWidget(button_frame_index, self.progress_ac_run)
+        else:
+            layout.addWidget(self.progress_ac_run)
+
     def _load_lcr_settings(self) -> None:
         self.lineEdit_lcr_frequencies.setText(
             self.ac_settings.value("frequencies", self._format_numeric_list(DEFAULT_FREQUENCY_PRESETS_HZ), type=str)
@@ -758,11 +772,6 @@ class MainWindow(CurrentAnnealingWindow):
         self._set_combo_text(self.comboBox_lcr_monitor1, self.ac_settings.value("monitor1", "Z", type=str))
         self._set_combo_text(self.comboBox_lcr_monitor2, self.ac_settings.value("monitor2", "IAC", type=str))
         self._set_combo_text(self.comboBox_lcr_aperture, self.ac_settings.value("aperture", "FAST", type=str))
-        repeats = self.ac_settings.value("baseline_repeats", 3)
-        try:
-            self.spinBox_lcr_baseline_repeats.setValue(max(1, int(repeats)))
-        except (TypeError, ValueError):
-            self.spinBox_lcr_baseline_repeats.setValue(3)
         plan_loops = self.ac_settings.value("plan_loops", 1)
         self.checkBox_ac_plan_loops.setChecked(str(plan_loops).lower() not in {"0", "false", "no"})
         self._set_combo_data(self.comboBox_ac_direction, self.ac_settings.value("direction", "up-down", type=str))
@@ -770,7 +779,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.spinBox_ac_current_stop.setValue(float(self.ac_settings.value("current_stop_mA", 80.0)))
         self.spinBox_ac_current_step.setValue(float(self.ac_settings.value("current_step_mA", 5.0)))
         self.spinBox_ac_dwell.setValue(float(self.ac_settings.value("dwell_s", 1.0)))
-        self.spinBox_ac_repeats.setValue(max(1, int(self.ac_settings.value("sweep_repeats", 1))))
+        self.spinBox_ac_repeats.setValue(max(1, int(self.ac_settings.value("sweep_repeats", 10))))
         voltage_limit = self.ac_settings.value("voltage_limit_v", None)
         if voltage_limit is None:
             self._sync_ac_psu_from_shared_controls()
@@ -800,7 +809,6 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("monitor2", self.comboBox_lcr_monitor2.currentText())
         self.ac_settings.setValue("aperture", self.comboBox_lcr_aperture.currentText())
         self.ac_settings.setValue("plan_loops", int(self.checkBox_ac_plan_loops.isChecked()))
-        self.ac_settings.setValue("baseline_repeats", int(self.spinBox_lcr_baseline_repeats.value()))
         self.ac_settings.setValue("psu_backend", self._selected_ac_psu_backend())
         self.ac_settings.setValue("psu_port", self._selected_ac_psu_resource())
         self.ac_settings.setValue("psu_baud", str(self._selected_ac_psu_baudrate()))
@@ -942,6 +950,7 @@ class MainWindow(CurrentAnnealingWindow):
         output_path = self._sweep_output_path()
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
+        self._reset_ac_progress("Microwire sweep", self._sweep_total_reads(config))
         self.pushButton_run_ac_sweep.setEnabled(False)
         self.pushButton_stop_ac_sweep.setEnabled(True)
         self._set_sticky_action_state(running=True)
@@ -967,6 +976,7 @@ class MainWindow(CurrentAnnealingWindow):
             self.pushButton_stop_ac_sweep.setEnabled(False)
             self._set_sticky_action_state(running=False)
         self.label_lcr_status.setText(f"AC sweep saved: {output_path}")
+        self._complete_ac_progress("Microwire sweep")
         QtWidgets.QMessageBox.information(self, "AC sweep saved", f"Saved AC sweep to:\n{output_path}")
 
     def handle_stop_ac_sweep_clicked(self) -> None:
@@ -981,8 +991,9 @@ class MainWindow(CurrentAnnealingWindow):
             return
         try:
             plan = self._prepare_lcr_plan()
-            repeats = max(1, int(self.spinBox_lcr_baseline_repeats.value()))
+            repeats = max(1, int(self.spinBox_ac_repeats.value()))
             path = self._baseline_output_path()
+            self._reset_ac_progress("Empty-coil baseline", len(plan) * repeats)
             self.pushButton_measure_lcr_baseline.setEnabled(False)
             self.label_lcr_status.setText(
                 f"Measuring baseline: {len(plan)} settings x {repeats} repeats"
@@ -1000,8 +1011,55 @@ class MainWindow(CurrentAnnealingWindow):
             return
         finally:
             self.pushButton_measure_lcr_baseline.setEnabled(True)
+            if self._ac_progress_value < self._ac_progress_total:
+                self._set_ac_progress_idle()
         self.label_lcr_status.setText(f"Baseline saved: {path}")
+        self._complete_ac_progress("Empty-coil baseline")
         QtWidgets.QMessageBox.information(self, "Baseline saved", f"Saved LCR baseline to:\n{path}")
+
+    def _sweep_total_reads(self, config: sweep.AcSweepConfig) -> int:
+        return len(config.lcr_settings) * len(config.current_points) * max(1, int(config.repeats))
+
+    def _reset_ac_progress(self, label: str, total: int) -> None:
+        self._ac_progress_total = max(1, int(total))
+        self._ac_progress_value = 0
+        progress = getattr(self, "progress_ac_run", None)
+        if isinstance(progress, QtWidgets.QProgressBar):
+            progress.setRange(0, self._ac_progress_total)
+            progress.setValue(0)
+            progress.setFormat(f"{label}: 0% (0/{self._ac_progress_total})")
+        QtWidgets.QApplication.processEvents()
+
+    def _advance_ac_progress(self, label: str) -> None:
+        try:
+            current_value = int(getattr(self, "_ac_progress_value"))
+            current_total = int(getattr(self, "_ac_progress_total"))
+        except (AttributeError, RuntimeError):
+            return
+        self._ac_progress_value = min(current_value + 1, max(1, current_total))
+        total = max(1, self._ac_progress_total)
+        percent = int(round((self._ac_progress_value / total) * 100.0))
+        progress = getattr(self, "progress_ac_run", None)
+        if isinstance(progress, QtWidgets.QProgressBar):
+            progress.setRange(0, total)
+            progress.setValue(self._ac_progress_value)
+            progress.setFormat(f"{label}: {percent}% ({self._ac_progress_value}/{total})")
+
+    def _complete_ac_progress(self, label: str) -> None:
+        total = max(1, self._ac_progress_total)
+        self._ac_progress_value = total
+        progress = getattr(self, "progress_ac_run", None)
+        if isinstance(progress, QtWidgets.QProgressBar):
+            progress.setRange(0, total)
+            progress.setValue(total)
+            progress.setFormat(f"{label}: complete ({total}/{total})")
+
+    def _set_ac_progress_idle(self) -> None:
+        progress = getattr(self, "progress_ac_run", None)
+        if isinstance(progress, QtWidgets.QProgressBar):
+            progress.setRange(0, 100)
+            progress.setValue(0)
+            progress.setFormat("AC progress: idle")
 
     def _set_sticky_action_state(self, *, running: bool) -> None:
         start = getattr(self.ui, "pushButton_start_process", None)
@@ -1080,17 +1138,21 @@ class MainWindow(CurrentAnnealingWindow):
         except Exception as exc:
             self.label_ac_sweep_estimate.setText(f"Estimate unavailable: {exc}")
             return
-        baseline_repeats = max(1, int(self.spinBox_lcr_baseline_repeats.value()))
+        baseline_repeats = max(1, int(self.spinBox_ac_repeats.value()))
         baseline_reads = len(plan) * baseline_repeats
-        baseline_seconds = len(plan) * max(0.0, float(self.spinBox_ac_dwell.value()))
+        baseline_seconds = (
+            len(plan) * max(0.0, float(self.spinBox_ac_dwell.value()))
+            + baseline_reads * sweep.ESTIMATED_LCR_READ_SECONDS
+        )
         self.label_ac_sweep_estimate.setText(
             f"Baseline: {baseline_reads} LCR reads, about {self._format_duration(baseline_seconds)}. "
             f"Microwire sweep: {estimate.total_measurements} LCR reads, about "
-            f"{self._format_duration(estimate.estimated_seconds)} before communication overhead"
+            f"{self._format_duration(estimate.estimated_seconds)} plus communication overhead"
         )
         self._refresh_ac_psu_status()
 
     def _handle_ac_sweep_progress(self, row: sweep.AcSweepRow) -> None:
+        self._advance_ac_progress("Microwire sweep")
         self._ac_plot_points.append(self._plot_point_from_sweep_row(row))
         if len(self._ac_plot_points) > 5000:
             del self._ac_plot_points[:-5000]
@@ -1393,6 +1455,7 @@ class MainWindow(CurrentAnnealingWindow):
                         reading=reading,
                     )
                 )
+                self._advance_ac_progress("Empty-coil baseline")
                 QtWidgets.QApplication.processEvents()
         return rows
 

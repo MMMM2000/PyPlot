@@ -84,10 +84,12 @@ every LCR read for overnight recovery.
 Point acquisition controls are named for the AC experiment:
 
 - **Settle time** waits after changing the current or LCR setting.
-- **LCR readings/point** stores repeated LCR reads at the same
-  model/frequency/amplitude/current point.
-- **Baseline readings/setting** applies the same repeated-read idea to the
-  empty-coil baseline.
+- **LCR readings/point** stores repeated LCR reads at the same setting. The
+  same value applies to empty-coil baseline settings and microwire
+  model/frequency/amplitude/current points.
+- The run estimate shows separate empty-coil baseline and microwire sweep
+  durations using the selected settle time and a rough LCR-read allowance;
+  real serial communication overhead can still add time.
 
 Every reading is saved as its own row. Averaging or baseline normalization can
 be done later from the raw TSV files.

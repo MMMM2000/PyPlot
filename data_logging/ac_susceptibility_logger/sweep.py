@@ -33,6 +33,8 @@ SWEEP_HEADER_LINE = (
     "PSU backend\tPSU resource\tPSU status\tError"
 )
 
+ESTIMATED_LCR_READ_SECONDS = 0.2
+
 
 POWER_SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
     "hmp4030": {
@@ -226,7 +228,10 @@ def estimate_sweep(
         total_settings=len(lcr_settings),
         total_current_points=len(current_points),
         total_measurements=total_measurements,
-        estimated_seconds=len(lcr_settings) * len(current_points) * max(0.0, float(dwell_s)),
+        estimated_seconds=(
+            len(lcr_settings) * len(current_points) * max(0.0, float(dwell_s))
+            + total_measurements * ESTIMATED_LCR_READ_SECONDS
+        ),
     )
 
 
