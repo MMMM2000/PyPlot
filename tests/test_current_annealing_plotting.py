@@ -113,6 +113,24 @@ def test_plot_one_uses_shared_default_label_style_and_size() -> None:
     plt.close(fig)
 
 
+def test_plot_one_can_show_power_top_axis() -> None:
+    df = pd.DataFrame(
+        {
+            "I_mA": [0.0, 10.0, 20.0, 30.0],
+            "R_Ohm": [100.0, 110.0, 120.0, 130.0],
+        }
+    )
+    fig, _ = anneal_core.plot_one(df, "Anneal", show_power_top_axis=True)
+    try:
+        assert len(fig.axes) == 2
+        top_ax = fig.axes[1]
+        assert top_ax.get_xlabel() == "Power [mW]"
+        assert top_ax.get_xlim() == pytest.approx(fig.axes[0].get_xlim())
+        assert any(label.get_text() for label in top_ax.get_xticklabels())
+    finally:
+        plt.close(fig)
+
+
 def test_plot_one_legend_text_color_follows_line_color() -> None:
     df = pd.DataFrame(
         {

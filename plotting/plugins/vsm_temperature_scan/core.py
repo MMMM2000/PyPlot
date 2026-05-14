@@ -1038,7 +1038,7 @@ class VSMTemperatureScanProcessor:
         set_float = getattr(legend, "set_float", None)
         if callable(set_float):
             try:
-                set_float("fsize", 10.0)
+                set_float("fsize", 8.0)
             except Exception:
                 pass
         set_int = getattr(legend, "set_int", None)
@@ -1450,10 +1450,10 @@ class VSMTemperatureScanProcessor:
             except Exception:
                 pass
             try:
-                layer.set_float("top", 24.0)
-                layer.set_float("left", 22.0)
-                layer.set_float("width", 52.0)
-                layer.set_float("height", 50.0)
+                layer.set_float("top", 22.0)
+                layer.set_float("left", 24.0)
+                layer.set_float("width", 50.0)
+                layer.set_float("height", 52.0)
             except Exception:
                 pass
             try:
@@ -1462,9 +1462,9 @@ class VSMTemperatureScanProcessor:
                 pass
             try:
                 layer.lt_exec(
-                    "layer -u 1; layer 52 50 22 24; "
-                    "layer.top=24; layer.left=22; layer.width=52; layer.height=50; "
-                    "legend.fsize=10;"
+                    "layer -u 1; layer 50 52 24 22; "
+                    "layer.top=22; layer.left=24; layer.width=50; layer.height=52; "
+                    "legend.fsize=8;"
                 )
             except Exception:
                 pass
@@ -1475,10 +1475,14 @@ class VSMTemperatureScanProcessor:
                         "axis -ps Y A 2; axis -ps Y L 2; "
                         "layer.x.showAxes=0; layer.x.showlabel=0; "
                         "layer.x.showLabels=0; layer.x.showlabels=0; "
-                        "layer.x2.showlabel=0; layer.x2.showLabels=0; layer.x2.showlabels=0; "
+                        "layer.x2.showlabel=0; "
                         "layer.y.showAxes=2; layer.y.showlabel=0; "
-                        "layer.y.showLabels=2; layer.y.showlabels=2; "
-                        "layer.y2.showlabel=1; layer.y2.showLabels=1; layer.y2.showlabels=1;"
+                        "layer.y2.showlabel=1; "
+                        "layer.y.color=color(black); layer.y2.color=color(black); "
+                        "layer.y.label.color=color(black); layer.y2.label.color=color(black); "
+                        "layer.y.label.fsize=10; layer.y2.label.fsize=10; "
+                        "layer.y.ticklabel.color=color(black); layer.y2.ticklabel.color=color(black); "
+                        "layer.y.label.offsetH=170; layer.y2.label.offsetH=170;"
                     )
                 else:
                     layer.lt_exec(
@@ -1489,12 +1493,21 @@ class VSMTemperatureScanProcessor:
                         "layer.x.ticks=1; "
                         "layer.y.showAxes=1; layer.y.showlabel=1; "
                         "layer.y.showLabels=1; layer.y.showlabels=1; "
-                        "layer.y2.showlabel=0; layer.y2.showLabels=0; layer.y2.showlabels=0;"
+                        "layer.y2.showlabel=0; "
+                        "layer.x.color=color(black); layer.x2.color=color(black); "
+                        "layer.y.color=color(black); layer.y2.color=color(black); "
+                        "layer.x.label.color=color(black); layer.x2.label.color=color(black); "
+                        "layer.y.label.color=color(black); layer.y2.label.color=color(black); "
+                        "layer.x.label.fsize=10; layer.x2.label.fsize=10; "
+                        "layer.y.label.fsize=10; layer.y2.label.fsize=10; "
+                        "layer.x.ticklabel.color=color(black); layer.x2.ticklabel.color=color(black); "
+                        "layer.y.ticklabel.color=color(black); layer.y2.ticklabel.color=color(black); "
+                        "layer.y.label.offsetH=170; layer.y2.label.offsetH=170;"
                     )
             except Exception:
                 pass
             try:
-                layer.lt_exec("layer.x2.show=0; layer.x2.ticks=0; layer.x2.showlabels=0;")
+                layer.lt_exec("layer.x2.show=0; layer.x2.ticks=0; layer.x2.showlabel=0;")
             except Exception:
                 pass
             try:
@@ -1514,7 +1527,7 @@ class VSMTemperatureScanProcessor:
                 setattr(axis_top, "showlabels", False)
             except Exception:
                 try:
-                    layer.lt_exec('layer.x2.title$=""; layer.x2.showlabels=0;')
+                    layer.lt_exec('layer.x2.title$=""; layer.x2.showlabel=0;')
                 except Exception:
                     pass
 
@@ -1595,25 +1608,26 @@ class VSMTemperatureScanProcessor:
                 graphs: list[Any] = []
                 fields = [item.series.field for item in prepared]
                 single_origin_axis = bool(getattr(self, "origin_single_axis", False))
-                template = (
-                    "doubley"
-                    if not single_origin_axis and len({round(float(value), 6) for value in fields}) > 1
-                    else "line"
-                )
+                multi_field_origin_axis = len({round(float(value), 6) for value in fields}) > 1
+                template = "line"
                 graph = origin.new_graph(template=template)
                 graphs.append(graph)
                 created_graphs.append(graph)
                 graph_title = self._plot_title(entry.sample, "Signal X", fields)
                 _set_origin_graph_title(origin, graph, graph_title)
                 unique_fields: list[float] = self.field_axis_order([field for field, _, _, _ in column_pairs])
+                dual_field_single_layer = (
+                    not single_origin_axis
+                    and multi_field_origin_axis
+                )
                 layer_map: Dict[float, Any] = {}
                 layer_number_map: Dict[float, int] = {}
-                if single_origin_axis:
+                if single_origin_axis or dual_field_single_layer:
                     single_layer = graph[0]
                     for field_value in unique_fields:
                         layer_map[field_value] = single_layer
                         layer_number_map[field_value] = 1
-                    axis_base = "Magnetization [emu]"
+                    axis_base = "Magnetization [emu]" if single_origin_axis else "Magnetization"
                 else:
                     existing_layers = len(graph)
                     for idx, field_value in enumerate(unique_fields):
@@ -1629,18 +1643,6 @@ class VSMTemperatureScanProcessor:
                 layer_fields: Dict[Any, list[float]] = {}
                 for field_value, layer in layer_map.items():
                     layer_fields.setdefault(layer, []).append(field_value)
-                for layer, layer_values in layer_fields.items():
-                    y_axis_name = _visible_axis_for_title(layer, "y")
-                    _set_origin_axis_title(
-                        layer,
-                        _visible_axis_for_title(layer, "x"),
-                        x_axis_label,
-                    )
-                    _set_origin_axis_title(
-                        layer,
-                        y_axis_name,
-                        self._axis_label_for_fields(layer_values, base=axis_base),
-                    )
                 legend_entries: dict[Any, list[tuple[int, str]]] = {}
                 combined_legend_entries: list[tuple[int, int, str]] = []
                 layer_plot_counts: dict[Any, int] = {}
@@ -1686,6 +1688,8 @@ class VSMTemperatureScanProcessor:
                         for field_value, layer in layer_map.items():
                             if round(float(field_value), 6) == round(float(primary_field), 6):
                                 continue
+                            if layer is primary_layer:
+                                continue
                             self._hide_origin_legend(layer)
                     else:
                         for layer, entries in legend_entries.items():
@@ -1695,14 +1699,63 @@ class VSMTemperatureScanProcessor:
                         self._set_origin_legend(layer, entries)
                 primary_layer = layer_map.get(unique_fields[0], graph[0]) if unique_fields else graph[0]
                 for layer in dict.fromkeys(layer_map.values()):
+                    is_secondary = layer is not primary_layer
                     _style_origin_layer(
                         layer,
                         graph_title,
-                        secondary_axes_only=layer is not primary_layer,
+                        secondary_axes_only=is_secondary,
                     )
+                    layer_values = layer_fields.get(layer, [])
                     if single_origin_axis:
                         _set_origin_axis_title(layer, "x", x_axis_label)
                         _set_origin_axis_title(layer, "y", "Magnetization [emu]")
+                    elif dual_field_single_layer:
+                        axis_fields = sorted(unique_fields, key=lambda value: abs(float(value)))
+                        left_fields = axis_fields[:1]
+                        right_fields = axis_fields[1:]
+                        try:
+                            layer.lt_exec(
+                                "axis -ps Y A 3; axis -ps Y L 3; "
+                                "layer.y.showlabel=1; layer.y2.showlabel=1; "
+                                "layer.y.showLabels=3; layer.y2.showLabels=3; "
+                                "layer.y.color=color(black); layer.y2.color=color(black); "
+                                "layer.y.label.color=color(black); layer.y2.label.color=color(black); "
+                                "layer.y.label.fsize=10; layer.y2.label.fsize=10; "
+                                "layer.y.ticklabel.color=color(black); layer.y2.ticklabel.color=color(black); "
+                                "layer.y.label.offsetH=170; layer.y2.label.offsetH=170;"
+                            )
+                        except Exception:
+                            pass
+                        _set_origin_axis_title(layer, "x", x_axis_label)
+                        _set_origin_axis_title(
+                            layer,
+                            "y",
+                            self._axis_label_for_fields(left_fields, base=axis_base),
+                        )
+                        _set_origin_axis_title(
+                            layer,
+                            "y2",
+                            self._axis_label_for_fields(right_fields, base=axis_base),
+                        )
+                        try:
+                            layer.lt_exec("page.ytitle=20; YL.fsize=12; YR.fsize=12;")
+                        except Exception:
+                            pass
+                    elif is_secondary:
+                        _set_origin_axis_title(layer, "x", "")
+                        _set_origin_axis_title(layer, "y", "")
+                        _set_origin_axis_title(
+                            layer,
+                            "y2",
+                            self._axis_label_for_fields(layer_values, base=axis_base),
+                        )
+                    else:
+                        _set_origin_axis_title(layer, "x", x_axis_label)
+                        _set_origin_axis_title(
+                            layer,
+                            "y",
+                            self._axis_label_for_fields(layer_values, base=axis_base),
+                        )
                 if single_origin_axis:
                     for layer, entries in legend_entries.items():
                         self._set_origin_plain_legend(

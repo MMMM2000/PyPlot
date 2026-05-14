@@ -1284,6 +1284,13 @@ _WORD_PROJECT_GRAPH_SOURCE_SPECS: dict[str, tuple[str, str, str, str, str]] = {
         "DMA Iso-Stress",
         "DMA iso-stress Origin graph",
     ),
+    "mini_dma": (
+        "_word_mini_dma_sources",
+        "Mini DMA graphs",
+        "Mini DMA graphs (Origin)",
+        "Mini DMA",
+        "Mini DMA Origin graph",
+    ),
     "shape_memory_stress_strain": (
         "_word_shape_memory_stress_strain_sources",
         "Shape memory stress/strain graphs",
@@ -1414,6 +1421,7 @@ def _load_project_word_report_frame(
         MICROSCOPE_IMAGE_COLUMNS,
         DMA_ISOSTRESS_ORIGIN_COLUMN,
         FMR_ORIGIN_COLUMN,
+        MINI_DMA_ORIGIN_COLUMN,
         RVT_FILE_COLUMN,
         RVT_GRAPH_COLUMN,
         RVT_ORIGIN_COLUMN,
@@ -1566,6 +1574,7 @@ def _load_project_word_report_frame(
         VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
         VSM_HYSTERESIS_ORIGIN_COLUMN,
         DMA_ISOSTRESS_ORIGIN_COLUMN,
+        MINI_DMA_ORIGIN_COLUMN,
         SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
         FMR_ORIGIN_COLUMN,
     ):

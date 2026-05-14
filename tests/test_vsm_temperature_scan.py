@@ -161,6 +161,7 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
         def __init__(self) -> None:
             self._axes: dict[str, _FakeAxis] = {}
             self.axis_calls: list[str] = []
+            self.commands: list[str] = []
             self._plot_count = 0
             self._legend = _FakeLabel()
 
@@ -181,6 +182,7 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
             return plot
 
         def lt_exec(self, _cmd: str) -> None:
+            self.commands.append(_cmd)
             return
 
         def rescale(self) -> None:
@@ -309,6 +311,8 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
     assert layer._axes["x2"].label.text == ""
     assert layer._axes["x2"].title == ""
     assert "[emu]" in layer._axes["y"].label.text
+    assert any("layer.y.color=color(black)" in cmd for cmd in layer.commands)
+    assert any("layer.y.ticklabel.color=color(black)" in cmd for cmd in layer.commands)
     assert "\\l(" in layer._legend.text
     titles = [str(getattr(item, "title_meta", "") or "") for item in fake_origin.graphs]
     assert any("Smoothed dSignal/dT" in title for title in titles)
@@ -346,6 +350,7 @@ def test_plot_origin_combines_legend_entries_for_dual_axis(monkeypatch) -> None:
             self._axes: dict[str, _FakeAxis] = {}
             self._plot_count = 0
             self._legend = _FakeLabel()
+            self.commands: list[str] = []
 
         def axis(self, axis_name: str) -> _FakeAxis:
             return self._axes.setdefault(axis_name, _FakeAxis())
@@ -362,6 +367,7 @@ def test_plot_origin_combines_legend_entries_for_dual_axis(monkeypatch) -> None:
             return plot
 
         def lt_exec(self, _cmd: str) -> None:
+            self.commands.append(_cmd)
             return
 
         def rescale(self) -> None:
@@ -478,12 +484,13 @@ def test_plot_origin_combines_legend_entries_for_dual_axis(monkeypatch) -> None:
 
     assert fake_origin.graphs
     graph = fake_origin.graphs[0]
-    assert len(graph) >= 2
+    assert len(graph) == 1
     primary = graph[0]
-    secondary = graph[1]
     assert "\\L(1." in primary._legend.text
-    assert "\\L(2." in primary._legend.text
-    assert secondary._legend.text == ""
+    assert any("axis -ps Y A 3" in cmd for cmd in primary.commands)
+    assert any("axis -ps Y L 3" in cmd for cmd in primary.commands)
+    assert any("layer.y2.ticklabel.color=color(black)" in cmd for cmd in primary.commands)
+    assert "10kOe" in primary._axes["y2"].label.text
 
 
 def test_plot_origin_keeps_primary_legend_when_layer_wrappers_change(monkeypatch) -> None:
@@ -664,7 +671,7 @@ def test_plot_origin_keeps_primary_legend_when_layer_wrappers_change(monkeypatch
     assert fake_origin.graphs
     graph = fake_origin.graphs[0]
     primary = graph[0]
-    secondary = graph[1]
     assert "\\L(1." in primary._legend.text
-    assert "\\L(2." in primary._legend.text
-    assert secondary._legend.text == ""
+    assert "10000" in primary._legend.text
+    assert "50" in primary._legend.text
+    assert len(graph) == 1

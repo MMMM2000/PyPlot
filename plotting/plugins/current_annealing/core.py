@@ -19,8 +19,10 @@ from plotting.shared.utils import save_figure, show_plots, schedule_origin_relea
 from plotting.shared.origin import (
     origin_session,
     hide_origin_workbook,
+    set_origin_axis_title as shared_set_origin_axis_title,
     set_origin_graph_title as shared_set_origin_graph_title,
 )
+from plotting.shared.power_axis import add_power_top_axis
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.toolkit import format_annealing_title
 
@@ -476,6 +478,80 @@ def _apply_axis_labels(layer: Any, x_label: str, y_label: str) -> None:
                     _set_visibility(sub, False)
 
 
+def _apply_origin_power_top_axis(
+    layer: Any,
+    workbook: Any | None,
+    worksheet: Any | None,
+    currents: np.ndarray,
+    resistances: np.ndarray,
+) -> None:
+    finite_current = np.asarray(currents, dtype=float)
+    finite_current = finite_current[np.isfinite(finite_current)]
+    if finite_current.size < 2:
+        return
+    current_min = float(np.nanmin(finite_current))
+    current_max = float(np.nanmax(finite_current))
+    if not math.isfinite(current_min) or not math.isfinite(current_max):
+        return
+    if math.isclose(current_min, current_max, abs_tol=1e-12):
+        return
+    finite_mask = np.isfinite(np.asarray(currents, dtype=float)) & np.isfinite(
+        np.asarray(resistances, dtype=float)
+    )
+    if not finite_mask.any():
+        return
+    power_values = (np.asarray(currents, dtype=float)[finite_mask] ** 2) * np.asarray(
+        resistances, dtype=float
+    )[finite_mask] / 1000.0
+    current_values = np.asarray(currents, dtype=float)[finite_mask]
+    grouped = pd.DataFrame({"current": current_values, "power": power_values}).groupby(
+        "current", sort=True, as_index=False
+    )["power"].median()
+    if len(grouped) < 2:
+        return
+    try:
+        x_values = grouped["current"].to_numpy(dtype=float)
+        p_values = grouped["power"].to_numpy(dtype=float)
+        denominator = float(np.sum(x_values**4))
+        if math.isclose(denominator, 0.0, abs_tol=1e-12):
+            return
+        quad = float(np.sum((x_values**2) * p_values) / denominator)
+    except Exception:
+        return
+    formula = f"({quad:.12g})*x^2"
+    lt_exec = getattr(layer, "lt_exec", None)
+    if not callable(lt_exec):
+        return
+    commands = [
+        "axis -ps X A 3;",
+        "axis -ps X L 3;",
+        "layer.x.showAxes=3;",
+        "layer.x.showlabel=1;",
+        "layer.x.showLabels=3;",
+        "layer.x2.showlabel=1;",
+        "layer.x2.showLabels=3;",
+        "layer.x2.label.type=1;",
+        "layer.x2.labelType=1;",
+        f'layer.x2.label.formula$="{formula}";',
+        "layer.x2.label.decPlaces=1;",
+        "layer.x.ticks=10;",
+        "layer.x2.ticks=10;",
+        "layer.x2.label.fsize=10;",
+    ]
+    for command in commands:
+        try:
+            lt_exec(command)
+        except Exception:
+            continue
+    try:
+        shared_set_origin_axis_title(layer, "x2", "Power [mW]")
+    except Exception:
+        try:
+            lt_exec('label -s -xt "Power [mW]";')
+        except Exception:
+            pass
+
+
 def _apply_tick_settings(layer: Any, axis_name: str, axis_obj: Any | None) -> None:
     show_ticks = bool(globals().get("SHOW_TICK_LABELS", True))
     tick_size = int(globals().get("TICK_SIZE", 18))
@@ -907,6 +983,7 @@ def plot_one(
     *,
     figsize: Tuple[float, float] | None = None,
     target_px: Tuple[int, int] | None = None,
+    show_power_top_axis: bool = False,
 ) -> Tuple[Figure, str]:
     if target_px is not None:
         target_width, target_height = target_px
@@ -999,6 +1076,15 @@ def plot_one(
     ax.set_ylabel("Resistance [Ω]", fontsize=AXIS_LABEL_SIZE)
     ax.set_title(title, fontsize=TITLE_SIZE, pad=10)
     ax.grid(True, ls="--", alpha=0.3)
+    if show_power_top_axis:
+        add_power_top_axis(
+            ax,
+            currents,
+            resistances,
+            label="Power [mW]",
+            label_size=AXIS_LABEL_SIZE,
+            tick_size=TICK_SIZE,
+        )
     if legend_handles:
         legend = ax.legend(
             handles=legend_handles,
@@ -1059,6 +1145,7 @@ def plot_one_origin(
     source_name: str,
     mode: str | None = None,
     *,
+    show_power_top_axis: bool = False,
     return_handles: bool = False,
 ) -> dict[str, object] | None:
     currents = df["I_mA"].to_numpy(dtype=float)
@@ -1100,6 +1187,8 @@ def plot_one_origin(
     hide_origin_workbook(origin_any, workbook, graph)
 
     _apply_origin_readability(layer, graph)
+    if show_power_top_axis:
+        _apply_origin_power_top_axis(layer, workbook, worksheet, currents, resistances)
     _set_graph_title(layer, display_label, graph=graph, origin_any=origin_any)
     _place_current_annealing_title(layer, display_label)
 

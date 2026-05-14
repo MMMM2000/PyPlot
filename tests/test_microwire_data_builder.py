@@ -4001,6 +4001,24 @@ def test_word_report_microwire_data_table_only_expands_multi_value_rows() -> Non
     assert "As (" in rows[2]
 
 
+def test_word_report_microwire_data_table_fills_columns_top_to_bottom() -> None:
+    table_xml = core._word_microwire_data_table(
+        [
+            ("A", ["1"]),
+            ("B", ["2"]),
+            ("C", ["3"]),
+            ("D", ["4"]),
+            ("E", ["5"]),
+        ]
+    )
+
+    rows = re.findall(r"<w:tr>(.*?)</w:tr>", table_xml)
+    assert len(rows) == 3
+    assert "A" in rows[0] and "D" in rows[0]
+    assert "B" in rows[1] and "E" in rows[1]
+    assert "C" in rows[2]
+
+
 def test_word_report_sections_start_on_new_pages() -> None:
     xml, _origin_insertions, _picture_insertions = core._word_document_xml(
         pd.Series({"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}),
@@ -5765,7 +5783,7 @@ def test_assemble_prepare_inputs_respects_hide_other_ends_setting(qtbot, tmp_pat
         )
 
         assert payload is not None
-        prepared_index = payload[8]
+        prepared_index = payload[9]
         assert ("Ni50Fe27Ga23", 5, 4, None) in prepared_index
         assert ("Ni50Fe27Ga23", 5, 4, "oe") not in prepared_index
     finally:
@@ -5994,7 +6012,7 @@ def test_assemble_prepare_inputs_keeps_fabrication_and_video_baselines_when_not_
 
         assert payload is not None
         fabrication_index = payload[0]
-        video_index = payload[9]
+        video_index = payload[10]
 
         piece_info = fabrication_index.get_piece("Ni50Fe27Ga23", 6, 2)
         draw_info = fabrication_index.get_draw("Ni50Fe27Ga23", 6)

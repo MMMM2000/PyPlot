@@ -227,6 +227,7 @@ OUTPUT_COLUMNS = [
     "VSM hysteresis graphs",
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
+    "Mini DMA graphs",
     "Shape memory stress/strain graphs",
     *SHAPE_MEMORY_VALUE_COLUMNS,
     *SHAPE_MEMORY_FRACTURE_COLUMNS,
@@ -251,10 +252,12 @@ FIGURE_COLUMNS = (
 VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
+MINI_DMA_COLUMN = "Mini DMA graphs"
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
 VSM_HYSTERESIS_ORIGIN_COLUMN = "VSM hysteresis graphs (Origin)"
 VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN = "VSM temperature scan graphs (Origin)"
 DMA_ISOSTRESS_ORIGIN_COLUMN = "DMA iso-stress graphs (Origin)"
+MINI_DMA_ORIGIN_COLUMN = "Mini DMA graphs (Origin)"
 SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Shape memory stress/strain graphs (Origin)"
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Displacement (mm)"
 SHAPE_MEMORY_LOAD_COLUMN = "Load (g)"
@@ -290,6 +293,7 @@ for _graph_column, _origin_column in (
     (VSM_HYSTERESIS_COLUMN, VSM_HYSTERESIS_ORIGIN_COLUMN),
     (VSM_TEMPERATURE_SCAN_COLUMN, VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN),
     (DMA_ISOSTRESS_COLUMN, DMA_ISOSTRESS_ORIGIN_COLUMN),
+    (MINI_DMA_COLUMN, MINI_DMA_ORIGIN_COLUMN),
     (SHAPE_MEMORY_STRESS_STRAIN_COLUMN, SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN),
     (FMR_COLUMN, FMR_ORIGIN_COLUMN),
 ):
@@ -306,6 +310,7 @@ ORIGIN_FIGURE_COLUMNS = tuple(
     VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
     VSM_HYSTERESIS_ORIGIN_COLUMN,
     DMA_ISOSTRESS_ORIGIN_COLUMN,
+    MINI_DMA_ORIGIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     FMR_ORIGIN_COLUMN,
 )
@@ -794,6 +799,17 @@ class DmaIsoStressRecord:
     path: Path
     sample: str
     datasets: Dict[int, Tuple[List[float], List[float]]]
+    key: Optional[Tuple[str, int, int]] = None
+    label: Optional[str] = None
+
+
+@dataclass
+class MiniDmaRecord:
+    """Parsed Mini DMA run for a single measurement folder."""
+
+    path: Path
+    sample: str
+    data: pd.DataFrame
     key: Optional[Tuple[str, int, int]] = None
     label: Optional[str] = None
 
@@ -3829,7 +3845,7 @@ def _plot_measurement_matplotlib(
         max(int(figsize[0] * dpi_target), 200),
         max(int(figsize[1] * dpi_target), 120),
     )
-    fig, fname = plot_one(plot_df, title, target_px=target_px)
+    fig, fname = plot_one(plot_df, title, target_px=target_px, show_power_top_axis=True)
     safe_stem = _safe_plot_stem(fname)
     plot_path = plot_dir / f"{safe_stem}.png"
     plot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4092,6 +4108,7 @@ def _plot_measurement_origin(
         plot_df,
         title,
         source.name,
+        show_power_top_axis=True,
         return_handles=True,
     )
 
@@ -4431,6 +4448,33 @@ def export_pyplot_origin_artifacts_for_paths(
             except Exception:
                 pass
 
+        plugin_key = str(plugin_name).strip().casefold()
+        if plugin is not None and plugin_key in {"current annealing", "mini dma"}:
+            try:
+                panel = getattr(plugin, "panel_widget", None)
+                if callable(panel):
+                    panel()
+            except Exception:
+                pass
+            try:
+                settings = getattr(plugin, "settings_widget", None)
+                if callable(settings):
+                    settings()
+            except Exception:
+                pass
+            setter = getattr(plugin, "_set_show_power_top_axis", None)
+            if callable(setter):
+                try:
+                    setter(True)
+                except Exception:
+                    pass
+            checkbox = getattr(plugin, "_show_power_top_axis_checkbox", None)
+            if checkbox is not None:
+                try:
+                    checkbox.setChecked(True)
+                except Exception:
+                    pass
+
         importer = getattr(window, "automation_import_paths", None)
         if not callable(importer):
             raise RuntimeError("PyPlot import automation is unavailable.")
@@ -4653,6 +4697,7 @@ _WORD_REPORT_LABELS: Dict[str, str] = {
     VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN: "VSM temperature scan graphs (Origin)",
     VSM_HYSTERESIS_ORIGIN_COLUMN: "VSM hysteresis graphs (Origin)",
     DMA_ISOSTRESS_ORIGIN_COLUMN: "DMA iso-stress graphs (Origin)",
+    MINI_DMA_ORIGIN_COLUMN: "Mini DMA graphs (Origin)",
     SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN: "Shape memory stress/strain graphs (Origin)",
     FMR_ORIGIN_COLUMN: "FMR graphs (Origin)",
     RVT_POINT_COUNT_COLUMN: "R vs T points",
@@ -4731,6 +4776,8 @@ _WORD_GRAPH_COLUMNS: Tuple[str, ...] = (
     VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
     DMA_ISOSTRESS_COLUMN,
     DMA_ISOSTRESS_ORIGIN_COLUMN,
+    MINI_DMA_COLUMN,
+    MINI_DMA_ORIGIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     FMR_COLUMN,
@@ -4748,6 +4795,7 @@ _WORD_GRAPH_SECTIONS: Tuple[
     ("VSM temperature scan", (VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,), (VSM_TEMPERATURE_SCAN_COLUMN,)),
     ("VSM hysteresis loops", (VSM_HYSTERESIS_ORIGIN_COLUMN,), (VSM_HYSTERESIS_COLUMN,)),
     ("DMA iso-stress", (DMA_ISOSTRESS_ORIGIN_COLUMN,), (DMA_ISOSTRESS_COLUMN,)),
+    ("Mini DMA", (MINI_DMA_ORIGIN_COLUMN,), (MINI_DMA_COLUMN,)),
     (
         "Shape memory stress/strain",
         (SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,),
@@ -4951,11 +4999,19 @@ def _word_microwire_data_table(rows: Sequence[Tuple[str, Sequence[str]]]) -> str
 
     def _flush_pairs() -> None:
         nonlocal pending_pairs
-        while pending_pairs:
-            pairs = pending_pairs[:2]
-            pending_pairs = pending_pairs[2:]
+        if not pending_pairs:
+            return
+        midpoint = (len(pending_pairs) + 1) // 2
+        left_pairs = pending_pairs[:midpoint]
+        right_pairs = pending_pairs[midpoint:]
+        pending_pairs = []
+        for index, pair in enumerate(left_pairs):
             cells = []
-            for label, value in pairs:
+            label, value = pair
+            cells.append(_cell(label, label=True, width=1900))
+            cells.append(_cell(value, width=2500))
+            if index < len(right_pairs):
+                label, value = right_pairs[index]
                 cells.append(_cell(label, label=True, width=1900))
                 cells.append(_cell(value, width=2500))
             while len(cells) < 4:
@@ -6391,6 +6447,7 @@ def build_database(
     vsm_hysteresis_records: Optional[Iterable[VsmHysteresisRecord]] = None,
     vsm_temperature_scan_records: Optional[Iterable[VsmTemperatureScanRecord]] = None,
     dma_iso_stress_records: Optional[Iterable[DmaIsoStressRecord]] = None,
+    mini_dma_records: Optional[Iterable[MiniDmaRecord]] = None,
     shape_memory_stress_strain_records: Optional[
         Iterable[ShapeMemoryStressStrainRecord]
     ] = None,
@@ -6584,6 +6641,7 @@ def build_database(
     vsm_hysteresis_groups = _group_records(vsm_hysteresis_records)
     vsm_temperature_groups = _group_records(vsm_temperature_scan_records)
     dma_isostress_groups = _group_records(dma_iso_stress_records)
+    mini_dma_groups = _group_records(mini_dma_records)
     shape_memory_stress_strain_groups = _group_records(
         shape_memory_stress_strain_records
     )
@@ -7377,6 +7435,23 @@ def build_database(
                 display_prefix="DMA iso-stress Origin graph",
                 section_token="dma_iso_stress",
             )
+        mini_dma_entries = mini_dma_groups.get(key, [])
+        if not mini_dma_entries:
+            mini_dma_entries = mini_dma_groups.get((composition, draw_x, piece_y, None), [])
+        if not mini_dma_entries:
+            mini_dma_entries = mini_dma_groups.get((composition, draw_x, piece_y), [])
+        if mini_dma_entries:
+            labels = [_record_label(record) for record in mini_dma_entries if _record_label(record)]
+            if labels:
+                row[MINI_DMA_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=mini_dma_entries,
+                origin_column=MINI_DMA_ORIGIN_COLUMN,
+                plugin_name="Mini DMA",
+                display_prefix="Mini DMA Origin graph",
+                section_token="mini_dma",
+            )
         shape_memory_records = shape_memory_stress_strain_groups.get(key, [])
         if not shape_memory_records:
             shape_memory_records = shape_memory_stress_strain_groups.get(
@@ -7776,15 +7851,18 @@ __all__ = [
     "VsmHysteresisRecord",
     "VsmTemperatureScanRecord",
     "DmaIsoStressRecord",
+    "MiniDmaRecord",
     "ShapeMemoryStressStrainRecord",
     "FmrRecord",
     "VSM_HYSTERESIS_COLUMN",
     "VSM_TEMPERATURE_SCAN_COLUMN",
     "DMA_ISOSTRESS_COLUMN",
+    "MINI_DMA_COLUMN",
     "SHAPE_MEMORY_STRESS_STRAIN_COLUMN",
     "VSM_HYSTERESIS_ORIGIN_COLUMN",
     "VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN",
     "DMA_ISOSTRESS_ORIGIN_COLUMN",
+    "MINI_DMA_ORIGIN_COLUMN",
     "SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN",
     "SHAPE_MEMORY_DISPLACEMENT_COLUMN",
     "SHAPE_MEMORY_LOAD_COLUMN",

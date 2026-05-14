@@ -1394,6 +1394,7 @@ class WorksheetData:
     source: Path | None = None
     workbook_key: Hashable | None = None
     axis_roles: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -5204,6 +5205,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             source=None,
             workbook_key=workbook.key,
             axis_roles="".join(axis_roles),
+            metadata=dict(descriptor.metadata or {}),
         )
         workbook.worksheets = [worksheet.key]
         return workbook, [worksheet]
@@ -5998,7 +6000,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 ),
             )
 
-    def _style_origin_legend_for_export(self, layer: Any) -> None:
+    def _style_origin_legend_for_export(
+        self,
+        layer: Any,
+        worksheet: WorksheetData | None = None,
+    ) -> None:
         self._activate_origin_layer(layer)
         label_getter = getattr(layer, "label", None)
         if not callable(label_getter):
@@ -6015,7 +6021,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
         set_float = getattr(legend, "set_float", None)
         if callable(set_float):
-            for key, value in (("fsize", 8.0),):
+            for key, value in (("fsize", 10.0),):
                 try:
                     set_float(key, float(value))
                 except Exception:
@@ -6029,11 +6035,31 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     pass
         lt_exec = getattr(layer, "lt_exec", None)
         if callable(lt_exec):
+            metadata = worksheet.metadata if worksheet is not None and isinstance(worksheet.metadata, dict) else {}
+            legend_position = str(metadata.get("origin_legend_position") or "").strip().casefold()
+            if legend_position == "outside_right":
+                get_float = getattr(layer, "get_float", None)
+                x_margin = 0.0
+                if callable(get_float):
+                    try:
+                        x_from = float(get_float("x.from"))
+                        x_to = float(get_float("x.to"))
+                        x_margin = max((x_to - x_from) * 0.035, 0.0)
+                    except Exception:
+                        x_margin = 0.0
+                commands = (
+                    "legend.fsize=10;",
+                    f"legend.x=layer.x.to + legend.dx / 2 + {x_margin:.12g};",
+                    "legend.y=layer.y.to - legend.dy / 2;",
+                )
+            else:
+                commands = (
+                    "legend.fsize=10;",
+                    "legend.x=layer.x.from + legend.dx / 2;",
+                    "legend.y=layer.y.to - legend.dy / 2;",
+                )
             for command in (
-                "legend.fsize=8;",
-                "legend.font=0;",
-                "legend.x=layer.x.from + legend.dx / 2;",
-                "legend.y=layer.y.to - legend.dy / 2;",
+                *commands,
             ):
                 self._origin_lt_exec(lt_exec, command)
 
@@ -6397,6 +6423,109 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return None
         return float(slope), float(intercept)
 
+    def _apply_origin_power_top_axis(
+        self,
+        layer: Any,
+        frame: pd.DataFrame,
+        worksheet: WorksheetData,
+        columns: list[str],
+        pairs: list[tuple[int, int]],
+    ) -> None:
+        metadata = worksheet.metadata if isinstance(worksheet.metadata, dict) else {}
+        if not bool(metadata.get("show_power_top_axis")):
+            return
+        current_values: list[float] = []
+        resistance_values: list[float] = []
+        metadata_currents = metadata.get("power_axis_current_mA")
+        metadata_resistances = metadata.get("power_axis_resistance_ohm")
+        if isinstance(metadata_currents, (list, tuple)) and isinstance(metadata_resistances, (list, tuple)):
+            try:
+                current_values = [float(value) for value in metadata_currents]
+                resistance_values = [float(value) for value in metadata_resistances]
+            except (TypeError, ValueError):
+                current_values = []
+                resistance_values = []
+        if not current_values or not resistance_values:
+            for x_index, y_index in pairs:
+                if not (0 <= x_index < len(columns) and 0 <= y_index < len(columns)):
+                    continue
+                x_title = self._origin_axis_title(worksheet, columns[x_index]).casefold()
+                y_title = self._origin_axis_title(worksheet, columns[y_index]).casefold()
+                if "current" not in x_title or "resistance" not in y_title:
+                    continue
+                current = pd.to_numeric(frame[columns[x_index]], errors="coerce")
+                resistance = pd.to_numeric(frame[columns[y_index]], errors="coerce")
+                count = min(len(current), len(resistance))
+                if count <= 0:
+                    continue
+                current_values.extend(current.iloc[:count].to_numpy(dtype=float).tolist())
+                resistance_values.extend(resistance.iloc[:count].to_numpy(dtype=float).tolist())
+        if not current_values or not resistance_values:
+            return
+
+        count = min(len(current_values), len(resistance_values))
+        if count < 2:
+            return
+        current_values = current_values[:count]
+        resistance_values = resistance_values[:count]
+
+        current_array = np.asarray(current_values, dtype=float)
+        current_array = current_array[np.isfinite(current_array)]
+        if current_array.size < 2:
+            return
+        data_min = float(np.nanmin(current_array))
+        data_max = float(np.nanmax(current_array))
+        if not (math.isfinite(data_min) and math.isfinite(data_max)) or math.isclose(data_min, data_max):
+            return
+        finite_mask = np.isfinite(np.asarray(current_values, dtype=float)) & np.isfinite(
+            np.asarray(resistance_values, dtype=float)
+        )
+        if not finite_mask.any():
+            return
+        power_values = (
+            np.asarray(current_values, dtype=float)[finite_mask] ** 2
+        ) * np.asarray(resistance_values, dtype=float)[finite_mask] / 1000.0
+        current_for_fit = np.asarray(current_values, dtype=float)[finite_mask]
+        try:
+            grouped = pd.DataFrame(
+                {"current": current_for_fit, "power": power_values}
+            ).groupby("current", sort=True, as_index=False)["power"].median()
+            x_values = grouped["current"].to_numpy(dtype=float)
+            p_values = grouped["power"].to_numpy(dtype=float)
+            denominator = float(np.sum(x_values**4))
+            if math.isclose(denominator, 0.0, abs_tol=1e-12):
+                return
+            quad = float(np.sum((x_values**2) * p_values) / denominator)
+        except Exception:
+            return
+        if not math.isfinite(quad):
+            return
+        formula = f"({quad:.12g})*x^2"
+
+        lt_exec = getattr(layer, "lt_exec", None)
+        if not callable(lt_exec):
+            return
+        commands = (
+            "axis -ps X A 3;",
+            "axis -ps X L 3;",
+            "layer.x.showAxes=3;",
+            "layer.x.showlabel=1;",
+            "layer.x.showLabels=3;",
+            "layer.x.ticks=10;",
+            "layer.x2.label.type=1;",
+            "layer.x2.labelType=1;",
+            f'layer.x2.label.formula$="{formula}";',
+            "layer.x2.label.decPlaces=1;",
+            "layer.x2.showlabel=1;",
+            "layer.x2.showLabels=3;",
+            "layer.x2.ticks=10;",
+            "layer.x2.label.fsize=12;",
+            "layer.x2.label.offsetV=20;",
+        )
+        for command in commands:
+            self._origin_lt_exec(lt_exec, command)
+        self._set_origin_axis_title(layer, "x2", "Power [mW]")
+
     def _origin_layer_axis_links(
         self,
         frame: pd.DataFrame,
@@ -6723,10 +6852,19 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._apply_origin_layer_axis_links(layer_groups, layer_axis_links)
         for plot_obj in duplicate_overlay_plots:
             self._set_origin_plot_visible(plot_obj, False)
+        metadata = worksheet.metadata if isinstance(worksheet.metadata, dict) else {}
+        origin_layer_width = metadata.get("origin_layer_width")
+        try:
+            origin_layer_width_float = float(origin_layer_width)
+        except (TypeError, ValueError):
+            origin_layer_width_float = ORIGIN_EXPORT_LAYER_WIDTH
+        if not math.isfinite(origin_layer_width_float) or origin_layer_width_float <= 0:
+            origin_layer_width_float = ORIGIN_EXPORT_LAYER_WIDTH
         for target_layer, _group_x_title, _group_y_title, _group_pairs, show_top_x in layer_groups:
             self._set_origin_layer_frame(
                 target_layer,
                 top=ORIGIN_EXPORT_LAYER_TOP,
+                width=origin_layer_width_float,
                 height=ORIGIN_EXPORT_LAYER_HEIGHT,
             )
         # Re-apply axis titles after rescale/hide passes to keep axis captions
@@ -6755,11 +6893,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 secondary_axes_only=True,
                 show_top_x=show_top_x,
             )
+        self._apply_origin_power_top_axis(layer, frame, worksheet, columns, layer_groups[0][3])
         # Re-assert title after rescale/legend updates so template-side smart
         # positioning cannot leave it in data coordinates.
         self._set_origin_graph_title(origin_any, graph, layer, graph_title)
         for target_layer, _group_x_title, _group_y_title, _group_pairs, _show_top_x in layer_groups:
-            self._style_origin_legend_for_export(target_layer)
+            self._style_origin_legend_for_export(target_layer, worksheet)
         if len(layer_groups) > 1:
             self._append_log(
                 f"Origin dual-axis layer snapshot ({graph_title}) primary: "
