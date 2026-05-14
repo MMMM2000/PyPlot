@@ -72,6 +72,9 @@ DEFAULT_FREQUENCY_PRESETS_HZ = [10.0, 20.0, 100.0, 1000.0, 2000.0, 10000.0, 1000
 LCR_FRONT_PANEL_VOLTAGE_PRESETS_V = list(_LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
 OWON_DEFAULT_VOLTAGE_LIMIT_V = 62.0
 HMP_DEFAULT_VOLTAGE_LIMIT_V = 30.0
+AC_DEFAULT_LOG_DIR = Path.home() / "Downloads" / "ac_susceptibility"
+AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
+AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
 
 
 class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
@@ -157,8 +160,10 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_plot_points: list[AcPlotPoint] = []
         self._plot_tiles: list[AcPlotTileWidgets] = []
         self.plot_config_dialog: AcPlotConfigDialog | None = None
+        self._ac_output_settings_ready = False
         super().__init__()
         self.setWindowTitle("AC Susceptibility Logger")
+        self._load_ac_output_settings()
         self._install_lcr_controls()
         self._simplify_inherited_ac_workflow()
         self._install_ac_sticky_progress()
@@ -446,9 +451,107 @@ class MainWindow(CurrentAnnealingWindow):
         line_edit = getattr(self.ui, "lineEdit_log_file", None)
         if isinstance(line_edit, QtWidgets.QLineEdit):
             current = line_edit.text().strip()
-            if not current or current in {"anneal_log", "ac_susceptibility_log"}:
-                line_edit.setText("ac_susc_current_sweep")
+            if not current or current in AC_LEGACY_INHERITED_BASES:
+                line_edit.setText(AC_DEFAULT_SWEEP_BASE)
                 self.sync_full_log_path()
+
+    def _load_ac_output_settings(self) -> None:
+        directory = str(self.ac_settings.value("log_dir", "", type=str) or "").strip()
+        inherited_directory = ""
+        inherited_base = ""
+        try:
+            inherited_directory = str(self.settings.value("log_dir", "", type=str) or "").strip()
+            inherited_base = str(self.settings.value("log_file", "", type=str) or "").strip()
+        except Exception:
+            pass
+        if directory and inherited_directory and Path(directory) == Path(inherited_directory):
+            directory = ""
+        if not directory:
+            directory = str(AC_DEFAULT_LOG_DIR)
+        base = str(self.ac_settings.value("log_file", "", type=str) or "").strip()
+        if base and inherited_base and base == inherited_base and not base.startswith("ac_susc"):
+            base = ""
+        if not base or base in AC_LEGACY_INHERITED_BASES:
+            base = AC_DEFAULT_SWEEP_BASE
+        dir_edit = getattr(self.ui, "lineEdit_log_dir", None)
+        file_edit = getattr(self.ui, "lineEdit_log_file", None)
+        if isinstance(dir_edit, QtWidgets.QLineEdit):
+            dir_edit.setText(directory)
+        if isinstance(file_edit, QtWidgets.QLineEdit):
+            file_edit.setText(base)
+        self._ac_output_settings_ready = True
+        self.sync_full_log_path()
+
+    def sync_full_log_path(self) -> None:  # type: ignore[override]
+        full = self.build_log_path()
+        hidden = getattr(self.ui, "lineEdit_log_file_full", None)
+        if isinstance(hidden, QtWidgets.QLineEdit):
+            hidden.setText(full)
+        self.f_name = full
+        try:
+            ready = bool(getattr(self, "_ac_output_settings_ready", False))
+        except RuntimeError:
+            ready = False
+        if not ready:
+            return
+        try:
+            directory = self.ui.lineEdit_log_dir.text().strip()
+            base = self.ui.lineEdit_log_file.text().strip()
+            if directory:
+                self.ac_settings.setValue("log_dir", directory)
+            if base:
+                self.ac_settings.setValue("log_file", base)
+        except Exception:
+            pass
+
+    def build_log_path(self) -> str:  # type: ignore[override]
+        try:
+            directory = self.ui.lineEdit_log_dir.text().strip() or str(AC_DEFAULT_LOG_DIR)
+            base = self.ui.lineEdit_log_file.text().strip() or AC_DEFAULT_SWEEP_BASE
+            if base in AC_LEGACY_INHERITED_BASES:
+                base = AC_DEFAULT_SWEEP_BASE
+            if base.lower().endswith(".tsv"):
+                base = base[:-4]
+            os.makedirs(directory, exist_ok=True)
+            return os.path.join(directory, f"{base}.tsv")
+        except Exception:
+            return str(AC_DEFAULT_LOG_DIR / f"{AC_DEFAULT_SWEEP_BASE}.tsv")
+
+    def handle_browse_log_dir(self) -> None:  # type: ignore[override]
+        start_dir = self.ui.lineEdit_log_dir.text() if hasattr(self.ui, "lineEdit_log_dir") else str(AC_DEFAULT_LOG_DIR)
+        new_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Select AC susceptibility output directory", start_dir)
+        if new_dir and hasattr(self.ui, "lineEdit_log_dir"):
+            self.ui.lineEdit_log_dir.setText(new_dir)
+            self.ac_settings.setValue("log_dir", new_dir)
+            self.sync_full_log_path()
+
+    def handle_browse_full_file(self) -> None:  # type: ignore[override]
+        start_dir = self.ui.lineEdit_log_dir.text() if hasattr(self.ui, "lineEdit_log_dir") else str(AC_DEFAULT_LOG_DIR)
+        fpath, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save AC susceptibility sweep as",
+            start_dir,
+            "TSV files (*.tsv);;All files (*)",
+        )
+        if not fpath:
+            return
+        if not fpath.lower().endswith(".tsv"):
+            fpath += ".tsv"
+        directory = os.path.dirname(fpath)
+        base = os.path.splitext(os.path.basename(fpath))[0] or AC_DEFAULT_SWEEP_BASE
+        if hasattr(self.ui, "lineEdit_log_dir"):
+            self.ui.lineEdit_log_dir.setText(directory)
+        if hasattr(self.ui, "lineEdit_log_file"):
+            self.ui.lineEdit_log_file.setText(base)
+        hidden = getattr(self.ui, "lineEdit_log_file_full", None)
+        if isinstance(hidden, QtWidgets.QLineEdit):
+            hidden.setText(fpath)
+        self.ac_settings.setValue("log_dir", directory)
+        self.ac_settings.setValue("log_file", base)
+        self.f_name = fpath
+
+    def handle_select_filename_en(self) -> None:  # type: ignore[override]
+        self.handle_browse_full_file()
 
     def _install_lcr_controls(self) -> None:
         frame = getattr(self.ui, "frame_serial_settings", None)

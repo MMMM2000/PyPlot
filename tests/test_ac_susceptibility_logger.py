@@ -579,6 +579,61 @@ def test_ac_logger_default_output_names_are_ac_specific(tmp_path: Path) -> None:
     app.processEvents()
 
 
+def test_ac_logger_output_settings_are_separate_from_current_annealing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    original = QtCore.QSettings
+    stores: dict[str, QtCore.QSettings] = {}
+    for name in ("current_annealing", "ac_susceptibility_logger", "naming_history", "current_annealing_history"):
+        store = original(
+            original.Format.IniFormat,
+            original.Scope.UserScope,
+            "microwire_tests",
+            f"separate_ac_output_{name}",
+        )
+        store.clear()
+        stores[name] = store
+    anneal_dir = str(tmp_path / "current annealing")
+    stores["current_annealing"].setValue("log_dir", anneal_dir)
+    stores["current_annealing"].setValue("log_file", "Ni48Fe25Ga27_2_3_30mA_with_glass")
+
+    def factory(_organization: str, application: str) -> QtCore.QSettings:
+        return stores.setdefault(
+            application,
+            original(
+                original.Format.IniFormat,
+                original.Scope.UserScope,
+                "microwire_tests",
+                f"separate_ac_output_{application}",
+            ),
+        )
+
+    monkeypatch.setattr(ac_logger.QtCore, "QSettings", factory)
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        assert window.ui.lineEdit_log_dir.text() == str(ac_logger.AC_DEFAULT_LOG_DIR)
+        assert window.ui.lineEdit_log_file.text() == ac_logger.AC_DEFAULT_SWEEP_BASE
+        assert window.ui.lineEdit_log_dir.text() != anneal_dir
+
+        ac_dir = str(tmp_path / "ac susceptibility")
+        window.ui.lineEdit_log_dir.setText(ac_dir)
+        window.ui.lineEdit_log_file.setText("ac_susc_wire_test")
+        window.sync_full_log_path()
+        assert stores["ac_susceptibility_logger"].value("log_dir", type=str) == ac_dir
+        assert stores["ac_susceptibility_logger"].value("log_file", type=str) == "ac_susc_wire_test"
+        assert stores["current_annealing"].value("log_dir", type=str) == anneal_dir
+        assert stores["current_annealing"].value("log_file", type=str) == "Ni48Fe25Ga27_2_3_30mA_with_glass"
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_graph_defaults_are_ac_susceptibility_specific(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

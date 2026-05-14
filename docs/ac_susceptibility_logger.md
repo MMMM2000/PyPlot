@@ -66,7 +66,7 @@ Quick probe after driver installation:
 
 Use **Measure empty-coil baseline** before mounting the microwire. Baseline
 runs the selected LCR model/frequency/amplitude matrix with the configured
-baseline readings per setting and writes a timestamped
+LCR readings per point and writes a timestamped
 `ac_susc_empty_coil_baseline_YYYYMMDD_HHMMSS.tsv` file next to the selected log
 file. The filename intentionally does not include sample or microwire identity
 because no sample is installed. Baseline does not enable, set, read, or
@@ -80,6 +80,10 @@ wire-installed no-current reference is needed; it is part of the microwire
 sweep rather than a separate baseline action. Sweep files use an AC-specific
 base such as `ac_susc_current_sweep_YYYYMMDD_HHMMSS.tsv` and are flushed after
 every LCR read for overnight recovery.
+
+The AC Susceptibility Logger keeps its output directory and sweep-base setting
+separate from the Current Annealing Logger. By default, AC files go under
+`Downloads/ac_susceptibility` with the sweep base `ac_susc_current_sweep`.
 
 Point acquisition controls are named for the AC experiment:
 
