@@ -28,6 +28,8 @@ except Exception:  # pragma: no cover - optional runtime dependency guard
 FRAME_WIDTH = 32
 FRAME_HEIGHT = 24
 FRAME_PIXELS = FRAME_WIDTH * FRAME_HEIGHT
+ROI_WIDTH = 16
+ROI_START_COL = (FRAME_WIDTH - ROI_WIDTH) // 2
 BINARY_MAGIC = b"MLX4"
 BINARY_VERSION = 1
 BINARY_HEADER = struct.Struct("<4sBBBBIIh")
@@ -42,16 +44,45 @@ RAW_AUX_WORDS = RAW_FRAME_WORDS - RAW_PIXEL_WORDS
 RAW_REQUIRED_AUX_START = 768
 RAW_REQUIRED_AUX_END = 810
 RAW_REQUIRED_AUX_WORDS = RAW_REQUIRED_AUX_END - RAW_REQUIRED_AUX_START + 1
-RAW_COMPACT_WORDS = (RAW_PIXEL_WORDS // 2) + RAW_REQUIRED_AUX_WORDS
+RAW_ROI_COMPACT_WORDS = ((FRAME_HEIGHT // 2) * ROI_WIDTH) + RAW_REQUIRED_AUX_WORDS
+RAW_COMPACT_WORDS = RAW_ROI_COMPACT_WORDS
+RAW_FULL_WIDTH_COMPACT_WORDS = (RAW_PIXEL_WORDS // 2) + RAW_REQUIRED_AUX_WORDS
 RAW_LEGACY_COMPACT_WORDS = (RAW_PIXEL_WORDS // 2) + RAW_AUX_WORDS
 RAW_PAYLOAD_BYTES = RAW_FRAME_WORDS * 2
 RAW_COMPACT_PAYLOAD_BYTES = RAW_COMPACT_WORDS * 2
+RAW_FULL_WIDTH_COMPACT_PAYLOAD_BYTES = RAW_FULL_WIDTH_COMPACT_WORDS * 2
 RAW_LEGACY_COMPACT_PAYLOAD_BYTES = RAW_LEGACY_COMPACT_WORDS * 2
 RAW_PACKET_SIZE = RAW_HEADER.size + RAW_PAYLOAD_BYTES + 2
 EEPROM_PACKET_SIZE = RAW_PACKET_SIZE
 RAW_FLAG_SUBPAGE_1 = 0x01
 RAW_FLAG_COMPACT = 0x40
 RAW_FLAG_OVERRUN = 0x80
+
+
+def _raw_compact_geometry(words: int) -> tuple[int, int] | None:
+    if words == RAW_FRAME_WORDS:
+        return FRAME_WIDTH, 0
+    if words == RAW_LEGACY_COMPACT_WORDS:
+        return FRAME_WIDTH, 0
+    if words == RAW_FULL_WIDTH_COMPACT_WORDS:
+        return FRAME_WIDTH, 0
+    data_words = words - RAW_REQUIRED_AUX_WORDS
+    subpage_rows = FRAME_HEIGHT // 2
+    if data_words <= 0 or data_words % subpage_rows != 0:
+        return None
+    row_width = data_words // subpage_rows
+    if row_width <= 0 or row_width > FRAME_WIDTH:
+        return None
+    return row_width, (FRAME_WIDTH - row_width) // 2
+
+
+def _raw_payload_len_is_valid(words: int, payload_len: int) -> bool:
+    if words == RAW_FRAME_WORDS:
+        return payload_len == RAW_PAYLOAD_BYTES
+    if words == RAW_LEGACY_COMPACT_WORDS:
+        return payload_len == RAW_LEGACY_COMPACT_PAYLOAD_BYTES
+    geometry = _raw_compact_geometry(words)
+    return geometry is not None and payload_len == words * 2
 BINARY_TEXT = "text"
 BINARY_FAST = "binary"
 CUBE_RAW = "cube_raw"
@@ -71,20 +102,25 @@ class ThermalFrame:
     sequence: int | None = None
     flags: int = 0
     raw_words: tuple[int, ...] = ()
+    raw_pixel_mask: tuple[bool, ...] = ()
     status: int = 0
     control: int = 0
+    width: int = FRAME_WIDTH
+    height: int = FRAME_HEIGHT
+    roi_start_col: int = 0
 
     @property
     def minimum_c(self) -> float:
-        return min(self.values)
+        return min(value for value in self.values if math.isfinite(value))
 
     @property
     def maximum_c(self) -> float:
-        return max(self.values)
+        return max(value for value in self.values if math.isfinite(value))
 
     @property
     def mean_c(self) -> float:
-        return sum(self.values) / len(self.values)
+        finite = [value for value in self.values if math.isfinite(value)]
+        return sum(finite) / len(finite) if finite else math.nan
 
 
 class FrameRateTracker:
@@ -239,8 +275,8 @@ def parse_raw_cube_frame(packet: bytes) -> ThermalFrame | None:
     if (
         magic != RAW_MAGIC
         or version != RAW_VERSION
-        or words not in {RAW_FRAME_WORDS, RAW_COMPACT_WORDS, RAW_LEGACY_COMPACT_WORDS}
-        or payload_len not in {RAW_PAYLOAD_BYTES, RAW_COMPACT_PAYLOAD_BYTES, RAW_LEGACY_COMPACT_PAYLOAD_BYTES}
+        or _raw_compact_geometry(words) is None
+        or not _raw_payload_len_is_valid(words, payload_len)
         or len(packet) != RAW_HEADER.size + payload_len + 2
     ):
         return None
@@ -252,14 +288,21 @@ def parse_raw_cube_frame(packet: bytes) -> ThermalFrame | None:
         return None
     if words == RAW_FRAME_WORDS:
         raw_words = tuple(int(value) for value in payload_words)
+        raw_pixel_mask = tuple(True for _ in range(FRAME_PIXELS))
     else:
         raw_words_list = [0] * RAW_FRAME_WORDS
+        raw_pixel_mask_list = [False] * FRAME_PIXELS
         cursor = 0
         subpage = int(flags & RAW_FLAG_SUBPAGE_1)
+        geometry = _raw_compact_geometry(words)
+        if geometry is None:
+            return None
+        row_width, row_start_col = geometry
         for row in range(subpage, FRAME_HEIGHT, 2):
-            row_offset = row * FRAME_WIDTH
-            raw_words_list[row_offset : row_offset + FRAME_WIDTH] = payload_words[cursor : cursor + FRAME_WIDTH]
-            cursor += FRAME_WIDTH
+            row_offset = row * FRAME_WIDTH + row_start_col
+            raw_words_list[row_offset : row_offset + row_width] = payload_words[cursor : cursor + row_width]
+            raw_pixel_mask_list[row_offset : row_offset + row_width] = [True] * row_width
+            cursor += row_width
         if words == RAW_LEGACY_COMPACT_WORDS:
             raw_words_list[RAW_PIXEL_WORDS:RAW_FRAME_WORDS] = payload_words[cursor : cursor + RAW_AUX_WORDS]
         else:
@@ -267,6 +310,7 @@ def parse_raw_cube_frame(packet: bytes) -> ThermalFrame | None:
                 cursor : cursor + RAW_REQUIRED_AUX_WORDS
             ]
         raw_words = tuple(raw_words_list)
+        raw_pixel_mask = tuple(raw_pixel_mask_list)
     raw_values = tuple(_s16_word(value) for value in raw_words[:FRAME_PIXELS])
     return ThermalFrame(
         int(elapsed_ms),
@@ -277,6 +321,7 @@ def parse_raw_cube_frame(packet: bytes) -> ThermalFrame | None:
         int(sequence),
         int(flags),
         tuple(int(value) for value in raw_words),
+        raw_pixel_mask,
         int(status),
         int(control),
     )
@@ -362,11 +407,11 @@ def pop_cube_packets(buffer: bytearray) -> tuple[list[tuple[int, ...]], list[The
             magic, _version, _flags, words, *_rest, payload_len = RAW_HEADER.unpack_from(buffer, 0)
         except struct.error:
             return eeprom_packets, frames
-        if magic not in {RAW_MAGIC, EEPROM_MAGIC} or words not in {RAW_FRAME_WORDS, RAW_COMPACT_WORDS, RAW_LEGACY_COMPACT_WORDS}:
+        if magic not in {RAW_MAGIC, EEPROM_MAGIC} or _raw_compact_geometry(words) is None:
             del buffer[0]
             continue
         packet_size = RAW_HEADER.size + int(payload_len) + 2
-        if payload_len not in {RAW_PAYLOAD_BYTES, RAW_COMPACT_PAYLOAD_BYTES, RAW_LEGACY_COMPACT_PAYLOAD_BYTES} or packet_size > RAW_PACKET_SIZE:
+        if not _raw_payload_len_is_valid(words, payload_len) or packet_size > RAW_PACKET_SIZE:
             del buffer[0]
             continue
         if len(buffer) < packet_size:
@@ -392,6 +437,28 @@ def pop_raw_cube_frames(buffer: bytearray) -> list[ThermalFrame]:
 
     _eeprom_packets, frames = pop_cube_packets(buffer)
     return frames
+
+
+def _active_columns_for_mask(pixel_mask: Sequence[bool]) -> list[int]:
+    return [
+        column
+        for column in range(FRAME_WIDTH)
+        if any(pixel_mask[row * FRAME_WIDTH + column] for row in range(FRAME_HEIGHT))
+    ]
+
+
+def _display_values_for_mask(values: Sequence[float], pixel_mask: Sequence[bool]) -> tuple[tuple[float, ...], int, int]:
+    active_columns = _active_columns_for_mask(pixel_mask)
+    if not active_columns:
+        return tuple(values), FRAME_WIDTH, 0
+    start_col = min(active_columns)
+    end_col = max(active_columns) + 1
+    width = end_col - start_col
+    cropped = []
+    for row in range(FRAME_HEIGHT):
+        offset = row * FRAME_WIDTH
+        cropped.extend(values[offset + start_col : offset + end_col])
+    return tuple(cropped), width, start_col
 
 
 def _parse_int(text: str) -> int | None:
@@ -435,18 +502,18 @@ def render_frame_pixmap(
     minimum = frame.minimum_c if minimum_c is None else float(minimum_c)
     maximum = frame.maximum_c if maximum_c is None else float(maximum_c)
     image = QtGui.QImage(
-        FRAME_WIDTH,
-        FRAME_HEIGHT,
+        frame.width,
+        frame.height,
         QtGui.QImage.Format.Format_RGB32,
     )
-    for y in range(FRAME_HEIGHT):
-        offset = y * FRAME_WIDTH
-        for x in range(FRAME_WIDTH):
+    for y in range(frame.height):
+        offset = y * frame.width
+        for x in range(frame.width):
             image.setPixelColor(x, y, _heat_color(frame.values[offset + x], minimum, maximum))
     pixmap = QtGui.QPixmap.fromImage(image)
     return pixmap.scaled(
-        FRAME_WIDTH * scale,
-        FRAME_HEIGHT * scale,
+        frame.width * scale,
+        frame.height * scale,
         QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
         QtCore.Qt.TransformationMode.FastTransformation,
     )
@@ -581,25 +648,38 @@ class ThermalSerialWorker(QtCore.QObject):
             return frame, previous_values
 
         values = [math.nan] * FRAME_PIXELS if previous_values is None else list(previous_values)
+        pixel_mask = frame.raw_pixel_mask or tuple(True for _ in range(FRAME_PIXELS))
         for index, value in enumerate(subpage_values):
-            if math.isfinite(value):
+            if pixel_mask[index] and math.isfinite(value):
                 values[index] = value
-        if any(not math.isfinite(value) for value in values):
+        active_columns = _active_columns_for_mask(pixel_mask)
+        complete_mask = [
+            (row * FRAME_WIDTH) + column
+            for row in range(FRAME_HEIGHT)
+            for column in active_columns
+        ] or list(range(FRAME_PIXELS))
+        if any(not math.isfinite(values[index]) for index in complete_mask):
             return None, values
-        if min(values) < -100.0 or max(values) > 500.0:
+        active_values = [values[index] for index in complete_mask]
+        if min(active_values) < -100.0 or max(active_values) > 500.0:
             self.status_changed.emit("Skipped Celsius conversion: calibrated pixels are out of range.")
             return frame, previous_values
+        display_values, display_width, roi_start_col = _display_values_for_mask(values, pixel_mask)
         return ThermalFrame(
             frame.elapsed_ms,
             ambient_c,
-            tuple(values),
+            display_values,
             "C",
             frame.raw_read_us,
             frame.sequence,
             frame.flags,
             frame.raw_words,
+            frame.raw_pixel_mask,
             frame.status,
             frame.control,
+            display_width,
+            FRAME_HEIGHT,
+            roi_start_col,
         ), values
 
     def stop(self) -> None:
@@ -943,10 +1023,15 @@ def _downloads_path() -> Path:
 
 
 def _write_frame_text(path: Path, frame: ThermalFrame) -> None:
-    lines = [f"FRAME_BEGIN,{frame.elapsed_ms or 0},{frame.ambient_c or 0:.2f}"]
-    for y in range(FRAME_HEIGHT):
-        offset = y * FRAME_WIDTH
-        row = frame.values[offset : offset + FRAME_WIDTH]
+    lines = [
+        f"FRAME_BEGIN,{frame.elapsed_ms or 0},{frame.ambient_c or 0:.2f}",
+        f"WIDTH,{frame.width}",
+        f"HEIGHT,{frame.height}",
+        f"ROI_START_COL,{frame.roi_start_col}",
+    ]
+    for y in range(frame.height):
+        offset = y * frame.width
+        row = frame.values[offset : offset + frame.width]
         lines.append("ROW," + str(y) + "," + ",".join(f"{value:.2f}" for value in row))
     lines.append("FRAME_END")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

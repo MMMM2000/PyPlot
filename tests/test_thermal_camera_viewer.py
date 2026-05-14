@@ -7,10 +7,11 @@ from experiments.thermal_camera_viewer import (
     FRAME_HEIGHT,
     FRAME_PIXELS,
     FRAME_WIDTH,
+    ROI_START_COL,
+    ROI_WIDTH,
     RAW_FRAME_WORDS,
     RAW_HEADER,
     RAW_COMPACT_WORDS,
-    RAW_COMPACT_PAYLOAD_BYTES,
     RAW_REQUIRED_AUX_END,
     RAW_REQUIRED_AUX_START,
     EEPROM_MAGIC,
@@ -126,8 +127,8 @@ def _raw_cube_packet(*, elapsed_ms: int = 2468, read_us: int = 17520) -> bytes:
     return bytes(body)
 
 
-def _compact_raw_cube_packet(*, subpage: int = 1) -> bytes:
-    values = [index for index in range(RAW_COMPACT_WORDS)]
+def _compact_raw_cube_packet(*, subpage: int = 1, words: int = RAW_COMPACT_WORDS) -> bytes:
+    values = [index for index in range(words)]
     payload = bytearray()
     for value in values:
         payload.extend(int(value).to_bytes(2, "big", signed=False))
@@ -136,13 +137,13 @@ def _compact_raw_cube_packet(*, subpage: int = 1) -> bytes:
             RAW_MAGIC,
             RAW_VERSION,
             0x40 | subpage,
-            RAW_COMPACT_WORDS,
+            words,
             10,
             1234,
             9900,
             subpage,
             0x1000,
-            RAW_COMPACT_PAYLOAD_BYTES,
+            words * 2,
         )
     )
     body.extend(payload)
@@ -198,13 +199,28 @@ def test_parse_compact_raw_cube_frame_maps_interleaved_rows() -> None:
 
     assert frame is not None
     assert frame.raw_words[0] == 0
-    assert frame.raw_words[32] == 0
-    assert frame.raw_words[33] == 1
-    assert frame.raw_words[95] == 0
-    assert frame.raw_words[96] == 32
+    assert frame.raw_words[FRAME_WIDTH + ROI_START_COL] == 0
+    assert frame.raw_words[FRAME_WIDTH + ROI_START_COL + 1] == 1
+    assert frame.raw_words[(3 * FRAME_WIDTH) + ROI_START_COL - 1] == 0
+    assert frame.raw_words[(3 * FRAME_WIDTH) + ROI_START_COL] == ROI_WIDTH
+    assert frame.raw_pixel_mask[FRAME_WIDTH + ROI_START_COL]
+    assert not frame.raw_pixel_mask[FRAME_WIDTH + ROI_START_COL - 1]
     assert frame.raw_words[RAW_REQUIRED_AUX_START] == RAW_COMPACT_WORDS - (RAW_REQUIRED_AUX_END - RAW_REQUIRED_AUX_START + 1)
     assert frame.raw_words[RAW_REQUIRED_AUX_END] == RAW_COMPACT_WORDS - 1
     assert frame.raw_words[RAW_FRAME_WORDS - 1] == 0
+
+
+def test_parse_compact_raw_cube_frame_infers_roi_width_from_word_count() -> None:
+    words = (12 * 24) + (RAW_REQUIRED_AUX_END - RAW_REQUIRED_AUX_START + 1)
+    frame = parse_raw_cube_frame(_compact_raw_cube_packet(subpage=0, words=words))
+
+    assert frame is not None
+    assert frame.raw_pixel_mask[4]
+    assert frame.raw_pixel_mask[27]
+    assert not frame.raw_pixel_mask[3]
+    assert not frame.raw_pixel_mask[28]
+    assert frame.raw_words[4] == 0
+    assert frame.raw_words[27] == 23
 
 
 def test_parse_cube_eeprom_packet_returns_unsigned_words() -> None:

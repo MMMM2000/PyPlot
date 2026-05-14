@@ -16,6 +16,7 @@ Default hardware assumptions:
 - Sensor mode: interleaved mode, 16 Hz refresh, 17-bit ADC resolution
 - I2C timing: 400 kHz Fast Mode (`0x20D01132`)
 - UART baud: `2000000`
+- Raw ROI: centered 16-column crop by default, columns 8 through 23
 
 The stream sends `MLXE` EEPROM packets at boot and after refresh-rate changes
 for host-side calibration, plus compact `MLXR` raw frame-RAM packets for live
@@ -31,13 +32,12 @@ port while streaming:
 - `7` selects 64 Hz
 
 The viewer's rate dropdown sends those commands for Cube raw mode. The firmware
-uses interleaved mode and reads only the current subpage rows plus auxiliary
-registers needed by the host Celsius conversion, then sends compact `MLXR`
-packets with interrupt-driven UART transmit. The refresh command also clears
-the MLX90640 chess-mode bit so the sensor pattern matches the row-subpage read.
-Bench testing with valid 400 kHz I2C calibration showed 16 Hz and 32 Hz are
-clean, while 64 Hz is still overrun limited because the 400 kHz sensor read is
-the remaining ceiling.
+uses interleaved mode and reads only a centered raw-pixel ROI from the current
+subpage rows plus auxiliary registers needed by the host Celsius conversion,
+then sends compact `MLXR` packets with interrupt-driven UART transmit. The
+refresh command also clears the MLX90640 chess-mode bit so the sensor pattern
+matches the row-subpage read. The firmware pulses SCL/SDA as GPIO before I2C
+startup to recover the bus if the MLX90640 was reset mid-transaction.
 
 Measure the stream from the project root after flashing:
 
@@ -45,20 +45,20 @@ Measure the stream from the project root after flashing:
 .\.venv\Scripts\python.exe experiments\firmware\stm32cube_mlx90640_stream\tools\capture_mlxr.py COM10 --baud 2000000 --seconds 5
 ```
 
-Known-good bench result with interleaved subpage reads, minimal auxiliary reads,
-and interrupt-driven UART packets:
+Known-good bench result with interleaved subpage reads, centered 16-column ROI,
+minimal auxiliary reads, and interrupt-driven UART packets:
 
-- 75 packets in 5 seconds at 16 Hz
-- 15.79 packets/s
-- 0 dropped sequence numbers
-- 0 overrun packets
+- 16 Hz setting: 75 packets in 5 seconds, 15.77 packets/s, 0 drops, 0 overruns
+- 32 Hz setting: 150 packets in 5 seconds, 31.46 packets/s, 0 drops, 0 overruns
+- 64 Hz setting: 607 packets in 10 seconds, 62.67 packets/s, 0 drops, 0 overruns
 - subpages alternate evenly
-- subpage row plus required auxiliary read time: about 18.7 ms at 400 kHz I2C
+- subpage ROI plus required auxiliary read time: about 10.9 ms at 400 kHz I2C
+- host Celsius sanity at 64 Hz: 384 finite ROI pixels, ambient about 31.9 C
 
-Experimental faster refresh results at 400 kHz I2C:
-
-- 32 Hz setting: about 31.52 packets/s, 0 overrun packets
-- 64 Hz setting: about 51.30 packets/s, all packets flagged overrun
+For comparison, the previous full-width compact packet read took about 18.7 ms
+and could not keep up with 64 Hz at valid 400 kHz I2C. A wider centered
+24-column ROI reduced read time to about 14.9 ms, but still produced occasional
+64 Hz overrun flags in longer captures.
 
 Experimental 1 MHz I2C builds reached about 62.7 packets/s at the 64 Hz setting
 with 0 overrun packets, but the EEPROM/ambient data was corrupted on the current
@@ -83,7 +83,10 @@ Refresh-rate codes follow the MLX90640 control register (`5=16 Hz`, `6=32 Hz`,
 `3=19 bit`. Known STM32H7 I2C timing values from the STM32 Arduino H7 variant
 are `0x1080091A` for 1 MHz Fast Mode Plus and `0x20D01132` for 400 kHz Fast
 Mode. `MLX_I2C_ANALOG_FILTER` and `MLX_I2C_DIGITAL_FILTER` can be used for
-repeatable signal-integrity experiments.
+repeatable signal-integrity experiments. `MLX90640_ROI_WIDTH` and
+`MLX90640_ROI_START_COL` can be used to rebuild with a different raw-pixel crop;
+the PyPlot viewer infers centered compact ROI widths from the `MLXR` packet
+word count.
 
 Flash with STM32CubeProgrammer:
 

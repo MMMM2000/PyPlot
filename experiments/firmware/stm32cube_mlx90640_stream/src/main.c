@@ -17,6 +17,15 @@
 #define MLX90640_AUX_REQUIRED_WORDS ((MLX90640_AUX_LAST_REQUIRED_WORD - MLX90640_AUX_START_WORD) + 1U)
 #define MLX90640_ROW_WORDS 32U
 #define MLX90640_ROWS 24U
+
+#ifndef MLX90640_ROI_WIDTH
+#define MLX90640_ROI_WIDTH 16U
+#endif
+
+#ifndef MLX90640_ROI_START_COL
+#define MLX90640_ROI_START_COL ((MLX90640_ROW_WORDS - MLX90640_ROI_WIDTH) / 2U)
+#endif
+
 #define MLX90640_READ_CHUNK_WORDS 120U
 #define MLX90640_REFRESH_16_HZ 5U
 #define MLX90640_ADC_17BIT 1U
@@ -56,7 +65,7 @@
 #define RAW_PACKET_VERSION 1U
 #define RAW_HEADER_BYTES 28U
 #define RAW_PAYLOAD_BYTES (MLX90640_FRAME_WORDS * 2U)
-#define RAW_COMPACT_WORDS ((MLX90640_PIXEL_WORDS / 2U) + MLX90640_AUX_REQUIRED_WORDS)
+#define RAW_COMPACT_WORDS (((MLX90640_ROWS / 2U) * MLX90640_ROI_WIDTH) + MLX90640_AUX_REQUIRED_WORDS)
 #define RAW_COMPACT_PAYLOAD_BYTES (RAW_COMPACT_WORDS * 2U)
 #define RAW_PACKET_BYTES (RAW_HEADER_BYTES + RAW_PAYLOAD_BYTES + 2U)
 #define RAW_FLAG_SUBPAGE_1 0x01U
@@ -83,6 +92,7 @@ static bool mlx_set_refresh_rate(uint8_t refresh_rate);
 static HAL_StatusTypeDef mlx_read_interleaved_subpage(uint8_t subpage);
 static bool mlx_read_eeprom(void);
 static bool mlx_read_frame(uint16_t *status, uint16_t *control, uint32_t *read_us);
+static void mlx_i2c_bus_recover(void);
 static void handle_uart_commands(void);
 static void send_raw_packet(uint16_t status, uint16_t control, uint32_t read_us);
 static void send_eeprom_packet(uint32_t read_us);
@@ -102,6 +112,7 @@ int main(void)
     SystemClock_Config();
     dwt_init();
     MX_GPIO_Init();
+    mlx_i2c_bus_recover();
     MX_I2C1_Init();
     MX_USART3_UART_Init();
 
@@ -358,18 +369,23 @@ static bool mlx_configure(void)
     uint16_t device_id = 0;
 
     if (HAL_I2C_IsDeviceReady(&hi2c1, MLX90640_ADDR << 1, 3, 100U) != HAL_OK) {
+        uart_write_text("MLX90640_CUBE_CONFIG_READY_FAIL\r\n");
         return false;
     }
     if (mlx_read_word(MLX90640_DEVICE_ID1, &device_id) != HAL_OK) {
+        uart_write_text("MLX90640_CUBE_CONFIG_ID_READ_FAIL\r\n");
         return false;
     }
     if (device_id == 0x0000U || device_id == 0xFFFFU) {
+        uart_write_text("MLX90640_CUBE_CONFIG_BAD_ID\r\n");
         return false;
     }
     if (!mlx_set_refresh_rate(MLX_REFRESH_RATE & 0x07U)) {
+        uart_write_text("MLX90640_CUBE_CONFIG_SET_REFRESH_FAIL\r\n");
         return false;
     }
     if (mlx_write_word(MLX90640_STATUS_REG, MLX90640_STATUS_CLEAR) != HAL_OK) {
+        uart_write_text("MLX90640_CUBE_CONFIG_STATUS_CLEAR_FAIL\r\n");
         return false;
     }
     return true;
@@ -422,14 +438,47 @@ static bool mlx_read_eeprom(void)
     return true;
 }
 
+static void mlx_i2c_bus_recover(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8 | GPIO_PIN_9, GPIO_PIN_SET);
+    HAL_Delay(2U);
+    for (uint8_t i = 0; i < 9U; ++i) {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
+        for (volatile uint32_t delay = 0; delay < 1200U; ++delay) {
+        }
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);
+        for (volatile uint32_t delay = 0; delay < 1200U; ++delay) {
+        }
+    }
+
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
+    for (volatile uint32_t delay = 0; delay < 1200U; ++delay) {
+    }
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);
+    for (volatile uint32_t delay = 0; delay < 1200U; ++delay) {
+    }
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);
+    HAL_Delay(2U);
+}
+
 static HAL_StatusTypeDef mlx_read_interleaved_subpage(uint8_t subpage)
 {
     for (uint16_t row = subpage; row < MLX90640_ROWS; row = (uint16_t)(row + 2U)) {
         uint16_t row_offset = (uint16_t)(row * MLX90640_ROW_WORDS);
         HAL_StatusTypeDef status = mlx_read_words(
-            (uint16_t)(MLX90640_FRAME_RAM + row_offset),
-            MLX90640_ROW_WORDS,
-            &frame_payload[row_offset * 2U]);
+            (uint16_t)(MLX90640_FRAME_RAM + row_offset + MLX90640_ROI_START_COL),
+            MLX90640_ROI_WIDTH,
+            &frame_payload[(row_offset + MLX90640_ROI_START_COL) * 2U]);
         if (status != HAL_OK) {
             return status;
         }
@@ -536,8 +585,8 @@ static void send_raw_packet(uint16_t status, uint16_t control, uint32_t read_us)
     put_u32(&offset, RAW_COMPACT_PAYLOAD_BYTES);
 
     for (uint16_t row = subpage; row < MLX90640_ROWS; row = (uint16_t)(row + 2U)) {
-        uint16_t row_offset = (uint16_t)(row * MLX90640_ROW_WORDS * 2U);
-        for (uint16_t i = 0; i < MLX90640_ROW_WORDS * 2U; ++i) {
+        uint16_t row_offset = (uint16_t)((row * MLX90640_ROW_WORDS + MLX90640_ROI_START_COL) * 2U);
+        for (uint16_t i = 0; i < MLX90640_ROI_WIDTH * 2U; ++i) {
             packet[offset++] = frame_payload[row_offset + i];
         }
     }
@@ -618,8 +667,11 @@ static uint32_t elapsed_us_since(uint32_t start_cycles)
 
 void Error_Handler(void)
 {
-    __disable_irq();
     while (1) {
+        if (huart3.Instance == USART3) {
+            static const uint8_t error_text[] = "MLX90640_CUBE_ERROR_HANDLER\r\n";
+            (void)HAL_UART_Transmit(&huart3, (uint8_t *)error_text, (uint16_t)(sizeof(error_text) - 1U), 100U);
+        }
         HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);
         for (volatile uint32_t i = 0; i < 2400000U; ++i) {
         }
