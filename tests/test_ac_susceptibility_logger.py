@@ -771,6 +771,80 @@ def test_ac_logger_graph_defaults_are_ac_susceptibility_specific(
         app.processEvents()
 
 
+def test_ac_logger_frequency_plot_uses_log_scatter_and_legend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "graph_frequency_scatter")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        for tile in window._plot_tiles:
+            tile.visible.setChecked(False)
+        tile = window._plot_tiles[0]
+        tile.visible.setChecked(True)
+        window._set_combo_data(tile.x_combo, "frequency_hz")
+        window._set_combo_data(tile.y_left_combo, "rs_ohm")
+        window._set_combo_data(tile.y_right_combo, "ls_h")
+        window._ac_plot_points = [
+            ac_logger.AcPlotPoint(0.0, "Ls-Rs", 10.0, 0.1, 0.0, 1e-5, 14.3),
+            ac_logger.AcPlotPoint(1.0, "Ls-Rs", 100.0, 0.1, 0.0, 2e-5, 14.4),
+            ac_logger.AcPlotPoint(2.0, "Ls-Rs", 1000.0, 0.1, 0.0, 3e-5, 14.5),
+        ]
+
+        window._refresh_ac_plots(force=True)
+
+        axis = window.figure.axes[0]
+        twin = window.figure.axes[1]
+        assert axis.get_xscale() == "log"
+        assert not axis.lines
+        assert not twin.lines
+        assert len(axis.collections) == 1
+        assert len(twin.collections) == 1
+        legend = axis.get_legend()
+        assert legend is not None
+        assert {text.get_text() for text in legend.get_texts()} == {"Rs [Ohm]", "Ls [H]"}
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_amplitude_plot_uses_scatter_without_log_x(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "graph_amplitude_scatter")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        for tile in window._plot_tiles:
+            tile.visible.setChecked(False)
+        tile = window._plot_tiles[0]
+        tile.visible.setChecked(True)
+        window._set_combo_data(tile.x_combo, "amplitude_v")
+        window._set_combo_data(tile.y_left_combo, "rs_ohm")
+        window._ac_plot_points = [
+            ac_logger.AcPlotPoint(0.0, "Ls-Rs", 1000.0, 0.1, 0.0, 1e-5, 14.3),
+            ac_logger.AcPlotPoint(1.0, "Ls-Rs", 1000.0, 1.0, 0.0, 2e-5, 14.4),
+        ]
+
+        window._refresh_ac_plots(force=True)
+
+        axis = window.figure.axes[0]
+        assert axis.get_xscale() == "linear"
+        assert not axis.lines
+        assert len(axis.collections) == 1
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_does_not_auto_detect_psu_during_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     _isolate_ac_qsettings(monkeypatch, "startup_no_auto_detect")

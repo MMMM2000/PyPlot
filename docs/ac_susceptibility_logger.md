@@ -224,6 +224,12 @@ Additional selectable channels include elapsed time, DC current, frequency,
 amplitude, `Rs`, and `Ls`. The plot renderer follows the Qt palette so dark
 mode labels, ticks, and titles remain readable.
 
+When frequency is selected as the X axis, the logger uses a logarithmic scale.
+Frequency and amplitude sweeps are drawn as scatter points instead of connected
+lines, because adjacent points are independent LCR settings rather than a
+continuous time trace. Combined `Rs + Ls` plots show a legend so the left and
+right axis data are easy to identify.
+
 ## Literature Cues
 
 Varga-related AC susceptibility work on shape-memory microwires points toward

@@ -480,6 +480,9 @@ class MainWindow(CurrentAnnealingWindow):
             y_right_channel = self._plot_channel(str(tile.y_right_combo.currentData() or ""))
             if x_channel is None or y_left_channel is None:
                 continue
+            scatter_only = x_channel.key in {"frequency_hz", "amplitude_v"}
+            if x_channel.key == "frequency_hz":
+                axis.set_xscale("log")
             axis.set_xlabel(x_channel.label, fontsize=9, labelpad=4)
             axis.set_ylabel(y_left_channel.label, fontsize=8, labelpad=3)
             axis.set_title(self._plot_title(x_channel, y_left_channel, y_right_channel), fontsize=9, pad=8)
@@ -488,15 +491,32 @@ class MainWindow(CurrentAnnealingWindow):
                 for point in points
             ]
             left_pairs = [(x_value, y_value) for x_value, y_value in left_pairs if x_value is not None and y_value is not None]
+            plot_handles: list[Any] = []
+            plot_labels: list[str] = []
             if left_pairs:
-                axis.plot(
-                    [x_value for x_value, _ in left_pairs],
-                    [y_value for _, y_value in left_pairs],
-                    color=y_left_channel.color,
-                    linewidth=1.7,
-                    marker="o",
-                    markersize=3.2,
-                )
+                x_values = [x_value for x_value, _ in left_pairs]
+                y_values = [y_value for _, y_value in left_pairs]
+                if scatter_only:
+                    artist = axis.scatter(
+                        x_values,
+                        y_values,
+                        color=y_left_channel.color,
+                        s=14,
+                        alpha=0.9,
+                        label=y_left_channel.label,
+                    )
+                else:
+                    (artist,) = axis.plot(
+                        x_values,
+                        y_values,
+                        color=y_left_channel.color,
+                        linewidth=1.7,
+                        marker="o",
+                        markersize=3.2,
+                        label=y_left_channel.label,
+                    )
+                plot_handles.append(artist)
+                plot_labels.append(y_left_channel.label)
             else:
                 axis.text(
                     0.5,
@@ -510,6 +530,8 @@ class MainWindow(CurrentAnnealingWindow):
             if y_right_channel is not None:
                 twin = axis.twinx()
                 self._style_ac_axis(twin, theme)
+                if x_channel.key == "frequency_hz":
+                    twin.set_xscale("log")
                 twin.set_ylabel(y_right_channel.label, fontsize=8, labelpad=3)
                 right_pairs = [
                     (x_channel.getter(point), y_right_channel.getter(point))
@@ -521,14 +543,43 @@ class MainWindow(CurrentAnnealingWindow):
                     if x_value is not None and y_value is not None
                 ]
                 if right_pairs:
-                    twin.plot(
-                        [x_value for x_value, _ in right_pairs],
-                        [y_value for _, y_value in right_pairs],
-                        color=y_right_channel.color,
-                        linewidth=1.5,
-                        marker="s",
-                        markersize=3.0,
-                    )
+                    x_values = [x_value for x_value, _ in right_pairs]
+                    y_values = [y_value for _, y_value in right_pairs]
+                    if scatter_only:
+                        artist = twin.scatter(
+                            x_values,
+                            y_values,
+                            color=y_right_channel.color,
+                            s=14,
+                            marker="s",
+                            alpha=0.9,
+                            label=y_right_channel.label,
+                        )
+                    else:
+                        (artist,) = twin.plot(
+                            x_values,
+                            y_values,
+                            color=y_right_channel.color,
+                            linewidth=1.5,
+                            marker="s",
+                            markersize=3.0,
+                            label=y_right_channel.label,
+                        )
+                    plot_handles.append(artist)
+                    plot_labels.append(y_right_channel.label)
+            if len(plot_handles) >= 2:
+                legend = axis.legend(
+                    plot_handles,
+                    plot_labels,
+                    loc="best",
+                    fontsize=8,
+                    framealpha=0.75,
+                )
+                if legend is not None:
+                    legend.get_frame().set_facecolor(theme["axes_rgb"])
+                    legend.get_frame().set_edgecolor(theme["text_rgb"])
+                    for text in legend.get_texts():
+                        text.set_color(theme["text_rgb"])
         figure.subplots_adjust(left=0.07, right=0.94, top=0.92, bottom=0.10, hspace=0.50, wspace=0.34)
         canvas = getattr(self, "canvas", None)
         if canvas is not None:
