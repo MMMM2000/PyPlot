@@ -172,6 +172,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_diagnostics_enabled = False
         self._ac_diagnostics_path = AC_DIAGNOSTICS_DEFAULT_PATH
         self._ac_lcr_scroll_area: QtWidgets.QScrollArea | None = None
+        self._auto_detect_used_connected_psu = False
         self._ac_plot_points: list[AcPlotPoint] = []
         self._plot_tiles: list[AcPlotTileWidgets] = []
         self.plot_config_dialog: AcPlotConfigDialog | None = None
@@ -1058,6 +1059,18 @@ class MainWindow(CurrentAnnealingWindow):
         self._sync_ac_psu_from_shared_controls()
 
     def auto_detect_power_supply(self) -> list[sweep.PowerSupplyCandidate]:
+        self._auto_detect_used_connected_psu = False
+        backend = self._selected_ac_psu_backend()
+        resource = self._selected_ac_psu_resource()
+        if bool(getattr(self, "is_connected", False)) and resource and backend in sweep.POWER_SUPPLY_PROFILES:
+            self._auto_detect_used_connected_psu = True
+            self._sync_ac_psu_from_shared_controls()
+            profile = sweep.POWER_SUPPLY_PROFILES[backend]
+            self.label_lcr_status.setText(
+                f"Using connected shared {profile['label']} on {resource}; skipped ID probe because the port is already open."
+            )
+            self._store_lcr_settings()
+            return []
         candidates = sweep.detect_power_supply_candidates()
         if not candidates:
             self._sync_ac_psu_from_shared_controls()
@@ -1093,7 +1106,12 @@ class MainWindow(CurrentAnnealingWindow):
         if not candidates:
             backend = self._selected_ac_psu_backend()
             resource = self._selected_ac_psu_resource()
-            if resource and backend in sweep.POWER_SUPPLY_PROFILES:
+            if bool(getattr(self, "_auto_detect_used_connected_psu", False)) and resource and backend in sweep.POWER_SUPPLY_PROFILES:
+                self.label_lcr_status.setText(
+                    f"Using connected shared {sweep.POWER_SUPPLY_PROFILES[backend]['label']} on {resource}; "
+                    "skipped ID probe because the port is already open."
+                )
+            elif resource and backend in sweep.POWER_SUPPLY_PROFILES:
                 self._sync_ac_psu_from_shared_controls()
                 self.label_lcr_status.setText(
                     "Auto-detect could not read a PSU ID, but kept the manually selected "
@@ -1191,6 +1209,7 @@ class MainWindow(CurrentAnnealingWindow):
                 output_path=output_path,
                 progress=self._handle_ac_sweep_progress,
                 stop_requested=lambda: self._ac_sweep_stop_requested,
+                sleep=self._ac_sweep_sleep,
             )
         except Exception as exc:
             self._lcr_last_error = str(exc)
@@ -1212,6 +1231,24 @@ class MainWindow(CurrentAnnealingWindow):
             self._ac_sweep_stop_requested = True
             self.label_lcr_status.setText("Stopping after the current LCR read...")
             self._set_ac_current_task("Current task: stopping after current read")
+            QtWidgets.QApplication.processEvents()
+
+    def _ac_sweep_sleep(self, seconds: float) -> None:
+        if not self._sleep_with_stop_processing(seconds):
+            raise RuntimeError("AC sweep stopped by user")
+
+    def _sleep_with_stop_processing(self, seconds: float, *, quantum_s: float = 0.1) -> bool:
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        while time.monotonic() < deadline:
+            QtWidgets.QApplication.processEvents()
+            if self._stop_requested():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(max(0.01, float(quantum_s)), remaining))
+        QtWidgets.QApplication.processEvents()
+        return not self._stop_requested()
 
     def handle_measure_lcr_baseline_clicked(self) -> None:
         if self._ac_sweep_running:
@@ -1238,13 +1275,16 @@ class MainWindow(CurrentAnnealingWindow):
             self.label_lcr_status.setText(
                 f"Measuring baseline: {len(plan)} settings x {repeats} repeats"
             )
-            rows = self._collect_baseline_rows(
-                plan,
-                repeats=repeats,
-                settle_s=max(0.0, float(self.spinBox_ac_dwell.value())),
-            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8", newline="") as fh:
+                self._write_baseline_header(fh, plan)
+                rows = self._collect_baseline_rows(
+                    plan,
+                    repeats=repeats,
+                    settle_s=max(0.0, float(self.spinBox_ac_dwell.value())),
+                    row_callback=lambda row: self._write_baseline_row(fh, row),
+                )
             stopped = self._ac_sweep_stop_requested
-            self._write_baseline_file(path, plan, rows)
         except Exception as exc:
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"Baseline failed: {exc}")
@@ -1767,6 +1807,7 @@ class MainWindow(CurrentAnnealingWindow):
         *,
         repeats: int,
         settle_s: float = 0.0,
+        row_callback: Callable[[list[str]], None] | None = None,
     ) -> list[list[str]]:
         meter = self.lcr_meter
         if meter is None or not meter.is_open:
@@ -1779,8 +1820,8 @@ class MainWindow(CurrentAnnealingWindow):
                 break
             meter.configure(setting)
             settle = max(0.0, float(settle_s))
-            if settle:
-                time.sleep(settle)
+            if settle and not self._sleep_with_stop_processing(settle):
+                break
             self._lcr_plan_index = setting_index - 1
             for repeat_index in range(1, repeat_count + 1):
                 if self._stop_requested():
@@ -1793,14 +1834,15 @@ class MainWindow(CurrentAnnealingWindow):
                 )
                 reading = self._fetch_baseline_reading()
                 self._lcr_last_reading = reading
-                rows.append(
-                    self._format_baseline_row(
-                        setting_index=setting_index,
-                        repeat_index=repeat_index,
-                        setting=setting,
-                        reading=reading,
-                    )
+                row = self._format_baseline_row(
+                    setting_index=setting_index,
+                    repeat_index=repeat_index,
+                    setting=setting,
+                    reading=reading,
                 )
+                rows.append(row)
+                if row_callback is not None:
+                    row_callback(row)
                 self._advance_ac_progress("Empty-coil baseline")
                 self._append_ac_plot_point(
                     self._plot_point_from_baseline_reading(
@@ -1857,6 +1899,20 @@ class MainWindow(CurrentAnnealingWindow):
         return CurrentAnnealingWindow._format_sample_value(value)
 
     @staticmethod
+    def _write_baseline_header(fh: Any, plan: Sequence[Lcr6000Settings]) -> None:
+        fh.write("# AC susceptibility baseline generated from LCR-6200 settings\n")
+        for index, setting in enumerate(plan, start=1):
+            commands = " ".join(command.strip() for command in commands_for_settings(setting))
+            fh.write(f"# AC setting {index}: {commands}\n")
+        fh.write(BASELINE_HEADER_LINE + "\n")
+        fh.flush()
+
+    @staticmethod
+    def _write_baseline_row(fh: Any, row: Sequence[str]) -> None:
+        fh.write("\t".join(row) + "\n")
+        fh.flush()
+
+    @staticmethod
     def _write_baseline_file(
         path: str | Path,
         plan: Sequence[Lcr6000Settings],
@@ -1865,13 +1921,9 @@ class MainWindow(CurrentAnnealingWindow):
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("w", encoding="utf-8", newline="") as fh:
-            fh.write("# AC susceptibility baseline generated from LCR-6200 settings\n")
-            for index, setting in enumerate(plan, start=1):
-                commands = " ".join(command.strip() for command in commands_for_settings(setting))
-                fh.write(f"# AC setting {index}: {commands}\n")
-            fh.write(BASELINE_HEADER_LINE + "\n")
+            MainWindow._write_baseline_header(fh, plan)
             for row in rows:
-                fh.write("\t".join(row) + "\n")
+                MainWindow._write_baseline_row(fh, row)
 
     def _ensure_log_header(self, path: str) -> None:  # type: ignore[override]
         try:

@@ -54,7 +54,7 @@ SUPPORTED_FUNCTIONS = (
 )
 
 SUPPORTED_MONITORS = (
-    "off",
+    "OFF",
     "Z",
     "D",
     "Q",

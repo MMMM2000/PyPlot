@@ -64,6 +64,23 @@ def test_build_settings_plan_crosses_frequency_and_level() -> None:
     assert all(item.monitor2 == "IAC" for item in plan)
 
 
+def test_lcr_monitor_off_uses_uppercase_scpi_token() -> None:
+    setting = lcr6000.Lcr6000Settings(
+        frequency_hz=1000.0,
+        level_value=0.1,
+        level_mode="voltage",
+        function="Ls-Rs",
+        monitor1=lcr6000.normalize_monitor("off"),
+        monitor2=lcr6000.normalize_monitor("OFF"),
+        aperture="FAST",
+    )
+
+    assert setting.monitor1 == "OFF"
+    assert setting.monitor2 == "OFF"
+    assert "FUNC:MON1 OFF\n" in lcr6000.commands_for_settings(setting)
+    assert "FUNC:MON2 OFF\n" in lcr6000.commands_for_settings(setting)
+
+
 def test_lcr6200_limits_accept_manual_frequency_and_voltage_ranges() -> None:
     lcr6000.validate_settings(
         lcr6000.Lcr6000Settings(
@@ -709,6 +726,36 @@ def test_ac_logger_auto_setup_keeps_manual_psu_when_id_probe_fails(monkeypatch: 
         app.processEvents()
 
 
+def test_ac_logger_auto_setup_trusts_connected_shared_psu_without_id_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "auto_setup_connected_shared_psu")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [("COM6 - USB", "COM6")])
+    calls = {"detect": 0}
+
+    def _detect(*_args: object, **_kwargs: object) -> list[sweep.PowerSupplyCandidate]:
+        calls["detect"] += 1
+        return []
+
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", _detect)
+
+    window = ac_logger.MainWindow()
+    try:
+        window.ui.comboBox_port.clear()
+        window.ui.comboBox_port.addItem("COM6 - USB", "COM6")
+        window._set_combo_data(window.ui.comboBox_supply, "owon_spe6102")
+        window.is_connected = True
+        window.handle_auto_setup_clicked()
+        assert calls["detect"] == 0
+        assert window._selected_ac_psu_backend() == "owon_spe6102"
+        assert "Using connected shared OWON SPE6102" in window.label_lcr_status.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_uses_shared_reading_count_and_sticky_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1004,6 +1051,45 @@ def test_ac_logger_collects_baseline_rows_without_power_supply() -> None:
     assert window._ac_plot_points[-1].frequency_hz == 1000.0
 
 
+def test_ac_logger_collects_baseline_rows_with_incremental_callback() -> None:
+    class FakeMeter:
+        is_open = True
+
+        def __init__(self) -> None:
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-05-04T12:00:0{self.fetch_count}.000+00:00",
+                raw=f"+{self.fetch_count}.0,+0.0,+0.0,+0.0,OK",
+                primary=float(self.fetch_count),
+                secondary=0.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    written: list[list[str]] = []
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window.lcr_meter = FakeMeter()
+    window._lcr_last_error = ""
+    window._ac_plot_points = []
+    window._refresh_ac_plots = lambda: None  # type: ignore[method-assign]
+
+    rows = window._collect_baseline_rows(
+        [lcr6000.Lcr6000Settings(frequency_hz=100.0, level_value=0.1)],
+        repeats=3,
+        row_callback=written.append,
+    )
+
+    assert rows == written
+    assert [row[2] for row in written] == ["1", "2", "3"]
+
+
 def test_ac_logger_baseline_collection_honors_stop_request() -> None:
     class FakeMeter:
         is_open = True
@@ -1042,6 +1128,28 @@ def test_ac_logger_baseline_collection_honors_stop_request() -> None:
 
     assert len(rows) == 1
     assert window._ac_sweep_stop_requested is True
+
+
+def test_ac_logger_settle_sleep_processes_stop_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window._ac_sweep_stop_requested = False
+    calls = {"events": 0, "sleeps": 0}
+
+    def _process_events(*_args: object) -> None:
+        calls["events"] += 1
+        window._ac_sweep_stop_requested = True
+
+    def _sleep(_seconds: float) -> None:
+        calls["sleeps"] += 1
+
+    monkeypatch.setattr(ac_logger.QtWidgets.QApplication, "processEvents", _process_events)
+    monkeypatch.setattr(ac_logger.time, "sleep", _sleep)
+
+    assert window._sleep_with_stop_processing(2.0, quantum_s=0.25) is False
+    assert calls["events"] == 1
+    assert calls["sleeps"] == 0
+    app.processEvents()
 
 
 def test_ac_logger_baseline_retries_empty_lcr_response() -> None:

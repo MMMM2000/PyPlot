@@ -101,7 +101,9 @@ Point acquisition controls are named for the AC experiment:
   plots as 0 mA points so the dashboard visibly updates before a microwire
   sweep is started.
 - The Stop button stops after the current LCR read. Empty-coil baseline stops
-  save a partial TSV with the rows already collected.
+  save a partial TSV with the rows already collected. Baseline rows are flushed
+  as they are measured, matching the microwire sweep behavior, so a PC or
+  instrument interruption still leaves the completed rows on disk.
 - The Developer menu can mirror AC diagnostics to a JSONL file. Those records
   include task changes and plot refresh timing, which is useful when checking
   whether the four-panel Matplotlib dashboard is slowing down the PC.
@@ -109,14 +111,16 @@ Point acquisition controls are named for the AC experiment:
 Every reading is saved as its own row. Averaging or baseline normalization can
 be done later from the raw TSV files.
 
-Suggested first-pass settings for the 1 cm, roughly 1 mm coil around a
+Suggested precision-baseline settings for the 1 cm, roughly 1 mm coil around a
 Ni50Fe27Ga23 microwire:
 
 - LCR model: `Ls-Rs`
 - Optional diagnostic model: `Lp-Rp`
 - Monitor 1: `Z`
-- Frequencies: `100, 1k, 10k, 100k`
-- Voltage levels: `0.1, 0.3, 1.0`
+- Frequencies: the full practical scan list, `10, 20, 50, 100, 200, 500, 1k,
+  2k, 5k, 10k, 20k, 50k, 100k, 200k Hz`
+- Voltage levels: all front-panel voltage presets, `0.01, 0.1, 0.3, 0.5, 1.0,
+  1.5, 2.0 V`
 - Aperture: `FAST` for searching, `MED` or `SLOW` after the best region is known
 - Current loop: start conservatively, for example `20 mA -> 80 mA -> 20 mA`
 
@@ -142,7 +146,7 @@ The official LCR-6000 manual gives these ranges for the lab LCR-6200:
 
 The UI includes one-click preset selectors:
 
-- **Default subset**: `10, 20, 100, 1k, 2k, 10k, 100k, 200k Hz` and all voltage
+- **Default full scan**: the full practical frequency scan and all voltage
   presets.
 - **All practical frequencies**: `10, 20, 50, 100, 200, 500, 1k, 2k, 5k, 10k,
   20k, 50k, 100k, 200k Hz`.
@@ -165,6 +169,11 @@ LCR primary/secondary/monitors/status/raw, PSU backend/resource/status/error
 The writer flushes every row so a long unattended run still leaves partial data
 if the PC, meter, or supply stops responding.
 
+The LCR `comparator/status` field is the meter's bin/comparator result. Empty
+coil runs can legitimately show values such as `OUT,AUX-NG,NG` while still
+returning valid `Ls` and `Rs` readings; this is not treated as a communication
+failure unless the raw LCR reply is empty or cannot be parsed.
+
 ## Power Supply Backends
 
 The AC sweep can use either the existing HMP4030-style SCPI path or an OWON
@@ -180,7 +189,9 @@ Use **Auto-detect instruments** to refresh LCR ports, scan serial ports with the
 HMP4030 or OWON SPE6102 backend automatically. The scan does not enable output
 or change current. If no supported PSU responds, the status text reports which
 ports were tried and leaves the shared top PSU controls available for manual
-selection.
+selection. If the shared top PSU connection is already open, auto-detect trusts
+that connected selection instead of trying to open the same COM port a second
+time.
 
 The logger no longer runs PSU auto-detection during normal launch. This avoids
 waiting on serial ports that do not answer `*IDN?`; probing only happens when
