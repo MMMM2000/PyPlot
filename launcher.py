@@ -880,6 +880,14 @@ def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
 
 
 _RVST_CSV_HEADER = ("iso_time", "t_elapsed_s", "sp_c", "pv_c", "resistance_ohm")
+_MINI_DMA_REQUIRED_COLUMNS = {
+    "elapsed_s",
+    "automation_phase",
+    "automation_target_value",
+    "plateau_index",
+    "strain_pct",
+    "resistance_ohm",
+}
 
 
 def _parse_microwire_word_sample(sample: object) -> tuple[str | None, str | None]:
@@ -918,6 +926,17 @@ def _looks_like_rvst_csv(path: Path) -> bool:
     return columns[: len(_RVST_CSV_HEADER)] == _RVST_CSV_HEADER
 
 
+def _looks_like_mini_dma_measurement(path: Path) -> bool:
+    if path.name.casefold() != "measurement.csv":
+        return False
+    try:
+        header = path.read_text(encoding="utf-8-sig", errors="ignore").splitlines()[0]
+    except (OSError, IndexError):
+        return False
+    columns = {column.strip().casefold() for column in header.split(",")}
+    return _MINI_DMA_REQUIRED_COLUMNS.issubset(columns)
+
+
 def _infer_rvst_word_sample(path: Path, sample_override: object) -> tuple[str, str]:
     composition, microwire = _parse_microwire_word_sample(sample_override)
     if composition and microwire:
@@ -931,6 +950,18 @@ def _infer_rvst_word_sample(path: Path, sample_override: object) -> tuple[str, s
     if composition:
         return composition, microwire or ""
     return path.stem, ""
+
+
+def _infer_mini_dma_word_sample(path: Path) -> tuple[str, str]:
+    container = path.parent if path.name.casefold() == "measurement.csv" else path
+    text = container.name.strip()
+    tokens = [token for token in re.split(r"[_\s]+", text) if token]
+    if len(tokens) >= 3 and tokens[1].isdigit():
+        piece_match = re.match(r"(?P<piece>\d+[A-Za-z0-9]*)", tokens[2])
+        if piece_match:
+            return tokens[0], f"{tokens[1]}/{piece_match.group('piece')}"
+    composition, microwire = _parse_microwire_word_sample(text.replace("_", "/"))
+    return composition or text, microwire or ""
 
 
 def _format_numeric_range(values: object) -> str:
@@ -1421,6 +1452,7 @@ def _load_project_word_report_frame(
         MICROSCOPE_IMAGE_COLUMNS,
         DMA_ISOSTRESS_ORIGIN_COLUMN,
         FMR_ORIGIN_COLUMN,
+        MINI_DMA_COLUMN,
         MINI_DMA_ORIGIN_COLUMN,
         RVT_FILE_COLUMN,
         RVT_GRAPH_COLUMN,
@@ -1582,6 +1614,55 @@ def _load_project_word_report_frame(
             frame[column] = pd.Series([None] * len(frame), dtype=object)
         else:
             frame[column] = frame[column].astype(object)
+
+    mini_dma_paths: list[Path] = []
+    seen_mini_dma_paths: set[Path] = set()
+    for root in rvt_search_roots:
+        for mini_root_name in ("mini DMA", "Mini DMA", "mini_dma"):
+            mini_root = root / mini_root_name
+            if not mini_root.exists():
+                continue
+            for path in mini_root.rglob("measurement.csv"):
+                try:
+                    resolved = path.resolve()
+                except OSError:
+                    resolved = path
+                if resolved in seen_mini_dma_paths or not path.is_file():
+                    continue
+                if not _looks_like_mini_dma_measurement(path):
+                    continue
+                seen_mini_dma_paths.add(resolved)
+                mini_dma_paths.append(path)
+
+    if mini_dma_paths:
+        source_column = "_word_mini_dma_sources"
+        if source_column not in frame.columns:
+            frame[source_column] = pd.Series([None] * len(frame), dtype=object)
+        if MINI_DMA_COLUMN not in frame.columns:
+            frame[MINI_DMA_COLUMN] = pd.Series([None] * len(frame), dtype=object)
+        for index, row in frame.iterrows():
+            composition = row.get("Composition")
+            microwire = row.get("Microwire")
+            matching_mini_dma = []
+            for path in mini_dma_paths:
+                inferred_composition, inferred_microwire = _infer_mini_dma_word_sample(path)
+                if (
+                    _normalise_microwire_word_part(inferred_composition)
+                    == _normalise_microwire_word_part(composition)
+                    and _normalise_microwire_word_key(inferred_microwire)
+                    == _normalise_microwire_word_key(microwire)
+                ):
+                    matching_mini_dma.append(path.parent)
+            if matching_mini_dma:
+                values = [str(path) for path in dict.fromkeys(matching_mini_dma)]
+                frame.at[index, source_column] = _word_project_merge_value(
+                    row.get(source_column),
+                    values,
+                )
+                frame.at[index, MINI_DMA_COLUMN] = _word_project_merge_value(
+                    row.get(MINI_DMA_COLUMN),
+                    [path.name for path in dict.fromkeys(matching_mini_dma)],
+                )
 
     if include_origin:
         origin_dir = output_dir / "_origin_objects"

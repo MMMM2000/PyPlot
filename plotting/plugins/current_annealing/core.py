@@ -718,16 +718,22 @@ def _apply_origin_readability(layer: Any, graph: Any | None) -> None:
             pass
 
 
-def _style_origin_report_layout(layer: Any, *, outside_legend: bool = True) -> None:
+def _style_origin_report_layout(layer: Any, *, outside_legend: bool = False) -> None:
     """Reserve page space for native Origin labels and place the legend predictably."""
     if layer is None:
         return
     lt_exec = getattr(layer, "lt_exec", None)
     if not callable(lt_exec):
         return
-    commands = [
+    layer_box = (
         "layer -u 1; layer 50 46 26 30; "
-        "layer.top=30; layer.left=26; layer.width=50; layer.height=46;",
+        "layer.top=30; layer.left=26; layer.width=50; layer.height=46;"
+        if outside_legend
+        else "layer -u 1; layer 58 46 23 30; "
+        "layer.top=30; layer.left=23; layer.width=58; layer.height=46;"
+    )
+    commands = [
+        layer_box,
         "layer.x.ticks=10;",
         "layer.x2.ticks=10;",
         "layer.x.label.fsize=10;",

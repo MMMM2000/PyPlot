@@ -278,7 +278,11 @@ class MiniDmaPlugin(PyPlotPlugin):
                 ),
                 "power_axis_current_mA": power_axis_current_mA,
                 "power_axis_resistance_ohm": power_axis_resistance_ohm,
-                "origin_legend_position": "outside_right",
+                "origin_legend_position": (
+                    "inside_upper_right"
+                    if plot_kind == "strain_current"
+                    else "inside_upper_left"
+                ),
                 "origin_layer_width": 54.0,
             },
         )

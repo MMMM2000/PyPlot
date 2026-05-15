@@ -6052,6 +6052,29 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     f"legend.x=layer.x.to + legend.dx / 2 + {x_margin:.12g};",
                     "legend.y=layer.y.to - legend.dy / 2;",
                 )
+            elif legend_position in {
+                "inside_upper_right",
+                "inside_lower_right",
+                "inside_lower_left",
+                "inside_upper_left",
+            }:
+                horizontal = "right" if legend_position.endswith("_right") else "left"
+                vertical = "lower" if "_lower_" in legend_position else "upper"
+                x_expr = (
+                    "layer.x.to - legend.dx * 0.85"
+                    if horizontal == "right"
+                    else "layer.x.from + legend.dx / 2"
+                )
+                y_expr = (
+                    "layer.y.from + legend.dy / 2"
+                    if vertical == "lower"
+                    else "layer.y.to - legend.dy / 2"
+                )
+                commands = (
+                    "legend.fsize=10;",
+                    f"legend.x={x_expr};",
+                    f"legend.y={y_expr};",
+                )
             else:
                 commands = (
                     "legend.fsize=10;",

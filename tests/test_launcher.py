@@ -318,6 +318,18 @@ def test_microwire_word_report_project_merges_section_rows_and_rvst(
         ),
         encoding="utf-8",
     )
+    mini_dma_path = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 test_run32" / "measurement.csv"
+    mini_dma_path.parent.mkdir(parents=True)
+    mini_dma_path.write_text(
+        "\n".join(
+            [
+                "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,resistance_ohm,current_measured_mA",
+                "0.1,current,50,1,0.0,100.0,1.0",
+                "0.2,current,50,1,0.1,101.0,2.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
     project_path.write_text(
         json.dumps(
             {
@@ -399,6 +411,7 @@ def test_microwire_word_report_project_merges_section_rows_and_rvst(
     assert row["R vs T graphs"] == [rvt_path.name]
     assert row["R vs T points"] == 2
     assert row["R vs T temperature range (deg C)"] == "-40.5 to -39"
+    assert row["Mini DMA graphs"] == mini_dma_path.parent.name
 
 
 def test_microwire_word_report_project_exports_rvst_through_pyplot(
