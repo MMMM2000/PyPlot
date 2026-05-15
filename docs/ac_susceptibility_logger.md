@@ -180,6 +180,15 @@ the configured time window. A complete file with no empty replies means no
 requested fetch failed; it does not mean every internal LCR conversion was
 captured if the meter converted faster than the serial polling loop.
 
+For unattended runs, the logger also watches for the abnormal high-frequency
+FAST-mode state observed on the bench, where the LCR meter keeps returning
+valid readings but only at a few readings per second instead of the expected
+FAST cadence. For settings at `1 kHz` and above, if the early read cadence is
+below the retry threshold, the logger records a warning, reconfigures the same
+LCR setting, discards a short recovery window, and retries automatically. If the
+slow state persists after the bounded retries, the file keeps the warning and
+the run continues instead of waiting for operator confirmation.
+
 The LCR `comparator/status` field is the meter's bin/comparator result. Empty
 coil runs can legitimately show values such as `OUT,AUX-NG,NG` while still
 returning valid `Ls` and `Rs` readings; this is not treated as a communication

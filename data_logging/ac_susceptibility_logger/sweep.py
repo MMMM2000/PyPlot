@@ -96,6 +96,12 @@ class AcSweepConfig:
     point_duration_s: float = 10.0
     repeats: int = 1
     lcr_read_attempts: int = 3
+    lcr_slow_retry_enabled: bool = True
+    lcr_slow_retry_min_frequency_hz: float = 1000.0
+    lcr_slow_retry_min_rate_hz: float = 20.0
+    lcr_slow_retry_check_s: float = 3.0
+    lcr_slow_retry_discard_s: float = 3.0
+    lcr_slow_retry_max_attempts: int = 2
 
 
 @dataclass(frozen=True)
@@ -252,7 +258,10 @@ class AcSweepTsvWriter:
             f"voltage_limit_v={self.config.voltage_limit_v:g} "
             f"dwell_s={self.config.dwell_s:g} "
             f"point_duration_s={self.config.point_duration_s:g} "
-            f"repeats={max(1, int(self.config.repeats))}"
+            f"repeats={max(1, int(self.config.repeats))} "
+            f"lcr_slow_retry_enabled={self.config.lcr_slow_retry_enabled} "
+            f"lcr_slow_retry_min_frequency_hz={self.config.lcr_slow_retry_min_frequency_hz:g} "
+            f"lcr_slow_retry_min_rate_hz={self.config.lcr_slow_retry_min_rate_hz:g}"
         )
         for index, setting in enumerate(self.config.lcr_settings, start=1):
             self._write(
@@ -339,37 +348,18 @@ def run_ac_sweep(
                 dwell = max(0.0, float(config.dwell_s))
                 if dwell:
                     sleep(dwell)
-                repeat_index = 0
-                point_started = time.monotonic()
-                point_duration = max(0.0, float(config.point_duration_s))
-                fallback_repeats = max(1, int(config.repeats))
-                while True:
-                    if stop_requested is not None and stop_requested():
-                        raise RuntimeError("AC sweep stopped by user")
-                    repeat_index += 1
-                    reading = _fetch_lcr_reading(lcr, attempts=config.lcr_read_attempts)
-                    psu_measurement = psu.measure()
-                    row = AcSweepRow(
-                        timestamp_utc=_timestamp_utc(),
-                        elapsed_s=time.monotonic() - started,
-                        setting_index=setting_index,
-                        total_settings=len(config.lcr_settings),
-                        setting=setting,
-                        current_point=current_point,
-                        repeat_index=repeat_index,
-                        lcr_reading=reading,
-                        psu_measurement=psu_measurement,
-                        psu_backend=psu.backend_id,
-                        psu_resource=psu.resource,
-                    )
-                    writer.write_row(row)
-                    if progress is not None:
-                        progress(row)
-                    if point_duration > 0.0:
-                        if time.monotonic() - point_started >= point_duration:
-                            break
-                    elif repeat_index >= fallback_repeats:
-                        break
+                _measure_sweep_point_with_retries(
+                    config=config,
+                    lcr=lcr,
+                    psu=psu,
+                    writer=writer,
+                    started=started,
+                    setting_index=setting_index,
+                    setting=setting,
+                    current_point=current_point,
+                    progress=progress,
+                    stop_requested=stop_requested,
+                )
     finally:
         active_error = sys.exc_info()[1]
         shutdown_error: Exception | None = None
@@ -398,6 +388,208 @@ def _fetch_lcr_reading(lcr: LcrDevice, *, attempts: int) -> Lcr6000Reading:
     if last_empty:
         raise RuntimeError("LCR returned an empty response during AC sweep")
     raise RuntimeError("LCR did not return a measurement")
+
+
+def _measure_sweep_point_with_retries(
+    *,
+    config: AcSweepConfig,
+    lcr: LcrDevice,
+    psu: CurrentSource,
+    writer: AcSweepTsvWriter,
+    started: float,
+    setting_index: int,
+    setting: Lcr6000Settings,
+    current_point: CurrentLoopPoint,
+    progress: Callable[[AcSweepRow], None] | None,
+    stop_requested: Callable[[], bool] | None,
+) -> None:
+    point_duration = max(0.0, float(config.point_duration_s))
+    fallback_repeats = max(1, int(config.repeats))
+    max_attempts = max(1, int(config.lcr_slow_retry_max_attempts) + 1)
+    attempt = 1
+    while True:
+        try:
+            _measure_sweep_point_once(
+                config=config,
+                lcr=lcr,
+                psu=psu,
+                writer=writer,
+                started=started,
+                setting_index=setting_index,
+                setting=setting,
+                current_point=current_point,
+                progress=progress,
+                stop_requested=stop_requested,
+                point_duration=point_duration,
+                fallback_repeats=fallback_repeats,
+                attempt=attempt,
+            )
+            return
+        except SlowLcrCadenceError as exc:
+            if stop_requested is not None and stop_requested():
+                raise RuntimeError("AC sweep stopped by user") from exc
+            if attempt >= max_attempts:
+                _write_sweep_warning_row(
+                    config=config,
+                    psu=psu,
+                    writer=writer,
+                    started=started,
+                    setting_index=setting_index,
+                    setting=setting,
+                    current_point=current_point,
+                    message=f"slow LCR cadence persisted after {attempt} attempts: {exc}",
+                    progress=progress,
+                )
+                return
+            _write_sweep_warning_row(
+                config=config,
+                psu=psu,
+                writer=writer,
+                started=started,
+                setting_index=setting_index,
+                setting=setting,
+                current_point=current_point,
+                message=f"slow LCR cadence attempt {attempt}: {exc}; reconfiguring and retrying",
+                progress=progress,
+            )
+            lcr.configure(setting)
+            _discard_lcr_reads(
+                lcr,
+                duration_s=max(0.0, float(config.lcr_slow_retry_discard_s)),
+                attempts=config.lcr_read_attempts,
+                stop_requested=stop_requested,
+            )
+            attempt += 1
+
+
+def _measure_sweep_point_once(
+    *,
+    config: AcSweepConfig,
+    lcr: LcrDevice,
+    psu: CurrentSource,
+    writer: AcSweepTsvWriter,
+    started: float,
+    setting_index: int,
+    setting: Lcr6000Settings,
+    current_point: CurrentLoopPoint,
+    progress: Callable[[AcSweepRow], None] | None,
+    stop_requested: Callable[[], bool] | None,
+    point_duration: float,
+    fallback_repeats: int,
+    attempt: int,
+) -> None:
+    repeat_index = 0
+    point_started = time.monotonic()
+    first_read_monotonic: float | None = None
+    cadence_checked = False
+    while True:
+        if stop_requested is not None and stop_requested():
+            raise RuntimeError("AC sweep stopped by user")
+        repeat_index += 1
+        reading = _fetch_lcr_reading(lcr, attempts=config.lcr_read_attempts)
+        read_monotonic = time.monotonic()
+        if first_read_monotonic is None:
+            first_read_monotonic = read_monotonic
+        psu_measurement = psu.measure()
+        row = AcSweepRow(
+            timestamp_utc=_timestamp_utc(),
+            elapsed_s=read_monotonic - started,
+            setting_index=setting_index,
+            total_settings=len(config.lcr_settings),
+            setting=setting,
+            current_point=current_point,
+            repeat_index=repeat_index,
+            lcr_reading=reading,
+            psu_measurement=psu_measurement,
+            psu_backend=psu.backend_id,
+            psu_resource=psu.resource,
+            error=f"retry_attempt={attempt}" if attempt > 1 else "",
+        )
+        writer.write_row(row)
+        if progress is not None:
+            progress(row)
+        if _should_check_lcr_cadence(config, setting) and not cadence_checked:
+            check_elapsed = read_monotonic - point_started
+            if check_elapsed >= max(0.1, float(config.lcr_slow_retry_check_s)):
+                cadence_checked = True
+                active_elapsed = max(1e-9, read_monotonic - first_read_monotonic)
+                completed_intervals = max(1, repeat_index - 1)
+                rate_hz = completed_intervals / active_elapsed
+                if rate_hz < float(config.lcr_slow_retry_min_rate_hz):
+                    raise SlowLcrCadenceError(rate_hz=rate_hz, reads=repeat_index)
+        if point_duration > 0.0:
+            if read_monotonic - point_started >= point_duration:
+                break
+        elif repeat_index >= fallback_repeats:
+            break
+
+
+def _should_check_lcr_cadence(config: AcSweepConfig, setting: Lcr6000Settings) -> bool:
+    if not bool(config.lcr_slow_retry_enabled):
+        return False
+    if setting.aperture.strip().upper() != "FAST":
+        return False
+    return float(setting.frequency_hz) >= float(config.lcr_slow_retry_min_frequency_hz)
+
+
+class SlowLcrCadenceError(RuntimeError):
+    def __init__(self, *, rate_hz: float, reads: int) -> None:
+        super().__init__(f"{rate_hz:.3g} Hz from {reads} reads")
+        self.rate_hz = rate_hz
+        self.reads = reads
+
+
+def _discard_lcr_reads(
+    lcr: LcrDevice,
+    *,
+    duration_s: float,
+    attempts: int,
+    stop_requested: Callable[[], bool] | None,
+) -> None:
+    deadline = time.monotonic() + max(0.0, float(duration_s))
+    while time.monotonic() < deadline:
+        if stop_requested is not None and stop_requested():
+            raise RuntimeError("AC sweep stopped by user")
+        _fetch_lcr_reading(lcr, attempts=attempts)
+
+
+def _write_sweep_warning_row(
+    *,
+    config: AcSweepConfig,
+    psu: CurrentSource,
+    writer: AcSweepTsvWriter,
+    started: float,
+    setting_index: int,
+    setting: Lcr6000Settings,
+    current_point: CurrentLoopPoint,
+    message: str,
+    progress: Callable[[AcSweepRow], None] | None,
+) -> None:
+    row = AcSweepRow(
+        timestamp_utc=_timestamp_utc(),
+        elapsed_s=time.monotonic() - started,
+        setting_index=setting_index,
+        total_settings=len(config.lcr_settings),
+        setting=setting,
+        current_point=current_point,
+        repeat_index=0,
+        lcr_reading=Lcr6000Reading(
+            timestamp_utc=_timestamp_utc(),
+            raw="",
+            primary=None,
+            secondary=None,
+            monitor1=None,
+            monitor2=None,
+            comparator="",
+        ),
+        psu_measurement=PowerSupplyMeasurement(status="WARN"),
+        psu_backend=psu.backend_id,
+        psu_resource=psu.resource,
+        error=message,
+    )
+    writer.write_row(row)
+    if progress is not None:
+        progress(row)
 
 
 class SerialScpiCurrentSource:

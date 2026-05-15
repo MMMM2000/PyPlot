@@ -444,6 +444,96 @@ def test_run_ac_sweep_measures_each_current_point_for_duration(
     assert [row.repeat_index for row in progress_rows] == [1, 2, 3]
 
 
+def test_run_ac_sweep_reconfigures_and_retries_slow_lcr_cadence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def advance(self, seconds: float) -> None:
+            self.now += seconds
+
+    class FakeLcr:
+        def __init__(self, clock: FakeClock) -> None:
+            self.clock = clock
+            self.configure_count = 0
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            self.configure_count += 1
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            self.clock.advance(0.2 if self.configure_count == 1 else 0.025)
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-05-15T10:00:{self.fetch_count:02d}.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, _current_a: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    clock = FakeClock()
+    monkeypatch.setattr(sweep.time, "monotonic", clock.monotonic)
+    lcr = FakeLcr(clock)
+    progress_rows: list[sweep.AcSweepRow] = []
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(200000.0, 0.3, function="Ls-Rs", aperture="FAST")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.7,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=62.0,
+        lcr_slow_retry_check_s=0.6,
+        lcr_slow_retry_discard_s=0.0,
+        lcr_slow_retry_max_attempts=1,
+    )
+
+    output_path = tmp_path / "slow-retry.tsv"
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=lcr,
+        psu=FakePsu(),
+        output_path=output_path,
+        progress=progress_rows.append,
+    )
+
+    assert lcr.configure_count == 2
+    assert any("slow LCR cadence attempt 1" in row.error for row in progress_rows)
+    assert any(row.error == "retry_attempt=2" for row in progress_rows)
+    assert "slow LCR cadence attempt 1" in output_path.read_text(encoding="utf-8")
+
+
 def _wheel_event(delta_y: int = -120) -> QtGui.QWheelEvent:
     return QtGui.QWheelEvent(
         QtCore.QPointF(10.0, 10.0),
@@ -1293,6 +1383,70 @@ def test_ac_baseline_worker_writes_rows_and_emits_plot_points(tmp_path: Path) ->
     assert points[0].frequency_hz == 1000.0
     lines = (tmp_path / "baseline.tsv").read_text(encoding="utf-8").splitlines()
     assert lines[-1].split("\t")[1:4] == ["1", "1", "1000"]
+
+
+def test_ac_baseline_worker_reconfigures_and_retries_slow_lcr_cadence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def advance(self, seconds: float) -> None:
+            self.now += seconds
+
+    class FakeMeter:
+        is_open = True
+
+        def __init__(self, clock: FakeClock) -> None:
+            self.clock = clock
+            self.configure_count = 0
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            self.configure_count += 1
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            self.clock.advance(0.2 if self.configure_count == 1 else 0.025)
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-05-15T00:00:{self.fetch_count:02d}.000+00:00",
+                primary=float(self.fetch_count) * 1e-6,
+                secondary=14.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+                raw=f"+{self.fetch_count}.0E-06,+1.4E+01,+0,+0,OK",
+            )
+
+    clock = FakeClock()
+    monkeypatch.setattr(ac_logger.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(ac_logger, "AC_LCR_SLOW_RETRY_CHECK_S", 0.6)
+    monkeypatch.setattr(ac_logger, "AC_LCR_SLOW_RETRY_DISCARD_S", 0.0)
+    monkeypatch.setattr(ac_logger, "AC_LCR_SLOW_RETRY_MAX_ATTEMPTS", 1)
+    meter = FakeMeter(clock)
+    worker = ac_logger.AcBaselineWorker(
+        meter=meter,
+        plan=[lcr6000.Lcr6000Settings(frequency_hz=200000.0, level_value=0.3, aperture="FAST")],
+        output_path=tmp_path / "baseline.tsv",
+        point_duration_s=0.7,
+        settle_s=0.0,
+        total_planned_s=1.0,
+    )
+    finished: list[tuple[str, bool]] = []
+    worker.finished.connect(lambda path, stopped: finished.append((path, stopped)))
+
+    worker.run()
+
+    assert finished == [(str(tmp_path / "baseline.tsv"), False)]
+    assert meter.configure_count == 2
+    text = (tmp_path / "baseline.tsv").read_text(encoding="utf-8")
+    assert "# WARN" in text
+    assert "slow LCR cadence attempt 1" in text
 
 
 def test_ac_logger_collects_baseline_rows_with_incremental_callback() -> None:

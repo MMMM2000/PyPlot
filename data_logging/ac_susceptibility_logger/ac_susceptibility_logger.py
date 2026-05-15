@@ -78,6 +78,11 @@ AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
 AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
 AC_PLOT_REFRESH_INTERVAL_S = 1.0
 AC_DIAGNOSTICS_DEFAULT_PATH = AC_DEFAULT_LOG_DIR / "ac_susc_diagnostics.jsonl"
+AC_LCR_SLOW_RETRY_MIN_FREQUENCY_HZ = 1000.0
+AC_LCR_SLOW_RETRY_MIN_RATE_HZ = 20.0
+AC_LCR_SLOW_RETRY_CHECK_S = 3.0
+AC_LCR_SLOW_RETRY_DISCARD_S = 3.0
+AC_LCR_SLOW_RETRY_MAX_ATTEMPTS = 2
 LEGACY_DEFAULT_FREQUENCY_TEXTS = {
     "10, 20, 100, 1000, 2000, 10000, 100000, 200000",
     "100, 1k, 10k, 100k",
@@ -165,6 +170,19 @@ def _fetch_lcr_reading_from_meter(meter: Any, *, attempts: int = 3) -> Lcr6000Re
     raise RuntimeError("LCR did not return a measurement")
 
 
+def _should_retry_slow_lcr_setting(setting: Lcr6000Settings) -> bool:
+    if setting.aperture.strip().upper() != "FAST":
+        return False
+    return float(setting.frequency_hz) >= AC_LCR_SLOW_RETRY_MIN_FREQUENCY_HZ
+
+
+class _SlowBaselineCadenceError(RuntimeError):
+    def __init__(self, *, rate_hz: float, reads: int) -> None:
+        super().__init__(f"{rate_hz:.3g} Hz from {reads} reads")
+        self.rate_hz = rate_hz
+        self.reads = reads
+
+
 def _plot_point_from_lcr_reading(
     setting: Lcr6000Settings,
     reading: Lcr6000Reading,
@@ -234,46 +252,140 @@ class AcBaselineWorker(QtCore.QObject):
                         stopped = True
                         break
                     self.meter.configure(setting)
+                    attempt = 1
                     if self.settle_s and not self._sleep_with_stop(self.settle_s):
                         stopped = True
                         break
-                    point_started = time.monotonic()
-                    repeat_index = 0
                     while True:
-                        if self._stop_requested:
-                            stopped = True
+                        try:
+                            stopped = self._measure_baseline_setting(
+                                fh=fh,
+                                started=started,
+                                setting_index=setting_index,
+                                setting=setting,
+                                attempt=attempt,
+                            )
                             break
-                        repeat_index += 1
-                        elapsed_point = time.monotonic() - point_started
-                        self.task_changed.emit(
-                            "Current task: empty-coil baseline - "
-                            f"{setting.function}, {setting.frequency_hz:g} Hz, "
-                            f"{setting.level_value:g} {setting.level_mode}, "
-                            f"{MainWindow._format_duration(elapsed_point)} / {MainWindow._format_duration(self.point_duration_s)}"
-                        )
-                        reading = _fetch_lcr_reading_from_meter(self.meter)
-                        row = MainWindow._format_baseline_row(
-                            setting_index=setting_index,
-                            repeat_index=repeat_index,
-                            setting=setting,
-                            reading=reading,
-                        )
-                        MainWindow._write_baseline_row(fh, row)
-                        elapsed_total = time.monotonic() - started
-                        self.plot_point_ready.emit(
-                            _plot_point_from_lcr_reading(setting, reading, elapsed_s=elapsed_total)
-                        )
-                        self.progress_changed.emit(elapsed_total, self.total_planned_s)
-                        if self.point_duration_s > 0.0:
-                            if time.monotonic() - point_started >= self.point_duration_s:
+                        except _SlowBaselineCadenceError as exc:
+                            if self._stop_requested:
+                                stopped = True
                                 break
-                        else:
-                            break
+                            if attempt > AC_LCR_SLOW_RETRY_MAX_ATTEMPTS:
+                                self._write_baseline_warning(
+                                    fh,
+                                    setting_index=setting_index,
+                                    setting=setting,
+                                    message=f"slow LCR cadence persisted after {attempt} attempts: {exc}",
+                                )
+                                break
+                            self._write_baseline_warning(
+                                fh,
+                                setting_index=setting_index,
+                                setting=setting,
+                                message=f"slow LCR cadence attempt {attempt}: {exc}; reconfiguring and retrying",
+                            )
+                            self.task_changed.emit(
+                                "Current task: empty-coil baseline - "
+                                f"{setting.function}, {setting.frequency_hz:g} Hz, "
+                                f"{setting.level_value:g} {setting.level_mode}, retrying slow LCR cadence"
+                            )
+                            self.meter.configure(setting)
+                            if self.settle_s and not self._sleep_with_stop(self.settle_s):
+                                stopped = True
+                                break
+                            if not self._discard_lcr_reads():
+                                stopped = True
+                                break
+                            attempt += 1
                     if stopped:
                         break
             self.finished.emit(str(self.output_path), stopped)
         except Exception as exc:
             self.failed.emit(str(exc))
+
+    def _measure_baseline_setting(
+        self,
+        *,
+        fh: Any,
+        started: float,
+        setting_index: int,
+        setting: Lcr6000Settings,
+        attempt: int,
+    ) -> bool:
+        point_started = time.monotonic()
+        first_read_monotonic: float | None = None
+        cadence_checked = False
+        repeat_index = 0
+        while True:
+            if self._stop_requested:
+                return True
+            repeat_index += 1
+            elapsed_point = time.monotonic() - point_started
+            suffix = f", retry {attempt}" if attempt > 1 else ""
+            self.task_changed.emit(
+                "Current task: empty-coil baseline - "
+                f"{setting.function}, {setting.frequency_hz:g} Hz, "
+                f"{setting.level_value:g} {setting.level_mode}, "
+                f"{MainWindow._format_duration(elapsed_point)} / {MainWindow._format_duration(self.point_duration_s)}"
+                f"{suffix}"
+            )
+            reading = _fetch_lcr_reading_from_meter(self.meter)
+            read_monotonic = time.monotonic()
+            if first_read_monotonic is None:
+                first_read_monotonic = read_monotonic
+            row = MainWindow._format_baseline_row(
+                setting_index=setting_index,
+                repeat_index=repeat_index,
+                setting=setting,
+                reading=reading,
+            )
+            MainWindow._write_baseline_row(fh, row)
+            elapsed_total = read_monotonic - started
+            self.plot_point_ready.emit(
+                _plot_point_from_lcr_reading(setting, reading, elapsed_s=elapsed_total)
+            )
+            self.progress_changed.emit(elapsed_total, self.total_planned_s)
+            if _should_retry_slow_lcr_setting(setting) and not cadence_checked:
+                check_elapsed = read_monotonic - point_started
+                if check_elapsed >= AC_LCR_SLOW_RETRY_CHECK_S:
+                    cadence_checked = True
+                    active_elapsed = max(1e-9, read_monotonic - first_read_monotonic)
+                    completed_intervals = max(1, repeat_index - 1)
+                    rate_hz = completed_intervals / active_elapsed
+                    if rate_hz < AC_LCR_SLOW_RETRY_MIN_RATE_HZ:
+                        raise _SlowBaselineCadenceError(rate_hz=rate_hz, reads=repeat_index)
+            if self.point_duration_s > 0.0:
+                if read_monotonic - point_started >= self.point_duration_s:
+                    break
+            else:
+                break
+        return False
+
+    def _discard_lcr_reads(self) -> bool:
+        deadline = time.monotonic() + max(0.0, AC_LCR_SLOW_RETRY_DISCARD_S)
+        while time.monotonic() < deadline:
+            if self._stop_requested:
+                return False
+            _fetch_lcr_reading_from_meter(self.meter)
+        return not self._stop_requested
+
+    def _write_baseline_warning(
+        self,
+        fh: Any,
+        *,
+        setting_index: int,
+        setting: Lcr6000Settings,
+        message: str,
+    ) -> None:
+        fh.write(
+            "# WARN "
+            f"setting_index={setting_index} "
+            f"function={setting.function} "
+            f"frequency_hz={setting.frequency_hz:g} "
+            f"{setting.level_mode}={setting.level_value:g} "
+            f"{message}\n"
+        )
+        fh.flush()
 
 
 class AcSweepWorker(QtCore.QObject):
@@ -1827,6 +1939,11 @@ class MainWindow(CurrentAnnealingWindow):
     def _handle_ac_sweep_progress(self, row: sweep.AcSweepRow) -> None:
         total_s = max(0.001, self._ac_progress_total / 1000.0)
         self._set_ac_elapsed_progress("Microwire sweep", row.elapsed_s, total_s)
+        if row.error and row.repeat_index == 0:
+            self._set_ac_current_task(f"Current task: microwire sweep - {row.error}")
+            self.label_lcr_status.setText(row.error)
+            QtWidgets.QApplication.processEvents()
+            return
         self._append_ac_plot_point(self._plot_point_from_sweep_row(row))
         self._set_ac_current_task(
             "Current task: microwire sweep - "
