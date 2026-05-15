@@ -94,10 +94,17 @@ Point acquisition controls are named for the AC experiment:
 - The run estimate shows separate empty-coil baseline and microwire sweep
   durations using the selected settle time and a rough LCR-read allowance;
   real serial communication overhead can still add time.
-- During a run, the sticky progress bar reports completed reads and estimates
-  time remaining from the actual observed read rate. Empty-coil baseline
-  readings are also added to the live plots as 0 mA points so the dashboard
-  visibly updates before a microwire sweep is started.
+- During a run, the sticky task line reports the active LCR model, frequency,
+  amplitude, read number, and microwire current when applicable. The progress
+  bar reports completed reads and estimates time remaining from the actual
+  observed read rate. Empty-coil baseline readings are also added to the live
+  plots as 0 mA points so the dashboard visibly updates before a microwire
+  sweep is started.
+- The Stop button stops after the current LCR read. Empty-coil baseline stops
+  save a partial TSV with the rows already collected.
+- The Developer menu can mirror AC diagnostics to a JSONL file. Those records
+  include task changes and plot refresh timing, which is useful when checking
+  whether the four-panel Matplotlib dashboard is slowing down the PC.
 
 Every reading is saved as its own row. Averaging or baseline normalization can
 be done later from the raw TSV files.

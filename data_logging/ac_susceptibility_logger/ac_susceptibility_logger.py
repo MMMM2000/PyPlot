@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import math
 import os
 import re
@@ -68,13 +69,21 @@ PRACTICAL_FREQUENCY_PRESETS_HZ = [
     200000.0,
 ]
 
-DEFAULT_FREQUENCY_PRESETS_HZ = [10.0, 20.0, 100.0, 1000.0, 2000.0, 10000.0, 100000.0, 200000.0]
+DEFAULT_FREQUENCY_PRESETS_HZ = list(PRACTICAL_FREQUENCY_PRESETS_HZ)
 LCR_FRONT_PANEL_VOLTAGE_PRESETS_V = list(_LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
 OWON_DEFAULT_VOLTAGE_LIMIT_V = 62.0
 HMP_DEFAULT_VOLTAGE_LIMIT_V = 30.0
 AC_DEFAULT_LOG_DIR = Path.home() / "Downloads" / "ac_susceptibility"
 AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
 AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
+AC_PLOT_REFRESH_INTERVAL_S = 0.75
+AC_DIAGNOSTICS_DEFAULT_PATH = AC_DEFAULT_LOG_DIR / "ac_susc_diagnostics.jsonl"
+LEGACY_DEFAULT_FREQUENCY_TEXTS = {
+    "10, 20, 100, 1000, 2000, 10000, 100000, 200000",
+    "100, 1k, 10k, 100k",
+    "100, 1000, 10000, 100000",
+}
+LEGACY_DEFAULT_LEVEL_TEXTS = {"0.1, 0.3, 1.0", "0.1, 0.3, 1"}
 
 
 class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
@@ -157,6 +166,11 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_progress_total = 0
         self._ac_progress_value = 0
         self._ac_progress_started_monotonic = 0.0
+        self._ac_last_plot_refresh_monotonic = 0.0
+        self._ac_last_plot_refresh_duration_s = 0.0
+        self._ac_last_task_text = "Current task: idle"
+        self._ac_diagnostics_enabled = False
+        self._ac_diagnostics_path = AC_DIAGNOSTICS_DEFAULT_PATH
         self._ac_lcr_scroll_area: QtWidgets.QScrollArea | None = None
         self._ac_plot_points: list[AcPlotPoint] = []
         self._plot_tiles: list[AcPlotTileWidgets] = []
@@ -164,6 +178,8 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_output_settings_ready = False
         super().__init__()
         self.setWindowTitle("AC Susceptibility Logger")
+        self._restore_ac_developer_settings()
+        self._install_ac_developer_menu()
         self._load_ac_output_settings()
         self._install_lcr_controls()
         self._simplify_inherited_ac_workflow()
@@ -182,7 +198,7 @@ class MainWindow(CurrentAnnealingWindow):
         layout = container.layout() if isinstance(container, QtWidgets.QWidget) else None
         if layout is not None:
             self._install_ac_plot_dashboard(container, layout)
-        self._refresh_ac_plots()
+        self._refresh_ac_plots(force=True)
 
     def _install_ac_plot_dashboard(self, container: QtWidgets.QWidget, layout: QtWidgets.QLayout) -> None:
         header = QtWidgets.QFrame(container)
@@ -353,10 +369,90 @@ class MainWindow(CurrentAnnealingWindow):
         self.plot_config_dialog.raise_()
         self.plot_config_dialog.activateWindow()
 
-    def _refresh_ac_plots(self) -> None:
+    def _restore_ac_developer_settings(self) -> None:
+        self._ac_diagnostics_enabled = bool(
+            self.ac_settings.value("developer_diagnostics_enabled", False, type=bool)
+        )
+        self._ac_diagnostics_path = Path(
+            self.ac_settings.value(
+                "developer_diagnostics_path",
+                str(AC_DIAGNOSTICS_DEFAULT_PATH),
+                type=str,
+            )
+        )
+
+    def _install_ac_developer_menu(self) -> None:
+        menu_bar = self.menuBar()
+        developer_menu: QtWidgets.QMenu | None = None
+        for action in menu_bar.actions():
+            menu = action.menu()
+            if menu is not None and (
+                menu.objectName() == "mw_shared_developer"
+                or action.text().replace("&", "").lower() == "developer"
+            ):
+                developer_menu = menu
+                break
+        if developer_menu is None:
+            developer_menu = menu_bar.addMenu("&Developer")
+            developer_menu.setObjectName("mw_shared_developer")
+        developer_menu.addSeparator()
+        self.action_ac_diagnostics = developer_menu.addAction("Mirror AC Diagnostics to File")
+        self.action_ac_diagnostics.setCheckable(True)
+        self.action_ac_diagnostics.setChecked(self._ac_diagnostics_enabled)
+        self.action_ac_diagnostics.toggled.connect(self._set_ac_diagnostics_enabled)
+        choose_action = developer_menu.addAction("Choose AC Diagnostics File...")
+        choose_action.triggered.connect(self._choose_ac_diagnostics_file)
+
+    def _set_ac_diagnostics_enabled(self, enabled: bool) -> None:
+        self._ac_diagnostics_enabled = bool(enabled)
+        self.ac_settings.setValue("developer_diagnostics_enabled", self._ac_diagnostics_enabled)
+        self._write_ac_diagnostic("diagnostics_enabled", enabled=self._ac_diagnostics_enabled)
+
+    def _choose_ac_diagnostics_file(self) -> None:
+        start = str(self._ac_diagnostics_path)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Choose AC diagnostics file",
+            start,
+            "JSON Lines (*.jsonl);;All files (*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".jsonl"):
+            path += ".jsonl"
+        self._ac_diagnostics_path = Path(path)
+        self.ac_settings.setValue("developer_diagnostics_path", str(self._ac_diagnostics_path))
+        self._write_ac_diagnostic("diagnostics_path_changed", path=str(self._ac_diagnostics_path))
+
+    def _write_ac_diagnostic(self, event: str, **payload: Any) -> None:
+        try:
+            enabled = bool(getattr(self, "_ac_diagnostics_enabled", False))
+        except RuntimeError:
+            enabled = False
+        if not enabled:
+            return
+        try:
+            path = Path(getattr(self, "_ac_diagnostics_path", AC_DIAGNOSTICS_DEFAULT_PATH))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+                "event": event,
+                **payload,
+            }
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        except OSError:
+            pass
+
+    def _refresh_ac_plots(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._ac_last_plot_refresh_monotonic < AC_PLOT_REFRESH_INTERVAL_S:
+            return
+        started = time.perf_counter()
         figure = getattr(self, "fig", None)
         if figure is None:
             return
+        self._ac_last_plot_refresh_monotonic = now
         theme = self._plot_theme()
         figure.clear()
         try:
@@ -436,6 +532,13 @@ class MainWindow(CurrentAnnealingWindow):
         canvas = getattr(self, "canvas", None)
         if canvas is not None:
             canvas.draw_idle()
+        self._ac_last_plot_refresh_duration_s = max(0.0, time.perf_counter() - started)
+        self._write_ac_diagnostic(
+            "plot_refresh",
+            duration_s=round(self._ac_last_plot_refresh_duration_s, 6),
+            points=len(points),
+            tiles=len(active_tiles[:4]),
+        )
 
     @staticmethod
     def _style_ac_axis(axis: Any, theme: dict[str, Any]) -> None:
@@ -648,7 +751,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.checkBox_ac_plan_loops.hide()
         self.pushButton_apply_lcr_setting = QtWidgets.QPushButton("Apply setting", group)
         self.pushButton_apply_lcr_setting.hide()
-        self.pushButton_lcr_default_presets = QtWidgets.QPushButton("Default subset", group)
+        self.pushButton_lcr_default_presets = QtWidgets.QPushButton("Default full scan", group)
         self.pushButton_lcr_all_frequencies = QtWidgets.QPushButton("All practical frequencies", group)
         self.pushButton_lcr_all_levels = QtWidgets.QPushButton("All amplitudes", group)
         self.pushButton_measure_lcr_baseline = QtWidgets.QPushButton("Measure empty-coil baseline", group)
@@ -849,6 +952,8 @@ class MainWindow(CurrentAnnealingWindow):
         layout = container.layout() if isinstance(container, QtWidgets.QWidget) else None
         if layout is None or button_frame is None:
             return
+        self.label_ac_current_task = QtWidgets.QLabel("Current task: idle", container)
+        self.label_ac_current_task.setWordWrap(True)
         self.progress_ac_run = QtWidgets.QProgressBar(container)
         self.progress_ac_run.setRange(0, 100)
         self.progress_ac_run.setValue(0)
@@ -856,8 +961,11 @@ class MainWindow(CurrentAnnealingWindow):
         self.progress_ac_run.setFormat("AC progress: idle")
         button_frame_index = layout.indexOf(button_frame)
         if button_frame_index >= 0:
+            layout.insertWidget(button_frame_index, self.label_ac_current_task)
+            button_frame_index = layout.indexOf(button_frame)
             layout.insertWidget(button_frame_index, self.progress_ac_run)
         else:
+            layout.addWidget(self.label_ac_current_task)
             layout.addWidget(self.progress_ac_run)
 
     def _load_lcr_settings(self) -> None:
@@ -876,6 +984,12 @@ class MainWindow(CurrentAnnealingWindow):
         self._set_combo_text(self.comboBox_lcr_monitor1, self.ac_settings.value("monitor1", "Z", type=str))
         self._set_combo_text(self.comboBox_lcr_monitor2, self.ac_settings.value("monitor2", "IAC", type=str))
         self._set_combo_text(self.comboBox_lcr_aperture, self.ac_settings.value("aperture", "FAST", type=str))
+        stored_frequencies = self.lineEdit_lcr_frequencies.text().strip()
+        if stored_frequencies in LEGACY_DEFAULT_FREQUENCY_TEXTS:
+            self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(PRACTICAL_FREQUENCY_PRESETS_HZ))
+        stored_levels = self.lineEdit_lcr_levels.text().strip()
+        if not stored_levels or stored_levels in LEGACY_DEFAULT_LEVEL_TEXTS:
+            self.lineEdit_lcr_levels.setText(self._format_numeric_list(LCR_FRONT_PANEL_VOLTAGE_PRESETS_V))
         plan_loops = self.ac_settings.value("plan_loops", 1)
         self.checkBox_ac_plan_loops.setChecked(str(plan_loops).lower() not in {"0", "false", "no"})
         self._set_combo_data(self.comboBox_ac_direction, self.ac_settings.value("direction", "up-down", type=str))
@@ -977,16 +1091,25 @@ class MainWindow(CurrentAnnealingWindow):
         self.populate_lcr_ports()
         candidates = self.auto_detect_power_supply()
         if not candidates:
-            self.populate_ac_psu_ports()
-            tried = ", ".join(device for _label, device in sweep.available_power_supply_ports()) or "no serial ports"
-            self.label_lcr_status.setText(
-                f"Auto-detect did not find a supported HMP/OWON power supply. Tried {tried}; select the PSU manually above if needed."
-            )
+            backend = self._selected_ac_psu_backend()
+            resource = self._selected_ac_psu_resource()
+            if resource and backend in sweep.POWER_SUPPLY_PROFILES:
+                self._sync_ac_psu_from_shared_controls()
+                self.label_lcr_status.setText(
+                    "Auto-detect could not read a PSU ID, but kept the manually selected "
+                    f"{sweep.POWER_SUPPLY_PROFILES[backend]['label']} on {resource}."
+                )
+            else:
+                tried = ", ".join(device for _label, device in sweep.available_power_supply_ports()) or "no serial ports"
+                self.label_lcr_status.setText(
+                    f"Auto-detect did not find a supported HMP/OWON power supply. Tried {tried}; select the PSU manually above if needed."
+                )
         else:
             self.label_lcr_status.setText(
                 f"Auto-detect selected {candidates[0].label} and LCR-6200-safe sweep defaults."
             )
-        self.apply_default_lcr_presets(store=False)
+        self.apply_all_lcr_frequencies()
+        self.apply_all_lcr_levels()
         self.checkBox_lcr_model_lsrs.setChecked(True)
         self.checkBox_lcr_model_lprp.setChecked(False)
         self._store_lcr_settings()
@@ -1055,6 +1178,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
         self._reset_ac_progress("Microwire sweep", self._sweep_total_reads(config))
+        self._set_ac_current_task("Current task: preparing microwire current sweep")
         self.pushButton_run_ac_sweep.setEnabled(False)
         self.pushButton_stop_ac_sweep.setEnabled(True)
         self._set_sticky_action_state(running=True)
@@ -1086,19 +1210,31 @@ class MainWindow(CurrentAnnealingWindow):
     def handle_stop_ac_sweep_clicked(self) -> None:
         if self._ac_sweep_running:
             self._ac_sweep_stop_requested = True
-            self.label_lcr_status.setText("Stopping AC sweep after the current point...")
+            self.label_lcr_status.setText("Stopping after the current LCR read...")
+            self._set_ac_current_task("Current task: stopping after current read")
 
     def handle_measure_lcr_baseline_clicked(self) -> None:
+        if self._ac_sweep_running:
+            self.handle_stop_ac_sweep_clicked()
+            return
         meter = self.lcr_meter
         if meter is None or not meter.is_open:
             QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
             return
+        path: Path | None = None
+        rows: list[list[str]] = []
+        stopped = False
         try:
             plan = self._prepare_lcr_plan()
             repeats = max(1, int(self.spinBox_ac_repeats.value()))
             path = self._baseline_output_path()
+            self._ac_sweep_running = True
+            self._ac_sweep_stop_requested = False
             self._reset_ac_progress("Empty-coil baseline", len(plan) * repeats)
+            self._set_ac_current_task("Current task: preparing empty-coil baseline")
             self.pushButton_measure_lcr_baseline.setEnabled(False)
+            self.pushButton_stop_ac_sweep.setEnabled(True)
+            self._set_sticky_action_state(running=True)
             self.label_lcr_status.setText(
                 f"Measuring baseline: {len(plan)} settings x {repeats} repeats"
             )
@@ -1107,6 +1243,7 @@ class MainWindow(CurrentAnnealingWindow):
                 repeats=repeats,
                 settle_s=max(0.0, float(self.spinBox_ac_dwell.value())),
             )
+            stopped = self._ac_sweep_stop_requested
             self._write_baseline_file(path, plan, rows)
         except Exception as exc:
             self._lcr_last_error = str(exc)
@@ -1114,12 +1251,29 @@ class MainWindow(CurrentAnnealingWindow):
             QtWidgets.QMessageBox.warning(self, "Baseline failed", str(exc))
             return
         finally:
+            self._ac_sweep_running = False
+            self._ac_sweep_stop_requested = False
             self.pushButton_measure_lcr_baseline.setEnabled(True)
+            self.pushButton_stop_ac_sweep.setEnabled(False)
+            self._set_sticky_action_state(running=False)
             if self._ac_progress_value < self._ac_progress_total:
-                self._set_ac_progress_idle()
-        self.label_lcr_status.setText(f"Baseline saved: {path}")
-        self._complete_ac_progress("Empty-coil baseline")
-        QtWidgets.QMessageBox.information(self, "Baseline saved", f"Saved LCR baseline to:\n{path}")
+                if stopped:
+                    self.progress_ac_run.setFormat(
+                        f"Empty-coil baseline: stopped ({self._ac_progress_value}/{self._ac_progress_total})"
+                    )
+                else:
+                    self._set_ac_progress_idle()
+        if path is None:
+            return
+        if stopped:
+            self.label_lcr_status.setText(f"Baseline stopped; partial file saved: {path}")
+            self._set_ac_current_task("Current task: stopped")
+            QtWidgets.QMessageBox.information(self, "Baseline stopped", f"Saved partial LCR baseline to:\n{path}")
+        else:
+            self.label_lcr_status.setText(f"Baseline saved: {path}")
+            self._complete_ac_progress("Empty-coil baseline")
+            self._set_ac_current_task("Current task: baseline complete")
+            QtWidgets.QMessageBox.information(self, "Baseline saved", f"Saved LCR baseline to:\n{path}")
 
     def _sweep_total_reads(self, config: sweep.AcSweepConfig) -> int:
         return len(config.lcr_settings) * len(config.current_points) * max(1, int(config.repeats))
@@ -1178,6 +1332,37 @@ class MainWindow(CurrentAnnealingWindow):
             progress.setRange(0, 100)
             progress.setValue(0)
             progress.setFormat("AC progress: idle")
+        self._set_ac_current_task("Current task: idle")
+
+    def _set_ac_current_task(self, text: str) -> None:
+        try:
+            self._ac_last_task_text = text
+        except RuntimeError:
+            return
+        try:
+            label = getattr(self, "label_ac_current_task", None)
+        except RuntimeError:
+            label = None
+        if isinstance(label, QtWidgets.QLabel):
+            label.setText(text)
+        try:
+            progress_value = getattr(self, "_ac_progress_value", 0)
+            progress_total = getattr(self, "_ac_progress_total", 0)
+        except RuntimeError:
+            progress_value = 0
+            progress_total = 0
+        self._write_ac_diagnostic(
+            "task",
+            text=text,
+            progress_value=progress_value,
+            progress_total=progress_total,
+        )
+
+    def _stop_requested(self) -> bool:
+        try:
+            return bool(getattr(self, "_ac_sweep_stop_requested"))
+        except (AttributeError, RuntimeError):
+            return False
 
     def _set_sticky_action_state(self, *, running: bool) -> None:
         start = getattr(self.ui, "pushButton_start_process", None)
@@ -1272,6 +1457,13 @@ class MainWindow(CurrentAnnealingWindow):
     def _handle_ac_sweep_progress(self, row: sweep.AcSweepRow) -> None:
         self._advance_ac_progress("Microwire sweep")
         self._append_ac_plot_point(self._plot_point_from_sweep_row(row))
+        self._set_ac_current_task(
+            "Current task: microwire sweep - "
+            f"{row.setting.function}, {row.setting.frequency_hz:g} Hz, "
+            f"{row.setting.level_value:g} {row.setting.level_mode}, "
+            f"{row.current_point.current_a * 1000:g} mA {row.current_point.direction}, "
+            f"read {row.repeat_index}"
+        )
         self.label_lcr_status.setText(
             f"AC sweep {row.setting_index}/{row.total_settings}: "
             f"{row.setting.function}, {row.setting.frequency_hz:g} Hz, "
@@ -1583,12 +1775,22 @@ class MainWindow(CurrentAnnealingWindow):
         repeat_count = max(1, int(repeats))
         started = time.monotonic()
         for setting_index, setting in enumerate(plan, start=1):
+            if self._stop_requested():
+                break
             meter.configure(setting)
             settle = max(0.0, float(settle_s))
             if settle:
                 time.sleep(settle)
             self._lcr_plan_index = setting_index - 1
             for repeat_index in range(1, repeat_count + 1):
+                if self._stop_requested():
+                    break
+                self._set_ac_current_task(
+                    "Current task: empty-coil baseline - "
+                    f"{setting.function}, {setting.frequency_hz:g} Hz, "
+                    f"{setting.level_value:g} {setting.level_mode}, "
+                    f"read {repeat_index}/{repeat_count}"
+                )
                 reading = self._fetch_baseline_reading()
                 self._lcr_last_reading = reading
                 rows.append(

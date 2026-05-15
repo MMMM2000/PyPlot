@@ -8,3 +8,4 @@
 - Updated the baseline and microwire time estimates so the shared repeated-read count affects both displayed durations.
 - Split AC susceptibility output directory and sweep-base persistence from the Current Annealing Logger settings.
 - Added live ETA text to the AC progress bar and plot empty-coil baseline reads as 0 mA live points so baseline runs show visible graph activity.
+- Added an AC task/status line, interruptible empty-coil baseline stops with partial TSV saving, all-frequency defaults, manual-PSU fallback during auto setup, throttled plot redraws, and optional AC diagnostics mirroring from the Developer menu.

@@ -492,6 +492,7 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert window.checkBox_lcr_model_lprp.isChecked() is False
         assert window.pushButton_measure_lcr_baseline.text() == "Measure empty-coil baseline"
         assert window.pushButton_run_ac_sweep.text() == "Run microwire current sweep"
+        assert window.pushButton_lcr_default_presets.text() == "Default full scan"
         sticky_texts = {
             window.ui.pushButton_start_process.text(),
             window.ui.pushButton_show_history.text(),
@@ -505,6 +506,7 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert window.pushButton_identify_lcr.isHidden()
         assert window.ui.label_log_file.text() == "Microwire sweep base:"
         assert window.ui.label_extension.text() == ".tsv"
+        assert window.label_ac_current_task.text() == "Current task: idle"
         assert "ac_susc_empty_coil_baseline" in window.label_ac_baseline_file.text()
         assert not hasattr(window, "comboBox_ac_psu_backend")
         assert not hasattr(window, "comboBox_ac_psu_port")
@@ -686,6 +688,27 @@ def test_ac_logger_does_not_auto_detect_psu_during_startup(monkeypatch: pytest.M
         app.processEvents()
 
 
+def test_ac_logger_auto_setup_keeps_manual_psu_when_id_probe_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "auto_setup_manual_psu_fallback")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [("COM6 - USB", "COM6")])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        window.ui.comboBox_port.clear()
+        window.ui.comboBox_port.addItem("COM6 - USB", "COM6")
+        window._set_combo_data(window.ui.comboBox_supply, "owon_spe6102")
+        window.handle_auto_setup_clicked()
+        assert window._selected_ac_psu_backend() == "owon_spe6102"
+        assert window._selected_ac_psu_resource() == "COM6"
+        assert "kept the manually selected" in window.label_lcr_status.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_uses_shared_reading_count_and_sticky_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -698,6 +721,8 @@ def test_ac_logger_uses_shared_reading_count_and_sticky_progress(
     window = ac_logger.MainWindow()
     try:
         assert window.spinBox_ac_repeats.value() == 10
+        assert window.lineEdit_lcr_frequencies.text() == window._format_numeric_list(ac_logger.PRACTICAL_FREQUENCY_PRESETS_HZ)
+        assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(ac_logger.LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
         assert window.progress_ac_run.format() == "AC progress: idle"
         sticky_frame = window.ui.pushButton_start_process.parentWidget()
         sticky_parent_layout = sticky_frame.parentWidget().layout()
@@ -724,6 +749,48 @@ def test_ac_logger_uses_shared_reading_count_and_sticky_progress(
         progress_text = window.progress_ac_run.format()
         assert "ETA" in progress_text
         assert "50/100" in progress_text
+        window._set_ac_current_task("Current task: empty-coil baseline - 100 Hz, 0.1 voltage, read 1/10")
+        assert "100 Hz" in window.label_ac_current_task.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_writes_optional_diagnostics(tmp_path: Path) -> None:
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    path = tmp_path / "ac_diag.jsonl"
+    window._ac_diagnostics_enabled = True
+    window._ac_diagnostics_path = path
+    window._write_ac_diagnostic("plot_refresh", duration_s=0.1, points=3)
+    text = path.read_text(encoding="utf-8")
+    assert '"event": "plot_refresh"' in text
+    assert '"points": 3' in text
+
+
+def test_ac_logger_migrates_old_short_frequency_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    original = QtCore.QSettings
+    store = original(
+        original.Format.IniFormat,
+        original.Scope.UserScope,
+        "microwire_tests",
+        "old_short_frequency_defaults",
+    )
+    store.clear()
+    store.setValue("frequencies", "100, 1k, 10k, 100k")
+    store.setValue("levels", "0.1, 0.3, 1.0")
+
+    def factory(_organization: str, _application: str) -> QtCore.QSettings:
+        return store
+
+    monkeypatch.setattr(ac_logger.QtCore, "QSettings", factory)
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    window = ac_logger.MainWindow()
+    try:
+        assert window.lineEdit_lcr_frequencies.text() == window._format_numeric_list(ac_logger.PRACTICAL_FREQUENCY_PRESETS_HZ)
+        assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(ac_logger.LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
     finally:
         window.close()
         app.processEvents()
@@ -935,6 +1002,46 @@ def test_ac_logger_collects_baseline_rows_without_power_supply() -> None:
     assert len(window._ac_plot_points) == 4
     assert {point.current_mA for point in window._ac_plot_points} == {0.0}
     assert window._ac_plot_points[-1].frequency_hz == 1000.0
+
+
+def test_ac_logger_baseline_collection_honors_stop_request() -> None:
+    class FakeMeter:
+        is_open = True
+
+        def __init__(self) -> None:
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-05-04T12:00:{self.fetch_count:02d}.000+00:00",
+                raw=f"+{self.fetch_count}.0,+0.0,+0.0,+0.0,OK",
+                primary=float(self.fetch_count),
+                secondary=0.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window.lcr_meter = FakeMeter()
+    window._lcr_last_error = ""
+    window._ac_sweep_stop_requested = False
+    window._ac_plot_points = []
+    window._refresh_ac_plots = lambda: None  # type: ignore[method-assign]
+    window._advance_ac_progress = lambda _label: setattr(window, "_ac_sweep_stop_requested", True)  # type: ignore[method-assign]
+    window._set_ac_current_task = lambda _text: None  # type: ignore[method-assign]
+
+    rows = window._collect_baseline_rows(
+        [lcr6000.Lcr6000Settings(frequency_hz=100.0, level_value=0.1)],
+        repeats=10,
+    )
+
+    assert len(rows) == 1
+    assert window._ac_sweep_stop_requested is True
 
 
 def test_ac_logger_baseline_retries_empty_lcr_response() -> None:
