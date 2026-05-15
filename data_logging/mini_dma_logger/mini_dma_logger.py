@@ -15,7 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
-from threading import Condition, Event, Thread
+from threading import Condition, Event, RLock, Thread, current_thread, get_ident
+from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -1554,6 +1555,155 @@ class ScaleWorker(QtCore.QObject):
         self._stop_event.set()
 
 
+class AutomationControlLoop:
+    """Run recipe-control ticks on a plain thread, independent of Qt repaint timing."""
+
+    def __init__(
+        self,
+        tick_callback: Callable[[], None],
+        *,
+        error_callback: Callable[[BaseException], None] | None = None,
+    ) -> None:
+        self._tick_callback = tick_callback
+        self._error_callback = error_callback
+        self._condition = Condition()
+        self._thread: Thread | None = None
+        self._running = False
+        self._paused = False
+        self._interval_s = DEFAULT_CONTROL_INTERVAL_MS / 1000.0
+
+    def start(self, interval_ms: int) -> None:
+        interval_s = max(0.001, float(interval_ms) / 1000.0)
+        with self._condition:
+            self._interval_s = interval_s
+            if self._running:
+                self._paused = False
+                self._condition.notify_all()
+                return
+            self._running = True
+            self._paused = False
+            self._thread = Thread(target=self._run, name="MiniDMAAutomationControlLoop", daemon=True)
+            self._thread.start()
+            self._condition.notify_all()
+
+    def pause(self) -> None:
+        with self._condition:
+            if self._running:
+                self._paused = True
+                self._condition.notify_all()
+
+    def resume(self) -> None:
+        with self._condition:
+            if self._running:
+                self._paused = False
+                self._condition.notify_all()
+
+    def stop(self) -> None:
+        with self._condition:
+            self._running = False
+            self._paused = False
+            thread = self._thread
+            self._condition.notify_all()
+        if thread is not None and thread is not current_thread():
+            thread.join(timeout=1.0)
+        with self._condition:
+            if self._thread is thread:
+                self._thread = None
+
+    def is_running(self) -> bool:
+        with self._condition:
+            return self._running
+
+    def is_paused(self) -> bool:
+        with self._condition:
+            return self._paused
+
+    def _run(self) -> None:
+        next_tick_s = time.monotonic()
+        while True:
+            with self._condition:
+                while self._running and self._paused:
+                    self._condition.wait()
+                    next_tick_s = time.monotonic()
+                if not self._running:
+                    return
+                interval_s = self._interval_s
+                delay_s = max(0.0, next_tick_s - time.monotonic())
+                if delay_s > 0.0:
+                    self._condition.wait(timeout=delay_s)
+                    continue
+            try:
+                self._tick_callback()
+            except BaseException as exc:
+                with self._condition:
+                    self._running = False
+                    self._paused = False
+                if self._error_callback is not None:
+                    self._error_callback(exc)
+                return
+            next_tick_s = max(next_tick_s + interval_s, time.monotonic())
+
+
+@dataclass(slots=True)
+class MiniDmaControlConfig:
+    diameter_mm: float
+    initial_length_mm: float
+    steps_per_mm: float
+    tension_decreases_scale_reading: bool
+    positive_motion_is_tension: bool
+    zero_on_preload: bool
+    preload_threshold_g: float
+    backlash_mm: float
+    scale_interval_ms: int
+    control_interval_ms: int
+    log_interval_ms: int
+    soft_limits_enabled: bool
+    soft_min_mm: float
+    soft_max_mm: float
+    max_load_enabled: bool
+    max_load_g: float
+    raw_scale_limit_g: float | None
+    jog_mm: float
+    motion_speed_mm_s: float
+    ramp_speed_mm_s: float
+    cycle_speed_mm_s: float
+    hold_speed_mm_s: float
+    distribution_seek_speed_mm_s: float
+    distribution_nudge_mm: float
+    calibration_preload_nudge_mm: float
+    calibration_preload_speed_mm_s: float
+    calibration_speed_mm_s: float
+    setup_preload_stress_mpa: float
+    setup_preload_duration_s: float
+    setup_return_duration_s: float
+    setup_slack_speed_strain_pct_s: float
+    setup_preload_tolerance_mpa: float
+    current_sweep_target_ramp_rate_value_s: float
+    current_sweep_target_speed_mm_s: float
+    current_sweep_correction_rate_pct_s: float
+    current_sweep_max_correction_strain_pct: float
+    current_sweep_max_correction_stress_mpa: float
+    current_sweep_hold_correction_stress_mpa: float
+    current_sweep_mid_correction_stress_mpa: float
+    current_sweep_near_correction_stress_mpa: float
+    current_sweep_hold_pause_factor: float
+    current_sweep_hold_resume_factor: float
+    current_sweep_hold_resume_stable_s: float
+    current_sweep_hold_filter_window_s: float
+    current_sweep_hold_noise_sigma: float
+    current_sweep_hold_min_pause_stress_mpa: float
+    current_sweep_hold_min_resume_stress_mpa: float
+    current_sweep_tolerance: float
+    current_sweep_nudge_mm: float
+    current_sweep_balance_speed_mm_s: float
+    current_sweep_max_seek_mm: float
+    current_sweep_settle_s: float
+    supply_profile_id: str
+    supply_current_resolution_mA: float
+    motor_supply_enabled: bool
+    return_to_origin: bool
+
+
 def _load_pyusb_backend() -> tuple[Any, Any, Any | None]:
     try:
         import usb.core as usb_core  # type: ignore[import-not-found]
@@ -2239,8 +2389,13 @@ class PowerSupplyController:
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    _control_ui_event = QtCore.pyqtSignal(object)
+
     def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
         super().__init__()
+        self._ui_thread_id = get_ident()
+        self._control_worker_thread_id: int | None = None
+        self._control_ui_event.connect(self._apply_control_ui_event, QtCore.Qt.ConnectionType.QueuedConnection)
         self.setWindowTitle(APP_NAME)
         self.settings = _mini_dma_settings()
         self._persist_settings = persist_settings
@@ -2435,6 +2590,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_tic_status_time_s: float | None = None
         self._last_feedback_wait_log_s = 0.0
         self._raw_scale_display_limit_active = False
+        self._automation_control_lock = RLock()
+        self._automation_control_loop: AutomationControlLoop | None = None
+        self._automation_control_error: str | None = None
+        self._active_control_config: MiniDmaControlConfig | None = None
         self._recovery_plot_dialog: QtWidgets.QDialog | None = None
         self._recovery_figure: Figure | None = None
         self._recovery_canvas: Any = None
@@ -2523,6 +2682,109 @@ class MainWindow(QtWidgets.QMainWindow):
         benchmark_action = developer_menu.addAction("Benchmark Tic Transports")
         if benchmark_action is not None:
             benchmark_action.triggered.connect(self._benchmark_tic_transports)
+
+    def _is_ui_thread(self) -> bool:
+        return get_ident() == self._ui_thread_id
+
+    def _run_on_ui_thread(self, callback: Callable[[], None]) -> None:
+        if self._is_ui_thread():
+            callback()
+            return
+        self._control_ui_event.emit(callback)
+
+    def _call_on_ui_thread_sync(self, callback: Callable[[], Any]) -> Any:
+        if self._is_ui_thread():
+            return callback()
+        done = Event()
+        result: dict[str, Any] = {}
+
+        def _invoke() -> None:
+            try:
+                result["value"] = callback()
+            except BaseException as exc:  # pragma: no cover - re-raised on worker thread
+                result["error"] = exc
+            finally:
+                done.set()
+
+        self._control_ui_event.emit(_invoke)
+        done.wait()
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
+
+    @QtCore.pyqtSlot(object)
+    def _apply_control_ui_event(self, callback: object) -> None:
+        if callable(callback):
+            callback()
+
+    def _freeze_control_config(self) -> MiniDmaControlConfig:
+        raw_limit = self._raw_scale_display_limit_g(live_widget=True)
+        if self._supply_controller is not None:
+            supply_resolution = self._supply_controller.current_resolution_mA()
+        else:
+            profile = SUPPLY_PROFILES.get(str(self.combo_supply_profile.currentData() or "hmp4030"), {})
+            supply_resolution = max(0.001, float(profile.get("current_resolution_mA", 1.0)))
+        return MiniDmaControlConfig(
+            diameter_mm=float(self.spin_diameter.value()),
+            initial_length_mm=float(self.spin_initial_length.value()),
+            steps_per_mm=float(self.spin_steps_per_mm.value()),
+            tension_decreases_scale_reading=self.check_tension_load_positive.isChecked(),
+            positive_motion_is_tension=self.check_positive_motion_is_tension.isChecked(),
+            zero_on_preload=self.check_zero_on_preload.isChecked(),
+            preload_threshold_g=float(self.spin_preload_threshold_g.value()),
+            backlash_mm=float(self.spin_backlash_mm.value()),
+            scale_interval_ms=int(self.spin_scale_interval.value()),
+            control_interval_ms=self._control_interval_ms(),
+            log_interval_ms=self._log_interval_ms(),
+            soft_limits_enabled=self.check_soft_limits.isChecked(),
+            soft_min_mm=float(self.spin_soft_min_mm.value()),
+            soft_max_mm=float(self.spin_soft_max_mm.value()),
+            max_load_enabled=self.check_max_load.isChecked(),
+            max_load_g=float(self.spin_max_load_g.value()),
+            raw_scale_limit_g=raw_limit,
+            jog_mm=float(self.spin_jog_mm.value()),
+            motion_speed_mm_s=float(self.spin_motion_speed_mm_s.value()),
+            ramp_speed_mm_s=float(self.spin_ramp_speed_mm_s.value()),
+            cycle_speed_mm_s=float(self.spin_cycle_speed_mm_s.value()),
+            hold_speed_mm_s=float(self.spin_hold_speed_mm_s.value()),
+            distribution_seek_speed_mm_s=float(self.spin_distribution_seek_speed_mm_s.value()),
+            distribution_nudge_mm=float(self.spin_distribution_nudge_mm.value()),
+            calibration_preload_nudge_mm=float(self.spin_calibration_preload_nudge_mm.value()),
+            calibration_preload_speed_mm_s=float(self.spin_calibration_preload_speed_mm_s.value()),
+            calibration_speed_mm_s=float(self.spin_calibration_speed_mm_s.value()),
+            setup_preload_stress_mpa=float(self.spin_setup_preload_stress_mpa.value()),
+            setup_preload_duration_s=float(self.spin_setup_preload_duration_s.value()),
+            setup_return_duration_s=float(self.spin_setup_return_duration_s.value()),
+            setup_slack_speed_strain_pct_s=float(self.spin_setup_slack_speed_strain_pct_s.value()),
+            setup_preload_tolerance_mpa=float(self.spin_setup_preload_tolerance_mpa.value()),
+            current_sweep_target_ramp_rate_value_s=float(self.spin_current_sweep_target_ramp_rate.value()),
+            current_sweep_target_speed_mm_s=float(self.spin_current_sweep_target_speed_mm_s.value()),
+            current_sweep_correction_rate_pct_s=float(self.spin_current_sweep_correction_rate_pct_s.value()),
+            current_sweep_max_correction_strain_pct=float(self.spin_current_sweep_max_correction_strain_pct.value()),
+            current_sweep_max_correction_stress_mpa=float(self.spin_current_sweep_max_correction_stress_mpa.value()),
+            current_sweep_hold_correction_stress_mpa=float(self.spin_current_sweep_hold_correction_stress_mpa.value()),
+            current_sweep_mid_correction_stress_mpa=float(self.spin_current_sweep_mid_correction_stress_mpa.value()),
+            current_sweep_near_correction_stress_mpa=float(self.spin_current_sweep_near_correction_stress_mpa.value()),
+            current_sweep_hold_pause_factor=float(self.spin_current_sweep_hold_pause_factor.value()),
+            current_sweep_hold_resume_factor=float(self.spin_current_sweep_hold_resume_factor.value()),
+            current_sweep_hold_resume_stable_s=float(self.spin_current_sweep_hold_resume_stable_s.value()),
+            current_sweep_hold_filter_window_s=float(self.spin_current_sweep_hold_filter_window_s.value()),
+            current_sweep_hold_noise_sigma=float(self.spin_current_sweep_hold_noise_sigma.value()),
+            current_sweep_hold_min_pause_stress_mpa=float(self.spin_current_sweep_hold_min_pause_stress_mpa.value()),
+            current_sweep_hold_min_resume_stress_mpa=float(self.spin_current_sweep_hold_min_resume_stress_mpa.value()),
+            current_sweep_tolerance=float(self.spin_current_sweep_tolerance.value()),
+            current_sweep_nudge_mm=float(self.spin_current_sweep_nudge_mm.value()),
+            current_sweep_balance_speed_mm_s=float(self.spin_current_sweep_balance_speed_mm_s.value()),
+            current_sweep_max_seek_mm=float(self.spin_current_sweep_max_seek_mm.value()),
+            current_sweep_settle_s=float(self.spin_current_sweep_settle_s.value()),
+            supply_profile_id=str(self.combo_supply_profile.currentData() or "hmp4030"),
+            supply_current_resolution_mA=supply_resolution,
+            motor_supply_enabled=self.check_motor_supply_power.isChecked(),
+            return_to_origin=self.check_return_to_origin.isChecked(),
+        )
+
+    def _control_config(self) -> MiniDmaControlConfig | None:
+        return self._active_control_config
 
     def _show_timing_settings_dialog(self) -> None:
         dialog = QtWidgets.QDialog(self)
@@ -5069,6 +5331,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.combo_supply_port.setCurrentIndex(index)
 
     def _log(self, message: str) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(lambda message=message: self._log(message))
+            return
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
         self.log_output.appendPlainText(line)
@@ -5318,6 +5583,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_supply_live_label()
 
     def _refresh_supply_live_label(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._refresh_supply_live_label)
+            return
         setpoint_text = "-" if self._supply_last_setpoint_mA is None else f"{self._supply_last_setpoint_mA:.2f} mA"
         current_text = "-" if self._supply_snapshot["current_mA"] is None else f"{self._supply_snapshot['current_mA']:.2f} mA"
         voltage_text = "-" if self._supply_snapshot["voltage_V"] is None else f"{self._supply_snapshot['voltage_V']:.3f} V"
@@ -5329,6 +5597,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _motor_supply_enabled(self) -> bool:
+        config = self._control_config()
+        if config is not None:
+            return config.motor_supply_enabled
         return self.check_motor_supply_power.isChecked()
 
     def _motor_supply_channel(self) -> int:
@@ -5494,6 +5765,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(summary, 10000)
 
     def _supply_current_resolution_mA(self) -> float:
+        config = self._control_config()
+        if config is not None:
+            return config.supply_current_resolution_mA
         if self._supply_controller is not None:
             return self._supply_controller.current_resolution_mA()
         profile = SUPPLY_PROFILES.get(str(self.combo_supply_profile.currentData() or "hmp4030"), {})
@@ -6278,20 +6552,35 @@ class MainWindow(QtWidgets.QMainWindow):
         return "-"
 
     def _setup_preload_ramp_rate_mpa_s(self) -> float:
-        preload_stress_mpa = max(0.001, float(self.spin_setup_preload_stress_mpa.value()))
-        preload_duration_s = max(0.1, float(self.spin_setup_preload_duration_s.value()))
+        config = self._control_config()
+        preload_stress_mpa = max(
+            0.001,
+            config.setup_preload_stress_mpa if config is not None else float(self.spin_setup_preload_stress_mpa.value()),
+        )
+        preload_duration_s = max(
+            0.1,
+            config.setup_preload_duration_s if config is not None else float(self.spin_setup_preload_duration_s.value()),
+        )
         return preload_stress_mpa / preload_duration_s
 
     def _setup_slack_speed_mm_s(self) -> float:
-        length_mm = max(0.001, float(self.spin_initial_length.value()))
-        strain_rate_pct_s = max(0.001, float(self.spin_setup_slack_speed_strain_pct_s.value()))
+        config = self._control_config()
+        length_mm = max(0.001, config.initial_length_mm if config is not None else float(self.spin_initial_length.value()))
+        strain_rate_pct_s = max(
+            0.001,
+            config.setup_slack_speed_strain_pct_s if config is not None else float(self.spin_setup_slack_speed_strain_pct_s.value()),
+        )
         return max(self._minimum_held_speed_mm_s(), length_mm * strain_rate_pct_s / 100.0)
 
     def _setup_motion_speed_cap_mm_s(self) -> float:
-        return max(self._minimum_held_speed_mm_s(), float(self.spin_motion_speed_mm_s.value()))
+        config = self._control_config()
+        speed_mm_s = config.motion_speed_mm_s if config is not None else float(self.spin_motion_speed_mm_s.value())
+        return max(self._minimum_held_speed_mm_s(), speed_mm_s)
 
     def _setup_return_duration_s(self) -> float:
-        return max(0.1, float(self.spin_setup_return_duration_s.value()))
+        config = self._control_config()
+        duration_s = config.setup_return_duration_s if config is not None else float(self.spin_setup_return_duration_s.value())
+        return max(0.1, duration_s)
 
     def _setup_return_speed_for_distance_mm_s(
         self,
@@ -7208,7 +7497,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _tension_motion_sign(self) -> float:
-        return 1.0 if self.check_positive_motion_is_tension.isChecked() else -1.0
+        config = self._control_config()
+        positive_motion_is_tension = (
+            config.positive_motion_is_tension
+            if config is not None
+            else self.check_positive_motion_is_tension.isChecked()
+        )
+        return 1.0 if positive_motion_is_tension else -1.0
 
     def _tensile_position_mm(self, raw_position_mm: float) -> float:
         return self._tension_motion_sign() * float(raw_position_mm)
@@ -7217,14 +7512,17 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._tension_motion_sign() * (float(raw_position_mm) - self._position_reference_mm)
 
     def _strain_percent_for_position(self, raw_position_mm: float) -> float | None:
+        config = self._control_config()
         return strain_percent(
             self._tensile_position_mm(raw_position_mm),
-            float(self.spin_initial_length.value()),
+            config.initial_length_mm if config is not None else float(self.spin_initial_length.value()),
             self._tensile_position_mm(self._position_reference_mm),
         )
 
     def _motor_step_mm(self) -> float:
-        return 1.0 / max(1.0, float(self.spin_steps_per_mm.value()))
+        config = self._control_config()
+        steps_per_mm = config.steps_per_mm if config is not None else float(self.spin_steps_per_mm.value())
+        return 1.0 / max(1.0, steps_per_mm)
 
     def _quantize_backlash_mm(self, backlash_mm: float) -> float:
         step_mm = self._motor_step_mm()
@@ -7239,60 +7537,106 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._motor_step_mm()
 
     def _strain_pct_to_stage_mm(self, strain_pct: float) -> float:
-        length_mm = max(0.001, float(self.spin_initial_length.value()))
+        config = self._control_config()
+        length_mm = max(0.001, config.initial_length_mm if config is not None else float(self.spin_initial_length.value()))
         return abs(float(strain_pct)) * length_mm / 100.0
 
     def _current_sweep_max_correction_mm(self) -> float:
-        strain_pct = SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT
-        if hasattr(self, "spin_current_sweep_max_correction_strain_pct"):
+        config = self._control_config()
+        strain_pct = (
+            config.current_sweep_max_correction_strain_pct
+            if config is not None
+            else SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT
+        )
+        if config is None and hasattr(self, "spin_current_sweep_max_correction_strain_pct"):
             strain_pct = float(self.spin_current_sweep_max_correction_strain_pct.value())
         return max(self._motor_step_mm(), self._strain_pct_to_stage_mm(strain_pct))
 
     def _current_sweep_max_correction_stress_mpa(self) -> float:
-        value = SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA
-        if hasattr(self, "spin_current_sweep_max_correction_stress_mpa"):
+        config = self._control_config()
+        value = (
+            config.current_sweep_max_correction_stress_mpa
+            if config is not None
+            else SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA
+        )
+        if config is None and hasattr(self, "spin_current_sweep_max_correction_stress_mpa"):
             value = float(self.spin_current_sweep_max_correction_stress_mpa.value())
         return max(0.001, abs(float(value)))
 
     def _current_sweep_hold_correction_stress_mpa(self) -> float:
-        value = SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
-        if hasattr(self, "spin_current_sweep_hold_correction_stress_mpa"):
+        config = self._control_config()
+        value = (
+            config.current_sweep_hold_correction_stress_mpa
+            if config is not None
+            else SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
+        )
+        if config is None and hasattr(self, "spin_current_sweep_hold_correction_stress_mpa"):
             value = float(self.spin_current_sweep_hold_correction_stress_mpa.value())
         return max(0.001, abs(float(value)))
 
     def _current_sweep_mid_correction_stress_mpa(self) -> float:
-        value = SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA
-        if hasattr(self, "spin_current_sweep_mid_correction_stress_mpa"):
+        config = self._control_config()
+        value = (
+            config.current_sweep_mid_correction_stress_mpa
+            if config is not None
+            else SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA
+        )
+        if config is None and hasattr(self, "spin_current_sweep_mid_correction_stress_mpa"):
             value = float(self.spin_current_sweep_mid_correction_stress_mpa.value())
         return max(0.001, abs(float(value)))
 
     def _current_sweep_near_correction_stress_mpa(self) -> float:
-        value = SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA
-        if hasattr(self, "spin_current_sweep_near_correction_stress_mpa"):
+        config = self._control_config()
+        value = (
+            config.current_sweep_near_correction_stress_mpa
+            if config is not None
+            else SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA
+        )
+        if config is None and hasattr(self, "spin_current_sweep_near_correction_stress_mpa"):
             value = float(self.spin_current_sweep_near_correction_stress_mpa.value())
         return max(0.001, abs(float(value)))
 
     def _current_sweep_hold_filter_window_s(self) -> float:
-        value = SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S
-        if hasattr(self, "spin_current_sweep_hold_filter_window_s"):
+        config = self._control_config()
+        value = (
+            config.current_sweep_hold_filter_window_s
+            if config is not None
+            else SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S
+        )
+        if config is None and hasattr(self, "spin_current_sweep_hold_filter_window_s"):
             value = float(self.spin_current_sweep_hold_filter_window_s.value())
         return max(0.1, abs(float(value)))
 
     def _current_sweep_hold_noise_sigma(self) -> float:
-        value = SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA
-        if hasattr(self, "spin_current_sweep_hold_noise_sigma"):
+        config = self._control_config()
+        value = (
+            config.current_sweep_hold_noise_sigma
+            if config is not None
+            else SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA
+        )
+        if config is None and hasattr(self, "spin_current_sweep_hold_noise_sigma"):
             value = float(self.spin_current_sweep_hold_noise_sigma.value())
         return max(0.0, abs(float(value)))
 
     def _current_sweep_hold_min_pause_stress_mpa(self) -> float:
-        value = SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA
-        if hasattr(self, "spin_current_sweep_hold_min_pause_stress_mpa"):
+        config = self._control_config()
+        value = (
+            config.current_sweep_hold_min_pause_stress_mpa
+            if config is not None
+            else SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA
+        )
+        if config is None and hasattr(self, "spin_current_sweep_hold_min_pause_stress_mpa"):
             value = float(self.spin_current_sweep_hold_min_pause_stress_mpa.value())
         return max(0.0, abs(float(value)))
 
     def _current_sweep_hold_min_resume_stress_mpa(self) -> float:
-        value = SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA
-        if hasattr(self, "spin_current_sweep_hold_min_resume_stress_mpa"):
+        config = self._control_config()
+        value = (
+            config.current_sweep_hold_min_resume_stress_mpa
+            if config is not None
+            else SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA
+        )
+        if config is None and hasattr(self, "spin_current_sweep_hold_min_resume_stress_mpa"):
             value = float(self.spin_current_sweep_hold_min_resume_stress_mpa.value())
         return max(0.0, abs(float(value)))
 
@@ -7310,7 +7654,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if basis == HSW_BASIS_STRESS_MPA:
                 return abs(float(cap_mpa))
             if basis == HSW_BASIS_LOAD_G:
-                load_cap_g = load_g_from_stress_mpa(cap_mpa, float(self.spin_diameter.value()))
+                config = self._control_config()
+                diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+                load_cap_g = load_g_from_stress_mpa(cap_mpa, diameter_mm)
                 return None if load_cap_g is None else abs(float(load_cap_g))
             return None
 
@@ -7344,19 +7690,31 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_STRESS_MPA:
             return abs(float(stress_mpa))
         if basis == HSW_BASIS_LOAD_G:
-            load_cap_g = load_g_from_stress_mpa(abs(float(stress_mpa)), float(self.spin_diameter.value()))
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            load_cap_g = load_g_from_stress_mpa(abs(float(stress_mpa)), diameter_mm)
             return None if load_cap_g is None else abs(float(load_cap_g))
         return None
 
     def _current_sweep_stage_speed_cap_mm_s(self) -> float:
-        speed_mm_s = SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S
-        if hasattr(self, "spin_current_sweep_target_speed_mm_s"):
+        config = self._control_config()
+        speed_mm_s = (
+            config.current_sweep_target_speed_mm_s
+            if config is not None
+            else SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S
+        )
+        if config is None and hasattr(self, "spin_current_sweep_target_speed_mm_s"):
             speed_mm_s = float(self.spin_current_sweep_target_speed_mm_s.value())
         return max(self._minimum_held_speed_mm_s(), speed_mm_s)
 
     def _current_sweep_strain_rate_speed_cap_mm_s(self) -> float:
-        strain_rate_pct_s = SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S
-        if hasattr(self, "spin_current_sweep_correction_rate_pct_s"):
+        config = self._control_config()
+        strain_rate_pct_s = (
+            config.current_sweep_correction_rate_pct_s
+            if config is not None
+            else SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S
+        )
+        if config is None and hasattr(self, "spin_current_sweep_correction_rate_pct_s"):
             strain_rate_pct_s = float(self.spin_current_sweep_correction_rate_pct_s.value())
         return max(self._minimum_held_speed_mm_s(), self._strain_pct_to_stage_mm(strain_rate_pct_s))
 
@@ -7559,7 +7917,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_LOAD_G:
             return effective_load
         if basis == HSW_BASIS_STRESS_MPA:
-            return stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            return stress_mpa_from_load_g(effective_load, diameter_mm)
         preload_state = self._current_preload_state(effective_load)
         if preload_state == PRELOAD_PENDING:
             return None
@@ -7569,7 +7929,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_LOAD_G:
             return abs(float(value))
         if basis == HSW_BASIS_STRESS_MPA:
-            return load_g_from_stress_mpa(abs(float(value)), float(self.spin_diameter.value()))
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            return load_g_from_stress_mpa(abs(float(value)), diameter_mm)
         return None
 
     def _motion_feedback_ready_after_s(self) -> float | None:
@@ -7641,7 +8003,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_STRESS_MPA:
             stress_tolerance = stress_mpa_from_load_g(
                 SERVO_AUTO_TOLERANCE_LOAD_G,
-                float(self.spin_diameter.value()),
+                self._control_config().diameter_mm if self._control_config() is not None else float(self.spin_diameter.value()),
             )
             return 0.0 if stress_tolerance is None else abs(float(stress_tolerance))
         if basis == HSW_BASIS_STRAIN_PCT:
@@ -7669,21 +8031,32 @@ class MainWindow(QtWidgets.QMainWindow):
         return abs(target_value - current_value) <= tolerance
 
     def _seek_nudge_mm(self) -> float:
+        config = self._control_config()
         if self._automation_name == RECOVERY_LOAD:
-            return abs(float(self.spin_jog_mm.value()))
+            return abs(float(config.jog_mm if config is not None else self.spin_jog_mm.value()))
         if self._is_calibration_mode(self._automation_name):
-            return abs(float(self.spin_calibration_preload_nudge_mm.value()))
+            value = (
+                config.calibration_preload_nudge_mm
+                if config is not None
+                else float(self.spin_calibration_preload_nudge_mm.value())
+            )
+            return abs(float(value))
         if self._is_current_sweep_mode(self._automation_name):
             return self._seek_speed_limited_step_mm(
                 self._automation_basis,
                 self._motion_speed_for_current_context(manual_jog=False),
             )
-        return abs(float(self.spin_distribution_nudge_mm.value()))
+        value = config.distribution_nudge_mm if config is not None else float(self.spin_distribution_nudge_mm.value())
+        return abs(float(value))
 
     def _seek_decision_interval_s(self, basis: str | None = None) -> float:
         interval_ms = max(1, int(self._automation_interval_ms))
-        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and hasattr(self, "spin_scale_interval"):
-            interval_ms = max(interval_ms, int(self.spin_scale_interval.value()))
+        config = self._control_config()
+        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            if config is not None:
+                interval_ms = max(interval_ms, int(config.scale_interval_ms))
+            elif hasattr(self, "spin_scale_interval"):
+                interval_ms = max(interval_ms, int(self.spin_scale_interval.value()))
         return max(0.001, interval_ms / 1000.0)
 
     def _seek_speed_limited_step_mm(self, basis: str | None, speed_mm_s: float) -> float:
@@ -7701,8 +8074,14 @@ class MainWindow(QtWidgets.QMainWindow):
         return speed * interval_s
 
     def _seek_max_travel_mm(self) -> float:
+        config = self._control_config()
         if self._is_current_sweep_mode(self._automation_name):
-            return max(self._motor_step_mm(), float(self.spin_current_sweep_max_seek_mm.value()))
+            max_seek_mm = (
+                config.current_sweep_max_seek_mm
+                if config is not None
+                else float(self.spin_current_sweep_max_seek_mm.value())
+            )
+            return max(self._motor_step_mm(), max_seek_mm)
         if self._is_calibration_mode(self._automation_name):
             return max(self._motor_step_mm(), self._seek_nudge_mm() * 100.0)
         return max(self._motor_step_mm(), self._seek_nudge_mm() * 30.0)
@@ -7718,7 +8097,8 @@ class MainWindow(QtWidgets.QMainWindow):
             or float(calibrated_length) <= 0.0
         ):
             return float(stiffness)
-        current_length = max(0.001, float(self.spin_initial_length.value()))
+        config = self._control_config()
+        current_length = max(0.001, config.initial_length_mm if config is not None else float(self.spin_initial_length.value()))
         return float(stiffness) * (float(calibrated_length) / current_length)
 
     def _load_stiffness_from_basis_sensitivity(self, basis: str, sensitivity_per_mm: float) -> float | None:
@@ -7728,7 +8108,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_LOAD_G:
             return sensitivity
         if basis == HSW_BASIS_STRESS_MPA:
-            load_per_mm = load_g_from_stress_mpa(sensitivity, float(self.spin_diameter.value()))
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            load_per_mm = load_g_from_stress_mpa(sensitivity, diameter_mm)
             return None if load_per_mm is None else abs(float(load_per_mm))
         return None
 
@@ -7745,7 +8127,8 @@ class MainWindow(QtWidgets.QMainWindow):
         seek_key: tuple[str, int, float] | None = None,
     ) -> float | None:
         if basis == HSW_BASIS_STRAIN_PCT:
-            length_mm = float(self.spin_initial_length.value())
+            config = self._control_config()
+            length_mm = config.initial_length_mm if config is not None else float(self.spin_initial_length.value())
             return None if length_mm <= 0.0 else 100.0 / length_mm
         stiffness_candidates: list[float | None] = []
         if seek_key is not None:
@@ -7775,7 +8158,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_LOAD_G:
             return float(stiffness)
         if basis == HSW_BASIS_STRESS_MPA:
-            return stress_mpa_from_load_g(float(stiffness), float(self.spin_diameter.value()))
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            return stress_mpa_from_load_g(float(stiffness), diameter_mm)
         return None
 
     def _setup_preload_takeup_active(
@@ -7903,7 +8288,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_LOAD_G:
             return noise_g
         if basis == HSW_BASIS_STRESS_MPA:
-            stress_noise = stress_mpa_from_load_g(noise_g, float(self.spin_diameter.value()))
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            stress_noise = stress_mpa_from_load_g(noise_g, diameter_mm)
             return 0.0 if stress_noise is None else abs(float(stress_noise))
         if basis == HSW_BASIS_STRAIN_PCT and sensitivity_per_mm is not None:
             return 0.0
@@ -7955,7 +8342,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_LOAD_G:
             return max(requested, contact_load_g)
         if basis == HSW_BASIS_STRESS_MPA:
-            contact_stress = stress_mpa_from_load_g(contact_load_g, float(self.spin_diameter.value()))
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            contact_stress = stress_mpa_from_load_g(contact_load_g, diameter_mm)
             return None if contact_stress is None else max(requested, abs(float(contact_stress)))
         return None
 
@@ -7967,7 +8356,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_LOAD_G:
             return cap_load_g
         if basis == HSW_BASIS_STRESS_MPA:
-            cap_stress = stress_mpa_from_load_g(cap_load_g, float(self.spin_diameter.value()))
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            cap_stress = stress_mpa_from_load_g(cap_load_g, diameter_mm)
             return None if cap_stress is None else max(requested, abs(float(cap_stress)))
         return None
 
@@ -8120,8 +8511,9 @@ class MainWindow(QtWidgets.QMainWindow):
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is not None and math.isfinite(float(sensitivity)) and abs(float(sensitivity)) > 0.0:
             step_value = abs(float(sensitivity)) * self._motor_step_mm()
+            config = self._control_config()
             backlash_mm = (
-                max(0.0, float(self.spin_backlash_mm.value()))
+                max(0.0, float(config.backlash_mm if config is not None else self.spin_backlash_mm.value()))
                 if self._use_backlash_compensation_for_current_recipe()
                 else 0.0
             )
@@ -8165,7 +8557,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_step_mm(self, error_value: float, tolerance: float, *, basis: str | None = None) -> float:
         if self._automation_name == RECOVERY_LOAD:
             interval_s = self._seek_decision_interval_s(basis)
-            max_step_mm = float(self.spin_motion_speed_mm_s.value()) * interval_s
+            config = self._control_config()
+            speed_mm_s = config.motion_speed_mm_s if config is not None else float(self.spin_motion_speed_mm_s.value())
+            max_step_mm = float(speed_mm_s) * interval_s
             return max(self._motor_step_mm(), max_step_mm * self._servo_landing_factor(error_value, tolerance))
         if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
             interval_s = self._seek_decision_interval_s(basis)
@@ -8238,14 +8632,19 @@ class MainWindow(QtWidgets.QMainWindow):
         current_value: float | None,
         target_value: float | None,
     ) -> float:
-        duration_s = max(0.1, float(self.spin_setup_preload_duration_s.value()))
+        config = self._control_config()
+        duration_s = max(
+            0.1,
+            config.setup_preload_duration_s if config is not None else float(self.spin_setup_preload_duration_s.value()),
+        )
         if current_value is None or target_value is None:
             return self._setup_preload_ramp_rate_mpa_s()
         if basis == HSW_BASIS_STRESS_MPA:
             delta_mpa = abs(float(target_value) - float(current_value))
         elif basis == HSW_BASIS_LOAD_G:
-            current_mpa = stress_mpa_from_load_g(float(current_value), float(self.spin_diameter.value()))
-            target_mpa = stress_mpa_from_load_g(float(target_value), float(self.spin_diameter.value()))
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            current_mpa = stress_mpa_from_load_g(float(current_value), diameter_mm)
+            target_mpa = stress_mpa_from_load_g(float(target_value), diameter_mm)
             if current_mpa is None or target_mpa is None:
                 return self._setup_preload_ramp_rate_mpa_s()
             delta_mpa = abs(float(target_mpa) - float(current_mpa))
@@ -8271,7 +8670,13 @@ class MainWindow(QtWidgets.QMainWindow):
             HSW_BASIS_STRESS_MPA,
             HSW_BASIS_STRAIN_PCT,
         }:
-            return abs(float(self.spin_current_sweep_target_ramp_rate.value()))
+            config = self._control_config()
+            value = (
+                config.current_sweep_target_ramp_rate_value_s
+                if config is not None
+                else float(self.spin_current_sweep_target_ramp_rate.value())
+            )
+            return abs(float(value))
         return None
 
     def _target_ramp_speed_cap_mm_s(
@@ -8450,7 +8855,14 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         safety_margin_mm = max(
             self._motor_step_mm() * 2.0,
-            max(0.0, float(self.spin_backlash_mm.value())),
+            max(
+                0.0,
+                float(
+                    self._control_config().backlash_mm
+                    if self._control_config() is not None
+                    else self.spin_backlash_mm.value()
+                ),
+            ),
             tolerance_mm,
         )
         return remaining_mm > feedback_travel_mm + safety_margin_mm + tolerance_mm
@@ -8458,7 +8870,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_backlash_takeup_mm(self, movement_direction: float) -> float:
         if not self._use_backlash_compensation_for_current_recipe():
             return 0.0
-        backlash_mm = max(0.0, float(self.spin_backlash_mm.value()))
+        config = self._control_config()
+        backlash_mm = max(0.0, float(config.backlash_mm if config is not None else self.spin_backlash_mm.value()))
         if backlash_mm <= 0.0:
             return 0.0
         if self._last_move_direction == 0.0 or math.copysign(1.0, movement_direction) == math.copysign(1.0, self._last_move_direction):
@@ -8600,7 +9013,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return False
 
     def _zero_fallback_min_travel_mm(self) -> float:
-        length_mm = max(0.001, float(self.spin_initial_length.value()))
+        config = self._control_config()
+        length_mm = max(0.001, config.initial_length_mm if config is not None else float(self.spin_initial_length.value()))
         strain_travel_mm = length_mm * (SETUP_ZERO_FALLBACK_MIN_STRAIN_PCT / 100.0)
         motor_travel_mm = self._motor_step_mm() * SETUP_ZERO_FALLBACK_MIN_MOTOR_STEPS
         return max(strain_travel_mm, motor_travel_mm)
@@ -9647,9 +10061,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not step.current_hold_enabled:
             return 0.0
         nominal_s = self._current_sweep_nominal_duration_s(step)
+        config = self._control_config()
         stable_s = self._current_sweep_hold_setting(
             step.current_hold_resume_stable_s,
-            self.spin_current_sweep_hold_resume_stable_s,
+            config.current_sweep_hold_resume_stable_s
+            if config is not None
+            else float(self.spin_current_sweep_hold_resume_stable_s.value()),
             CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
         )
         return min(
@@ -10012,12 +10429,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return connected
 
     def _start_tic_keepalive(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._start_tic_keepalive)
+            return
         self._tic_keepalive_warning_active = False
         self._tic_keepalive_timer.setInterval(self._tic_keepalive_interval_ms())
         if not self._tic_keepalive_timer.isActive():
             self._tic_keepalive_timer.start()
 
     def _stop_tic_keepalive(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._stop_tic_keepalive)
+            return
         self._tic_keepalive_timer.stop()
         self._tic_keepalive_warning_active = False
 
@@ -10074,8 +10497,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _effective_max_load_limit_g(self) -> float | None:
         zero_load_limit_g = abs(self._zero_load_scale_reference_g())
-        custom_limit_g = float(self.spin_max_load_g.value())
-        if self.check_max_load.isChecked():
+        config = self._control_config()
+        custom_limit_g = float(config.max_load_g if config is not None else self.spin_max_load_g.value())
+        max_load_enabled = config.max_load_enabled if config is not None else self.check_max_load.isChecked()
+        if max_load_enabled:
             return min(custom_limit_g, zero_load_limit_g) if zero_load_limit_g > 0.0 else custom_limit_g
         if zero_load_limit_g > 0.0:
             return zero_load_limit_g
@@ -10087,7 +10512,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return abs(self._current_effective_load_g()) > limit_g
 
-    def _raw_scale_display_limit_g(self) -> float | None:
+    def _raw_scale_display_limit_g(self, *, live_widget: bool = False) -> float | None:
+        config = None if live_widget else self._control_config()
+        if config is not None:
+            return config.raw_scale_limit_g
         if not hasattr(self, "spin_raw_scale_limit_g"):
             return RAW_SCALE_DISPLAY_LIMIT_DEFAULT_G
         limit_g = float(self.spin_raw_scale_limit_g.value())
@@ -10169,11 +10597,14 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _motion_speed_for_current_context(self, *, manual_jog: bool) -> float:
+        config = self._control_config()
         if manual_jog:
-            return max(self._minimum_held_speed_mm_s(), float(self.spin_motion_speed_mm_s.value()))
+            speed_mm_s = config.motion_speed_mm_s if config is not None else float(self.spin_motion_speed_mm_s.value())
+            return max(self._minimum_held_speed_mm_s(), speed_mm_s)
         if self._automation_active:
             if self._is_recovery_mode(self._automation_name):
-                return max(self._minimum_held_speed_mm_s(), float(self.spin_motion_speed_mm_s.value()))
+                speed_mm_s = config.motion_speed_mm_s if config is not None else float(self.spin_motion_speed_mm_s.value())
+                return max(self._minimum_held_speed_mm_s(), speed_mm_s)
             if self._automation_step_note in {"setup_preload", "setup_return_zero"} or (
                 self._automation_phase == "target_ramp"
                 and self._is_calibration_mode(self._automation_name)
@@ -10187,25 +10618,43 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             if self._is_calibration_mode(self._automation_name):
                 if self._automation_phase == "seek":
+                    speed_mm_s = (
+                        config.calibration_preload_speed_mm_s
+                        if config is not None
+                        else float(self.spin_calibration_preload_speed_mm_s.value())
+                    )
                     return max(
                         self._minimum_held_speed_mm_s(),
-                        float(self.spin_calibration_preload_speed_mm_s.value()),
+                        speed_mm_s,
                     )
+                speed_mm_s = (
+                    config.calibration_speed_mm_s
+                    if config is not None
+                    else float(self.spin_calibration_speed_mm_s.value())
+                )
                 return max(
                     self._minimum_held_speed_mm_s(),
-                    float(self.spin_calibration_speed_mm_s.value()),
+                    speed_mm_s,
                 )
             if self._automation_name == "distribution":
+                speed_mm_s = (
+                    config.distribution_seek_speed_mm_s
+                    if config is not None
+                    else float(self.spin_distribution_seek_speed_mm_s.value())
+                )
                 return max(
                     self._minimum_held_speed_mm_s(),
-                    float(self.spin_distribution_seek_speed_mm_s.value()),
+                    speed_mm_s,
                 )
             if self._automation_name == "cycle":
-                return max(self._minimum_held_speed_mm_s(), float(self.spin_cycle_speed_mm_s.value()))
+                speed_mm_s = config.cycle_speed_mm_s if config is not None else float(self.spin_cycle_speed_mm_s.value())
+                return max(self._minimum_held_speed_mm_s(), speed_mm_s)
             if self._automation_name == "hold":
-                return max(self._minimum_held_speed_mm_s(), float(self.spin_hold_speed_mm_s.value()))
+                speed_mm_s = config.hold_speed_mm_s if config is not None else float(self.spin_hold_speed_mm_s.value())
+                return max(self._minimum_held_speed_mm_s(), speed_mm_s)
             if self._automation_name == "ramp":
-                return max(self._minimum_held_speed_mm_s(), float(self.spin_ramp_speed_mm_s.value()))
+                speed_mm_s = config.ramp_speed_mm_s if config is not None else float(self.spin_ramp_speed_mm_s.value())
+                return max(self._minimum_held_speed_mm_s(), speed_mm_s)
         mode = str(self.combo_recipe_mode.currentData() or "ramp")
         if self._is_current_sweep_mode(mode):
             return self._current_sweep_dynamic_speed_cap_mm_s()
@@ -10341,9 +10790,19 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._automation_active and not chain_from_last_target:
                 self._stop_auto_ramp(log_completion=False, offer_recovery=False)
             return False
-        if self.check_soft_limits.isChecked():
-            min_mm = min(float(self.spin_soft_min_mm.value()), float(self.spin_soft_max_mm.value()))
-            max_mm = max(float(self.spin_soft_min_mm.value()), float(self.spin_soft_max_mm.value()))
+        config = self._control_config()
+        soft_limits_enabled = (
+            config.soft_limits_enabled
+            if config is not None
+            else self.check_soft_limits.isChecked()
+        )
+        if soft_limits_enabled:
+            if config is not None:
+                min_mm = min(config.soft_min_mm, config.soft_max_mm)
+                max_mm = max(config.soft_min_mm, config.soft_max_mm)
+            else:
+                min_mm = min(float(self.spin_soft_min_mm.value()), float(self.spin_soft_max_mm.value()))
+                max_mm = max(float(self.spin_soft_min_mm.value()), float(self.spin_soft_max_mm.value()))
             if position_mm < min_mm or position_mm > max_mm:
                 self._log(
                     f"Move cancelled because {position_mm:.4f} mm is outside soft limits "
@@ -10352,7 +10811,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self._automation_active:
                     self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return False
-        steps_per_mm = float(self.spin_steps_per_mm.value())
+        steps_per_mm = config.steps_per_mm if config is not None else float(self.spin_steps_per_mm.value())
         target_steps = int(round(position_mm * steps_per_mm))
         if target_steps == self._commanded_position_steps():
             min_step_mm = 1.0 / max(1.0, steps_per_mm)
@@ -10372,7 +10831,10 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self._build_tic_dispatcher().set_target_position(target_steps, max_speed=max_speed_units)
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to move Tic: {exc}")
+            if self._is_ui_thread():
+                QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to move Tic: {exc}")
+            else:
+                self._log(f"Failed to move Tic: {exc}")
             return False
         self._log(
             f"Move command sent to {_format_compact_unit(position_mm, 'mm')} "
@@ -11176,7 +11638,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _load_sign(self) -> float:
-        return -1.0 if self.check_tension_load_positive.isChecked() else 1.0
+        config = self._control_config()
+        tension_decreases_scale_reading = (
+            config.tension_decreases_scale_reading
+            if config is not None
+            else self.check_tension_load_positive.isChecked()
+        )
+        return -1.0 if tension_decreases_scale_reading else 1.0
 
     def _effective_load_from_raw_g(self, raw_g: float) -> float:
         signed_load_g = self._load_sign() * (float(raw_g) - self._zero_load_scale_reference_g())
@@ -11188,13 +11656,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._effective_load_from_raw_g(self._latest_scale_value_g)
 
     def _current_preload_state(self, load_g: float) -> str:
-        if not self.check_zero_on_preload.isChecked() or self.spin_preload_threshold_g.value() <= 0:
+        config = self._control_config()
+        zero_on_preload = config.zero_on_preload if config is not None else self.check_zero_on_preload.isChecked()
+        threshold_g = config.preload_threshold_g if config is not None else float(self.spin_preload_threshold_g.value())
+        if not zero_on_preload or threshold_g <= 0:
             return PRELOAD_DISABLED
         if self._preload_reference_armed:
             return PRELOAD_PENDING
         if self._preload_trigger_elapsed_s is not None:
             return PRELOAD_ACTIVE
-        if abs(load_g) >= float(self.spin_preload_threshold_g.value()):
+        if abs(load_g) >= float(threshold_g):
             return PRELOAD_ACTIVE
         return PRELOAD_PENDING
 
@@ -11210,7 +11681,13 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> MeasurementPoint:
         specimen_position_mm = float(position_mm) if effective_position_mm is None else float(effective_position_mm)
         preload_state = self._current_preload_state(load_g)
-        if preload_state == PRELOAD_PENDING and abs(load_g) >= float(self.spin_preload_threshold_g.value()):
+        config = self._control_config()
+        preload_threshold_g = (
+            config.preload_threshold_g
+            if config is not None
+            else float(self.spin_preload_threshold_g.value())
+        )
+        if preload_state == PRELOAD_PENDING and abs(load_g) >= float(preload_threshold_g):
             self._position_reference_mm = specimen_position_mm
             self._preload_reference_armed = False
             self._preload_trigger_elapsed_s = elapsed_s
@@ -11222,7 +11699,8 @@ class MainWindow(QtWidgets.QMainWindow):
         stress = None
         if preload_state != PRELOAD_PENDING:
             strain = self._strain_percent_for_position(specimen_position_mm)
-            stress = stress_mpa_from_load_g(load_g, float(self.spin_diameter.value()))
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            stress = stress_mpa_from_load_g(load_g, diameter_mm)
         tensile_displacement_mm = self._tensile_displacement_mm(specimen_position_mm)
         snapshot = self._refresh_supply_snapshot()
         current_set_mA = self._supply_last_setpoint_mA
@@ -11278,7 +11756,9 @@ class MainWindow(QtWidgets.QMainWindow):
         stress = None
         if preload_state != PRELOAD_PENDING:
             strain = self._strain_percent_for_position(specimen_position_mm)
-            stress = stress_mpa_from_load_g(load_g, float(self.spin_diameter.value()))
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            stress = stress_mpa_from_load_g(load_g, diameter_mm)
         tensile_displacement_mm = self._tensile_displacement_mm(specimen_position_mm)
         current_set_mA = self._supply_last_setpoint_mA
         current_measured_mA = self._supply_snapshot.get("current_mA")
@@ -11347,11 +11827,17 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> bool:
         if not self._session_active:
             if not quiet:
-                QtWidgets.QMessageBox.information(self, APP_NAME, "Start a session before recording points.")
+                if self._is_ui_thread():
+                    QtWidgets.QMessageBox.information(self, APP_NAME, "Start a session before recording points.")
+                else:
+                    self._log("Point not recorded because no session is active.")
             return False
         if not self._session_logging_enabled:
             if not quiet and not self._automation_active:
-                QtWidgets.QMessageBox.information(self, APP_NAME, "Recipe setup is running; normal logging has not started.")
+                if self._is_ui_thread():
+                    QtWidgets.QMessageBox.information(self, APP_NAME, "Recipe setup is running; normal logging has not started.")
+                else:
+                    self._log("Point not recorded because recipe setup is running; normal logging has not started.")
             return True
         if self._handle_raw_scale_display_limit_status():
             return False
@@ -11973,6 +12459,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_dashboard_value("task", task_text)
 
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(lambda complete=complete: self._update_recipe_progress(complete=complete))
+            return
         total = max(1, self._automation_total_steps or len(self._automation_steps))
         if self._automation_active and not complete and self._automation_completed_ticks >= total:
             total = self._automation_completed_ticks + 1
@@ -12039,6 +12528,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._length_setup_progress.setFormat("Setup progress: idle")
 
     def _update_recipe_buttons(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._update_recipe_buttons)
+            return
         self.button_start_recipe.setEnabled(not self._automation_active or self._automation_paused)
         self.button_pause_recipe.setEnabled(self._automation_active)
         self.button_pause_recipe.setText("Resume recipe" if self._automation_paused else "Pause recipe")
@@ -12111,6 +12603,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = int(state.interval_ms)
+        self._active_control_config = self._freeze_control_config()
         self._automation_name = str(state.name)
         self._recipe_origin_mm = float(state.origin_mm)
         self._last_recipe_summary = state.summary
@@ -12133,11 +12626,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self._end_zero_fallback_return_position_mm = None
         self._end_zero_fallback_raw_g = None
         self._reset_timed_step_state()
-        self._auto_ramp_timer.start(self._automation_interval_ms)
+        self._start_automation_control_loop(self._automation_interval_ms)
         self._log(f"Recipe resumed at saved recipe row {self._automation_index + 1}.")
         self._update_recipe_progress()
         self._update_recipe_buttons()
         self._refresh_live_labels()
+
+    def _run_automation_control_tick(self) -> None:
+        self._control_worker_thread_id = get_ident()
+        with self._automation_control_lock:
+            self._handle_auto_ramp_tick()
+
+    def _handle_automation_control_loop_error(self, exc: BaseException) -> None:
+        self._automation_control_error = str(exc) or exc.__class__.__name__
+        self._run_on_ui_thread(lambda: self._log(f"Recipe control worker stopped: {self._automation_control_error}"))
+
+    def _start_automation_control_loop(self, interval_ms: int) -> None:
+        self._auto_ramp_timer.stop()
+        if self._automation_control_loop is None:
+            self._automation_control_loop = AutomationControlLoop(
+                self._run_automation_control_tick,
+                error_callback=self._handle_automation_control_loop_error,
+            )
+        self._automation_control_error = None
+        self._automation_control_loop.start(interval_ms)
+
+    def _pause_automation_control_loop(self) -> None:
+        if self._automation_control_loop is not None:
+            self._automation_control_loop.pause()
+        self._auto_ramp_timer.stop()
+
+    def _resume_automation_control_loop(self) -> None:
+        if self._automation_control_loop is None:
+            self._start_automation_control_loop(self._automation_interval_ms)
+            return
+        self._auto_ramp_timer.stop()
+        self._automation_control_loop.resume()
+
+    def _stop_automation_control_loop(self) -> None:
+        if self._automation_control_loop is not None:
+            self._automation_control_loop.stop()
+        self._auto_ramp_timer.stop()
 
     def _start_auto_ramp(self) -> None:
         if self._automation_paused:
@@ -12228,13 +12757,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = interval_ms
+        self._active_control_config = self._freeze_control_config()
         self._recipe_origin_mm = self._current_position_mm
         self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
         self._last_recipe_summary = summary
         self._set_automation_context(phase="start")
         if steps and steps[0].note in {"setup_start_length", "setup_preload"}:
             self._show_length_setup_dialog()
-        self._auto_ramp_timer.start(interval_ms)
+        self._start_automation_control_loop(interval_ms)
         self._log(summary)
         self._update_recipe_progress()
         self._update_recipe_buttons()
@@ -12245,7 +12775,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._automation_paused = True
         self._paused_current_setpoint_mA = self._supply_last_setpoint_mA
-        self._auto_ramp_timer.stop()
+        self._pause_automation_control_loop()
         self._stop_tic_keepalive()
         try:
             dispatcher = self._build_tic_dispatcher()
@@ -12267,7 +12797,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self._set_recipe_current_mA(float(self._paused_current_setpoint_mA)):
                 return
         self._automation_paused = False
-        self._auto_ramp_timer.start(self._automation_interval_ms)
+        self._resume_automation_control_loop()
         self._set_automation_context(phase="resume")
         self._log("Recipe resumed.")
         self._update_recipe_buttons()
@@ -12296,6 +12826,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_effective_move_target_mm = self._effective_position_mm
 
     def _ask_recovery_after_stop(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._ask_recovery_after_stop)
+            return
         if self._tic_motor_power_ok is False:
             return
         box = QtWidgets.QMessageBox(self)
@@ -12399,10 +12932,16 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.activateWindow()
 
     def _update_length_setup_dialog(self, message: str) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(lambda message=message: self._update_length_setup_dialog(message))
+            return
         if self._length_setup_status_label is not None:
             self._length_setup_status_label.setText(message)
 
     def _close_length_setup_dialog(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._close_length_setup_dialog)
+            return
         if self._length_setup_dialog is not None:
             self._length_setup_dialog.close()
         self._length_setup_progress = None
@@ -12440,6 +12979,9 @@ class MainWindow(QtWidgets.QMainWindow):
         axis.grid(True, color=theme["grid_rgba"], alpha=0.6)
 
     def _refresh_length_setup_plot(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._refresh_length_setup_plot)
+            return
         if self._length_setup_figure is None or self._length_setup_canvas is None:
             return
         theme = self._plot_theme()
@@ -12489,6 +13031,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_canvas.draw_idle()
 
     def _refresh_recovery_plot(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._refresh_recovery_plot)
+            return
         if self._recovery_plot_dialog is None or self._recovery_plot_dialog.isHidden():
             return
         if self._recovery_figure is None or self._recovery_canvas is None:
@@ -12555,7 +13100,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_canvas.draw_idle()
 
     def _start_recovery_position_target(self, target_mm: float, label: str) -> None:
-        self._sync_manual_motion_base_from_current_position()
         distance_mm = abs(target_mm - self._current_position_mm)
         return_duration_s = self._pending_recovery_return_duration_s or self._setup_return_duration_s()
         self._pending_recovery_return_duration_s = None
@@ -12581,9 +13125,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = interval_ms
+        self._active_control_config = self._freeze_control_config()
         self._automation_name = RECOVERY_POSITION
         self._set_automation_context(phase="recover")
-        self._auto_ramp_timer.start(self._automation_interval_ms)
+        self._start_automation_control_loop(self._automation_interval_ms)
         self._apply_ui_refresh_interval()
         self._ui_refresh_timer.start()
         self._log(f"Started displacement recovery: {label}.")
@@ -12621,13 +13166,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_progress_last_format_update_s = 0.0
         self._automation_active = True
         self._automation_paused = False
+        self._active_control_config = self._freeze_control_config()
         self._automation_name = RECOVERY_LOAD
         self._end_zero_fallback_armed = True
         self._end_zero_fallback_start_point_index = len(self._recovery_points)
         self._end_zero_fallback_return_position_mm = None
         self._end_zero_fallback_raw_g = None
         self._set_automation_context(phase="recover", basis=HSW_BASIS_LOAD_G, target_value=0.0, plateau_index=0)
-        self._auto_ramp_timer.start(self._automation_interval_ms)
+        self._start_automation_control_loop(self._automation_interval_ms)
         self._apply_ui_refresh_interval()
         self._ui_refresh_timer.start()
         self._log("Started load-zero recovery.")
@@ -12650,6 +13196,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._store_resume_state()
         self._automation_active = False
         self._automation_paused = False
+        self._active_control_config = None
         self._automation_steps = []
         self._automation_index = 0
         if not keep_progress:
@@ -12678,10 +13225,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_start_value = None
         self._active_target_ramp_rate_value_s = None
         self._reset_timed_step_state()
-        self._auto_ramp_timer.stop()
-        if not self._manual_jog_timer.isActive():
-            self._stop_tic_keepalive()
-        self._sync_manual_motion_base_from_current_position()
+        self._stop_automation_control_loop()
+        self._stop_tic_keepalive()
+        if self._is_ui_thread():
+            self._sync_manual_motion_base_from_current_position()
+        else:
+            self._run_on_ui_thread(self._sync_manual_motion_base_from_current_position)
         self._set_automation_context(phase="idle")
         if self._supply_output_enabled:
             self._disable_supply_output()
@@ -13216,26 +13765,31 @@ class MainWindow(QtWidgets.QMainWindow):
     def _current_sweep_hold_setting(
         self,
         step_value: float | None,
-        widget: QtWidgets.QDoubleSpinBox,
+        widget_value: float | None,
         default: float,
     ) -> float:
         value = step_value
         if value is None:
-            value = float(widget.value()) if widget is not None else default
+            value = widget_value if widget_value is not None else default
         value = float(value)
         if not math.isfinite(value):
             return default
         return value
 
     def _current_sweep_hold_resume_factor(self, step: AutomationStep) -> float:
+        config = self._control_config()
         pause_factor = self._current_sweep_hold_setting(
             step.current_hold_pause_tolerance_factor,
-            self.spin_current_sweep_hold_pause_factor,
+            config.current_sweep_hold_pause_factor
+            if config is not None
+            else float(self.spin_current_sweep_hold_pause_factor.value()),
             CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
         )
         resume_factor = self._current_sweep_hold_setting(
             step.current_hold_resume_tolerance_factor,
-            self.spin_current_sweep_hold_resume_factor,
+            config.current_sweep_hold_resume_factor
+            if config is not None
+            else float(self.spin_current_sweep_hold_resume_factor.value()),
             CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
         )
         return max(0.0, min(pause_factor, resume_factor))
@@ -13244,7 +13798,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_STRESS_MPA:
             return abs(float(stress_mpa))
         if basis == HSW_BASIS_LOAD_G:
-            load_g = load_g_from_stress_mpa(abs(float(stress_mpa)), float(self.spin_diameter.value()))
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            load_g = load_g_from_stress_mpa(abs(float(stress_mpa)), diameter_mm)
             return 0.0 if load_g is None else abs(float(load_g))
         return 0.0
 
@@ -13267,8 +13823,10 @@ class MainWindow(QtWidgets.QMainWindow):
         noise_load_g = 0.0 if summary.load_std_g is None else max(0.0, float(summary.load_std_g))
         if basis == HSW_BASIS_LOAD_G:
             return mean_load_g, noise_load_g
-        mean_stress = stress_mpa_from_load_g(mean_load_g, float(self.spin_diameter.value()))
-        noise_stress = stress_mpa_from_load_g(noise_load_g, float(self.spin_diameter.value()))
+        config = self._control_config()
+        diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+        mean_stress = stress_mpa_from_load_g(mean_load_g, diameter_mm)
+        noise_stress = stress_mpa_from_load_g(noise_load_g, diameter_mm)
         if mean_stress is None:
             return float(current_value), 0.0
         return float(mean_stress), 0.0 if noise_stress is None else abs(float(noise_stress))
@@ -13324,7 +13882,9 @@ class MainWindow(QtWidgets.QMainWindow):
             1e-12,
             self._current_sweep_hold_setting(
                 step.current_hold_pause_tolerance_factor,
-                self.spin_current_sweep_hold_pause_factor,
+                self._control_config().current_sweep_hold_pause_factor
+                if self._control_config() is not None
+                else float(self.spin_current_sweep_hold_pause_factor.value()),
                 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
             ),
         )
@@ -13374,7 +13934,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 0.0,
                 self._current_sweep_hold_setting(
                     step.current_hold_resume_stable_s,
-                    self.spin_current_sweep_hold_resume_stable_s,
+                    self._control_config().current_sweep_hold_resume_stable_s
+                    if self._control_config() is not None
+                    else float(self.spin_current_sweep_hold_resume_stable_s.value()),
                     CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
                 ),
             )
@@ -13549,9 +14111,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
         end_value = float(step.target_end_value if step.target_end_value is not None else step.target_value)
+        config = self._control_config()
         configured_ramp_rate = max(
             1e-9,
-            abs(float(step.target_ramp_rate_value_s or self.spin_current_sweep_target_ramp_rate.value())),
+            abs(
+                float(
+                    step.target_ramp_rate_value_s
+                    or (
+                        config.current_sweep_target_ramp_rate_value_s
+                        if config is not None
+                        else self.spin_current_sweep_target_ramp_rate.value()
+                    )
+                )
+            ),
         )
         ramp_rate = configured_ramp_rate
         if self._active_target_ramp_step_index != step_index:
@@ -13602,7 +14174,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if active_start < end_value or float(current_value) > active_start + abs(float(tolerance)):
                     self._active_target_ramp_start_value = float(current_value)
                     self._active_target_ramp_started_s = time.monotonic()
-                    setup_duration_s = max(0.1, float(self.spin_setup_preload_duration_s.value()))
+                    setup_duration_s = max(
+                        0.1,
+                        config.setup_preload_duration_s
+                        if config is not None
+                        else float(self.spin_setup_preload_duration_s.value()),
+                    )
                     ramp_rate = max(1e-9, abs(float(current_value) - end_value) / setup_duration_s)
                     self._active_target_ramp_rate_value_s = ramp_rate
 
@@ -13643,7 +14220,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return False
 
     def _handle_starting_length_prompt_step(self) -> bool:
-        default_length_mm = max(0.001, float(self.spin_initial_length.value()))
+        if not self._is_ui_thread():
+            return bool(self._call_on_ui_thread_sync(self._handle_starting_length_prompt_step))
+        config = self._control_config()
+        default_length_mm = max(0.001, config.initial_length_mm if config is not None else float(self.spin_initial_length.value()))
         self._update_length_setup_dialog("Enter the approximate mounted wire length before setup.")
         starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
             self,
@@ -13675,6 +14255,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _handle_measure_length_prompt_step(self) -> bool:
+        if not self._is_ui_thread():
+            return bool(self._call_on_ui_thread_sync(self._handle_measure_length_prompt_step))
         try:
             self._refresh_tic_status()
         except Exception:
@@ -13682,7 +14264,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_preload_position_mm = float(self._current_position_mm)
         self._record_length_setup_point()
         self._update_length_setup_dialog("Setup preload reached. Enter the measured wire length at preload.")
-        default_length_mm = max(0.001, float(self.spin_initial_length.value()))
+        config = self._control_config()
+        default_length_mm = max(0.001, config.initial_length_mm if config is not None else float(self.spin_initial_length.value()))
         measured_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             APP_NAME,
@@ -13716,6 +14299,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _handle_apply_length_setup_step(self) -> bool:
+        if not self._is_ui_thread():
+            return bool(self._call_on_ui_thread_sync(self._handle_apply_length_setup_step))
         if self._setup_measured_length_mm is None or self._setup_preload_position_mm is None:
             self._log("Recipe stopped because preload length setup is missing the measured length or preload position.")
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
@@ -13780,10 +14365,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timed_step_elapsed_s(step_index)
         if not self._active_timed_move_sent:
             target_mm = self._commanded_motion_base_mm() + float(step.relative_mm)
+            config = self._control_config()
+            calibration_speed_mm_s = (
+                config.calibration_speed_mm_s
+                if config is not None
+                else float(self.spin_calibration_speed_mm_s.value())
+            )
             if not self._move_to_position_mm(
                 target_mm,
                 chain_from_last_target=True,
-                speed_mm_s=max(self._minimum_held_speed_mm_s(), float(self.spin_calibration_speed_mm_s.value())),
+                speed_mm_s=max(self._minimum_held_speed_mm_s(), calibration_speed_mm_s),
             ):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return True
@@ -13896,7 +14487,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log("Recovery completed." if is_recovery else "Recipe completed.")
             if not is_recovery and self._session_active:
                 self._stop_session()
-            if not is_recovery and self.check_return_to_origin.isChecked():
+            config = self._control_config()
+            return_to_origin = config.return_to_origin if config is not None else self.check_return_to_origin.isChecked()
+            if not is_recovery and return_to_origin:
                 self._pending_recovery_return_duration_s = recovery_return_duration_s
                 self._start_recovery_position_origin()
             return
@@ -14075,7 +14668,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _handle_ui_heartbeat_timer(self) -> None:
-        now_s = time.monotonic()
+        now_s = perf_counter()
         previous_s = self._ui_heartbeat_last_s
         self._ui_heartbeat_last_s = now_s
         if previous_s is None:
@@ -14189,6 +14782,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return recorded
 
     def _refresh_live_labels(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._refresh_live_labels)
+            return
         effective_load = self._current_effective_load_g()
         if self._latest_scale_timestamp is None:
             self.label_scale_value.setText("Raw scale: no readings yet | Applied tensile load: -")
@@ -14305,6 +14901,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_supply_live_label()
 
     def _refresh_plots(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._refresh_plots)
+            return
         if self._setup_dialog_visible():
             return
         theme = self._plot_theme()

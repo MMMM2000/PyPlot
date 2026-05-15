@@ -8,6 +8,7 @@ import dataclasses
 import importlib
 import json
 import math
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,6 +59,133 @@ def _restore_settings(snapshot: dict[str, object]) -> None:
     for key, value in snapshot.items():
         settings.setValue(key, value)
     settings.sync()
+
+
+def test_automation_control_loop_ticks_without_qt_event_processing() -> None:
+    ticks: list[float] = []
+    loop = mini_dma_mod.AutomationControlLoop(lambda: ticks.append(time.monotonic()))
+
+    try:
+        loop.start(20)
+        deadline = time.monotonic() + 0.35
+        while len(ticks) < 4 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert len(ticks) >= 4
+        assert loop.is_running() is True
+    finally:
+        loop.stop()
+
+
+def test_automation_control_loop_pause_resume_and_stop() -> None:
+    ticks: list[float] = []
+    loop = mini_dma_mod.AutomationControlLoop(lambda: ticks.append(time.monotonic()))
+
+    try:
+        loop.start(20)
+        deadline = time.monotonic() + 0.3
+        while len(ticks) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(ticks) >= 3
+
+        loop.pause()
+        paused_count = len(ticks)
+        time.sleep(0.08)
+        assert len(ticks) == paused_count
+        assert loop.is_running() is True
+        assert loop.is_paused() is True
+
+        loop.resume()
+        deadline = time.monotonic() + 0.3
+        while len(ticks) <= paused_count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(ticks) > paused_count
+
+        loop.stop()
+        stopped_count = len(ticks)
+        time.sleep(0.08)
+        assert len(ticks) == stopped_count
+        assert loop.is_running() is False
+    finally:
+        loop.stop()
+
+
+def test_main_window_automation_control_loop_ticks_off_ui_thread(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    main_thread_id = threading.get_ident()
+    tick_thread_ids: list[int] = []
+
+    def fake_tick() -> None:
+        tick_thread_ids.append(threading.get_ident())
+        if len(tick_thread_ids) >= 3:
+            window._stop_automation_control_loop()
+
+    try:
+        window._handle_auto_ramp_tick = fake_tick  # type: ignore[method-assign]
+        window._start_automation_control_loop(20)
+        deadline = time.monotonic() + 0.35
+        while len(tick_thread_ids) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert len(tick_thread_ids) >= 3
+        assert all(thread_id != main_thread_id for thread_id in tick_thread_ids)
+        assert window._auto_ramp_timer.isActive() is False
+    finally:
+        window._stop_automation_control_loop()
+        _close_test_window(window)
+
+
+def test_recipe_start_freezes_control_config_before_worker_ticks(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._preflight_recipe_hardware = lambda _steps: True  # type: ignore[method-assign]
+        window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+        window._start_session = lambda **_kwargs: setattr(window, "_session_active", True)  # type: ignore[method-assign]
+        window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
+        window.spin_diameter.setValue(0.05)
+        window.spin_steps_per_mm.setValue(800.0)
+        window.spin_initial_length.setValue(25.0)
+        window.spin_motion_speed_mm_s.setValue(0.75)
+        window.spin_current_sweep_target_speed_mm_s.setValue(0.20)
+        window.spin_current_sweep_hold_filter_window_s.setValue(2.5)
+        window.spin_current_sweep_hold_noise_sigma.setValue(4.0)
+        window.check_max_load.setChecked(True)
+        window.spin_max_load_g.setValue(30.0)
+        window.spin_raw_scale_limit_g.setValue(45.0)
+
+        window._start_auto_ramp()
+        assert window._active_control_config is not None
+        config = window._active_control_config
+
+        window.spin_diameter.setValue(0.10)
+        window.spin_steps_per_mm.setValue(100.0)
+        window.spin_initial_length.setValue(80.0)
+        window.spin_motion_speed_mm_s.setValue(5.0)
+        window.spin_current_sweep_target_speed_mm_s.setValue(4.0)
+        window.spin_current_sweep_hold_filter_window_s.setValue(10.0)
+        window.spin_current_sweep_hold_noise_sigma.setValue(9.0)
+        window.spin_max_load_g.setValue(90.0)
+        window.spin_raw_scale_limit_g.setValue(100.0)
+
+        assert config.diameter_mm == pytest.approx(0.05)
+        assert config.steps_per_mm == pytest.approx(800.0)
+        assert config.initial_length_mm == pytest.approx(25.0)
+        assert config.motion_speed_mm_s == pytest.approx(0.75)
+        assert config.current_sweep_target_speed_mm_s == pytest.approx(0.20)
+        assert config.current_sweep_hold_filter_window_s == pytest.approx(2.5)
+        assert config.current_sweep_hold_noise_sigma == pytest.approx(4.0)
+        assert config.max_load_g == pytest.approx(30.0)
+        assert config.raw_scale_limit_g == pytest.approx(45.0)
+        assert window._raw_scale_display_limit_g() == pytest.approx(45.0)
+        assert window._motor_step_mm() == pytest.approx(1.0 / 800.0)
+        assert window._setup_motion_speed_cap_mm_s() == pytest.approx(0.75)
+        assert window._current_sweep_stage_speed_cap_mm_s() == pytest.approx(0.20)
+        assert window._current_sweep_hold_filter_window_s() == pytest.approx(2.5)
+        assert window._current_sweep_hold_noise_sigma() == pytest.approx(4.0)
+    finally:
+        window._stop_automation_control_loop()
+        _close_test_window(window)
 
 
 def _build_window(
@@ -8429,6 +8557,8 @@ def test_prepare_session_files_can_save_as_next_run_without_replacing_existing(
             _raw_scale_writer,
             control_trace_handle,
             _control_trace_writer,
+            ui_telemetry_handle,
+            _ui_telemetry_writer,
             setup_txt_handle,
             setup_csv_handle,
             _setup_csv_writer,
@@ -8437,6 +8567,7 @@ def test_prepare_session_files_can_save_as_next_run_without_replacing_existing(
             json_path,
             raw_scale_path,
             control_trace_path,
+            ui_telemetry_path,
             setup_txt_path,
             setup_csv_path,
         ) = window._prepare_session_files(created_utc="2026-04-28 12:00:00")
@@ -8445,6 +8576,7 @@ def test_prepare_session_files_can_save_as_next_run_without_replacing_existing(
             csv_handle,
             raw_scale_handle,
             control_trace_handle,
+            ui_telemetry_handle,
             setup_txt_handle,
             setup_csv_handle,
         ):
@@ -8455,6 +8587,7 @@ def test_prepare_session_files_can_save_as_next_run_without_replacing_existing(
         assert json_path == tmp_path / "same_sample_run03" / "metadata.json"
         assert raw_scale_path == tmp_path / "same_sample_run03" / "scale_raw.csv"
         assert control_trace_path == tmp_path / "same_sample_run03" / "control_trace.csv"
+        assert ui_telemetry_path == tmp_path / "same_sample_run03" / "ui_telemetry.csv"
         assert setup_txt_path == tmp_path / "same_sample_run03" / "setup.txt"
         assert setup_csv_path == tmp_path / "same_sample_run03" / "setup.csv"
         assert window.edit_log_name.text() == "same_sample_run03"
@@ -8514,6 +8647,8 @@ def test_prepare_session_files_does_not_chain_run_suffixes(tmp_path: Path, qtbot
             _raw_scale_writer,
             control_trace_handle,
             _control_trace_writer,
+            ui_telemetry_handle,
+            _ui_telemetry_writer,
             setup_txt_handle,
             setup_csv_handle,
             _setup_csv_writer,
@@ -8525,6 +8660,7 @@ def test_prepare_session_files_does_not_chain_run_suffixes(tmp_path: Path, qtbot
             csv_handle,
             raw_scale_handle,
             control_trace_handle,
+            ui_telemetry_handle,
             setup_txt_handle,
             setup_csv_handle,
         ):
@@ -8557,6 +8693,8 @@ def test_prepare_session_files_can_replace_existing_outputs(tmp_path: Path, qtbo
             _raw_scale_writer,
             control_trace_handle,
             _control_trace_writer,
+            ui_telemetry_handle,
+            _ui_telemetry_writer,
             setup_txt_handle,
             setup_csv_handle,
             _setup_csv_writer,
@@ -8568,6 +8706,7 @@ def test_prepare_session_files_can_replace_existing_outputs(tmp_path: Path, qtbo
             csv_handle,
             raw_scale_handle,
             control_trace_handle,
+            ui_telemetry_handle,
             setup_txt_handle,
             setup_csv_handle,
         ):

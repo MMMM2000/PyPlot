@@ -129,6 +129,11 @@ Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph forma
 - **Graph/figure automation**: recipe runs can now build worksheet-backed graphs (`build_graphs`) and assemble multi-panel figures (`create_figures`) without using the interactive dialogs, so agent-authored jobs can import tabular data, create exact X/Y plots, and then arrange them into shared-axis layouts in one pass.
 - **Current scope**: v1 automation is PyPlot-only. The shared recipe entrypoint reserves `kind: "builder"` for future Microwire Builder / `.pydpj` automation, but that mode is not implemented yet.
 
+## Mini DMA Notes
+
+- Mini DMA recipe/control execution uses a worker scheduler with settings frozen at start, while Qt widgets, dialogs, labels, progress bars, run-log display, and Matplotlib redraws are applied through queued UI updates.
+- Mini DMA run folders include `ui_telemetry.csv` alongside `measurement.csv`, `scale_raw.csv`, `control_trace.csv`, and setup logs. Use it to separate real control/logging cadence from Qt event-loop or graph redraw stalls.
+
 ## Annotation And Composition
 
 - **Annotate toolbar**: PyPlot now includes a shared `Annotate` toolbar with `Select`, `Text`, `Arrow`, `Line`, `Rect`, and `Ellipse` tools. Text labels are placed on click; arrows/shapes are created by dragging directly on the graph canvas.
