@@ -65,8 +65,8 @@ Quick probe after driver installation:
 ## Measurement Workflow
 
 Use **Measure empty-coil baseline** before mounting the microwire. Baseline
-runs the selected LCR model/frequency/amplitude matrix with the configured
-LCR readings per point and writes a timestamped
+runs the selected LCR model/frequency/amplitude matrix for the configured
+measurement time per point and writes a timestamped
 `ac_susc_empty_coil_baseline_YYYYMMDD_HHMMSS.tsv` file next to the selected log
 file. The filename intentionally does not include sample or microwire identity
 because no sample is installed. Baseline does not enable, set, read, or
@@ -88,9 +88,11 @@ separate from the Current Annealing Logger. By default, AC files go under
 Point acquisition controls are named for the AC experiment:
 
 - **Settle time** waits after changing the current or LCR setting.
-- **LCR readings/point** stores repeated LCR reads at the same setting. The
-  same value applies to empty-coil baseline settings and microwire
-  model/frequency/amplitude/current points.
+- **Measure time/point** controls how long the logger keeps fetching LCR data
+  at each setting. The default is `10 s`, and the same duration applies to
+  empty-coil baseline settings and microwire
+  model/frequency/amplitude/current points. The actual number of rows depends
+  on how fast the LCR meter responds at that condition.
 - The run estimate shows separate empty-coil baseline and microwire sweep
   durations using the selected settle time and a rough LCR-read allowance;
   real serial communication overhead can still add time.
@@ -168,6 +170,11 @@ LCR primary/secondary/monitors/status/raw, PSU backend/resource/status/error
 
 The writer flushes every row so a long unattended run still leaves partial data
 if the PC, meter, or supply stops responding.
+
+The logger polls `FETC:IMP?` and records every valid reply it receives during
+the configured time window. A complete file with no empty replies means no
+requested fetch failed; it does not mean every internal LCR conversion was
+captured if the meter converted faster than the serial polling loop.
 
 The LCR `comparator/status` field is the meter's bin/comparator result. Empty
 coil runs can legitimately show values such as `OUT,AUX-NG,NG` while still

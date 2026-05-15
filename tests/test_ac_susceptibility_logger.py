@@ -153,7 +153,7 @@ def test_build_current_loop_points_supports_up_down_without_duplicate_peak() -> 
     ]
 
 
-def test_estimate_sweep_totals_counts_repeats_and_dwell() -> None:
+def test_estimate_sweep_totals_counts_time_per_point_and_dwell() -> None:
     estimate = sweep.estimate_sweep(
         lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1), lcr6000.Lcr6000Settings(10000.0, 0.1)],
         current_points=[
@@ -161,12 +161,12 @@ def test_estimate_sweep_totals_counts_repeats_and_dwell() -> None:
             sweep.CurrentLoopPoint(0.04, "up"),
             sweep.CurrentLoopPoint(0.02, "down"),
         ],
-        repeats=3,
+        point_duration_s=10.0,
         dwell_s=2.0,
     )
 
-    assert estimate.total_measurements == 18
-    assert estimate.estimated_seconds == pytest.approx(15.6)
+    assert estimate.total_measurements == 0
+    assert estimate.estimated_seconds == pytest.approx(72.0)
 
 
 def test_power_supply_idn_classification_detects_supported_backends() -> None:
@@ -227,6 +227,7 @@ def test_write_sweep_metadata_and_row_flushes_incrementally(tmp_path: Path) -> N
     config = sweep.AcSweepConfig(
         lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
         current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
         repeats=1,
         dwell_s=0.0,
         psu_backend="owon_spe6102",
@@ -334,6 +335,7 @@ def test_run_ac_sweep_uses_owon_backend_and_safe_shutdown_on_lcr_failure(tmp_pat
     config = sweep.AcSweepConfig(
         lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
         current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
         repeats=1,
         dwell_s=0.0,
         psu_backend="owon_spe6102",
@@ -357,6 +359,89 @@ def test_run_ac_sweep_uses_owon_backend_and_safe_shutdown_on_lcr_failure(tmp_pat
         "off",
         "close",
     ]
+
+
+def test_run_ac_sweep_measures_each_current_point_for_duration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def advance(self, seconds: float) -> None:
+            self.now += seconds
+
+    class FakeLcr:
+        def __init__(self, clock: FakeClock) -> None:
+            self.clock = clock
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            self.clock.advance(0.4)
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-05-13T10:00:{self.fetch_count:02d}.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, _current_a: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    clock = FakeClock()
+    monkeypatch.setattr(sweep.time, "monotonic", clock.monotonic)
+    lcr = FakeLcr(clock)
+    progress_rows: list[sweep.AcSweepRow] = []
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=1.0,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=lcr,
+        psu=FakePsu(),
+        output_path=tmp_path / "duration.tsv",
+        progress=progress_rows.append,
+    )
+
+    assert lcr.fetch_count == 3
+    assert [row.repeat_index for row in progress_rows] == [1, 2, 3]
 
 
 def _wheel_event(delta_y: int = -120) -> QtGui.QWheelEvent:
@@ -453,8 +538,8 @@ def test_ac_logger_uses_shared_owon_supply_defaults_for_sweep_config() -> None:
     window.comboBox_ac_direction.addItem("Up and down", "up-down")
     window.spinBox_ac_dwell = QtWidgets.QDoubleSpinBox()
     window.spinBox_ac_dwell.setValue(0.5)
-    window.spinBox_ac_repeats = QtWidgets.QSpinBox()
-    window.spinBox_ac_repeats.setValue(2)
+    window.spinBox_ac_point_duration = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_point_duration.setValue(10.0)
     window._prepare_lcr_plan = lambda: [lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")]
 
     window._sync_ac_psu_from_shared_controls()
@@ -558,17 +643,20 @@ def test_ac_logger_numeric_fields_and_acquisition_labels_are_concise(
         assert window.spinBox_ac_current_start.text() == "20 mA"
         assert window.spinBox_ac_current_step.text() == "5 mA"
         assert window.spinBox_ac_dwell.text() == "1 s"
+        assert window.spinBox_ac_point_duration.text() == "10 s"
         window.spinBox_ac_current_step.setValue(2.5)
         window.spinBox_ac_dwell.setValue(0.5)
+        window.spinBox_ac_point_duration.setValue(2.5)
         assert window.spinBox_ac_current_step.text() == "2.5 mA"
         assert window.spinBox_ac_dwell.text() == "0.5 s"
+        assert window.spinBox_ac_point_duration.text() == "2.5 s"
         assert window.label_ac_settle_time.text() == "Settle time:"
-        assert window.label_ac_readings_per_point.text() == "LCR readings/point:"
+        assert window.label_ac_point_duration.text() == "Measure time/point:"
         assert not hasattr(window, "label_ac_baseline_readings")
         assert not hasattr(window, "spinBox_lcr_baseline_repeats")
         assert "Baseline:" in window.label_ac_sweep_estimate.text()
         before = window.label_ac_sweep_estimate.text()
-        window.spinBox_ac_repeats.setValue(window.spinBox_ac_repeats.value() + 1)
+        window.spinBox_ac_point_duration.setValue(window.spinBox_ac_point_duration.value() + 1)
         window._update_ac_sweep_estimate()
         assert window.label_ac_sweep_estimate.text() != before
     finally:
@@ -756,7 +844,7 @@ def test_ac_logger_auto_setup_trusts_connected_shared_psu_without_id_probe(
         app.processEvents()
 
 
-def test_ac_logger_uses_shared_reading_count_and_sticky_progress(
+def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -767,7 +855,7 @@ def test_ac_logger_uses_shared_reading_count_and_sticky_progress(
 
     window = ac_logger.MainWindow()
     try:
-        assert window.spinBox_ac_repeats.value() == 10
+        assert window.spinBox_ac_point_duration.value() == pytest.approx(10.0)
         assert window.lineEdit_lcr_frequencies.text() == window._format_numeric_list(ac_logger.PRACTICAL_FREQUENCY_PRESETS_HZ)
         assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(ac_logger.LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
         assert window.progress_ac_run.format() == "AC progress: idle"
@@ -780,14 +868,14 @@ def test_ac_logger_uses_shared_reading_count_and_sticky_progress(
         assert progress_index < sticky_index
         window.lineEdit_lcr_frequencies.setText("100, 1k")
         window.lineEdit_lcr_levels.setText("0.1, 1")
-        window.spinBox_ac_repeats.setValue(10)
+        window.spinBox_ac_point_duration.setValue(10.0)
         window.spinBox_ac_current_start.setValue(0.0)
         window.spinBox_ac_current_stop.setValue(10.0)
         window.spinBox_ac_current_step.setValue(10.0)
         window._update_ac_sweep_estimate()
         estimate = window.label_ac_sweep_estimate.text()
-        assert "Baseline: 40 LCR reads" in estimate
-        assert "Microwire sweep: 120 LCR reads" in estimate
+        assert "Baseline: about 44s" in estimate
+        assert "Microwire sweep: about 2m 12s" in estimate
         monkeypatch.setattr(ac_logger.time, "monotonic", lambda: 100.0)
         window._reset_ac_progress("Empty-coil baseline", 100)
         monkeypatch.setattr(ac_logger.time, "monotonic", lambda: 110.0)
@@ -796,7 +884,7 @@ def test_ac_logger_uses_shared_reading_count_and_sticky_progress(
         progress_text = window.progress_ac_run.format()
         assert "ETA" in progress_text
         assert "50/100" in progress_text
-        window._set_ac_current_task("Current task: empty-coil baseline - 100 Hz, 0.1 voltage, read 1/10")
+        window._set_ac_current_task("Current task: empty-coil baseline - 100 Hz, 0.1 voltage, read 1")
         assert "100 Hz" in window.label_ac_current_task.text()
     finally:
         window.close()

@@ -89,11 +89,12 @@ class PowerSupplyCandidate:
 class AcSweepConfig:
     lcr_settings: Sequence[Lcr6000Settings]
     current_points: Sequence[CurrentLoopPoint]
-    repeats: int
     dwell_s: float
     psu_backend: str
     psu_resource: str
     voltage_limit_v: float
+    point_duration_s: float = 10.0
+    repeats: int = 1
     lcr_read_attempts: int = 3
 
 
@@ -219,18 +220,17 @@ def estimate_sweep(
     *,
     lcr_settings: Sequence[Lcr6000Settings],
     current_points: Sequence[CurrentLoopPoint],
-    repeats: int,
+    point_duration_s: float,
     dwell_s: float,
 ) -> SweepEstimate:
-    repeat_count = max(1, int(repeats))
-    total_measurements = len(lcr_settings) * len(current_points) * repeat_count
+    total_points = len(lcr_settings) * len(current_points)
     return SweepEstimate(
         total_settings=len(lcr_settings),
         total_current_points=len(current_points),
-        total_measurements=total_measurements,
+        total_measurements=0,
         estimated_seconds=(
-            len(lcr_settings) * len(current_points) * max(0.0, float(dwell_s))
-            + total_measurements * ESTIMATED_LCR_READ_SECONDS
+            total_points * max(0.0, float(dwell_s))
+            + total_points * max(0.0, float(point_duration_s))
         ),
     )
 
@@ -251,6 +251,7 @@ class AcSweepTsvWriter:
             f"psu_resource={self.config.psu_resource} "
             f"voltage_limit_v={self.config.voltage_limit_v:g} "
             f"dwell_s={self.config.dwell_s:g} "
+            f"point_duration_s={self.config.point_duration_s:g} "
             f"repeats={max(1, int(self.config.repeats))}"
         )
         for index, setting in enumerate(self.config.lcr_settings, start=1):
@@ -338,7 +339,14 @@ def run_ac_sweep(
                 dwell = max(0.0, float(config.dwell_s))
                 if dwell:
                     sleep(dwell)
-                for repeat_index in range(1, max(1, int(config.repeats)) + 1):
+                repeat_index = 0
+                point_started = time.monotonic()
+                point_duration = max(0.0, float(config.point_duration_s))
+                fallback_repeats = max(1, int(config.repeats))
+                while True:
+                    if stop_requested is not None and stop_requested():
+                        raise RuntimeError("AC sweep stopped by user")
+                    repeat_index += 1
                     reading = _fetch_lcr_reading(lcr, attempts=config.lcr_read_attempts)
                     psu_measurement = psu.measure()
                     row = AcSweepRow(
@@ -357,6 +365,11 @@ def run_ac_sweep(
                     writer.write_row(row)
                     if progress is not None:
                         progress(row)
+                    if point_duration > 0.0:
+                        if time.monotonic() - point_started >= point_duration:
+                            break
+                    elif repeat_index >= fallback_repeats:
+                        break
     finally:
         active_error = sys.exc_info()[1]
         shutdown_error: Exception | None = None

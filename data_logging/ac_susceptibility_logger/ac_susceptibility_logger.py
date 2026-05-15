@@ -787,9 +787,11 @@ class MainWindow(CurrentAnnealingWindow):
         self.spinBox_ac_dwell.setDecimals(3)
         self.spinBox_ac_dwell.setSuffix(" s")
         self.spinBox_ac_dwell.setValue(1.0)
-        self.spinBox_ac_repeats = QtWidgets.QSpinBox(group)
-        self.spinBox_ac_repeats.setRange(1, 1000)
-        self.spinBox_ac_repeats.setValue(10)
+        self.spinBox_ac_point_duration = CompactDoubleSpinBox(group)
+        self.spinBox_ac_point_duration.setRange(0.1, 3600.0)
+        self.spinBox_ac_point_duration.setDecimals(3)
+        self.spinBox_ac_point_duration.setSuffix(" s")
+        self.spinBox_ac_point_duration.setValue(10.0)
         self.label_ac_sweep_estimate = QtWidgets.QLabel("", group)
         self.label_ac_sweep_estimate.setWordWrap(True)
         self.pushButton_run_ac_sweep = QtWidgets.QPushButton("Run microwire current sweep", group)
@@ -838,11 +840,11 @@ class MainWindow(CurrentAnnealingWindow):
         self.label_ac_current_step = QtWidgets.QLabel("Current step:", plan_group)
         self.label_ac_direction = QtWidgets.QLabel("Direction:", plan_group)
         self.label_ac_settle_time = QtWidgets.QLabel("Settle time:", plan_group)
-        self.label_ac_readings_per_point = QtWidgets.QLabel("LCR readings/point:", plan_group)
+        self.label_ac_point_duration = QtWidgets.QLabel("Measure time/point:", plan_group)
         plan_grid.addWidget(self.label_ac_voltage_limit, 1, 0)
         plan_grid.addWidget(self.spinBox_ac_voltage_limit, 1, 1)
-        plan_grid.addWidget(self.label_ac_readings_per_point, 1, 2)
-        plan_grid.addWidget(self.spinBox_ac_repeats, 1, 3)
+        plan_grid.addWidget(self.label_ac_point_duration, 1, 2)
+        plan_grid.addWidget(self.spinBox_ac_point_duration, 1, 3)
         plan_grid.addWidget(self.label_ac_current_start, 2, 0)
         plan_grid.addWidget(self.spinBox_ac_current_start, 2, 1)
         plan_grid.addWidget(self.label_ac_current_stop, 2, 2)
@@ -914,7 +916,7 @@ class MainWindow(CurrentAnnealingWindow):
             self.spinBox_ac_current_step,
             self.comboBox_ac_direction,
             self.spinBox_ac_dwell,
-            self.spinBox_ac_repeats,
+            self.spinBox_ac_point_duration,
         ):
             signal = getattr(widget, "currentIndexChanged", None) or getattr(widget, "valueChanged", None)
             if signal is not None:
@@ -998,7 +1000,11 @@ class MainWindow(CurrentAnnealingWindow):
         self.spinBox_ac_current_stop.setValue(float(self.ac_settings.value("current_stop_mA", 80.0)))
         self.spinBox_ac_current_step.setValue(float(self.ac_settings.value("current_step_mA", 5.0)))
         self.spinBox_ac_dwell.setValue(float(self.ac_settings.value("dwell_s", 1.0)))
-        self.spinBox_ac_repeats.setValue(max(1, int(self.ac_settings.value("sweep_repeats", 10))))
+        point_duration = self.ac_settings.value("point_duration_s", None)
+        if point_duration is None:
+            legacy_repeats = float(self.ac_settings.value("sweep_repeats", 10))
+            point_duration = max(1.0, legacy_repeats)
+        self.spinBox_ac_point_duration.setValue(float(point_duration))
         voltage_limit = self.ac_settings.value("voltage_limit_v", None)
         if voltage_limit is None:
             self._sync_ac_psu_from_shared_controls()
@@ -1037,7 +1043,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("current_step_mA", float(self.spinBox_ac_current_step.value()))
         self.ac_settings.setValue("direction", self.comboBox_ac_direction.currentData())
         self.ac_settings.setValue("dwell_s", float(self.spinBox_ac_dwell.value()))
-        self.ac_settings.setValue("sweep_repeats", int(self.spinBox_ac_repeats.value()))
+        self.ac_settings.setValue("point_duration_s", float(self.spinBox_ac_point_duration.value()))
 
     def populate_lcr_ports(self) -> None:
         self.comboBox_lcr_port.clear()
@@ -1263,25 +1269,28 @@ class MainWindow(CurrentAnnealingWindow):
         stopped = False
         try:
             plan = self._prepare_lcr_plan()
-            repeats = max(1, int(self.spinBox_ac_repeats.value()))
+            point_duration = max(0.1, float(self.spinBox_ac_point_duration.value()))
+            dwell = max(0.0, float(self.spinBox_ac_dwell.value()))
+            baseline_seconds = len(plan) * (point_duration + dwell)
             path = self._baseline_output_path()
             self._ac_sweep_running = True
             self._ac_sweep_stop_requested = False
-            self._reset_ac_progress("Empty-coil baseline", len(plan) * repeats)
+            self._reset_ac_progress("Empty-coil baseline", max(1, int(round(baseline_seconds * 1000.0))))
             self._set_ac_current_task("Current task: preparing empty-coil baseline")
             self.pushButton_measure_lcr_baseline.setEnabled(False)
             self.pushButton_stop_ac_sweep.setEnabled(True)
             self._set_sticky_action_state(running=True)
             self.label_lcr_status.setText(
-                f"Measuring baseline: {len(plan)} settings x {repeats} repeats"
+                f"Measuring baseline: {len(plan)} settings x {point_duration:g} s"
             )
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("w", encoding="utf-8", newline="") as fh:
                 self._write_baseline_header(fh, plan)
                 rows = self._collect_baseline_rows(
                     plan,
-                    repeats=repeats,
-                    settle_s=max(0.0, float(self.spinBox_ac_dwell.value())),
+                    point_duration_s=point_duration,
+                    settle_s=dwell,
+                    total_planned_s=baseline_seconds,
                     row_callback=lambda row: self._write_baseline_row(fh, row),
                 )
             stopped = self._ac_sweep_stop_requested
@@ -1316,7 +1325,13 @@ class MainWindow(CurrentAnnealingWindow):
             QtWidgets.QMessageBox.information(self, "Baseline saved", f"Saved LCR baseline to:\n{path}")
 
     def _sweep_total_reads(self, config: sweep.AcSweepConfig) -> int:
-        return len(config.lcr_settings) * len(config.current_points) * max(1, int(config.repeats))
+        estimate = sweep.estimate_sweep(
+            lcr_settings=config.lcr_settings,
+            current_points=config.current_points,
+            point_duration_s=config.point_duration_s,
+            dwell_s=config.dwell_s,
+        )
+        return max(1, int(round(estimate.estimated_seconds * 1000.0)))
 
     def _reset_ac_progress(self, label: str, total: int) -> None:
         self._ac_progress_total = max(1, int(total))
@@ -1365,6 +1380,21 @@ class MainWindow(CurrentAnnealingWindow):
             progress.setRange(0, total)
             progress.setValue(total)
             progress.setFormat(f"{label}: complete ({total}/{total})")
+
+    def _set_ac_elapsed_progress(self, label: str, elapsed_s: float, total_s: float) -> None:
+        total_ms = max(1, int(round(max(0.001, total_s) * 1000.0)))
+        value_ms = min(total_ms, max(0, int(round(max(0.0, elapsed_s) * 1000.0))))
+        self._ac_progress_total = total_ms
+        self._ac_progress_value = value_ms
+        percent = int(round((value_ms / total_ms) * 100.0))
+        progress = getattr(self, "progress_ac_run", None)
+        if isinstance(progress, QtWidgets.QProgressBar):
+            progress.setRange(0, total_ms)
+            progress.setValue(value_ms)
+            eta = self._format_duration(max(0.0, total_s - elapsed_s))
+            progress.setFormat(
+                f"{label}: {percent}% ({self._format_duration(elapsed_s)} / {self._format_duration(total_s)}), ETA {eta}"
+            )
 
     def _set_ac_progress_idle(self) -> None:
         progress = getattr(self, "progress_ac_run", None)
@@ -1456,11 +1486,11 @@ class MainWindow(CurrentAnnealingWindow):
         return sweep.AcSweepConfig(
             lcr_settings=plan,
             current_points=current_points,
-            repeats=max(1, int(self.spinBox_ac_repeats.value())),
             dwell_s=max(0.0, float(self.spinBox_ac_dwell.value())),
             psu_backend=self._selected_ac_psu_backend(),
             psu_resource=psu_resource,
             voltage_limit_v=float(self.spinBox_ac_voltage_limit.value()),
+            point_duration_s=max(0.1, float(self.spinBox_ac_point_duration.value())),
         )
 
     def _update_ac_sweep_estimate(self) -> None:
@@ -1475,27 +1505,27 @@ class MainWindow(CurrentAnnealingWindow):
             estimate = sweep.estimate_sweep(
                 lcr_settings=plan,
                 current_points=current_points,
-                repeats=max(1, int(self.spinBox_ac_repeats.value())),
+                point_duration_s=max(0.1, float(self.spinBox_ac_point_duration.value())),
                 dwell_s=max(0.0, float(self.spinBox_ac_dwell.value())),
             )
         except Exception as exc:
             self.label_ac_sweep_estimate.setText(f"Estimate unavailable: {exc}")
             return
-        baseline_repeats = max(1, int(self.spinBox_ac_repeats.value()))
-        baseline_reads = len(plan) * baseline_repeats
+        point_duration = max(0.1, float(self.spinBox_ac_point_duration.value()))
         baseline_seconds = (
             len(plan) * max(0.0, float(self.spinBox_ac_dwell.value()))
-            + baseline_reads * sweep.ESTIMATED_LCR_READ_SECONDS
+            + len(plan) * point_duration
         )
         self.label_ac_sweep_estimate.setText(
-            f"Baseline: {baseline_reads} LCR reads, about {self._format_duration(baseline_seconds)}. "
-            f"Microwire sweep: {estimate.total_measurements} LCR reads, about "
+            f"Baseline: about {self._format_duration(baseline_seconds)}. "
+            f"Microwire sweep: about "
             f"{self._format_duration(estimate.estimated_seconds)} plus communication overhead"
         )
         self._refresh_ac_psu_status()
 
     def _handle_ac_sweep_progress(self, row: sweep.AcSweepRow) -> None:
-        self._advance_ac_progress("Microwire sweep")
+        total_s = max(0.001, self._ac_progress_total / 1000.0)
+        self._set_ac_elapsed_progress("Microwire sweep", row.elapsed_s, total_s)
         self._append_ac_plot_point(self._plot_point_from_sweep_row(row))
         self._set_ac_current_task(
             "Current task: microwire sweep - "
@@ -1805,15 +1835,20 @@ class MainWindow(CurrentAnnealingWindow):
         self,
         plan: Sequence[Lcr6000Settings],
         *,
-        repeats: int,
+        point_duration_s: float | None = None,
+        repeats: int | None = None,
         settle_s: float = 0.0,
+        total_planned_s: float | None = None,
         row_callback: Callable[[list[str]], None] | None = None,
     ) -> list[list[str]]:
         meter = self.lcr_meter
         if meter is None or not meter.is_open:
             raise RuntimeError("LCR meter is not connected")
         rows: list[list[str]] = []
-        repeat_count = max(1, int(repeats))
+        if point_duration_s is None:
+            point_duration_s = 0.0
+        point_duration = max(0.0, float(point_duration_s))
+        fallback_repeats = max(1, int(repeats if repeats is not None else 1))
         started = time.monotonic()
         for setting_index, setting in enumerate(plan, start=1):
             if self._stop_requested():
@@ -1823,14 +1858,17 @@ class MainWindow(CurrentAnnealingWindow):
             if settle and not self._sleep_with_stop_processing(settle):
                 break
             self._lcr_plan_index = setting_index - 1
-            for repeat_index in range(1, repeat_count + 1):
+            point_started = time.monotonic()
+            repeat_index = 0
+            while True:
                 if self._stop_requested():
                     break
+                repeat_index += 1
                 self._set_ac_current_task(
                     "Current task: empty-coil baseline - "
                     f"{setting.function}, {setting.frequency_hz:g} Hz, "
                     f"{setting.level_value:g} {setting.level_mode}, "
-                    f"read {repeat_index}/{repeat_count}"
+                    f"{self._format_duration(time.monotonic() - point_started)} / {self._format_duration(point_duration)}"
                 )
                 reading = self._fetch_baseline_reading()
                 self._lcr_last_reading = reading
@@ -1843,7 +1881,10 @@ class MainWindow(CurrentAnnealingWindow):
                 rows.append(row)
                 if row_callback is not None:
                     row_callback(row)
-                self._advance_ac_progress("Empty-coil baseline")
+                if total_planned_s is not None:
+                    self._set_ac_elapsed_progress("Empty-coil baseline", time.monotonic() - started, total_planned_s)
+                else:
+                    self._advance_ac_progress("Empty-coil baseline")
                 self._append_ac_plot_point(
                     self._plot_point_from_baseline_reading(
                         setting,
@@ -1852,6 +1893,11 @@ class MainWindow(CurrentAnnealingWindow):
                     )
                 )
                 QtWidgets.QApplication.processEvents()
+                if point_duration > 0.0:
+                    if time.monotonic() - point_started >= point_duration:
+                        break
+                elif repeat_index >= fallback_repeats:
+                    break
         return rows
 
     def _fetch_baseline_reading(self, *, attempts: int = 3) -> Lcr6000Reading:
