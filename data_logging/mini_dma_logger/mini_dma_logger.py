@@ -99,7 +99,10 @@ UI_TELEMETRY_FIELDNAMES = [
     "target_interval_ms",
     "actual_interval_ms",
     "ui_fps",
+    "ui_heartbeat_interval_ms",
+    "ui_heartbeat_fps",
     "handler_duration_ms",
+    "graph_refresh_interval_ms",
     "automation_active",
     "session_active",
     "session_logging_enabled",
@@ -107,6 +110,7 @@ UI_TELEMETRY_FIELDNAMES = [
     "recovery_dialog_visible",
     "scale_sample_changed",
     "dialog_sample_recorded",
+    "live_plot_sample_recorded",
     "dashboard_plot_refreshed",
     "latest_scale_age_s",
     "session_points",
@@ -172,6 +176,8 @@ DEFAULT_SUPPLY_READ_INTERVAL_MS = 750
 DEFAULT_CONTROL_INTERVAL_MS = 50
 DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
+DEFAULT_UI_HEARTBEAT_INTERVAL_MS = 16
+DEFAULT_GRAPH_REFRESH_INTERVAL_MS = 1000
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 LIVE_PLOT_MAX_POINTS = 3000
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
@@ -2437,6 +2443,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_last_record_scale_timestamp: float | None = None
         self._pending_recovery_return_duration_s: float | None = None
         self._recovery_points: list[MeasurementPoint] = []
+        self._last_dashboard_plot_refresh_s: float | None = None
+        self._ui_heartbeat_last_s: float | None = None
+        self._ui_heartbeat_interval_ms: float | None = None
+        self._ui_heartbeat_fps: float | None = None
         self.action_timing_settings: QtGui.QAction | None = None
         self.action_mirror_run_log: QtGui.QAction | None = None
         self._manual_jog_timer = QtCore.QTimer(self)
@@ -2452,6 +2462,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ui_refresh_timer = QtCore.QTimer(self)
         self._ui_refresh_timer.setInterval(DEFAULT_UI_REFRESH_INTERVAL_MS)
         self._ui_refresh_timer.timeout.connect(self._handle_ui_refresh_timer)
+        self._ui_heartbeat_timer = QtCore.QTimer(self)
+        self._ui_heartbeat_timer.setInterval(DEFAULT_UI_HEARTBEAT_INTERVAL_MS)
+        self._ui_heartbeat_timer.timeout.connect(self._handle_ui_heartbeat_timer)
+        self._ui_heartbeat_timer.start()
         self._auto_ramp_timer = QtCore.QTimer(self)
         self._auto_ramp_timer.timeout.connect(self._handle_auto_ramp_tick)
         self._scale_hint_timer = QtCore.QTimer(self)
@@ -2529,7 +2543,12 @@ class MainWindow(QtWidgets.QMainWindow):
         ui_interval.setRange(50, 5000)
         ui_interval.setValue(self._ui_refresh_interval_ms())
         ui_interval.setSuffix(" ms")
-        form.addRow("UI refresh interval", ui_interval)
+        form.addRow("Live label/telemetry interval", ui_interval)
+        graph_interval = QtWidgets.QSpinBox(dialog)
+        graph_interval.setRange(100, 60000)
+        graph_interval.setValue(self._graph_refresh_interval_ms())
+        graph_interval.setSuffix(" ms")
+        form.addRow("Dashboard graph interval", graph_interval)
         scale_interval = QtWidgets.QSpinBox(dialog)
         scale_interval.setRange(50, 60000)
         scale_interval.setValue(int(self.spin_scale_interval.value()))
@@ -2563,6 +2582,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_control_interval.setValue(control_interval.value())
         self.spin_log_interval.setValue(log_interval.value())
         self.spin_ui_interval.setValue(ui_interval.value())
+        self.spin_graph_interval.setValue(graph_interval.value())
         self.spin_scale_interval.setValue(scale_interval.value())
         self.spin_tic_status_interval.setValue(tic_status_interval.value())
         self.spin_tic_keepalive_interval.setValue(tic_keepalive_interval.value())
@@ -3486,11 +3506,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_ui_interval.setValue(DEFAULT_UI_REFRESH_INTERVAL_MS)
         self.spin_ui_interval.setSuffix(" ms")
         self.spin_ui_interval.setToolTip("Live label refresh cadence; hardware polling has separate limits.")
-        automation_form.addRow("UI refresh interval", self.spin_ui_interval)
+        automation_form.addRow("Live label/telemetry interval", self.spin_ui_interval)
         self.spin_ui_interval.setVisible(False)
         ui_interval_label = automation_form.labelForField(self.spin_ui_interval)
         if ui_interval_label is not None:
             ui_interval_label.setVisible(False)
+        self.spin_graph_interval = QtWidgets.QSpinBox(automation_box)
+        self.spin_graph_interval.setRange(100, 60000)
+        self.spin_graph_interval.setValue(DEFAULT_GRAPH_REFRESH_INTERVAL_MS)
+        self.spin_graph_interval.setSuffix(" ms")
+        self.spin_graph_interval.setToolTip(
+            "Dashboard Matplotlib redraw cadence. Data acquisition and control continue independently."
+        )
+        automation_form.addRow("Dashboard graph interval", self.spin_graph_interval)
+        self.spin_graph_interval.setVisible(False)
+        graph_interval_label = automation_form.labelForField(self.spin_graph_interval)
+        if graph_interval_label is not None:
+            graph_interval_label.setVisible(False)
         self.combo_recipe_mode = QtWidgets.QComboBox(automation_box)
         self.combo_recipe_mode.addItem("Displacement ramp", "ramp")
         self.combo_recipe_mode.addItem("Cyclic displacement", "cycle")
@@ -4613,6 +4645,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             widget.valueChanged.connect(self._update_recipe_mode_ui)
         self.spin_ui_interval.valueChanged.connect(self._apply_ui_refresh_interval)
+        self.spin_graph_interval.valueChanged.connect(self._apply_ui_refresh_interval)
         self.spin_tic_status_interval.valueChanged.connect(self._apply_hardware_timer_intervals)
         self.spin_tic_keepalive_interval.valueChanged.connect(self._apply_hardware_timer_intervals)
         self.spin_full_steps_per_mm.valueChanged.connect(self._sync_tic_units_per_mm_from_full_steps)
@@ -10562,6 +10595,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return int(self.spin_ui_interval.value())
         return DEFAULT_UI_REFRESH_INTERVAL_MS
 
+    def _graph_refresh_interval_ms(self) -> int:
+        if hasattr(self, "spin_graph_interval"):
+            return int(self.spin_graph_interval.value())
+        return DEFAULT_GRAPH_REFRESH_INTERVAL_MS
+
     def _tic_status_interval_ms(self) -> int:
         if hasattr(self, "spin_tic_status_interval"):
             return int(self.spin_tic_status_interval.value())
@@ -10583,6 +10621,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_ui_refresh_interval(self) -> None:
         if hasattr(self, "_ui_refresh_timer"):
             self._ui_refresh_timer.setInterval(self._ui_refresh_interval_ms())
+
+    def _dashboard_graph_refresh_due(self, *, now_s: float) -> bool:
+        interval_s = max(0.0, self._graph_refresh_interval_ms() / 1000.0)
+        return (
+            self._last_dashboard_plot_refresh_s is None
+            or now_s - self._last_dashboard_plot_refresh_s >= interval_s
+        )
 
     def _apply_hardware_timer_intervals(self) -> None:
         if hasattr(self, "_status_timer"):
@@ -10681,7 +10726,10 @@ class MainWindow(QtWidgets.QMainWindow):
             },
             "control": {
                 "control_interval_ms": self._control_interval_ms(),
+                "live_label_interval_ms": self._ui_refresh_interval_ms(),
                 "ui_refresh_interval_ms": self._ui_refresh_interval_ms(),
+                "ui_heartbeat_interval_ms": DEFAULT_UI_HEARTBEAT_INTERVAL_MS,
+                "graph_refresh_interval_ms": self._graph_refresh_interval_ms(),
                 "tic_keepalive_interval_ms": self._tic_keepalive_interval_ms(),
                 "tic_status_interval_ms": self._tic_status_interval_ms(),
                 "supply_read_interval_ms": self._supply_read_interval_ms(),
@@ -10906,6 +10954,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_points = []
         self._live_plot_points = []
         self._last_live_plot_scale_timestamp = None
+        self._last_dashboard_plot_refresh_s = None
         self._session_active = True
         self._session_logging_enabled = bool(enable_logging)
         self._session_start_monotonic = time.monotonic()
@@ -10961,6 +11010,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_points = []
         self._live_plot_points = []
         self._last_live_plot_scale_timestamp = None
+        self._last_dashboard_plot_refresh_s = None
         self._session_logging_enabled = True
         self._session_start_monotonic = time.monotonic()
         self._session_start_wall_s = time.time()
@@ -14007,7 +14057,7 @@ class MainWindow(QtWidgets.QMainWindow):
         previous_scale_timestamp = self._latest_scale_timestamp
         self._ui_refresh_last_monotonic_s = started_s
         dialog_sample_recorded = self._record_live_dialog_samples_from_ui_refresh()
-        dashboard_plot_refreshed = self._record_live_plot_sample_from_ui_refresh()
+        live_plot_sample_recorded, dashboard_plot_refreshed = self._record_live_plot_sample_from_ui_refresh()
         self._refresh_live_labels()
         finished_s = time.monotonic()
         self._write_ui_telemetry_sample(
@@ -14020,8 +14070,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 and self._latest_scale_timestamp != previous_scale_timestamp
             ),
             dialog_sample_recorded=dialog_sample_recorded,
+            live_plot_sample_recorded=live_plot_sample_recorded,
             dashboard_plot_refreshed=dashboard_plot_refreshed,
         )
+
+    def _handle_ui_heartbeat_timer(self) -> None:
+        now_s = time.monotonic()
+        previous_s = self._ui_heartbeat_last_s
+        self._ui_heartbeat_last_s = now_s
+        if previous_s is None:
+            return
+        interval_ms = max(0.0, (now_s - previous_s) * 1000.0)
+        self._ui_heartbeat_interval_ms = interval_ms
+        self._ui_heartbeat_fps = None if interval_ms <= 0.0 else 1000.0 / interval_ms
 
     def _setup_dialog_visible(self) -> bool:
         return self._length_setup_dialog is not None and not self._length_setup_dialog.isHidden()
@@ -14037,6 +14098,7 @@ class MainWindow(QtWidgets.QMainWindow):
         previous_ui_s: float | None,
         scale_sample_changed: bool,
         dialog_sample_recorded: bool,
+        live_plot_sample_recorded: bool,
         dashboard_plot_refreshed: bool,
     ) -> None:
         if (
@@ -14061,7 +14123,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "target_interval_ms": int(self._ui_refresh_interval_ms()),
                 "actual_interval_ms": _number(actual_interval_ms, decimals=3),
                 "ui_fps": _number(ui_fps, decimals=3),
+                "ui_heartbeat_interval_ms": _number(self._ui_heartbeat_interval_ms, decimals=3),
+                "ui_heartbeat_fps": _number(self._ui_heartbeat_fps, decimals=3),
                 "handler_duration_ms": _number(max(0.0, (finished_s - started_s) * 1000.0), decimals=3),
+                "graph_refresh_interval_ms": int(self._graph_refresh_interval_ms()),
                 "automation_active": int(bool(self._automation_active)),
                 "session_active": int(bool(self._session_active)),
                 "session_logging_enabled": int(bool(self._session_logging_enabled)),
@@ -14069,6 +14134,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "recovery_dialog_visible": int(self._recovery_dialog_visible()),
                 "scale_sample_changed": int(bool(scale_sample_changed)),
                 "dialog_sample_recorded": int(bool(dialog_sample_recorded)),
+                "live_plot_sample_recorded": int(bool(live_plot_sample_recorded)),
                 "dashboard_plot_refreshed": int(bool(dashboard_plot_refreshed)),
                 "latest_scale_age_s": _number(scale_age_s, decimals=3),
                 "session_points": len(self._session_points),
@@ -14079,23 +14145,27 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_ui_telemetry_count % 10 == 0:
             self._session_ui_telemetry_handle.flush()
 
-    def _record_live_plot_sample_from_ui_refresh(self) -> bool:
+    def _record_live_plot_sample_from_ui_refresh(self) -> tuple[bool, bool]:
         if (
             not self._session_active
             or self._latest_scale_timestamp is None
             or self._last_live_plot_scale_timestamp == self._latest_scale_timestamp
             or self._setup_dialog_visible()
         ):
-            return False
+            return False, False
         point = self._capture_live_plot_point()
         if point is None:
-            return False
+            return False, False
         self._live_plot_points.append(point)
         if len(self._live_plot_points) > LIVE_PLOT_MAX_POINTS:
             self._live_plot_points = self._live_plot_points[-LIVE_PLOT_MAX_POINTS:]
         self._last_live_plot_scale_timestamp = self._latest_scale_timestamp
-        self._refresh_plots()
-        return True
+        now_s = time.monotonic()
+        if self._dashboard_graph_refresh_due(now_s=now_s):
+            self._refresh_plots()
+            self._last_dashboard_plot_refresh_s = now_s
+            return True, True
+        return True, False
 
     def _record_live_dialog_samples_from_ui_refresh(self) -> bool:
         recorded = False
@@ -14443,6 +14513,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("control_interval_ms", self._control_interval_ms())
         self.settings.setValue("log_interval_ms", self._log_interval_ms())
         self.settings.setValue("ui_refresh_interval_ms", self._ui_refresh_interval_ms())
+        self.settings.setValue("graph_refresh_interval_ms", self._graph_refresh_interval_ms())
         self.settings.setValue("supply_read_interval_ms", self._supply_read_interval_ms())
         self.settings.setValue("ramp_distance_mm", self.spin_ramp_distance.value())
         self.settings.setValue("ramp_step_mm", self.spin_ramp_step.value())
@@ -14806,6 +14877,9 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         self.spin_ui_interval.setValue(int(self.settings.value("ui_refresh_interval_ms", DEFAULT_UI_REFRESH_INTERVAL_MS)))
+        self.spin_graph_interval.setValue(
+            int(self.settings.value("graph_refresh_interval_ms", DEFAULT_GRAPH_REFRESH_INTERVAL_MS))
+        )
         self._apply_ui_refresh_interval()
         self.spin_supply_read_interval.setValue(
             int(self.settings.value("supply_read_interval_ms", DEFAULT_SUPPLY_READ_INTERVAL_MS))

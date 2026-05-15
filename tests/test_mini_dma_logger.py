@@ -3277,6 +3277,7 @@ def test_timing_controls_are_opened_from_settings_menu(tmp_path: Path, qtbot) ->
         assert window.spin_control_interval.isHidden()
         assert window.spin_log_interval.isHidden()
         assert window.spin_ui_interval.isHidden()
+        assert window.spin_graph_interval.isHidden()
         assert window.spin_scale_interval.isHidden()
         assert window.spin_tic_status_interval.isHidden()
         assert window.spin_tic_keepalive_interval.isHidden()
@@ -3326,6 +3327,7 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
     settings.setValue("tic_status_interval_ms", 1500)
     settings.setValue("tic_keepalive_interval_ms", 350)
     settings.setValue("supply_read_interval_ms", 1250)
+    settings.setValue("graph_refresh_interval_ms", 500)
     settings.sync()
     window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
@@ -3335,6 +3337,7 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
         assert window.spin_tic_status_interval.value() == 1500
         assert window.spin_tic_keepalive_interval.value() == 350
         assert window.spin_supply_read_interval.value() == 1250
+        assert window.spin_graph_interval.value() == 500
         assert window._status_timer.interval() == 1500
         assert window._tic_keepalive_timer.interval() == 350
 
@@ -3345,6 +3348,7 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
         assert int(settings.value("tic_status_interval_ms")) == 1500
         assert int(settings.value("tic_keepalive_interval_ms")) == 450
         assert int(settings.value("supply_read_interval_ms")) == 1250
+        assert int(settings.value("graph_refresh_interval_ms")) == 500
     finally:
         _close_test_window(window)
 
@@ -3485,6 +3489,46 @@ def test_ui_refresh_adds_live_plot_sample_without_logging_or_supply_io(
         assert point.load_g == pytest.approx(0.2)
         assert point.current_measured_mA == pytest.approx(49.0)
         assert point.resistance_ohm == pytest.approx(50.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_ui_refresh_throttles_dashboard_graph_redraws_but_keeps_live_samples(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
+    plot_refreshes: list[float] = []
+    window._refresh_plots = lambda: plot_refreshes.append(clock["now"])  # type: ignore[method-assign]
+
+    try:
+        window._session_active = True
+        window._session_logging_enabled = True
+        window._session_start_monotonic = 90.0
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_tension_load_positive.setChecked(True)
+        window._latest_scale_value_g = 21.0
+        window._latest_scale_timestamp = 123.0
+        window._current_position_mm = -0.4
+        window._effective_position_mm = -0.4
+        window._position_reference_mm = 0.0
+        window.spin_graph_interval.setValue(1000)
+
+        window._handle_ui_refresh_timer()
+        clock["now"] += 0.2
+        window._latest_scale_value_g = 20.9
+        window._latest_scale_timestamp = 124.0
+        window._handle_ui_refresh_timer()
+        clock["now"] += 1.0
+        window._latest_scale_value_g = 20.8
+        window._latest_scale_timestamp = 125.0
+        window._handle_ui_refresh_timer()
+
+        assert len(window._live_plot_points) == 3
+        assert plot_refreshes == [100.0, 101.2]
     finally:
         _close_test_window(window)
 
@@ -5294,12 +5338,16 @@ def test_session_writes_ui_refresh_telemetry(tmp_path: Path, qtbot) -> None:
     try:
         window._start_session(enable_logging=False, record_initial_point=False)
         assert window._session_ui_telemetry_path is not None
+        window._ui_heartbeat_interval_ms = 16.0
+        window._ui_heartbeat_fps = 62.5
+        window.spin_graph_interval.setValue(500)
         window._write_ui_telemetry_sample(
             started_s=window._session_start_monotonic + 0.2,
             finished_s=window._session_start_monotonic + 0.212,
             previous_ui_s=window._session_start_monotonic,
             scale_sample_changed=True,
             dialog_sample_recorded=False,
+            live_plot_sample_recorded=True,
             dashboard_plot_refreshed=True,
         )
         window._stop_session()
@@ -5311,8 +5359,12 @@ def test_session_writes_ui_refresh_telemetry(tmp_path: Path, qtbot) -> None:
         assert rows[0]["target_interval_ms"] == str(window._ui_refresh_interval_ms())
         assert rows[0]["actual_interval_ms"] == "200.000"
         assert rows[0]["ui_fps"] == "5.000"
+        assert rows[0]["ui_heartbeat_interval_ms"] == "16.000"
+        assert rows[0]["ui_heartbeat_fps"] == "62.500"
         assert rows[0]["handler_duration_ms"] == "12.000"
+        assert rows[0]["graph_refresh_interval_ms"] == "500"
         assert rows[0]["scale_sample_changed"] == "1"
+        assert rows[0]["live_plot_sample_recorded"] == "1"
         assert rows[0]["dashboard_plot_refreshed"] == "1"
         assert metadata["logging"]["ui_telemetry_sample_count"] == 1
     finally:

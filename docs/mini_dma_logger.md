@@ -62,7 +62,7 @@ Current intended hardware stack:
 - each run is written to its own output folder containing `measurement.txt`, `measurement.csv`, `metadata.json`, `scale_raw.csv`, `control_trace.csv`, `setup.txt`, and `setup.csv`
 - `measurement.csv` remains the slower recipe/session log, `scale_raw.csv` preserves every acquired balance reply, `control_trace.csv` records closed-loop seek decisions, and `setup.csv` records pre-measurement setup separately from the recipe data
 - saved or typed base filenames with repeated `_run02` / `_run03` suffix chains are cleaned back to the base sample name before choosing the next run folder, and the output-folder row includes an `Open` button next to `Browse`
-- recipe timing is split into a global control interval, global log interval, and UI refresh interval; individual recipes no longer own their own scheduler frequency
+- recipe timing is split into a global control interval, global log interval, live label/telemetry interval, and dashboard graph refresh interval; individual recipes no longer own their own scheduler frequency
 - the global timing controls live under `Settings -> Timing...` instead of taking space in the normal Recipe panel
 - hardware communication keeps its own cadence: request-mode scale acquisition, Tic status, Tic command-timeout keepalive, and power-supply readbacks all have explicit timing settings, with supply readbacks still throttled so they do not block fast current commands
 - Tic command state is tracked separately from slower Tic status polling: recipes and calibration micro-moves chain from the last commanded target, while scheduled data-log rows use cached/commanded position instead of forcing a blocking Tic status subprocess
@@ -118,8 +118,8 @@ Current intended hardware stack:
 - the current G&G request/response scale on `COM6` at `9600` baud does not stream passively; it replies to `ESC+p` at about 5 Hz, so request-mode scale polling defaults to 250 ms and feeds a rolling signal buffer
 - main CSV rows include interval load mean, standard deviation, min/max, sample count, and achieved scale sample rate
 - raw scale sidecars preserve every real balance reading during a session with both raw grams and applied wire load on one continuous elapsed-time axis across setup and recipe logging, so transition fluctuations can be inspected without forcing the main log to run at the hardware polling rate
-- setup and recovery popups plot live UI-refresh samples when fresh scale replies arrive; recovery explicitly restarts that UI timer after a stopped session so displacement and load remain visible during manual return-to-zero moves
-- the main dashboard graphs also use lightweight live UI-refresh samples between scheduled CSV rows, so the plots keep moving with fresh scale data instead of waiting for the logging/control cadence; these live points are not written to the measurement CSV and do not trigger extra hardware reads
+- setup and recovery popups plot live samples when fresh scale replies arrive; recovery explicitly restarts that lightweight timer after a stopped session so displacement and load remain visible during manual return-to-zero moves
+- the main dashboard graphs also use lightweight live samples between scheduled CSV rows, so the plots keep moving with fresh scale data instead of waiting for the logging/control cadence; these live points are not written to the measurement CSV, do not trigger extra hardware reads, and redraw at the separate dashboard graph interval
 - tensile displacement uses its own motion-direction setting; the current rig defaults to negative raw Tic travel as positive tensile displacement, so the app can show/log positive `position_mm` while preserving raw Tic position as `raw_position_mm`
 - `raw_position_mm` is the commanded/confirmed Tic motor coordinate; `position_mm` and `strain_pct` are specimen displacement/strain and exclude configured backlash take-up travel during direction reversals
 - software tare is kept only in advanced hardware diagnostics because the normal workflow should leave Mini DMA using either the real scale reading plus `Capture zero-load`, or the explicit physical `Tare scale` command when the balance display itself needs re-zeroing
@@ -173,7 +173,7 @@ Current intended hardware stack:
 - dark-theme-aware Matplotlib styling
 - configurable 4-tile dashboard instead of a fixed graph trio
 - selectable plot channels with left/right axis support
-- recovery actions open a temporary dual-axis load/displacement vs time graph while returning load or displacement toward zero/start, update that graph at the UI refresh cadence when new scale replies arrive, and the same actions are available from `Manual Actions`
+- recovery actions open a temporary dual-axis load/displacement vs time graph while returning load or displacement toward zero/start, update that graph from fresh scale replies, and the same actions are available from `Manual Actions`
 - plot configuration moved into a popup dialog instead of taking permanent dashboard space
 - sample/project/output fields and dashboard plot selections are persisted as they change and when a session starts, so a crash or interrupted test window is less likely to wipe the operator's saved run identity
 
