@@ -102,6 +102,10 @@ Point acquisition controls are named for the AC experiment:
   observed read rate. Empty-coil baseline readings are also added to the live
   plots as 0 mA points so the dashboard visibly updates before a microwire
   sweep is started.
+- Acquisition and file writing run in a worker thread, separate from the
+  Matplotlib dashboard. Each reading is flushed to disk before the UI plot is
+  updated, and plot redraws are throttled to about once per second so graph
+  rendering cannot slow the LCR logging loop.
 - The Stop button stops after the current LCR read. Empty-coil baseline stops
   save a partial TSV with the rows already collected. Baseline rows are flushed
   as they are measured, matching the microwire sweep behavior, so a PC or

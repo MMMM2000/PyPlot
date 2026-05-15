@@ -76,7 +76,7 @@ HMP_DEFAULT_VOLTAGE_LIMIT_V = 30.0
 AC_DEFAULT_LOG_DIR = Path.home() / "Downloads" / "ac_susceptibility"
 AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
 AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
-AC_PLOT_REFRESH_INTERVAL_S = 0.75
+AC_PLOT_REFRESH_INTERVAL_S = 1.0
 AC_DIAGNOSTICS_DEFAULT_PATH = AC_DEFAULT_LOG_DIR / "ac_susc_diagnostics.jsonl"
 LEGACY_DEFAULT_FREQUENCY_TEXTS = {
     "10, 20, 100, 1000, 2000, 10000, 100000, 200000",
@@ -151,6 +151,181 @@ class AcPlotConfigDialog(QtWidgets.QDialog):
         layout.addLayout(button_row)
 
 
+def _fetch_lcr_reading_from_meter(meter: Any, *, attempts: int = 3) -> Lcr6000Reading:
+    last_empty = False
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        reading = meter.fetch_impedance()
+        if reading.raw.strip():
+            return reading
+        last_empty = True
+        if attempt < attempts:
+            time.sleep(0.25)
+    if last_empty:
+        raise RuntimeError("LCR returned an empty response during baseline measurement")
+    raise RuntimeError("LCR did not return a measurement")
+
+
+def _plot_point_from_lcr_reading(
+    setting: Lcr6000Settings,
+    reading: Lcr6000Reading,
+    *,
+    elapsed_s: float,
+    current_mA: float = 0.0,
+) -> AcPlotPoint:
+    ls_h, rs_ohm = MainWindow._lcr_ls_rs_values(setting, reading)
+    return AcPlotPoint(
+        elapsed_s=float(elapsed_s),
+        model=setting.function,
+        frequency_hz=float(setting.frequency_hz),
+        amplitude_v=float(setting.level_value if setting.level_mode == "voltage" else math.nan),
+        current_mA=float(current_mA),
+        ls_h=ls_h,
+        rs_ohm=rs_ohm,
+    )
+
+
+class AcBaselineWorker(QtCore.QObject):
+    task_changed = QtCore.pyqtSignal(str)
+    progress_changed = QtCore.pyqtSignal(float, float)
+    plot_point_ready = QtCore.pyqtSignal(object)
+    finished = QtCore.pyqtSignal(str, bool)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(
+        self,
+        *,
+        meter: Any,
+        plan: Sequence[Lcr6000Settings],
+        output_path: Path,
+        point_duration_s: float,
+        settle_s: float,
+        total_planned_s: float,
+    ) -> None:
+        super().__init__()
+        self.meter = meter
+        self.plan = list(plan)
+        self.output_path = Path(output_path)
+        self.point_duration_s = max(0.0, float(point_duration_s))
+        self.settle_s = max(0.0, float(settle_s))
+        self.total_planned_s = max(0.001, float(total_planned_s))
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    def _sleep_with_stop(self, seconds: float) -> bool:
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        while time.monotonic() < deadline:
+            if self._stop_requested:
+                return False
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        return not self._stop_requested
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        started = time.monotonic()
+        stopped = False
+        try:
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.output_path.open("w", encoding="utf-8", newline="") as fh:
+                MainWindow._write_baseline_header(fh, self.plan)
+                for setting_index, setting in enumerate(self.plan, start=1):
+                    if self._stop_requested:
+                        stopped = True
+                        break
+                    self.meter.configure(setting)
+                    if self.settle_s and not self._sleep_with_stop(self.settle_s):
+                        stopped = True
+                        break
+                    point_started = time.monotonic()
+                    repeat_index = 0
+                    while True:
+                        if self._stop_requested:
+                            stopped = True
+                            break
+                        repeat_index += 1
+                        elapsed_point = time.monotonic() - point_started
+                        self.task_changed.emit(
+                            "Current task: empty-coil baseline - "
+                            f"{setting.function}, {setting.frequency_hz:g} Hz, "
+                            f"{setting.level_value:g} {setting.level_mode}, "
+                            f"{MainWindow._format_duration(elapsed_point)} / {MainWindow._format_duration(self.point_duration_s)}"
+                        )
+                        reading = _fetch_lcr_reading_from_meter(self.meter)
+                        row = MainWindow._format_baseline_row(
+                            setting_index=setting_index,
+                            repeat_index=repeat_index,
+                            setting=setting,
+                            reading=reading,
+                        )
+                        MainWindow._write_baseline_row(fh, row)
+                        elapsed_total = time.monotonic() - started
+                        self.plot_point_ready.emit(
+                            _plot_point_from_lcr_reading(setting, reading, elapsed_s=elapsed_total)
+                        )
+                        self.progress_changed.emit(elapsed_total, self.total_planned_s)
+                        if self.point_duration_s > 0.0:
+                            if time.monotonic() - point_started >= self.point_duration_s:
+                                break
+                        else:
+                            break
+                    if stopped:
+                        break
+            self.finished.emit(str(self.output_path), stopped)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class AcSweepWorker(QtCore.QObject):
+    row_ready = QtCore.pyqtSignal(object)
+    finished = QtCore.pyqtSignal(str, bool)
+    failed = QtCore.pyqtSignal(str)
+
+    def __init__(
+        self,
+        *,
+        config: sweep.AcSweepConfig,
+        lcr: Any,
+        psu: sweep.CurrentSource,
+        output_path: Path,
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.lcr = lcr
+        self.psu = psu
+        self.output_path = Path(output_path)
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    def _sleep_with_stop(self, seconds: float) -> None:
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        while time.monotonic() < deadline:
+            if self._stop_requested:
+                return
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            sweep.run_ac_sweep(
+                config=self.config,
+                lcr=self.lcr,
+                psu=self.psu,
+                output_path=self.output_path,
+                progress=self.row_ready.emit,
+                stop_requested=lambda: self._stop_requested,
+                sleep=self._sleep_with_stop,
+            )
+            self.finished.emit(str(self.output_path), False)
+        except Exception as exc:
+            if self._stop_requested:
+                self.finished.emit(str(self.output_path), True)
+                return
+            self.failed.emit(str(exc))
+
+
 class MainWindow(CurrentAnnealingWindow):
     """Current annealing logger extended with LCR-6200 measurements."""
 
@@ -168,6 +343,8 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_progress_started_monotonic = 0.0
         self._ac_last_plot_refresh_monotonic = 0.0
         self._ac_last_plot_refresh_duration_s = 0.0
+        self._ac_plot_dirty = False
+        self._ac_plot_refresh_timer: QtCore.QTimer | None = None
         self._ac_last_task_text = "Current task: idle"
         self._ac_diagnostics_enabled = False
         self._ac_diagnostics_path = AC_DIAGNOSTICS_DEFAULT_PATH
@@ -177,6 +354,8 @@ class MainWindow(CurrentAnnealingWindow):
         self._plot_tiles: list[AcPlotTileWidgets] = []
         self.plot_config_dialog: AcPlotConfigDialog | None = None
         self._ac_output_settings_ready = False
+        self._ac_worker_thread: QtCore.QThread | None = None
+        self._ac_worker: QtCore.QObject | None = None
         super().__init__()
         self.setWindowTitle("AC Susceptibility Logger")
         self._restore_ac_developer_settings()
@@ -190,6 +369,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.populate_ac_psu_ports()
         self._update_ac_sweep_estimate()
         self._set_default_log_name()
+        self._start_ac_plot_refresh_timer()
 
     def init_graph_window(self):  # type: ignore[override]
         super().init_graph_window()
@@ -591,6 +771,23 @@ class MainWindow(CurrentAnnealingWindow):
             points=len(points),
             tiles=len(active_tiles[:4]),
         )
+
+    def _start_ac_plot_refresh_timer(self) -> None:
+        timer = QtCore.QTimer(self)
+        timer.setInterval(int(round(AC_PLOT_REFRESH_INTERVAL_S * 1000.0)))
+        timer.timeout.connect(self._refresh_dirty_ac_plots)
+        timer.start()
+        self._ac_plot_refresh_timer = timer
+
+    def _refresh_dirty_ac_plots(self) -> None:
+        try:
+            dirty = bool(getattr(self, "_ac_plot_dirty"))
+        except RuntimeError:
+            return
+        if not dirty:
+            return
+        self._ac_plot_dirty = False
+        self._refresh_ac_plots(force=True)
 
     @staticmethod
     def _style_ac_axis(axis: Any, theme: dict[str, Any]) -> None:
@@ -1259,33 +1456,39 @@ class MainWindow(CurrentAnnealingWindow):
         self._set_sticky_action_state(running=True)
         self.label_lcr_status.setText(f"Running AC sweep: {output_path}")
         try:
-            sweep.run_ac_sweep(
+            worker = AcSweepWorker(
                 config=config,
                 lcr=meter,
                 psu=psu,
                 output_path=output_path,
-                progress=self._handle_ac_sweep_progress,
-                stop_requested=lambda: self._ac_sweep_stop_requested,
-                sleep=self._ac_sweep_sleep,
             )
+            thread = QtCore.QThread(self)
+            worker.moveToThread(thread)
+            worker.row_ready.connect(self._handle_ac_sweep_progress)
+            worker.finished.connect(self._handle_sweep_worker_finished)
+            worker.failed.connect(self._handle_ac_worker_failed)
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            thread.started.connect(worker.run)
+            thread.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            thread.finished.connect(self._clear_ac_worker_refs)
+            self._ac_worker = worker
+            self._ac_worker_thread = thread
+            thread.start()
+            return
         except Exception as exc:
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"AC sweep failed: {exc}")
             QtWidgets.QMessageBox.warning(self, "AC sweep failed", str(exc))
             return
-        finally:
-            self._ac_sweep_running = False
-            self._ac_sweep_stop_requested = False
-            self.pushButton_run_ac_sweep.setEnabled(True)
-            self.pushButton_stop_ac_sweep.setEnabled(False)
-            self._set_sticky_action_state(running=False)
-        self.label_lcr_status.setText(f"AC sweep saved: {output_path}")
-        self._complete_ac_progress("Microwire sweep")
-        QtWidgets.QMessageBox.information(self, "AC sweep saved", f"Saved AC sweep to:\n{output_path}")
 
     def handle_stop_ac_sweep_clicked(self) -> None:
         if self._ac_sweep_running:
             self._ac_sweep_stop_requested = True
+            worker = getattr(self, "_ac_worker", None)
+            if hasattr(worker, "request_stop"):
+                worker.request_stop()
             self.label_lcr_status.setText("Stopping after the current LCR read...")
             self._set_ac_current_task("Current task: stopping after current read")
             QtWidgets.QApplication.processEvents()
@@ -1315,9 +1518,6 @@ class MainWindow(CurrentAnnealingWindow):
         if meter is None or not meter.is_open:
             QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
             return
-        path: Path | None = None
-        rows: list[list[str]] = []
-        stopped = False
         try:
             plan = self._prepare_lcr_plan()
             point_duration = max(0.1, float(self.spinBox_ac_point_duration.value()))
@@ -1334,46 +1534,38 @@ class MainWindow(CurrentAnnealingWindow):
             self.label_lcr_status.setText(
                 f"Measuring baseline: {len(plan)} settings x {point_duration:g} s"
             )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8", newline="") as fh:
-                self._write_baseline_header(fh, plan)
-                rows = self._collect_baseline_rows(
-                    plan,
-                    point_duration_s=point_duration,
-                    settle_s=dwell,
-                    total_planned_s=baseline_seconds,
-                    row_callback=lambda row: self._write_baseline_row(fh, row),
-                )
-            stopped = self._ac_sweep_stop_requested
+            worker = AcBaselineWorker(
+                meter=meter,
+                plan=plan,
+                output_path=path,
+                point_duration_s=point_duration,
+                settle_s=dwell,
+                total_planned_s=baseline_seconds,
+            )
+            thread = QtCore.QThread(self)
+            worker.moveToThread(thread)
+            worker.task_changed.connect(self._set_ac_current_task)
+            worker.progress_changed.connect(
+                lambda elapsed, total: self._set_ac_elapsed_progress("Empty-coil baseline", elapsed, total)
+            )
+            worker.plot_point_ready.connect(self._append_ac_plot_point)
+            worker.finished.connect(self._handle_baseline_worker_finished)
+            worker.failed.connect(self._handle_ac_worker_failed)
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            thread.started.connect(worker.run)
+            thread.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            thread.finished.connect(self._clear_ac_worker_refs)
+            self._ac_worker = worker
+            self._ac_worker_thread = thread
+            thread.start()
+            return
         except Exception as exc:
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"Baseline failed: {exc}")
             QtWidgets.QMessageBox.warning(self, "Baseline failed", str(exc))
             return
-        finally:
-            self._ac_sweep_running = False
-            self._ac_sweep_stop_requested = False
-            self.pushButton_measure_lcr_baseline.setEnabled(True)
-            self.pushButton_stop_ac_sweep.setEnabled(False)
-            self._set_sticky_action_state(running=False)
-            if self._ac_progress_value < self._ac_progress_total:
-                if stopped:
-                    self.progress_ac_run.setFormat(
-                        f"Empty-coil baseline: stopped ({self._ac_progress_value}/{self._ac_progress_total})"
-                    )
-                else:
-                    self._set_ac_progress_idle()
-        if path is None:
-            return
-        if stopped:
-            self.label_lcr_status.setText(f"Baseline stopped; partial file saved: {path}")
-            self._set_ac_current_task("Current task: stopped")
-            QtWidgets.QMessageBox.information(self, "Baseline stopped", f"Saved partial LCR baseline to:\n{path}")
-        else:
-            self.label_lcr_status.setText(f"Baseline saved: {path}")
-            self._complete_ac_progress("Empty-coil baseline")
-            self._set_ac_current_task("Current task: baseline complete")
-            QtWidgets.QMessageBox.information(self, "Baseline saved", f"Saved LCR baseline to:\n{path}")
 
     def _sweep_total_reads(self, config: sweep.AcSweepConfig) -> int:
         estimate = sweep.estimate_sweep(
@@ -1383,6 +1575,64 @@ class MainWindow(CurrentAnnealingWindow):
             dwell_s=config.dwell_s,
         )
         return max(1, int(round(estimate.estimated_seconds * 1000.0)))
+
+    def _finish_ac_worker_state(self) -> None:
+        self._ac_sweep_running = False
+        self._ac_sweep_stop_requested = False
+        self.pushButton_measure_lcr_baseline.setEnabled(True)
+        self.pushButton_run_ac_sweep.setEnabled(True)
+        self.pushButton_stop_ac_sweep.setEnabled(False)
+        self._set_sticky_action_state(running=False)
+        self._refresh_dirty_ac_plots()
+
+    def _clear_ac_worker_refs(self) -> None:
+        self._ac_worker = None
+        self._ac_worker_thread = None
+
+    @QtCore.pyqtSlot(str, bool)
+    def _handle_baseline_worker_finished(self, path_text: str, stopped: bool) -> None:
+        self._finish_ac_worker_state()
+        path = Path(path_text)
+        if stopped:
+            self.label_lcr_status.setText(f"Baseline stopped; partial file saved: {path}")
+            self._set_ac_current_task("Current task: stopped")
+            self.progress_ac_run.setFormat(
+                f"Empty-coil baseline: stopped ({self._format_duration(self._ac_progress_value / 1000.0)} / "
+                f"{self._format_duration(self._ac_progress_total / 1000.0)})"
+            )
+            QtWidgets.QMessageBox.information(self, "Baseline stopped", f"Saved partial LCR baseline to:\n{path}")
+            return
+        self.label_lcr_status.setText(f"Baseline saved: {path}")
+        self._complete_ac_progress("Empty-coil baseline")
+        self._set_ac_current_task("Current task: baseline complete")
+        QtWidgets.QMessageBox.information(self, "Baseline saved", f"Saved LCR baseline to:\n{path}")
+
+    @QtCore.pyqtSlot(str, bool)
+    def _handle_sweep_worker_finished(self, path_text: str, stopped: bool = False) -> None:
+        self._finish_ac_worker_state()
+        path = Path(path_text)
+        if stopped:
+            self.label_lcr_status.setText(f"AC sweep stopped; partial file saved: {path}")
+            self._set_ac_current_task("Current task: stopped")
+            QtWidgets.QMessageBox.information(self, "AC sweep stopped", f"Saved partial AC sweep to:\n{path}")
+            return
+        self.label_lcr_status.setText(f"AC sweep saved: {path}")
+        self._complete_ac_progress("Microwire sweep")
+        self._set_ac_current_task("Current task: microwire sweep complete")
+        QtWidgets.QMessageBox.information(self, "AC sweep saved", f"Saved AC sweep to:\n{path}")
+
+    @QtCore.pyqtSlot(str)
+    def _handle_ac_worker_failed(self, message: str) -> None:
+        stopped = "stopped by user" in message.lower()
+        self._finish_ac_worker_state()
+        if stopped:
+            self.label_lcr_status.setText("AC run stopped by user.")
+            self._set_ac_current_task("Current task: stopped")
+            return
+        self._lcr_last_error = message
+        self.label_lcr_status.setText(f"AC run failed: {message}")
+        self._set_ac_current_task("Current task: failed")
+        QtWidgets.QMessageBox.warning(self, "AC run failed", message)
 
     def _reset_ac_progress(self, label: str, total: int) -> None:
         self._ac_progress_total = max(1, int(total))
@@ -1631,7 +1881,7 @@ class MainWindow(CurrentAnnealingWindow):
         points.append(point)
         if len(points) > 5000:
             del points[:-5000]
-        self._refresh_ac_plots()
+        self._ac_plot_dirty = True
 
     @staticmethod
     def _lcr_ls_rs_values(setting: Lcr6000Settings, reading: Lcr6000Reading) -> tuple[float | None, float | None]:

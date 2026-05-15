@@ -1213,6 +1213,88 @@ def test_ac_logger_collects_baseline_rows_without_power_supply() -> None:
     assert window._ac_plot_points[-1].frequency_hz == 1000.0
 
 
+def test_ac_logger_baseline_collection_does_not_redraw_plots_inline() -> None:
+    class FakeMeter:
+        is_open = True
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            pass
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-05-15T00:00:00.000+00:00",
+                primary=1e-5,
+                secondary=14.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+                raw="+1.0E-05,+1.4E+01,+0,+0,OK",
+            )
+
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window.lcr_meter = FakeMeter()
+    window._ac_sweep_stop_requested = False
+    window._lcr_last_error = ""
+    window._ac_plot_points = []
+    redraws = {"count": 0}
+    window._refresh_ac_plots = lambda: redraws.__setitem__("count", redraws["count"] + 1)  # type: ignore[method-assign]
+    window._set_ac_current_task = lambda _text: None  # type: ignore[method-assign]
+    window._advance_ac_progress = lambda _label: None  # type: ignore[method-assign]
+
+    rows = window._collect_baseline_rows(
+        [lcr6000.Lcr6000Settings(frequency_hz=100.0, level_value=0.1)],
+        repeats=5,
+    )
+
+    assert len(rows) == 5
+    assert len(window._ac_plot_points) == 5
+    assert redraws["count"] == 0
+
+
+def test_ac_baseline_worker_writes_rows_and_emits_plot_points(tmp_path: Path) -> None:
+    class FakeMeter:
+        is_open = True
+
+        def __init__(self) -> None:
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-05-15T00:00:0{self.fetch_count}.000+00:00",
+                primary=float(self.fetch_count) * 1e-6,
+                secondary=14.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+                raw=f"+{self.fetch_count}.0E-06,+1.4E+01,+0,+0,OK",
+            )
+
+    worker = ac_logger.AcBaselineWorker(
+        meter=FakeMeter(),
+        plan=[lcr6000.Lcr6000Settings(frequency_hz=1000.0, level_value=0.1)],
+        output_path=tmp_path / "baseline.tsv",
+        point_duration_s=0.0,
+        settle_s=0.0,
+        total_planned_s=1.0,
+    )
+    points: list[ac_logger.AcPlotPoint] = []
+    finished: list[tuple[str, bool]] = []
+    worker.plot_point_ready.connect(points.append)
+    worker.finished.connect(lambda path, stopped: finished.append((path, stopped)))
+
+    worker.run()
+
+    assert finished == [(str(tmp_path / "baseline.tsv"), False)]
+    assert len(points) == 1
+    assert points[0].frequency_hz == 1000.0
+    lines = (tmp_path / "baseline.tsv").read_text(encoding="utf-8").splitlines()
+    assert lines[-1].split("\t")[1:4] == ["1", "1", "1000"]
+
+
 def test_ac_logger_collects_baseline_rows_with_incremental_callback() -> None:
     class FakeMeter:
         is_open = True
