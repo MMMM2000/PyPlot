@@ -367,7 +367,7 @@ def _place_current_annealing_title(layer: Any, text: str) -> None:
     except Exception:
         pass
     _set_visibility(title_label, True)
-    _set_text_size(title_label, TITLE_SIZE)
+    _set_text_size(title_label, max(11, min(TITLE_SIZE, 12)))
     get_float = getattr(layer, "get_float", None)
     set_float = getattr(title_label, "set_float", None)
     if not callable(get_float) or not callable(set_float):
@@ -386,7 +386,7 @@ def _place_current_annealing_title(layer: Any, text: str) -> None:
         return
     for key, value in (
         ("x", (x_from + x_to) / 2.0),
-        ("y", y_to + (y_span * 0.08)),
+        ("y", y_to + (y_span * 0.34)),
     ):
         try:
             set_float(key, float(value))
@@ -716,6 +716,47 @@ def _apply_origin_readability(layer: Any, graph: Any | None) -> None:
             graph.activate()
         except Exception:
             pass
+
+
+def _style_origin_report_layout(layer: Any, *, outside_legend: bool = True) -> None:
+    """Reserve page space for native Origin labels and place the legend predictably."""
+    if layer is None:
+        return
+    lt_exec = getattr(layer, "lt_exec", None)
+    if not callable(lt_exec):
+        return
+    commands = [
+        "layer -u 1; layer 50 46 26 30; "
+        "layer.top=30; layer.left=26; layer.width=50; layer.height=46;",
+        "layer.x.ticks=10;",
+        "layer.x2.ticks=10;",
+        "layer.x.label.fsize=10;",
+        "layer.x2.label.fsize=10;",
+        "layer.y.label.fsize=10;",
+        "layer.x.title.fsize=12;",
+        "layer.x2.title.fsize=12;",
+        "layer.y.title.fsize=12;",
+        "legend.fsize=10;",
+    ]
+    if outside_legend:
+        commands.extend(
+            [
+                "legend.x=layer.x.to + legend.dx / 2 + abs(layer.x.to - layer.x.from) * 0.04;",
+                "legend.y=layer.y.to - legend.dy / 2;",
+            ]
+        )
+    else:
+        commands.extend(
+            [
+                "legend.x=layer.x.from + legend.dx / 2;",
+                "legend.y=layer.y.to - legend.dy / 2;",
+            ]
+        )
+    for command in commands:
+        try:
+            lt_exec(command)
+        except Exception:
+            continue
 
 
 def _apply_origin_curve_color(plot_any: Any, color: str) -> None:
@@ -1189,6 +1230,7 @@ def plot_one_origin(
     _apply_origin_readability(layer, graph)
     if show_power_top_axis:
         _apply_origin_power_top_axis(layer, workbook, worksheet, currents, resistances)
+    _style_origin_report_layout(layer)
     _set_graph_title(layer, display_label, graph=graph, origin_any=origin_any)
     _place_current_annealing_title(layer, display_label)
 
