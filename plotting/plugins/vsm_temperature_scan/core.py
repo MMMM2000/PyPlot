@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 from dataclasses import dataclass
 from itertools import zip_longest
@@ -24,6 +25,7 @@ except Exception:  # pragma: no cover - optional dependency
     op = None
 try:
     from plotting.shared.origin import (
+        activate_origin_layer as _shared_activate_origin_layer,
         origin_session,
         set_origin_axis_title as _shared_set_origin_axis_title,
         set_origin_graph_title as _shared_set_origin_graph_title,
@@ -31,6 +33,7 @@ try:
     )
 except Exception:  # pragma: no cover - optional dependency
     origin_session = None  # type: ignore
+    _shared_activate_origin_layer = None  # type: ignore
     _shared_set_origin_axis_title = None  # type: ignore
     _shared_set_origin_graph_title = None  # type: ignore
     _shared_escape_origin_text = None  # type: ignore
@@ -919,6 +922,7 @@ class VSMTemperatureScanProcessor:
         except Exception:
             pass
         self._style_origin_legend_label(legend)
+        self._place_origin_legend_for_export(layer, legend)
 
     def _set_origin_plain_legend(self, layer: Any, labels: Sequence[str]) -> None:
         filtered: list[str] = []
@@ -1032,19 +1036,48 @@ class VSMTemperatureScanProcessor:
         except Exception:
             pass
         self._style_origin_legend_label(legend)
+        self._place_origin_legend_for_export(layer, legend)
 
     @staticmethod
     def _style_origin_legend_label(legend: Any) -> None:
         set_float = getattr(legend, "set_float", None)
         if callable(set_float):
             try:
-                set_float("fsize", 8.0)
+                set_float("fsize", 10.0)
             except Exception:
                 pass
         set_int = getattr(legend, "set_int", None)
         if callable(set_int):
             try:
                 set_int("show", 1)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _place_origin_legend_for_export(layer: Any, legend: Any) -> None:
+        get_float = getattr(layer, "get_float", None)
+        set_float = getattr(legend, "set_float", None)
+        if not callable(get_float) or not callable(set_float):
+            return
+        try:
+            x_from = float(get_float("x.from"))
+            x_to = float(get_float("x.to"))
+            y_from = float(get_float("y.from"))
+            y_to = float(get_float("y.to"))
+        except Exception:
+            return
+        if not all(math.isfinite(value) for value in (x_from, x_to, y_from, y_to)):
+            return
+        x_span = x_to - x_from
+        y_span = y_to - y_from
+        if x_span <= 0.0 or y_span <= 0.0:
+            return
+        for key, value in (
+            ("x", x_to - (x_span * 0.18)),
+            ("y", y_from + (y_span * 0.34)),
+        ):
+            try:
+                set_float(key, float(value))
             except Exception:
                 pass
 
@@ -1367,11 +1400,26 @@ class VSMTemperatureScanProcessor:
         derivative_axis_label = "d(Signal X)/dT [emu/°C]"
 
         def _set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
-            if callable(_shared_set_origin_axis_title):
-                _shared_set_origin_axis_title(layer, axis_name, title)
-                return
             key = str(axis_name).lower()
-            safe_title = str(title).replace('"', "''")
+            display_title = str(title)
+            axis_method = getattr(layer, "axis", None)
+            if callable(axis_method):
+                try:
+                    axis_obj = axis_method(axis_name)
+                except Exception:
+                    axis_obj = None
+                else:
+                    label_obj = getattr(axis_obj, "label", None)
+                    if label_obj is not None and hasattr(label_obj, "text"):
+                        try:
+                            label_obj.text = display_title
+                        except Exception:
+                            pass
+                    try:
+                        axis_obj.title = display_title
+                    except Exception:
+                        pass
+            safe_title = display_title.replace('"', "''")
             if key == "x":
                 cmd = f'label -s -xb "{safe_title}";'
             elif key == "y":
@@ -1383,9 +1431,44 @@ class VSMTemperatureScanProcessor:
             else:
                 return
             try:
+                if callable(_shared_activate_origin_layer):
+                    _shared_activate_origin_layer(layer)
                 layer.lt_exec(cmd)
             except Exception:
                 pass
+            label_method = getattr(layer, "label", None)
+            if not callable(label_method):
+                return
+            label_tokens = {
+                "x": ("xb", "XB", "Xb"),
+                "y": ("yl", "YL", "Yl"),
+                "x2": ("xt", "XT", "Xt"),
+                "y2": ("yr", "YR", "Yr"),
+            }.get(key, ())
+            for token in label_tokens:
+                try:
+                    label_obj = label_method(token)
+                except Exception:
+                    label_obj = None
+                if label_obj is None:
+                    continue
+                try:
+                    label_obj.text = display_title
+                except Exception:
+                    pass
+                set_int = getattr(label_obj, "set_int", None)
+                if callable(set_int):
+                    try:
+                        set_int("show", 1 if display_title else 0)
+                    except Exception:
+                        pass
+                set_float = getattr(label_obj, "set_float", None)
+                if callable(set_float):
+                    try:
+                        set_float("fsize", 10.0)
+                    except Exception:
+                        pass
+                break
 
         def _visible_axis_for_title(layer: Any, axis_name: str) -> str:
             base = str(axis_name).lower()
@@ -1451,9 +1534,9 @@ class VSMTemperatureScanProcessor:
                 pass
             try:
                 layer.set_float("top", 22.0)
-                layer.set_float("left", 24.0)
-                layer.set_float("width", 50.0)
-                layer.set_float("height", 52.0)
+                layer.set_float("left", 27.0)
+                layer.set_float("width", 46.0)
+                layer.set_float("height", 54.0)
             except Exception:
                 pass
             try:
@@ -1462,9 +1545,9 @@ class VSMTemperatureScanProcessor:
                 pass
             try:
                 layer.lt_exec(
-                    "layer -u 1; layer 50 52 24 22; "
-                    "layer.top=22; layer.left=24; layer.width=50; layer.height=52; "
-                    "legend.fsize=8;"
+                    "layer -u 1; layer 46 54 27 22; "
+                    "layer.top=22; layer.left=27; layer.width=46; layer.height=54; "
+                    "legend.fsize=10;"
                 )
             except Exception:
                 pass
@@ -1482,7 +1565,7 @@ class VSMTemperatureScanProcessor:
                         "layer.y.label.color=color(black); layer.y2.label.color=color(black); "
                         "layer.y.label.fsize=10; layer.y2.label.fsize=10; "
                         "layer.y.ticklabel.color=color(black); layer.y2.ticklabel.color=color(black); "
-                        "layer.y.label.offsetH=170; layer.y2.label.offsetH=170;"
+                        "layer.y.ticks=10; layer.y2.ticks=10;"
                     )
                 else:
                     layer.lt_exec(
@@ -1490,7 +1573,7 @@ class VSMTemperatureScanProcessor:
                         "axis -ps Y A 1; axis -ps Y L 1; "
                         "layer.x.showAxes=1; layer.x.showlabel=1; "
                         "layer.x.showLabels=1; layer.x.showlabels=1; "
-                        "layer.x.ticks=1; "
+                        "layer.x.ticks=10; layer.x2.ticks=10; "
                         "layer.y.showAxes=1; layer.y.showlabel=1; "
                         "layer.y.showLabels=1; layer.y.showlabels=1; "
                         "layer.y2.showlabel=0; "
@@ -1502,7 +1585,7 @@ class VSMTemperatureScanProcessor:
                         "layer.y.label.fsize=10; layer.y2.label.fsize=10; "
                         "layer.x.ticklabel.color=color(black); layer.x2.ticklabel.color=color(black); "
                         "layer.y.ticklabel.color=color(black); layer.y2.ticklabel.color=color(black); "
-                        "layer.y.label.offsetH=170; layer.y2.label.offsetH=170;"
+                        "layer.y.ticks=10; layer.y2.ticks=10;"
                     )
             except Exception:
                 pass
@@ -1722,7 +1805,7 @@ class VSMTemperatureScanProcessor:
                                 "layer.y.label.color=color(black); layer.y2.label.color=color(black); "
                                 "layer.y.label.fsize=10; layer.y2.label.fsize=10; "
                                 "layer.y.ticklabel.color=color(black); layer.y2.ticklabel.color=color(black); "
-                                "layer.y.label.offsetH=170; layer.y2.label.offsetH=170;"
+                                "layer.y.ticks=10; layer.y2.ticks=10;"
                             )
                         except Exception:
                             pass
@@ -1738,7 +1821,7 @@ class VSMTemperatureScanProcessor:
                             self._axis_label_for_fields(right_fields, base=axis_base),
                         )
                         try:
-                            layer.lt_exec("page.ytitle=20; YL.fsize=12; YR.fsize=12;")
+                            layer.lt_exec("YL.fsize=12; YR.fsize=12;")
                         except Exception:
                             pass
                     elif is_secondary:
