@@ -60,8 +60,19 @@ POWER_SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": False,
         "voltage_first": True,
         "current_resolution_a": 0.0001,
+        "max_voltage_v": 61.0,
     },
 }
+
+
+def effective_power_supply_voltage_limit(backend_id: str, voltage_limit_v: float) -> float:
+    """Return the voltage setpoint that will actually be sent to the PSU."""
+    voltage = max(0.0, float(voltage_limit_v))
+    profile = POWER_SUPPLY_PROFILES.get(backend_id, {})
+    max_voltage = profile.get("max_voltage_v")
+    if max_voltage is not None:
+        voltage = min(voltage, float(max_voltage))
+    return voltage
 
 
 @dataclass(frozen=True)
@@ -827,7 +838,7 @@ class SerialScpiCurrentSource:
         if self.profile.get("reset_on_start", False):
             self.command("*RST", settle_s=1.2)
         self.select_channel()
-        voltage = max(0.0, float(voltage_limit_v))
+        voltage = effective_power_supply_voltage_limit(self.backend_id, voltage_limit_v)
         if bool(self.profile.get("voltage_first", False)):
             self.command(f"VOLT {voltage:.3f}")
             self.command("CURR 0.0000")

@@ -190,6 +190,12 @@ def test_power_supply_serial_resource_is_normalized_for_windows_paths() -> None:
     assert psu.resource == "COM6"
 
 
+def test_owon_voltage_limit_is_clamped_to_bench_scpi_maximum() -> None:
+    assert sweep.effective_power_supply_voltage_limit("owon_spe6102", 62.0) == pytest.approx(61.0)
+    assert sweep.effective_power_supply_voltage_limit("owon_spe6102", 48.0) == pytest.approx(48.0)
+    assert sweep.effective_power_supply_voltage_limit("hmp4030", 62.0) == pytest.approx(62.0)
+
+
 def test_serial_scpi_current_source_requires_supported_id_before_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeSerialPort:
         instances: list["FakeSerialPort"] = []
@@ -277,6 +283,50 @@ def test_serial_scpi_current_source_accepts_matching_supported_id(monkeypatch: p
 
     assert psu._serial is not None
     assert psu._serial.written == [b"*IDN?\n"]
+
+
+def test_serial_scpi_current_source_clamps_owon_voltage_before_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSerialPort:
+        def __init__(self, port: str, baudrate: int, timeout: float, write_timeout: float) -> None:
+            self.port = port
+            self.baudrate = baudrate
+            self.is_open = True
+            self.written: list[bytes] = []
+            self.rts = False
+            self.dtr = False
+
+        def reset_input_buffer(self) -> None:
+            return None
+
+        def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+        def flush(self) -> None:
+            return None
+
+        def readline(self) -> bytes:
+            if self.written and self.written[-1] == b"*IDN?\n":
+                return b"OWON,SPE6102,123456,V1.0\n"
+            return b""
+
+        def close(self) -> None:
+            self.is_open = False
+
+    fake_serial_module = type("SerialModule", (), {"Serial": FakeSerialPort})
+    monkeypatch.setattr(sweep, "serial", fake_serial_module)
+
+    psu = sweep.SerialScpiCurrentSource(
+        backend_id="owon_spe6102",
+        resource="COM7",
+        baudrate=115200,
+        voltage_limit_v=62.0,
+    )
+
+    psu.connect()
+    psu.initialize(voltage_limit_v=62.0)
+
+    assert b"VOLT 61.000\n" in psu._serial.written
+    assert b"VOLT 62.000\n" not in psu._serial.written
 
 
 def test_serial_scpi_current_source_shutdown_zeroes_current_and_voltage(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1089,7 +1139,7 @@ def test_ac_logger_uses_ac_specific_owon_supply_defaults_for_sweep_config() -> N
     assert config.psu_backend == "owon_spe6102"
     assert config.psu_resource == "COM7"
     assert window._selected_ac_psu_baudrate() == 9600
-    assert config.voltage_limit_v == pytest.approx(62.0)
+    assert config.voltage_limit_v == pytest.approx(61.0)
     app.processEvents()
 
 
@@ -1191,10 +1241,10 @@ def test_ac_logger_upgrades_older_owon_voltage_limit_defaults() -> None:
     window.spinBox_ac_voltage_limit = QtWidgets.QDoubleSpinBox()
     window.spinBox_ac_voltage_limit.setRange(0.1, 120.0)
 
-    for old_default in (5.0, 60.0):
+    for old_default in (5.0, 60.0, 62.0):
         window.spinBox_ac_voltage_limit.setValue(old_default)
         window._sync_ac_psu_from_shared_controls()
-        assert window.spinBox_ac_voltage_limit.value() == pytest.approx(62.0)
+        assert window.spinBox_ac_voltage_limit.value() == pytest.approx(61.0)
 
     window.spinBox_ac_voltage_limit.setValue(48.0)
     window._sync_ac_psu_from_shared_controls()
@@ -1264,7 +1314,7 @@ def test_ac_logger_numeric_fields_and_acquisition_labels_are_concise(
         window.spinBox_ac_current_start.setValue(20.0)
         window.spinBox_ac_current_step.setValue(5.0)
         window.spinBox_ac_dwell.setValue(1.0)
-        assert window.spinBox_ac_voltage_limit.text() == "62 V"
+        assert window.spinBox_ac_voltage_limit.text() == "61 V"
         assert window.spinBox_ac_current_start.text() == "20 mA"
         assert window.spinBox_ac_current_step.text() == "5 mA"
         assert window.spinBox_ac_dwell.text() == "1 s"

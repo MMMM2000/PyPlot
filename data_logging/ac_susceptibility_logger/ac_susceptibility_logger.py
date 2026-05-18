@@ -72,7 +72,7 @@ PRACTICAL_FREQUENCY_PRESETS_HZ = [
 
 DEFAULT_FREQUENCY_PRESETS_HZ = list(PRACTICAL_FREQUENCY_PRESETS_HZ)
 LCR_FRONT_PANEL_VOLTAGE_PRESETS_V = list(_LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
-OWON_DEFAULT_VOLTAGE_LIMIT_V = 62.0
+OWON_DEFAULT_VOLTAGE_LIMIT_V = 61.0
 HMP_DEFAULT_VOLTAGE_LIMIT_V = 30.0
 AC_DEFAULT_LOG_DIR = Path.home() / "Downloads" / "ac_susceptibility"
 AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
@@ -1971,13 +1971,20 @@ class MainWindow(CurrentAnnealingWindow):
         psu_resource = self._selected_ac_psu_resource()
         if not psu_resource:
             raise ValueError("Select the power-supply serial port first.")
+        backend = self._selected_ac_psu_backend()
+        voltage_limit_v = sweep.effective_power_supply_voltage_limit(
+            backend,
+            float(self.spinBox_ac_voltage_limit.value()),
+        )
+        if voltage_limit_v != float(self.spinBox_ac_voltage_limit.value()):
+            self.spinBox_ac_voltage_limit.setValue(voltage_limit_v)
         return sweep.AcSweepConfig(
             lcr_settings=plan,
             current_points=current_points,
             dwell_s=max(0.0, float(self.spinBox_ac_dwell.value())),
-            psu_backend=self._selected_ac_psu_backend(),
+            psu_backend=backend,
             psu_resource=psu_resource,
-            voltage_limit_v=float(self.spinBox_ac_voltage_limit.value()),
+            voltage_limit_v=voltage_limit_v,
             point_duration_s=max(0.1, float(self.spinBox_ac_point_duration.value())),
         )
 
@@ -2226,7 +2233,14 @@ class MainWindow(CurrentAnnealingWindow):
         if (
             not math.isfinite(current_limit)
             or current_limit <= 0
-            or (backend == "owon_spe6102" and (current_limit <= 5.0 or math.isclose(current_limit, 60.0)))
+            or (
+                backend == "owon_spe6102"
+                and (
+                    current_limit <= 5.0
+                    or math.isclose(current_limit, 60.0)
+                    or current_limit > OWON_DEFAULT_VOLTAGE_LIMIT_V
+                )
+            )
             or (backend != "owon_spe6102" and math.isclose(current_limit, OWON_DEFAULT_VOLTAGE_LIMIT_V))
         ):
             self.spinBox_ac_voltage_limit.setValue(default_limit)
