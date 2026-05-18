@@ -1617,6 +1617,7 @@ class MainWindow(CurrentAnnealingWindow):
             voltage_limit_v=config.voltage_limit_v,
         )
         output_path = self._sweep_output_path()
+        self._reset_ac_live_plots("microwire_sweep_start")
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
         self._reset_ac_progress("Microwire sweep", self._sweep_total_reads(config), units="time")
@@ -1694,6 +1695,7 @@ class MainWindow(CurrentAnnealingWindow):
             dwell = max(0.0, float(self.spinBox_ac_dwell.value()))
             baseline_seconds = len(plan) * (point_duration + dwell)
             path = self._baseline_output_path()
+            self._reset_ac_live_plots("empty_coil_baseline_start")
             self._ac_sweep_running = True
             self._ac_sweep_stop_requested = False
             self._reset_ac_progress(
@@ -2072,6 +2074,16 @@ class MainWindow(CurrentAnnealingWindow):
         if len(points) > 5000:
             del points[:-5000]
         self._ac_plot_dirty = True
+
+    def _reset_ac_live_plots(self, reason: str) -> None:
+        try:
+            points = getattr(self, "_ac_plot_points")
+        except (AttributeError, RuntimeError):
+            return
+        points.clear()
+        self._ac_plot_dirty = False
+        self._write_ac_diagnostic("plot_reset", reason=reason)
+        self._refresh_ac_plots(force=True)
 
     @staticmethod
     def _lcr_ls_rs_values(setting: Lcr6000Settings, reading: Lcr6000Reading) -> tuple[float | None, float | None]:

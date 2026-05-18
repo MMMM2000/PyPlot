@@ -190,6 +190,95 @@ def test_power_supply_serial_resource_is_normalized_for_windows_paths() -> None:
     assert psu.resource == "COM6"
 
 
+def test_serial_scpi_current_source_requires_supported_id_before_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSerialPort:
+        instances: list["FakeSerialPort"] = []
+
+        def __init__(self, port: str, baudrate: int, timeout: float, write_timeout: float) -> None:
+            self.port = port
+            self.baudrate = baudrate
+            self.is_open = True
+            self.written: list[bytes] = []
+            self.closed = False
+            FakeSerialPort.instances.append(self)
+
+        def reset_input_buffer(self) -> None:
+            return None
+
+        def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+        def flush(self) -> None:
+            return None
+
+        def readline(self) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            self.closed = True
+            self.is_open = False
+
+    fake_serial_module = type("SerialModule", (), {"Serial": FakeSerialPort})
+    monkeypatch.setattr(sweep, "serial", fake_serial_module)
+
+    psu = sweep.SerialScpiCurrentSource(
+        backend_id="owon_spe6102",
+        resource="COM6",
+        baudrate=115200,
+        voltage_limit_v=62.0,
+    )
+
+    with pytest.raises(RuntimeError, match="not a supported HMP/OWON power supply"):
+        psu.connect()
+
+    assert FakeSerialPort.instances
+    assert FakeSerialPort.instances[0].written == [b"*IDN?\n"]
+    assert FakeSerialPort.instances[0].closed
+
+
+def test_serial_scpi_current_source_accepts_matching_supported_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSerialPort:
+        def __init__(self, port: str, baudrate: int, timeout: float, write_timeout: float) -> None:
+            self.port = port
+            self.baudrate = baudrate
+            self.is_open = True
+            self.written: list[bytes] = []
+            self.rts = False
+            self.dtr = False
+
+        def reset_input_buffer(self) -> None:
+            return None
+
+        def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+        def flush(self) -> None:
+            return None
+
+        def readline(self) -> bytes:
+            if self.written and self.written[-1] == b"*IDN?\n":
+                return b"OWON,SPE6102,123456,V1.0\n"
+            return b""
+
+        def close(self) -> None:
+            self.is_open = False
+
+    fake_serial_module = type("SerialModule", (), {"Serial": FakeSerialPort})
+    monkeypatch.setattr(sweep, "serial", fake_serial_module)
+
+    psu = sweep.SerialScpiCurrentSource(
+        backend_id="owon_spe6102",
+        resource="COM7",
+        baudrate=115200,
+        voltage_limit_v=62.0,
+    )
+
+    psu.connect()
+
+    assert psu._serial is not None
+    assert psu._serial.written == [b"*IDN?\n"]
+
+
 def test_detect_power_supply_candidates_queries_ports_without_selecting_lcr() -> None:
     class FakeInfo:
         def __init__(self, device: str, description: str) -> None:
@@ -1937,6 +2026,26 @@ def test_ac_logger_collects_baseline_rows_with_incremental_callback() -> None:
 
     assert rows == written
     assert [row[2] for row in written] == ["1", "2", "3"]
+
+
+def test_ac_logger_reset_live_plots_clears_previous_run_points() -> None:
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window._ac_plot_points = [
+        ac_logger.AcPlotPoint(0.0, "Ls-Rs", 1000.0, 0.3, 20.0, 2e-5, 14.4),
+        ac_logger.AcPlotPoint(1.0, "Ls-Rs", 1000.0, 0.3, 40.0, 2.1e-5, 14.5),
+    ]
+    window._ac_plot_dirty = True
+    diagnostics: list[tuple[str, dict[str, object]]] = []
+    redraws = {"count": 0}
+    window._write_ac_diagnostic = lambda event, **payload: diagnostics.append((event, payload))  # type: ignore[method-assign]
+    window._refresh_ac_plots = lambda **_kwargs: redraws.__setitem__("count", redraws["count"] + 1)  # type: ignore[method-assign]
+
+    window._reset_ac_live_plots("microwire_sweep_start")
+
+    assert window._ac_plot_points == []
+    assert window._ac_plot_dirty is False
+    assert diagnostics == [("plot_reset", {"reason": "microwire_sweep_start"})]
+    assert redraws["count"] == 1
 
 
 def test_ac_logger_baseline_collection_honors_stop_request() -> None:

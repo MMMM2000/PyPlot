@@ -695,6 +695,24 @@ class SerialScpiCurrentSource:
         self._serial.rts = False
         self._serial.dtr = False
         time.sleep(0.08)
+        self._verify_identity()
+
+    def _verify_identity(self) -> None:
+        idn = self.identify()
+        backend = classify_power_supply_idn(idn)
+        if backend is None:
+            self.close()
+            detail = "no SCPI ID response" if not idn else f"unexpected ID response {idn!r}"
+            raise RuntimeError(f"{self.resource} is not a supported HMP/OWON power supply ({detail})")
+        if backend != self.backend_id:
+            self.close()
+            expected = POWER_SUPPLY_PROFILES[self.backend_id]["label"]
+            actual = POWER_SUPPLY_PROFILES[backend]["label"]
+            raise RuntimeError(f"{self.resource} identified as {actual}, not selected {expected}")
+
+    def identify(self) -> str:
+        self.command("*IDN?", settle_s=0.08)
+        return self._read_line()
 
     def initialize(self, *, voltage_limit_v: float) -> None:
         if self.profile.get("reset_on_start", False):
