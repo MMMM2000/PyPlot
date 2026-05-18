@@ -18,6 +18,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from data_logging.current_annealing_logger.current_annealing_logger import (
     DEFAULT_LOG_DIR,
     MainWindow as CurrentAnnealingWindow,
+    SUPPLY_PROFILES,
     _apply_app_font_to_matplotlib,
 )
 from plotting.shared.utils import ensure_app_theme
@@ -77,6 +78,8 @@ AC_DEFAULT_LOG_DIR = Path.home() / "Downloads" / "ac_susceptibility"
 AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
 AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
 AC_PLOT_REFRESH_INTERVAL_S = 1.0
+AC_PLOT_RECENT_POINTS = 5000
+AC_PLOT_MAX_POINTS_PER_CONDITION = 800
 AC_DIAGNOSTICS_DEFAULT_PATH = AC_DEFAULT_LOG_DIR / "ac_susc_diagnostics.jsonl"
 AC_LCR_SLOW_RETRY_MIN_FREQUENCY_HZ = 1000.0
 AC_LCR_SLOW_RETRY_MIN_RATE_HZ = 20.0
@@ -264,6 +267,7 @@ class AcBaselineWorker(QtCore.QObject):
                                 setting_index=setting_index,
                                 setting=setting,
                                 attempt=attempt,
+                                check_cadence=True,
                             )
                             break
                         except _SlowBaselineCadenceError as exc:
@@ -276,6 +280,14 @@ class AcBaselineWorker(QtCore.QObject):
                                     setting_index=setting_index,
                                     setting=setting,
                                     message=f"slow LCR cadence persisted after {attempt} attempts: {exc}",
+                                )
+                                stopped = self._measure_baseline_setting(
+                                    fh=fh,
+                                    started=started,
+                                    setting_index=setting_index,
+                                    setting=setting,
+                                    attempt=attempt + 1,
+                                    check_cadence=False,
                                 )
                                 break
                             self._write_baseline_warning(
@@ -311,6 +323,7 @@ class AcBaselineWorker(QtCore.QObject):
         setting_index: int,
         setting: Lcr6000Settings,
         attempt: int,
+        check_cadence: bool,
     ) -> bool:
         point_started = time.monotonic()
         first_read_monotonic: float | None = None
@@ -345,7 +358,7 @@ class AcBaselineWorker(QtCore.QObject):
                 _plot_point_from_lcr_reading(setting, reading, elapsed_s=elapsed_total)
             )
             self.progress_changed.emit(elapsed_total, self.total_planned_s)
-            if _should_retry_slow_lcr_setting(setting) and not cadence_checked:
+            if check_cadence and _should_retry_slow_lcr_setting(setting) and not cadence_checked:
                 check_elapsed = read_monotonic - point_started
                 if check_elapsed >= AC_LCR_SLOW_RETRY_CHECK_S:
                     cadence_checked = True
@@ -466,6 +479,11 @@ class MainWindow(CurrentAnnealingWindow):
         self._plot_tiles: list[AcPlotTileWidgets] = []
         self.plot_config_dialog: AcPlotConfigDialog | None = None
         self._ac_output_settings_ready = False
+        self._ac_loading_settings = False
+        self._ac_psu_backend = "hmp4030"
+        self._ac_psu_resource = ""
+        self._ac_psu_baudrate = 115200
+        self._ac_progress_units = "count"
         self._ac_worker_thread: QtCore.QThread | None = None
         self._ac_worker: QtCore.QObject | None = None
         super().__init__()
@@ -474,6 +492,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._install_ac_developer_menu()
         self._load_ac_output_settings()
         self._install_lcr_controls()
+        self._detach_inherited_psu_settings()
         self._simplify_inherited_ac_workflow()
         self._install_ac_sticky_progress()
         self._load_lcr_settings()
@@ -662,6 +681,25 @@ class MainWindow(CurrentAnnealingWindow):
         self.plot_config_dialog.raise_()
         self.plot_config_dialog.activateWindow()
 
+    def _detach_inherited_psu_settings(self) -> None:
+        for combo in (
+            getattr(self.ui, "comboBox_supply", None),
+            getattr(self.ui, "comboBox_port", None),
+            getattr(self.ui, "comboBox_baudrate", None),
+        ):
+            if isinstance(combo, QtWidgets.QComboBox):
+                try:
+                    combo.currentIndexChanged.disconnect()
+                except TypeError:
+                    pass
+                combo.currentIndexChanged.connect(lambda *_args: self._handle_ac_psu_controls_changed())
+
+    def _handle_ac_psu_controls_changed(self) -> None:
+        self._capture_ac_psu_controls()
+        self._apply_ac_psu_profile_state(self._ac_psu_backend)
+        self._refresh_ac_psu_status()
+        self._store_lcr_settings()
+
     def _restore_ac_developer_settings(self) -> None:
         self._ac_diagnostics_enabled = bool(
             self.ac_settings.value("developer_diagnostics_enabled", False, type=bool)
@@ -762,7 +800,6 @@ class MainWindow(CurrentAnnealingWindow):
                 canvas.draw_idle()
             return
         grid = figure.add_gridspec(2, 2, hspace=0.50, wspace=0.34)
-        points = list(self._ac_plot_points[-5000:])
         for tile_index, tile in enumerate(active_tiles[:4]):
             row, column = divmod(tile_index, 2)
             axis = figure.add_subplot(grid[row, column])
@@ -772,7 +809,7 @@ class MainWindow(CurrentAnnealingWindow):
             y_right_channel = self._plot_channel(str(tile.y_right_combo.currentData() or ""))
             if x_channel is None or y_left_channel is None:
                 continue
-            scatter_only = x_channel.key in {"frequency_hz", "amplitude_v"}
+            points = self._display_points_for_plot(str(x_channel.key))
             if x_channel.key == "frequency_hz":
                 axis.set_xscale("log")
             axis.set_xlabel(x_channel.label, fontsize=9, labelpad=4)
@@ -788,25 +825,14 @@ class MainWindow(CurrentAnnealingWindow):
             if left_pairs:
                 x_values = [x_value for x_value, _ in left_pairs]
                 y_values = [y_value for _, y_value in left_pairs]
-                if scatter_only:
-                    artist = axis.scatter(
-                        x_values,
-                        y_values,
-                        color=y_left_channel.color,
-                        s=14,
-                        alpha=0.9,
-                        label=y_left_channel.label,
-                    )
-                else:
-                    (artist,) = axis.plot(
-                        x_values,
-                        y_values,
-                        color=y_left_channel.color,
-                        linewidth=1.7,
-                        marker="o",
-                        markersize=3.2,
-                        label=y_left_channel.label,
-                    )
+                artist = axis.scatter(
+                    x_values,
+                    y_values,
+                    color=y_left_channel.color,
+                    s=6,
+                    alpha=0.65,
+                    label=y_left_channel.label,
+                )
                 plot_handles.append(artist)
                 plot_labels.append(y_left_channel.label)
             else:
@@ -837,26 +863,15 @@ class MainWindow(CurrentAnnealingWindow):
                 if right_pairs:
                     x_values = [x_value for x_value, _ in right_pairs]
                     y_values = [y_value for _, y_value in right_pairs]
-                    if scatter_only:
-                        artist = twin.scatter(
-                            x_values,
-                            y_values,
-                            color=y_right_channel.color,
-                            s=14,
-                            marker="s",
-                            alpha=0.9,
-                            label=y_right_channel.label,
-                        )
-                    else:
-                        (artist,) = twin.plot(
-                            x_values,
-                            y_values,
-                            color=y_right_channel.color,
-                            linewidth=1.5,
-                            marker="s",
-                            markersize=3.0,
-                            label=y_right_channel.label,
-                        )
+                    artist = twin.scatter(
+                        x_values,
+                        y_values,
+                        color=y_right_channel.color,
+                        s=6,
+                        marker="s",
+                        alpha=0.65,
+                        label=y_right_channel.label,
+                    )
                     plot_handles.append(artist)
                     plot_labels.append(y_right_channel.label)
             if len(plot_handles) >= 2:
@@ -880,9 +895,42 @@ class MainWindow(CurrentAnnealingWindow):
         self._write_ac_diagnostic(
             "plot_refresh",
             duration_s=round(self._ac_last_plot_refresh_duration_s, 6),
-            points=len(points),
+            points=len(getattr(self, "_ac_plot_points", [])),
             tiles=len(active_tiles[:4]),
         )
+
+    def _display_points_for_plot(self, x_key: str) -> list[AcPlotPoint]:
+        points = list(getattr(self, "_ac_plot_points", []))
+        if x_key in {"elapsed_s", "current_mA"}:
+            return points[-AC_PLOT_RECENT_POINTS:]
+        if x_key not in {"frequency_hz", "amplitude_v"}:
+            return points[-AC_PLOT_RECENT_POINTS:]
+        grouped: dict[tuple[str, float, float, float], list[AcPlotPoint]] = {}
+        for point in points:
+            key = (
+                point.model,
+                round(point.frequency_hz, 12),
+                round(point.amplitude_v, 12),
+                round(point.current_mA, 12),
+            )
+            grouped.setdefault(key, []).append(point)
+        selected: list[AcPlotPoint] = []
+        for group in grouped.values():
+            selected.extend(self._thin_ac_plot_group(group, AC_PLOT_MAX_POINTS_PER_CONDITION))
+        selected.sort(key=lambda point: point.elapsed_s)
+        return selected
+
+    @staticmethod
+    def _thin_ac_plot_group(points: Sequence[AcPlotPoint], limit: int) -> list[AcPlotPoint]:
+        values = list(points)
+        limit = max(2, int(limit))
+        if len(values) <= limit:
+            return values
+        if limit == 2:
+            return [values[0], values[-1]]
+        step = (len(values) - 1) / float(limit - 1)
+        indices = sorted({int(round(i * step)) for i in range(limit)})
+        return [values[index] for index in indices]
 
     def _start_ac_plot_refresh_timer(self) -> None:
         timer = QtCore.QTimer(self)
@@ -1332,45 +1380,50 @@ class MainWindow(CurrentAnnealingWindow):
             layout.addWidget(self.progress_ac_run)
 
     def _load_lcr_settings(self) -> None:
-        self.lineEdit_lcr_frequencies.setText(
-            self.ac_settings.value("frequencies", self._format_numeric_list(DEFAULT_FREQUENCY_PRESETS_HZ), type=str)
-        )
-        self.lineEdit_lcr_levels.setText(
-            self.ac_settings.value("levels", self._format_numeric_list(LCR_FRONT_PANEL_VOLTAGE_PRESETS_V), type=str)
-        )
-        self._set_combo_data(self.comboBox_lcr_level_mode, self.ac_settings.value("level_mode", "voltage", type=str))
-        self._set_combo_text(self.comboBox_lcr_function, "Ls-Rs")
-        models = str(self.ac_settings.value("models", "Ls-Rs", type=str))
-        model_tokens = {token.strip().lower() for token in re.split(r"[,;\s]+", models) if token.strip()}
-        self.checkBox_lcr_model_lsrs.setChecked(True)
-        self.checkBox_lcr_model_lprp.setChecked("lp-rp" in model_tokens)
-        self._set_combo_text(self.comboBox_lcr_monitor1, self.ac_settings.value("monitor1", "Z", type=str))
-        self._set_combo_text(self.comboBox_lcr_monitor2, self.ac_settings.value("monitor2", "IAC", type=str))
-        self._set_combo_text(self.comboBox_lcr_aperture, self.ac_settings.value("aperture", "FAST", type=str))
-        stored_frequencies = self.lineEdit_lcr_frequencies.text().strip()
-        if stored_frequencies in LEGACY_DEFAULT_FREQUENCY_TEXTS:
-            self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(PRACTICAL_FREQUENCY_PRESETS_HZ))
-        stored_levels = self.lineEdit_lcr_levels.text().strip()
-        if not stored_levels or stored_levels in LEGACY_DEFAULT_LEVEL_TEXTS:
-            self.lineEdit_lcr_levels.setText(self._format_numeric_list(LCR_FRONT_PANEL_VOLTAGE_PRESETS_V))
-        plan_loops = self.ac_settings.value("plan_loops", 1)
-        self.checkBox_ac_plan_loops.setChecked(str(plan_loops).lower() not in {"0", "false", "no"})
-        self._set_combo_data(self.comboBox_ac_direction, self.ac_settings.value("direction", "up-down", type=str))
-        self.spinBox_ac_current_start.setValue(float(self.ac_settings.value("current_start_mA", 20.0)))
-        self.spinBox_ac_current_stop.setValue(float(self.ac_settings.value("current_stop_mA", 80.0)))
-        self.spinBox_ac_current_step.setValue(float(self.ac_settings.value("current_step_mA", 5.0)))
-        self.spinBox_ac_dwell.setValue(float(self.ac_settings.value("dwell_s", 1.0)))
-        point_duration = self.ac_settings.value("point_duration_s", None)
-        if point_duration is None:
-            legacy_repeats = float(self.ac_settings.value("sweep_repeats", 10))
-            point_duration = max(1.0, legacy_repeats)
-        self.spinBox_ac_point_duration.setValue(float(point_duration))
-        voltage_limit = self.ac_settings.value("voltage_limit_v", None)
-        if voltage_limit is None:
-            self._sync_ac_psu_from_shared_controls()
-        else:
-            self.spinBox_ac_voltage_limit.setValue(float(voltage_limit))
-            self._sync_ac_psu_from_shared_controls()
+        self._ac_loading_settings = True
+        try:
+            self.lineEdit_lcr_frequencies.setText(
+                self.ac_settings.value("frequencies", self._format_numeric_list(DEFAULT_FREQUENCY_PRESETS_HZ), type=str)
+            )
+            self.lineEdit_lcr_levels.setText(
+                self.ac_settings.value("levels", self._format_numeric_list(LCR_FRONT_PANEL_VOLTAGE_PRESETS_V), type=str)
+            )
+            self._set_combo_data(self.comboBox_lcr_level_mode, self.ac_settings.value("level_mode", "voltage", type=str))
+            self._set_combo_text(self.comboBox_lcr_function, "Ls-Rs")
+            models = str(self.ac_settings.value("models", "Ls-Rs", type=str))
+            model_tokens = {token.strip().lower() for token in re.split(r"[,;\s]+", models) if token.strip()}
+            self.checkBox_lcr_model_lsrs.setChecked(True)
+            self.checkBox_lcr_model_lprp.setChecked("lp-rp" in model_tokens)
+            self._set_combo_text(self.comboBox_lcr_monitor1, self.ac_settings.value("monitor1", "Z", type=str))
+            self._set_combo_text(self.comboBox_lcr_monitor2, self.ac_settings.value("monitor2", "IAC", type=str))
+            self._set_combo_text(self.comboBox_lcr_aperture, self.ac_settings.value("aperture", "FAST", type=str))
+            stored_frequencies = self.lineEdit_lcr_frequencies.text().strip()
+            if stored_frequencies in LEGACY_DEFAULT_FREQUENCY_TEXTS:
+                self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(PRACTICAL_FREQUENCY_PRESETS_HZ))
+            stored_levels = self.lineEdit_lcr_levels.text().strip()
+            if not stored_levels or stored_levels in LEGACY_DEFAULT_LEVEL_TEXTS:
+                self.lineEdit_lcr_levels.setText(self._format_numeric_list(LCR_FRONT_PANEL_VOLTAGE_PRESETS_V))
+            plan_loops = self.ac_settings.value("plan_loops", 1)
+            self.checkBox_ac_plan_loops.setChecked(str(plan_loops).lower() not in {"0", "false", "no"})
+            self._set_combo_data(self.comboBox_ac_direction, self.ac_settings.value("direction", "up-down", type=str))
+            self.spinBox_ac_current_start.setValue(float(self.ac_settings.value("current_start_mA", 20.0)))
+            self.spinBox_ac_current_stop.setValue(float(self.ac_settings.value("current_stop_mA", 80.0)))
+            self.spinBox_ac_current_step.setValue(float(self.ac_settings.value("current_step_mA", 5.0)))
+            self.spinBox_ac_dwell.setValue(float(self.ac_settings.value("dwell_s", 1.0)))
+            point_duration = self.ac_settings.value("point_duration_s", None)
+            if point_duration is None:
+                legacy_repeats = float(self.ac_settings.value("sweep_repeats", 10))
+                point_duration = max(1.0, legacy_repeats)
+            self.spinBox_ac_point_duration.setValue(float(point_duration))
+            self._load_ac_psu_settings()
+            voltage_limit = self.ac_settings.value("voltage_limit_v", None)
+            if voltage_limit is None:
+                self._sync_ac_psu_from_shared_controls()
+            else:
+                self.spinBox_ac_voltage_limit.setValue(float(voltage_limit))
+                self._sync_ac_psu_from_shared_controls()
+        finally:
+            self._ac_loading_settings = False
 
     @staticmethod
     def _set_combo_text(combo: QtWidgets.QComboBox, text: str) -> None:
@@ -1385,6 +1438,8 @@ class MainWindow(CurrentAnnealingWindow):
             combo.setCurrentIndex(idx)
 
     def _store_lcr_settings(self) -> None:
+        if bool(getattr(self, "_ac_loading_settings", False)):
+            return
         self.ac_settings.setValue("frequencies", self.lineEdit_lcr_frequencies.text())
         self.ac_settings.setValue("levels", self.lineEdit_lcr_levels.text())
         self.ac_settings.setValue("level_mode", self.comboBox_lcr_level_mode.currentData())
@@ -1394,9 +1449,10 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("monitor2", self.comboBox_lcr_monitor2.currentText())
         self.ac_settings.setValue("aperture", self.comboBox_lcr_aperture.currentText())
         self.ac_settings.setValue("plan_loops", int(self.checkBox_ac_plan_loops.isChecked()))
-        self.ac_settings.setValue("psu_backend", self._selected_ac_psu_backend())
-        self.ac_settings.setValue("psu_port", self._selected_ac_psu_resource())
-        self.ac_settings.setValue("psu_baud", str(self._selected_ac_psu_baudrate()))
+        self._capture_ac_psu_controls()
+        self.ac_settings.setValue("psu_backend", self._ac_psu_backend)
+        self.ac_settings.setValue("psu_port", self._ac_psu_resource)
+        self.ac_settings.setValue("psu_baud", str(self._ac_psu_baudrate))
         self.ac_settings.setValue("voltage_limit_v", float(self.spinBox_ac_voltage_limit.value()))
         self.ac_settings.setValue("current_start_mA", float(self.spinBox_ac_current_start.value()))
         self.ac_settings.setValue("current_stop_mA", float(self.spinBox_ac_current_stop.value()))
@@ -1422,6 +1478,7 @@ class MainWindow(CurrentAnnealingWindow):
             self.populate_ports()
         except Exception:
             pass
+        self._apply_ac_psu_controls()
         self._sync_ac_psu_from_shared_controls()
 
     def auto_detect_power_supply(self) -> list[sweep.PowerSupplyCandidate]:
@@ -1433,7 +1490,7 @@ class MainWindow(CurrentAnnealingWindow):
             self._sync_ac_psu_from_shared_controls()
             profile = sweep.POWER_SUPPLY_PROFILES[backend]
             self.label_lcr_status.setText(
-                f"Using connected shared {profile['label']} on {resource}; skipped ID probe because the port is already open."
+                f"Using connected AC {profile['label']} on {resource}; skipped ID probe because the port is already open."
             )
             self._store_lcr_settings()
             return []
@@ -1474,7 +1531,7 @@ class MainWindow(CurrentAnnealingWindow):
             resource = self._selected_ac_psu_resource()
             if bool(getattr(self, "_auto_detect_used_connected_psu", False)) and resource and backend in sweep.POWER_SUPPLY_PROFILES:
                 self.label_lcr_status.setText(
-                    f"Using connected shared {sweep.POWER_SUPPLY_PROFILES[backend]['label']} on {resource}; "
+                    f"Using connected AC {sweep.POWER_SUPPLY_PROFILES[backend]['label']} on {resource}; "
                     "skipped ID probe because the port is already open."
                 )
             elif resource and backend in sweep.POWER_SUPPLY_PROFILES:
@@ -1561,7 +1618,7 @@ class MainWindow(CurrentAnnealingWindow):
         output_path = self._sweep_output_path()
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
-        self._reset_ac_progress("Microwire sweep", self._sweep_total_reads(config))
+        self._reset_ac_progress("Microwire sweep", self._sweep_total_reads(config), units="time")
         self._set_ac_current_task("Current task: preparing microwire current sweep")
         self.pushButton_run_ac_sweep.setEnabled(False)
         self.pushButton_stop_ac_sweep.setEnabled(True)
@@ -1638,7 +1695,11 @@ class MainWindow(CurrentAnnealingWindow):
             path = self._baseline_output_path()
             self._ac_sweep_running = True
             self._ac_sweep_stop_requested = False
-            self._reset_ac_progress("Empty-coil baseline", max(1, int(round(baseline_seconds * 1000.0))))
+            self._reset_ac_progress(
+                "Empty-coil baseline",
+                max(1, int(round(baseline_seconds * 1000.0))),
+                units="time",
+            )
             self._set_ac_current_task("Current task: preparing empty-coil baseline")
             self.pushButton_measure_lcr_baseline.setEnabled(False)
             self.pushButton_stop_ac_sweep.setEnabled(True)
@@ -1746,15 +1807,21 @@ class MainWindow(CurrentAnnealingWindow):
         self._set_ac_current_task("Current task: failed")
         QtWidgets.QMessageBox.warning(self, "AC run failed", message)
 
-    def _reset_ac_progress(self, label: str, total: int) -> None:
+    def _reset_ac_progress(self, label: str, total: int, *, units: str = "count") -> None:
         self._ac_progress_total = max(1, int(total))
         self._ac_progress_value = 0
         self._ac_progress_started_monotonic = time.monotonic()
+        self._ac_progress_units = units
         progress = getattr(self, "progress_ac_run", None)
         if isinstance(progress, QtWidgets.QProgressBar):
             progress.setRange(0, self._ac_progress_total)
             progress.setValue(0)
-            progress.setFormat(f"{label}: 0% (0/{self._ac_progress_total}), ETA calculating")
+            if units == "time":
+                progress.setFormat(
+                    f"{label}: 0% (0s / {self._format_duration(self._ac_progress_total / 1000.0)}), ETA calculating"
+                )
+            else:
+                progress.setFormat(f"{label}: 0% (0/{self._ac_progress_total}), ETA calculating")
         QtWidgets.QApplication.processEvents()
 
     def _advance_ac_progress(self, label: str) -> None:
@@ -1792,13 +1859,18 @@ class MainWindow(CurrentAnnealingWindow):
         if isinstance(progress, QtWidgets.QProgressBar):
             progress.setRange(0, total)
             progress.setValue(total)
-            progress.setFormat(f"{label}: complete ({total}/{total})")
+            if getattr(self, "_ac_progress_units", "count") == "time":
+                duration = self._format_duration(total / 1000.0)
+                progress.setFormat(f"{label}: complete ({duration} / {duration})")
+            else:
+                progress.setFormat(f"{label}: complete ({total}/{total})")
 
     def _set_ac_elapsed_progress(self, label: str, elapsed_s: float, total_s: float) -> None:
         total_ms = max(1, int(round(max(0.001, total_s) * 1000.0)))
         value_ms = min(total_ms, max(0, int(round(max(0.0, elapsed_s) * 1000.0))))
         self._ac_progress_total = total_ms
         self._ac_progress_value = value_ms
+        self._ac_progress_units = "time"
         percent = int(round((value_ms / total_ms) * 100.0))
         progress = getattr(self, "progress_ac_run", None)
         if isinstance(progress, QtWidgets.QProgressBar):
@@ -2047,39 +2119,89 @@ class MainWindow(CurrentAnnealingWindow):
         self._store_lcr_settings()
         self._update_ac_sweep_estimate()
 
-    def _selected_ac_psu_backend(self) -> str:
+    def _load_ac_psu_settings(self) -> None:
+        self._ac_psu_backend = str(self.ac_settings.value("psu_backend", "owon_spe6102", type=str))
+        if self._ac_psu_backend not in sweep.POWER_SUPPLY_PROFILES:
+            self._ac_psu_backend = "owon_spe6102"
+        self._ac_psu_resource = str(self.ac_settings.value("psu_port", "", type=str) or "")
+        try:
+            self._ac_psu_baudrate = int(str(self.ac_settings.value("psu_baud", "115200", type=str)))
+        except ValueError:
+            self._ac_psu_baudrate = 115200
+        self._apply_ac_psu_controls()
+        self._apply_ac_psu_profile_state(self._ac_psu_backend)
+
+    def _apply_ac_psu_controls(self) -> None:
+        supply_combo = getattr(getattr(self, "ui", None), "comboBox_supply", None)
+        if isinstance(supply_combo, QtWidgets.QComboBox):
+            self._set_combo_data(supply_combo, self._ac_psu_backend)
+        port_combo = getattr(getattr(self, "ui", None), "comboBox_port", None)
+        if isinstance(port_combo, QtWidgets.QComboBox) and self._ac_psu_resource:
+            idx = port_combo.findData(self._ac_psu_resource)
+            if idx < 0:
+                idx = port_combo.findText(self._ac_psu_resource, QtCore.Qt.MatchFlag.MatchContains)
+            if idx < 0:
+                port_combo.addItem(self._ac_psu_resource, self._ac_psu_resource)
+                idx = port_combo.count() - 1
+            port_combo.setCurrentIndex(idx)
+        baud_combo = getattr(getattr(self, "ui", None), "comboBox_baudrate", None)
+        if isinstance(baud_combo, QtWidgets.QComboBox):
+            idx = baud_combo.findText(str(self._ac_psu_baudrate), QtCore.Qt.MatchFlag.MatchFixedString)
+            if idx >= 0:
+                baud_combo.setCurrentIndex(idx)
+
+    def _capture_ac_psu_controls(self) -> None:
         combo = getattr(getattr(self, "ui", None), "comboBox_supply", None)
         if isinstance(combo, QtWidgets.QComboBox):
             data = combo.currentData(QtCore.Qt.ItemDataRole.UserRole)
             text = combo.currentText()
-            if isinstance(data, str) and data in sweep.POWER_SUPPLY_PROFILES:
-                return data
-            classified = sweep.classify_power_supply_idn(text)
-            if classified is not None:
-                return classified
-            upper = text.upper()
-            if "OWON" in upper or "SPE" in upper:
-                return "owon_spe6102"
-            if "HMP" in upper or "HAMEG" in upper or "ROHDE" in upper:
-                return "hmp4030"
-        return "hmp4030"
-
-    def _selected_ac_psu_resource(self) -> str:
-        combo = getattr(getattr(self, "ui", None), "comboBox_port", None)
-        if isinstance(combo, QtWidgets.QComboBox):
-            return str(combo.currentData(QtCore.Qt.ItemDataRole.UserRole) or combo.currentText()).strip()
-        return ""
-
-    def _selected_ac_psu_baudrate(self) -> int:
-        combo = getattr(getattr(self, "ui", None), "comboBox_baudrate", None)
-        if isinstance(combo, QtWidgets.QComboBox):
+            backend = data if isinstance(data, str) and data in sweep.POWER_SUPPLY_PROFILES else None
+            if backend is None:
+                backend = sweep.classify_power_supply_idn(text)
+            if backend is None:
+                upper = text.upper()
+                if "OWON" in upper or "SPE" in upper:
+                    backend = "owon_spe6102"
+                elif "HMP" in upper or "HAMEG" in upper or "ROHDE" in upper:
+                    backend = "hmp4030"
+            if backend in sweep.POWER_SUPPLY_PROFILES:
+                self._ac_psu_backend = str(backend)
+        port_combo = getattr(getattr(self, "ui", None), "comboBox_port", None)
+        if isinstance(port_combo, QtWidgets.QComboBox):
+            self._ac_psu_resource = str(
+                port_combo.currentData(QtCore.Qt.ItemDataRole.UserRole) or port_combo.currentText()
+            ).strip()
+            self.port_name = self._ac_psu_resource
+        baud_combo = getattr(getattr(self, "ui", None), "comboBox_baudrate", None)
+        if isinstance(baud_combo, QtWidgets.QComboBox):
             try:
-                return int(combo.currentText())
+                self._ac_psu_baudrate = int(baud_combo.currentText())
+                self.baudrate = self._ac_psu_baudrate
             except ValueError:
                 pass
-        return 9600 if self._selected_ac_psu_backend() == "owon_spe6102" else 115200
+
+    def _apply_ac_psu_profile_state(self, backend: str) -> None:
+        profile = SUPPLY_PROFILES.get(backend, SUPPLY_PROFILES.get("hmp4030", {}))
+        self.supply_profile_id = backend
+        self.min_start_current_mA = int(profile.get("min_start_current_mA", 1))
+        self.voltage_first = bool(profile.get("voltage_first", False))
+        self.reset_on_start = bool(profile.get("reset_on_start", backend != "owon_spe6102"))
+        self.channel_select = int(profile.get("channel_select", 0 if backend == "owon_spe6102" else 3))
+
+    def _selected_ac_psu_backend(self) -> str:
+        self._capture_ac_psu_controls()
+        return self._ac_psu_backend
+
+    def _selected_ac_psu_resource(self) -> str:
+        self._capture_ac_psu_controls()
+        return self._ac_psu_resource
+
+    def _selected_ac_psu_baudrate(self) -> int:
+        self._capture_ac_psu_controls()
+        return self._ac_psu_baudrate
 
     def _sync_ac_psu_from_shared_controls(self) -> None:
+        self._capture_ac_psu_controls()
         backend = self._selected_ac_psu_backend()
         if backend == "owon_spe6102":
             default_limit = OWON_DEFAULT_VOLTAGE_LIMIT_V
@@ -2107,7 +2229,7 @@ class MainWindow(CurrentAnnealingWindow):
         backend_label = str(profile.get("label", backend))
         resource = self._selected_ac_psu_resource() or "no port selected"
         baudrate = self._selected_ac_psu_baudrate()
-        label.setText(f"{backend_label} from shared PSU controls, {resource}, {baudrate} baud")
+        label.setText(f"AC current supply: {backend_label}, {resource}, {baudrate} baud")
 
     def _install_ac_wheel_guard(self, control_root: QtWidgets.QWidget) -> None:
         self._ac_lcr_scroll_area = self._find_parent_scroll_area(control_root)

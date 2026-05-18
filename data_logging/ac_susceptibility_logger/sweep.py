@@ -423,6 +423,7 @@ def _measure_sweep_point_with_retries(
                 point_duration=point_duration,
                 fallback_repeats=fallback_repeats,
                 attempt=attempt,
+                check_cadence=True,
             )
             return
         except SlowLcrCadenceError as exc:
@@ -439,6 +440,22 @@ def _measure_sweep_point_with_retries(
                     current_point=current_point,
                     message=f"slow LCR cadence persisted after {attempt} attempts: {exc}",
                     progress=progress,
+                )
+                _measure_sweep_point_once(
+                    config=config,
+                    lcr=lcr,
+                    psu=psu,
+                    writer=writer,
+                    started=started,
+                    setting_index=setting_index,
+                    setting=setting,
+                    current_point=current_point,
+                    progress=progress,
+                    stop_requested=stop_requested,
+                    point_duration=point_duration,
+                    fallback_repeats=fallback_repeats,
+                    attempt=attempt + 1,
+                    check_cadence=False,
                 )
                 return
             _write_sweep_warning_row(
@@ -477,6 +494,7 @@ def _measure_sweep_point_once(
     point_duration: float,
     fallback_repeats: int,
     attempt: int,
+    check_cadence: bool,
 ) -> None:
     repeat_index = 0
     point_started = time.monotonic()
@@ -508,7 +526,7 @@ def _measure_sweep_point_once(
         writer.write_row(row)
         if progress is not None:
             progress(row)
-        if _should_check_lcr_cadence(config, setting) and not cadence_checked:
+        if check_cadence and _should_check_lcr_cadence(config, setting) and not cadence_checked:
             check_elapsed = read_monotonic - point_started
             if check_elapsed >= max(0.1, float(config.lcr_slow_retry_check_s)):
                 cadence_checked = True

@@ -98,10 +98,9 @@ Point acquisition controls are named for the AC experiment:
   real serial communication overhead can still add time.
 - During a run, the sticky task line reports the active LCR model, frequency,
   amplitude, read number, and microwire current when applicable. The progress
-  bar reports completed reads and estimates time remaining from the actual
-  observed read rate. Empty-coil baseline readings are also added to the live
-  plots as 0 mA points so the dashboard visibly updates before a microwire
-  sweep is started.
+  bar reports elapsed/total measurement time and estimates time remaining.
+  Empty-coil baseline readings are also added to the live plots as 0 mA points
+  so the dashboard visibly updates before a microwire sweep is started.
 - Acquisition and file writing run in a worker thread, separate from the
   Matplotlib dashboard. Each reading is flushed to disk before the UI plot is
   updated, and plot redraws are throttled to about once per second so graph
@@ -187,7 +186,8 @@ FAST cadence. For settings at `1 kHz` and above, if the early read cadence is
 below the retry threshold, the logger records a warning, reconfigures the same
 LCR setting, discards a short recovery window, and retries automatically. If the
 slow state persists after the bounded retries, the file keeps the warning and
-the run continues instead of waiting for operator confirmation.
+the logger still measures the requested point duration at the slower cadence
+instead of waiting for operator confirmation or truncating the setting.
 
 The LCR `comparator/status` field is the meter's bin/comparator result. Empty
 coil runs can legitimately show values such as `OUT,AUX-NG,NG` while still
@@ -197,21 +197,21 @@ failure unless the raw LCR reply is empty or cannot be parsed.
 ## Power Supply Backends
 
 The AC sweep can use either the existing HMP4030-style SCPI path or an OWON
-SPE6102-style backend. The AC panel reuses the shared top PSU controls for
-supply type, serial port, and baud rate instead of asking for the same PSU
-settings twice. If the shared supply is OWON SPE6102, the AC sweep selects the
-OWON backend automatically and defaults the voltage limit to `62 V`. Older
-saved OWON defaults such as `5 V` or `60 V` are lifted to `62 V` when OWON is
+SPE6102-style backend. The AC logger keeps its own supply profile, serial port,
+baud rate, and voltage-limit settings, separate from the Current Annealing
+Logger. If the AC current supply is OWON SPE6102, the AC sweep selects the OWON
+backend automatically and defaults the voltage limit to `62 V`. Older saved
+OWON defaults such as `5 V` or `60 V` are lifted to `62 V` when OWON is
 selected; non-OWON supplies keep their own lower defaults.
 
 Use **Auto-detect instruments** to refresh LCR ports, scan serial ports with the safe
 `*IDN?` query, ignore the LCR meter as a PSU candidate, and select a recognized
 HMP4030 or OWON SPE6102 backend automatically. The scan does not enable output
 or change current. If no supported PSU responds, the status text reports which
-ports were tried and leaves the shared top PSU controls available for manual
-selection. If the shared top PSU connection is already open, auto-detect trusts
-that connected selection instead of trying to open the same COM port a second
-time.
+ports were tried and leaves the AC current-supply controls available for manual
+selection. If the AC current-supply connection is already open, auto-detect
+trusts that connected selection instead of trying to open the same COM port a
+second time.
 
 The logger no longer runs PSU auto-detection during normal launch. This avoids
 waiting on serial ports that do not answer `*IDN?`; probing only happens when
@@ -237,11 +237,14 @@ Additional selectable channels include elapsed time, DC current, frequency,
 amplitude, `Rs`, and `Ls`. The plot renderer follows the Qt palette so dark
 mode labels, ticks, and titles remain readable.
 
-When frequency is selected as the X axis, the logger uses a logarithmic scale.
-Frequency and amplitude sweeps are drawn as scatter points instead of connected
-lines, because adjacent points are independent LCR settings rather than a
-continuous time trace. Combined `Rs + Ls` plots show a legend so the left and
-right axis data are easy to identify.
+Plots are scatter-first with small translucent markers; dense time traces and
+dense parameter scans are easier to read without connecting lines. When
+frequency is selected as the X axis, the logger uses a logarithmic scale.
+Frequency and amplitude plots use display-only per-condition thinning once a
+condition contains many points, preserving representation from each
+model/frequency/amplitude/current group while leaving the TSV logging complete.
+Combined `Rs + Ls` plots show a legend so the left and right axis data are easy
+to identify.
 
 ## Literature Cues
 

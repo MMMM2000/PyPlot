@@ -534,6 +534,93 @@ def test_run_ac_sweep_reconfigures_and_retries_slow_lcr_cadence(
     assert "slow LCR cadence attempt 1" in output_path.read_text(encoding="utf-8")
 
 
+def test_run_ac_sweep_continues_full_point_after_slow_lcr_retries_are_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def advance(self, seconds: float) -> None:
+            self.now += seconds
+
+    class FakeLcr:
+        def __init__(self, clock: FakeClock) -> None:
+            self.clock = clock
+            self.configure_count = 0
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            self.configure_count += 1
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            self.clock.advance(0.2)
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-05-15T10:01:{self.fetch_count:02d}.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, _current_a: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    clock = FakeClock()
+    monkeypatch.setattr(sweep.time, "monotonic", clock.monotonic)
+    progress_rows: list[sweep.AcSweepRow] = []
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(100000.0, 2.0, function="Ls-Rs", aperture="FAST")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=1.0,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=62.0,
+        lcr_slow_retry_check_s=0.6,
+        lcr_slow_retry_discard_s=0.0,
+        lcr_slow_retry_max_attempts=1,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(clock),
+        psu=FakePsu(),
+        output_path=tmp_path / "slow-persist.tsv",
+        progress=progress_rows.append,
+    )
+
+    assert any("slow LCR cadence persisted" in row.error for row in progress_rows)
+    assert any(row.error == "retry_attempt=3" for row in progress_rows)
+    assert clock.now >= 2.2
+
+
 def _wheel_event(delta_y: int = -120) -> QtGui.QWheelEvent:
     return QtGui.QWheelEvent(
         QtCore.QPointF(10.0, 10.0),
@@ -602,7 +689,7 @@ def test_lcr_preset_lists_match_simplified_ac_workflow() -> None:
     ]
 
 
-def test_ac_logger_uses_shared_owon_supply_defaults_for_sweep_config() -> None:
+def test_ac_logger_uses_ac_specific_owon_supply_defaults_for_sweep_config() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
     window.ac_settings = QtCore.QSettings("microwire", "ac_susceptibility_logger_test_shared_owon")
@@ -615,6 +702,9 @@ def test_ac_logger_uses_shared_owon_supply_defaults_for_sweep_config() -> None:
     window.ui.comboBox_port.addItem("COM7", "COM7")
     window.ui.comboBox_baudrate = QtWidgets.QComboBox()
     window.ui.comboBox_baudrate.addItem("9600")
+    window._ac_psu_backend = "owon_spe6102"
+    window._ac_psu_resource = "COM7"
+    window._ac_psu_baudrate = 9600
     window.spinBox_ac_voltage_limit = QtWidgets.QDoubleSpinBox()
     window.spinBox_ac_voltage_limit.setRange(0.1, 120.0)
     window.spinBox_ac_voltage_limit.setValue(5.0)
@@ -640,6 +730,48 @@ def test_ac_logger_uses_shared_owon_supply_defaults_for_sweep_config() -> None:
     assert window._selected_ac_psu_baudrate() == 9600
     assert config.voltage_limit_v == pytest.approx(62.0)
     app.processEvents()
+
+
+def test_ac_logger_psu_settings_are_separate_from_current_annealing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    original = QtCore.QSettings
+    ini_format = original.Format.IniFormat
+    user_scope = original.Scope.UserScope
+    stores: dict[str, QtCore.QSettings] = {}
+
+    def factory(_organization: str, application: str) -> QtCore.QSettings:
+        settings = stores.get(application)
+        if settings is None:
+            settings = original(ini_format, user_scope, "microwire_tests", f"separate_{application}")
+            settings.clear()
+            stores[application] = settings
+        return settings
+
+    monkeypatch.setattr(ac_logger.QtCore, "QSettings", factory)
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    factory("microwire", "current_annealing").setValue("supply_profile", "hmp4030")
+    ac_store = factory("microwire", "ac_susceptibility_logger")
+    ac_store.setValue("psu_backend", "owon_spe6102")
+    ac_store.setValue("psu_port", "COM6")
+    ac_store.setValue("psu_baud", "115200")
+
+    window = ac_logger.MainWindow()
+    try:
+        assert window._selected_ac_psu_backend() == "owon_spe6102"
+        assert window._selected_ac_psu_resource().endswith("COM6")
+        assert "AC current supply" in window.label_ac_psu_status.text()
+        window._set_combo_data(window.ui.comboBox_supply, "hmp4030")
+        window._handle_ac_psu_controls_changed()
+        assert ac_store.value("psu_backend", type=str) == "hmp4030"
+        assert factory("microwire", "current_annealing").value("supply_profile", type=str) == "hmp4030"
+    finally:
+        window.close()
+        app.processEvents()
 
 
 def test_ac_logger_upgrades_older_owon_voltage_limit_defaults() -> None:
@@ -935,6 +1067,76 @@ def test_ac_logger_amplitude_plot_uses_scatter_without_log_x(
         app.processEvents()
 
 
+def test_ac_logger_elapsed_plot_defaults_to_small_scatter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "graph_elapsed_scatter")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        for tile in window._plot_tiles:
+            tile.visible.setChecked(False)
+        tile = window._plot_tiles[0]
+        tile.visible.setChecked(True)
+        window._set_combo_data(tile.x_combo, "elapsed_s")
+        window._set_combo_data(tile.y_left_combo, "rs_ohm")
+        window._ac_plot_points = [
+            ac_logger.AcPlotPoint(float(index), "Ls-Rs", 1000.0, 0.1, 0.0, 1e-5, 14.3)
+            for index in range(20)
+        ]
+
+        window._refresh_ac_plots(force=True)
+
+        axis = window.figure.axes[0]
+        assert not axis.lines
+        assert len(axis.collections) == 1
+        assert max(axis.collections[0].get_sizes()) <= 8
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_frequency_plot_keeps_each_condition_when_display_thinning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "graph_frequency_condition_thinning")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ac_logger, "AC_PLOT_MAX_POINTS_PER_CONDITION", 8)
+
+    window = ac_logger.MainWindow()
+    try:
+        for tile in window._plot_tiles:
+            tile.visible.setChecked(False)
+        tile = window._plot_tiles[0]
+        tile.visible.setChecked(True)
+        window._set_combo_data(tile.x_combo, "frequency_hz")
+        window._set_combo_data(tile.y_left_combo, "rs_ohm")
+        window._ac_plot_points = [
+            ac_logger.AcPlotPoint(float(index), "Ls-Rs", 100.0, 0.1, 0.0, 1e-5, 14.0 + index * 1e-4)
+            for index in range(100)
+        ] + [
+            ac_logger.AcPlotPoint(100.0 + float(index), "Ls-Rs", 200000.0, 2.0, 0.0, 2e-5, 15.0 + index * 1e-4)
+            for index in range(100)
+        ]
+
+        window._refresh_ac_plots(force=True)
+
+        offsets = window.figure.axes[0].collections[0].get_offsets()
+        x_values = {float(point[0]) for point in offsets}
+        assert x_values == {100.0, 200000.0}
+        assert len(offsets) <= 16
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_does_not_auto_detect_psu_during_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     _isolate_ac_qsettings(monkeypatch, "startup_no_auto_detect")
@@ -951,7 +1153,7 @@ def test_ac_logger_does_not_auto_detect_psu_during_startup(monkeypatch: pytest.M
     window = ac_logger.MainWindow()
     try:
         assert calls["detect"] == 0
-        assert "from shared PSU controls" in window.label_ac_psu_status.text()
+        assert "AC current supply" in window.label_ac_psu_status.text()
     finally:
         window.close()
         app.processEvents()
@@ -1002,7 +1204,7 @@ def test_ac_logger_auto_setup_trusts_connected_shared_psu_without_id_probe(
         window.handle_auto_setup_clicked()
         assert calls["detect"] == 0
         assert window._selected_ac_psu_backend() == "owon_spe6102"
-        assert "Using connected shared OWON SPE6102" in window.label_lcr_status.text()
+        assert "Using connected AC OWON SPE6102" in window.label_lcr_status.text()
     finally:
         window.close()
         app.processEvents()
@@ -1048,6 +1250,10 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
         progress_text = window.progress_ac_run.format()
         assert "ETA" in progress_text
         assert "50/100" in progress_text
+        window._reset_ac_progress("Empty-coil baseline", 100_000, units="time")
+        window._complete_ac_progress("Empty-coil baseline")
+        assert "1m 40s" in window.progress_ac_run.format()
+        assert "100000/100000" not in window.progress_ac_run.format()
         window._set_ac_current_task("Current task: empty-coil baseline - 100 Hz, 0.1 voltage, read 1")
         assert "100 Hz" in window.label_ac_current_task.text()
     finally:
@@ -1447,6 +1653,65 @@ def test_ac_baseline_worker_reconfigures_and_retries_slow_lcr_cadence(
     text = (tmp_path / "baseline.tsv").read_text(encoding="utf-8")
     assert "# WARN" in text
     assert "slow LCR cadence attempt 1" in text
+
+
+def test_ac_baseline_worker_continues_full_point_after_slow_lcr_retries_are_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def advance(self, seconds: float) -> None:
+            self.now += seconds
+
+    class FakeMeter:
+        is_open = True
+
+        def __init__(self, clock: FakeClock) -> None:
+            self.clock = clock
+            self.configure_count = 0
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            self.configure_count += 1
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            self.clock.advance(0.2)
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-05-15T00:01:{self.fetch_count:02d}.000+00:00",
+                primary=float(self.fetch_count) * 1e-6,
+                secondary=14.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+                raw=f"+{self.fetch_count}.0E-06,+1.4E+01,+0,+0,OK",
+            )
+
+    clock = FakeClock()
+    monkeypatch.setattr(ac_logger.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(ac_logger, "AC_LCR_SLOW_RETRY_CHECK_S", 0.6)
+    monkeypatch.setattr(ac_logger, "AC_LCR_SLOW_RETRY_DISCARD_S", 0.0)
+    monkeypatch.setattr(ac_logger, "AC_LCR_SLOW_RETRY_MAX_ATTEMPTS", 1)
+    worker = ac_logger.AcBaselineWorker(
+        meter=FakeMeter(clock),
+        plan=[lcr6000.Lcr6000Settings(frequency_hz=100000.0, level_value=2.0, aperture="FAST")],
+        output_path=tmp_path / "baseline.tsv",
+        point_duration_s=1.0,
+        settle_s=0.0,
+        total_planned_s=1.0,
+    )
+    worker.run()
+
+    text = (tmp_path / "baseline.tsv").read_text(encoding="utf-8")
+    assert "slow LCR cadence persisted" in text
+    assert clock.now >= 2.2
+    assert text.count("\n2026-") >= 10
 
 
 def test_ac_logger_collects_baseline_rows_with_incremental_callback() -> None:
