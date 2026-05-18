@@ -112,6 +112,9 @@ class AcSweepConfig:
     lcr_slow_retry_check_s: float = 3.0
     lcr_slow_retry_discard_s: float = 3.0
     lcr_slow_retry_max_attempts: int = 2
+    psu_current_ready_timeout_s: float = 3.0
+    psu_current_ready_poll_s: float = 0.2
+    psu_measure_attempts: int = 3
 
 
 @dataclass(frozen=True)
@@ -355,6 +358,27 @@ def run_ac_sweep(
                 if stop_requested is not None and stop_requested():
                     raise RuntimeError("AC sweep stopped by user")
                 psu.set_current(current_point.current_a)
+                try:
+                    _wait_for_psu_current(
+                        config=config,
+                        psu=psu,
+                        current_point=current_point,
+                        stop_requested=stop_requested,
+                        sleep=sleep,
+                    )
+                except PsuOutputVerificationError as exc:
+                    _write_sweep_failure_row(
+                        config=config,
+                        psu=psu,
+                        writer=writer,
+                        started=started,
+                        setting_index=setting_index,
+                        setting=setting,
+                        current_point=current_point,
+                        message=str(exc),
+                        progress=progress,
+                    )
+                    raise
                 dwell = max(0.0, float(config.dwell_s))
                 if dwell:
                     sleep(dwell)
@@ -518,7 +542,7 @@ def _measure_sweep_point_once(
         read_monotonic = time.monotonic()
         if first_read_monotonic is None:
             first_read_monotonic = read_monotonic
-        psu_measurement = psu.measure()
+        psu_measurement = _measure_psu_with_retries(psu, attempts=config.psu_measure_attempts)
         error = f"retry_attempt={attempt}" if attempt > 1 else ""
         try:
             _validate_psu_output(current_point, psu_measurement)
@@ -598,6 +622,52 @@ class PsuOutputVerificationError(RuntimeError):
     """Raised when PSU readback does not prove the requested current is active."""
 
 
+def _measure_psu_with_retries(psu: CurrentSource, *, attempts: int) -> PowerSupplyMeasurement:
+    last_error = ""
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        try:
+            measurement = psu.measure()
+        except Exception as exc:
+            last_error = str(exc)
+        else:
+            if measurement.current_actual_a is not None:
+                return measurement
+            last_error = "missing actual-current readback"
+        if attempt < attempts:
+            time.sleep(0.1)
+    return PowerSupplyMeasurement(status="FAIL", error=last_error)
+
+
+def _wait_for_psu_current(
+    *,
+    config: AcSweepConfig,
+    psu: CurrentSource,
+    current_point: CurrentLoopPoint,
+    stop_requested: Callable[[], bool] | None,
+    sleep: Callable[[float], None],
+) -> PowerSupplyMeasurement:
+    if float(current_point.current_a) <= 1e-9:
+        return _measure_psu_with_retries(psu, attempts=config.psu_measure_attempts)
+    deadline = time.monotonic() + max(0.1, float(config.psu_current_ready_timeout_s))
+    last_error = "PSU current readback was not checked"
+    while True:
+        if stop_requested is not None and stop_requested():
+            raise RuntimeError("AC sweep stopped by user")
+        measurement = _measure_psu_with_retries(psu, attempts=config.psu_measure_attempts)
+        try:
+            _validate_psu_output(current_point, measurement)
+        except PsuOutputVerificationError as exc:
+            last_error = str(exc)
+        else:
+            return measurement
+        if time.monotonic() >= deadline:
+            raise PsuOutputVerificationError(
+                f"PSU did not reach requested current within "
+                f"{float(config.psu_current_ready_timeout_s):g} s: {last_error}"
+            )
+        sleep(max(0.02, float(config.psu_current_ready_poll_s)))
+
+
 def _validate_psu_output(current_point: CurrentLoopPoint, measurement: PowerSupplyMeasurement) -> None:
     current_set = max(0.0, float(current_point.current_a))
     actual = measurement.current_actual_a
@@ -659,6 +729,45 @@ def _write_sweep_warning_row(
             comparator="",
         ),
         psu_measurement=PowerSupplyMeasurement(status="WARN"),
+        psu_backend=psu.backend_id,
+        psu_resource=psu.resource,
+        error=message,
+    )
+    writer.write_row(row)
+    if progress is not None:
+        progress(row)
+
+
+def _write_sweep_failure_row(
+    *,
+    config: AcSweepConfig,
+    psu: CurrentSource,
+    writer: AcSweepTsvWriter,
+    started: float,
+    setting_index: int,
+    setting: Lcr6000Settings,
+    current_point: CurrentLoopPoint,
+    message: str,
+    progress: Callable[[AcSweepRow], None] | None,
+) -> None:
+    row = AcSweepRow(
+        timestamp_utc=_timestamp_utc(),
+        elapsed_s=time.monotonic() - started,
+        setting_index=setting_index,
+        total_settings=len(config.lcr_settings),
+        setting=setting,
+        current_point=current_point,
+        repeat_index=0,
+        lcr_reading=Lcr6000Reading(
+            timestamp_utc=_timestamp_utc(),
+            raw="",
+            primary=None,
+            secondary=None,
+            monitor1=None,
+            monitor2=None,
+            comparator="",
+        ),
+        psu_measurement=PowerSupplyMeasurement(status="FAIL"),
         psu_backend=psu.backend_id,
         psu_resource=psu.resource,
         error=message,
@@ -753,6 +862,7 @@ class SerialScpiCurrentSource:
         except Exception:
             pass
         self.command("CURR 0.0000", settle_s=0.03)
+        self.command("VOLT 0.000", settle_s=0.03)
         self.command("OUTP OFF", settle_s=0.03)
 
     def close(self) -> None:

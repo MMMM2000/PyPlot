@@ -279,6 +279,48 @@ def test_serial_scpi_current_source_accepts_matching_supported_id(monkeypatch: p
     assert psu._serial.written == [b"*IDN?\n"]
 
 
+def test_serial_scpi_current_source_shutdown_zeroes_current_and_voltage(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSerialPort:
+        def __init__(self, port: str, baudrate: int, timeout: float, write_timeout: float) -> None:
+            self.port = port
+            self.baudrate = baudrate
+            self.is_open = True
+            self.written: list[bytes] = []
+
+        def reset_input_buffer(self) -> None:
+            return None
+
+        def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+        def flush(self) -> None:
+            return None
+
+        def readline(self) -> bytes:
+            if self.written and self.written[-1] == b"*IDN?\n":
+                return b"OWON,SPE6102,123456,V1.0\n"
+            return b""
+
+        def close(self) -> None:
+            self.is_open = False
+
+    fake_serial_module = type("SerialModule", (), {"Serial": FakeSerialPort})
+    monkeypatch.setattr(sweep, "serial", fake_serial_module)
+
+    psu = sweep.SerialScpiCurrentSource(
+        backend_id="owon_spe6102",
+        resource="COM7",
+        baudrate=115200,
+        voltage_limit_v=62.0,
+    )
+
+    psu.connect()
+    psu.output_off()
+
+    assert psu._serial is not None
+    assert psu._serial.written[-3:] == [b"CURR 0.0000\n", b"VOLT 0.000\n", b"OUTP OFF\n"]
+
+
 def test_detect_power_supply_candidates_queries_ports_without_selecting_lcr() -> None:
     class FakeInfo:
         def __init__(self, device: str, description: str) -> None:
@@ -460,6 +502,7 @@ def test_run_ac_sweep_uses_owon_backend_and_safe_shutdown_on_lcr_failure(tmp_pat
         "connect",
         ("initialize", 5.0),
         ("current", 0.02),
+        "measure",
         "off",
         "close",
     ]
@@ -518,6 +561,9 @@ def test_run_ac_sweep_aborts_when_psu_actual_current_is_missing(tmp_path: Path) 
         psu_backend="owon_spe6102",
         psu_resource="COM7",
         voltage_limit_v=62.0,
+        psu_current_ready_timeout_s=0.05,
+        psu_current_ready_poll_s=0.01,
+        psu_measure_attempts=1,
     )
 
     with pytest.raises(sweep.PsuOutputVerificationError, match="actual-current readback"):
@@ -530,9 +576,11 @@ def test_run_ac_sweep_aborts_when_psu_actual_current_is_missing(tmp_path: Path) 
         )
 
     text = output.read_text(encoding="utf-8")
-    assert "PSU did not return an actual-current readback" in text
+    assert "PSU did not reach requested current" in text
     assert "\tFAIL\t" in text
-    assert psu.events == ["connect", "initialize:62", "current:0.02", "measure", "off", "close"]
+    assert psu.events[0:3] == ["connect", "initialize:62", "current:0.02"]
+    assert psu.events[-2:] == ["off", "close"]
+    assert "measure" in psu.events
 
 
 def test_run_ac_sweep_aborts_when_psu_actual_current_is_too_low(tmp_path: Path) -> None:
@@ -582,9 +630,12 @@ def test_run_ac_sweep_aborts_when_psu_actual_current_is_too_low(tmp_path: Path) 
         psu_backend="owon_spe6102",
         psu_resource="COM7",
         voltage_limit_v=62.0,
+        psu_current_ready_timeout_s=0.05,
+        psu_current_ready_poll_s=0.01,
+        psu_measure_attempts=1,
     )
 
-    with pytest.raises(sweep.PsuOutputVerificationError, match="far below requested"):
+    with pytest.raises(sweep.PsuOutputVerificationError, match="did not reach requested current"):
         sweep.run_ac_sweep(
             config=config,
             lcr=FakeLcr(),
@@ -592,6 +643,83 @@ def test_run_ac_sweep_aborts_when_psu_actual_current_is_too_low(tmp_path: Path) 
             output_path=tmp_path / "low-current.tsv",
             sleep=lambda _seconds: None,
         )
+
+
+def test_run_ac_sweep_waits_for_psu_current_before_lcr_reads(tmp_path: Path) -> None:
+    class FakeLcr:
+        def __init__(self) -> None:
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-05-18T00:00:00Z",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def __init__(self) -> None:
+            self.measurements = [
+                sweep.PowerSupplyMeasurement(current_actual_a=0.0, voltage_actual_v=0.0, status="OK"),
+                sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.0, status="OK"),
+                sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.0, status="OK"),
+            ]
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return self.measurements.pop(0)
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    sleeps: list[float] = []
+    lcr = FakeLcr()
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=62.0,
+        psu_current_ready_timeout_s=1.0,
+        psu_current_ready_poll_s=0.01,
+        psu_measure_attempts=1,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=lcr,
+        psu=FakePsu(),
+        output_path=tmp_path / "waits-for-current.tsv",
+        sleep=sleeps.append,
+    )
+
+    assert lcr.fetch_count == 1
+    assert sleeps == [0.02]
 
 
 def test_run_ac_sweep_measures_each_current_point_for_duration(

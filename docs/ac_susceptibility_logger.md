@@ -217,10 +217,16 @@ The logger no longer runs PSU auto-detection during normal launch. This avoids
 waiting on serial ports that do not answer `*IDN?`; probing only happens when
 the operator explicitly asks for auto-detection.
 
-The sweep engine treats the supply generically: connect, initialize with a
-voltage limit, set current, read actual voltage/current when available, then
-turn output off on normal completion, user stop, or error. Baseline measurement
-does not create or command a power-supply backend.
+The sweep engine treats the supply generically: connect, identify the selected
+SCPI backend, initialize with the selected voltage limit, set current, and wait
+briefly for actual-current readback before starting LCR reads at each current
+point. If the supply keeps reporting missing or near-zero current for a
+non-zero setpoint, the run aborts and the partial file records a failure row.
+After a current has been accepted, a later drop to zero is also treated as a
+failure because it can indicate an open circuit or broken wire. On normal
+completion, user stop, or error, the shutdown sequence sets current and voltage
+to zero before turning output off. Baseline measurement does not create or
+command a power-supply backend.
 
 ## Live Plots
 
