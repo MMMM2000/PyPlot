@@ -1606,6 +1606,7 @@ class MainWindow(CurrentAnnealingWindow):
             return
         try:
             config = self._build_ac_sweep_config()
+            self._release_inherited_psu_port_for_ac(config.psu_resource)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Invalid AC sweep", str(exc))
             return
@@ -2168,9 +2169,11 @@ class MainWindow(CurrentAnnealingWindow):
                 self._ac_psu_backend = str(backend)
         port_combo = getattr(getattr(self, "ui", None), "comboBox_port", None)
         if isinstance(port_combo, QtWidgets.QComboBox):
-            self._ac_psu_resource = str(
+            self._ac_psu_resource = sweep.normalize_serial_resource(
+                str(
                 port_combo.currentData(QtCore.Qt.ItemDataRole.UserRole) or port_combo.currentText()
-            ).strip()
+                )
+            )
             self.port_name = self._ac_psu_resource
         baud_combo = getattr(getattr(self, "ui", None), "comboBox_baudrate", None)
         if isinstance(baud_combo, QtWidgets.QComboBox):
@@ -2216,6 +2219,36 @@ class MainWindow(CurrentAnnealingWindow):
         ):
             self.spinBox_ac_voltage_limit.setValue(default_limit)
         self._refresh_ac_psu_status()
+
+    def _release_inherited_psu_port_for_ac(self, resource: str) -> None:
+        """Close the inherited Qt serial handle before the AC worker opens pyserial."""
+        if not bool(getattr(self, "is_connected", False)):
+            return
+        if bool(getattr(self, "process_running", False)):
+            raise RuntimeError("Stop the inherited current-annealing process before starting an AC current sweep.")
+        selected = sweep.normalize_serial_resource(resource)
+        active = sweep.normalize_serial_resource(str(getattr(self, "port_name", "") or ""))
+        if active and selected and active != selected:
+            return
+        try:
+            self.send_safe_end_commands()
+        except Exception:
+            pass
+        try:
+            self.ser_mcu.readyRead.disconnect(self.handle_ser_mcu_readyRead)
+        except Exception:
+            pass
+        try:
+            self.ser_mcu.close()
+        except Exception:
+            pass
+        self.is_connected = False
+        try:
+            self.ui.pushButton_connect_port.setText("Connect")
+            self._set_port_controls_enabled(True)
+            self._update_mode_action_state()
+        except Exception:
+            pass
 
     def _refresh_ac_psu_status(self) -> None:
         try:

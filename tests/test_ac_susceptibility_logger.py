@@ -175,6 +175,21 @@ def test_power_supply_idn_classification_detects_supported_backends() -> None:
     assert sweep.classify_power_supply_idn("LCR-6200,REV E8.13,GEZ883931") is None
 
 
+def test_power_supply_serial_resource_is_normalized_for_windows_paths() -> None:
+    assert sweep.normalize_serial_resource("COM6 - Prolific USB serial") == "COM6"
+    assert sweep.normalize_serial_resource(r"\\.\COM6") == "COM6"
+    assert sweep.normalize_serial_resource(r"\\\\COM6") == "COM6"
+
+    psu = sweep.SerialScpiCurrentSource(
+        backend_id="owon_spe6102",
+        resource=r"\\\\COM6",
+        baudrate=115200,
+        voltage_limit_v=62.0,
+    )
+
+    assert psu.resource == "COM6"
+
+
 def test_detect_power_supply_candidates_queries_ports_without_selecting_lcr() -> None:
     class FakeInfo:
         def __init__(self, device: str, description: str) -> None:
@@ -772,6 +787,48 @@ def test_ac_logger_psu_settings_are_separate_from_current_annealing(
     finally:
         window.close()
         app.processEvents()
+
+
+def test_ac_logger_releases_inherited_connected_psu_before_ac_run() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.disconnected = False
+
+        def disconnect(self, *_args: object) -> None:
+            self.disconnected = True
+
+    class FakeSerial:
+        def __init__(self) -> None:
+            self.readyRead = FakeSignal()
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_serial = FakeSerial()
+    button = QtWidgets.QPushButton("Disconnect")
+    window.ui = type("Ui", (), {"pushButton_connect_port": button})()
+    window.is_connected = True
+    window.process_running = False
+    window.port_name = r"\\.\COM6"
+    window.ser_mcu = fake_serial
+    window.handle_ser_mcu_readyRead = lambda: None
+    safe_end_calls: list[str] = []
+    window.send_safe_end_commands = lambda: safe_end_calls.append("safe")
+    window._set_port_controls_enabled = lambda _enabled: None
+    window._update_mode_action_state = lambda: None
+
+    window._release_inherited_psu_port_for_ac("COM6")
+
+    assert safe_end_calls == ["safe"]
+    assert fake_serial.closed
+    assert fake_serial.readyRead.disconnected
+    assert window.is_connected is False
+    assert button.text() == "Connect"
+    app.processEvents()
 
 
 def test_ac_logger_upgrades_older_owon_voltage_limit_defaults() -> None:

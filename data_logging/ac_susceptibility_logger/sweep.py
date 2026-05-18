@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Callable, Protocol, Sequence
@@ -34,6 +35,15 @@ SWEEP_HEADER_LINE = (
 )
 
 ESTIMATED_LCR_READ_SECONDS = 0.2
+
+
+def normalize_serial_resource(resource: str) -> str:
+    """Return a pyserial-friendly Windows serial resource name."""
+    text = str(resource or "").strip().strip("'\"")
+    match = re.search(r"COM\d+", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(0).upper()
+    return text
 
 
 POWER_SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
@@ -620,7 +630,7 @@ class SerialScpiCurrentSource:
         voltage_limit_v: float,
     ) -> None:
         self.backend_id = backend_id if backend_id in POWER_SUPPLY_PROFILES else "hmp4030"
-        self.resource = resource.strip()
+        self.resource = normalize_serial_resource(resource)
         self.baudrate = int(baudrate)
         self.voltage_limit_v = float(voltage_limit_v)
         self.profile = dict(POWER_SUPPLY_PROFILES[self.backend_id])
