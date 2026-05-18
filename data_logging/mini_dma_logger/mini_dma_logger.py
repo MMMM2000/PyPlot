@@ -1321,9 +1321,24 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
     def _normalize_on_edit(self, _text: str) -> None:
         if self._normalizing:
             return
-        normalized = self.to_display_text(self.text())
+        raw_text = self.text()
+        raw_cursor = self.cursorPosition()
+        compact = re.sub(r"\s+", "", raw_text).replace("\\", "/").replace("_", "/")
+        if "/" not in compact:
+            digits = re.sub(r"\D", "", compact)
+            if len(digits) <= 3:
+                normalized = digits
+                cursor = min(raw_cursor, len(normalized))
+            else:
+                normalized = f"{digits[:3]}/{digits[3:]}"
+                cursor = len(normalized)
+        else:
+            normalized = self.to_display_text(raw_text)
+            cursor = min(len(normalized), raw_cursor)
+            slash_index = normalized.find("/")
+            if slash_index >= 0 and raw_cursor > slash_index:
+                cursor = len(normalized)
         self._normalizing = True
-        cursor = len(normalized)
         self.setText(normalized)
         self.setCursorPosition(cursor)
         self._normalizing = False
@@ -4227,15 +4242,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_target_ramp_rate,
         )
         current_sweep_form.addRow("Target ramp rate", current_ramp_row)
-        self.spin_current_sweep_target_speed_mm_s = CompactDoubleSpinBox(automation_box)
-        self.spin_current_sweep_target_speed_mm_s.setDecimals(3)
-        self.spin_current_sweep_target_speed_mm_s.setRange(0.001, 50.0)
-        self.spin_current_sweep_target_speed_mm_s.setValue(SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S)
-        self.spin_current_sweep_target_speed_mm_s.setSuffix(" mm/s")
-        self.spin_current_sweep_target_speed_mm_s.setToolTip(
-            "Absolute motor speed ceiling for target ramps and dynamic iso-load/iso-stress/iso-strain balancing."
-        )
-        current_sweep_form.addRow("Stage speed cap", self.spin_current_sweep_target_speed_mm_s)
         self.button_current_sweep_advanced_controls = QtWidgets.QToolButton(automation_box)
         self.button_current_sweep_advanced_controls.setText("Advanced speeds/caps")
         self.button_current_sweep_advanced_controls.setToolTip(
@@ -4253,7 +4259,25 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         current_sweep_form.addRow(self.button_current_sweep_advanced_controls)
-        self.spin_current_sweep_max_correction_strain_pct = CompactDoubleSpinBox(automation_box)
+        self.current_sweep_advanced_panel = QtWidgets.QWidget(automation_box)
+        current_sweep_advanced_form = QtWidgets.QFormLayout(self.current_sweep_advanced_panel)
+        current_sweep_advanced_form.setContentsMargins(8, 2, 0, 2)
+        current_sweep_advanced_form.setHorizontalSpacing(8)
+        current_sweep_advanced_form.setVerticalSpacing(4)
+        current_sweep_advanced_form.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        current_sweep_form.addRow(self.current_sweep_advanced_panel)
+        self.spin_current_sweep_target_speed_mm_s = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
+        self.spin_current_sweep_target_speed_mm_s.setDecimals(3)
+        self.spin_current_sweep_target_speed_mm_s.setRange(0.001, 50.0)
+        self.spin_current_sweep_target_speed_mm_s.setValue(SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S)
+        self.spin_current_sweep_target_speed_mm_s.setSuffix(" mm/s")
+        self.spin_current_sweep_target_speed_mm_s.setToolTip(
+            "Absolute motor speed ceiling for target ramps and dynamic iso-load/iso-stress/iso-strain balancing."
+        )
+        current_sweep_advanced_form.addRow("Stage speed cap", self.spin_current_sweep_target_speed_mm_s)
+        self.spin_current_sweep_max_correction_strain_pct = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_max_correction_strain_pct.setDecimals(3)
         self.spin_current_sweep_max_correction_strain_pct.setRange(0.001, 100.0)
         self.spin_current_sweep_max_correction_strain_pct.setValue(
@@ -4263,8 +4287,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_max_correction_strain_pct.setToolTip(
             "Maximum specimen-strain change allowed in one predictive servo correction."
         )
-        current_sweep_form.addRow("Corr. strain", self.spin_current_sweep_max_correction_strain_pct)
-        self.spin_current_sweep_correction_rate_pct_s = CompactDoubleSpinBox(automation_box)
+        current_sweep_advanced_form.addRow("Corr. strain", self.spin_current_sweep_max_correction_strain_pct)
+        self.spin_current_sweep_correction_rate_pct_s = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_correction_rate_pct_s.setDecimals(3)
         self.spin_current_sweep_correction_rate_pct_s.setRange(0.001, 1000.0)
         self.spin_current_sweep_correction_rate_pct_s.setValue(
@@ -4274,8 +4298,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_correction_rate_pct_s.setToolTip(
             "Specimen-strain-rate ceiling for dynamic servo corrections; still limited by the stage speed cap."
         )
-        current_sweep_form.addRow("Corr. rate", self.spin_current_sweep_correction_rate_pct_s)
-        self.spin_current_sweep_max_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
+        current_sweep_advanced_form.addRow("Corr. rate", self.spin_current_sweep_correction_rate_pct_s)
+        self.spin_current_sweep_max_correction_stress_mpa = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_max_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_max_correction_stress_mpa.setRange(0.001, 100000.0)
         self.spin_current_sweep_max_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA)
@@ -4283,8 +4307,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_max_correction_stress_mpa.setToolTip(
             "Absolute stress-equivalent safety rail for one current-sweep servo correction while current is moving."
         )
-        current_sweep_form.addRow("Sweep cap", self.spin_current_sweep_max_correction_stress_mpa)
-        self.spin_current_sweep_hold_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
+        current_sweep_advanced_form.addRow("Sweep cap", self.spin_current_sweep_max_correction_stress_mpa)
+        self.spin_current_sweep_hold_correction_stress_mpa = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_hold_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_hold_correction_stress_mpa.setRange(0.001, 100000.0)
         self.spin_current_sweep_hold_correction_stress_mpa.setValue(
@@ -4294,8 +4318,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_correction_stress_mpa.setToolTip(
             "Absolute stress-equivalent safety rail for one servo correction while current is paused for target recovery."
         )
-        current_sweep_form.addRow("Hold cap", self.spin_current_sweep_hold_correction_stress_mpa)
-        self.spin_current_sweep_mid_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
+        current_sweep_advanced_form.addRow("Hold cap", self.spin_current_sweep_hold_correction_stress_mpa)
+        self.spin_current_sweep_mid_correction_stress_mpa = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_mid_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_mid_correction_stress_mpa.setRange(0.001, 100000.0)
         self.spin_current_sweep_mid_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA)
@@ -4303,9 +4327,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_mid_correction_stress_mpa.setToolTip(
             "Legacy medium-error correction cap kept for older saved settings."
         )
-        current_sweep_form.addRow("Mid correction cap", self.spin_current_sweep_mid_correction_stress_mpa)
-        self._hide_form_row(current_sweep_form, self.spin_current_sweep_mid_correction_stress_mpa)
-        self.spin_current_sweep_near_correction_stress_mpa = CompactDoubleSpinBox(automation_box)
+        current_sweep_advanced_form.addRow("Mid correction cap", self.spin_current_sweep_mid_correction_stress_mpa)
+        self._hide_form_row(current_sweep_advanced_form, self.spin_current_sweep_mid_correction_stress_mpa)
+        self.spin_current_sweep_near_correction_stress_mpa = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_near_correction_stress_mpa.setDecimals(2)
         self.spin_current_sweep_near_correction_stress_mpa.setRange(0.001, 100000.0)
         self.spin_current_sweep_near_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA)
@@ -4313,7 +4337,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_near_correction_stress_mpa.setToolTip(
             "Stress-equivalent near-target band. Inside this band, the controller only sends one motor step."
         )
-        current_sweep_form.addRow("Near band", self.spin_current_sweep_near_correction_stress_mpa)
+        current_sweep_advanced_form.addRow("Near band", self.spin_current_sweep_near_correction_stress_mpa)
         self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
         self.check_current_sweep_return_target.setChecked(True)
         current_sweep_form.addRow("", self.check_current_sweep_return_target)
@@ -4347,7 +4371,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "while the displacement servo keeps correcting."
         )
         current_sweep_form.addRow("", self.check_current_sweep_hold_on_error)
-        self.spin_current_sweep_hold_pause_factor = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_hold_pause_factor = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_hold_pause_factor.setDecimals(2)
         self.spin_current_sweep_hold_pause_factor.setRange(1.0, 1000.0)
         self.spin_current_sweep_hold_pause_factor.setValue(CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR)
@@ -4355,8 +4379,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_pause_factor.setToolTip(
             "Pause the current ramp when target error exceeds this multiple of the hold tolerance."
         )
-        current_sweep_form.addRow("Pause band", self.spin_current_sweep_hold_pause_factor)
-        self.spin_current_sweep_hold_resume_factor = CompactDoubleSpinBox(automation_box)
+        current_sweep_advanced_form.addRow("Pause band", self.spin_current_sweep_hold_pause_factor)
+        self.spin_current_sweep_hold_resume_factor = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_hold_resume_factor.setDecimals(2)
         self.spin_current_sweep_hold_resume_factor.setRange(0.1, 1000.0)
         self.spin_current_sweep_hold_resume_factor.setValue(CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR)
@@ -4364,8 +4388,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_resume_factor.setToolTip(
             "Resume the current ramp once target error is inside this multiple of the hold tolerance."
         )
-        current_sweep_form.addRow("Resume band", self.spin_current_sweep_hold_resume_factor)
-        self.spin_current_sweep_hold_resume_stable_s = CompactDoubleSpinBox(automation_box)
+        current_sweep_advanced_form.addRow("Resume band", self.spin_current_sweep_hold_resume_factor)
+        self.spin_current_sweep_hold_resume_stable_s = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_hold_resume_stable_s.setDecimals(2)
         self.spin_current_sweep_hold_resume_stable_s.setRange(0.0, 600.0)
         self.spin_current_sweep_hold_resume_stable_s.setValue(CURRENT_SWEEP_HOLD_RESUME_STABLE_S)
@@ -4373,8 +4397,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_resume_stable_s.setToolTip(
             "Require the target error to stay inside the resume band for this long before current ramping resumes."
         )
-        current_sweep_form.addRow("Resume time", self.spin_current_sweep_hold_resume_stable_s)
-        self.spin_current_sweep_hold_filter_window_s = CompactDoubleSpinBox(automation_box)
+        current_sweep_advanced_form.addRow("Resume time", self.spin_current_sweep_hold_resume_stable_s)
+        self.spin_current_sweep_hold_filter_window_s = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_hold_filter_window_s.setDecimals(2)
         self.spin_current_sweep_hold_filter_window_s.setRange(0.1, 60.0)
         self.spin_current_sweep_hold_filter_window_s.setValue(SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S)
@@ -4382,8 +4406,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_filter_window_s.setToolTip(
             "Scale averaging window used for current-hold pause/resume decisions."
         )
-        current_sweep_form.addRow("Filter window", self.spin_current_sweep_hold_filter_window_s)
-        self.spin_current_sweep_hold_noise_sigma = CompactDoubleSpinBox(automation_box)
+        current_sweep_advanced_form.addRow("Filter window", self.spin_current_sweep_hold_filter_window_s)
+        self.spin_current_sweep_hold_noise_sigma = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_hold_noise_sigma.setDecimals(2)
         self.spin_current_sweep_hold_noise_sigma.setRange(0.0, 100.0)
         self.spin_current_sweep_hold_noise_sigma.setValue(SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA)
@@ -4391,8 +4415,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_noise_sigma.setToolTip(
             "Recent scale-noise multiplier added to the current-hold pause/resume bands."
         )
-        current_sweep_form.addRow("Noise band", self.spin_current_sweep_hold_noise_sigma)
-        self.spin_current_sweep_hold_min_pause_stress_mpa = CompactDoubleSpinBox(automation_box)
+        current_sweep_advanced_form.addRow("Noise band", self.spin_current_sweep_hold_noise_sigma)
+        self.spin_current_sweep_hold_min_pause_stress_mpa = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_hold_min_pause_stress_mpa.setDecimals(2)
         self.spin_current_sweep_hold_min_pause_stress_mpa.setRange(0.0, 100000.0)
         self.spin_current_sweep_hold_min_pause_stress_mpa.setValue(SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA)
@@ -4400,8 +4424,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_min_pause_stress_mpa.setToolTip(
             "Minimum MPa-equivalent error required before current hold can start."
         )
-        current_sweep_form.addRow("Min pause", self.spin_current_sweep_hold_min_pause_stress_mpa)
-        self.spin_current_sweep_hold_min_resume_stress_mpa = CompactDoubleSpinBox(automation_box)
+        current_sweep_advanced_form.addRow("Min pause", self.spin_current_sweep_hold_min_pause_stress_mpa)
+        self.spin_current_sweep_hold_min_resume_stress_mpa = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_hold_min_resume_stress_mpa.setDecimals(2)
         self.spin_current_sweep_hold_min_resume_stress_mpa.setRange(0.0, 100000.0)
         self.spin_current_sweep_hold_min_resume_stress_mpa.setValue(SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA)
@@ -4409,7 +4433,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_hold_min_resume_stress_mpa.setToolTip(
             "Minimum MPa-equivalent band used before current hold can resume the current ramp."
         )
-        current_sweep_form.addRow("Min resume", self.spin_current_sweep_hold_min_resume_stress_mpa)
+        current_sweep_advanced_form.addRow("Min resume", self.spin_current_sweep_hold_min_resume_stress_mpa)
         self._current_sweep_advanced_control_widgets = [
             self.spin_current_sweep_target_speed_mm_s,
             self.spin_current_sweep_max_correction_strain_pct,
@@ -4434,7 +4458,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Hide advanced speeds/caps" if checked else "Advanced speeds/caps"
             )
             for advanced_widget in self._current_sweep_advanced_control_widgets:
-                self._set_form_row_visible(current_sweep_form, advanced_widget, checked)
+                self._set_form_row_visible(current_sweep_advanced_form, advanced_widget, checked)
+            self.current_sweep_advanced_panel.setVisible(checked)
+            if hasattr(self, "recipe_stack"):
+                self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
+            if hasattr(self, "_control_scroll_area") and self._control_scroll_area.widget() is not None:
+                self._control_scroll_area.widget().adjustSize()
 
         self.button_current_sweep_advanced_controls.toggled.connect(
             _toggle_current_sweep_advanced_controls
@@ -4586,11 +4615,11 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_layout.addLayout(manual_form)
         manual_motion_row = QtWidgets.QVBoxLayout()
         manual_motion_row.setSpacing(6)
-        manual_connect = QtWidgets.QPushButton("Auto-connect hardware", manual_box)
-        manual_connect.setObjectName("manual_auto_connect_button")
-        manual_connect.setToolTip("Auto-detect/connect the motor and scale for manual setup.")
-        manual_connect.clicked.connect(self._auto_connect_manual_hardware)
-        manual_motion_row.addWidget(manual_connect)
+        self.button_manual_auto_connect = QtWidgets.QPushButton("Auto-connect hardware", manual_box)
+        self.button_manual_auto_connect.setObjectName("manual_auto_connect_button")
+        self.button_manual_auto_connect.setToolTip("Auto-detect/connect the motor and scale for manual setup.")
+        self.button_manual_auto_connect.clicked.connect(self._auto_connect_manual_hardware)
+        manual_motion_row.addWidget(self.button_manual_auto_connect)
         manual_up = QtWidgets.QPushButton("▲ Move up", manual_box)
         manual_up.setObjectName("manual_jog_tension_button")
         manual_up.setToolTip("Move the stage in the tension-increasing direction by the jog step.")
@@ -10411,22 +10440,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self._jog_relative(direction, force_step=True)
 
     def _auto_connect_manual_hardware(self) -> bool:
+        if getattr(self, "_manual_auto_connect_active", False):
+            return False
+        self._manual_auto_connect_active = True
+        if hasattr(self, "button_manual_auto_connect"):
+            self.button_manual_auto_connect.setEnabled(False)
+            self.button_manual_auto_connect.setText("Auto-connecting...")
+        self._log("Manual hardware auto-connect started.")
+        QtCore.QTimer.singleShot(0, self._run_manual_auto_connect_hardware)
+        return True
+
+    def _run_manual_auto_connect_hardware(self) -> None:
         connected = True
-        if not self._ensure_tic_ready_for_recipe():
-            connected = False
-        if self._scale_thread is None:
-            connected = self._ensure_scale_ready_for_recipe() and connected
-        if self._motor_supply_enabled():
-            if not self._ensure_supply_ready_for_recipe():
+        try:
+            if not self._ensure_tic_ready_for_recipe():
                 connected = False
-            elif not self._enable_motor_supply_output():
-                connected = False
-        if connected:
-            self._log("Manual hardware auto-connect completed.")
-        else:
-            self._log("Manual hardware auto-connect did not complete; check the hardware status cards.")
-        self._refresh_live_labels()
-        return connected
+            if self._scale_thread is None:
+                connected = self._ensure_scale_ready_for_recipe() and connected
+            if self._motor_supply_enabled():
+                if not self._ensure_supply_ready_for_recipe():
+                    connected = False
+                elif not self._enable_motor_supply_output():
+                    connected = False
+            if connected:
+                self._log("Manual hardware auto-connect completed.")
+            else:
+                self._log("Manual hardware auto-connect did not complete; check the hardware status cards.")
+            self._refresh_live_labels()
+        finally:
+            self._manual_auto_connect_active = False
+            if hasattr(self, "button_manual_auto_connect"):
+                self.button_manual_auto_connect.setEnabled(True)
+                self.button_manual_auto_connect.setText("Auto-connect hardware")
 
     def _start_tic_keepalive(self) -> None:
         if not self._is_ui_thread():

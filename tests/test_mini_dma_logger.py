@@ -2087,9 +2087,65 @@ def test_manual_auto_connect_button_runs_manual_preflight(tmp_path: Path, qtbot)
 
         button.clicked.emit()
 
+        qtbot.waitUntil(lambda: called == ["tic", "scale"], timeout=1000)
         assert called == ["tic", "scale"]
+        assert button.isEnabled()
+        assert button.text() == "Auto-connect hardware"
     finally:
         _close_test_window(window)
+
+
+def test_manual_auto_connect_button_disables_while_queued(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+
+    try:
+        button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
+
+        assert button is not None
+
+        button.clicked.emit()
+
+        assert not button.isEnabled()
+        assert button.text() == "Auto-connecting..."
+        qtbot.waitUntil(lambda: button.isEnabled(), timeout=1000)
+    finally:
+        _close_test_window(window)
+
+
+def test_microwire_entry_does_not_insert_slash_before_fourth_digit(qtbot) -> None:
+    edit = mini_dma_mod.MicrowireLineEdit()
+    qtbot.addWidget(edit)
+
+    edit.show()
+    edit.setFocus()
+
+    qtbot.keyClicks(edit, "1")
+    assert edit.text() == "1"
+    assert edit.cursorPosition() == 1
+
+    qtbot.keyClicks(edit, "23")
+    assert edit.text() == "123"
+    assert edit.cursorPosition() == 3
+
+    qtbot.keyClicks(edit, "4")
+    assert edit.text() == "123/4"
+    assert edit.cursorPosition() == len("123/4")
+
+
+def test_microwire_entry_allows_manual_slash_and_right_side_typing(qtbot) -> None:
+    edit = mini_dma_mod.MicrowireLineEdit()
+    qtbot.addWidget(edit)
+
+    edit.show()
+    edit.setFocus()
+
+    qtbot.keyClicks(edit, "11/1")
+
+    assert edit.text() == "11/1"
+    assert edit.cursorPosition() == len("11/1")
 
 
 def test_recipe_stop_resets_manual_jog_base_to_confirmed_position(tmp_path: Path, qtbot) -> None:
