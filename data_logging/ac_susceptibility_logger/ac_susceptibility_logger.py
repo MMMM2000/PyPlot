@@ -484,6 +484,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_psu_resource = ""
         self._ac_psu_baudrate = 115200
         self._ac_progress_units = "count"
+        self._ac_active_sweep_config: sweep.AcSweepConfig | None = None
         self._ac_worker_thread: QtCore.QThread | None = None
         self._ac_worker: QtCore.QObject | None = None
         super().__init__()
@@ -1620,6 +1621,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._reset_ac_live_plots("microwire_sweep_start")
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
+        self._ac_active_sweep_config = config
         self._reset_ac_progress("Microwire sweep", self._sweep_total_reads(config), units="time")
         self._set_ac_current_task("Current task: preparing microwire current sweep")
         self.pushButton_run_ac_sweep.setEnabled(False)
@@ -1755,6 +1757,7 @@ class MainWindow(CurrentAnnealingWindow):
     def _finish_ac_worker_state(self) -> None:
         self._ac_sweep_running = False
         self._ac_sweep_stop_requested = False
+        self._ac_active_sweep_config = None
         self.pushButton_measure_lcr_baseline.setEnabled(True)
         self.pushButton_run_ac_sweep.setEnabled(True)
         self.pushButton_stop_ac_sweep.setEnabled(False)
@@ -1882,6 +1885,36 @@ class MainWindow(CurrentAnnealingWindow):
             eta = self._format_duration(max(0.0, total_s - elapsed_s))
             progress.setFormat(
                 f"{label}: {percent}% ({self._format_duration(elapsed_s)} / {self._format_duration(total_s)}), ETA {eta}"
+            )
+
+    def _set_ac_planned_progress(
+        self,
+        label: str,
+        planned_elapsed_s: float,
+        total_s: float,
+        *,
+        wall_elapsed_s: float | None = None,
+    ) -> None:
+        total_ms = max(1, int(round(max(0.001, total_s) * 1000.0)))
+        value_ms = min(total_ms, max(0, int(round(max(0.0, planned_elapsed_s) * 1000.0))))
+        self._ac_progress_total = total_ms
+        self._ac_progress_value = value_ms
+        self._ac_progress_units = "time"
+        percent = int(round((value_ms / total_ms) * 100.0))
+        progress = getattr(self, "progress_ac_run", None)
+        if isinstance(progress, QtWidgets.QProgressBar):
+            progress.setRange(0, total_ms)
+            progress.setValue(value_ms)
+            if wall_elapsed_s is None:
+                started = float(getattr(self, "_ac_progress_started_monotonic", 0.0))
+                wall_elapsed_s = max(0.0, time.monotonic() - started) if started > 0.0 else max(0.0, planned_elapsed_s)
+            wall_elapsed_s = max(0.0, float(wall_elapsed_s))
+            planned_elapsed_s = max(0.001, planned_elapsed_s)
+            remaining_planned_s = max(0.0, total_s - planned_elapsed_s)
+            eta_s = (wall_elapsed_s / planned_elapsed_s) * remaining_planned_s if remaining_planned_s > 0.0 else 0.0
+            progress.setFormat(
+                f"{label}: {percent}% ({self._format_duration(wall_elapsed_s)} / {self._format_duration(total_s)}), "
+                f"ETA {self._format_duration(eta_s)}"
             )
 
     def _set_ac_progress_idle(self) -> None:
@@ -2019,8 +2052,12 @@ class MainWindow(CurrentAnnealingWindow):
         self._refresh_ac_psu_status()
 
     def _handle_ac_sweep_progress(self, row: sweep.AcSweepRow) -> None:
+        planned_elapsed_s = self._planned_ac_sweep_elapsed(row)
         total_s = max(0.001, self._ac_progress_total / 1000.0)
-        self._set_ac_elapsed_progress("Microwire sweep", row.elapsed_s, total_s)
+        if planned_elapsed_s is None:
+            self._set_ac_elapsed_progress("Microwire sweep", row.elapsed_s, total_s)
+        else:
+            self._set_ac_planned_progress("Microwire sweep", planned_elapsed_s, total_s, wall_elapsed_s=row.elapsed_s)
         if row.error and row.repeat_index == 0:
             self._set_ac_current_task(f"Current task: microwire sweep - {row.error}")
             self.label_lcr_status.setText(row.error)
@@ -2041,6 +2078,23 @@ class MainWindow(CurrentAnnealingWindow):
             f"repeat {row.repeat_index}"
         )
         QtWidgets.QApplication.processEvents()
+
+    def _planned_ac_sweep_elapsed(self, row: sweep.AcSweepRow) -> float | None:
+        config = getattr(self, "_ac_active_sweep_config", None)
+        if config is None:
+            return None
+        total_current_points = max(1, int(row.total_current_points))
+        point_span_s = max(0.0, float(config.dwell_s)) + max(0.0, float(config.point_duration_s))
+        if point_span_s <= 0.0:
+            return None
+        completed_current_points = max(0, int(row.current_point_index) - 1)
+        completed_settings = max(0, int(row.setting_index) - 1)
+        completed_points = completed_settings * total_current_points + completed_current_points
+        point_progress_s = max(0.0, float(config.dwell_s)) + min(
+            max(0.0, float(row.point_elapsed_s)),
+            max(0.0, float(config.point_duration_s)),
+        )
+        return completed_points * point_span_s + point_progress_s
 
     def _plot_point_from_sweep_row(self, row: sweep.AcSweepRow) -> AcPlotPoint:
         ls_h, rs_ohm = self._lcr_ls_rs_values(row.setting, row.lcr_reading)

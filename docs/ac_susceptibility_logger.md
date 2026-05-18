@@ -167,12 +167,18 @@ Each AC sweep row includes:
 
 ```text
 timestamp, elapsed_s, setting index/count, LCR model, frequency, level,
-current_set_a, current_actual_a, voltage_actual_v, direction, repeat,
-LCR primary/secondary/monitors/status/raw, PSU backend/resource/status/error
+current_set_a, current_actual_a, voltage_actual_v, PSU resistance, PSU power,
+direction, repeat, LCR primary/secondary/monitors/status/raw,
+PSU backend/resource/status/error
 ```
 
 The writer flushes every row so a long unattended run still leaves partial data
 if the PC, meter, or supply stops responding.
+
+For microwire current sweeps, PSU resistance is calculated from the power-supply
+readback as `voltage_actual_v / current_actual_a` when the actual current is
+non-zero. This is a diagnostic of the DC current path and wire/contact state,
+separate from the LCR `Rs` value.
 
 The logger polls `FETC:IMP?` and records every valid reply it receives during
 the configured time window. A complete file with no empty replies means no

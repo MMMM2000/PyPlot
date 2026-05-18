@@ -463,6 +463,8 @@ def test_write_sweep_metadata_and_row_flushes_incrementally(tmp_path: Path) -> N
     assert lines[0] == "# AC susceptibility sweep"
     assert "psu_backend=owon_spe6102" in lines[1]
     assert lines[-2] == sweep.SWEEP_HEADER_LINE
+    assert "PSU resistance (Ohm)" in lines[-2]
+    assert "PSU power (W)" in lines[-2]
     assert lines[-1].split("\t") == [
         "2026-05-13T10:00:01.000+00:00",
         "1.5",
@@ -475,6 +477,8 @@ def test_write_sweep_metadata_and_row_flushes_incrementally(tmp_path: Path) -> N
         "0.02",
         "0.0198",
         "1.2",
+        "60.6060606061",
+        "0.02376",
         "up",
         "1",
         "1",
@@ -1709,6 +1713,71 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
         assert "100000/100000" not in window.progress_ac_run.format()
         window._set_ac_current_task("Current task: empty-coil baseline - 100 Hz, 0.1 voltage, read 1")
         assert "100 Hz" in window.label_ac_current_task.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_microwire_eta_uses_planned_sweep_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "microwire_eta_position")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        config = sweep.AcSweepConfig(
+            lcr_settings=[
+                lcr6000.Lcr6000Settings(1000.0, 0.3, function="Ls-Rs"),
+                lcr6000.Lcr6000Settings(1000.0, 0.5, function="Ls-Rs"),
+            ],
+            current_points=sweep.build_current_loop_points(
+                start_mA=20.0,
+                stop_mA=80.0,
+                step_mA=20.0,
+                direction_mode="up-down",
+            ),
+            dwell_s=1.0,
+            psu_backend="owon_spe6102",
+            psu_resource="COM11",
+            voltage_limit_v=61.0,
+            point_duration_s=10.0,
+        )
+        window._ac_active_sweep_config = config
+        window._reset_ac_progress("Microwire sweep", window._sweep_total_reads(config), units="time")
+        monkeypatch.setattr(ac_logger.time, "monotonic", lambda: 180.0)
+        row = sweep.AcSweepRow(
+            timestamp_utc="2026-05-18T15:00:00.000+00:00",
+            elapsed_s=180.0,
+            setting_index=2,
+            total_settings=2,
+            setting=config.lcr_settings[1],
+            current_point=config.current_points[5],
+            repeat_index=33,
+            lcr_reading=lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-05-18T15:00:00.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            ),
+            psu_measurement=sweep.PowerSupplyMeasurement(current_actual_a=0.04, voltage_actual_v=16.0, status="OK"),
+            psu_backend="owon_spe6102",
+            psu_resource="COM11",
+            current_point_index=6,
+            total_current_points=7,
+            point_elapsed_s=3.0,
+        )
+        window._handle_ac_sweep_progress(row)
+        text = window.progress_ac_run.format()
+        assert "100%" not in text
+        assert "ETA 0s" not in text
+        assert "ETA" in text
     finally:
         window.close()
         app.processEvents()

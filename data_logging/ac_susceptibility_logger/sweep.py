@@ -29,6 +29,7 @@ SWEEP_HEADER_LINE = (
     "# Timestamp UTC\tElapsed (s)\tAC setting index\tAC setting count\t"
     "LCR function\tLCR frequency (Hz)\tLCR level mode\tLCR level\t"
     "Current set (A)\tCurrent actual (A)\tVoltage actual (V)\t"
+    "PSU resistance (Ohm)\tPSU power (W)\t"
     "Sweep direction\tRepeat index\tLCR primary\tLCR secondary\t"
     "LCR monitor1\tLCR monitor2\tLCR comparator\tLCR raw\t"
     "PSU backend\tPSU resource\tPSU status\tError"
@@ -96,6 +97,26 @@ class PowerSupplyMeasurement:
     status: str = ""
     error: str = ""
 
+    @property
+    def resistance_ohm(self) -> float | None:
+        current = self.current_actual_a
+        voltage = self.voltage_actual_v
+        if current is None or voltage is None:
+            return None
+        if not math.isfinite(current) or not math.isfinite(voltage) or abs(current) < 1e-12:
+            return None
+        return voltage / current
+
+    @property
+    def power_w(self) -> float | None:
+        current = self.current_actual_a
+        voltage = self.voltage_actual_v
+        if current is None or voltage is None:
+            return None
+        if not math.isfinite(current) or not math.isfinite(voltage):
+            return None
+        return voltage * current
+
 
 @dataclass(frozen=True)
 class PowerSupplyCandidate:
@@ -141,6 +162,9 @@ class AcSweepRow:
     psu_measurement: PowerSupplyMeasurement
     psu_backend: str
     psu_resource: str
+    current_point_index: int = 1
+    total_current_points: int = 1
+    point_elapsed_s: float = 0.0
     error: str = ""
 
 
@@ -314,6 +338,8 @@ class AcSweepTsvWriter:
             _format_value(row.current_point.current_a),
             _format_optional_value(measurement.current_actual_a),
             _format_optional_value(measurement.voltage_actual_v),
+            _format_optional_value(measurement.resistance_ohm),
+            _format_optional_value(measurement.power_w),
             row.current_point.direction,
             str(row.repeat_index),
             _format_optional_value(row.lcr_reading.primary),
@@ -365,7 +391,8 @@ def run_ac_sweep(
             if stop_requested is not None and stop_requested():
                 raise RuntimeError("AC sweep stopped by user")
             lcr.configure(setting)
-            for current_point in config.current_points:
+            total_current_points = len(config.current_points)
+            for current_point_index, current_point in enumerate(config.current_points, start=1):
                 if stop_requested is not None and stop_requested():
                     raise RuntimeError("AC sweep stopped by user")
                 psu.set_current(current_point.current_a)
@@ -386,6 +413,8 @@ def run_ac_sweep(
                         setting_index=setting_index,
                         setting=setting,
                         current_point=current_point,
+                        current_point_index=current_point_index,
+                        total_current_points=total_current_points,
                         message=str(exc),
                         progress=progress,
                     )
@@ -402,6 +431,8 @@ def run_ac_sweep(
                     setting_index=setting_index,
                     setting=setting,
                     current_point=current_point,
+                    current_point_index=current_point_index,
+                    total_current_points=total_current_points,
                     progress=progress,
                     stop_requested=stop_requested,
                 )
@@ -445,6 +476,8 @@ def _measure_sweep_point_with_retries(
     setting_index: int,
     setting: Lcr6000Settings,
     current_point: CurrentLoopPoint,
+    current_point_index: int,
+    total_current_points: int,
     progress: Callable[[AcSweepRow], None] | None,
     stop_requested: Callable[[], bool] | None,
 ) -> None:
@@ -463,6 +496,8 @@ def _measure_sweep_point_with_retries(
                 setting_index=setting_index,
                 setting=setting,
                 current_point=current_point,
+                current_point_index=current_point_index,
+                total_current_points=total_current_points,
                 progress=progress,
                 stop_requested=stop_requested,
                 point_duration=point_duration,
@@ -483,6 +518,8 @@ def _measure_sweep_point_with_retries(
                     setting_index=setting_index,
                     setting=setting,
                     current_point=current_point,
+                    current_point_index=current_point_index,
+                    total_current_points=total_current_points,
                     message=f"slow LCR cadence persisted after {attempt} attempts: {exc}",
                     progress=progress,
                 )
@@ -495,6 +532,8 @@ def _measure_sweep_point_with_retries(
                     setting_index=setting_index,
                     setting=setting,
                     current_point=current_point,
+                    current_point_index=current_point_index,
+                    total_current_points=total_current_points,
                     progress=progress,
                     stop_requested=stop_requested,
                     point_duration=point_duration,
@@ -511,6 +550,8 @@ def _measure_sweep_point_with_retries(
                 setting_index=setting_index,
                 setting=setting,
                 current_point=current_point,
+                current_point_index=current_point_index,
+                total_current_points=total_current_points,
                 message=f"slow LCR cadence attempt {attempt}: {exc}; reconfiguring and retrying",
                 progress=progress,
             )
@@ -534,6 +575,8 @@ def _measure_sweep_point_once(
     setting_index: int,
     setting: Lcr6000Settings,
     current_point: CurrentLoopPoint,
+    current_point_index: int,
+    total_current_points: int,
     progress: Callable[[AcSweepRow], None] | None,
     stop_requested: Callable[[], bool] | None,
     point_duration: float,
@@ -553,6 +596,7 @@ def _measure_sweep_point_once(
         read_monotonic = time.monotonic()
         if first_read_monotonic is None:
             first_read_monotonic = read_monotonic
+        point_elapsed_s = max(0.0, read_monotonic - point_started)
         psu_measurement = _measure_psu_with_retries(psu, attempts=config.psu_measure_attempts)
         error = f"retry_attempt={attempt}" if attempt > 1 else ""
         try:
@@ -575,6 +619,9 @@ def _measure_sweep_point_once(
                 ),
                 psu_backend=psu.backend_id,
                 psu_resource=psu.resource,
+                current_point_index=current_point_index,
+                total_current_points=total_current_points,
+                point_elapsed_s=point_elapsed_s,
                 error=f"{error}; {exc}" if error else str(exc),
             )
             writer.write_row(row)
@@ -593,6 +640,9 @@ def _measure_sweep_point_once(
             psu_measurement=psu_measurement,
             psu_backend=psu.backend_id,
             psu_resource=psu.resource,
+            current_point_index=current_point_index,
+            total_current_points=total_current_points,
+            point_elapsed_s=point_elapsed_s,
             error=error,
         )
         writer.write_row(row)
@@ -719,6 +769,8 @@ def _write_sweep_warning_row(
     setting_index: int,
     setting: Lcr6000Settings,
     current_point: CurrentLoopPoint,
+    current_point_index: int,
+    total_current_points: int,
     message: str,
     progress: Callable[[AcSweepRow], None] | None,
 ) -> None:
@@ -742,6 +794,8 @@ def _write_sweep_warning_row(
         psu_measurement=PowerSupplyMeasurement(status="WARN"),
         psu_backend=psu.backend_id,
         psu_resource=psu.resource,
+        current_point_index=current_point_index,
+        total_current_points=total_current_points,
         error=message,
     )
     writer.write_row(row)
@@ -758,6 +812,8 @@ def _write_sweep_failure_row(
     setting_index: int,
     setting: Lcr6000Settings,
     current_point: CurrentLoopPoint,
+    current_point_index: int,
+    total_current_points: int,
     message: str,
     progress: Callable[[AcSweepRow], None] | None,
 ) -> None:
@@ -781,6 +837,8 @@ def _write_sweep_failure_row(
         psu_measurement=PowerSupplyMeasurement(status="FAIL"),
         psu_backend=psu.backend_id,
         psu_resource=psu.resource,
+        current_point_index=current_point_index,
+        total_current_points=total_current_points,
         error=message,
     )
     writer.write_row(row)
