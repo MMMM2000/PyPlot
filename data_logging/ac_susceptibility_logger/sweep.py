@@ -519,6 +519,33 @@ def _measure_sweep_point_once(
         if first_read_monotonic is None:
             first_read_monotonic = read_monotonic
         psu_measurement = psu.measure()
+        error = f"retry_attempt={attempt}" if attempt > 1 else ""
+        try:
+            _validate_psu_output(current_point, psu_measurement)
+        except PsuOutputVerificationError as exc:
+            row = AcSweepRow(
+                timestamp_utc=_timestamp_utc(),
+                elapsed_s=read_monotonic - started,
+                setting_index=setting_index,
+                total_settings=len(config.lcr_settings),
+                setting=setting,
+                current_point=current_point,
+                repeat_index=repeat_index,
+                lcr_reading=reading,
+                psu_measurement=PowerSupplyMeasurement(
+                    current_actual_a=psu_measurement.current_actual_a,
+                    voltage_actual_v=psu_measurement.voltage_actual_v,
+                    status="FAIL",
+                    error=psu_measurement.error,
+                ),
+                psu_backend=psu.backend_id,
+                psu_resource=psu.resource,
+                error=f"{error}; {exc}" if error else str(exc),
+            )
+            writer.write_row(row)
+            if progress is not None:
+                progress(row)
+            raise
         row = AcSweepRow(
             timestamp_utc=_timestamp_utc(),
             elapsed_s=read_monotonic - started,
@@ -531,7 +558,7 @@ def _measure_sweep_point_once(
             psu_measurement=psu_measurement,
             psu_backend=psu.backend_id,
             psu_resource=psu.resource,
-            error=f"retry_attempt={attempt}" if attempt > 1 else "",
+            error=error,
         )
         writer.write_row(row)
         if progress is not None:
@@ -565,6 +592,27 @@ class SlowLcrCadenceError(RuntimeError):
         super().__init__(f"{rate_hz:.3g} Hz from {reads} reads")
         self.rate_hz = rate_hz
         self.reads = reads
+
+
+class PsuOutputVerificationError(RuntimeError):
+    """Raised when PSU readback does not prove the requested current is active."""
+
+
+def _validate_psu_output(current_point: CurrentLoopPoint, measurement: PowerSupplyMeasurement) -> None:
+    current_set = max(0.0, float(current_point.current_a))
+    actual = measurement.current_actual_a
+    if actual is None or not math.isfinite(float(actual)):
+        raise PsuOutputVerificationError(
+            "PSU did not return an actual-current readback; aborting current sweep."
+        )
+    if current_set <= 1e-9:
+        return
+    minimum_expected = max(0.001, 0.25 * current_set)
+    if float(actual) < minimum_expected:
+        raise PsuOutputVerificationError(
+            f"PSU actual current {float(actual) * 1000:g} mA is far below "
+            f"requested {current_set * 1000:g} mA; output may be off."
+        )
 
 
 def _discard_lcr_reads(
