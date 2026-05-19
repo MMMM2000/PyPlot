@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 import math
 from pathlib import Path
 import re
@@ -235,6 +236,7 @@ def build_current_loop_points(
     stop_mA: float,
     step_mA: float,
     direction_mode: str,
+    include_zero: bool = False,
 ) -> list[CurrentLoopPoint]:
     start = float(start_mA)
     stop = float(stop_mA)
@@ -249,14 +251,30 @@ def build_current_loop_points(
 
     up = _inclusive_current_values(min(start, stop), max(start, stop), step)
     if mode == "up":
-        return [CurrentLoopPoint(value / 1000.0, "up") for value in up]
+        points = [CurrentLoopPoint(value / 1000.0, "up") for value in up]
+        return _with_optional_zero_reference(points, include_zero=include_zero)
     down = list(reversed(up))
     if mode == "down":
-        return [CurrentLoopPoint(value / 1000.0, "down") for value in down]
-    return (
+        points = [CurrentLoopPoint(value / 1000.0, "down") for value in down]
+        return _with_optional_zero_reference(points, include_zero=include_zero)
+    points = (
         [CurrentLoopPoint(value / 1000.0, "up") for value in up]
         + [CurrentLoopPoint(value / 1000.0, "down") for value in down[1:]]
     )
+    return _with_optional_zero_reference(points, include_zero=include_zero)
+
+
+def _with_optional_zero_reference(
+    points: Sequence[CurrentLoopPoint],
+    *,
+    include_zero: bool,
+) -> list[CurrentLoopPoint]:
+    values = list(points)
+    if not include_zero:
+        return values
+    if values and math.isclose(values[0].current_a, 0.0, rel_tol=0.0, abs_tol=1e-12):
+        return values
+    return [CurrentLoopPoint(0.0, "zero")] + values
 
 
 def _inclusive_current_values(start_mA: float, stop_mA: float, step_mA: float) -> list[float]:
@@ -299,6 +317,7 @@ class AcSweepTsvWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = self.path.open("w", encoding="utf-8", newline="")
         self._write("# AC susceptibility sweep")
+        self._write(f"# config_json={self._settings_snapshot_json()}")
         self._write(
             "# "
             f"psu_backend={self.config.psu_backend} "
@@ -321,6 +340,51 @@ class AcSweepTsvWriter:
                 f"aperture={setting.aperture}"
             )
         self._write(SWEEP_HEADER_LINE)
+
+    def _settings_snapshot_json(self) -> str:
+        snapshot = {
+            "run_type": "microwire_current_sweep",
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "psu": {
+                "backend": self.config.psu_backend,
+                "resource": self.config.psu_resource,
+                "voltage_limit_v": float(self.config.voltage_limit_v),
+            },
+            "acquisition": {
+                "dwell_s": float(self.config.dwell_s),
+                "point_duration_s": float(self.config.point_duration_s),
+                "repeats": max(1, int(self.config.repeats)),
+                "lcr_read_attempts": int(self.config.lcr_read_attempts),
+                "psu_measure_attempts": int(self.config.psu_measure_attempts),
+                "psu_current_ready_timeout_s": float(self.config.psu_current_ready_timeout_s),
+                "psu_current_ready_poll_s": float(self.config.psu_current_ready_poll_s),
+            },
+            "lcr_slow_retry": {
+                "enabled": bool(self.config.lcr_slow_retry_enabled),
+                "min_frequency_hz": float(self.config.lcr_slow_retry_min_frequency_hz),
+                "min_rate_hz": float(self.config.lcr_slow_retry_min_rate_hz),
+                "check_s": float(self.config.lcr_slow_retry_check_s),
+                "discard_s": float(self.config.lcr_slow_retry_discard_s),
+                "max_attempts": int(self.config.lcr_slow_retry_max_attempts),
+            },
+            "current_loop": {
+                "points_mA": [round(point.current_a * 1000.0, 9) for point in self.config.current_points],
+                "directions": [point.direction for point in self.config.current_points],
+            },
+            "lcr_settings": [
+                {
+                    "function": setting.function,
+                    "frequency_hz": float(setting.frequency_hz),
+                    "level_mode": setting.level_mode,
+                    "level_value": float(setting.level_value),
+                    "monitor1": setting.monitor1,
+                    "monitor2": setting.monitor2,
+                    "aperture": setting.aperture,
+                }
+                for setting in self.config.lcr_settings
+            ],
+        }
+        return json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     def write_row(self, row: AcSweepRow) -> None:
         if self._fh is None:

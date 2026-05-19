@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -150,6 +151,27 @@ def test_build_current_loop_points_supports_up_down_without_duplicate_peak() -> 
         (0.08, "up"),
         (0.05, "down"),
         (0.02, "down"),
+    ]
+
+
+def test_build_current_loop_points_can_include_zero_reference_before_sweep() -> None:
+    points = sweep.build_current_loop_points(
+        start_mA=20.0,
+        stop_mA=80.0,
+        step_mA=20.0,
+        direction_mode="up-down",
+        include_zero=True,
+    )
+
+    assert [(round(point.current_a * 1000.0), point.direction) for point in points] == [
+        (0, "zero"),
+        (20, "up"),
+        (40, "up"),
+        (60, "up"),
+        (80, "up"),
+        (60, "down"),
+        (40, "down"),
+        (20, "down"),
     ]
 
 
@@ -461,7 +483,8 @@ def test_write_sweep_metadata_and_row_flushes_incrementally(tmp_path: Path) -> N
 
     lines = path.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "# AC susceptibility sweep"
-    assert "psu_backend=owon_spe6102" in lines[1]
+    assert "psu_backend=owon_spe6102" in lines[2]
+    assert any(line.startswith("# config_json=") for line in lines)
     assert lines[-2] == sweep.SWEEP_HEADER_LINE
     assert "PSU resistance (Ohm)" in lines[-2]
     assert "PSU power (W)" in lines[-2]
@@ -560,6 +583,39 @@ def test_run_ac_sweep_uses_owon_backend_and_safe_shutdown_on_lcr_failure(tmp_pat
         "off",
         "close",
     ]
+
+
+def test_sweep_metadata_snapshot_includes_full_settings(tmp_path: Path) -> None:
+    path = tmp_path / "settings_snapshot.tsv"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[
+            lcr6000.Lcr6000Settings(1000.0, 0.3, function="Ls-Rs"),
+            lcr6000.Lcr6000Settings(2000.0, 0.5, function="Lp-Rp"),
+        ],
+        current_points=[
+            sweep.CurrentLoopPoint(0.0, "zero"),
+            sweep.CurrentLoopPoint(0.02, "up"),
+            sweep.CurrentLoopPoint(0.04, "up"),
+        ],
+        point_duration_s=10.0,
+        repeats=1,
+        dwell_s=1.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM11",
+        voltage_limit_v=61.0,
+    )
+
+    writer = sweep.AcSweepTsvWriter(path, config)
+    writer.write_metadata()
+    writer.close()
+
+    line = next(line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("# config_json="))
+    snapshot = json.loads(line.removeprefix("# config_json="))
+    assert snapshot["psu"]["backend"] == "owon_spe6102"
+    assert snapshot["psu"]["resource"] == "COM11"
+    assert snapshot["acquisition"]["point_duration_s"] == 10.0
+    assert snapshot["current_loop"]["points_mA"] == [0.0, 20.0, 40.0]
+    assert snapshot["lcr_settings"][1]["function"] == "Lp-Rp"
 
 
 def test_run_ac_sweep_aborts_when_psu_actual_current_is_missing(tmp_path: Path) -> None:
@@ -1238,6 +1294,50 @@ def test_ac_logger_remembers_psu_hardware_settings_per_profile(
         app.processEvents()
 
 
+def test_ac_logger_reapplies_saved_psu_port_after_port_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    original = QtCore.QSettings
+    store = original(
+        original.Format.IniFormat,
+        original.Scope.UserScope,
+        "microwire_tests",
+        "psu_refresh_keeps_com11",
+    )
+    store.clear()
+    store.setValue("psu_backend", "owon_spe6102")
+    store.setValue("psu_profiles/owon_spe6102/port", "COM11")
+    store.setValue("psu_profiles/owon_spe6102/baud", "115200")
+    store.setValue("psu_profiles/owon_spe6102/voltage_limit_v", 61.0)
+
+    def factory(_organization: str, _application: str) -> QtCore.QSettings:
+        return store
+
+    calls = {"ports": 0}
+
+    def _ports() -> list[tuple[str, str]]:
+        calls["ports"] += 1
+        if calls["ports"] == 1:
+            return [("COM6 - Scale", "COM6")]
+        return [("COM6 - Scale", "COM6"), ("COM11 - OWON", "COM11")]
+
+    monkeypatch.setattr(ac_logger.QtCore, "QSettings", factory)
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", _ports)
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        assert window._selected_ac_psu_resource() == "COM11"
+        window.populate_ac_psu_ports()
+        assert window._selected_ac_psu_resource() == "COM11"
+        assert store.value("psu_profiles/owon_spe6102/port", type=str) == "COM11"
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_releases_inherited_connected_psu_before_ac_run() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
@@ -1503,7 +1603,7 @@ def test_ac_logger_graph_defaults_are_ac_susceptibility_specific(
         app.processEvents()
 
 
-def test_ac_logger_frequency_plot_uses_log_scatter_and_legend(
+def test_ac_logger_frequency_plot_uses_log_scatter_and_colored_axes_without_legend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -1536,9 +1636,10 @@ def test_ac_logger_frequency_plot_uses_log_scatter_and_legend(
         assert not twin.lines
         assert len(axis.collections) == 1
         assert len(twin.collections) == 1
-        legend = axis.get_legend()
-        assert legend is not None
-        assert {text.get_text() for text in legend.get_texts()} == {"Rs [Ohm]", "Ls [H]"}
+        assert axis.get_legend() is None
+        assert axis.yaxis.label.get_color() == window._plot_channel("rs_ohm").color
+        assert twin.yaxis.label.get_color() == window._plot_channel("ls_h").color
+        assert not any(line.get_visible() for line in twin.get_ygridlines())
     finally:
         window.close()
         app.processEvents()
@@ -1684,6 +1785,8 @@ def test_ac_logger_current_plot_uses_measured_current_and_wire_resistance_line(
         assert axes[1].collections
         assert not axes[1].lines
         assert axes[2].get_ylabel() == "Wire R [Ohm]"
+        assert axes[2].yaxis.label.get_color() == window._plot_channel("wire_resistance_ohm").color
+        assert axes[0].get_legend() is None
         assert axes[2].lines
         assert not axes[2].collections
         x_values = list(axes[2].lines[0].get_xdata())
@@ -1812,6 +1915,43 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
         assert "100000/100000" not in window.progress_ac_run.format()
         window._set_ac_current_task("Current task: empty-coil baseline - 100 Hz, 0.1 voltage, read 1")
         assert "100 Hz" in window.label_ac_current_task.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_builds_current_loop_with_optional_zero_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "zero_reference_loop")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [("COM11 - OWON", "COM11")])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        window.lineEdit_lcr_frequencies.setText("1000")
+        window.lineEdit_lcr_levels.setText("0.3")
+        window._set_combo_data(window.ui.comboBox_supply, "owon_spe6102")
+        window._set_combo_data(window.ui.comboBox_port, "COM11")
+        window.spinBox_ac_current_start.setValue(20.0)
+        window.spinBox_ac_current_stop.setValue(80.0)
+        window.spinBox_ac_current_step.setValue(20.0)
+        window.checkBox_ac_include_zero_current.setChecked(True)
+
+        config = window._build_ac_sweep_config()
+
+        assert [(round(point.current_a * 1000.0), point.direction) for point in config.current_points] == [
+            (0, "zero"),
+            (20, "up"),
+            (40, "up"),
+            (60, "up"),
+            (80, "up"),
+            (60, "down"),
+            (40, "down"),
+            (20, "down"),
+        ]
     finally:
         window.close()
         app.processEvents()
@@ -2557,6 +2697,10 @@ def test_ac_logger_writes_baseline_file_with_lcr_only_header(tmp_path: Path) -> 
 
     lines = path.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "# AC susceptibility baseline generated from LCR-6200 settings"
-    assert lines[2] == ac_logger.BASELINE_HEADER_LINE
-    assert "Current (mA)" not in lines[2]
-    assert lines[3].split("\t") == row
+    assert lines[1].startswith("# config_json=")
+    snapshot = json.loads(lines[1].removeprefix("# config_json="))
+    assert snapshot["run_type"] == "empty_coil_baseline"
+    assert snapshot["lcr_settings"][0]["frequency_hz"] == 1000.0
+    assert lines[3] == ac_logger.BASELINE_HEADER_LINE
+    assert "Current (mA)" not in lines[3]
+    assert lines[4].split("\t") == row

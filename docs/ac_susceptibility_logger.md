@@ -75,11 +75,13 @@ otherwise command the power supply.
 Use **Run microwire current sweep** after inserting the microwire. The logger
 uses the same selected LCR settings, configures the LCR meter first, then runs
 the current loop at each AC setting. The default loop is up-down, for example
-`20 mA -> 80 mA -> 20 mA`. Include `0 mA` as the start current when a
-wire-installed no-current reference is needed; it is part of the microwire
-sweep rather than a separate baseline action. Sweep files use an AC-specific
-base such as `ac_susc_current_sweep_YYYYMMDD_HHMMSS.tsv` and are flushed after
-every LCR read for overnight recovery.
+`20 mA -> 80 mA -> 20 mA`. Enable **Also measure 0 mA reference** when a
+wire-installed no-current reference is needed before the PSU current loop; the
+0 mA point is part of the microwire sweep rather than a separate baseline
+action, and avoids asking the OWON to regulate currents below its useful
+minimum. Sweep files use an AC-specific base such as
+`ac_susc_current_sweep_YYYYMMDD_HHMMSS.tsv` and are flushed after every LCR read
+for overnight recovery.
 
 The AC Susceptibility Logger keeps its output directory and sweep-base setting
 separate from the Current Annealing Logger. By default, AC files go under
@@ -115,6 +117,13 @@ Point acquisition controls are named for the AC experiment:
 
 Every reading is saved as its own row. Averaging or baseline normalization can
 be done later from the raw TSV files.
+
+Each generated TSV begins with commented metadata lines. Both empty-coil
+baseline and microwire sweep files include a compact `config_json` snapshot with
+the selected LCR settings, acquisition timing, current-loop points and
+directions, and, for current sweeps, the selected PSU backend/resource/voltage
+limit and retry settings. This makes partial or overnight files self-describing
+for debugging even if UI settings are changed later.
 
 Suggested precision-baseline settings for the 1 cm, roughly 1 mm coil around a
 Ni50Fe27Ga23 microwire:
@@ -270,15 +279,15 @@ when selected because it follows the DC current path through the microwire and
 contacts.
 
 When frequency is selected as the X axis, the logger uses a logarithmic scale.
-Current, frequency, and amplitude scatter plots use a small display-space
-horizontal spread for repeated X values so dense repeated points do not collapse
-into a single vertical stripe. The spread is based on screen pixels rather than
-the numeric data range, so it appears similar on current, amplitude, and
-log-frequency plots. Frequency and amplitude plots also use display-only
-per-condition thinning once a condition contains many points, preserving
-representation from each model/frequency/amplitude/current group while leaving
-the TSV logging complete. Combined plots show a legend so the left, right, and
-far-right axis data are easy to identify.
+Current scatter plots use a small display-space horizontal spread for repeated X
+values so dense repeated points do not collapse into a single vertical stripe.
+The spread is based on screen pixels rather than the numeric data range.
+Frequency and amplitude plots keep single-condition points at the real X value,
+and use display-only per-condition thinning once a condition contains many
+points, preserving representation from each model/frequency/amplitude/current
+group while leaving the TSV logging complete. Combined plots use colored Y-axis
+labels/ticks instead of in-plot legends, keeping dense traces readable while
+still identifying left, right, and far-right axis data.
 
 When AC diagnostics mirroring is enabled from the Developer menu, the logger
 writes plot redraw timing and lightweight UI timer telemetry. These diagnostics

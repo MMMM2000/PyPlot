@@ -257,7 +257,12 @@ class AcBaselineWorker(QtCore.QObject):
         try:
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
             with self.output_path.open("w", encoding="utf-8", newline="") as fh:
-                MainWindow._write_baseline_header(fh, self.plan)
+                MainWindow._write_baseline_header(
+                    fh,
+                    self.plan,
+                    point_duration_s=self.point_duration_s,
+                    settle_s=self.settle_s,
+                )
                 for setting_index, setting in enumerate(self.plan, start=1):
                     if self._stop_requested:
                         stopped = True
@@ -941,10 +946,9 @@ class MainWindow(CurrentAnnealingWindow):
                 axis.set_xscale("log")
             axis.set_xlabel(x_channel.label, fontsize=9, labelpad=4)
             axis.set_ylabel(y_left_channel.label, fontsize=8, labelpad=3)
+            self._color_ac_y_axis(axis, y_left_channel.color)
             axis.set_title(self._plot_title(x_channel, y_left_channel, y_right_channel, y_extra_channel), fontsize=9, pad=8)
             left_pairs = self._plot_pairs(points, x_channel, y_left_channel)
-            plot_handles: list[Any] = []
-            plot_labels: list[str] = []
             if left_pairs:
                 x_values = self._jitter_plot_x_values(
                     axis,
@@ -960,8 +964,6 @@ class MainWindow(CurrentAnnealingWindow):
                     alpha=0.65,
                     label=y_left_channel.label,
                 )
-                plot_handles.append(artist)
-                plot_labels.append(y_left_channel.label)
             else:
                 axis.text(
                     0.5,
@@ -974,10 +976,11 @@ class MainWindow(CurrentAnnealingWindow):
                 )
             if y_right_channel is not None:
                 twin = axis.twinx()
-                self._style_ac_axis(twin, theme)
+                self._style_ac_axis(twin, theme, grid=False)
                 if x_channel.key == "frequency_hz":
                     twin.set_xscale("log")
                 twin.set_ylabel(y_right_channel.label, fontsize=8, labelpad=3)
+                self._color_ac_y_axis(twin, y_right_channel.color)
                 right_pairs = self._plot_pairs(points, x_channel, y_right_channel)
                 if right_pairs:
                     x_values = self._jitter_plot_x_values(
@@ -995,16 +998,15 @@ class MainWindow(CurrentAnnealingWindow):
                         alpha=0.65,
                         label=y_right_channel.label,
                     )
-                    plot_handles.append(artist)
-                    plot_labels.append(y_right_channel.label)
             if y_extra_channel is not None:
                 extra_axis = axis.twinx()
-                self._style_ac_axis(extra_axis, theme)
+                self._style_ac_axis(extra_axis, theme, grid=False)
                 extra_axis.spines["right"].set_position(("axes", 1.20))
                 extra_axis.spines["right"].set_visible(True)
                 if x_channel.key == "frequency_hz":
                     extra_axis.set_xscale("log")
                 extra_axis.set_ylabel(y_extra_channel.label, fontsize=8, labelpad=12)
+                self._color_ac_y_axis(extra_axis, y_extra_channel.color)
                 extra_pairs = self._plot_pairs(points, x_channel, y_extra_channel)
                 if extra_pairs:
                     x_values = [x_value for x_value, _ in extra_pairs]
@@ -1030,21 +1032,6 @@ class MainWindow(CurrentAnnealingWindow):
                             alpha=0.65,
                             label=y_extra_channel.label,
                         )
-                    plot_handles.append(artist)
-                    plot_labels.append(y_extra_channel.label)
-            if len(plot_handles) >= 2:
-                legend = axis.legend(
-                    plot_handles,
-                    plot_labels,
-                    loc="best",
-                    fontsize=8,
-                    framealpha=0.75,
-                )
-                if legend is not None:
-                    legend.get_frame().set_facecolor(theme["axes_rgb"])
-                    legend.get_frame().set_edgecolor(theme["text_rgb"])
-                    for text in legend.get_texts():
-                        text.set_color(theme["text_rgb"])
         figure.subplots_adjust(left=0.07, right=0.84, top=0.92, bottom=0.10, hspace=0.50, wspace=0.58)
         canvas = getattr(self, "canvas", None)
         if canvas is not None:
@@ -1078,6 +1065,8 @@ class MainWindow(CurrentAnnealingWindow):
         if x_key not in {"current_actual_mA", "current_set_mA", "current_mA", "frequency_hz", "amplitude_v"}:
             return values
         if len(values) < 2:
+            return values
+        if x_key in {"frequency_hz", "amplitude_v"} and len({round(value, 12) for value in values}) < 2:
             return values
         groups: dict[float, list[int]] = {}
         for index, value in enumerate(values):
@@ -1175,7 +1164,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._refresh_ac_plots(force=True)
 
     @staticmethod
-    def _style_ac_axis(axis: Any, theme: dict[str, Any]) -> None:
+    def _style_ac_axis(axis: Any, theme: dict[str, Any], *, grid: bool = True) -> None:
         axis.set_facecolor(theme["axes_rgb"])
         for spine in axis.spines.values():
             spine.set_color(theme["text_rgb"])
@@ -1183,7 +1172,23 @@ class MainWindow(CurrentAnnealingWindow):
         axis.xaxis.label.set_color(theme["text_rgb"])
         axis.yaxis.label.set_color(theme["text_rgb"])
         axis.title.set_color(theme["text_rgb"])
-        axis.grid(True, color=theme["grid_rgba"], alpha=0.6)
+        if grid:
+            axis.grid(True, color=theme["grid_rgba"], alpha=0.6)
+        else:
+            axis.grid(False)
+
+    @staticmethod
+    def _color_ac_y_axis(axis: Any, color: str) -> None:
+        axis.yaxis.label.set_color(color)
+        axis.tick_params(axis="y", colors=color)
+        try:
+            axis.spines["left"].set_color(color)
+        except Exception:
+            pass
+        try:
+            axis.spines["right"].set_color(color)
+        except Exception:
+            pass
 
     def _set_default_log_name(self) -> None:
         line_edit = getattr(self.ui, "lineEdit_log_file", None)
@@ -1415,6 +1420,10 @@ class MainWindow(CurrentAnnealingWindow):
         self.comboBox_ac_direction.addItem("Up and down", "up-down")
         self.comboBox_ac_direction.addItem("Up only", "up")
         self.comboBox_ac_direction.addItem("Down only", "down")
+        self.checkBox_ac_include_zero_current = QtWidgets.QCheckBox("Also measure 0 mA reference", group)
+        self.checkBox_ac_include_zero_current.setToolTip(
+            "Add one no-current point before the PSU current loop. Useful because the OWON cannot regulate below about 10 mA."
+        )
         self.spinBox_ac_dwell = CompactDoubleSpinBox(group)
         self.spinBox_ac_dwell.setRange(0.0, 3600.0)
         self.spinBox_ac_dwell.setDecimals(3)
@@ -1488,6 +1497,7 @@ class MainWindow(CurrentAnnealingWindow):
         plan_grid.addWidget(self.comboBox_ac_direction, 3, 3)
         plan_grid.addWidget(self.label_ac_settle_time, 4, 0)
         plan_grid.addWidget(self.spinBox_ac_dwell, 4, 1)
+        plan_grid.addWidget(self.checkBox_ac_include_zero_current, 4, 2, 1, 2)
         plan_grid.addWidget(self.label_ac_sweep_estimate, 5, 0, 1, 4)
         action_row = QtWidgets.QHBoxLayout()
         action_row.addWidget(self.pushButton_measure_lcr_baseline)
@@ -1538,6 +1548,8 @@ class MainWindow(CurrentAnnealingWindow):
             combo.currentIndexChanged.connect(lambda *_args: self._store_lcr_settings())
             combo.currentIndexChanged.connect(lambda *_args: self._update_ac_sweep_estimate())
         self.checkBox_ac_plan_loops.toggled.connect(lambda *_args: self._store_lcr_settings())
+        self.checkBox_ac_include_zero_current.toggled.connect(lambda *_args: self._store_lcr_settings())
+        self.checkBox_ac_include_zero_current.toggled.connect(lambda *_args: self._update_ac_sweep_estimate())
         self.checkBox_lcr_model_lsrs.toggled.connect(lambda *_args: self._store_lcr_settings())
         self.checkBox_lcr_model_lprp.toggled.connect(lambda *_args: self._store_lcr_settings())
         self.checkBox_lcr_model_lsrs.toggled.connect(lambda *_args: self._update_ac_sweep_estimate())
@@ -1641,7 +1653,10 @@ class MainWindow(CurrentAnnealingWindow):
                 point_duration = max(1.0, legacy_repeats)
             self.spinBox_ac_point_duration.setValue(float(point_duration))
             self._load_ac_psu_settings()
-            self._sync_ac_psu_from_shared_controls()
+            self._apply_ac_psu_controls()
+            self._refresh_ac_psu_status()
+            include_zero = self.ac_settings.value("include_zero_current", 0)
+            self.checkBox_ac_include_zero_current.setChecked(str(include_zero).lower() in {"1", "true", "yes"})
         finally:
             self._ac_loading_settings = False
 
@@ -1658,7 +1673,7 @@ class MainWindow(CurrentAnnealingWindow):
             combo.setCurrentIndex(idx)
 
     def _store_lcr_settings(self) -> None:
-        if bool(getattr(self, "_ac_loading_settings", False)):
+        if bool(getattr(self, "_ac_loading_settings", False)) or self._is_ac_refreshing_psu_ports():
             return
         self.ac_settings.setValue("frequencies", self.lineEdit_lcr_frequencies.text())
         self.ac_settings.setValue("levels", self.lineEdit_lcr_levels.text())
@@ -1681,6 +1696,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("direction", self.comboBox_ac_direction.currentData())
         self.ac_settings.setValue("dwell_s", float(self.spinBox_ac_dwell.value()))
         self.ac_settings.setValue("point_duration_s", float(self.spinBox_ac_point_duration.value()))
+        self.ac_settings.setValue("include_zero_current", int(self.checkBox_ac_include_zero_current.isChecked()))
 
     def populate_lcr_ports(self) -> None:
         self.comboBox_lcr_port.clear()
@@ -1695,10 +1711,19 @@ class MainWindow(CurrentAnnealingWindow):
                 break
 
     def populate_ac_psu_ports(self) -> None:
+        saved_backend = str(getattr(self, "_ac_psu_backend", "") or "")
+        if saved_backend:
+            self._load_ac_psu_profile_settings(saved_backend)
+        self._ac_refreshing_psu_ports = True
         try:
-            self.populate_ports()
-        except Exception:
-            pass
+            try:
+                self.populate_ports()
+            except Exception:
+                pass
+        finally:
+            self._ac_refreshing_psu_ports = False
+        if saved_backend:
+            self._load_ac_psu_profile_settings(saved_backend)
         self._apply_ac_psu_controls()
         self._sync_ac_psu_from_shared_controls()
 
@@ -2219,6 +2244,7 @@ class MainWindow(CurrentAnnealingWindow):
             stop_mA=float(self.spinBox_ac_current_stop.value()),
             step_mA=float(self.spinBox_ac_current_step.value()),
             direction_mode=str(self.comboBox_ac_direction.currentData() or "up-down"),
+            include_zero=self._include_zero_current_selected(),
         )
         self._sync_ac_psu_from_shared_controls()
         psu_resource = self._selected_ac_psu_resource()
@@ -2249,6 +2275,7 @@ class MainWindow(CurrentAnnealingWindow):
                 stop_mA=float(self.spinBox_ac_current_stop.value()),
                 step_mA=float(self.spinBox_ac_current_step.value()),
                 direction_mode=str(self.comboBox_ac_direction.currentData() or "up-down"),
+                include_zero=self._include_zero_current_selected(),
             )
             estimate = sweep.estimate_sweep(
                 lcr_settings=plan,
@@ -2452,6 +2479,8 @@ class MainWindow(CurrentAnnealingWindow):
                     baud_combo.setCurrentIndex(idx)
 
     def _capture_ac_psu_controls(self) -> None:
+        if self._is_ac_refreshing_psu_ports():
+            return
         self._ac_psu_backend = self._backend_from_ac_supply_combo()
         port_combo = getattr(getattr(self, "ui", None), "comboBox_port", None)
         if isinstance(port_combo, QtWidgets.QComboBox):
@@ -2552,6 +2581,8 @@ class MainWindow(CurrentAnnealingWindow):
         return self._ac_psu_baudrate
 
     def _sync_ac_psu_from_shared_controls(self) -> None:
+        if self._is_ac_refreshing_psu_ports():
+            return
         self._capture_ac_psu_controls()
         backend = self._selected_ac_psu_backend()
         if backend == "owon_spe6102":
@@ -2574,6 +2605,19 @@ class MainWindow(CurrentAnnealingWindow):
         ):
             self.spinBox_ac_voltage_limit.setValue(default_limit)
         self._refresh_ac_psu_status()
+
+    def _is_ac_refreshing_psu_ports(self) -> bool:
+        try:
+            return bool(getattr(self, "_ac_refreshing_psu_ports", False))
+        except RuntimeError:
+            return False
+
+    def _include_zero_current_selected(self) -> bool:
+        try:
+            checkbox = getattr(self, "checkBox_ac_include_zero_current", None)
+        except RuntimeError:
+            return False
+        return bool(isinstance(checkbox, QtWidgets.QCheckBox) and checkbox.isChecked())
 
     def _release_inherited_psu_port_for_ac(self, resource: str) -> None:
         """Close the inherited Qt serial handle before the AC worker opens pyserial."""
@@ -2612,11 +2656,13 @@ class MainWindow(CurrentAnnealingWindow):
             return
         if not isinstance(label, QtWidgets.QLabel):
             return
-        backend = self._selected_ac_psu_backend()
+        backend = str(getattr(self, "_ac_psu_backend", "") or "owon_spe6102")
+        if backend not in sweep.POWER_SUPPLY_PROFILES:
+            backend = "owon_spe6102"
         profile = sweep.POWER_SUPPLY_PROFILES.get(backend, {})
         backend_label = str(profile.get("label", backend))
-        resource = self._selected_ac_psu_resource() or "no port selected"
-        baudrate = self._selected_ac_psu_baudrate()
+        resource = str(getattr(self, "_ac_psu_resource", "") or "") or "no port selected"
+        baudrate = int(getattr(self, "_ac_psu_baudrate", 115200) or 115200)
         label.setText(f"AC current supply: {backend_label}, {resource}, {baudrate} baud")
 
     def _install_ac_wheel_guard(self, control_root: QtWidgets.QWidget) -> None:
@@ -2873,13 +2919,58 @@ class MainWindow(CurrentAnnealingWindow):
         return CurrentAnnealingWindow._format_sample_value(value)
 
     @staticmethod
-    def _write_baseline_header(fh: Any, plan: Sequence[Lcr6000Settings]) -> None:
+    def _write_baseline_header(
+        fh: Any,
+        plan: Sequence[Lcr6000Settings],
+        *,
+        point_duration_s: float | None = None,
+        settle_s: float | None = None,
+    ) -> None:
         fh.write("# AC susceptibility baseline generated from LCR-6200 settings\n")
+        fh.write(
+            "# config_json="
+            + MainWindow._baseline_settings_snapshot_json(
+                plan,
+                point_duration_s=point_duration_s,
+                settle_s=settle_s,
+            )
+            + "\n"
+        )
         for index, setting in enumerate(plan, start=1):
             commands = " ".join(command.strip() for command in commands_for_settings(setting))
             fh.write(f"# AC setting {index}: {commands}\n")
         fh.write(BASELINE_HEADER_LINE + "\n")
         fh.flush()
+
+    @staticmethod
+    def _baseline_settings_snapshot_json(
+        plan: Sequence[Lcr6000Settings],
+        *,
+        point_duration_s: float | None = None,
+        settle_s: float | None = None,
+    ) -> str:
+        snapshot = {
+            "run_type": "empty_coil_baseline",
+            "created_utc": datetime.now().astimezone().isoformat(),
+            "sample": "empty_coil_no_sample",
+            "acquisition": {
+                "point_duration_s": None if point_duration_s is None else float(point_duration_s),
+                "settle_s": None if settle_s is None else float(settle_s),
+            },
+            "lcr_settings": [
+                {
+                    "function": setting.function,
+                    "frequency_hz": float(setting.frequency_hz),
+                    "level_mode": setting.level_mode,
+                    "level_value": float(setting.level_value),
+                    "monitor1": setting.monitor1,
+                    "monitor2": setting.monitor2,
+                    "aperture": setting.aperture,
+                }
+                for setting in plan
+            ],
+        }
+        return json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
     def _write_baseline_row(fh: Any, row: Sequence[str]) -> None:
