@@ -284,18 +284,23 @@ Plots are scatter-first with small translucent markers; dense time traces and
 dense parameter scans are easier to read without connecting lines. `Rs` and
 `Ls` are scatter-only by default. Wire resistance is drawn as line plus symbols
 when selected because it follows the DC current path through the microwire and
-contacts.
+contacts, but it is reduced to the median wire resistance for each
+model/frequency/amplitude/current setting so noisy PSU readback does not
+dominate the dashboard.
 
 When frequency is selected as the X axis, the logger uses a logarithmic scale.
-Current scatter plots use a small display-space horizontal spread for repeated X
-values so dense repeated points do not collapse into a single vertical stripe.
-The spread is based on screen pixels rather than the numeric data range.
-Frequency and amplitude plots keep single-condition points at the real X value,
-and use display-only per-condition thinning once a condition contains many
-points, preserving representation from each model/frequency/amplitude/current
-group while leaving the TSV logging complete. Combined plots use colored Y-axis
-labels/ticks instead of in-plot legends, keeping dense traces readable while
-still identifying left, right, and far-right axis data.
+Current, frequency, and amplitude scatter plots can use display-space
+horizontal spread for repeated X values so dense repeated points do not collapse
+into a single vertical stripe. Configure the spread from **Configure plots**;
+the default is **Small**, and **Off** keeps exact stacked positions. The spread
+is deterministic and based on screen pixels rather than the numeric data range,
+so it improves readability without changing the logged values. Frequency and
+amplitude plots use display-only per-condition thinning once a condition
+contains many points, preserving representation from each
+model/frequency/amplitude/current group while leaving the TSV logging complete.
+Combined plots use colored Y-axis labels/ticks instead of in-plot legends,
+keeping dense traces readable while still identifying left, right, and
+far-right axis data.
 
 When AC diagnostics mirroring is enabled from the Developer menu, the logger
 writes plot redraw timing and lightweight UI timer telemetry. These diagnostics

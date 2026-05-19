@@ -82,6 +82,12 @@ AC_PLOT_REFRESH_INTERVAL_S = 1.0
 AC_PLOT_RECENT_POINTS = 5000
 AC_PLOT_MAX_POINTS_PER_CONDITION = 800
 AC_PLOT_JITTER_PX = 5.0
+AC_PLOT_SPREAD_PIXELS = {
+    "off": 0.0,
+    "small": 5.0,
+    "medium": 9.0,
+    "large": 14.0,
+}
 AC_UI_TELEMETRY_INTERVAL_MS = 16
 AC_UI_TELEMETRY_REPORT_TICKS = 60
 AC_DIAGNOSTICS_DEFAULT_PATH = AC_DEFAULT_LOG_DIR / "ac_susc_diagnostics.jsonl"
@@ -568,8 +574,23 @@ class MainWindow(CurrentAnnealingWindow):
         config_layout.addWidget(QtWidgets.QLabel("Presets", config_box), 0, 0)
         config_layout.addLayout(preset_row, 0, 1, 1, 4)
 
+        self.comboBox_ac_plot_spread = QtWidgets.QComboBox(config_box)
+        self.comboBox_ac_plot_spread.addItem("Off", "off")
+        self.comboBox_ac_plot_spread.addItem("Small", "small")
+        self.comboBox_ac_plot_spread.addItem("Medium", "medium")
+        self.comboBox_ac_plot_spread.addItem("Large", "large")
+        self._set_combo_data(
+            self.comboBox_ac_plot_spread,
+            self.ac_settings.value("plot_x_spread", "small", type=str),
+        )
+        self.comboBox_ac_plot_spread.currentIndexChanged.connect(
+            lambda *_args: self._handle_plot_config_changed()
+        )
+        config_layout.addWidget(QtWidgets.QLabel("Repeated-X spread", config_box), 1, 0)
+        config_layout.addWidget(self.comboBox_ac_plot_spread, 1, 1, 1, 2)
+
         for column, label in enumerate(("Tile", "Show", "Bottom X", "Left Y", "Right Y", "Far-right Y")):
-            config_layout.addWidget(QtWidgets.QLabel(label, config_box), 1, column)
+            config_layout.addWidget(QtWidgets.QLabel(label, config_box), 2, column)
 
         self._plot_tiles = []
         defaults = [
@@ -600,12 +621,13 @@ class MainWindow(CurrentAnnealingWindow):
             for widget in (visible, x_combo, y_left_combo, y_right_combo, y_extra_combo):
                 signal = widget.toggled if isinstance(widget, QtWidgets.QCheckBox) else widget.currentIndexChanged
                 signal.connect(lambda *_args: self._handle_plot_config_changed())
-            config_layout.addWidget(QtWidgets.QLabel(f"Plot {tile_index + 1}", config_box), tile_index + 2, 0)
-            config_layout.addWidget(visible, tile_index + 2, 1)
-            config_layout.addWidget(x_combo, tile_index + 2, 2)
-            config_layout.addWidget(y_left_combo, tile_index + 2, 3)
-            config_layout.addWidget(y_right_combo, tile_index + 2, 4)
-            config_layout.addWidget(y_extra_combo, tile_index + 2, 5)
+            row = tile_index + 3
+            config_layout.addWidget(QtWidgets.QLabel(f"Plot {tile_index + 1}", config_box), row, 0)
+            config_layout.addWidget(visible, row, 1)
+            config_layout.addWidget(x_combo, row, 2)
+            config_layout.addWidget(y_left_combo, row, 3)
+            config_layout.addWidget(y_right_combo, row, 4)
+            config_layout.addWidget(y_extra_combo, row, 5)
             self._plot_tiles.append(
                 AcPlotTileWidgets(
                     visible=visible,
@@ -665,6 +687,9 @@ class MainWindow(CurrentAnnealingWindow):
         return f"{left_label} + {right_label} + {extra_label} vs {x_label}"
 
     def _handle_plot_config_changed(self) -> None:
+        spread_combo = getattr(self, "comboBox_ac_plot_spread", None)
+        if isinstance(spread_combo, QtWidgets.QComboBox):
+            self.ac_settings.setValue("plot_x_spread", spread_combo.currentData() or "small")
         for index, tile in enumerate(self._plot_tiles):
             prefix = f"plot_tile_{index}"
             self.ac_settings.setValue(f"{prefix}_visible", tile.visible.isChecked())
@@ -1007,7 +1032,10 @@ class MainWindow(CurrentAnnealingWindow):
                     extra_axis.set_xscale("log")
                 extra_axis.set_ylabel(y_extra_channel.label, fontsize=8, labelpad=12)
                 self._color_ac_y_axis(extra_axis, y_extra_channel.color)
-                extra_pairs = self._plot_pairs(points, x_channel, y_extra_channel)
+                if y_extra_channel.key == "wire_resistance_ohm":
+                    extra_pairs = self._median_wire_resistance_pairs(points, x_channel)
+                else:
+                    extra_pairs = self._plot_pairs(points, x_channel, y_extra_channel)
                 if extra_pairs:
                     x_values = [x_value for x_value, _ in extra_pairs]
                     y_values = [y_value for _, y_value in extra_pairs]
@@ -1060,13 +1088,55 @@ class MainWindow(CurrentAnnealingWindow):
             and math.isfinite(float(y_value))
         ]
 
+    def _median_wire_resistance_pairs(
+        self,
+        points: Sequence[AcPlotPoint],
+        x_channel: AcPlotChannel,
+    ) -> list[tuple[float, float]]:
+        grouped: dict[tuple[str, float, float, float], list[tuple[float, float]]] = {}
+        for point in points:
+            x_value = x_channel.getter(point)
+            y_value = point.wire_resistance_ohm
+            if (
+                x_value is None
+                or y_value is None
+                or not math.isfinite(float(x_value))
+                or not math.isfinite(float(y_value))
+            ):
+                continue
+            key = (
+                point.model,
+                round(float(point.frequency_hz), 12),
+                round(float(point.amplitude_v), 12),
+                round(float(point.current_mA), 12),
+            )
+            grouped.setdefault(key, []).append((float(x_value), float(y_value)))
+        pairs = [
+            (self._median([x_value for x_value, _ in values]), self._median([y_value for _, y_value in values]))
+            for values in grouped.values()
+            if values
+        ]
+        pairs.sort(key=lambda pair: pair[0])
+        return pairs
+
+    @staticmethod
+    def _median(values: Sequence[float]) -> float:
+        ordered = sorted(float(value) for value in values)
+        if not ordered:
+            return math.nan
+        middle = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[middle]
+        return (ordered[middle - 1] + ordered[middle]) / 2.0
+
     def _jitter_plot_x_values(self, axis: Any, x_key: str, x_values: Sequence[float]) -> list[float]:
         values = [float(value) for value in x_values]
         if x_key not in {"current_actual_mA", "current_set_mA", "current_mA", "frequency_hz", "amplitude_v"}:
             return values
-        if len(values) < 2:
+        spread_px = self._plot_spread_pixels()
+        if spread_px <= 0.0:
             return values
-        if x_key in {"frequency_hz", "amplitude_v"} and len({round(value, 12) for value in values}) < 2:
+        if len(values) < 2:
             return values
         groups: dict[float, list[int]] = {}
         for index, value in enumerate(values):
@@ -1078,13 +1148,20 @@ class MainWindow(CurrentAnnealingWindow):
             if len(indices) < 2:
                 continue
             if len(indices) == 2:
-                offsets_px = [-AC_PLOT_JITTER_PX, AC_PLOT_JITTER_PX]
+                offsets_px = [-spread_px, spread_px]
             else:
-                step = (AC_PLOT_JITTER_PX * 2.0) / float(len(indices) - 1)
-                offsets_px = [-AC_PLOT_JITTER_PX + step * offset_index for offset_index in range(len(indices))]
+                step = (spread_px * 2.0) / float(len(indices) - 1)
+                offsets_px = [-spread_px + step * offset_index for offset_index in range(len(indices))]
             for index, offset_px in zip(indices, offsets_px):
                 jittered[index] = self._offset_x_by_display_px(axis, x_key, values[index], offset_px, values)
         return jittered
+
+    def _plot_spread_pixels(self) -> float:
+        combo = getattr(self, "comboBox_ac_plot_spread", None)
+        key = "small"
+        if isinstance(combo, QtWidgets.QComboBox):
+            key = str(combo.currentData() or "small")
+        return float(AC_PLOT_SPREAD_PIXELS.get(key, AC_PLOT_SPREAD_PIXELS["small"]))
 
     @staticmethod
     def _offset_x_by_display_px(axis: Any, x_key: str, x_value: float, offset_px: float, values: Sequence[float]) -> float:

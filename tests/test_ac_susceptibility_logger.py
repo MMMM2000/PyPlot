@@ -1618,6 +1618,7 @@ def test_ac_logger_graph_defaults_are_ac_susceptibility_specific(
         assert window.figure.axes[0].get_xlabel() == "Elapsed time [s]"
         assert window.figure.axes[2].get_title() == "Rs + Ls + Wire R vs Current measured"
         assert window.figure.axes[2].get_xlabel() == "Current measured [mA]"
+        assert window.comboBox_ac_plot_spread.currentData() == "small"
     finally:
         window.close()
         app.processEvents()
@@ -1659,6 +1660,8 @@ def test_ac_logger_frequency_plot_uses_log_scatter_and_colored_axes_without_lege
         assert axis.get_legend() is None
         assert axis.yaxis.label.get_color() == window._plot_channel("rs_ohm").color
         assert twin.yaxis.label.get_color() == window._plot_channel("ls_h").color
+        assert axis.yaxis.get_offset_text().get_color() == window._plot_channel("rs_ohm").color
+        assert twin.yaxis.get_offset_text().get_color() == window._plot_channel("ls_h").color
         assert not any(line.get_visible() for line in twin.get_ygridlines())
     finally:
         window.close()
@@ -1771,6 +1774,42 @@ def test_ac_logger_frequency_plot_keeps_each_condition_when_display_thinning(
         app.processEvents()
 
 
+def test_ac_logger_repeated_frequency_points_are_spread_unless_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "graph_frequency_spread")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        for tile in window._plot_tiles:
+            tile.visible.setChecked(False)
+        tile = window._plot_tiles[0]
+        tile.visible.setChecked(True)
+        window._set_combo_data(tile.x_combo, "frequency_hz")
+        window._set_combo_data(tile.y_left_combo, "rs_ohm")
+        window._ac_plot_points = [
+            ac_logger.AcPlotPoint(float(index), "Ls-Rs", 1000.0, 0.3, 0.0, 2e-5, 14.0 + index * 0.01)
+            for index in range(5)
+        ]
+
+        window._set_combo_data(window.comboBox_ac_plot_spread, "small")
+        window._refresh_ac_plots(force=True)
+        spread_x = [float(point[0]) for point in window.figure.axes[0].collections[0].get_offsets()]
+        assert len({round(value, 6) for value in spread_x}) > 1
+
+        window._set_combo_data(window.comboBox_ac_plot_spread, "off")
+        window._refresh_ac_plots(force=True)
+        stacked_x = [float(point[0]) for point in window.figure.axes[0].collections[0].get_offsets()]
+        assert {round(value, 6) for value in stacked_x} == {1000.0}
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_current_plot_uses_measured_current_and_wire_resistance_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1791,8 +1830,10 @@ def test_ac_logger_current_plot_uses_measured_current_and_wire_resistance_line(
         window._set_combo_data(tile.y_right_combo, "ls_h")
         window._set_combo_data(tile.y_extra_combo, "wire_resistance_ohm")
         window._ac_plot_points = [
-            ac_logger.AcPlotPoint(0.0, "Ls-Rs", 1000.0, 0.3, 20.0, 2e-5, 14.4, 19.6, 410.0, 0.16),
-            ac_logger.AcPlotPoint(1.0, "Ls-Rs", 1000.0, 0.3, 40.0, 2.1e-5, 14.5, 39.2, 430.0, 0.66),
+            ac_logger.AcPlotPoint(0.0, "Ls-Rs", 1000.0, 0.3, 20.0, 2e-5, 14.4, 19.6, 400.0, 0.16),
+            ac_logger.AcPlotPoint(1.0, "Ls-Rs", 1000.0, 0.3, 20.0, 2.1e-5, 14.5, 19.8, 420.0, 0.17),
+            ac_logger.AcPlotPoint(2.0, "Ls-Rs", 1000.0, 0.3, 40.0, 2.2e-5, 14.6, 39.2, 430.0, 0.66),
+            ac_logger.AcPlotPoint(3.0, "Ls-Rs", 1000.0, 0.3, 40.0, 2.3e-5, 14.7, 39.4, 470.0, 0.67),
         ]
 
         window._refresh_ac_plots(force=True)
@@ -1810,7 +1851,9 @@ def test_ac_logger_current_plot_uses_measured_current_and_wire_resistance_line(
         assert axes[2].lines
         assert not axes[2].collections
         x_values = list(axes[2].lines[0].get_xdata())
-        assert x_values == [19.6, 39.2]
+        y_values = list(axes[2].lines[0].get_ydata())
+        assert x_values == pytest.approx([19.7, 39.3])
+        assert y_values == pytest.approx([410.0, 450.0])
     finally:
         window.close()
         app.processEvents()
@@ -2109,6 +2152,9 @@ def test_ac_logger_diagnostics_records_ui_telemetry(
     monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
     window = ac_logger.MainWindow()
     try:
+        timer = getattr(window, "_ac_plot_refresh_timer", None)
+        if isinstance(timer, QtCore.QTimer):
+            timer.stop()
         path = tmp_path / "ac_diag.jsonl"
         window._ac_diagnostics_enabled = True
         window._ac_diagnostics_path = path
@@ -2116,8 +2162,13 @@ def test_ac_logger_diagnostics_records_ui_telemetry(
         window._ac_ui_telemetry_ticks = 0
         window._ac_ui_telemetry_sum_s = 0.0
         window._ac_ui_telemetry_max_s = 0.0
-        times = iter([1.0] + [1.0 + 0.016 * index for index in range(1, 62)])
-        monkeypatch.setattr(ac_logger.time, "perf_counter", lambda: next(times))
+        clock_values = [1.0] + [1.0 + 0.016 * index for index in range(1, 62)]
+        times = iter(clock_values)
+
+        def fake_perf_counter() -> float:
+            return next(times, clock_values[-1] + 1.0)
+
+        monkeypatch.setattr(ac_logger.time, "perf_counter", fake_perf_counter)
 
         for _ in range(62):
             window._record_ac_ui_telemetry_tick()
