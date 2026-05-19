@@ -3523,6 +3523,11 @@ def test_scale_worker_request_mode_uses_response_timeout() -> None:
     assert worker._request_poll_delay_s(started_s=10.0, finished_s=10.06) == pytest.approx(0.0)
 
 
+def test_supply_scientific_notation_current_reply_is_parsed_as_amps() -> None:
+    assert mini_dma_mod._parse_first_float("2.150E-2") == pytest.approx(0.0215)
+    assert mini_dma_mod._parse_first_float("+1.00e-3 A") == pytest.approx(0.001)
+
+
 def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
@@ -3532,6 +3537,7 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
     settings.setValue("tic_keepalive_interval_ms", 350)
     settings.setValue("supply_read_interval_ms", 1250)
     settings.setValue("graph_refresh_interval_ms", 500)
+    settings.setValue("current_sweep_supply_channel", 2)
     settings.sync()
     window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
@@ -3542,6 +3548,8 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
         assert window.spin_tic_keepalive_interval.value() == 350
         assert window.spin_supply_read_interval.value() == 1250
         assert window.spin_graph_interval.value() == 500
+        assert window.combo_current_sweep_supply_channel.currentData() == 2
+        assert window._build_supply_controller().selected_channel() == 2
         assert window._status_timer.interval() == 1500
         assert window._tic_keepalive_timer.interval() == 350
 
@@ -3553,6 +3561,7 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
         assert int(settings.value("tic_keepalive_interval_ms")) == 450
         assert int(settings.value("supply_read_interval_ms")) == 1250
         assert int(settings.value("graph_refresh_interval_ms")) == 500
+        assert int(settings.value("current_sweep_supply_channel")) == 2
     finally:
         _close_test_window(window)
 
@@ -4883,6 +4892,41 @@ def test_hmp4030_initial_current_command_preserves_sub_milliamp_resolution() -> 
     assert b"CURR 0.0002\n" in written
 
 
+def test_supply_shutdown_turns_output_off_and_resets_current_channel() -> None:
+    written: list[bytes] = []
+
+    class _FakePort:
+        is_open = True
+
+        def reset_input_buffer(self) -> None:
+            return None
+
+        def write(self, payload: bytes) -> None:
+            written.append(payload)
+
+        def flush(self) -> None:
+            return None
+
+    controller = mini_dma_mod.PowerSupplyController(
+        port_name="COM3",
+        baudrate=115200,
+        profile_id="hmp4030",
+        max_voltage_v=30.0,
+        channel_select=3,
+    )
+    controller._serial = _FakePort()  # type: ignore[assignment]
+
+    controller.shutdown_output(reset_voltage_v=1.0, reset_current_mA=1.0)
+
+    assert written == [
+        b"INST:NSEL 3\n",
+        b"OUTP OFF\n",
+        b"VOLT 1.000\n",
+        b"CURR 0.0010\n",
+        b"OUTP OFF\n",
+    ]
+
+
 def test_supply_reads_are_throttled_during_fast_recipe_logging(
     tmp_path: Path,
     qtbot,
@@ -5878,7 +5922,7 @@ def test_emergency_stop_turns_off_current_halts_tic_and_stops_session(tmp_path: 
         assert (2, 12.0, 0.5, False) in supply.configured
         assert tic.halted is True
         assert window._supply_output_enabled is False
-        assert window._supply_last_setpoint_mA == pytest.approx(0.0)
+        assert window._supply_last_setpoint_mA == pytest.approx(1.0)
         assert window._automation_active is False
         assert window._session_active is False
         assert not window._auto_ramp_timer.isActive()
@@ -8044,6 +8088,7 @@ def test_hmp4030_defaults_use_real_voltage_limit_and_kosice_channels(tmp_path: P
         assert mini_dma_mod.SUPPLY_PROFILES["hmp4030"]["max_voltage"] == pytest.approx(32.05)
         assert mini_dma_mod.SUPPLY_PROFILES["hmp4030"]["channel_select"] == 3
         assert window.spin_supply_voltage_limit.value() == pytest.approx(32.05)
+        assert window.combo_current_sweep_supply_channel.currentData() == 3
         assert window.combo_motor_supply_channel.currentData() == 2
         assert window.spin_motor_supply_voltage.value() == pytest.approx(12.0)
         assert window.spin_motor_supply_current_limit.value() == pytest.approx(0.5)

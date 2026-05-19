@@ -149,7 +149,7 @@ MEASUREMENT_CSV_FIELDNAMES = [
     "resistance_ohm",
     "power_W",
 ]
-FLOAT_PATTERN = re.compile(r"[-+]?(?:\d+(?:[.,]\d*)?|[.,]\d+)")
+FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)?)")
 RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
 WINDOWS: list[QtWidgets.QWidget] = []
 GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
@@ -2253,15 +2253,19 @@ class PowerSupplyController:
         baudrate: int,
         profile_id: str,
         max_voltage_v: float,
+        channel_select: int | None = None,
         device_serial: str = "",
     ) -> None:
         self.port_name = port_name.strip()
         self.baudrate = int(baudrate)
         self.profile_id = profile_id if profile_id in SUPPLY_PROFILES else "hmp4030"
         self.profile = dict(SUPPLY_PROFILES[self.profile_id])
+        if channel_select is not None:
+            self.profile["channel_select"] = int(channel_select)
         self.max_voltage_v = float(max_voltage_v)
         self.device_serial = device_serial.strip()
         self._serial: Any = None
+        self._io_lock = RLock()
 
     def connect(self) -> None:
         if serial is None:
@@ -2319,11 +2323,13 @@ class PowerSupplyController:
         return b"".join(chunks).decode("ascii", errors="ignore").strip()
 
     def command(self, command: str, *, settle_s: float = 0.08) -> None:
-        self._write_command(command, settle_s=settle_s)
+        with self._io_lock:
+            self._write_command(command, settle_s=settle_s)
 
     def query_float(self, command: str, *, settle_s: float = 0.08, timeout_s: float = 0.7) -> float | None:
-        self._write_command(command, settle_s=settle_s)
-        return _parse_first_float(self._read_line(timeout_s=timeout_s))
+        with self._io_lock:
+            self._write_command(command, settle_s=settle_s)
+            return _parse_first_float(self._read_line(timeout_s=timeout_s))
 
     def selected_channel(self) -> int:
         return int(self.profile.get("channel_select", 0) or 0)
@@ -2348,10 +2354,11 @@ class PowerSupplyController:
         current_a: float,
         output_on: bool,
     ) -> None:
-        self.select_channel(channel)
-        self.command(f"VOLT {max(0.0, float(voltage_v)):.3f}")
-        self.command(f"CURR {max(0.0, float(current_a)):.3f}")
-        self.command("OUTP ON" if output_on else "OUTP OFF")
+        with self._io_lock:
+            self.select_channel(channel)
+            self.command(f"VOLT {max(0.0, float(voltage_v)):.3f}")
+            self.command(f"CURR {max(0.0, float(current_a)):.3f}")
+            self.command("OUTP ON" if output_on else "OUTP OFF")
 
     def initialize_output(
         self,
@@ -2360,36 +2367,49 @@ class PowerSupplyController:
         reset_on_start: bool,
         force_voltage_first: bool | None = None,
     ) -> None:
-        if reset_on_start:
-            self.command("*RST", settle_s=1.2)
-        self.select_channel()
-        limit_v = max(0.0, float(self.max_voltage_v))
-        current_a = self.quantize_current_mA(current_mA) / 1000.0
-        voltage_first = bool(self.profile.get("voltage_first", False)) if force_voltage_first is None else bool(force_voltage_first)
-        if voltage_first:
-            self.command(f"VOLT {limit_v:.1f}")
-            self.command(f"CURR {current_a:.4f}")
-        else:
-            self.command(f"CURR {current_a:.4f}")
-            self.command(f"VOLT {limit_v:.1f}")
-        self.command("OUTP ON")
+        with self._io_lock:
+            if reset_on_start:
+                self.command("*RST", settle_s=1.2)
+            self.select_channel()
+            limit_v = max(0.0, float(self.max_voltage_v))
+            current_a = self.quantize_current_mA(current_mA) / 1000.0
+            voltage_first = bool(self.profile.get("voltage_first", False)) if force_voltage_first is None else bool(force_voltage_first)
+            if voltage_first:
+                self.command(f"VOLT {limit_v:.1f}")
+                self.command(f"CURR {current_a:.4f}")
+            else:
+                self.command(f"CURR {current_a:.4f}")
+                self.command(f"VOLT {limit_v:.1f}")
+            self.command("OUTP ON")
 
     def set_current_mA(self, current_mA: float) -> None:
-        self.select_channel()
-        self.command(f"CURR {self.quantize_current_mA(current_mA) / 1000.0:.4f}", settle_s=0.03)
+        with self._io_lock:
+            self.select_channel()
+            self.command(f"CURR {self.quantize_current_mA(current_mA) / 1000.0:.4f}", settle_s=0.03)
 
     def output_on(self) -> None:
-        self.select_channel()
-        self.command("OUTP ON")
+        with self._io_lock:
+            self.select_channel()
+            self.command("OUTP ON")
 
     def output_off(self) -> None:
-        self.select_channel()
-        self.command("OUTP OFF")
+        with self._io_lock:
+            self.select_channel()
+            self.command("OUTP OFF")
+
+    def shutdown_output(self, *, reset_voltage_v: float = 1.0, reset_current_mA: float = 1.0) -> None:
+        with self._io_lock:
+            self.select_channel()
+            self.command("OUTP OFF")
+            self.command(f"VOLT {max(0.0, float(reset_voltage_v)):.3f}")
+            self.command(f"CURR {max(0.0, float(reset_current_mA)) / 1000.0:.4f}")
+            self.command("OUTP OFF")
 
     def measure(self) -> dict[str, float | None]:
-        self.select_channel()
-        voltage_v = self.query_float("MEAS:VOLT?")
-        current_a = self.query_float("MEAS:CURR?")
+        with self._io_lock:
+            self.select_channel()
+            voltage_v = self.query_float("MEAS:VOLT?")
+            current_a = self.query_float("MEAS:CURR?")
         current_mA = None if current_a is None else current_a * 1000.0
         resistance_ohm = None
         power_w = None
@@ -3498,6 +3518,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_supply_profile.addItem(str(profile.get("label", profile_id)), profile_id)
         self.combo_supply_profile.currentIndexChanged.connect(self._apply_supply_profile_defaults)
         supply_form.addRow("Profile", self.combo_supply_profile)
+
+        self.combo_current_sweep_supply_channel = QtWidgets.QComboBox(supply_box)
+        self.combo_current_sweep_supply_channel.addItem("Profile default", 0)
+        for channel in range(1, 5):
+            self.combo_current_sweep_supply_channel.addItem(f"CH{channel}", channel)
+        self.combo_current_sweep_supply_channel.setCurrentIndex(
+            self.combo_current_sweep_supply_channel.findData(SUPPLY_PROFILES["hmp4030"]["channel_select"])
+        )
+        supply_form.addRow("Current-sweep channel", self.combo_current_sweep_supply_channel)
 
         self.spin_supply_voltage_limit = CompactDoubleSpinBox(supply_box)
         self.spin_supply_voltage_limit.setDecimals(2)
@@ -5583,6 +5612,7 @@ class MainWindow(QtWidgets.QMainWindow):
             baudrate=int(self.combo_supply_baud.currentText()),
             profile_id=str(self.combo_supply_profile.currentData() or "hmp4030"),
             max_voltage_v=float(self.spin_supply_voltage_limit.value()),
+            channel_select=self._current_sweep_supply_channel(),
         )
 
     def _apply_supply_profile_defaults(self) -> None:
@@ -5640,6 +5670,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _motor_supply_channel(self) -> int:
         return int(self.combo_motor_supply_channel.currentData() or 1)
+
+    def _current_sweep_supply_channel(self) -> int | None:
+        configured = int(self.combo_current_sweep_supply_channel.currentData() or 0)
+        if configured > 0:
+            return configured
+        profile = SUPPLY_PROFILES.get(str(self.combo_supply_profile.currentData() or "hmp4030"), {})
+        channel = int(profile.get("channel_select", 0) or 0)
+        return channel if channel > 0 else None
 
     def _enable_motor_supply_output(self) -> bool:
         if self._supply_controller is None or not self._supply_controller.is_connected():
@@ -5746,12 +5784,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self._supply_last_setpoint_mA = 0.0
             return
         try:
-            self._supply_controller.output_off()
+            shutdown = getattr(self._supply_controller, "shutdown_output", None)
+            if callable(shutdown):
+                shutdown(reset_voltage_v=1.0, reset_current_mA=1.0)
+            else:
+                self._supply_controller.output_off()
         except Exception as exc:
-            self._log(f"Failed to disable supply output: {exc}")
+            self._log(f"Failed to disable/reset supply output: {exc}")
         self._supply_output_enabled = False
-        self._supply_last_setpoint_mA = 0.0
-        self.label_supply_status.setText("Supply output disabled.")
+        self._supply_last_setpoint_mA = 1.0
+        if self._is_ui_thread():
+            self.label_supply_status.setText("Supply output disabled; current channel reset to 1 V / 1 mA.")
+        else:
+            self._run_on_ui_thread(
+                lambda: self.label_supply_status.setText(
+                    "Supply output disabled; current channel reset to 1 V / 1 mA."
+                )
+            )
         self._refresh_supply_snapshot(force=True)
 
     def _emergency_stop(self) -> None:
@@ -11277,6 +11326,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "port": str(self.combo_supply_port.currentData() or ""),
                 "baud": int(self.combo_supply_baud.currentText()),
                 "profile": str(self.combo_supply_profile.currentData() or "hmp4030"),
+                "current_sweep_channel": self._current_sweep_supply_channel(),
                 "voltage_limit_v": float(self.spin_supply_voltage_limit.value()),
                 "mode": HEATING_MODE_OFF,
                 "voltage_limit_behavior": "current_sweeps_unwind_to_start_current",
@@ -12245,7 +12295,11 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as exc:
                 statuses.append(f"FAIL: Motor supply channel setup failed ({exc}).")
                 ok = False
-            statuses.append(f"PASS: Current-sweep supply channel CH{SUPPLY_PROFILES['hmp4030']['channel_select']} selected.")
+            channel = self._current_sweep_supply_channel()
+            if channel is None:
+                statuses.append("PASS: Current-sweep supply uses the profile's direct output channel.")
+            else:
+                statuses.append(f"PASS: Current-sweep supply channel CH{channel} selected.")
 
         if not self._ensure_scale_ready_for_recipe():
             statuses.append("FAIL: Scale did not connect/respond with the selected preset.")
@@ -15153,6 +15207,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("supply_port", self.combo_supply_port.currentData() or "")
         self.settings.setValue("supply_baud", self.combo_supply_baud.currentText())
         self.settings.setValue("supply_profile", self.combo_supply_profile.currentData() or "hmp4030")
+        self.settings.setValue("current_sweep_supply_channel", self.combo_current_sweep_supply_channel.currentData() or 0)
         self.settings.setValue("supply_voltage_limit_v", self.spin_supply_voltage_limit.value())
         self.settings.setValue("supply_manual_current_mA", self.spin_supply_manual_current.value())
         self.settings.setValue("continuity_monitor_enabled", self.check_continuity_monitor.isChecked())
@@ -15376,6 +15431,10 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_profile_index = self.combo_supply_profile.findData(supply_profile)
         if supply_profile_index >= 0:
             self.combo_supply_profile.setCurrentIndex(supply_profile_index)
+        current_sweep_channel = int(self.settings.value("current_sweep_supply_channel", SUPPLY_PROFILES["hmp4030"]["channel_select"]))
+        current_sweep_channel_index = self.combo_current_sweep_supply_channel.findData(current_sweep_channel)
+        if current_sweep_channel_index >= 0:
+            self.combo_current_sweep_supply_channel.setCurrentIndex(current_sweep_channel_index)
         self.spin_supply_voltage_limit.setValue(
             float(self.settings.value("supply_voltage_limit_v", SUPPLY_PROFILES["hmp4030"]["max_voltage"]))
         )
