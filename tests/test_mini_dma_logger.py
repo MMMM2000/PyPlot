@@ -2520,6 +2520,41 @@ def test_current_sweep_modes_are_separate_recipe_choices(tmp_path: Path, qtbot) 
         _close_test_window(window)
 
 
+def test_current_sweep_target_values_are_recipe_mode_specific(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        stress_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        strain_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRAIN)
+        load_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
+
+        window.combo_recipe_mode.setCurrentIndex(stress_index)
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(1000.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_target_ramp_rate.setValue(5.0)
+
+        window.combo_recipe_mode.setCurrentIndex(strain_index)
+
+        assert window._current_sweep_basis() == mini_dma_mod.HSW_BASIS_STRAIN_PCT
+        assert window.spin_current_sweep_target_start.value() == pytest.approx(0.0)
+        assert window.spin_current_sweep_target_end.value() == pytest.approx(0.5)
+        assert window.spin_current_sweep_target_step.value() == pytest.approx(0.1)
+        assert window.spin_current_sweep_target_ramp_rate.value() == pytest.approx(0.05)
+
+        window.spin_current_sweep_target_end.setValue(0.3)
+        window.combo_recipe_mode.setCurrentIndex(load_index)
+        assert window.spin_current_sweep_target_end.value() == pytest.approx(9.0)
+
+        window.combo_recipe_mode.setCurrentIndex(stress_index)
+        assert window.spin_current_sweep_target_end.value() == pytest.approx(1000.0)
+
+        window.combo_recipe_mode.setCurrentIndex(strain_index)
+        assert window.spin_current_sweep_target_end.value() == pytest.approx(0.3)
+    finally:
+        _close_test_window(window)
+
+
 def test_status_bar_is_hidden_so_run_log_is_not_duplicated(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -3816,11 +3851,57 @@ def test_display_plot_points_downsample_old_points_but_keep_recent_samples(tmp_p
 
         display_points = window._display_plot_points()
 
-        assert len(display_points) == mini_dma_mod.DISPLAY_PLOT_MAX_POINTS
+        assert len(display_points) <= mini_dma_mod.DISPLAY_PLOT_MAX_POINTS
         assert display_points[0].elapsed_s == pytest.approx(0.0)
         assert [point.elapsed_s for point in display_points[-mini_dma_mod.DISPLAY_PLOT_RECENT_POINTS :]] == [
             float(index)
             for index in range(total_points - mini_dma_mod.DISPLAY_PLOT_RECENT_POINTS, total_points)
+        ]
+    finally:
+        _close_test_window(window)
+
+
+def test_display_plot_points_keep_older_downsample_stable_as_new_samples_arrive(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _point(elapsed_s: float) -> mini_dma_mod.MeasurementPoint:
+        return mini_dma_mod.MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc="2026-05-11 00:00:00",
+            raw_position_mm=elapsed_s,
+            position_mm=elapsed_s,
+            raw_load_g=elapsed_s,
+            load_g=elapsed_s,
+            preload_state=mini_dma_mod.PRELOAD_DISABLED,
+            strain_pct=None,
+            stress_mpa=None,
+            current_set_mA=None,
+            current_measured_mA=None,
+            voltage_V=None,
+            resistance_ohm=None,
+            power_W=None,
+            automation_phase="current",
+            automation_basis=None,
+            automation_target_value=None,
+            plateau_index=None,
+            plateau_label=None,
+        )
+
+    try:
+        first_total = mini_dma_mod.DISPLAY_PLOT_MAX_POINTS + 800
+        second_total = first_total + 80
+        window._session_points = [_point(float(index)) for index in range(first_total)]
+        first_display = window._display_plot_points()
+        first_old = [point.elapsed_s for point in first_display[:40]]
+
+        window._session_points = [_point(float(index)) for index in range(second_total)]
+        second_display = window._display_plot_points()
+        second_old = [point.elapsed_s for point in second_display[:40]]
+
+        assert second_old == first_old
+        assert [point.elapsed_s for point in second_display[-mini_dma_mod.DISPLAY_PLOT_RECENT_POINTS :]] == [
+            float(index)
+            for index in range(second_total - mini_dma_mod.DISPLAY_PLOT_RECENT_POINTS, second_total)
         ]
     finally:
         _close_test_window(window)
@@ -6401,9 +6482,10 @@ def test_dashboard_uses_compact_live_value_cells_without_overview(tmp_path: Path
     try:
         assert not hasattr(window, "overview_section")
         assert "speed_mm_s" in window._dashboard_value_labels
-        assert "scale" in window._dashboard_value_labels
+        assert "scale" not in window._dashboard_value_labels
         assert "task" in window._dashboard_value_labels
-        assert window._dashboard_value_labels["task"].wordWrap()
+        assert not window._dashboard_value_labels["task"].wordWrap()
+        assert window._dashboard_value_labels["task"].height() > 0
         assert window.dashboard_status_box.parentWidget() is window.dashboard_header
         positions = [
             window.dashboard_status_box.layout().getItemPosition(index)[:2]

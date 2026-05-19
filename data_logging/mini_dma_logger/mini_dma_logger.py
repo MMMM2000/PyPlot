@@ -183,6 +183,7 @@ DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 LIVE_PLOT_MAX_POINTS = 3000
 DISPLAY_PLOT_MAX_POINTS = 1500
 DISPLAY_PLOT_RECENT_POINTS = 600
+DISPLAY_PLOT_BASE_BUCKET_S = 1.0
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 SETUP_ZERO_FALLBACK_MIN_POINTS = 4
 SETUP_ZERO_FALLBACK_MIN_TIME_S = 0.8
@@ -376,6 +377,11 @@ CURRENT_SWEEP_BASIS_BY_MODE = {
     CURRENT_SWEEP_LOAD: HSW_BASIS_LOAD_G,
     CURRENT_SWEEP_STRESS: HSW_BASIS_STRESS_MPA,
     CURRENT_SWEEP_STRAIN: HSW_BASIS_STRAIN_PCT,
+}
+CURRENT_SWEEP_TARGET_DEFAULTS_BY_MODE = {
+    CURRENT_SWEEP_LOAD: (0.0, 9.0, 3.0, 0.1),
+    CURRENT_SWEEP_STRESS: (50.0, 1000.0, 50.0, 5.0),
+    CURRENT_SWEEP_STRAIN: (0.0, 0.5, 0.1, 0.05),
 }
 CURRENT_SWEEP_MODES = frozenset(CURRENT_SWEEP_BASIS_BY_MODE) | {LEGACY_CURRENT_SWEEP}
 CALIBRATION_MODES = frozenset({CALIBRATION, CALIBRATION_COPPER})
@@ -2619,6 +2625,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_import_in_progress = False
         self._plot_tiles: list[PlotTileWidgets] = []
         self._dashboard_value_labels: dict[str, QtWidgets.QLabel] = {}
+        self._current_sweep_target_values_by_mode: dict[str, tuple[float, float, float, float]] = {}
+        self._last_recipe_mode = "ramp"
         self._control_scroll_area: QtWidgets.QScrollArea | None = None
         self._manual_jog_direction = 0.0
         self._manual_jog_last_tick_s: float | None = None
@@ -2957,10 +2965,13 @@ class MainWindow(QtWidgets.QMainWindow):
         title: str,
         *,
         min_width: int = 96,
+        fixed_height: int | None = None,
     ) -> QtWidgets.QFrame:
         cell = QtWidgets.QFrame(parent)
         cell.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         cell.setMinimumWidth(min_width)
+        if fixed_height is not None:
+            cell.setFixedHeight(fixed_height)
         cell.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.MinimumExpanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
@@ -2978,8 +2989,10 @@ class MainWindow(QtWidgets.QMainWindow):
         value_font.setBold(True)
         value_label.setFont(value_font)
         value_label.setMinimumWidth(max(54, min_width - 42))
-        value_label.setWordWrap(key == "task")
+        value_label.setWordWrap(False)
         value_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        if fixed_height is not None:
+            value_label.setFixedHeight(max(16, fixed_height - 4))
         layout.addWidget(title_label)
         layout.addWidget(value_label, stretch=1)
         self._dashboard_value_labels[key] = value_label
@@ -3845,7 +3858,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_recipe_mode.addItem("Iso-load current sweep", CURRENT_SWEEP_LOAD)
         self.combo_recipe_mode.addItem("Iso-stress current sweep", CURRENT_SWEEP_STRESS)
         self.combo_recipe_mode.addItem("Iso-strain current sweep", CURRENT_SWEEP_STRAIN)
-        self.combo_recipe_mode.currentIndexChanged.connect(self._update_recipe_mode_ui)
+        self.combo_recipe_mode.currentIndexChanged.connect(self._handle_recipe_mode_changed)
         automation_form.addRow("Recipe type", self.combo_recipe_mode)
         recipe_file_row = QtWidgets.QHBoxLayout()
         self.button_save_recipe = QtWidgets.QPushButton("Save recipe", automation_box)
@@ -4753,10 +4766,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ("stress_mpa", "Stress", 92),
             ("strain_pct", "Strain", 88),
             ("speed_mm_s", "Speed", 96),
-            ("scale", "Scale", 98),
             ("motor", "Motor", 108),
             ("supply", "Supply", 112),
-            ("task", "Task", 150),
         )
         for index, (key, title, min_width) in enumerate(status_cells):
             row = index // 3
@@ -4772,6 +4783,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 column,
             )
             status_layout.setColumnStretch(column, 1)
+        status_layout.addWidget(
+            self._build_dashboard_value_cell(
+                self.dashboard_status_box,
+                "task",
+                "Task",
+                min_width=340,
+                fixed_height=24,
+            ),
+            2,
+            0,
+            1,
+            3,
+        )
+        status_layout.setRowMinimumHeight(2, 26)
         hero_layout.addWidget(self.dashboard_status_box, stretch=1)
         self.label_recipe_banner = QtWidgets.QLabel("Manual mode", hero_box)
         self.label_recipe_banner.setAlignment(
@@ -7939,6 +7964,78 @@ class MainWindow(QtWidgets.QMainWindow):
             if basis == mode_basis:
                 return mode
         return CURRENT_SWEEP_LOAD
+
+    def _current_sweep_target_settings_prefix(self, mode: str | None = None) -> str:
+        mode = str(mode or self.combo_recipe_mode.currentData() or CURRENT_SWEEP_LOAD)
+        basis = CURRENT_SWEEP_BASIS_BY_MODE.get(mode, HSW_BASIS_LOAD_G)
+        return f"current_sweep_{basis}"
+
+    def _current_sweep_target_defaults(self, mode: str | None = None) -> tuple[float, float, float, float]:
+        return CURRENT_SWEEP_TARGET_DEFAULTS_BY_MODE.get(
+            str(mode or self.combo_recipe_mode.currentData() or CURRENT_SWEEP_LOAD),
+            CURRENT_SWEEP_TARGET_DEFAULTS_BY_MODE[CURRENT_SWEEP_LOAD],
+        )
+
+    def _current_sweep_target_values(self) -> tuple[float, float, float, float]:
+        return (
+            float(self.spin_current_sweep_target_start.value()),
+            float(self.spin_current_sweep_target_end.value()),
+            float(self.spin_current_sweep_target_step.value()),
+            float(self.spin_current_sweep_target_ramp_rate.value()),
+        )
+
+    def _store_current_sweep_target_values(self, mode: str | None = None) -> None:
+        mode = str(mode or self.combo_recipe_mode.currentData() or "")
+        if mode in CURRENT_SWEEP_BASIS_BY_MODE:
+            self._current_sweep_target_values_by_mode[mode] = self._current_sweep_target_values()
+
+    def _apply_current_sweep_target_values(
+        self,
+        mode: str | None = None,
+        *,
+        allow_legacy_settings: bool = False,
+    ) -> None:
+        mode = str(mode or self.combo_recipe_mode.currentData() or CURRENT_SWEEP_LOAD)
+        defaults = self._current_sweep_target_defaults(mode)
+        values = self._current_sweep_target_values_by_mode.get(mode)
+        if values is None:
+            prefix = self._current_sweep_target_settings_prefix(mode)
+            if self.settings.contains(f"{prefix}_target_start"):
+                values = (
+                    float(self.settings.value(f"{prefix}_target_start", defaults[0])),
+                    float(self.settings.value(f"{prefix}_target_end", defaults[1])),
+                    float(self.settings.value(f"{prefix}_target_step", defaults[2])),
+                    max(0.0001, float(self.settings.value(f"{prefix}_target_ramp_rate", defaults[3]))),
+                )
+            elif allow_legacy_settings:
+                values = (
+                    float(self.settings.value("current_sweep_target_start", defaults[0])),
+                    float(self.settings.value("current_sweep_target_end", defaults[1])),
+                    float(self.settings.value("current_sweep_target_step", defaults[2])),
+                    max(0.0001, float(self.settings.value("current_sweep_target_ramp_rate", defaults[3]))),
+                )
+            else:
+                values = defaults
+        start_value, end_value, step_value, ramp_rate = values
+        for widget, value in (
+            (self.spin_current_sweep_target_start, start_value),
+            (self.spin_current_sweep_target_end, end_value),
+            (self.spin_current_sweep_target_step, step_value),
+            (self.spin_current_sweep_target_ramp_rate, max(0.0001, ramp_rate)),
+        ):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+
+    def _handle_recipe_mode_changed(self, _index: int | None = None) -> None:
+        previous_mode = self._last_recipe_mode
+        current_mode = str(self.combo_recipe_mode.currentData() or "ramp")
+        if not self._settings_restore_in_progress:
+            self._store_current_sweep_target_values(previous_mode)
+            if current_mode in CURRENT_SWEEP_BASIS_BY_MODE and current_mode != previous_mode:
+                self._apply_current_sweep_target_values(current_mode)
+        self._last_recipe_mode = current_mode
+        self._update_recipe_mode_ui()
 
     def _pre_measurement_setup_enabled(self, mode: str | None = None) -> bool:
         _ = mode
@@ -15006,15 +15103,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if self._latest_scale_timestamp is None:
             scale_value = "No readings yet"
-            self._set_dashboard_value("scale", "-")
         else:
             age_s = self._scale_reading_age_s() or 0.0
             freshness = "stale" if age_s > STALE_SCALE_AFTER_S else "live"
             recent_rate = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
             rate_suffix = "" if recent_rate is None else f" | {recent_rate:.1f} Hz"
             scale_value = f"{effective_load:.4f} g | {freshness} {age_s:.1f} s{rate_suffix}"
-            rate_cell_text = "-" if recent_rate is None else f"{recent_rate:.1f} Hz"
-            self._set_dashboard_value("scale", f"{freshness} {rate_cell_text}")
         self.label_card_scale.setText(scale_value)
         vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
         if self._tic_motor_power_ok is False:
@@ -15098,9 +15192,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     [x_value for x_value, _ in left_pairs],
                     [y_value for _, y_value in left_pairs],
                     color=y_left_channel.color,
-                    linewidth=1.7,
+                    linewidth=1.15,
                     marker="o",
-                    markersize=3.2,
+                    markersize=1.9,
                 )
             else:
                 axis.text(
@@ -15135,9 +15229,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         [x_value for x_value, _ in right_pairs],
                         [y_value for _, y_value in right_pairs],
                         color=y_right_channel.color,
-                        linewidth=1.5,
+                        linewidth=1.05,
                         marker="s",
-                        markersize=3.0,
+                        markersize=1.8,
                     )
         self.figure.subplots_adjust(left=0.07, right=0.94, top=0.90, bottom=0.12, hspace=0.50, wspace=0.34)
 
@@ -15163,12 +15257,41 @@ class MainWindow(QtWidgets.QMainWindow):
         recent_points = points[-recent_count:]
         if len(older_points) <= old_budget:
             return older_points + recent_points
-        if old_budget == 1:
-            sampled_older = [older_points[-1]]
-        else:
-            step = (len(older_points) - 1) / float(old_budget - 1)
-            sampled_older = [older_points[round(index * step)] for index in range(old_budget)]
+        sampled_older = self._stable_downsample_older_plot_points(older_points, old_budget)
         return sampled_older + recent_points
+
+    def _stable_downsample_older_plot_points(
+        self,
+        points: list[MeasurementPoint],
+        budget: int,
+    ) -> list[MeasurementPoint]:
+        if budget <= 0:
+            return []
+        if len(points) <= budget:
+            return points
+        if budget == 1:
+            return [points[0]]
+        first_elapsed_s = float(points[0].elapsed_s)
+        last_elapsed_s = float(points[-1].elapsed_s)
+        span_s = max(0.0, last_elapsed_s - first_elapsed_s)
+        bucket_s = DISPLAY_PLOT_BASE_BUCKET_S
+        target_bucket_s = span_s / max(1, budget - 1)
+        while bucket_s < target_bucket_s:
+            bucket_s *= 2.0
+        sampled: list[MeasurementPoint] = []
+        seen_buckets: set[int] = set()
+        for point in points:
+            bucket = int(math.floor(max(0.0, float(point.elapsed_s)) / bucket_s))
+            if bucket in seen_buckets:
+                continue
+            seen_buckets.add(bucket)
+            sampled.append(point)
+        if sampled[-1] is not points[-1]:
+            sampled.append(points[-1])
+        if len(sampled) <= budget:
+            return sampled
+        step = (len(sampled) - 1) / float(budget - 1)
+        return [sampled[round(index * step)] for index in range(budget)]
 
     def _choose_log_dir(self) -> None:
         start_dir = self.edit_log_dir.text().strip() or _default_download_dir()
@@ -15332,6 +15455,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("current_sweep_target_end", self.spin_current_sweep_target_end.value())
         self.settings.setValue("current_sweep_target_step", self.spin_current_sweep_target_step.value())
         self.settings.setValue("current_sweep_target_ramp_rate", self.spin_current_sweep_target_ramp_rate.value())
+        self._store_current_sweep_target_values()
+        for mode, values in self._current_sweep_target_values_by_mode.items():
+            prefix = self._current_sweep_target_settings_prefix(mode)
+            self.settings.setValue(f"{prefix}_target_start", values[0])
+            self.settings.setValue(f"{prefix}_target_end", values[1])
+            self.settings.setValue(f"{prefix}_target_step", values[2])
+            self.settings.setValue(f"{prefix}_target_ramp_rate", values[3])
         self.settings.setValue("current_sweep_target_speed_mm_s", self.spin_current_sweep_target_speed_mm_s.value())
         self.settings.setValue(
             "current_sweep_max_correction_strain_pct",
@@ -15805,12 +15935,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_setup_zero_stable_s.setValue(
             max(0.0, float(self.settings.value("setup_zero_stable_s", 1.0)))
         )
-        self.spin_current_sweep_target_start.setValue(float(self.settings.value("current_sweep_target_start", 0.0)))
-        self.spin_current_sweep_target_end.setValue(float(self.settings.value("current_sweep_target_end", 9.0)))
-        self.spin_current_sweep_target_step.setValue(float(self.settings.value("current_sweep_target_step", 3.0)))
-        self.spin_current_sweep_target_ramp_rate.setValue(
-            max(0.0001, float(self.settings.value("current_sweep_target_ramp_rate", 0.1)))
-        )
+        self._apply_current_sweep_target_values(recipe_mode, allow_legacy_settings=True)
+        self._last_recipe_mode = recipe_mode
         current_sweep_servo_defaults_version = int(
             self.settings.value("current_sweep_servo_defaults_version", 0)
         )
