@@ -1099,6 +1099,48 @@ def test_setup_zero_plateau_fallback_waits_until_return_position_is_reached(
         _close_test_window(window)
 
 
+def test_pending_linear_unload_fallback_accepts_stable_near_zero_plateau(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_setup_zero_stable_s.setValue(1.0)
+    window._automation_step_note = "setup_return_zero"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
+    window._automation_phase = "seek"
+    window._setup_return_zero_start_point_index = 0
+    window._setup_zero_position_mm = -1.925
+    window._setup_zero_fallback_return_position_mm = -1.925
+    window._setup_zero_fallback_reason = "linear_unload_slack"
+    window._latest_scale_timestamp = time.time()
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._move_to_position_mm = pytest.fail  # type: ignore[method-assign]
+
+    for index, raw_load_g in enumerate([21.1300, 21.1305, 21.1298, 21.1302, 21.1301]):
+        window._latest_scale_value_g = raw_load_g
+        window._current_position_mm = -1.94875
+        window._effective_position_mm = -1.94875
+        window._record_length_setup_point()
+        window._length_setup_points[-1].elapsed_s = index * 0.4
+
+    try:
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=0.005,
+        ) is True
+
+        assert window._setup_zero_fallback_return_position_mm is None
+        assert window._setup_zero_position_mm == pytest.approx(-1.94875)
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.1301, abs=0.001)
+        assert "stable near-zero load plateau" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_final_zero_plateau_fallback_accepts_near_zero_load(
     tmp_path: Path,
     qtbot,
@@ -8870,6 +8912,26 @@ def test_stale_output_base_filename_syncs_to_current_sample(tmp_path: Path, qtbo
         window._sync_stale_log_name_from_sample()
 
         assert window.edit_log_name.text() == "Ni50Fe27Ga23 10_4 calibration"
+    finally:
+        _close_test_window(window)
+
+
+def test_auto_output_base_filename_includes_current_sweep_recipe_type(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRAIN)
+    window.combo_recipe_mode.setCurrentIndex(index)
+    window.edit_name_composition.setText("Ni50Fe27Ga23")
+    window.edit_name_wire.setText("11/1")
+    window.edit_sample_name.setText("Ni50Fe27Ga23 11/1")
+    window.edit_log_name.setText(mini_dma_mod.DEFAULT_LOG_BASENAME)
+
+    try:
+        window._sync_stale_log_name_from_sample()
+
+        assert window.edit_log_name.text() == "Ni50Fe27Ga23 11_1 iso-strain"
     finally:
         _close_test_window(window)
 

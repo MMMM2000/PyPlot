@@ -384,6 +384,11 @@ CURRENT_SWEEP_TARGET_DEFAULTS_BY_MODE = {
     CURRENT_SWEEP_STRAIN: (0.0, 0.5, 0.1, 0.05),
 }
 CURRENT_SWEEP_MODES = frozenset(CURRENT_SWEEP_BASIS_BY_MODE) | {LEGACY_CURRENT_SWEEP}
+RECIPE_FILENAME_TOKENS = {
+    CURRENT_SWEEP_LOAD: "iso-load",
+    CURRENT_SWEEP_STRESS: "iso-stress",
+    CURRENT_SWEEP_STRAIN: "iso-strain",
+}
 CALIBRATION_MODES = frozenset({CALIBRATION, CALIBRATION_COPPER})
 PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d", "Diameter", "diameter_um")
 PROJECT_ROW_CURRENT_KEYS = (
@@ -6575,6 +6580,20 @@ class MainWindow(QtWidgets.QMainWindow):
             log_label = f"{log_label} {self._distribution_log_suffix()}".strip()
         return log_label
 
+    def _recipe_filename_token(self) -> str:
+        mode = str(self.combo_recipe_mode.currentData() or "")
+        return RECIPE_FILENAME_TOKENS.get(mode, "")
+
+    def _log_name_with_recipe_token(self, log_label: str) -> str:
+        token = self._recipe_filename_token()
+        if not token:
+            return log_label
+        label = _clean_session_basename(log_label)
+        token_label = _clean_session_basename(token)
+        if not label or token_label in label.split():
+            return label
+        return f"{label} {token_label}".strip()
+
     def _distribution_log_suffix(self) -> str:
         basis = self._distribution_basis()
         basis_label = {
@@ -6591,7 +6610,7 @@ class MainWindow(QtWidgets.QMainWindow):
         built = self._build_sample_name()
         if built:
             self.edit_sample_name.setText(built)
-            log_label = self._build_log_name_label(built)
+            log_label = self._log_name_with_recipe_token(self._build_log_name_label(built))
             safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
             self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
             self._log(f"Applied naming fields: {built}")
@@ -6599,7 +6618,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _sync_auto_name_fields(self) -> None:
         built = self._build_sample_name()
         if built:
-            log_label = self._build_log_name_label(built)
+            log_label = self._log_name_with_recipe_token(self._build_log_name_label(built))
             safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
             safe_name = safe_name or DEFAULT_LOG_BASENAME
             current_sample_name = self.edit_sample_name.text().strip()
@@ -6624,7 +6643,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sample_name = self.edit_sample_name.text().strip()
         if not sample_name:
             return
-        desired = _clean_session_basename(self._build_log_name_label(sample_name))
+        desired = _clean_session_basename(self._log_name_with_recipe_token(self._build_log_name_label(sample_name)))
         current = _clean_session_basename(self.edit_log_name.text())
         if not desired or current == desired:
             return
@@ -9197,6 +9216,51 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._setup_zero_fallback_return_position_mm is not None
         )
 
+    def _setup_zero_stable_duration_s(self) -> float:
+        config = self._control_config()
+        stable_s = config.setup_zero_stable_s if config is not None else float(self.spin_setup_zero_stable_s.value())
+        return max(SETUP_ZERO_FALLBACK_MIN_TIME_S, float(stable_s))
+
+    def _accept_pending_linear_zero_plateau_if_stable(self) -> bool:
+        if self._setup_zero_fallback_reason != "linear_unload_slack":
+            return False
+        return_points = self._length_setup_points[max(0, int(self._setup_return_zero_start_point_index)) :]
+        if len(return_points) < SETUP_ZERO_FALLBACK_MIN_POINTS:
+            return False
+        stable_window_s = self._setup_zero_stable_duration_s()
+        final_raw_g = float(return_points[-1].raw_load_g)
+        recent_points: list[MeasurementPoint] = []
+        for point in reversed(return_points):
+            if abs(float(point.raw_load_g) - final_raw_g) > SETUP_ZERO_FALLBACK_RAW_SPAN_G:
+                break
+            recent_points.append(point)
+        recent_points.reverse()
+        if len(recent_points) < SETUP_ZERO_FALLBACK_MIN_POINTS:
+            return False
+        elapsed_values = [float(point.elapsed_s) for point in recent_points]
+        if max(elapsed_values) - min(elapsed_values) < stable_window_s:
+            return False
+        recent_raw_values = [float(point.raw_load_g) for point in recent_points]
+        raw_span_g = max(recent_raw_values) - min(recent_raw_values)
+        if raw_span_g > SETUP_ZERO_FALLBACK_RAW_SPAN_G:
+            return False
+        plateau_raw_g = 0.5 * (min(recent_raw_values) + max(recent_raw_values))
+        residual_load_g = abs(self._effective_load_from_raw_g(plateau_raw_g))
+        if residual_load_g > SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G:
+            return False
+        zero_position_mm = float(self._current_position_mm)
+        self._set_run_zero_load_scale_reference(float(plateau_raw_g), reason="setup linear-unload near-zero plateau")
+        self._setup_zero_position_mm = zero_position_mm
+        self._setup_zero_fallback_raw_g = float(plateau_raw_g)
+        self._setup_zero_fallback_return_position_mm = None
+        self._log(
+            "Accepted stable near-zero load plateau during setup return: "
+            f"{_format_compact_unit(abs(residual_load_g), 'g')} residual over "
+            f"{_format_duration(max(elapsed_values) - min(elapsed_values))}; "
+            f"using current position {_format_compact_unit(zero_position_mm, 'mm')} for l0."
+        )
+        return True
+
     def _handle_pending_setup_zero_fallback(self) -> bool:
         target_mm = self._setup_zero_fallback_return_position_mm
         if target_mm is None:
@@ -9212,6 +9276,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log("Returned to the linear-unload zero-stress position for l0.")
             else:
                 self._log("Returned to zero-load plateau position for l0.")
+            return True
+        if self._accept_pending_linear_zero_plateau_if_stable():
             return True
         if self._setup_zero_fallback_reason == "linear_unload_slack":
             self._log_waiting_for_feedback("Returning to the linear-unload zero-stress position before computing l0.")
