@@ -96,11 +96,13 @@ Point acquisition controls are named for the AC experiment:
   model/frequency/amplitude/current points. The actual number of rows depends
   on how fast the LCR meter responds at that condition.
 - The run estimate shows separate empty-coil baseline and microwire sweep
-  durations using the selected settle time and a rough LCR-read allowance;
-  real serial communication overhead can still add time.
+  durations, plus the local clock time when each run would finish if started
+  now. The estimate uses the selected settle time and a rough LCR-read
+  allowance; real serial communication overhead can still add time.
 - During a run, the sticky task line reports the active LCR model, frequency,
   amplitude, read number, and microwire current when applicable. The progress
-  bar reports elapsed/total measurement time and estimates time remaining.
+  bar reports elapsed/total measurement time, estimated time remaining, and
+  the expected finish clock time/date.
   Empty-coil baseline readings are also added to the live plots as 0 mA points
   so the dashboard visibly updates before a microwire sweep is started.
 - Acquisition and file writing run in a worker thread, separate from the
@@ -248,6 +250,12 @@ failure because it can indicate an open circuit or broken wire. On normal
 completion, user stop, or error, the shutdown sequence sets current and voltage
 to zero before turning output off. Baseline measurement does not create or
 command a power-supply backend.
+
+The wire-break guard is always enabled for non-zero current points. The actual
+current readback must stay above `max(1 mA, 25% of the requested current)`;
+0 mA reference points are exempt. This is intentionally not a casual UI toggle,
+because an overnight run should stop and shut the output down if the DC current
+path opens.
 
 ## Live Plots
 

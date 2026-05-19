@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -752,6 +753,25 @@ def test_run_ac_sweep_aborts_when_psu_actual_current_is_too_low(tmp_path: Path) 
             psu=FakePsu(),
             output_path=tmp_path / "low-current.tsv",
             sleep=lambda _seconds: None,
+        )
+
+
+def test_psu_output_verification_allows_zero_reference_and_catches_wire_break() -> None:
+    sweep._validate_psu_output(
+        sweep.CurrentLoopPoint(0.0, "zero"),
+        sweep.PowerSupplyMeasurement(current_actual_a=0.0, voltage_actual_v=0.0, status="OK"),
+    )
+
+    with pytest.raises(sweep.PsuOutputVerificationError, match="far below requested"):
+        sweep._validate_psu_output(
+            sweep.CurrentLoopPoint(0.02, "up"),
+            sweep.PowerSupplyMeasurement(current_actual_a=0.0, voltage_actual_v=0.0, status="OK"),
+        )
+
+    with pytest.raises(sweep.PsuOutputVerificationError, match="far below requested"):
+        sweep._validate_psu_output(
+            sweep.CurrentLoopPoint(0.08, "up"),
+            sweep.PowerSupplyMeasurement(current_actual_a=0.015, voltage_actual_v=1.0, status="OK"),
         )
 
 
@@ -1915,6 +1935,51 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
         assert "100000/100000" not in window.progress_ac_run.format()
         window._set_ac_current_task("Current task: empty-coil baseline - 100 Hz, 0.1 voltage, read 1")
         assert "100 Hz" in window.label_ac_current_task.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_formats_expected_finish_times() -> None:
+    now = datetime(2026, 5, 19, 9, 15)
+    assert ac_logger.MainWindow._format_expected_finish(45 * 60, now=now) == "today 10:00"
+    assert ac_logger.MainWindow._format_expected_finish(24 * 3600 + 45 * 60, now=now) == "tomorrow 10:00"
+    assert ac_logger.MainWindow._format_expected_finish(3 * 24 * 3600, now=now) == "2026-05-22 09:15"
+
+
+def test_ac_logger_estimate_and_progress_show_expected_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "finish_estimate")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        monkeypatch.setattr(
+            ac_logger.MainWindow,
+            "_format_expected_finish",
+            staticmethod(lambda seconds, now=None: f"finish-{int(round(seconds))}s"),
+        )
+        window.lineEdit_lcr_frequencies.setText("100")
+        window.lineEdit_lcr_levels.setText("0.1")
+        window.spinBox_ac_point_duration.setValue(10.0)
+        window.spinBox_ac_dwell.setValue(1.0)
+        window.spinBox_ac_current_start.setValue(0.0)
+        window.spinBox_ac_current_stop.setValue(10.0)
+        window.spinBox_ac_current_step.setValue(10.0)
+        window._update_ac_sweep_estimate()
+        estimate = window.label_ac_sweep_estimate.text()
+        assert "finish finish-11s if started now" in estimate
+        assert "finish finish-33s if started now" in estimate
+
+        window._set_ac_elapsed_progress("Empty-coil baseline", 4.0, 10.0)
+        assert "finish finish-6s" in window.progress_ac_run.format()
+
+        window._set_ac_planned_progress("Microwire sweep", 5.0, 20.0, wall_elapsed_s=10.0)
+        assert "finish finish-30s" in window.progress_ac_run.format()
     finally:
         window.close()
         app.processEvents()

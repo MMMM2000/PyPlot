@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import math
 import os
@@ -2098,10 +2098,13 @@ class MainWindow(CurrentAnnealingWindow):
         elapsed = max(0.0, time.monotonic() - started) if started > 0 else 0.0
         if value <= 0 or elapsed <= 0:
             eta = "calculating"
+            finish = ""
         else:
             remaining = max(0, total - value)
-            eta = self._format_duration((elapsed / value) * remaining)
-        return f"{label}: {percent}% ({value}/{total}), ETA {eta}"
+            eta_s = (elapsed / value) * remaining
+            eta = self._format_duration(eta_s)
+            finish = f", finish {self._format_expected_finish(eta_s)}" if eta_s > 0.0 else ""
+        return f"{label}: {percent}% ({value}/{total}), ETA {eta}{finish}"
 
     def _complete_ac_progress(self, label: str) -> None:
         total = max(1, self._ac_progress_total)
@@ -2128,8 +2131,11 @@ class MainWindow(CurrentAnnealingWindow):
             progress.setRange(0, total_ms)
             progress.setValue(value_ms)
             eta = self._format_duration(max(0.0, total_s - elapsed_s))
+            eta_s = max(0.0, total_s - elapsed_s)
+            finish = f", finish {self._format_expected_finish(eta_s)}" if eta_s > 0.0 else ""
             progress.setFormat(
-                f"{label}: {percent}% ({self._format_duration(elapsed_s)} / {self._format_duration(total_s)}), ETA {eta}"
+                f"{label}: {percent}% ({self._format_duration(elapsed_s)} / {self._format_duration(total_s)}), "
+                f"ETA {eta}{finish}"
             )
 
     def _set_ac_planned_progress(
@@ -2157,9 +2163,10 @@ class MainWindow(CurrentAnnealingWindow):
             planned_elapsed_s = max(0.001, planned_elapsed_s)
             remaining_planned_s = max(0.0, total_s - planned_elapsed_s)
             eta_s = (wall_elapsed_s / planned_elapsed_s) * remaining_planned_s if remaining_planned_s > 0.0 else 0.0
+            finish = f", finish {self._format_expected_finish(eta_s)}" if eta_s > 0.0 else ""
             progress.setFormat(
                 f"{label}: {percent}% ({self._format_duration(wall_elapsed_s)} / {self._format_duration(total_s)}), "
-                f"ETA {self._format_duration(eta_s)}"
+                f"ETA {self._format_duration(eta_s)}{finish}"
             )
 
     def _set_ac_progress_idle(self) -> None:
@@ -2292,9 +2299,12 @@ class MainWindow(CurrentAnnealingWindow):
             + len(plan) * point_duration
         )
         self.label_ac_sweep_estimate.setText(
-            f"Baseline: about {self._format_duration(baseline_seconds)}. "
+            f"Baseline: about {self._format_duration(baseline_seconds)} "
+            f"(finish {self._format_expected_finish(baseline_seconds)} if started now). "
             f"Microwire sweep: about "
-            f"{self._format_duration(estimate.estimated_seconds)} plus communication overhead"
+            f"{self._format_duration(estimate.estimated_seconds)} "
+            f"(finish {self._format_expected_finish(estimate.estimated_seconds)} if started now) "
+            f"plus communication overhead"
         )
         self._refresh_ac_psu_status()
 
@@ -2426,6 +2436,18 @@ class MainWindow(CurrentAnnealingWindow):
         if minutes:
             return f"{minutes}m {secs}s"
         return f"{secs}s"
+
+    @staticmethod
+    def _format_expected_finish(seconds: float, *, now: datetime | None = None) -> str:
+        start = now or datetime.now()
+        finish = start + timedelta(seconds=max(0.0, float(seconds)))
+        today = start.date()
+        tomorrow = (start + timedelta(days=1)).date()
+        if finish.date() == today:
+            return f"today {finish:%H:%M}"
+        if finish.date() == tomorrow:
+            return f"tomorrow {finish:%H:%M}"
+        return finish.strftime("%Y-%m-%d %H:%M")
 
     @staticmethod
     def _format_numeric_list(values: Sequence[float]) -> str:
