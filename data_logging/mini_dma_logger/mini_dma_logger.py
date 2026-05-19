@@ -181,6 +181,8 @@ DEFAULT_UI_HEARTBEAT_INTERVAL_MS = 16
 DEFAULT_GRAPH_REFRESH_INTERVAL_MS = 1000
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 LIVE_PLOT_MAX_POINTS = 3000
+DISPLAY_PLOT_MAX_POINTS = 1500
+DISPLAY_PLOT_RECENT_POINTS = 600
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 SETUP_ZERO_FALLBACK_MIN_POINTS = 4
 SETUP_ZERO_FALLBACK_MIN_TIME_S = 0.8
@@ -15091,12 +15093,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _display_plot_points(self) -> list[MeasurementPoint]:
         if not self._live_plot_points:
-            return list(self._session_points)
+            return self._downsample_display_plot_points(list(self._session_points))
         points = list(self._session_points) + list(self._live_plot_points)
         points.sort(key=lambda point: point.elapsed_s)
-        if len(points) > LIVE_PLOT_MAX_POINTS:
-            points = points[-LIVE_PLOT_MAX_POINTS:]
-        return points
+        return self._downsample_display_plot_points(points)
+
+    def _downsample_display_plot_points(self, points: list[MeasurementPoint]) -> list[MeasurementPoint]:
+        if len(points) <= DISPLAY_PLOT_MAX_POINTS:
+            return points
+        recent_count = min(DISPLAY_PLOT_RECENT_POINTS, DISPLAY_PLOT_MAX_POINTS, len(points))
+        old_budget = max(0, DISPLAY_PLOT_MAX_POINTS - recent_count)
+        if old_budget <= 0:
+            return points[-DISPLAY_PLOT_MAX_POINTS:]
+        older_points = points[:-recent_count]
+        recent_points = points[-recent_count:]
+        if len(older_points) <= old_budget:
+            return older_points + recent_points
+        if old_budget == 1:
+            sampled_older = [older_points[-1]]
+        else:
+            step = (len(older_points) - 1) / float(old_budget - 1)
+            sampled_older = [older_points[round(index * step)] for index in range(old_budget)]
+        return sampled_older + recent_points
 
     def _choose_log_dir(self) -> None:
         start_dir = self.edit_log_dir.text().strip() or _default_download_dir()

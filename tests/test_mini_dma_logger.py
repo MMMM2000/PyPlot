@@ -3775,6 +3775,48 @@ def test_display_plot_points_include_live_samples_between_logged_rows(tmp_path: 
         _close_test_window(window)
 
 
+def test_display_plot_points_downsample_old_points_but_keep_recent_samples(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _point(elapsed_s: float) -> mini_dma_mod.MeasurementPoint:
+        return mini_dma_mod.MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc="2026-05-11 00:00:00",
+            raw_position_mm=elapsed_s,
+            position_mm=elapsed_s,
+            raw_load_g=elapsed_s,
+            load_g=elapsed_s,
+            preload_state=mini_dma_mod.PRELOAD_DISABLED,
+            strain_pct=None,
+            stress_mpa=None,
+            current_set_mA=None,
+            current_measured_mA=None,
+            voltage_V=None,
+            resistance_ohm=None,
+            power_W=None,
+            automation_phase="current",
+            automation_basis=None,
+            automation_target_value=None,
+            plateau_index=None,
+            plateau_label=None,
+        )
+
+    try:
+        total_points = mini_dma_mod.DISPLAY_PLOT_MAX_POINTS + 800
+        window._session_points = [_point(float(index)) for index in range(total_points)]
+
+        display_points = window._display_plot_points()
+
+        assert len(display_points) == mini_dma_mod.DISPLAY_PLOT_MAX_POINTS
+        assert display_points[0].elapsed_s == pytest.approx(0.0)
+        assert [point.elapsed_s for point in display_points[-mini_dma_mod.DISPLAY_PLOT_RECENT_POINTS :]] == [
+            float(index)
+            for index in range(total_points - mini_dma_mod.DISPLAY_PLOT_RECENT_POINTS, total_points)
+        ]
+    finally:
+        _close_test_window(window)
+
+
 def test_length_setup_dialog_has_local_pause_stop_and_progress(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
