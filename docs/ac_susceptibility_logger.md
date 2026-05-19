@@ -244,25 +244,46 @@ command a power-supply backend.
 
 The right-side graph area follows the Mini DMA dashboard pattern: use
 **Configure plots** to choose which plot tiles are visible and what each tile
-uses for bottom X, left Y, and optional right Y.
+uses for bottom X, left Y, optional right Y, and optional far-right Y.
 
 By default it shows:
 
-- `Rs vs DC current`
-- `Ls vs DC current`
+- `Rs + Ls vs elapsed time`
+- `Rs + Ls + wire resistance vs measured current`
+- `Rs + Ls vs frequency`
+- `Rs + Ls vs amplitude`
 
-Additional selectable channels include elapsed time, DC current, frequency,
-amplitude, `Rs`, and `Ls`. The plot renderer follows the Qt palette so dark
-mode labels, ticks, and titles remain readable.
+Current plots distinguish `Current measured [mA]` from `Current set [mA]`.
+Measured current is the default X axis because it is the physical value returned
+by the power supply. The legacy saved `DC current` plot key is interpreted as
+measured current when old settings are loaded.
+
+Additional selectable channels include elapsed time, measured current, set
+current, frequency, amplitude, `Rs`, `Ls`, wire resistance, and PSU power. The
+plot renderer follows the Qt palette so dark mode labels, ticks, and titles
+remain readable.
 
 Plots are scatter-first with small translucent markers; dense time traces and
-dense parameter scans are easier to read without connecting lines. When
-frequency is selected as the X axis, the logger uses a logarithmic scale.
-Frequency and amplitude plots use display-only per-condition thinning once a
-condition contains many points, preserving representation from each
-model/frequency/amplitude/current group while leaving the TSV logging complete.
-Combined `Rs + Ls` plots show a legend so the left and right axis data are easy
-to identify.
+dense parameter scans are easier to read without connecting lines. `Rs` and
+`Ls` are scatter-only by default. Wire resistance is drawn as line plus symbols
+when selected because it follows the DC current path through the microwire and
+contacts.
+
+When frequency is selected as the X axis, the logger uses a logarithmic scale.
+Current, frequency, and amplitude scatter plots use a small display-space
+horizontal spread for repeated X values so dense repeated points do not collapse
+into a single vertical stripe. The spread is based on screen pixels rather than
+the numeric data range, so it appears similar on current, amplitude, and
+log-frequency plots. Frequency and amplitude plots also use display-only
+per-condition thinning once a condition contains many points, preserving
+representation from each model/frequency/amplitude/current group while leaving
+the TSV logging complete. Combined plots show a legend so the left, right, and
+far-right axis data are easy to identify.
+
+When AC diagnostics mirroring is enabled from the Developer menu, the logger
+writes plot redraw timing and lightweight UI timer telemetry. These diagnostics
+help confirm that plot refresh work stays separate from the acquisition/logging
+loop during long runs.
 
 ## Literature Cues
 

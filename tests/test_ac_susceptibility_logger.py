@@ -1482,18 +1482,22 @@ def test_ac_logger_graph_defaults_are_ac_susceptibility_specific(
     try:
         assert window.button_plot_setup.text() == "Configure plots"
         assert len(window._plot_tiles) == 4
-        assert [tile.visible.isChecked() for tile in window._plot_tiles] == [True, True, False, False]
-        assert window._plot_tiles[0].x_combo.currentData() == "current_mA"
+        assert [tile.visible.isChecked() for tile in window._plot_tiles] == [True, True, True, True]
+        assert window._plot_tiles[0].x_combo.currentData() == "elapsed_s"
         assert window._plot_tiles[0].y_left_combo.currentData() == "rs_ohm"
-        assert window._plot_tiles[1].x_combo.currentData() == "current_mA"
-        assert window._plot_tiles[1].y_left_combo.currentData() == "ls_h"
-        assert len(window.figure.axes) == 2
-        assert window.figure.axes[0].get_title() == "Rs vs DC current"
+        assert window._plot_tiles[0].y_right_combo.currentData() == "ls_h"
+        assert window._plot_tiles[1].x_combo.currentData() == "current_actual_mA"
+        assert window._plot_tiles[1].y_left_combo.currentData() == "rs_ohm"
+        assert window._plot_tiles[1].y_right_combo.currentData() == "ls_h"
+        assert window._plot_tiles[1].y_extra_combo.currentData() == "wire_resistance_ohm"
+        assert window._plot_tiles[2].x_combo.currentData() == "frequency_hz"
+        assert window._plot_tiles[3].x_combo.currentData() == "amplitude_v"
+        assert len(window.figure.axes) >= 4
+        assert window.figure.axes[0].get_title() == "Rs + Ls vs Elapsed time"
         assert window.figure.axes[0].get_ylabel() == "Rs [Ohm]"
-        assert window.figure.axes[0].get_xlabel() == "DC current [mA]"
-        assert window.figure.axes[1].get_title() == "Ls vs DC current"
-        assert window.figure.axes[1].get_ylabel() == "Ls [H]"
-        assert window.figure.axes[1].get_xlabel() == "DC current [mA]"
+        assert window.figure.axes[0].get_xlabel() == "Elapsed time [s]"
+        assert window.figure.axes[2].get_title() == "Rs + Ls + Wire R vs Current measured"
+        assert window.figure.axes[2].get_xlabel() == "Current measured [mA]"
     finally:
         window.close()
         app.processEvents()
@@ -1636,8 +1640,54 @@ def test_ac_logger_frequency_plot_keeps_each_condition_when_display_thinning(
 
         offsets = window.figure.axes[0].collections[0].get_offsets()
         x_values = {float(point[0]) for point in offsets}
-        assert x_values == {100.0, 200000.0}
+        assert len(x_values) > 2
+        assert min(x_values) < 100.0 < max(x_values)
+        assert any(90.0 <= value <= 110.0 for value in x_values)
+        assert any(180000.0 <= value <= 220000.0 for value in x_values)
         assert len(offsets) <= 16
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_current_plot_uses_measured_current_and_wire_resistance_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "graph_actual_current_wire_r")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        for tile in window._plot_tiles:
+            tile.visible.setChecked(False)
+        tile = window._plot_tiles[0]
+        tile.visible.setChecked(True)
+        window._set_combo_data(tile.x_combo, "current_actual_mA")
+        window._set_combo_data(tile.y_left_combo, "rs_ohm")
+        window._set_combo_data(tile.y_right_combo, "ls_h")
+        window._set_combo_data(tile.y_extra_combo, "wire_resistance_ohm")
+        window._ac_plot_points = [
+            ac_logger.AcPlotPoint(0.0, "Ls-Rs", 1000.0, 0.3, 20.0, 2e-5, 14.4, 19.6, 410.0, 0.16),
+            ac_logger.AcPlotPoint(1.0, "Ls-Rs", 1000.0, 0.3, 40.0, 2.1e-5, 14.5, 39.2, 430.0, 0.66),
+        ]
+
+        window._refresh_ac_plots(force=True)
+
+        axes = window.figure.axes
+        assert axes[0].get_xlabel() == "Current measured [mA]"
+        assert axes[0].get_title() == "Rs + Ls + Wire R vs Current measured"
+        assert axes[0].collections
+        assert not axes[0].lines
+        assert axes[1].collections
+        assert not axes[1].lines
+        assert axes[2].get_ylabel() == "Wire R [Ohm]"
+        assert axes[2].lines
+        assert not axes[2].collections
+        x_values = list(axes[2].lines[0].get_xdata())
+        assert x_values == [19.6, 39.2]
     finally:
         window.close()
         app.processEvents()
@@ -1841,6 +1891,39 @@ def test_ac_logger_writes_optional_diagnostics(tmp_path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     assert '"event": "plot_refresh"' in text
     assert '"points": 3' in text
+
+
+def test_ac_logger_diagnostics_records_ui_telemetry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "ui_telemetry_diag")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    window = ac_logger.MainWindow()
+    try:
+        path = tmp_path / "ac_diag.jsonl"
+        window._ac_diagnostics_enabled = True
+        window._ac_diagnostics_path = path
+        window._ac_ui_telemetry_last_s = 0.0
+        window._ac_ui_telemetry_ticks = 0
+        window._ac_ui_telemetry_sum_s = 0.0
+        window._ac_ui_telemetry_max_s = 0.0
+        times = iter([1.0] + [1.0 + 0.016 * index for index in range(1, 62)])
+        monkeypatch.setattr(ac_logger.time, "perf_counter", lambda: next(times))
+
+        for _ in range(62):
+            window._record_ac_ui_telemetry_tick()
+
+        text = path.read_text(encoding="utf-8")
+        assert '"event": "ui_telemetry"' in text
+        assert '"ticks": 60' in text
+        assert '"fps_estimate"' in text
+    finally:
+        window.close()
+        app.processEvents()
 
 
 def test_ac_logger_migrates_old_short_frequency_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

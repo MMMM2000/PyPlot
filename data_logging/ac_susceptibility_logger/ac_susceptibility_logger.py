@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Sequence, cast
 
@@ -80,6 +81,9 @@ AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
 AC_PLOT_REFRESH_INTERVAL_S = 1.0
 AC_PLOT_RECENT_POINTS = 5000
 AC_PLOT_MAX_POINTS_PER_CONDITION = 800
+AC_PLOT_JITTER_PX = 5.0
+AC_UI_TELEMETRY_INTERVAL_MS = 16
+AC_UI_TELEMETRY_REPORT_TICKS = 60
 AC_DIAGNOSTICS_DEFAULT_PATH = AC_DEFAULT_LOG_DIR / "ac_susc_diagnostics.jsonl"
 AC_LCR_SLOW_RETRY_MIN_FREQUENCY_HZ = 1000.0
 AC_LCR_SLOW_RETRY_MIN_RATE_HZ = 20.0
@@ -121,6 +125,9 @@ class AcPlotPoint:
     current_mA: float
     ls_h: float | None
     rs_ohm: float | None
+    current_actual_mA: float | None = None
+    wire_resistance_ohm: float | None = None
+    psu_power_w: float | None = None
 
 
 @dataclass
@@ -137,6 +144,7 @@ class AcPlotTileWidgets:
     x_combo: QtWidgets.QComboBox
     y_left_combo: QtWidgets.QComboBox
     y_right_combo: QtWidgets.QComboBox
+    y_extra_combo: QtWidgets.QComboBox
 
 
 class AcPlotConfigDialog(QtWidgets.QDialog):
@@ -473,6 +481,11 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_last_task_text = "Current task: idle"
         self._ac_diagnostics_enabled = False
         self._ac_diagnostics_path = AC_DIAGNOSTICS_DEFAULT_PATH
+        self._ac_ui_telemetry_timer: QtCore.QTimer | None = None
+        self._ac_ui_telemetry_last_s = 0.0
+        self._ac_ui_telemetry_ticks = 0
+        self._ac_ui_telemetry_sum_s = 0.0
+        self._ac_ui_telemetry_max_s = 0.0
         self._ac_lcr_scroll_area: QtWidgets.QScrollArea | None = None
         self._auto_detect_used_connected_psu = False
         self._ac_plot_points: list[AcPlotPoint] = []
@@ -502,6 +515,8 @@ class MainWindow(CurrentAnnealingWindow):
         self._update_ac_sweep_estimate()
         self._set_default_log_name()
         self._start_ac_plot_refresh_timer()
+        if self._ac_diagnostics_enabled:
+            self._start_ac_ui_telemetry_timer()
 
     def init_graph_window(self):  # type: ignore[override]
         super().init_graph_window()
@@ -548,33 +563,36 @@ class MainWindow(CurrentAnnealingWindow):
         config_layout.addWidget(QtWidgets.QLabel("Presets", config_box), 0, 0)
         config_layout.addLayout(preset_row, 0, 1, 1, 4)
 
-        for column, label in enumerate(("Tile", "Show", "Bottom X", "Left Y", "Right Y")):
+        for column, label in enumerate(("Tile", "Show", "Bottom X", "Left Y", "Right Y", "Far-right Y")):
             config_layout.addWidget(QtWidgets.QLabel(label, config_box), 1, column)
 
         self._plot_tiles = []
         defaults = [
-            (True, "current_mA", "rs_ohm", ""),
-            (True, "current_mA", "ls_h", ""),
-            (False, "frequency_hz", "rs_ohm", ""),
-            (False, "frequency_hz", "ls_h", ""),
+            (True, "elapsed_s", "rs_ohm", "ls_h", ""),
+            (True, "current_actual_mA", "rs_ohm", "ls_h", "wire_resistance_ohm"),
+            (True, "frequency_hz", "rs_ohm", "ls_h", ""),
+            (True, "amplitude_v", "rs_ohm", "ls_h", ""),
         ]
-        for tile_index, (visible_default, x_default, y_default, right_default) in enumerate(defaults):
+        for tile_index, (visible_default, x_default, y_default, right_default, extra_default) in enumerate(defaults):
             visible = QtWidgets.QCheckBox(config_box)
             x_combo = QtWidgets.QComboBox(config_box)
             y_left_combo = QtWidgets.QComboBox(config_box)
             y_right_combo = QtWidgets.QComboBox(config_box)
+            y_extra_combo = QtWidgets.QComboBox(config_box)
             for combo in (x_combo, y_left_combo):
                 for channel in self._plot_channels():
                     combo.addItem(channel.label, channel.key)
-            y_right_combo.addItem("(none)", "")
-            for channel in self._plot_channels():
-                y_right_combo.addItem(channel.label, channel.key)
+            for combo in (y_right_combo, y_extra_combo):
+                combo.addItem("(none)", "")
+                for channel in self._plot_channels():
+                    combo.addItem(channel.label, channel.key)
             prefix = f"plot_tile_{tile_index}"
             visible.setChecked(bool(self.ac_settings.value(f"{prefix}_visible", visible_default, type=bool)))
             self._set_combo_data(x_combo, self.ac_settings.value(f"{prefix}_x", x_default, type=str))
             self._set_combo_data(y_left_combo, self.ac_settings.value(f"{prefix}_y_left", y_default, type=str))
             self._set_combo_data(y_right_combo, self.ac_settings.value(f"{prefix}_y_right", right_default, type=str))
-            for widget in (visible, x_combo, y_left_combo, y_right_combo):
+            self._set_combo_data(y_extra_combo, self.ac_settings.value(f"{prefix}_y_extra", extra_default, type=str))
+            for widget in (visible, x_combo, y_left_combo, y_right_combo, y_extra_combo):
                 signal = widget.toggled if isinstance(widget, QtWidgets.QCheckBox) else widget.currentIndexChanged
                 signal.connect(lambda *_args: self._handle_plot_config_changed())
             config_layout.addWidget(QtWidgets.QLabel(f"Plot {tile_index + 1}", config_box), tile_index + 2, 0)
@@ -582,12 +600,14 @@ class MainWindow(CurrentAnnealingWindow):
             config_layout.addWidget(x_combo, tile_index + 2, 2)
             config_layout.addWidget(y_left_combo, tile_index + 2, 3)
             config_layout.addWidget(y_right_combo, tile_index + 2, 4)
+            config_layout.addWidget(y_extra_combo, tile_index + 2, 5)
             self._plot_tiles.append(
                 AcPlotTileWidgets(
                     visible=visible,
                     x_combo=x_combo,
                     y_left_combo=y_left_combo,
                     y_right_combo=y_right_combo,
+                    y_extra_combo=y_extra_combo,
                 )
             )
         self.plot_config_dialog.body_layout.addWidget(config_box)
@@ -595,14 +615,24 @@ class MainWindow(CurrentAnnealingWindow):
     def _plot_channels(self) -> list[AcPlotChannel]:
         return [
             AcPlotChannel("elapsed_s", "Elapsed time [s]", "#ef4444", lambda point: point.elapsed_s),
-            AcPlotChannel("current_mA", "DC current [mA]", "#f97316", lambda point: point.current_mA),
+            AcPlotChannel(
+                "current_actual_mA",
+                "Current measured [mA]",
+                "#f97316",
+                lambda point: point.current_actual_mA if point.current_actual_mA is not None else point.current_mA,
+            ),
+            AcPlotChannel("current_set_mA", "Current set [mA]", "#fb923c", lambda point: point.current_mA),
             AcPlotChannel("frequency_hz", "Frequency [Hz]", "#60a5fa", lambda point: point.frequency_hz),
             AcPlotChannel("amplitude_v", "Amplitude [V]", "#facc15", lambda point: point.amplitude_v),
             AcPlotChannel("rs_ohm", "Rs [Ohm]", "#14b8a6", lambda point: point.rs_ohm),
             AcPlotChannel("ls_h", "Ls [H]", "#a78bfa", lambda point: point.ls_h),
+            AcPlotChannel("wire_resistance_ohm", "Wire R [Ohm]", "#f59e0b", lambda point: point.wire_resistance_ohm),
+            AcPlotChannel("psu_power_w", "PSU power [W]", "#22c55e", lambda point: point.psu_power_w),
         ]
 
     def _plot_channel(self, key: str) -> AcPlotChannel | None:
+        if key == "current_mA":
+            key = "current_actual_mA"
         for channel in self._plot_channels():
             if channel.key == key:
                 return channel
@@ -617,13 +647,17 @@ class MainWindow(CurrentAnnealingWindow):
         x_channel: AcPlotChannel,
         y_left_channel: AcPlotChannel,
         y_right_channel: AcPlotChannel | None,
+        y_extra_channel: AcPlotChannel | None = None,
     ) -> str:
         left_label = self._compact_plot_label(y_left_channel.label)
         x_label = self._compact_plot_label(x_channel.label)
         if y_right_channel is None:
             return f"{left_label} vs {x_label}"
         right_label = self._compact_plot_label(y_right_channel.label)
-        return f"{left_label} + {right_label} vs {x_label}"
+        if y_extra_channel is None:
+            return f"{left_label} + {right_label} vs {x_label}"
+        extra_label = self._compact_plot_label(y_extra_channel.label)
+        return f"{left_label} + {right_label} + {extra_label} vs {x_label}"
 
     def _handle_plot_config_changed(self) -> None:
         for index, tile in enumerate(self._plot_tiles):
@@ -632,28 +666,33 @@ class MainWindow(CurrentAnnealingWindow):
             self.ac_settings.setValue(f"{prefix}_x", tile.x_combo.currentData() or "current_mA")
             self.ac_settings.setValue(f"{prefix}_y_left", tile.y_left_combo.currentData() or "rs_ohm")
             self.ac_settings.setValue(f"{prefix}_y_right", tile.y_right_combo.currentData() or "")
+            self.ac_settings.setValue(f"{prefix}_y_extra", tile.y_extra_combo.currentData() or "")
         self._refresh_ac_plots()
 
     def _apply_plot_preset(self, preset: str) -> None:
         presets = {
             "current": [
-                (True, "current_mA", "rs_ohm", ""),
-                (True, "current_mA", "ls_h", ""),
-                (False, "frequency_hz", "rs_ohm", ""),
-                (False, "frequency_hz", "ls_h", ""),
+                (True, "elapsed_s", "rs_ohm", "ls_h", ""),
+                (True, "current_actual_mA", "rs_ohm", "ls_h", "wire_resistance_ohm"),
+                (True, "frequency_hz", "rs_ohm", "ls_h", ""),
+                (True, "amplitude_v", "rs_ohm", "ls_h", ""),
             ],
             "frequency": [
-                (True, "frequency_hz", "rs_ohm", ""),
-                (True, "frequency_hz", "ls_h", ""),
-                (True, "amplitude_v", "rs_ohm", ""),
-                (True, "amplitude_v", "ls_h", ""),
+                (True, "frequency_hz", "rs_ohm", "ls_h", ""),
+                (True, "amplitude_v", "rs_ohm", "ls_h", ""),
+                (True, "elapsed_s", "rs_ohm", "ls_h", ""),
+                (True, "current_actual_mA", "rs_ohm", "ls_h", "wire_resistance_ohm"),
             ],
         }
-        for tile, (visible, x_key, y_left, y_right) in zip(self._plot_tiles, presets.get(preset, presets["current"])):
+        for tile, (visible, x_key, y_left, y_right, y_extra) in zip(
+            self._plot_tiles,
+            presets.get(preset, presets["current"]),
+        ):
             tile.visible.setChecked(visible)
             self._set_combo_data(tile.x_combo, x_key)
             self._set_combo_data(tile.y_left_combo, y_left)
             self._set_combo_data(tile.y_right_combo, y_right)
+            self._set_combo_data(tile.y_extra_combo, y_extra)
         self._handle_plot_config_changed()
 
     def _plot_theme(self) -> dict[str, Any]:
@@ -757,7 +796,68 @@ class MainWindow(CurrentAnnealingWindow):
     def _set_ac_diagnostics_enabled(self, enabled: bool) -> None:
         self._ac_diagnostics_enabled = bool(enabled)
         self.ac_settings.setValue("developer_diagnostics_enabled", self._ac_diagnostics_enabled)
+        if self._ac_diagnostics_enabled:
+            self._start_ac_ui_telemetry_timer()
+        else:
+            self._stop_ac_ui_telemetry_timer()
         self._write_ac_diagnostic("diagnostics_enabled", enabled=self._ac_diagnostics_enabled)
+
+    def _start_ac_ui_telemetry_timer(self) -> None:
+        try:
+            existing = getattr(self, "_ac_ui_telemetry_timer", None)
+        except RuntimeError:
+            return
+        if existing is not None:
+            return
+        self._ac_ui_telemetry_last_s = 0.0
+        self._ac_ui_telemetry_ticks = 0
+        self._ac_ui_telemetry_sum_s = 0.0
+        self._ac_ui_telemetry_max_s = 0.0
+        timer = QtCore.QTimer(self)
+        timer.setInterval(AC_UI_TELEMETRY_INTERVAL_MS)
+        timer.timeout.connect(self._record_ac_ui_telemetry_tick)
+        timer.start()
+        self._ac_ui_telemetry_timer = timer
+
+    def _stop_ac_ui_telemetry_timer(self) -> None:
+        try:
+            timer = getattr(self, "_ac_ui_telemetry_timer", None)
+        except RuntimeError:
+            return
+        if timer is not None:
+            timer.stop()
+        self._ac_ui_telemetry_timer = None
+        self._ac_ui_telemetry_last_s = 0.0
+        self._ac_ui_telemetry_ticks = 0
+        self._ac_ui_telemetry_sum_s = 0.0
+        self._ac_ui_telemetry_max_s = 0.0
+
+    def _record_ac_ui_telemetry_tick(self) -> None:
+        now = time.perf_counter()
+        last = float(getattr(self, "_ac_ui_telemetry_last_s", 0.0))
+        self._ac_ui_telemetry_last_s = now
+        if last <= 0.0:
+            return
+        interval_s = max(0.0, now - last)
+        self._ac_ui_telemetry_ticks = int(getattr(self, "_ac_ui_telemetry_ticks", 0)) + 1
+        self._ac_ui_telemetry_sum_s = float(getattr(self, "_ac_ui_telemetry_sum_s", 0.0)) + interval_s
+        self._ac_ui_telemetry_max_s = max(float(getattr(self, "_ac_ui_telemetry_max_s", 0.0)), interval_s)
+        if self._ac_ui_telemetry_ticks < AC_UI_TELEMETRY_REPORT_TICKS:
+            return
+        total_s = max(1e-9, float(self._ac_ui_telemetry_sum_s))
+        ticks = int(self._ac_ui_telemetry_ticks)
+        self._write_ac_diagnostic(
+            "ui_telemetry",
+            ticks=ticks,
+            fps_estimate=round(float(ticks) / total_s, 3),
+            average_interval_s=round(total_s / float(ticks), 6),
+            max_interval_s=round(float(self._ac_ui_telemetry_max_s), 6),
+            target_interval_s=round(AC_UI_TELEMETRY_INTERVAL_MS / 1000.0, 6),
+            last_plot_refresh_duration_s=round(float(getattr(self, "_ac_last_plot_refresh_duration_s", 0.0)), 6),
+        )
+        self._ac_ui_telemetry_ticks = 0
+        self._ac_ui_telemetry_sum_s = 0.0
+        self._ac_ui_telemetry_max_s = 0.0
 
     def _choose_ac_diagnostics_file(self) -> None:
         start = str(self._ac_diagnostics_path)
@@ -805,7 +905,13 @@ class MainWindow(CurrentAnnealingWindow):
             return
         self._ac_last_plot_refresh_monotonic = now
         theme = self._plot_theme()
-        figure.clear()
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Attempt to set non-positive xlim on a log-scaled axis will be ignored.",
+                category=UserWarning,
+            )
+            figure.clear()
         try:
             figure.set_layout_engine(None)
         except Exception:
@@ -827,6 +933,7 @@ class MainWindow(CurrentAnnealingWindow):
             x_channel = self._plot_channel(str(tile.x_combo.currentData() or "current_mA"))
             y_left_channel = self._plot_channel(str(tile.y_left_combo.currentData() or "rs_ohm"))
             y_right_channel = self._plot_channel(str(tile.y_right_combo.currentData() or ""))
+            y_extra_channel = self._plot_channel(str(tile.y_extra_combo.currentData() or ""))
             if x_channel is None or y_left_channel is None:
                 continue
             points = self._display_points_for_plot(str(x_channel.key))
@@ -834,22 +941,22 @@ class MainWindow(CurrentAnnealingWindow):
                 axis.set_xscale("log")
             axis.set_xlabel(x_channel.label, fontsize=9, labelpad=4)
             axis.set_ylabel(y_left_channel.label, fontsize=8, labelpad=3)
-            axis.set_title(self._plot_title(x_channel, y_left_channel, y_right_channel), fontsize=9, pad=8)
-            left_pairs = [
-                (x_channel.getter(point), y_left_channel.getter(point))
-                for point in points
-            ]
-            left_pairs = [(x_value, y_value) for x_value, y_value in left_pairs if x_value is not None and y_value is not None]
+            axis.set_title(self._plot_title(x_channel, y_left_channel, y_right_channel, y_extra_channel), fontsize=9, pad=8)
+            left_pairs = self._plot_pairs(points, x_channel, y_left_channel)
             plot_handles: list[Any] = []
             plot_labels: list[str] = []
             if left_pairs:
-                x_values = [x_value for x_value, _ in left_pairs]
+                x_values = self._jitter_plot_x_values(
+                    axis,
+                    str(x_channel.key),
+                    [x_value for x_value, _ in left_pairs],
+                )
                 y_values = [y_value for _, y_value in left_pairs]
                 artist = axis.scatter(
                     x_values,
                     y_values,
                     color=y_left_channel.color,
-                    s=6,
+                    s=5,
                     alpha=0.65,
                     label=y_left_channel.label,
                 )
@@ -871,29 +978,60 @@ class MainWindow(CurrentAnnealingWindow):
                 if x_channel.key == "frequency_hz":
                     twin.set_xscale("log")
                 twin.set_ylabel(y_right_channel.label, fontsize=8, labelpad=3)
-                right_pairs = [
-                    (x_channel.getter(point), y_right_channel.getter(point))
-                    for point in points
-                ]
-                right_pairs = [
-                    (x_value, y_value)
-                    for x_value, y_value in right_pairs
-                    if x_value is not None and y_value is not None
-                ]
+                right_pairs = self._plot_pairs(points, x_channel, y_right_channel)
                 if right_pairs:
-                    x_values = [x_value for x_value, _ in right_pairs]
+                    x_values = self._jitter_plot_x_values(
+                        twin,
+                        str(x_channel.key),
+                        [x_value for x_value, _ in right_pairs],
+                    )
                     y_values = [y_value for _, y_value in right_pairs]
                     artist = twin.scatter(
                         x_values,
                         y_values,
                         color=y_right_channel.color,
-                        s=6,
+                        s=5,
                         marker="s",
                         alpha=0.65,
                         label=y_right_channel.label,
                     )
                     plot_handles.append(artist)
                     plot_labels.append(y_right_channel.label)
+            if y_extra_channel is not None:
+                extra_axis = axis.twinx()
+                self._style_ac_axis(extra_axis, theme)
+                extra_axis.spines["right"].set_position(("axes", 1.20))
+                extra_axis.spines["right"].set_visible(True)
+                if x_channel.key == "frequency_hz":
+                    extra_axis.set_xscale("log")
+                extra_axis.set_ylabel(y_extra_channel.label, fontsize=8, labelpad=12)
+                extra_pairs = self._plot_pairs(points, x_channel, y_extra_channel)
+                if extra_pairs:
+                    x_values = [x_value for x_value, _ in extra_pairs]
+                    y_values = [y_value for _, y_value in extra_pairs]
+                    if y_extra_channel.key == "wire_resistance_ohm":
+                        artist = extra_axis.plot(
+                            x_values,
+                            y_values,
+                            color=y_extra_channel.color,
+                            marker="o",
+                            markersize=3,
+                            linewidth=1.1,
+                            alpha=0.80,
+                            label=y_extra_channel.label,
+                        )[0]
+                    else:
+                        artist = extra_axis.scatter(
+                            self._jitter_plot_x_values(extra_axis, str(x_channel.key), x_values),
+                            y_values,
+                            color=y_extra_channel.color,
+                            s=5,
+                            marker="^",
+                            alpha=0.65,
+                            label=y_extra_channel.label,
+                        )
+                    plot_handles.append(artist)
+                    plot_labels.append(y_extra_channel.label)
             if len(plot_handles) >= 2:
                 legend = axis.legend(
                     plot_handles,
@@ -907,7 +1045,7 @@ class MainWindow(CurrentAnnealingWindow):
                     legend.get_frame().set_edgecolor(theme["text_rgb"])
                     for text in legend.get_texts():
                         text.set_color(theme["text_rgb"])
-        figure.subplots_adjust(left=0.07, right=0.94, top=0.92, bottom=0.10, hspace=0.50, wspace=0.34)
+        figure.subplots_adjust(left=0.07, right=0.84, top=0.92, bottom=0.10, hspace=0.50, wspace=0.58)
         canvas = getattr(self, "canvas", None)
         if canvas is not None:
             canvas.draw_idle()
@@ -919,9 +1057,76 @@ class MainWindow(CurrentAnnealingWindow):
             tiles=len(active_tiles[:4]),
         )
 
+    @staticmethod
+    def _plot_pairs(
+        points: Sequence[AcPlotPoint],
+        x_channel: AcPlotChannel,
+        y_channel: AcPlotChannel,
+    ) -> list[tuple[float, float]]:
+        pairs = [(x_channel.getter(point), y_channel.getter(point)) for point in points]
+        return [
+            (float(x_value), float(y_value))
+            for x_value, y_value in pairs
+            if x_value is not None
+            and y_value is not None
+            and math.isfinite(float(x_value))
+            and math.isfinite(float(y_value))
+        ]
+
+    def _jitter_plot_x_values(self, axis: Any, x_key: str, x_values: Sequence[float]) -> list[float]:
+        values = [float(value) for value in x_values]
+        if x_key not in {"current_actual_mA", "current_set_mA", "current_mA", "frequency_hz", "amplitude_v"}:
+            return values
+        if len(values) < 2:
+            return values
+        groups: dict[float, list[int]] = {}
+        for index, value in enumerate(values):
+            groups.setdefault(round(value, 12), []).append(index)
+        if all(len(indices) == 1 for indices in groups.values()):
+            return values
+        jittered = list(values)
+        for indices in groups.values():
+            if len(indices) < 2:
+                continue
+            if len(indices) == 2:
+                offsets_px = [-AC_PLOT_JITTER_PX, AC_PLOT_JITTER_PX]
+            else:
+                step = (AC_PLOT_JITTER_PX * 2.0) / float(len(indices) - 1)
+                offsets_px = [-AC_PLOT_JITTER_PX + step * offset_index for offset_index in range(len(indices))]
+            for index, offset_px in zip(indices, offsets_px):
+                jittered[index] = self._offset_x_by_display_px(axis, x_key, values[index], offset_px, values)
+        return jittered
+
+    @staticmethod
+    def _offset_x_by_display_px(axis: Any, x_key: str, x_value: float, offset_px: float, values: Sequence[float]) -> float:
+        if offset_px == 0.0:
+            return float(x_value)
+        bbox_width = 300.0
+        try:
+            bbox_width = max(1.0, float(axis.get_window_extent().width))
+        except Exception:
+            pass
+        finite_values = [float(value) for value in values if math.isfinite(float(value))]
+        if not finite_values:
+            return float(x_value)
+        if x_key == "frequency_hz" and x_value > 0.0:
+            positives = [value for value in finite_values if value > 0.0]
+            if not positives:
+                return float(x_value)
+            log_min = math.log10(min(positives))
+            log_max = math.log10(max(positives))
+            log_span = max(0.10, log_max - log_min)
+            return 10.0 ** (math.log10(float(x_value)) + (float(offset_px) / bbox_width) * log_span)
+        min_value = min(finite_values)
+        max_value = max(finite_values)
+        span = max(max_value - min_value, abs(float(x_value)) * 0.04, 1.0)
+        return float(x_value) + (float(offset_px) / bbox_width) * span
+
     def _display_points_for_plot(self, x_key: str) -> list[AcPlotPoint]:
         points = list(getattr(self, "_ac_plot_points", []))
-        if x_key in {"elapsed_s", "current_mA"}:
+        if x_key == "current_mA":
+            x_key = "current_actual_mA"
+        if x_key in {"elapsed_s", "current_actual_mA", "current_set_mA"}:
             return points[-AC_PLOT_RECENT_POINTS:]
         if x_key not in {"frequency_hz", "amplitude_v"}:
             return points[-AC_PLOT_RECENT_POINTS:]
@@ -2121,6 +2326,13 @@ class MainWindow(CurrentAnnealingWindow):
             current_mA=float(row.current_point.current_a) * 1000.0,
             ls_h=ls_h,
             rs_ohm=rs_ohm,
+            current_actual_mA=(
+                float(row.psu_measurement.current_actual_a) * 1000.0
+                if row.psu_measurement.current_actual_a is not None
+                else None
+            ),
+            wire_resistance_ohm=row.psu_measurement.resistance_ohm,
+            psu_power_w=row.psu_measurement.power_w,
         )
 
     def _plot_point_from_baseline_reading(
@@ -2139,6 +2351,7 @@ class MainWindow(CurrentAnnealingWindow):
             current_mA=0.0,
             ls_h=ls_h,
             rs_ohm=rs_ohm,
+            current_actual_mA=0.0,
         )
 
     def _append_ac_plot_point(self, point: AcPlotPoint) -> None:
