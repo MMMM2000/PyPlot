@@ -1189,6 +1189,55 @@ def test_ac_logger_psu_settings_are_separate_from_current_annealing(
         app.processEvents()
 
 
+def test_ac_logger_remembers_psu_hardware_settings_per_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "psu_profile_memory")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        port_combo = window.ui.comboBox_port
+        port_combo.clear()
+        port_combo.addItem("COM11 - OWON", "COM11")
+        port_combo.addItem("COM3 - HMP", "COM3")
+        window.ui.comboBox_baudrate.clear()
+        window.ui.comboBox_baudrate.addItems(["9600", "115200"])
+
+        window._set_combo_data(window.ui.comboBox_supply, "owon_spe6102")
+        window._set_combo_data(port_combo, "COM11")
+        window._set_combo_text(window.ui.comboBox_baudrate, "115200")
+        window.spinBox_ac_voltage_limit.setValue(61.0)
+        window._handle_ac_psu_controls_changed()
+
+        window._set_combo_data(window.ui.comboBox_supply, "hmp4030")
+        window._handle_ac_psu_controls_changed()
+        window._set_combo_data(port_combo, "COM3")
+        window._set_combo_text(window.ui.comboBox_baudrate, "9600")
+        window.spinBox_ac_voltage_limit.setValue(30.0)
+        window._handle_ac_psu_controls_changed()
+
+        window._set_combo_data(window.ui.comboBox_supply, "owon_spe6102")
+        window._handle_ac_psu_controls_changed()
+        assert window._selected_ac_psu_backend() == "owon_spe6102"
+        assert window._selected_ac_psu_resource() == "COM11"
+        assert window._selected_ac_psu_baudrate() == 115200
+        assert window.spinBox_ac_voltage_limit.value() == pytest.approx(61.0)
+
+        window._set_combo_data(window.ui.comboBox_supply, "hmp4030")
+        window._handle_ac_psu_controls_changed()
+        assert window._selected_ac_psu_backend() == "hmp4030"
+        assert window._selected_ac_psu_resource() == "COM3"
+        assert window._selected_ac_psu_baudrate() == 9600
+        assert window.spinBox_ac_voltage_limit.value() == pytest.approx(30.0)
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_releases_inherited_connected_psu_before_ac_run() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)

@@ -696,7 +696,26 @@ class MainWindow(CurrentAnnealingWindow):
                 combo.currentIndexChanged.connect(lambda *_args: self._handle_ac_psu_controls_changed())
 
     def _handle_ac_psu_controls_changed(self) -> None:
-        self._capture_ac_psu_controls()
+        if bool(getattr(self, "_ac_loading_settings", False)):
+            return
+        previous_backend = self._ac_psu_backend
+        backend = self._backend_from_ac_supply_combo()
+        if backend != previous_backend:
+            self._store_ac_psu_profile_settings(previous_backend)
+            self._ac_psu_backend = backend
+            self._load_ac_psu_profile_settings(backend)
+            self._apply_ac_psu_controls()
+            self._apply_ac_psu_profile_state(self._ac_psu_backend)
+            self._refresh_ac_psu_status()
+            self.ac_settings.setValue("psu_backend", self._ac_psu_backend)
+            self.ac_settings.setValue("psu_port", self._ac_psu_resource)
+            self.ac_settings.setValue("psu_baud", str(self._ac_psu_baudrate))
+            self.ac_settings.setValue("voltage_limit_v", float(self.spinBox_ac_voltage_limit.value()))
+            self._store_ac_psu_profile_settings(self._ac_psu_backend)
+            return
+        else:
+            self._capture_ac_psu_controls()
+            self._store_ac_psu_profile_settings(self._ac_psu_backend)
         self._apply_ac_psu_profile_state(self._ac_psu_backend)
         self._refresh_ac_psu_status()
         self._store_lcr_settings()
@@ -1417,12 +1436,7 @@ class MainWindow(CurrentAnnealingWindow):
                 point_duration = max(1.0, legacy_repeats)
             self.spinBox_ac_point_duration.setValue(float(point_duration))
             self._load_ac_psu_settings()
-            voltage_limit = self.ac_settings.value("voltage_limit_v", None)
-            if voltage_limit is None:
-                self._sync_ac_psu_from_shared_controls()
-            else:
-                self.spinBox_ac_voltage_limit.setValue(float(voltage_limit))
-                self._sync_ac_psu_from_shared_controls()
+            self._sync_ac_psu_from_shared_controls()
         finally:
             self._ac_loading_settings = False
 
@@ -1455,6 +1469,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("psu_port", self._ac_psu_resource)
         self.ac_settings.setValue("psu_baud", str(self._ac_psu_baudrate))
         self.ac_settings.setValue("voltage_limit_v", float(self.spinBox_ac_voltage_limit.value()))
+        self._store_ac_psu_profile_settings(self._ac_psu_backend)
         self.ac_settings.setValue("current_start_mA", float(self.spinBox_ac_current_start.value()))
         self.ac_settings.setValue("current_stop_mA", float(self.spinBox_ac_current_stop.value()))
         self.ac_settings.setValue("current_step_mA", float(self.spinBox_ac_current_step.value()))
@@ -2197,49 +2212,34 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_psu_backend = str(self.ac_settings.value("psu_backend", "owon_spe6102", type=str))
         if self._ac_psu_backend not in sweep.POWER_SUPPLY_PROFILES:
             self._ac_psu_backend = "owon_spe6102"
-        self._ac_psu_resource = str(self.ac_settings.value("psu_port", "", type=str) or "")
-        try:
-            self._ac_psu_baudrate = int(str(self.ac_settings.value("psu_baud", "115200", type=str)))
-        except ValueError:
-            self._ac_psu_baudrate = 115200
+        self._load_ac_psu_profile_settings(self._ac_psu_backend)
         self._apply_ac_psu_controls()
         self._apply_ac_psu_profile_state(self._ac_psu_backend)
 
     def _apply_ac_psu_controls(self) -> None:
         supply_combo = getattr(getattr(self, "ui", None), "comboBox_supply", None)
         if isinstance(supply_combo, QtWidgets.QComboBox):
-            self._set_combo_data(supply_combo, self._ac_psu_backend)
+            with QtCore.QSignalBlocker(supply_combo):
+                self._set_combo_data(supply_combo, self._ac_psu_backend)
         port_combo = getattr(getattr(self, "ui", None), "comboBox_port", None)
         if isinstance(port_combo, QtWidgets.QComboBox) and self._ac_psu_resource:
-            idx = port_combo.findData(self._ac_psu_resource)
-            if idx < 0:
-                idx = port_combo.findText(self._ac_psu_resource, QtCore.Qt.MatchFlag.MatchContains)
-            if idx < 0:
-                port_combo.addItem(self._ac_psu_resource, self._ac_psu_resource)
-                idx = port_combo.count() - 1
-            port_combo.setCurrentIndex(idx)
+            with QtCore.QSignalBlocker(port_combo):
+                idx = port_combo.findData(self._ac_psu_resource)
+                if idx < 0:
+                    idx = port_combo.findText(self._ac_psu_resource, QtCore.Qt.MatchFlag.MatchContains)
+                if idx < 0:
+                    port_combo.addItem(self._ac_psu_resource, self._ac_psu_resource)
+                    idx = port_combo.count() - 1
+                port_combo.setCurrentIndex(idx)
         baud_combo = getattr(getattr(self, "ui", None), "comboBox_baudrate", None)
         if isinstance(baud_combo, QtWidgets.QComboBox):
-            idx = baud_combo.findText(str(self._ac_psu_baudrate), QtCore.Qt.MatchFlag.MatchFixedString)
-            if idx >= 0:
-                baud_combo.setCurrentIndex(idx)
+            with QtCore.QSignalBlocker(baud_combo):
+                idx = baud_combo.findText(str(self._ac_psu_baudrate), QtCore.Qt.MatchFlag.MatchFixedString)
+                if idx >= 0:
+                    baud_combo.setCurrentIndex(idx)
 
     def _capture_ac_psu_controls(self) -> None:
-        combo = getattr(getattr(self, "ui", None), "comboBox_supply", None)
-        if isinstance(combo, QtWidgets.QComboBox):
-            data = combo.currentData(QtCore.Qt.ItemDataRole.UserRole)
-            text = combo.currentText()
-            backend = data if isinstance(data, str) and data in sweep.POWER_SUPPLY_PROFILES else None
-            if backend is None:
-                backend = sweep.classify_power_supply_idn(text)
-            if backend is None:
-                upper = text.upper()
-                if "OWON" in upper or "SPE" in upper:
-                    backend = "owon_spe6102"
-                elif "HMP" in upper or "HAMEG" in upper or "ROHDE" in upper:
-                    backend = "hmp4030"
-            if backend in sweep.POWER_SUPPLY_PROFILES:
-                self._ac_psu_backend = str(backend)
+        self._ac_psu_backend = self._backend_from_ac_supply_combo()
         port_combo = getattr(getattr(self, "ui", None), "comboBox_port", None)
         if isinstance(port_combo, QtWidgets.QComboBox):
             self._ac_psu_resource = sweep.normalize_serial_resource(
@@ -2255,6 +2255,68 @@ class MainWindow(CurrentAnnealingWindow):
                 self.baudrate = self._ac_psu_baudrate
             except ValueError:
                 pass
+
+    def _backend_from_ac_supply_combo(self) -> str:
+        combo = getattr(getattr(self, "ui", None), "comboBox_supply", None)
+        backend: str | None = None
+        if isinstance(combo, QtWidgets.QComboBox):
+            data = combo.currentData(QtCore.Qt.ItemDataRole.UserRole)
+            text = combo.currentText()
+            backend = data if isinstance(data, str) and data in sweep.POWER_SUPPLY_PROFILES else None
+            if backend is None:
+                backend = sweep.classify_power_supply_idn(text)
+            if backend is None:
+                upper = text.upper()
+                if "OWON" in upper or "SPE" in upper:
+                    backend = "owon_spe6102"
+                elif "HMP" in upper or "HAMEG" in upper or "ROHDE" in upper:
+                    backend = "hmp4030"
+        if backend not in sweep.POWER_SUPPLY_PROFILES:
+            backend = self._ac_psu_backend if self._ac_psu_backend in sweep.POWER_SUPPLY_PROFILES else "owon_spe6102"
+        return str(backend)
+
+    def _psu_profile_key(self, backend: str, name: str) -> str:
+        return f"psu_profiles/{backend}/{name}"
+
+    def _load_ac_psu_profile_settings(self, backend: str) -> None:
+        if backend not in sweep.POWER_SUPPLY_PROFILES:
+            backend = "owon_spe6102"
+        default_voltage = OWON_DEFAULT_VOLTAGE_LIMIT_V if backend == "owon_spe6102" else HMP_DEFAULT_VOLTAGE_LIMIT_V
+        legacy_backend = str(self.ac_settings.value("psu_backend", "", type=str) or "")
+        legacy_matches_backend = legacy_backend == backend
+        legacy_port = str(self.ac_settings.value("psu_port", "", type=str) or "") if legacy_matches_backend else ""
+        legacy_baud = (
+            str(self.ac_settings.value("psu_baud", "115200", type=str) or "115200")
+            if legacy_matches_backend
+            else "115200"
+        )
+        port = self.ac_settings.value(self._psu_profile_key(backend, "port"), legacy_port, type=str)
+        baud_text = self.ac_settings.value(self._psu_profile_key(backend, "baud"), legacy_baud, type=str)
+        voltage = self.ac_settings.value(
+            self._psu_profile_key(backend, "voltage_limit_v"),
+            self.ac_settings.value("voltage_limit_v", default_voltage) if legacy_matches_backend else default_voltage,
+        )
+        self._ac_psu_resource = sweep.normalize_serial_resource(str(port or ""))
+        try:
+            self._ac_psu_baudrate = int(str(baud_text))
+        except ValueError:
+            self._ac_psu_baudrate = 115200
+        with QtCore.QSignalBlocker(self.spinBox_ac_voltage_limit):
+            try:
+                self.spinBox_ac_voltage_limit.setValue(float(voltage))
+            except (TypeError, ValueError):
+                self.spinBox_ac_voltage_limit.setValue(default_voltage)
+
+    def _store_ac_psu_profile_settings(self, backend: str | None = None) -> None:
+        backend = backend or self._ac_psu_backend
+        if backend not in sweep.POWER_SUPPLY_PROFILES:
+            return
+        self.ac_settings.setValue(self._psu_profile_key(backend, "port"), self._ac_psu_resource)
+        self.ac_settings.setValue(self._psu_profile_key(backend, "baud"), str(self._ac_psu_baudrate))
+        self.ac_settings.setValue(
+            self._psu_profile_key(backend, "voltage_limit_v"),
+            float(self.spinBox_ac_voltage_limit.value()),
+        )
 
     def _apply_ac_psu_profile_state(self, backend: str) -> None:
         profile = SUPPLY_PROFILES.get(backend, SUPPLY_PROFILES.get("hmp4030", {}))

@@ -205,8 +205,11 @@ failure unless the raw LCR reply is empty or cannot be parsed.
 The AC sweep can use either the existing HMP4030-style SCPI path or an OWON
 SPE6102-style backend. The AC logger keeps its own supply profile, serial port,
 baud rate, and voltage-limit settings, separate from the Current Annealing
-Logger. If the AC current supply is OWON SPE6102, the AC sweep selects the OWON
-backend automatically and defaults the voltage setpoint to `61 V`. The bench
+Logger. It also remembers hardware settings per AC supply profile, so switching
+between OWON and HMP restores that profile's last port, baud rate, and voltage
+limit instead of overwriting one shared PSU slot. If the AC current supply is
+OWON SPE6102, the AC sweep selects the OWON backend automatically and defaults
+the voltage setpoint to `61 V`. The bench
 SPE6102 is nominally a 62 V supply, but its SCPI voltage setpoint accepted
 values up to `61 V`; sending `62 V` left the setpoint at zero on the tested
 unit. Older saved OWON defaults such as `5 V`, `60 V`, or `62 V` are lifted or
