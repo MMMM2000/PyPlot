@@ -2428,6 +2428,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._latest_scale_value_g = 0.0
         self._latest_scale_text = ""
         self._latest_scale_timestamp: float | None = None
+        self._scale_state_lock = RLock()
+        self._cached_tension_decreases_scale_reading = True
+        self._cached_zero_load_scale_g = DEFAULT_ZERO_LOAD_SCALE_G
         self._scale_connected_at_s: float | None = None
         self._scale_no_data_hint_emitted = False
         self._scale_signal_buffer = ScaleSignalBuffer()
@@ -2575,6 +2578,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_canvas: Any = None
         self._length_setup_start_monotonic = 0.0
         self._length_setup_last_record_scale_timestamp: float | None = None
+        self._last_length_setup_plot_refresh_s: float | None = None
         self._length_setup_points: list[MeasurementPoint] = []
         self._motor_step_calibration_dialog: QtWidgets.QDialog | None = None
         self._motor_step_calibration_status_label: QtWidgets.QLabel | None = None
@@ -2615,6 +2619,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_start_elapsed_s: float | None = None
         self._recovery_start_monotonic = 0.0
         self._recovery_last_record_scale_timestamp: float | None = None
+        self._last_recovery_plot_refresh_s: float | None = None
         self._pending_recovery_return_duration_s: float | None = None
         self._recovery_points: list[MeasurementPoint] = []
         self._last_dashboard_plot_refresh_s: float | None = None
@@ -3432,7 +3437,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Leave checked for the hanging-weight setup: pulling up unloads the balance, "
             "so applied wire load is zero-load reading minus current scale reading."
         )
-        self.check_tension_load_positive.toggled.connect(lambda _checked: self._refresh_live_labels())
+        self.check_tension_load_positive.toggled.connect(self._handle_scale_reference_setting_changed)
         safety_form.addRow("", self.check_tension_load_positive)
         self.check_positive_motion_is_tension = QtWidgets.QCheckBox(
             "Positive raw Tic motion pulls the wire",
@@ -6260,7 +6265,10 @@ class MainWindow(QtWidgets.QMainWindow):
         thread = QtCore.QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.measurement_received.connect(self._handle_scale_measurement)
+        worker.measurement_received.connect(
+            self._handle_scale_measurement,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
         worker.status_changed.connect(self._handle_scale_status)
         worker.error_occurred.connect(self._handle_scale_error)
         worker.finished.connect(thread.quit)
@@ -6297,18 +6305,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
 
     def _handle_scale_measurement(self, value_g: float, raw_text: str, timestamp_s: float) -> None:
-        self._latest_scale_value_g = value_g
-        self._latest_scale_text = raw_text
-        self._latest_scale_timestamp = timestamp_s
-        sample = self._scale_signal_buffer.add_sample(
-            timestamp_s=timestamp_s,
-            raw_g=value_g,
-            applied_load_g=self._effective_load_from_raw_g(value_g),
-            raw_text=raw_text,
-        )
-        self._write_raw_scale_sample(sample)
-        self._scale_no_data_hint_emitted = True
-        self._scale_hint_timer.stop()
+        with self._scale_state_lock:
+            self._latest_scale_value_g = value_g
+            self._latest_scale_text = raw_text
+            self._latest_scale_timestamp = timestamp_s
+            sample = self._scale_signal_buffer.add_sample(
+                timestamp_s=timestamp_s,
+                raw_g=value_g,
+                applied_load_g=self._effective_load_from_raw_g(value_g),
+                raw_text=raw_text,
+            )
+            self._write_raw_scale_sample(sample)
+            self._scale_no_data_hint_emitted = True
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._handle_scale_measurement_ui_update)
+            return
+        self._handle_scale_measurement_ui_update()
+
+    def _handle_scale_measurement_ui_update(self) -> None:
+        if self._scale_hint_timer.isActive():
+            self._scale_hint_timer.stop()
         self._refresh_live_labels()
 
     def _handle_scale_status(self, message: str) -> None:
@@ -6349,6 +6365,8 @@ class MainWindow(QtWidgets.QMainWindow):
         run_reference_g = getattr(self, "_run_zero_load_scale_g", None)
         if run_reference_g is not None:
             return float(run_reference_g)
+        if not self._is_ui_thread():
+            return float(self._cached_zero_load_scale_g)
         if hasattr(self, "spin_zero_load_scale_g"):
             return float(self.spin_zero_load_scale_g.value())
         return DEFAULT_ZERO_LOAD_SCALE_G
@@ -6367,10 +6385,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _clear_run_zero_load_scale_reference(self) -> None:
         self._run_zero_load_scale_g = None
+        self._refresh_scale_reference_cache()
+        self._refresh_live_labels()
+
+    def _refresh_scale_reference_cache(self) -> None:
+        if hasattr(self, "check_tension_load_positive"):
+            self._cached_tension_decreases_scale_reading = self.check_tension_load_positive.isChecked()
+        if hasattr(self, "spin_zero_load_scale_g"):
+            self._cached_zero_load_scale_g = float(self.spin_zero_load_scale_g.value())
+
+    def _handle_scale_reference_setting_changed(self, _value: object | None = None) -> None:
+        self._refresh_scale_reference_cache()
         self._refresh_live_labels()
 
     def _handle_zero_load_scale_changed(self, _value: float) -> None:
         self._run_zero_load_scale_g = None
+        self._refresh_scale_reference_cache()
         self._refresh_live_labels()
 
     def _capture_zero_load_scale_reference(self) -> bool:
@@ -11668,18 +11698,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_handle.flush()
 
     def _scale_reading_age_s(self) -> float | None:
-        if self._latest_scale_timestamp is None:
+        with self._scale_state_lock:
+            timestamp_s = self._latest_scale_timestamp
+        if timestamp_s is None:
             return None
-        return max(0.0, time.time() - self._latest_scale_timestamp)
+        return max(0.0, time.time() - timestamp_s)
 
     def _has_fresh_scale_reading(self, *, after_s: float | None = None) -> bool:
         age_s = self._scale_reading_age_s()
         if age_s is None or age_s > STALE_SCALE_AFTER_S:
             return False
-        if after_s is not None and (
-            self._latest_scale_timestamp is None or self._latest_scale_timestamp < after_s
-        ):
-            return False
+        if after_s is not None:
+            with self._scale_state_lock:
+                timestamp_s = self._latest_scale_timestamp
+            if timestamp_s is None or timestamp_s < after_s:
+                return False
         return True
 
     def _load_sign(self) -> float:
@@ -11687,7 +11720,11 @@ class MainWindow(QtWidgets.QMainWindow):
         tension_decreases_scale_reading = (
             config.tension_decreases_scale_reading
             if config is not None
-            else self.check_tension_load_positive.isChecked()
+            else (
+                self._cached_tension_decreases_scale_reading
+                if not self._is_ui_thread()
+                else self.check_tension_load_positive.isChecked()
+            )
         )
         return -1.0 if tension_decreases_scale_reading else 1.0
 
@@ -11989,7 +12026,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._recovery_points.append(point)
         self._recovery_last_record_scale_timestamp = self._latest_scale_timestamp
-        self._refresh_recovery_plot()
+        now_s = time.monotonic()
+        if self._dialog_plot_refresh_due(self._last_recovery_plot_refresh_s, now_s=now_s):
+            self._last_recovery_plot_refresh_s = now_s
+            self._refresh_recovery_plot()
         self._refresh_live_labels()
         return True
 
@@ -12899,6 +12939,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recovery_start_monotonic = time.monotonic()
         self._recovery_start_elapsed_s = 0.0
         self._recovery_last_record_scale_timestamp = None
+        self._last_recovery_plot_refresh_s = None
         dialog = self._recovery_plot_dialog
         if dialog is None or dialog.isHidden():
             dialog = QtWidgets.QDialog(self)
@@ -12961,6 +13002,7 @@ class MainWindow(QtWidgets.QMainWindow):
             dialog.setWindowTitle(title)
         self._length_setup_points.clear()
         self._length_setup_last_record_scale_timestamp = None
+        self._last_length_setup_plot_refresh_s = None
         self._setup_return_zero_start_point_index = 0
         self._setup_return_zero_speed_mm_s_value = None
         self._setup_zero_position_mm = None
@@ -13010,8 +13052,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._write_setup_point(point)
         if len(self._length_setup_points) > 1000:
             self._length_setup_points = self._length_setup_points[-1000:]
-        self._refresh_length_setup_plot()
+        now_s = time.monotonic()
+        if self._dialog_plot_refresh_due(self._last_length_setup_plot_refresh_s, now_s=now_s):
+            self._last_length_setup_plot_refresh_s = now_s
+            self._refresh_length_setup_plot()
         return True
+
+    def _dialog_plot_refresh_due(self, last_refresh_s: float | None, *, now_s: float) -> bool:
+        if last_refresh_s is None:
+            return True
+        interval_s = max(0.1, float(self._graph_refresh_interval_ms()) / 1000.0)
+        return now_s - float(last_refresh_s) >= interval_s
 
     def _style_plot_axis(self, axis: Any, theme: Mapping[str, Any]) -> None:
         axis.set_facecolor(theme["axes_rgb"])
@@ -15439,6 +15490,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_tension_load_positive.setChecked(
             bool(self.settings.value("negative_scale_is_tension", True, type=bool))
         )
+        self._refresh_scale_reference_cache()
         if not bool(self.settings.value("negative_tic_motion_default_applied", False, type=bool)):
             motion_positive_is_tension = False
             self.settings.setValue("positive_motion_is_tension", False)

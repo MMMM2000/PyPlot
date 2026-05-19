@@ -1333,6 +1333,26 @@ def test_scale_signal_buffer_trims_old_samples() -> None:
     assert summary.raw_last_g == pytest.approx(2.0)
 
 
+def test_scale_measurement_updates_freshness_off_ui_thread(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    timestamp_s = time.time()
+
+    try:
+        thread = threading.Thread(
+            target=window._handle_scale_measurement,
+            args=(12.5, "12.5 g", timestamp_s),
+        )
+        thread.start()
+        thread.join(timeout=1.0)
+
+        assert not thread.is_alive()
+        assert window._has_fresh_scale_reading()
+        assert window._latest_scale_timestamp == pytest.approx(timestamp_s)
+        assert window._scale_signal_buffer.latest() is not None
+    finally:
+        _close_test_window(window)
+
+
 def _calibration_point(
     *,
     position_mm: float,
