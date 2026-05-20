@@ -197,7 +197,7 @@ SETUP_ZERO_FALLBACK_RAW_SPAN_G = 0.012
 SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
 SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
 SETUP_PRELOAD_TAKEUP_LOAD_G = 0.03
-SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA = 5.0
+SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA = 50.0
 SETUP_UNLOAD_BASELINE_MIN_POINTS = 5
 SETUP_UNLOAD_BASELINE_MIN_FRACTION = 0.15
 SETUP_UNLOAD_BASELINE_MIN_STRESS_MPA = 1.0
@@ -1738,6 +1738,7 @@ class MiniDmaControlConfig:
     setup_preload_duration_s: float
     setup_return_duration_s: float
     setup_slack_speed_strain_pct_s: float
+    setup_slack_step_cap_stress_mpa: float
     setup_preload_tolerance_mpa: float
     setup_zero_stable_s: float
     current_sweep_target_ramp_rate_value_s: float
@@ -2880,6 +2881,7 @@ class MainWindow(QtWidgets.QMainWindow):
             setup_preload_duration_s=float(self.spin_setup_preload_duration_s.value()),
             setup_return_duration_s=float(self.spin_setup_return_duration_s.value()),
             setup_slack_speed_strain_pct_s=float(self.spin_setup_slack_speed_strain_pct_s.value()),
+            setup_slack_step_cap_stress_mpa=float(self.spin_setup_slack_step_cap_stress_mpa.value()),
             setup_preload_tolerance_mpa=float(self.spin_setup_preload_tolerance_mpa.value()),
             setup_zero_stable_s=float(self.spin_setup_zero_stable_s.value()),
             current_sweep_target_ramp_rate_value_s=float(self.spin_current_sweep_target_ramp_rate.value()),
@@ -3981,6 +3983,15 @@ class MainWindow(QtWidgets.QMainWindow):
             "Mechanical take-up speed while the wire is slack and load/stress feedback is not yet meaningful."
         )
         strain_setup_form.addRow("Slack take-up speed", self.spin_setup_slack_speed_strain_pct_s)
+        self.spin_setup_slack_step_cap_stress_mpa = CompactDoubleSpinBox(self.strain_setup_box)
+        self.spin_setup_slack_step_cap_stress_mpa.setDecimals(2)
+        self.spin_setup_slack_step_cap_stress_mpa.setRange(0.001, 10000.0)
+        self.spin_setup_slack_step_cap_stress_mpa.setValue(SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA)
+        self.spin_setup_slack_step_cap_stress_mpa.setSuffix(" MPa")
+        self.spin_setup_slack_step_cap_stress_mpa.setToolTip(
+            "Maximum stiffness-prior-equivalent setup slack take-up step before real load response is detected."
+        )
+        strain_setup_form.addRow("Slack step cap", self.spin_setup_slack_step_cap_stress_mpa)
         self.spin_setup_return_duration_s = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_return_duration_s.setDecimals(2)
         self.spin_setup_return_duration_s.setRange(0.1, 3600.0)
@@ -5111,6 +5122,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_setup_preload_duration_s,
             self.spin_setup_return_duration_s,
             self.spin_setup_slack_speed_strain_pct_s,
+            self.spin_setup_slack_step_cap_stress_mpa,
             self.spin_setup_preload_tolerance_mpa,
             self.spin_setup_zero_tolerance_g,
             self.spin_setup_zero_stable_s,
@@ -8805,9 +8817,15 @@ class MainWindow(QtWidgets.QMainWindow):
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or not math.isfinite(float(sensitivity)) or abs(float(sensitivity)) <= 0.0:
             return None
+        config = self._control_config()
+        cap_stress_mpa = (
+            config.setup_slack_step_cap_stress_mpa
+            if config is not None
+            else float(self.spin_setup_slack_step_cap_stress_mpa.value())
+        )
         cap_value = self._current_sweep_basis_value_from_stress_cap(
             basis,
-            SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA,
+            max(0.001, float(cap_stress_mpa)),
         )
         if cap_value is None:
             return None
@@ -11872,6 +11890,7 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_txt_handle.write(f"# Setup preload ramp rate MPa/s\t{self._setup_preload_ramp_rate_mpa_s():.6f}\n")
         setup_txt_handle.write(f"# Setup return duration s\t{self.spin_setup_return_duration_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup slack speed pct/s\t{self.spin_setup_slack_speed_strain_pct_s.value():.6f}\n")
+        setup_txt_handle.write(f"# Setup slack step cap MPa\t{self.spin_setup_slack_step_cap_stress_mpa.value():.6f}\n")
         setup_txt_handle.write(f"# Setup stage max speed mm/s\t{self._setup_motion_speed_cap_mm_s():.6f}\n")
         setup_txt_handle.flush()
 
@@ -12129,6 +12148,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_preload_ramp_rate_mpa_s": self._setup_preload_ramp_rate_mpa_s(),
                 "setup_return_duration_s": float(self.spin_setup_return_duration_s.value()),
                 "setup_slack_speed_strain_pct_s": float(self.spin_setup_slack_speed_strain_pct_s.value()),
+                "setup_slack_step_cap_stress_mpa": float(self.spin_setup_slack_step_cap_stress_mpa.value()),
                 "setup_stage_max_speed_mm_s": self._setup_motion_speed_cap_mm_s(),
                 "setup_preload_tolerance_mpa": self._auto_requested_tolerance_for_basis(HSW_BASIS_STRESS_MPA),
                 "setup_preload_tolerance_mode": "automatic",
@@ -13191,6 +13211,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "preload_duration_s": float(self.spin_setup_preload_duration_s.value()),
                     "return_duration_s": float(self.spin_setup_return_duration_s.value()),
                     "slack_speed_strain_pct_s": float(self.spin_setup_slack_speed_strain_pct_s.value()),
+                    "slack_step_cap_stress_mpa": float(self.spin_setup_slack_step_cap_stress_mpa.value()),
                     "preload_tolerance_mpa": float(self.spin_setup_preload_tolerance_mpa.value()),
                     "zero_tolerance_g": float(self.spin_setup_zero_tolerance_g.value()),
                 },
@@ -13265,6 +13286,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_setup_preload_duration_s.setValue(float(setup.get("preload_duration_s", self.spin_setup_preload_duration_s.value())))
             self.spin_setup_return_duration_s.setValue(float(setup.get("return_duration_s", self.spin_setup_return_duration_s.value())))
             self.spin_setup_slack_speed_strain_pct_s.setValue(float(setup.get("slack_speed_strain_pct_s", self.spin_setup_slack_speed_strain_pct_s.value())))
+            self.spin_setup_slack_step_cap_stress_mpa.setValue(float(setup.get("slack_step_cap_stress_mpa", self.spin_setup_slack_step_cap_stress_mpa.value())))
             self.spin_setup_preload_tolerance_mpa.setValue(float(setup.get("preload_tolerance_mpa", self.spin_setup_preload_tolerance_mpa.value())))
             self.spin_setup_zero_tolerance_g.setValue(float(setup.get("zero_tolerance_g", self.spin_setup_zero_tolerance_g.value())))
         timing = recipe.get("timing")
@@ -16672,6 +16694,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "setup_slack_speed_strain_pct_s",
             self.spin_setup_slack_speed_strain_pct_s.value(),
         )
+        self.settings.setValue(
+            "setup_slack_step_cap_stress_mpa",
+            self.spin_setup_slack_step_cap_stress_mpa.value(),
+        )
         self.settings.setValue("setup_preload_tolerance_mpa", self.spin_setup_preload_tolerance_mpa.value())
         self.settings.setValue("setup_zero_tolerance_g", SERVO_AUTO_TOLERANCE_LOAD_G)
         self.settings.setValue("setup_zero_stable_s", self.spin_setup_zero_stable_s.value())
@@ -17155,6 +17181,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.settings.value(
                         "setup_slack_speed_strain_pct_s",
                         SETUP_SLACK_DEFAULT_STRAIN_RATE_PCT_S,
+                    )
+                ),
+            )
+        )
+        self.spin_setup_slack_step_cap_stress_mpa.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "setup_slack_step_cap_stress_mpa",
+                        SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA,
                     )
                 ),
             )

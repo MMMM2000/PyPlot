@@ -3490,7 +3490,7 @@ def test_setup_preload_slack_takeup_caps_single_step_by_stiffness_prior(tmp_path
         assert moves
         _, effective_target_mm = moves[-1]
         assert effective_target_mm is not None
-        assert abs(effective_target_mm - 7.015) <= (5.0 / 231.692884) + 1e-9
+        assert abs(effective_target_mm - 7.015) <= (50.0 / 231.692884) + 1e-9
     finally:
         _close_test_window(window)
 
@@ -7600,7 +7600,7 @@ def test_setup_preload_tiny_baseline_load_uses_stiffness_capped_slack_takeup(
         stiffness_mpa_per_mm = mini_dma_mod.stress_mpa_from_load_g(1.56, window.spin_diameter.value())
         assert stiffness_mpa_per_mm is not None
         assert abs((controller.target_steps / 10000.0) - 1.0) <= (
-            5.0 / stiffness_mpa_per_mm
+            50.0 / stiffness_mpa_per_mm
         ) + window._motor_step_mm()
         assert controller.max_speed == 20_000_000
     finally:
@@ -9196,6 +9196,7 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window.combo_recipe_mode.setCurrentIndex(index)
         window.spin_setup_preload_stress_mpa.setValue(20.0)
         window.spin_setup_preload_duration_s.setValue(10.0)
+        window.spin_setup_slack_step_cap_stress_mpa.setValue(75.0)
         window.spin_current_sweep_target_start.setValue(50.0)
         window.spin_current_sweep_target_end.setValue(500.0)
         window.spin_current_sweep_target_step.setValue(50.0)
@@ -9212,8 +9213,10 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         payload = json.loads(recipe_path.read_text(encoding="utf-8"))
         assert payload["schema_version"] == 1
         assert payload["recipe"]["mode"] == mini_dma_mod.CURRENT_SWEEP_STRESS
+        assert payload["recipe"]["setup"]["slack_step_cap_stress_mpa"] == pytest.approx(75.0)
 
         window.spin_setup_preload_stress_mpa.setValue(5.0)
+        window.spin_setup_slack_step_cap_stress_mpa.setValue(10.0)
         window.spin_current_sweep_target_end.setValue(25.0)
         window.spin_current_sweep_end_mA.setValue(5.0)
         window.check_current_sweep_hold_on_error.setChecked(False)
@@ -9223,6 +9226,7 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
 
         assert window.combo_recipe_mode.currentData() == mini_dma_mod.CURRENT_SWEEP_STRESS
         assert window.spin_setup_preload_stress_mpa.value() == pytest.approx(20.0)
+        assert window.spin_setup_slack_step_cap_stress_mpa.value() == pytest.approx(75.0)
         assert window.spin_current_sweep_target_end.value() == pytest.approx(500.0)
         assert window.spin_current_sweep_end_mA.value() == pytest.approx(80.0)
         assert window.check_current_sweep_hold_on_error.isChecked() is True
