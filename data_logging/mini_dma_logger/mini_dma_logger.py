@@ -198,6 +198,7 @@ SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
 SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
 SETUP_PRELOAD_TAKEUP_LOAD_G = 0.03
 SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA = 50.0
+SETUP_RETURN_MIN_SPEED_STRAIN_PCT = 0.10
 SETUP_UNLOAD_BASELINE_MIN_POINTS = 5
 SETUP_UNLOAD_BASELINE_MIN_FRACTION = 0.15
 SETUP_UNLOAD_BASELINE_MIN_STRESS_MPA = 1.0
@@ -7081,6 +7082,10 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             return self._setup_motion_speed_cap_mm_s()
         distance_mm = abs(float(current_load_g)) / abs(float(stiffness))
+        config = self._control_config()
+        length_mm = max(0.001, config.initial_length_mm if config is not None else float(self.spin_initial_length.value()))
+        distance_floor_mm = length_mm * SETUP_RETURN_MIN_SPEED_STRAIN_PCT / 100.0
+        distance_mm = max(distance_mm, distance_floor_mm)
         speed_mm_s = self._setup_return_speed_for_distance_mm_s(distance_mm)
         self._setup_return_zero_speed_mm_s_value = speed_mm_s
         return speed_mm_s
@@ -14197,7 +14202,7 @@ class MainWindow(QtWidgets.QMainWindow):
             spine.set_color(theme["text_rgb"])
         load_axis.tick_params(colors=theme["text_rgb"])
         load_axis.yaxis.label.set_color(theme["text_rgb"])
-        points = self._length_setup_points
+        points = tuple(self._length_setup_points)
         if points:
             x_values = [point.elapsed_s for point in points]
             stress_values = [float("nan") if point.stress_mpa is None else point.stress_mpa for point in points]
@@ -15715,6 +15720,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         self._setup_starting_length_mm = float(starting_length_mm)
         self.spin_initial_length.setValue(float(starting_length_mm))
+        self._active_control_config = self._freeze_control_config()
         if self._session_setup_txt_handle is not None:
             self._session_setup_txt_handle.write(
                 f"# Accepted starting length prior mm\t{self._setup_starting_length_mm:.6f}\n"
@@ -15796,6 +15802,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 preload_position_mm=self._setup_preload_position_mm,
                 zero_position_mm=zero_position_mm,
             )
+            self._active_control_config = self._freeze_control_config()
             if self._session_setup_txt_handle is not None:
                 self._session_setup_txt_handle.write(f"# Computed l0 mm\t{l0_mm:.6f}\n")
                 self._session_setup_txt_handle.write(f"# Zero-load position mm\t{zero_position_mm:.6f}\n")

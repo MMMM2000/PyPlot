@@ -778,6 +778,8 @@ def test_length_setup_uses_linear_unload_intercept_for_l0(tmp_path: Path, qtbot)
 
         assert window._setup_zero_position_mm == pytest.approx(-1.1)
         assert window.spin_initial_length.value() == pytest.approx(30.1)
+        assert window._active_control_config is not None
+        assert window._active_control_config.initial_length_mm == pytest.approx(30.1)
         assert "linear unload fit" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -7638,6 +7640,31 @@ def test_setup_return_zero_uses_return_time_speed(tmp_path: Path, qtbot) -> None
         )
 
         assert speed == pytest.approx((1.0 / 22.7) / 5.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_return_zero_uses_strain_floor_for_tiny_residual_load(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_initial_length.setValue(80.0)
+    window.spin_setup_return_duration_s.setValue(5.0)
+    window.spin_motion_speed_mm_s.setValue(1.0)
+    window._calibrated_stiffness_g_per_mm = 100.0
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="seek",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=0.0,
+        note="setup_return_zero",
+    )
+
+    try:
+        speed = window._setup_return_zero_speed_mm_s(mini_dma_mod.HSW_BASIS_LOAD_G, 0.01)
+
+        expected_floor_mm = window.spin_initial_length.value() * 0.001
+        assert speed == pytest.approx(expected_floor_mm / window.spin_setup_return_duration_s.value())
     finally:
         _close_test_window(window)
 
