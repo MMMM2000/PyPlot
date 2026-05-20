@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
+from plotting.plugins.base import PyPlotPlugin, register_plugin
 
 from . import core
 
@@ -66,14 +66,14 @@ class MiniDmaPlugin(PyPlotPlugin):
         section_layout.addWidget(note)
         zero_minimum = QtWidgets.QCheckBox("Use each trace minimum as strain l0")
         zero_minimum.setToolTip(
-            "Recalculate each strain-current curve using that trace's lowest plotted strain value "
-            "as l0, so the lowest point is 0 strain."
+            "Recalculate each strain-current curve using the shortest measured length in that trace "
+            "as l0, so its lowest point is physically treated as 0 strain."
         )
         section_layout.addWidget(zero_minimum)
         self._zero_minimum_strain_checkbox = zero_minimum
-        show_power = QtWidgets.QCheckBox("Show power top axis on resistance plot")
+        show_power = QtWidgets.QCheckBox("Show power top axis")
         show_power.setToolTip(
-            "Add a top X axis with P = I^2R labels calculated from the resistance-current curves."
+            "Add a top X axis with P = I^2R labels calculated from the current-sweep curves."
         )
         section_layout.addWidget(show_power)
         self._show_power_top_axis_checkbox = show_power

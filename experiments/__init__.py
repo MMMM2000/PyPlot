@@ -61,6 +61,9 @@ EXPERIMENTS: Dict[str, ExperimentFactory] = {
     "Current Annealing Unit Converter": _lazy(
         "experiments.current_annealing_converter", label="Current Annealing Unit Converter"
     ),
+    "Thermal Camera Viewer": _lazy(
+        "experiments.thermal_camera_viewer", label="Thermal Camera Viewer"
+    ),
     "VSM Folder Export": _lazy(
         "experiments.vsm_folder_export", "launch_gui", label="VSM Folder Export"
     ),

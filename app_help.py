@@ -35,9 +35,9 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             ### Develop menu essentials
             * **Keep File Selections** – when iterating on a dataset, enable this so the dialog
               reopens with your previous file list intact.
-            * **Show Experiments Tab** – exposes prototypes (the PyVISA annealing logger and the
-              microwire data builder). Leave the toggle off during routine work to keep the
-              launcher tidy.
+            * **Show Experiments Tab** – exposes prototypes such as thermal-camera viewing,
+              conversion helpers, and folder exporters. Leave the toggle off during routine work
+              to keep the launcher tidy.
 
             ### Menu bar highlights
             * **File → Open File… / Open Folder…** call the same loaders as the toolbar buttons
@@ -91,11 +91,36 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                closing it would also close child dialogs.
             3. Use **Develop → Show Experiments Tab** to reveal or hide the prototype list and
                **Develop → Keep File Selections** if you want plotting dialogs to reopen with
-               the same input files pre-selected. The experiments currently bundle the PyVISA
-               annealing logger and the Microwire Data Builder.
+               the same input files pre-selected. The experiments currently bundle prototype
+               hardware viewers, conversion helpers, and folder exporters.
             4. The **View** menu mirrors other windows—switch theme, collapse the file browser or
                console, and reset splitter sizes when needed. **File → Exit** quits the launcher
                after confirming there are no unsaved child windows.
+            """
+        ).strip(),
+    },
+    "experiment_thermal_camera_viewer": {
+        "title": "Thermal camera viewer",
+        "body": dedent(
+            """
+            ### Live MLX90640 view
+            1. Keep the Nucleo running the STM32Cube MLX90640 raw-stream firmware for the
+               fastest live diagnostic view, or the older Arduino firmware for calibrated
+               binary/text modes.
+            2. Select the Nucleo serial port, normally `COM10`, use **Cube raw** at
+               `2000000` baud for the STM32Cube firmware, choose the requested refresh
+               rate, and press **Connect**. The current 400 kHz I2C firmware is clean at
+               16 Hz and 32 Hz; 64 Hz remains experimental and may overrun. Use
+               **Arduino binary** at `921600` baud or **Text frame dump** at `115200` baud only
+               with the older Arduino firmware.
+            3. The viewer reconstructs the 32 x 24 frame, scales it into a heatmap, and updates
+               the min, mean, max, ambient, and frame-rate readouts. Cube raw mode loads the
+               camera EEPROM when available and attempts host-side Celsius conversion; if the
+               calibration sanity checks fail, it falls back to raw sensor counts.
+            4. Use **Auto scale** while aligning the camera. Switch to fixed min/max scaling when
+               comparing before/after current frames so colour changes are easier to judge.
+            5. Press **Export frame** to save the current PNG heatmap and raw text frame to
+               Downloads.
             """
         ).strip(),
     },

@@ -15460,10 +15460,9 @@ class VideoSection(MiniDatabaseSection):
         if not isinstance(table, pd.DataFrame) or table.empty:
             return table
         updated = self._ensure_core_columns(table.copy())
-        if VIDEO_END_LENGTH_COLUMN not in updated.columns:
-            updated[VIDEO_END_LENGTH_COLUMN] = None
-        if VIDEO_MW_LENGTH_COLUMN not in updated.columns:
-            updated[VIDEO_MW_LENGTH_COLUMN] = None
+        for column in (VIDEO_END_LENGTH_COLUMN, VIDEO_MW_LENGTH_COLUMN):
+            if column not in updated.columns:
+                updated[column] = None
         fabrication_frame = self._fabrication_table()
         cumulative_map = self._build_cumulative_lengths(updated, fabrication_frame)
         shared_video_end_lengths: Dict[Tuple[str, int], Any] = {}

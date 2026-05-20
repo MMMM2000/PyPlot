@@ -53,6 +53,10 @@ if (-not (Test-Path $venvPython)) {
     }
     py -3.14 -m venv .venv
     $venvPython = Join-Path $PWD ".venv\Scripts\python.exe"
+    & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Created .venv is not Python 3.14."
+    }
 }
 
 & $venvPython -m pip install --upgrade pip
@@ -71,7 +75,6 @@ platform = "darwin"
 name = "Run"
 icon = "run"
 command = '''
-.\.venv\Scripts\Activate.ps1
-python -m launcher
+C:\Windows\System32\cmd.exe /d /c "set PYPLOT_NO_PAUSE=1&& call .codex\run-pyplot.cmd"
 '''
 platform = "win32"

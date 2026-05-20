@@ -7,6 +7,7 @@ from typing import Iterable
 
 import pandas as pd
 from matplotlib.figure import Figure
+
 from plotting.shared.power_axis import add_power_top_axis
 
 MEASUREMENT_FILE = "measurement.csv"
@@ -122,7 +123,7 @@ def make_strain_current_figure(
         run,
         y_column="strain_pct",
         y_label=(
-            "Strain from trace-minimum [%]"
+            "Strain from trace-minimum length [%]"
             if zero_minimum_strain
             else "Strain [%]"
         ),
@@ -226,8 +227,7 @@ def power_axis_points(run: MiniDmaRun, *, filter_resistance_outliers: bool = Tru
 
 
 def strain_from_trace_minimum_length(run: MiniDmaRun, group: pd.DataFrame) -> pd.Series:
-    _ = run
-    return pd.Series(_strain_from_trace_minimum_y(group), index=group.index)
+    return pd.Series(_strain_from_trace_minimum_length(run, group), index=group.index)
 
 
 def _drop_resistance_outliers(group: pd.DataFrame) -> pd.DataFrame:
@@ -249,20 +249,23 @@ def _drop_resistance_outliers(group: pd.DataFrame) -> pd.DataFrame:
 
 
 def _strain_from_trace_minimum_length(run: MiniDmaRun, group: pd.DataFrame) -> pd.Series:
-    _ = run
-    return _strain_from_trace_minimum_y(group)
+    """Recalculate strain with each curve's shortest measured length as l0."""
+    if "position_mm" in group.columns and run.initial_length_mm is not None:
+        position = pd.to_numeric(group["position_mm"], errors="coerce")
+        if position.notna().any():
+            length_mm = run.initial_length_mm + position
+            l0_mm = float(length_mm.min(skipna=True))
+            if pd.notna(l0_mm) and l0_mm > 0.0:
+                return (length_mm - l0_mm) / l0_mm * 100.0
 
-
-def _strain_from_trace_minimum_y(group: pd.DataFrame) -> pd.Series:
-    """Recalculate strain by using each trace's lowest plotted Y value as l0."""
     strain_pct = pd.to_numeric(group["strain_pct"], errors="coerce")
-    baseline = strain_pct.min(skipna=True)
-    if not pd.notna(baseline):
-        return strain_pct
-    baseline_factor = 1.0 + (float(baseline) / 100.0)
-    if baseline_factor <= 0.0:
-        return strain_pct - baseline
-    return ((1.0 + (strain_pct / 100.0)) / baseline_factor - 1.0) * 100.0
+    if run.initial_length_mm is not None and strain_pct.notna().any():
+        length_mm = run.initial_length_mm * (1.0 + strain_pct / 100.0)
+        l0_mm = float(length_mm.min(skipna=True))
+        if pd.notna(l0_mm) and l0_mm > 0.0:
+            return (length_mm - l0_mm) / l0_mm * 100.0
+
+    return strain_pct - strain_pct.min(skipna=True)
 
 
 def _choose_current_column(frame: pd.DataFrame) -> str | None:
