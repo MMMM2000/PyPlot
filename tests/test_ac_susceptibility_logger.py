@@ -36,6 +36,14 @@ def _isolate_ac_qsettings(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setattr(ac_logger.QtCore, "QSettings", factory)
 
 
+def _show_single_ac_plot_tile(window: object, tile_index: int = 0) -> object:
+    for tile in window._plot_tiles:
+        tile.visible.setChecked(False)
+    tile = window._plot_tiles[tile_index]
+    tile.visible.setChecked(True)
+    return tile
+
+
 def test_parse_numeric_list_accepts_frequency_suffixes() -> None:
     assert lcr6000.parse_numeric_list("100, 1k, 2.5MHz", quantity="frequency") == pytest.approx(
         [100.0, 1000.0, 2_500_000.0]
@@ -1756,12 +1764,14 @@ def test_ac_logger_graph_defaults_are_ac_susceptibility_specific(
         assert window._plot_tiles[1].y_extra_combo.currentData() == "wire_resistance_ohm"
         assert window._plot_tiles[2].x_combo.currentData() == "frequency_hz"
         assert window._plot_tiles[3].x_combo.currentData() == "amplitude_v"
-        assert len(window.figure.axes) >= 4
-        assert window.figure.axes[0].get_title() == "Rs + Ls vs Elapsed time"
-        assert window.figure.axes[0].get_ylabel() == "Rs [Ohm]"
-        assert window.figure.axes[0].get_xlabel() == "Elapsed time [s]"
-        assert window.figure.axes[2].get_title() == "Rs + Ls + Wire R vs Current measured"
-        assert window.figure.axes[2].get_xlabel() == "Current measured [mA]"
+        assert ac_logger.pg is not None
+        assert len(window._ac_pg_tiles) == 4
+        assert window._ac_plot_render_state[0]["title"] == "Rs + Ls vs Elapsed time"
+        assert window._ac_plot_render_state[0]["x_label"] == "Elapsed time [s]"
+        assert window._ac_plot_render_state[0]["left_label"] == "Rs [Ohm]"
+        assert window._ac_plot_render_state[1]["title"] == "Rs + Ls + Wire R vs Current measured"
+        assert window._ac_plot_render_state[1]["x_label"] == "Current measured [mA]"
+        assert getattr(window, "canvas", None) is None
         assert window.comboBox_ac_plot_spread.currentData() == "small"
     finally:
         window.close()
@@ -1779,10 +1789,7 @@ def test_ac_logger_frequency_plot_uses_log_scatter_and_colored_axes_without_lege
 
     window = ac_logger.MainWindow()
     try:
-        for tile in window._plot_tiles:
-            tile.visible.setChecked(False)
-        tile = window._plot_tiles[0]
-        tile.visible.setChecked(True)
+        tile = _show_single_ac_plot_tile(window)
         window._set_combo_data(tile.x_combo, "frequency_hz")
         window._set_combo_data(tile.y_left_combo, "rs_ohm")
         window._set_combo_data(tile.y_right_combo, "ls_h")
@@ -1794,19 +1801,14 @@ def test_ac_logger_frequency_plot_uses_log_scatter_and_colored_axes_without_lege
 
         window._refresh_ac_plots(force=True)
 
-        axis = window.figure.axes[0]
-        twin = window.figure.axes[1]
-        assert axis.get_xscale() == "log"
-        assert not axis.lines
-        assert not twin.lines
-        assert len(axis.collections) == 1
-        assert len(twin.collections) == 1
-        assert axis.get_legend() is None
-        assert axis.yaxis.label.get_color() == window._plot_channel("rs_ohm").color
-        assert twin.yaxis.label.get_color() == window._plot_channel("ls_h").color
-        assert axis.yaxis.get_offset_text().get_color() == window._plot_channel("rs_ohm").color
-        assert twin.yaxis.get_offset_text().get_color() == window._plot_channel("ls_h").color
-        assert not any(line.get_visible() for line in twin.get_ygridlines())
+        state = window._ac_plot_render_state[0]
+        assert state["x_log"] is True
+        assert state["left_item_type"] == "scatter"
+        assert state["right_item_type"] == "scatter"
+        assert state["left_color"] == window._plot_channel("rs_ohm").color
+        assert state["right_color"] == window._plot_channel("ls_h").color
+        assert state["show_legend"] is False
+        assert state["grid"] == "left-only"
     finally:
         window.close()
         app.processEvents()
@@ -1823,10 +1825,7 @@ def test_ac_logger_amplitude_plot_uses_scatter_without_log_x(
 
     window = ac_logger.MainWindow()
     try:
-        for tile in window._plot_tiles:
-            tile.visible.setChecked(False)
-        tile = window._plot_tiles[0]
-        tile.visible.setChecked(True)
+        tile = _show_single_ac_plot_tile(window)
         window._set_combo_data(tile.x_combo, "amplitude_v")
         window._set_combo_data(tile.y_left_combo, "rs_ohm")
         window._ac_plot_points = [
@@ -1836,10 +1835,9 @@ def test_ac_logger_amplitude_plot_uses_scatter_without_log_x(
 
         window._refresh_ac_plots(force=True)
 
-        axis = window.figure.axes[0]
-        assert axis.get_xscale() == "linear"
-        assert not axis.lines
-        assert len(axis.collections) == 1
+        state = window._ac_plot_render_state[0]
+        assert state["x_log"] is False
+        assert state["left_item_type"] == "scatter"
     finally:
         window.close()
         app.processEvents()
@@ -1856,10 +1854,7 @@ def test_ac_logger_elapsed_plot_defaults_to_small_scatter(
 
     window = ac_logger.MainWindow()
     try:
-        for tile in window._plot_tiles:
-            tile.visible.setChecked(False)
-        tile = window._plot_tiles[0]
-        tile.visible.setChecked(True)
+        tile = _show_single_ac_plot_tile(window)
         window._set_combo_data(tile.x_combo, "elapsed_s")
         window._set_combo_data(tile.y_left_combo, "rs_ohm")
         window._ac_plot_points = [
@@ -1869,10 +1864,9 @@ def test_ac_logger_elapsed_plot_defaults_to_small_scatter(
 
         window._refresh_ac_plots(force=True)
 
-        axis = window.figure.axes[0]
-        assert not axis.lines
-        assert len(axis.collections) == 1
-        assert max(axis.collections[0].get_sizes()) <= 8
+        state = window._ac_plot_render_state[0]
+        assert state["left_item_type"] == "scatter"
+        assert state["left_symbol_size"] <= 5
     finally:
         window.close()
         app.processEvents()
@@ -1890,10 +1884,7 @@ def test_ac_logger_frequency_plot_keeps_each_condition_when_display_thinning(
 
     window = ac_logger.MainWindow()
     try:
-        for tile in window._plot_tiles:
-            tile.visible.setChecked(False)
-        tile = window._plot_tiles[0]
-        tile.visible.setChecked(True)
+        tile = _show_single_ac_plot_tile(window)
         window._set_combo_data(tile.x_combo, "frequency_hz")
         window._set_combo_data(tile.y_left_combo, "rs_ohm")
         window._ac_plot_points = [
@@ -1906,13 +1897,13 @@ def test_ac_logger_frequency_plot_keeps_each_condition_when_display_thinning(
 
         window._refresh_ac_plots(force=True)
 
-        offsets = window.figure.axes[0].collections[0].get_offsets()
-        x_values = {float(point[0]) for point in offsets}
+        state = window._ac_plot_render_state[0]
+        x_values = {float(point[0]) for point in state["left_xy"]}
         assert len(x_values) > 2
         assert min(x_values) < 100.0 < max(x_values)
         assert any(90.0 <= value <= 110.0 for value in x_values)
         assert any(180000.0 <= value <= 220000.0 for value in x_values)
-        assert len(offsets) <= 16
+        assert len(state["left_xy"]) <= 16
     finally:
         window.close()
         app.processEvents()
@@ -1929,10 +1920,7 @@ def test_ac_logger_repeated_frequency_points_are_spread_unless_disabled(
 
     window = ac_logger.MainWindow()
     try:
-        for tile in window._plot_tiles:
-            tile.visible.setChecked(False)
-        tile = window._plot_tiles[0]
-        tile.visible.setChecked(True)
+        tile = _show_single_ac_plot_tile(window)
         window._set_combo_data(tile.x_combo, "frequency_hz")
         window._set_combo_data(tile.y_left_combo, "rs_ohm")
         window._ac_plot_points = [
@@ -1942,12 +1930,12 @@ def test_ac_logger_repeated_frequency_points_are_spread_unless_disabled(
 
         window._set_combo_data(window.comboBox_ac_plot_spread, "small")
         window._refresh_ac_plots(force=True)
-        spread_x = [float(point[0]) for point in window.figure.axes[0].collections[0].get_offsets()]
+        spread_x = [float(point[0]) for point in window._ac_plot_render_state[0]["left_xy"]]
         assert len({round(value, 6) for value in spread_x}) > 1
 
         window._set_combo_data(window.comboBox_ac_plot_spread, "off")
         window._refresh_ac_plots(force=True)
-        stacked_x = [float(point[0]) for point in window.figure.axes[0].collections[0].get_offsets()]
+        stacked_x = [float(point[0]) for point in window._ac_plot_render_state[0]["left_xy"]]
         assert {round(value, 6) for value in stacked_x} == {1000.0}
     finally:
         window.close()
@@ -1965,10 +1953,7 @@ def test_ac_logger_current_plot_uses_measured_current_and_wire_resistance_line(
 
     window = ac_logger.MainWindow()
     try:
-        for tile in window._plot_tiles:
-            tile.visible.setChecked(False)
-        tile = window._plot_tiles[0]
-        tile.visible.setChecked(True)
+        tile = _show_single_ac_plot_tile(window)
         window._set_combo_data(tile.x_combo, "current_actual_mA")
         window._set_combo_data(tile.y_left_combo, "rs_ohm")
         window._set_combo_data(tile.y_right_combo, "ls_h")
@@ -1982,22 +1967,51 @@ def test_ac_logger_current_plot_uses_measured_current_and_wire_resistance_line(
 
         window._refresh_ac_plots(force=True)
 
-        axes = window.figure.axes
-        assert axes[0].get_xlabel() == "Current measured [mA]"
-        assert axes[0].get_title() == "Rs + Ls + Wire R vs Current measured"
-        assert axes[0].collections
-        assert not axes[0].lines
-        assert axes[1].collections
-        assert not axes[1].lines
-        assert axes[2].get_ylabel() == "Wire R [Ohm]"
-        assert axes[2].yaxis.label.get_color() == window._plot_channel("wire_resistance_ohm").color
-        assert axes[0].get_legend() is None
-        assert axes[2].lines
-        assert not axes[2].collections
-        x_values = list(axes[2].lines[0].get_xdata())
-        y_values = list(axes[2].lines[0].get_ydata())
+        state = window._ac_plot_render_state[0]
+        assert state["x_label"] == "Current measured [mA]"
+        assert state["title"] == "Rs + Ls + Wire R vs Current measured"
+        assert state["left_item_type"] == "scatter"
+        assert state["right_item_type"] == "scatter"
+        assert state["extra_label"] == "Wire R [Ohm]"
+        assert state["extra_color"] == window._plot_channel("wire_resistance_ohm").color
+        assert state["show_legend"] is False
+        assert state["extra_item_type"] == "line"
+        x_values = [point[0] for point in state["extra_xy"]]
+        y_values = [point[1] for point in state["extra_xy"]]
         assert x_values == pytest.approx([19.7, 39.3])
         assert y_values == pytest.approx([410.0, 450.0])
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_pyqtgraph_reuses_plot_items_between_refreshes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "graph_reuse_items")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        tile = _show_single_ac_plot_tile(window)
+        window._set_combo_data(tile.x_combo, "elapsed_s")
+        window._set_combo_data(tile.y_left_combo, "rs_ohm")
+        window._ac_plot_points = [
+            ac_logger.AcPlotPoint(0.0, "Ls-Rs", 1000.0, 0.3, 0.0, 2e-5, 14.0),
+        ]
+        window._refresh_ac_plots(force=True)
+        left_item = window._ac_pg_tiles[0].left_item
+
+        window._ac_plot_points.append(
+            ac_logger.AcPlotPoint(1.0, "Ls-Rs", 1000.0, 0.3, 0.0, 2.1e-5, 14.1)
+        )
+        window._refresh_ac_plots(force=True)
+
+        assert window._ac_pg_tiles[0].left_item is left_item
+        assert len(window._ac_plot_render_state[0]["left_xy"]) == 2
     finally:
         window.close()
         app.processEvents()

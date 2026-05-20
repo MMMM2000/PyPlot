@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any, Callable, Sequence, cast
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+try:
+    import pyqtgraph as pg
+except Exception:  # pragma: no cover - optional runtime fallback
+    pg = None  # type: ignore[assignment]
 
 from data_logging.current_annealing_logger.current_annealing_logger import (
     DEFAULT_LOG_DIR,
@@ -79,8 +83,8 @@ AC_DEFAULT_LOG_DIR = Path.home() / "Downloads" / "ac_susceptibility"
 AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
 AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
 AC_PLOT_REFRESH_INTERVAL_S = 1.0
-AC_PLOT_RECENT_POINTS = 5000
-AC_PLOT_MAX_POINTS_PER_CONDITION = 800
+AC_PLOT_RECENT_POINTS = 3000
+AC_PLOT_MAX_POINTS_PER_CONDITION = 160
 AC_PLOT_JITTER_PX = 5.0
 AC_PLOT_SPREAD_PIXELS = {
     "off": 0.0,
@@ -151,6 +155,19 @@ class AcPlotTileWidgets:
     y_left_combo: QtWidgets.QComboBox
     y_right_combo: QtWidgets.QComboBox
     y_extra_combo: QtWidgets.QComboBox
+
+
+@dataclass
+class AcPyQtGraphTile:
+    widget: Any
+    plot_item: Any
+    left_item: Any
+    right_view: Any
+    right_item: Any
+    extra_axis: Any
+    extra_view: Any
+    extra_item: Any
+    no_data_item: Any
 
 
 class AcPlotConfigDialog(QtWidgets.QDialog):
@@ -501,6 +518,8 @@ class MainWindow(CurrentAnnealingWindow):
         self._auto_detect_used_connected_psu = False
         self._ac_plot_points: list[AcPlotPoint] = []
         self._plot_tiles: list[AcPlotTileWidgets] = []
+        self._ac_pg_tiles: list[AcPyQtGraphTile] = []
+        self._ac_plot_render_state: list[dict[str, Any]] = []
         self.plot_config_dialog: AcPlotConfigDialog | None = None
         self._ac_output_settings_ready = False
         self._ac_loading_settings = False
@@ -530,13 +549,32 @@ class MainWindow(CurrentAnnealingWindow):
             self._start_ac_ui_telemetry_timer()
 
     def init_graph_window(self):  # type: ignore[override]
-        super().init_graph_window()
-        if hasattr(self, "fig"):
-            self.figure = self.fig
         container = getattr(getattr(self, "ui", None), "plot_container", None)
-        layout = container.layout() if isinstance(container, QtWidgets.QWidget) else None
-        if layout is not None:
-            self._install_ac_plot_dashboard(container, layout)
+        if pg is None or not isinstance(container, QtWidgets.QWidget):
+            super().init_graph_window()
+            if hasattr(self, "fig"):
+                self.figure = self.fig
+            container = getattr(getattr(self, "ui", None), "plot_container", None)
+            layout = container.layout() if isinstance(container, QtWidgets.QWidget) else None
+            if layout is not None:
+                self._install_ac_plot_dashboard(container, layout)
+            self._refresh_ac_plots(force=True)
+            return
+        self.fig = None
+        self.figure = None
+        self.canvas = None
+        self.toolbar = None
+        layout = container.layout()
+        if layout is None:
+            layout = QtWidgets.QVBoxLayout(container)
+            layout.setContentsMargins(0, 0, 0, 0)
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._install_ac_plot_dashboard(container, layout)
         self._refresh_ac_plots(force=True)
 
     def _install_ac_plot_dashboard(self, container: QtWidgets.QWidget, layout: QtWidgets.QLayout) -> None:
@@ -638,6 +676,79 @@ class MainWindow(CurrentAnnealingWindow):
                 )
             )
         self.plot_config_dialog.body_layout.addWidget(config_box)
+        if pg is not None:
+            self._install_ac_pyqtgraph_tiles(container, layout)
+
+    def _install_ac_pyqtgraph_tiles(self, container: QtWidgets.QWidget, layout: QtWidgets.QLayout) -> None:
+        grid_widget = QtWidgets.QWidget(container)
+        grid_layout = QtWidgets.QGridLayout(grid_widget)
+        grid_layout.setContentsMargins(10, 10, 10, 10)
+        grid_layout.setHorizontalSpacing(18)
+        grid_layout.setVerticalSpacing(18)
+        self._ac_pg_tiles = []
+        for index in range(4):
+            plot_widget = pg.PlotWidget(grid_widget)
+            plot_widget.setMinimumSize(320, 230)
+            plot_widget.setBackground(self._qt_color_to_tuple(self.palette().color(QtGui.QPalette.ColorRole.Base)))
+            plot_item = plot_widget.getPlotItem()
+            plot_item.showGrid(x=True, y=True, alpha=0.22)
+            plot_item.showAxis("right")
+            plot_item.getAxis("top").setStyle(showValues=False)
+            plot_item.getAxis("right").setStyle(showValues=True)
+            left_item = pg.PlotDataItem(pen=None, symbol="o", symbolSize=4)
+            right_item = pg.PlotDataItem(pen=None, symbol="s", symbolSize=4)
+            extra_item = pg.PlotDataItem(pen=pg.mkPen("#f59e0b", width=1.25), symbol="o", symbolSize=4)
+            plot_item.addItem(left_item)
+            right_view = pg.ViewBox()
+            plot_item.scene().addItem(right_view)
+            plot_item.getAxis("right").linkToView(right_view)
+            right_view.setXLink(plot_item.vb)
+            right_view.addItem(right_item)
+            extra_axis = pg.AxisItem("right")
+            plot_item.layout.addItem(extra_axis, 2, 3)
+            extra_view = pg.ViewBox()
+            plot_item.scene().addItem(extra_view)
+            extra_axis.linkToView(extra_view)
+            extra_view.setXLink(plot_item.vb)
+            extra_view.addItem(extra_item)
+            no_data_item = pg.TextItem("No AC data yet", color=self._plot_theme_text_qcolor(), anchor=(0.5, 0.5))
+            plot_item.addItem(no_data_item)
+            no_data_item.setPos(0.5, 0.5)
+            row, column = divmod(index, 2)
+            grid_layout.addWidget(plot_widget, row, column)
+            runtime = AcPyQtGraphTile(
+                widget=plot_widget,
+                plot_item=plot_item,
+                left_item=left_item,
+                right_view=right_view,
+                right_item=right_item,
+                extra_axis=extra_axis,
+                extra_view=extra_view,
+                extra_item=extra_item,
+                no_data_item=no_data_item,
+            )
+            self._ac_pg_tiles.append(runtime)
+            plot_item.vb.sigResized.connect(
+                lambda *_args, _runtime=runtime: self._update_pg_linked_views(_runtime)
+            )
+            self._update_pg_linked_views(runtime)
+        layout.addWidget(grid_widget, 1)
+        self._ac_plot_render_state = [{} for _ in self._ac_pg_tiles]
+
+    @staticmethod
+    def _update_pg_linked_views(runtime: AcPyQtGraphTile) -> None:
+        geometry = runtime.plot_item.vb.sceneBoundingRect()
+        runtime.right_view.setGeometry(geometry)
+        runtime.right_view.linkedViewChanged(runtime.plot_item.vb, runtime.right_view.XAxis)
+        runtime.extra_view.setGeometry(geometry)
+        runtime.extra_view.linkedViewChanged(runtime.plot_item.vb, runtime.extra_view.XAxis)
+
+    @staticmethod
+    def _qt_color_to_tuple(color: QtGui.QColor) -> tuple[int, int, int]:
+        return color.red(), color.green(), color.blue()
+
+    def _plot_theme_text_qcolor(self) -> QtGui.QColor:
+        return self.palette().color(QtGui.QPalette.ColorRole.Text)
 
     def _plot_channels(self) -> list[AcPlotChannel]:
         return [
@@ -926,6 +1037,188 @@ class MainWindow(CurrentAnnealingWindow):
             pass
 
     def _refresh_ac_plots(self, *, force: bool = False) -> None:
+        if pg is not None and getattr(self, "_ac_pg_tiles", None):
+            self._refresh_ac_pyqtgraph_plots(force=force)
+            return
+        self._refresh_ac_matplotlib_plots(force=force)
+
+    def _refresh_ac_pyqtgraph_plots(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._ac_last_plot_refresh_monotonic < AC_PLOT_REFRESH_INTERVAL_S:
+            return
+        started = time.perf_counter()
+        self._ac_last_plot_refresh_monotonic = now
+        active_tiles = [tile for tile in self._plot_tiles if tile.visible.isChecked()]
+        if not active_tiles and self._plot_tiles:
+            active_tiles = list(self._plot_tiles[:1])
+        if not active_tiles:
+            return
+        render_state: list[dict[str, Any]] = []
+        for index, runtime in enumerate(self._ac_pg_tiles):
+            if index >= len(active_tiles[:4]):
+                runtime.widget.hide()
+                render_state.append({})
+                continue
+            runtime.widget.show()
+            tile = active_tiles[index]
+            state = self._update_ac_pyqtgraph_tile(runtime, tile)
+            render_state.append(state)
+        self._ac_plot_render_state = render_state
+        self._ac_last_plot_refresh_duration_s = max(0.0, time.perf_counter() - started)
+        self._write_ac_diagnostic(
+            "plot_refresh",
+            backend="pyqtgraph",
+            duration_s=round(self._ac_last_plot_refresh_duration_s, 6),
+            points=len(getattr(self, "_ac_plot_points", [])),
+            displayed_points=sum(len(state.get("left_xy", [])) for state in render_state),
+            tiles=len(active_tiles[:4]),
+        )
+
+    def _update_ac_pyqtgraph_tile(
+        self,
+        runtime: AcPyQtGraphTile,
+        tile: AcPlotTileWidgets,
+    ) -> dict[str, Any]:
+        x_channel = self._plot_channel(str(tile.x_combo.currentData() or "current_mA"))
+        y_left_channel = self._plot_channel(str(tile.y_left_combo.currentData() or "rs_ohm"))
+        y_right_channel = self._plot_channel(str(tile.y_right_combo.currentData() or ""))
+        y_extra_channel = self._plot_channel(str(tile.y_extra_combo.currentData() or ""))
+        plot_item = runtime.plot_item
+        if x_channel is None or y_left_channel is None:
+            runtime.left_item.setData([], [])
+            runtime.right_item.setData([], [])
+            runtime.extra_item.setData([], [])
+            return {}
+        x_log = x_channel.key == "frequency_hz"
+        plot_item.setLogMode(x=x_log, y=False)
+        runtime.left_item.setLogMode(x_log, False)
+        runtime.right_item.setLogMode(x_log, False)
+        runtime.extra_item.setLogMode(x_log, False)
+        title = self._plot_title(x_channel, y_left_channel, y_right_channel, y_extra_channel)
+        plot_item.setTitle(title, color=self._plot_theme_text_qcolor())
+        plot_item.setLabel("bottom", x_channel.label, color=self._plot_theme_text_qcolor())
+        self._style_pg_axis(plot_item.getAxis("bottom"), self._plot_theme_text_qcolor())
+        plot_item.setLabel("left", y_left_channel.label, color=y_left_channel.color)
+        self._style_pg_axis(plot_item.getAxis("left"), y_left_channel.color)
+        if y_right_channel is not None:
+            plot_item.setLabel("right", y_right_channel.label, color=y_right_channel.color)
+            self._style_pg_axis(plot_item.getAxis("right"), y_right_channel.color)
+            plot_item.getAxis("right").show()
+        else:
+            plot_item.setLabel("right", "")
+            self._style_pg_axis(plot_item.getAxis("right"), self._plot_theme_text_qcolor())
+            plot_item.getAxis("right").hide()
+        if y_extra_channel is not None:
+            runtime.extra_axis.setLabel(y_extra_channel.label, color=y_extra_channel.color)
+            self._style_pg_axis(runtime.extra_axis, y_extra_channel.color)
+            runtime.extra_axis.show()
+        else:
+            runtime.extra_axis.setLabel("")
+            runtime.extra_axis.hide()
+        points = self._display_points_for_plot(str(x_channel.key))
+        left_pairs = self._plot_pairs(points, x_channel, y_left_channel)
+        left_xy = self._pairs_with_plot_spread(plot_item, x_channel.key, left_pairs)
+        self._set_pg_scatter(runtime.left_item, left_xy, y_left_channel.color, symbol="o")
+        right_xy: list[tuple[float, float]] = []
+        if y_right_channel is not None:
+            right_pairs = self._plot_pairs(points, x_channel, y_right_channel)
+            right_xy = self._pairs_with_plot_spread(plot_item, x_channel.key, right_pairs)
+            self._set_pg_scatter(runtime.right_item, right_xy, y_right_channel.color, symbol="s")
+        else:
+            runtime.right_item.setData([], [])
+        extra_xy: list[tuple[float, float]] = []
+        extra_type = ""
+        if y_extra_channel is not None:
+            extra_pairs = (
+                self._median_wire_resistance_pairs(points, x_channel)
+                if y_extra_channel.key == "wire_resistance_ohm"
+                else self._plot_pairs(points, x_channel, y_extra_channel)
+            )
+            extra_xy = self._pairs_with_plot_spread(plot_item, x_channel.key, extra_pairs)
+            if y_extra_channel.key == "wire_resistance_ohm":
+                extra_type = "line"
+                self._set_pg_line(runtime.extra_item, extra_xy, y_extra_channel.color)
+            else:
+                extra_type = "scatter"
+                self._set_pg_scatter(runtime.extra_item, extra_xy, y_extra_channel.color, symbol="t")
+        else:
+            runtime.extra_item.setData([], [])
+        has_data = bool(left_xy or right_xy or extra_xy)
+        runtime.no_data_item.setVisible(not has_data)
+        if not has_data:
+            plot_item.setRange(xRange=(0.0, 1.0), yRange=(0.0, 1.0), padding=0.0)
+            runtime.no_data_item.setPos(0.5, 0.5)
+        else:
+            plot_item.enableAutoRange()
+            runtime.right_view.enableAutoRange()
+            runtime.extra_view.enableAutoRange()
+        self._update_pg_linked_views(runtime)
+        return {
+            "title": title,
+            "x_key": x_channel.key,
+            "x_label": x_channel.label,
+            "x_log": x_log,
+            "left_label": y_left_channel.label,
+            "left_color": y_left_channel.color,
+            "left_item_type": "scatter",
+            "left_symbol_size": 4,
+            "left_xy": left_xy,
+            "right_label": y_right_channel.label if y_right_channel is not None else "",
+            "right_color": y_right_channel.color if y_right_channel is not None else "",
+            "right_item_type": "scatter" if y_right_channel is not None else "",
+            "right_xy": right_xy,
+            "extra_label": y_extra_channel.label if y_extra_channel is not None else "",
+            "extra_color": y_extra_channel.color if y_extra_channel is not None else "",
+            "extra_item_type": extra_type,
+            "extra_xy": extra_xy,
+            "show_legend": False,
+            "grid": "left-only",
+        }
+
+    def _style_pg_axis(self, axis: Any, color: str | QtGui.QColor) -> None:
+        axis.setPen(pg.mkPen(color))
+        axis.setTextPen(pg.mkPen(color))
+        try:
+            axis.enableAutoSIPrefix(False)
+        except AttributeError:
+            pass
+
+    def _set_pg_scatter(
+        self,
+        item: Any,
+        xy: Sequence[tuple[float, float]],
+        color: str,
+        *,
+        symbol: str,
+    ) -> None:
+        item.setSymbol(symbol)
+        item.setPen(None)
+        item.setSymbolSize(4)
+        item.setSymbolBrush(pg.mkBrush(QtGui.QColor(color)))
+        item.setSymbolPen(None)
+        item.setData([x for x, _ in xy], [y for _, y in xy])
+
+    def _set_pg_line(self, item: Any, xy: Sequence[tuple[float, float]], color: str) -> None:
+        item.setPen(pg.mkPen(color, width=1.2))
+        item.setSymbol("o")
+        item.setSymbolSize(4)
+        item.setSymbolBrush(pg.mkBrush(QtGui.QColor(color)))
+        item.setSymbolPen(None)
+        item.setData([x for x, _ in xy], [y for _, y in xy])
+
+    def _pairs_with_plot_spread(
+        self,
+        axis: Any,
+        x_key: str,
+        pairs: Sequence[tuple[float, float]],
+    ) -> list[tuple[float, float]]:
+        if not pairs:
+            return []
+        x_values = [x_value for x_value, _ in pairs]
+        jittered = self._jitter_plot_x_values(axis, str(x_key), x_values)
+        return list(zip(jittered, [y_value for _, y_value in pairs]))
+
+    def _refresh_ac_matplotlib_plots(self, *, force: bool = False) -> None:
         now = time.monotonic()
         if not force and now - self._ac_last_plot_refresh_monotonic < AC_PLOT_REFRESH_INTERVAL_S:
             return

@@ -106,16 +106,17 @@ Point acquisition controls are named for the AC experiment:
   Empty-coil baseline readings are also added to the live plots as 0 mA points
   so the dashboard visibly updates before a microwire sweep is started.
 - Acquisition and file writing run in a worker thread, separate from the
-  Matplotlib dashboard. Each reading is flushed to disk before the UI plot is
-  updated, and plot redraws are throttled to about once per second so graph
+  PyQtGraph dashboard. Each reading is flushed to disk before the UI plot buffer
+  is updated, and plot refreshes are throttled to about once per second so graph
   rendering cannot slow the LCR logging loop.
 - The Stop button stops after the current LCR read. Empty-coil baseline stops
   save a partial TSV with the rows already collected. Baseline rows are flushed
   as they are measured, matching the microwire sweep behavior, so a PC or
   instrument interruption still leaves the completed rows on disk.
 - The Developer menu can mirror AC diagnostics to a JSONL file. Those records
-  include task changes and plot refresh timing, which is useful when checking
-  whether the four-panel Matplotlib dashboard is slowing down the PC.
+  include task changes, plot refresh timing, displayed-point counts, and UI
+  timer telemetry, which is useful when checking whether the four-panel
+  dashboard is slowing down the PC.
 
 Every reading is saved as its own row. Averaging or baseline normalization can
 be done later from the raw TSV files.
@@ -278,6 +279,11 @@ Measured current is the default X axis because it is the physical value returned
 by the power supply. The legacy saved `DC current` plot key is interpreted as
 measured current when old settings are loaded.
 
+The live dashboard uses PyQtGraph so it can update persistent plot objects
+instead of rebuilding a Matplotlib figure. The raw TSV logging path is separate
+from the dashboard: the logger can keep writing every valid LCR/PSU read while
+the display shows a reduced, recent view for responsiveness.
+
 Additional selectable channels include elapsed time, measured current, set
 current, frequency, amplitude, `Rs`, `Ls`, wire resistance, and PSU power. The
 plot renderer follows the Qt palette so dark mode labels, ticks, and titles
@@ -285,11 +291,11 @@ remain readable.
 
 Plots are scatter-first with small translucent markers; dense time traces and
 dense parameter scans are easier to read without connecting lines. `Rs` and
-`Ls` are scatter-only by default. Wire resistance is drawn as line plus symbols
-when selected because it follows the DC current path through the microwire and
-contacts, but it is reduced to the median wire resistance for each
-model/frequency/amplitude/current setting so noisy PSU readback does not
-dominate the dashboard.
+`Ls` are scatter-only by default and use separate Y scales. Wire resistance is
+drawn as line plus symbols when selected because it follows the DC current path
+through the microwire and contacts, but it is reduced to the median wire
+resistance for each model/frequency/amplitude/current setting so noisy PSU
+readback does not dominate the dashboard.
 
 When frequency is selected as the X axis, the logger uses a logarithmic scale.
 Current, frequency, and amplitude scatter plots can use display-space
