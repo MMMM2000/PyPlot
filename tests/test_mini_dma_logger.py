@@ -4584,6 +4584,9 @@ def test_length_setup_progress_tracks_active_ramp_phase_without_tick_counts(
         window._active_target_ramp_started_s = 100.0
         window._active_target_ramp_start_value = 320.0
         window._active_target_ramp_rate_value_s = 60.0
+        window._setup_preload_engaged_seek_keys.add(
+            window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 20.0)
+        )
         window._show_length_setup_dialog()
 
         window._update_length_setup_progress()
@@ -4596,6 +4599,52 @@ def test_length_setup_progress_tracks_active_ramp_phase_without_tick_counts(
         assert "50%" in text
         assert "20000" not in text
         assert "1234" not in text
+    finally:
+        _close_test_window(window)
+
+
+def test_length_setup_progress_is_indeterminate_during_slack_takeup(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [125.0]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+
+    try:
+        window._automation_active = True
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep(
+                "ramp_target",
+                target_value=20.0,
+                target_end_value=20.0,
+                basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                note="setup_preload",
+            ),
+        ]
+        window._automation_index = 0
+        window._active_target_ramp_step_index = 0
+        window._active_target_ramp_started_s = 100.0
+        window._active_target_ramp_start_value = 0.0
+        window._active_target_ramp_rate_value_s = 4.0
+        window._current_distribution_value = lambda *_args, **_kwargs: 0.0  # type: ignore[method-assign]
+        window._set_automation_context(
+            phase="target_ramp",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            note="setup_preload",
+        )
+        window._show_length_setup_dialog()
+
+        window._update_length_setup_progress()
+
+        assert window._length_setup_progress is not None
+        assert window._length_setup_progress.minimum() == 0
+        assert window._length_setup_progress.maximum() == 0
+        text = window._length_setup_progress.format()
+        assert "Slack take-up" in text
+        assert "100%" not in text
     finally:
         _close_test_window(window)
 
@@ -5518,6 +5567,58 @@ def test_current_sweep_settle_advances_after_timed_recovery_even_if_target_is_no
         assert window._automation_active is True
         assert window._automation_index == 1
         assert attempts["count"] == 1
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_setup_preload_settle_requires_continuous_target_stability_in_current_sweep(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [100.0]
+    seek_results = [False, True, True]
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+
+    def _fake_seek(*_args: object, **_kwargs: object) -> bool:
+        return seek_results.pop(0)
+
+    window._seek_distribution_target = _fake_seek  # type: ignore[method-assign]
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "settle",
+            target_value=20.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            duration_s=3.0,
+            note="setup_preload",
+        )
+    ]
+    window._automation_total_steps = 1
+    window._automation_index = 0
+
+    try:
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_active is True
+        assert window._automation_index == 0
+        assert window._active_timed_step_index is None
+
+        now_s[0] = 101.0
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_index == 0
+        assert window._active_timed_step_index == 0
+
+        now_s[0] = 104.1
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_index == 1
+        assert window._active_timed_step_index is None
     finally:
         window._automation_active = False
         _close_test_window(window)

@@ -13535,16 +13535,38 @@ class MainWindow(QtWidgets.QMainWindow):
             phase_text = ""
             phase_fraction: float | None = None
             if current_step.action == "ramp_target" and current_step.note == "setup_preload":
-                phase_text = "Preload ramp"
-                start_value = self._active_target_ramp_start_value
-                rate_value_s = self._active_target_ramp_rate_value_s
+                phase_text = "Slack take-up"
+                slack_takeup = False
                 target_value = (
                     current_step.target_end_value
                     if current_step.target_end_value is not None
                     else current_step.target_value
                 )
+                current_value = (
+                    self._current_distribution_value(current_step.basis)
+                    if current_step.basis
+                    else None
+                )
                 if (
-                    start_value is not None
+                    current_step.basis
+                    and target_value is not None
+                    and current_value is not None
+                    and self._setup_preload_takeup_active(
+                        current_step.basis,
+                        float(current_value),
+                        float(target_value) - float(current_value),
+                        self._automation_tolerance_for_step(current_step),
+                        seek_key=self._seek_error_key(current_step.basis, float(target_value)),
+                    )
+                ):
+                    slack_takeup = True
+                else:
+                    phase_text = "Preload ramp"
+                start_value = self._active_target_ramp_start_value
+                rate_value_s = self._active_target_ramp_rate_value_s
+                if (
+                    not slack_takeup
+                    and start_value is not None
                     and rate_value_s is not None
                     and target_value is not None
                     and abs(float(rate_value_s)) > 0.0
@@ -16029,6 +16051,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif step.action == "settle":
             self._timed_step_elapsed_s(step_index)
             plateau_index = int(step.note) if step.note.isdigit() else None
+            setup_settle_phase = step.note in {"setup_preload", "setup_return_zero"}
             self._set_automation_context(
                 phase="settle",
                 basis=step.basis,
@@ -16037,6 +16060,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 note=step.note,
             )
             settle_target_reached = True
+            setup_points_before = len(self._length_setup_points) if setup_settle_phase else None
             if (
                 step.basis
                 and step.target_value is not None
@@ -16054,7 +16078,11 @@ class MainWindow(QtWidgets.QMainWindow):
             elif not self._record_scheduled_recipe_point(step):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return
+            if setup_settle_phase and setup_points_before == len(self._length_setup_points):
+                self._record_length_setup_point()
             current_sweep_timed_settle = self._is_current_sweep_mode(self._automation_name)
+            if setup_settle_phase:
+                current_sweep_timed_settle = False
             if not settle_target_reached and not current_sweep_timed_settle:
                 self._reset_timed_step_state()
             if (
