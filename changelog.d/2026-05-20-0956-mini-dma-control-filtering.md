@@ -8,3 +8,4 @@
 - Mini DMA mandatory length setup now refreshes the frozen control config after accepted starting length and computed `l0`, so strain logging and subsequent control use the measured setup length instead of a stale recipe-start value.
 - Mini DMA setup return-to-zero now applies a small strain-based speed floor for tiny residual loads, avoiding very slow one-step unloads near baseline.
 - Mini DMA length-setup plotting now snapshots setup samples before drawing, preventing live plot refresh crashes from concurrent sample updates.
+- Mini DMA paused-current recovery can now use a local hold-only response stiffness after several confirmed correction samples, allowing faster load/stress recovery during transformations while keeping the frozen current-sweep stiffness and displacement/strain safety rails intact.

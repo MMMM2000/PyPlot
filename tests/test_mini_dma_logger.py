@@ -8315,6 +8315,81 @@ def test_current_sweep_hold_uses_smooth_dynamic_stress_cap(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_current_sweep_hold_uses_adaptive_response_stiffness_for_large_errors(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_initial_length.setValue(58.0)
+        window.spin_current_sweep_max_correction_strain_pct.setValue(1.0)
+        window.spin_current_sweep_hold_correction_stress_mpa.setValue(100.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._set_automation_context(
+            phase="current_hold",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=150.0,
+            plateau_index=3,
+        )
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 150.0)
+        adaptive_load_stiffness = mini_dma_mod.load_g_from_stress_mpa(450.0, window.spin_diameter.value())
+        assert adaptive_load_stiffness is not None
+        window._current_sweep_hold_response_stiffness_by_key[seek_key] = adaptive_load_stiffness
+        window._current_sweep_hold_response_count_by_key[seek_key] = 3
+
+        correction_mm = window._current_sweep_max_stress_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            sensitivity_per_mm=2090.0,
+            error_value=40.0,
+            seek_key=seek_key,
+        )
+
+        assert correction_mm is not None
+        assert correction_mm == pytest.approx(0.059, rel=0.08)
+        assert correction_mm > (20.0 / 2090.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_adaptive_response_respects_displacement_rail(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_initial_length.setValue(58.0)
+        window.spin_current_sweep_max_correction_strain_pct.setValue(1.0)
+        window.spin_current_sweep_hold_correction_stress_mpa.setValue(100.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._set_automation_context(
+            phase="current_hold",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=150.0,
+            plateau_index=3,
+        )
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 150.0)
+        adaptive_load_stiffness = mini_dma_mod.load_g_from_stress_mpa(150.0, window.spin_diameter.value())
+        assert adaptive_load_stiffness is not None
+        window._current_sweep_hold_response_stiffness_by_key[seek_key] = adaptive_load_stiffness
+        window._current_sweep_hold_response_count_by_key[seek_key] = 4
+
+        correction_mm = window._current_sweep_max_stress_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            sensitivity_per_mm=2090.0,
+            error_value=180.0,
+            seek_key=seek_key,
+        )
+
+        assert correction_mm is not None
+        assert correction_mm == pytest.approx(0.20)
+    finally:
+        _close_test_window(window)
+
+
 def test_very_near_current_sweep_waits_for_two_fresh_samples_after_move(
     tmp_path: Path,
     qtbot,

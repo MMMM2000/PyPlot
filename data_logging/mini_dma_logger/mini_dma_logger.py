@@ -357,6 +357,12 @@ SERVO_CURRENT_SWEEP_MIN_COMMAND_SPEED_MM_S = 0.05
 SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION = 0.20
 SERVO_CURRENT_SWEEP_DYNAMIC_MAX_FRACTION = 0.60
 SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA = 25.0
+SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION = 0.50
+SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
+SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
+SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_MM = 0.20
+SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
+SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES = 3
 SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA = 1.0
@@ -2528,6 +2534,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._seek_travel_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_pending_reversal_by_key: dict[tuple[str, int, float], tuple[float, float | None]] = {}
+        self._current_sweep_hold_response_stiffness_by_key: dict[tuple[str, int, float], float] = {}
+        self._current_sweep_hold_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._setup_preload_engaged_seek_keys: set[tuple[str, int, float]] = set()
         self._seek_live_stiffness_g_per_mm: float | None = None
         self._seek_last_stiffness_value_by_basis: dict[str, float] = {}
@@ -8154,6 +8162,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sensitivity_per_mm: float,
         *,
         error_value: float | None = None,
+        seek_key: tuple[str, int, float] | None = None,
     ) -> float | None:
         sensitivity = abs(float(sensitivity_per_mm))
         if not math.isfinite(sensitivity) or sensitivity <= 0.0:
@@ -8177,6 +8186,32 @@ class MainWindow(QtWidgets.QMainWindow):
             near_cap = _basis_cap_from_stress(near_mpa)
             max_cap = _basis_cap_from_stress(cap_mpa)
             near_threshold = 0.0 if near_cap is None else near_cap
+            adaptive_sensitivity = self._current_sweep_hold_response_sensitivity_per_mm(
+                basis,
+                seek_key=seek_key,
+            )
+            if (
+                adaptive_sensitivity is not None
+                and math.isfinite(float(adaptive_sensitivity))
+                and float(adaptive_sensitivity) > 0.0
+                and max_cap is not None
+                and max_cap > 0.0
+                and error_abs > near_threshold
+            ):
+                large_error = max(
+                    0.0,
+                    error_abs - max(near_threshold, SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA),
+                )
+                fraction = SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION + (
+                    SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION
+                    - SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION
+                ) * (1.0 - math.exp(-large_error / SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA))
+                cap_value = min(max_cap, max(near_threshold, error_abs * fraction))
+                adaptive_mm = cap_value / abs(float(adaptive_sensitivity))
+                return max(
+                    self._motor_step_mm(),
+                    min(self._current_sweep_hold_adaptive_command_cap_mm(), adaptive_mm),
+                )
             if near_threshold > 0.0 and error_abs <= near_threshold:
                 return self._motor_step_mm()
             if max_cap is not None and max_cap > 0.0:
@@ -8193,6 +8228,41 @@ class MainWindow(QtWidgets.QMainWindow):
         if cap_value is None:
             return None
         return max(self._motor_step_mm(), cap_value / sensitivity)
+
+    def _current_sweep_hold_adaptive_command_cap_mm(self) -> float:
+        strain_cap_mm = self._strain_pct_to_stage_mm(
+            SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
+        )
+        return max(
+            self._motor_step_mm(),
+            min(
+                SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_MM,
+                strain_cap_mm,
+                self._current_sweep_max_correction_mm(),
+            ),
+        )
+
+    def _current_sweep_hold_response_sensitivity_per_mm(
+        self,
+        basis: str,
+        *,
+        seek_key: tuple[str, int, float] | None,
+    ) -> float | None:
+        if self._automation_phase != "current_hold" or seek_key is None:
+            return None
+        count = self._current_sweep_hold_response_count_by_key.get(seek_key, 0)
+        if count < SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES:
+            return None
+        load_stiffness = self._current_sweep_hold_response_stiffness_by_key.get(seek_key)
+        if load_stiffness is None or not math.isfinite(float(load_stiffness)) or float(load_stiffness) <= 0.0:
+            return None
+        if basis == HSW_BASIS_LOAD_G:
+            return float(load_stiffness)
+        if basis == HSW_BASIS_STRESS_MPA:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            return stress_mpa_from_load_g(float(load_stiffness), diameter_mm)
+        return None
 
     def _current_sweep_basis_value_from_stress_cap(self, basis: str, stress_mpa: float) -> float | None:
         if basis == HSW_BASIS_STRESS_MPA:
@@ -8986,6 +9056,11 @@ class MainWindow(QtWidgets.QMainWindow):
         current_value: float,
     ) -> None:
         if self._current_sweep_freezes_live_stiffness():
+            self._update_current_sweep_hold_response_stiffness(
+                seek_key,
+                basis,
+                current_value,
+            )
             return
         current_position = self._current_effective_tensile_position_mm()
         if self._setup_preload_first_contact_transition(seek_key, basis, current_value):
@@ -9033,6 +9108,43 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._remember_live_stiffness(load_stiffness)
 
+    def _update_current_sweep_hold_response_stiffness(
+        self,
+        seek_key: tuple[str, int, float],
+        basis: str,
+        current_value: float,
+    ) -> None:
+        if self._current_sweep_freezes_live_stiffness():
+            if self._automation_phase != "current_hold" or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+                return
+        else:
+            return
+        current_position = self._current_effective_tensile_position_mm()
+        previous_value = self._seek_last_value_by_key.get(seek_key)
+        previous_position = self._seek_last_effective_position_by_key.get(seek_key)
+        if previous_value is None or previous_position is None:
+            return
+        delta_position = abs(current_position - previous_position)
+        if delta_position < self._motor_step_mm() * 0.5:
+            return
+        delta_value = abs(float(current_value) - float(previous_value))
+        if delta_value <= 0.0 or not math.isfinite(delta_value):
+            return
+        load_stiffness = self._load_stiffness_from_basis_sensitivity(basis, delta_value / delta_position)
+        if load_stiffness is None:
+            return
+        old = self._current_sweep_hold_response_stiffness_by_key.get(seek_key)
+        old_count = self._current_sweep_hold_response_count_by_key.get(seek_key, 0)
+        if old is None or old <= 0.0 or not math.isfinite(float(old)):
+            self._current_sweep_hold_response_stiffness_by_key[seek_key] = load_stiffness
+            self._current_sweep_hold_response_count_by_key[seek_key] = 1
+            return
+        self._current_sweep_hold_response_stiffness_by_key[seek_key] = (
+            (1.0 - SERVO_LIVE_STIFFNESS_ALPHA) * float(old)
+            + SERVO_LIVE_STIFFNESS_ALPHA * load_stiffness
+        )
+        self._current_sweep_hold_response_count_by_key[seek_key] = old_count + 1
+
     def _predictive_seek_step_mm(
         self,
         basis: str,
@@ -9062,6 +9174,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 basis,
                 sensitivity,
                 error_value=error_value,
+                seek_key=seek_key,
             )
             if stress_cap_mm is not None:
                 correction_caps.append(stress_cap_mm)
@@ -9077,6 +9190,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 basis,
                 sensitivity,
                 error_value=error_value,
+                seek_key=seek_key,
             )
             if stress_cap_mm is not None:
                 correction_caps.append(stress_cap_mm)
@@ -10335,6 +10449,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         basis,
                         sensitivity,
                         error_value=delta_value,
+                        seek_key=seek_key,
                     )
                 )
                 if stress_cap_mm is not None:
@@ -13877,6 +13992,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_live_stiffness_g_per_mm = None
         self._seek_last_stiffness_value_by_basis.clear()
         self._seek_last_stiffness_position_by_basis.clear()
+        self._current_sweep_hold_response_stiffness_by_key.clear()
+        self._current_sweep_hold_response_count_by_key.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         self._setup_preload_engaged_seek_keys.clear()
@@ -14416,6 +14533,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_live_stiffness_by_key.clear()
         self._seek_last_stiffness_value_by_basis.clear()
         self._seek_last_stiffness_position_by_basis.clear()
+        self._current_sweep_hold_response_stiffness_by_key.clear()
+        self._current_sweep_hold_response_count_by_key.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         self._setup_preload_engaged_seek_keys.clear()
