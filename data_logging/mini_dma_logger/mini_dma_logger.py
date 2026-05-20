@@ -143,6 +143,10 @@ MEASUREMENT_CSV_FIELDNAMES = [
     "preload_state",
     "strain_pct",
     "stress_mpa",
+    "current_zero_position_mm",
+    "current_l0_mm",
+    "current_relative_position_mm",
+    "current_relative_strain_pct",
     "current_set_mA",
     "current_measured_mA",
     "voltage_V",
@@ -241,6 +245,7 @@ OUTPUT_COLLISION_CANCEL = "cancel"
 HSW_BASIS_LOAD_G = "load_g"
 HSW_BASIS_STRESS_MPA = "stress_mpa"
 HSW_BASIS_STRAIN_PCT = "strain_pct"
+MECHANICAL_STEP_DISPLACEMENT_MM = "displacement_mm"
 HSW_BASIS_LABELS = {
     HSW_BASIS_LOAD_G: "Load (g)",
     HSW_BASIS_STRESS_MPA: "Stress (MPa)",
@@ -249,6 +254,7 @@ HSW_BASIS_LABELS = {
 CURRENT_SWEEP_LOAD = "current_sweep_load"
 CURRENT_SWEEP_STRESS = "current_sweep_stress"
 CURRENT_SWEEP_STRAIN = "current_sweep_strain"
+CONSTANT_CURRENT_STRAIN_SWEEP = "constant_current_strain_sweep"
 LEGACY_CURRENT_SWEEP = "current_sweep"
 CALIBRATION = "calibration"
 CALIBRATION_COPPER = "calibration_copper"
@@ -371,6 +377,7 @@ WIRE_BREAK_MIN_SETPOINT_MA = 5.0
 WIRE_BREAK_MAX_MEASURED_MA = 0.5
 WIRE_BREAK_VOLTAGE_LIMIT_FRACTION = 0.95
 CONTINUITY_CURRENT_DEFAULT_MA = 1.0
+MIN_RECIPE_CURRENT_MA = 1.0
 RAW_SCALE_DISPLAY_LIMIT_DEFAULT_G = 30.0
 SETUP_PRELOAD_OVERLOAD_FACTOR = 2.0
 CURRENT_SWEEP_BASIS_BY_MODE = {
@@ -384,10 +391,12 @@ CURRENT_SWEEP_TARGET_DEFAULTS_BY_MODE = {
     CURRENT_SWEEP_STRAIN: (0.0, 0.5, 0.1, 0.05),
 }
 CURRENT_SWEEP_MODES = frozenset(CURRENT_SWEEP_BASIS_BY_MODE) | {LEGACY_CURRENT_SWEEP}
+CURRENT_TARGET_VALUE_MODES = frozenset(CURRENT_SWEEP_TARGET_DEFAULTS_BY_MODE)
 RECIPE_FILENAME_TOKENS = {
     CURRENT_SWEEP_LOAD: "iso-load",
     CURRENT_SWEEP_STRESS: "iso-stress",
     CURRENT_SWEEP_STRAIN: "iso-strain",
+    CONSTANT_CURRENT_STRAIN_SWEEP: "iso-current",
 }
 CALIBRATION_MODES = frozenset({CALIBRATION, CALIBRATION_COPPER})
 PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d", "Diameter", "diameter_um")
@@ -917,6 +926,10 @@ class MeasurementPoint:
     load_max_g: float | None = None
     load_sample_count: int = 0
     scale_sample_rate_hz: float | None = None
+    current_zero_position_mm: float | None = None
+    current_l0_mm: float | None = None
+    current_relative_position_mm: float | None = None
+    current_relative_strain_pct: float | None = None
 
 
 @dataclass
@@ -937,6 +950,10 @@ class AutomationStep:
     current_hold_pause_tolerance_factor: float | None = None
     current_hold_resume_tolerance_factor: float | None = None
     current_hold_resume_stable_s: float | None = None
+    mechanical_step_basis: str | None = None
+    mechanical_step_value: float | None = None
+    mechanical_step_speed_mm_s: float | None = None
+    mechanical_step_limit: int | None = None
     duration_s: float | None = None
     note: str = ""
 
@@ -1706,6 +1723,7 @@ class MiniDmaControlConfig:
     setup_return_duration_s: float
     setup_slack_speed_strain_pct_s: float
     setup_preload_tolerance_mpa: float
+    setup_zero_stable_s: float
     current_sweep_target_ramp_rate_value_s: float
     current_sweep_target_speed_mm_s: float
     current_sweep_correction_rate_pct_s: float
@@ -2573,6 +2591,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA: float | None = None
+        self._active_current_sweep_display_target_mA: float | None = None
+        self._active_current_sweep_display_direction = 0.0
         self._current_sweep_ramp_hold_step_index: int | None = None
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s: float | None = None
@@ -2629,8 +2649,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._diameter_imported = False
         self._builder_import_in_progress = False
         self._plot_tiles: list[PlotTileWidgets] = []
+        self._dashboard_plot_settings_by_mode: dict[str, list[dict[str, object]]] = {}
+        self._plot_settings_restore_in_progress = False
         self._dashboard_value_labels: dict[str, QtWidgets.QLabel] = {}
         self._current_sweep_target_values_by_mode: dict[str, tuple[float, float, float, float]] = {}
+        self._constant_current_step_base_position_by_note: dict[str, float] = {}
+        self._constant_current_step_base_strain_by_note: dict[str, float] = {}
+        self._active_constant_current_zero_position_mm: float | None = None
+        self._active_constant_current_zero_current_mA: float | None = None
+        self._active_mechanical_scan_step_index: int | None = None
+        self._active_mechanical_scan_started_s = 0.0
+        self._active_mechanical_scan_move_count = 0
+        self._active_mechanical_scan_hold_started_s: float | None = None
+        self._active_mechanical_scan_move_pending = False
+        self._active_mechanical_scan_direction: float | None = None
+        self._active_mechanical_scan_origin_position_mm: float | None = None
         self._last_recipe_mode = "ramp"
         self._control_scroll_area: QtWidgets.QScrollArea | None = None
         self._manual_jog_direction = 0.0
@@ -2661,6 +2694,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ui_heartbeat_last_s: float | None = None
         self._ui_heartbeat_interval_ms: float | None = None
         self._ui_heartbeat_fps: float | None = None
+        self._window_closing = False
         self.action_timing_settings: QtGui.QAction | None = None
         self.action_mirror_run_log: QtGui.QAction | None = None
         self._manual_jog_timer = QtCore.QTimer(self)
@@ -2747,6 +2781,24 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._control_ui_event.emit(callback)
 
+    def _restore_main_window_focus_soon(self) -> None:
+        if self._window_closing:
+            return
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._restore_main_window_focus_soon)
+            return
+        QtCore.QTimer.singleShot(0, self._restore_main_window_focus)
+
+    def _restore_main_window_focus(self) -> None:
+        if self._window_closing:
+            return
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
     def _call_on_ui_thread_sync(self, callback: Callable[[], Any]) -> Any:
         if self._is_ui_thread():
             return callback()
@@ -2812,6 +2864,7 @@ class MainWindow(QtWidgets.QMainWindow):
             setup_return_duration_s=float(self.spin_setup_return_duration_s.value()),
             setup_slack_speed_strain_pct_s=float(self.spin_setup_slack_speed_strain_pct_s.value()),
             setup_preload_tolerance_mpa=float(self.spin_setup_preload_tolerance_mpa.value()),
+            setup_zero_stable_s=float(self.spin_setup_zero_stable_s.value()),
             current_sweep_target_ramp_rate_value_s=float(self.spin_current_sweep_target_ramp_rate.value()),
             current_sweep_target_speed_mm_s=float(self.spin_current_sweep_target_speed_mm_s.value()),
             current_sweep_correction_rate_pct_s=float(self.spin_current_sweep_correction_rate_pct_s.value()),
@@ -3863,6 +3916,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_recipe_mode.addItem("Iso-load current sweep", CURRENT_SWEEP_LOAD)
         self.combo_recipe_mode.addItem("Iso-stress current sweep", CURRENT_SWEEP_STRESS)
         self.combo_recipe_mode.addItem("Iso-strain current sweep", CURRENT_SWEEP_STRAIN)
+        self.combo_recipe_mode.addItem("Constant-current stress-strain", CONSTANT_CURRENT_STRAIN_SWEEP)
         self.combo_recipe_mode.currentIndexChanged.connect(self._handle_recipe_mode_changed)
         automation_form.addRow("Recipe type", self.combo_recipe_mode)
         recipe_file_row = QtWidgets.QHBoxLayout()
@@ -4611,6 +4665,78 @@ class MainWindow(QtWidgets.QMainWindow):
             current_log_interval_label.setVisible(False)
         self.recipe_stack.addWidget(current_sweep_page)
 
+        constant_current_page = QtWidgets.QWidget(self.recipe_stack)
+        constant_current_form = QtWidgets.QFormLayout(constant_current_page)
+        self.combo_constant_current_start_basis = QtWidgets.QComboBox(automation_box)
+        for basis_key in (HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT):
+            self.combo_constant_current_start_basis.addItem(HSW_BASIS_LABELS[basis_key], basis_key)
+        constant_current_form.addRow("Start target", self.combo_constant_current_start_basis)
+        self.spin_constant_current_start_target = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_start_target.setDecimals(3)
+        self.spin_constant_current_start_target.setRange(-100000.0, 100000.0)
+        self.spin_constant_current_start_target.setValue(0.0)
+        constant_current_start_row, self.label_constant_current_start_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_start_target,
+        )
+        constant_current_form.addRow("Target start", constant_current_start_row)
+        self.spin_constant_current_end_target = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_end_target.setDecimals(3)
+        self.spin_constant_current_end_target.setRange(-100000.0, 100000.0)
+        self.spin_constant_current_end_target.setValue(500.0)
+        constant_current_end_row, self.label_constant_current_end_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_end_target,
+        )
+        constant_current_form.addRow("Target end", constant_current_end_row)
+        self.combo_constant_current_step_basis = QtWidgets.QComboBox(automation_box)
+        self.combo_constant_current_step_basis.addItem("Displacement (mm)", MECHANICAL_STEP_DISPLACEMENT_MM)
+        self.combo_constant_current_step_basis.addItem("Strain (%)", HSW_BASIS_STRAIN_PCT)
+        constant_current_form.addRow("Step basis", self.combo_constant_current_step_basis)
+        self.spin_constant_current_step_size = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_step_size.setDecimals(4)
+        self.spin_constant_current_step_size.setRange(-100000.0, 100000.0)
+        self.spin_constant_current_step_size.setValue(0.01)
+        self.spin_constant_current_step_size.setSuffix(" mm")
+        constant_current_form.addRow("Step size", self.spin_constant_current_step_size)
+        self.spin_constant_current_hold_s = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_hold_s.setDecimals(2)
+        self.spin_constant_current_hold_s.setRange(0.0, 3600.0)
+        self.spin_constant_current_hold_s.setValue(1.0)
+        self.spin_constant_current_hold_s.setSuffix(" s")
+        constant_current_form.addRow("Hold per step", self.spin_constant_current_hold_s)
+        self.spin_constant_current_move_speed_mm_s = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_move_speed_mm_s.setDecimals(3)
+        self.spin_constant_current_move_speed_mm_s.setRange(0.001, 50.0)
+        self.spin_constant_current_move_speed_mm_s.setValue(0.05)
+        self.spin_constant_current_move_speed_mm_s.setSuffix(" mm/s")
+        constant_current_form.addRow("Step speed", self.spin_constant_current_move_speed_mm_s)
+        self.spin_constant_current_start_mA = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_start_mA.setDecimals(2)
+        self.spin_constant_current_start_mA.setRange(0.0, 5000.0)
+        self.spin_constant_current_start_mA.setValue(1.0)
+        self.spin_constant_current_start_mA.setSuffix(" mA")
+        constant_current_form.addRow("Current start", self.spin_constant_current_start_mA)
+        self.spin_constant_current_end_mA = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_end_mA.setDecimals(2)
+        self.spin_constant_current_end_mA.setRange(0.0, 5000.0)
+        self.spin_constant_current_end_mA.setValue(80.0)
+        self.spin_constant_current_end_mA.setSuffix(" mA")
+        constant_current_form.addRow("Current end", self.spin_constant_current_end_mA)
+        self.spin_constant_current_step_mA = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_step_mA.setDecimals(2)
+        self.spin_constant_current_step_mA.setRange(0.01, 5000.0)
+        self.spin_constant_current_step_mA.setValue(10.0)
+        self.spin_constant_current_step_mA.setSuffix(" mA")
+        constant_current_form.addRow("Current step", self.spin_constant_current_step_mA)
+        self.check_constant_current_return_to_start = QtWidgets.QCheckBox(
+            "Step back to the start target after each current",
+            automation_box,
+        )
+        self.check_constant_current_return_to_start.setChecked(True)
+        constant_current_form.addRow("", self.check_constant_current_return_to_start)
+        self.recipe_stack.addWidget(constant_current_page)
+
         automation_form.addRow("", self.recipe_stack)
         self.check_return_to_origin = QtWidgets.QCheckBox(
             "Return to the recipe start position when finished",
@@ -4999,6 +5125,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_settle_s,
             self.spin_current_sweep_interval,
             self.spin_current_sweep_log_interval,
+            self.spin_constant_current_start_target,
+            self.spin_constant_current_end_target,
+            self.spin_constant_current_step_size,
+            self.spin_constant_current_hold_s,
+            self.spin_constant_current_move_speed_mm_s,
+            self.spin_constant_current_start_mA,
+            self.spin_constant_current_end_mA,
+            self.spin_constant_current_step_mA,
         ):
             widget.valueChanged.connect(self._update_recipe_mode_ui)
         self.spin_ui_interval.valueChanged.connect(self._apply_ui_refresh_interval)
@@ -5018,6 +5152,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_distribution_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
         self.combo_current_sweep_basis.currentIndexChanged.connect(self._update_current_sweep_basis_ui)
         self.combo_current_sweep_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
+        self.combo_constant_current_start_basis.currentIndexChanged.connect(self._update_constant_current_basis_ui)
+        self.combo_constant_current_start_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
+        self.combo_constant_current_step_basis.currentIndexChanged.connect(self._update_constant_current_basis_ui)
+        self.combo_constant_current_step_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
+        self.check_constant_current_return_to_start.toggled.connect(self._update_recipe_mode_ui)
         self.spin_steps_per_mm.valueChanged.connect(self._clamp_motion_resolution_controls)
         self.spin_steps_per_mm.valueChanged.connect(self._update_recipe_mode_ui)
 
@@ -5026,6 +5165,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_supply_profile_defaults()
         self._update_distribution_basis_ui()
         self._update_current_sweep_basis_ui()
+        self._update_constant_current_basis_ui()
         self._clamp_motion_resolution_controls()
         self._apply_plot_preset("dma")
         self._update_recipe_mode_ui()
@@ -5282,8 +5422,146 @@ class MainWindow(QtWidgets.QMainWindow):
             self._save_settings()
 
     def _handle_plot_config_changed(self, *_args: object) -> None:
+        if not self._plot_settings_restore_in_progress:
+            self._store_dashboard_plot_settings()
         self._refresh_plots()
         self._persist_settings_if_enabled()
+
+    def _dashboard_plot_settings_mode_key(self, mode: str | None = None) -> str:
+        mode_text = str(mode if mode is not None else self.combo_recipe_mode.currentData() or "ramp")
+        safe = re.sub(r"[^A-Za-z0-9_]+", "_", mode_text).strip("_")
+        return safe or "recipe"
+
+    def _dashboard_plot_settings_prefix(self, index: int, mode: str | None = None) -> str:
+        if mode is None:
+            return f"plot_tile_{index}"
+        return f"plot_tile_recipe_{self._dashboard_plot_settings_mode_key(mode)}_{index}"
+
+    def _default_dashboard_plot_settings(self, _index: int) -> dict[str, object]:
+        return {
+            "visible": True,
+            "x": "elapsed_s",
+            "y_left": "load_g",
+            "y_right": "",
+        }
+
+    def _capture_dashboard_plot_settings(self) -> list[dict[str, object]]:
+        settings: list[dict[str, object]] = []
+        for index, tile in enumerate(self._plot_tiles):
+            fallback = self._default_dashboard_plot_settings(index)
+            settings.append(
+                {
+                    "visible": tile.visible.isChecked(),
+                    "x": tile.x_combo.currentData() or fallback["x"],
+                    "y_left": tile.y_left_combo.currentData() or fallback["y_left"],
+                    "y_right": tile.y_right_combo.currentData() or fallback["y_right"],
+                }
+            )
+        return settings
+
+    def _settings_have_dashboard_plot_values(self, mode: str | None = None) -> bool:
+        if mode is not None and self._dashboard_plot_settings_mode_key(mode) in self._dashboard_plot_settings_by_mode:
+            return True
+        if not self._plot_tiles:
+            return False
+        prefix = self._dashboard_plot_settings_prefix(0, mode)
+        return self.settings.contains(f"{prefix}_x") or self.settings.contains(f"{prefix}_y_left")
+
+    def _read_dashboard_plot_settings(self, mode: str | None = None) -> list[dict[str, object]]:
+        if mode is not None:
+            mode_key = self._dashboard_plot_settings_mode_key(mode)
+            cached = self._dashboard_plot_settings_by_mode.get(mode_key)
+            if cached is not None:
+                return [dict(values) for values in cached]
+            if self._settings_have_dashboard_plot_values(mode):
+                settings = [
+                    self._read_dashboard_plot_tile_settings(index, mode)
+                    for index in range(len(self._plot_tiles))
+                ]
+                self._dashboard_plot_settings_by_mode[mode_key] = [dict(values) for values in settings]
+                return settings
+        if self._settings_have_dashboard_plot_values(None):
+            return [
+                self._read_dashboard_plot_tile_settings(index, None)
+                for index in range(len(self._plot_tiles))
+            ]
+        return [self._default_dashboard_plot_settings(index) for index in range(len(self._plot_tiles))]
+
+    def _read_dashboard_plot_tile_settings(self, index: int, mode: str | None = None) -> dict[str, object]:
+        defaults = self._default_dashboard_plot_settings(index)
+        prefix = self._dashboard_plot_settings_prefix(index, mode)
+        return {
+            "visible": bool(self.settings.value(f"{prefix}_visible", defaults["visible"], type=bool)),
+            "x": self.settings.value(f"{prefix}_x", defaults["x"], type=str),
+            "y_left": self.settings.value(f"{prefix}_y_left", defaults["y_left"], type=str),
+            "y_right": self.settings.value(f"{prefix}_y_right", defaults["y_right"], type=str),
+        }
+
+    def _write_dashboard_plot_settings(
+        self,
+        values_by_tile: Sequence[Mapping[str, object]],
+        mode: str | None = None,
+    ) -> None:
+        for index, values in enumerate(values_by_tile):
+            prefix = self._dashboard_plot_settings_prefix(index, mode)
+            defaults = self._default_dashboard_plot_settings(index)
+            self.settings.setValue(f"{prefix}_visible", bool(values.get("visible", defaults["visible"])))
+            self.settings.setValue(f"{prefix}_x", str(values.get("x", defaults["x"])))
+            self.settings.setValue(f"{prefix}_y_left", str(values.get("y_left", defaults["y_left"])))
+            self.settings.setValue(f"{prefix}_y_right", str(values.get("y_right", defaults["y_right"])))
+
+    def _store_default_dashboard_plot_settings_if_missing(self) -> None:
+        if self._settings_have_dashboard_plot_values(None):
+            return
+        defaults = [self._default_dashboard_plot_settings(index) for index in range(len(self._plot_tiles))]
+        self._write_dashboard_plot_settings(defaults, None)
+
+    def _store_dashboard_plot_settings(
+        self,
+        mode: str | None = None,
+        *,
+        write_settings: bool = False,
+    ) -> None:
+        if not self._plot_tiles:
+            return
+        mode_text = str(mode if mode is not None else self.combo_recipe_mode.currentData() or "ramp")
+        values = self._capture_dashboard_plot_settings()
+        self._dashboard_plot_settings_by_mode[self._dashboard_plot_settings_mode_key(mode_text)] = [
+            dict(tile_values) for tile_values in values
+        ]
+        if write_settings:
+            self._write_dashboard_plot_settings(values, mode_text)
+
+    def _apply_dashboard_plot_settings(self, mode: str | None = None) -> None:
+        if not self._plot_tiles:
+            return
+        mode_text = str(mode if mode is not None else self.combo_recipe_mode.currentData() or "ramp")
+        settings = self._read_dashboard_plot_settings(mode_text)
+        self._plot_settings_restore_in_progress = True
+        try:
+            for index, tile in enumerate(self._plot_tiles):
+                values = settings[index] if index < len(settings) else self._default_dashboard_plot_settings(index)
+                blockers = [
+                    QtCore.QSignalBlocker(tile.visible),
+                    QtCore.QSignalBlocker(tile.x_combo),
+                    QtCore.QSignalBlocker(tile.y_left_combo),
+                    QtCore.QSignalBlocker(tile.y_right_combo),
+                ]
+                try:
+                    tile.visible.setChecked(bool(values.get("visible", True)))
+                    for combo, key_name in (
+                        (tile.x_combo, "x"),
+                        (tile.y_left_combo, "y_left"),
+                        (tile.y_right_combo, "y_right"),
+                    ):
+                        combo_index = combo.findData(str(values.get(key_name, "")))
+                        if combo_index >= 0:
+                            combo.setCurrentIndex(combo_index)
+                finally:
+                    del blockers
+        finally:
+            self._plot_settings_restore_in_progress = False
+        self._refresh_plots()
 
     def _apply_plot_preset(self, preset: str) -> None:
         presets = {
@@ -5892,6 +6170,12 @@ class MainWindow(QtWidgets.QMainWindow):
         resolution_mA = self._supply_current_resolution_mA()
         return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
 
+    def _minimum_recipe_current_mA(self) -> float:
+        return MIN_RECIPE_CURRENT_MA
+
+    def _recipe_current_setpoint_mA(self, current_mA: float) -> float:
+        return max(self._minimum_recipe_current_mA(), self._quantize_supply_current_mA(current_mA))
+
     def _quantize_ramp_current_mA(self, current_mA: float, direction: float, end_mA: float) -> float:
         resolution_mA = self._supply_current_resolution_mA()
         if direction >= 0.0:
@@ -5905,6 +6189,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log("Recipe stopped because the power supply is not connected.")
             return False
         current_mA = self._quantize_supply_current_mA(current_mA)
+        if self._automation_active or self._session_active:
+            current_mA = max(self._minimum_recipe_current_mA(), current_mA)
         try:
             if not self._supply_output_enabled:
                 self._supply_controller.initialize_output(
@@ -5996,9 +6282,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         if not self._supply_voltage_limit_logged:
+            target_text = (
+                f"{self._minimum_recipe_current_mA():.3g} mA"
+                if self._automation_active or self._session_active
+                else "0 mA"
+            )
             self._log(
                 f"Supply voltage reached the configured limit ({measured_v:.3f} V / {limit_v:.3f} V); "
-                "setting current to 0 mA."
+                f"setting current to {target_text}."
             )
             self._supply_voltage_limit_logged = True
         if self._supply_output_enabled and (self._supply_last_setpoint_mA or 0.0) > 0.0:
@@ -6813,6 +7104,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 float(self.spin_current_sweep_target_ramp_rate.value()),
                 per_second=True,
             )
+        )
+        constant_basis = self._constant_current_start_basis()
+        self.label_constant_current_start_equiv.setText(
+            self._target_equivalent_text(constant_basis, float(self.spin_constant_current_start_target.value()))
+        )
+        self.label_constant_current_end_equiv.setText(
+            self._target_equivalent_text(constant_basis, float(self.spin_constant_current_end_target.value()))
         )
 
     def _set_position_reference_now(self) -> None:
@@ -7673,6 +7971,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self._tensile_position_mm(self._position_reference_mm),
         )
 
+    def _current_relative_position_and_strain(
+        self,
+        specimen_position_mm: float,
+    ) -> tuple[float | None, float | None, float | None, float | None]:
+        zero_position_mm = self._active_constant_current_zero_position_mm
+        if zero_position_mm is None:
+            return None, None, None, None
+        relative_position_mm = self._tension_motion_sign() * (float(specimen_position_mm) - float(zero_position_mm))
+        config = self._control_config()
+        length_mm = config.initial_length_mm if config is not None else float(self.spin_initial_length.value())
+        current_l0_mm = float(length_mm) + self._tension_motion_sign() * (
+            float(zero_position_mm) - float(self._position_reference_mm)
+        )
+        if not math.isfinite(float(current_l0_mm)) or float(current_l0_mm) <= 0.0:
+            return float(zero_position_mm), None, relative_position_mm, None
+        return (
+            float(zero_position_mm),
+            current_l0_mm,
+            relative_position_mm,
+            100.0 * relative_position_mm / current_l0_mm,
+        )
+
     def _motor_step_mm(self) -> float:
         config = self._control_config()
         steps_per_mm = config.steps_per_mm if config is not None else float(self.spin_steps_per_mm.value())
@@ -7951,6 +8271,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_calibration_speed_mm_s,
             self.spin_current_sweep_target_speed_mm_s,
             self.spin_current_sweep_balance_speed_mm_s,
+            self.spin_constant_current_move_speed_mm_s,
         ):
             control.blockSignals(True)
             control.setMinimum(min_speed)
@@ -7964,6 +8285,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _is_current_sweep_mode(self, mode: str | None = None) -> bool:
         return str(mode if mode is not None else self.combo_recipe_mode.currentData() or "") in CURRENT_SWEEP_MODES
+
+    def _is_constant_current_strain_sweep_mode(self, mode: str | None = None) -> bool:
+        default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
+        return str(mode if mode is not None else default_mode or "") == CONSTANT_CURRENT_STRAIN_SWEEP
 
     def _is_calibration_mode(self, mode: str | None = None) -> bool:
         default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
@@ -8005,7 +8330,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _store_current_sweep_target_values(self, mode: str | None = None) -> None:
         mode = str(mode or self.combo_recipe_mode.currentData() or "")
-        if mode in CURRENT_SWEEP_BASIS_BY_MODE:
+        if mode in CURRENT_TARGET_VALUE_MODES:
             self._current_sweep_target_values_by_mode[mode] = self._current_sweep_target_values()
 
     def _apply_current_sweep_target_values(
@@ -8050,10 +8375,13 @@ class MainWindow(QtWidgets.QMainWindow):
         previous_mode = self._last_recipe_mode
         current_mode = str(self.combo_recipe_mode.currentData() or "ramp")
         if not self._settings_restore_in_progress:
+            self._store_dashboard_plot_settings(previous_mode)
             self._store_current_sweep_target_values(previous_mode)
-            if current_mode in CURRENT_SWEEP_BASIS_BY_MODE and current_mode != previous_mode:
+            if current_mode in CURRENT_TARGET_VALUE_MODES and current_mode != previous_mode:
                 self._apply_current_sweep_target_values(current_mode)
         self._last_recipe_mode = current_mode
+        if not self._settings_restore_in_progress:
+            self._apply_dashboard_plot_settings(current_mode)
         self._update_recipe_mode_ui()
 
     def _pre_measurement_setup_enabled(self, mode: str | None = None) -> bool:
@@ -8067,6 +8395,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis == HSW_BASIS_STRAIN_PCT:
             return " %", 4
         return " MPa", 3
+
+    def _constant_current_start_basis(self) -> str:
+        return str(self.combo_constant_current_start_basis.currentData() or HSW_BASIS_STRAIN_PCT)
+
+    def _constant_current_step_basis(self) -> str:
+        return str(self.combo_constant_current_step_basis.currentData() or MECHANICAL_STEP_DISPLACEMENT_MM)
+
+    def _update_constant_current_basis_ui(self) -> None:
+        suffix, decimals = self._distribution_units(self._constant_current_start_basis())
+        for widget in (self.spin_constant_current_start_target, self.spin_constant_current_end_target):
+            widget.blockSignals(True)
+            widget.setDecimals(decimals)
+            widget.setSuffix(suffix)
+            widget.blockSignals(False)
+        step_basis = self._constant_current_step_basis()
+        self.spin_constant_current_step_size.blockSignals(True)
+        if step_basis == HSW_BASIS_STRAIN_PCT:
+            self.spin_constant_current_step_size.setDecimals(4)
+            self.spin_constant_current_step_size.setSuffix(" %")
+        else:
+            self.spin_constant_current_step_size.setDecimals(4)
+            self.spin_constant_current_step_size.setSuffix(" mm")
+        self.spin_constant_current_step_size.blockSignals(False)
 
     def _update_distribution_basis_ui(self) -> None:
         suffix, decimals = self._distribution_units()
@@ -9224,6 +9575,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _accept_pending_linear_zero_plateau_if_stable(self) -> bool:
         if self._setup_zero_fallback_reason != "linear_unload_slack":
             return False
+        return self._accept_stable_setup_zero_plateau()
+
+    def _accept_stable_setup_zero_plateau(self) -> bool:
         return_points = self._length_setup_points[max(0, int(self._setup_return_zero_start_point_index)) :]
         if len(return_points) < SETUP_ZERO_FALLBACK_MIN_POINTS:
             return False
@@ -9260,6 +9614,27 @@ class MainWindow(QtWidgets.QMainWindow):
             f"using current position {_format_compact_unit(zero_position_mm, 'mm')} for l0."
         )
         return True
+
+    def _maybe_accept_setup_zero_plateau_without_more_travel(
+        self,
+        basis: str,
+        target_value: float,
+    ) -> bool:
+        if self._automation_step_note != "setup_return_zero":
+            return False
+        if self._setup_zero_position_mm is not None or self._setup_zero_fallback_return_position_mm is not None:
+            return False
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        target_load_g = self._basis_value_as_load_g(basis, target_value)
+        if target_load_g is None or target_load_g > self._zero_return_acceptance_tolerance_g():
+            return False
+        current_load_g = abs(self._current_effective_load_g())
+        if current_load_g <= self._zero_return_acceptance_tolerance_g():
+            return False
+        if current_load_g > SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G:
+            return False
+        return self._accept_stable_setup_zero_plateau()
 
     def _handle_pending_setup_zero_fallback(self) -> bool:
         target_mm = self._setup_zero_fallback_return_position_mm
@@ -9556,6 +9931,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if self._maybe_start_end_zero_plateau_fallback(basis, target_value, effective_tolerance):
             return False
+        self._maybe_accept_setup_zero_plateau_without_more_travel(basis, target_value)
         if (
             self._automation_step_note == "setup_return_zero"
             and self._setup_zero_position_mm is not None
@@ -9993,6 +10369,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "distribution": 3,
             CALIBRATION: 4,
             CALIBRATION_COPPER: 4,
+            CONSTANT_CURRENT_STRAIN_SWEEP: 6,
         }.get(mode, 0)
         self.recipe_stack.setCurrentIndex(page_index)
         self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
@@ -10102,15 +10479,50 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"{_format_compact_unit(self.spin_setup_preload_stress_mpa.value(), 'MPa', decimals=3)}"
                     f"{load_text} preload for length entry, then back to 0 g."
                 )
+        elif self._is_constant_current_strain_sweep_mode(mode):
+            self._update_constant_current_basis_ui()
+            basis = self._constant_current_start_basis()
+            suffix, _ = self._distribution_units(basis)
+            step_suffix = "%" if self._constant_current_step_basis() == HSW_BASIS_STRAIN_PCT else "mm"
+            summary = (
+                f"Plan: constant-current stress-strain, current "
+                f"{_format_compact_number(self.spin_constant_current_start_mA.value(), decimals=2)} to "
+                f"{_format_compact_unit(self.spin_constant_current_end_mA.value(), 'mA', decimals=2)} in "
+                f"{_format_compact_unit(self.spin_constant_current_step_mA.value(), 'mA', decimals=2)} steps; "
+                f"seek {HSW_BASIS_LABELS.get(basis, basis)} "
+                f"{_format_compact_number(self.spin_constant_current_start_target.value())}{suffix}, "
+                f"then fixed {_format_compact_unit(abs(self.spin_constant_current_step_size.value()), step_suffix, decimals=4)} "
+                f"mechanical steps until {_format_compact_number(self.spin_constant_current_end_target.value())}{suffix}."
+            )
+            if self.check_constant_current_return_to_start.isChecked():
+                summary += " Steps back to the start target after each current."
+            summary += (
+                f" Holds/logs {_format_compact_unit(self.spin_constant_current_hold_s.value(), 's', decimals=2)} "
+                "after each displacement step. No closed-loop corrections are applied during the linear steps."
+            )
+            if self._pre_measurement_setup_enabled(mode):
+                setup_load_g = load_g_from_stress_mpa(
+                    float(self.spin_setup_preload_stress_mpa.value()),
+                    float(self.spin_diameter.value()),
+                )
+                load_text = "" if setup_load_g is None else f" ({_format_compact_unit(setup_load_g, 'g', decimals=4)})"
+                summary += (
+                    " Setup: 0 g load, "
+                    f"{_format_compact_unit(self.spin_setup_preload_stress_mpa.value(), 'MPa', decimals=3)}"
+                    f"{load_text} preload for length entry, then back to 0 g."
+                )
+            banner = "Constant-current stress-strain"
         else:
             summary = (
                 f"Plan: displacement ramp of {_format_compact_unit(self.spin_ramp_distance.value(), 'mm')} "
                 f"from the current position."
             )
             banner = "Displacement ramp"
-        if self._is_current_sweep_mode(mode) or self._is_calibration_mode(mode):
+        if self._is_current_sweep_mode(mode) or self._is_calibration_mode(mode) or self._is_constant_current_strain_sweep_mode(mode):
             if self._is_current_sweep_mode(mode):
                 summary += " Recipe controls current."
+            elif self._is_constant_current_strain_sweep_mode(mode):
+                summary += " Recipe controls current and open-loop displacement steps."
             else:
                 summary += " Recipe owns the hardware sequence."
         preload_text = (
@@ -10296,6 +10708,16 @@ class MainWindow(QtWidgets.QMainWindow):
                         control_interval_s=interval_s,
                     )
                 continue
+            if step.action == "mechanical_scan":
+                max_steps = self._estimate_mechanical_scan_step_count(step)
+                per_step_s = max(interval_s, float(step.duration_s or 0.0))
+                ticks += max_steps * max(1, int(math.ceil(per_step_s / interval_s)))
+                if logging_enabled:
+                    points += max_steps * self._scheduled_log_point_count(
+                        duration_s=per_step_s,
+                        control_interval_s=interval_s,
+                    )
+                continue
             duration_s = max(0.0, float(step.duration_s or 0.0))
             if duration_s > 0.0:
                 ticks += max(1, int(math.ceil(duration_s / interval_s)))
@@ -10318,6 +10740,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 points += 1
         return points, ticks
 
+    def _estimate_mechanical_scan_step_count(self, step: AutomationStep) -> int:
+        if step.mechanical_step_limit is not None:
+            return max(1, int(step.mechanical_step_limit))
+        if step.mechanical_step_basis == HSW_BASIS_STRAIN_PCT and step.basis == HSW_BASIS_STRAIN_PCT:
+            try:
+                step_value = abs(float(step.mechanical_step_value or 0.0))
+                target_value = abs(float(step.target_value or 0.0))
+            except (TypeError, ValueError):
+                step_value = 0.0
+                target_value = 0.0
+            if step_value > 0.0:
+                return max(1, int(math.ceil(target_value / step_value)))
+        return 100
+
     def _current_sweep_nominal_duration_s(self, step: AutomationStep) -> float:
         if step.current_start_mA is None or step.current_end_mA is None:
             return 0.0
@@ -10326,8 +10762,8 @@ class MainWindow(QtWidgets.QMainWindow):
             abs(float(step.current_ramp_rate_mA_s or self.spin_current_sweep_step_mA.value())),
         )
         return abs(
-            self._quantize_supply_current_mA(float(step.current_end_mA))
-            - self._quantize_supply_current_mA(float(step.current_start_mA))
+            self._recipe_current_setpoint_mA(float(step.current_end_mA))
+            - self._recipe_current_setpoint_mA(float(step.current_start_mA))
         ) / ramp_rate
 
     def _current_sweep_hold_estimate_s(self, step: AutomationStep) -> float:
@@ -10905,6 +11341,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._minimum_held_speed_mm_s(),
                     self._current_sweep_dynamic_speed_cap_mm_s(),
                 )
+            if self._is_constant_current_strain_sweep_mode(self._automation_name):
+                speed_mm_s = (
+                    config.distribution_seek_speed_mm_s
+                    if config is not None
+                    else float(self.spin_distribution_seek_speed_mm_s.value())
+                )
+                return max(self._minimum_held_speed_mm_s(), speed_mm_s)
             if self._is_calibration_mode(self._automation_name):
                 if self._automation_phase == "seek":
                     speed_mm_s = (
@@ -10947,6 +11390,8 @@ class MainWindow(QtWidgets.QMainWindow):
         mode = str(self.combo_recipe_mode.currentData() or "ramp")
         if self._is_current_sweep_mode(mode):
             return self._current_sweep_dynamic_speed_cap_mm_s()
+        if self._is_constant_current_strain_sweep_mode(mode):
+            return max(self._minimum_held_speed_mm_s(), float(self.spin_constant_current_move_speed_mm_s.value()))
         if self._is_calibration_mode(mode):
             return max(
                 self._minimum_held_speed_mm_s(),
@@ -11446,6 +11891,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "positive_motion_is_tension": self.check_positive_motion_is_tension.isChecked(),
             "backlash_mm": float(self.spin_backlash_mm.value()),
             "return_to_origin": self.check_return_to_origin.isChecked(),
+            "constant_current_zero": {
+                "active_position_mm": self._active_constant_current_zero_position_mm,
+                "active_current_mA": self._active_constant_current_zero_current_mA,
+                "positions_by_leg": dict(self._constant_current_step_base_position_by_note),
+            },
             "scale": {
                 "port": str(self.combo_scale_port.currentData() or ""),
                 "baud": int(self.combo_scale_baud.currentText()),
@@ -11775,6 +12225,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._record_current_point()
 
     def _stop_session(self) -> None:
+        if not self._is_ui_thread():
+            self._call_on_ui_thread_sync(self._stop_session)
+            return
         if not self._session_active:
             return
         self._finalize_calibration_report_if_needed()
@@ -11998,6 +12451,14 @@ class MainWindow(QtWidgets.QMainWindow):
             strain = self._strain_percent_for_position(specimen_position_mm)
             diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
             stress = stress_mpa_from_load_g(load_g, diameter_mm)
+        (
+            current_zero_position_mm,
+            current_l0_mm,
+            current_relative_position_mm,
+            current_relative_strain_pct,
+        ) = (
+            self._current_relative_position_and_strain(specimen_position_mm)
+        )
         tensile_displacement_mm = self._tensile_displacement_mm(specimen_position_mm)
         snapshot = self._refresh_supply_snapshot()
         current_set_mA = self._supply_last_setpoint_mA
@@ -12020,6 +12481,10 @@ class MainWindow(QtWidgets.QMainWindow):
             preload_state=preload_state,
             strain_pct=strain,
             stress_mpa=stress,
+            current_zero_position_mm=current_zero_position_mm,
+            current_l0_mm=current_l0_mm,
+            current_relative_position_mm=current_relative_position_mm,
+            current_relative_strain_pct=current_relative_strain_pct,
             current_set_mA=current_set_mA,
             current_measured_mA=current_measured_mA,
             voltage_V=snapshot.get("voltage_V"),
@@ -12056,6 +12521,14 @@ class MainWindow(QtWidgets.QMainWindow):
             config = self._control_config()
             diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
             stress = stress_mpa_from_load_g(load_g, diameter_mm)
+        (
+            current_zero_position_mm,
+            current_l0_mm,
+            current_relative_position_mm,
+            current_relative_strain_pct,
+        ) = (
+            self._current_relative_position_and_strain(specimen_position_mm)
+        )
         tensile_displacement_mm = self._tensile_displacement_mm(specimen_position_mm)
         current_set_mA = self._supply_last_setpoint_mA
         current_measured_mA = self._supply_snapshot.get("current_mA")
@@ -12077,6 +12550,10 @@ class MainWindow(QtWidgets.QMainWindow):
             preload_state=preload_state,
             strain_pct=strain,
             stress_mpa=stress,
+            current_zero_position_mm=current_zero_position_mm,
+            current_l0_mm=current_l0_mm,
+            current_relative_position_mm=current_relative_position_mm,
+            current_relative_strain_pct=current_relative_strain_pct,
             current_set_mA=current_set_mA,
             current_measured_mA=current_measured_mA,
             voltage_V=self._supply_snapshot.get("voltage_V"),
@@ -12295,6 +12772,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 "preload_state": point.preload_state,
                 "strain_pct": "" if point.strain_pct is None else f"{point.strain_pct:.6f}",
                 "stress_mpa": "" if point.stress_mpa is None else f"{point.stress_mpa:.6f}",
+                "current_zero_position_mm": ""
+                if point.current_zero_position_mm is None
+                else f"{point.current_zero_position_mm:.6f}",
+                "current_l0_mm": "" if point.current_l0_mm is None else f"{point.current_l0_mm:.6f}",
+                "current_relative_position_mm": ""
+                if point.current_relative_position_mm is None
+                else f"{point.current_relative_position_mm:.6f}",
+                "current_relative_strain_pct": ""
+                if point.current_relative_strain_pct is None
+                else f"{point.current_relative_strain_pct:.6f}",
                 "current_set_mA": "" if point.current_set_mA is None else f"{point.current_set_mA:.6f}",
                 "current_measured_mA": "" if point.current_measured_mA is None else f"{point.current_measured_mA:.6f}",
                 "voltage_V": "" if point.voltage_V is None else f"{point.voltage_V:.6f}",
@@ -12326,7 +12813,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _recipe_requires_tic(self, steps: Sequence[AutomationStep]) -> bool:
-        return any(step.action in {"move", "seek_target", "ramp_target", "calibration_move"} for step in steps)
+        return any(step.action in {"move", "seek_target", "ramp_target", "calibration_move", "mechanical_scan"} for step in steps)
 
     def _recipe_requires_scale(self, steps: Sequence[AutomationStep]) -> bool:
         if self.check_hardware_tare_on_start.isChecked():
@@ -12334,7 +12821,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if any(step.action in {"calibration_record", "calibration_move"} for step in steps):
             return True
         return any(
-            step.action in {"seek_target", "ramp_target"} and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            step.action in {"seek_target", "ramp_target", "mechanical_scan"}
+            and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             for step in steps
         )
 
@@ -12500,6 +12988,24 @@ class MainWindow(QtWidgets.QMainWindow):
         elif mode == CURRENT_SWEEP_STRAIN:
             prefix = "iso-strain"
             target_unit = "pct"
+        elif mode == CONSTANT_CURRENT_STRAIN_SWEEP:
+            setup = self._recipe_number_token(self.spin_setup_preload_stress_mpa.value())
+            target_start = self._recipe_number_token(self.spin_constant_current_start_target.value())
+            target_end = self._recipe_number_token(self.spin_constant_current_end_target.value())
+            step = self._recipe_number_token(abs(self.spin_constant_current_step_size.value()))
+            current_start = self._recipe_number_token(self.spin_constant_current_start_mA.value())
+            current_end = self._recipe_number_token(self.spin_constant_current_end_mA.value())
+            current_step = self._recipe_number_token(self.spin_constant_current_step_mA.value())
+            step_unit = "pct" if self._constant_current_step_basis() == HSW_BASIS_STRAIN_PCT else "mm"
+            basis_token = {
+                HSW_BASIS_LOAD_G: "load",
+                HSW_BASIS_STRESS_MPA: "stress",
+                HSW_BASIS_STRAIN_PCT: "strain",
+            }.get(self._constant_current_start_basis(), "target")
+            return (
+                f"constant-current-stress-strain_setup{setup}MPa_{basis_token}{target_start}-{target_end}_"
+                f"step{step}{step_unit}_current{current_start}-{current_end}x{current_step}mA.recipe.json"
+            )
         else:
             prefix = re.sub(r"[^a-z0-9]+", "-", mode.lower()).strip("-") or "recipe"
             return f"{prefix}.recipe.json"
@@ -12577,6 +13083,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 "max_seek_mm": float(self.spin_current_sweep_max_seek_mm.value()),
                 "settle_s": float(self.spin_current_sweep_settle_s.value()),
             }
+        if self._is_constant_current_strain_sweep_mode(mode):
+            payload["recipe"]["constant_current_stress_strain"] = {
+                "start_basis": self._constant_current_start_basis(),
+                "target_start": float(self.spin_constant_current_start_target.value()),
+                "target_end": float(self.spin_constant_current_end_target.value()),
+                "step_basis": self._constant_current_step_basis(),
+                "step_size": float(self.spin_constant_current_step_size.value()),
+                "hold_s": float(self.spin_constant_current_hold_s.value()),
+                "move_speed_mm_s": float(self.spin_constant_current_move_speed_mm_s.value()),
+                "current_start_mA": float(self.spin_constant_current_start_mA.value()),
+                "current_end_mA": float(self.spin_constant_current_end_mA.value()),
+                "current_step_mA": float(self.spin_constant_current_step_mA.value()),
+                "return_to_start": bool(self.check_constant_current_return_to_start.isChecked()),
+            }
         return payload
 
     def _apply_recipe_payload(self, payload: Mapping[str, Any]) -> None:
@@ -12637,6 +13157,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_balance_speed_mm_s.setValue(float(current_sweep.get("balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())))
             self.spin_current_sweep_max_seek_mm.setValue(float(current_sweep.get("max_seek_mm", self.spin_current_sweep_max_seek_mm.value())))
             self.spin_current_sweep_settle_s.setValue(float(current_sweep.get("settle_s", self.spin_current_sweep_settle_s.value())))
+        constant_current = recipe.get("constant_current_stress_strain")
+        if isinstance(constant_current, Mapping):
+            basis = str(constant_current.get("start_basis", self._constant_current_start_basis()))
+            basis_index = self.combo_constant_current_start_basis.findData(basis)
+            if basis_index >= 0:
+                self.combo_constant_current_start_basis.setCurrentIndex(basis_index)
+            step_basis = str(constant_current.get("step_basis", self._constant_current_step_basis()))
+            step_basis_index = self.combo_constant_current_step_basis.findData(step_basis)
+            if step_basis_index >= 0:
+                self.combo_constant_current_step_basis.setCurrentIndex(step_basis_index)
+            self.spin_constant_current_start_target.setValue(float(constant_current.get("target_start", self.spin_constant_current_start_target.value())))
+            self.spin_constant_current_end_target.setValue(float(constant_current.get("target_end", self.spin_constant_current_end_target.value())))
+            self.spin_constant_current_step_size.setValue(float(constant_current.get("step_size", self.spin_constant_current_step_size.value())))
+            self.spin_constant_current_hold_s.setValue(float(constant_current.get("hold_s", self.spin_constant_current_hold_s.value())))
+            self.spin_constant_current_move_speed_mm_s.setValue(float(constant_current.get("move_speed_mm_s", self.spin_constant_current_move_speed_mm_s.value())))
+            self.spin_constant_current_start_mA.setValue(float(constant_current.get("current_start_mA", self.spin_constant_current_start_mA.value())))
+            self.spin_constant_current_end_mA.setValue(float(constant_current.get("current_end_mA", self.spin_constant_current_end_mA.value())))
+            self.spin_constant_current_step_mA.setValue(float(constant_current.get("current_step_mA", self.spin_constant_current_step_mA.value())))
+            self.check_constant_current_return_to_start.setChecked(bool(constant_current.get("return_to_start", self.check_constant_current_return_to_start.isChecked())))
         self._update_recipe_mode_ui()
 
     def _save_recipe_to_path(self, path: str | Path) -> None:
@@ -12730,16 +13269,30 @@ class MainWindow(QtWidgets.QMainWindow):
             return f"Ramp to {end_text}"
 
         if step.action == "sweep_current":
+            if self._automation_phase in {"current", "current_hold", "current_limit_unwind"}:
+                context_target_text = self._automation_target_text(self._automation_basis, self._automation_target_value)
+                if self._automation_phase == "current_hold":
+                    held = self._automation_current_target_text(self._active_current_sweep_last_setpoint_mA)
+                    return f"At {context_target_text}: holding {held}, recovering target"
+                target_current = self._automation_current_target_text(self._active_current_sweep_display_target_mA)
+                direction_value = self._active_current_sweep_display_direction
+                if abs(direction_value) <= 1e-12 and self._active_current_sweep_display_target_mA is not None:
+                    start_for_display = self._active_current_sweep_last_setpoint_mA
+                    if start_for_display is not None:
+                        direction_value = float(self._active_current_sweep_display_target_mA) - float(start_for_display)
+                direction = "increasing" if direction_value >= 0.0 else "decreasing"
+                return f"At {context_target_text}: {direction} current to {target_current}"
             start_mA = step.current_start_mA
             end_mA = step.current_end_mA
             if start_mA is None or end_mA is None:
                 return f"Current sweep at {target_text}"
             direction = "Increasing" if float(end_mA) >= float(start_mA) else "Decreasing"
             target_current = self._automation_current_target_text(end_mA)
-            if self._automation_phase == "current_hold":
-                held = self._automation_current_target_text(self._active_current_sweep_last_setpoint_mA)
-                return f"At {target_text}: holding {held}, recovering target"
             return f"At {target_text}: {direction.lower()} current to {target_current}"
+
+        if step.action == "mechanical_scan":
+            current_text = self._automation_current_target_text(step.current_mA)
+            return f"At {current_text}: fixed displacement steps toward {target_text}"
 
         if step.action == "settle":
             return f"Settling at {target_text}"
@@ -12816,18 +13369,25 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         if self._length_setup_progress is None:
             return
-        if total is None:
-            total = max(1, self._automation_total_steps or len(self._automation_steps))
-        if value is None:
-            value = total if complete else min(self._automation_completed_ticks, max(0, total - 1))
-        if percent is None:
-            percent = int(round((value / max(1, total)) * 100.0))
-        self._length_setup_progress.setRange(0, max(1, total))
-        self._length_setup_progress.setValue(max(0, min(value, max(1, total))))
+        setup_total = 0
+        for step in self._automation_steps:
+            if step.action == "start_session":
+                break
+            setup_total += 1
+        setup_total = max(1, setup_total)
+        setup_value = setup_total if complete else min(max(0, self._automation_index), max(0, setup_total - 1))
+        if self._automation_index >= setup_total:
+            setup_value = setup_total
+        setup_percent = int(round((setup_value / max(1, setup_total)) * 100.0))
+        self._length_setup_progress.setRange(0, setup_total)
+        self._length_setup_progress.setValue(max(0, min(setup_value, setup_total)))
+        sample_count = len(self._length_setup_points)
         if complete:
-            self._length_setup_progress.setFormat(f"Setup progress: complete ({total}/{total})")
+            self._length_setup_progress.setFormat(f"Setup progress: complete ({sample_count} samples)")
         elif self._automation_active:
-            self._length_setup_progress.setFormat(f"Setup progress: {percent}% ({value}/{total})")
+            self._length_setup_progress.setFormat(
+                f"Setup progress: {setup_percent}% ({setup_value}/{setup_total} steps, {sample_count} samples)"
+            )
         else:
             self._length_setup_progress.setFormat("Setup progress: idle")
 
@@ -12920,6 +13480,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
         self._clear_current_sweep_ramp_hold()
+        self._active_mechanical_scan_step_index = None
+        self._active_mechanical_scan_started_s = 0.0
+        self._active_mechanical_scan_move_count = 0
+        self._active_mechanical_scan_hold_started_s = None
+        self._active_mechanical_scan_move_pending = False
+        self._active_mechanical_scan_direction = None
+        self._active_mechanical_scan_origin_position_mm = None
+        self._constant_current_step_base_position_by_note.clear()
+        self._constant_current_step_base_strain_by_note.clear()
+        self._active_constant_current_zero_position_mm = None
+        self._active_constant_current_zero_current_mA = None
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
@@ -13010,6 +13581,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
         self._clear_current_sweep_ramp_hold()
+        self._active_mechanical_scan_step_index = None
+        self._active_mechanical_scan_started_s = 0.0
+        self._active_mechanical_scan_move_count = 0
+        self._active_mechanical_scan_hold_started_s = None
+        self._active_mechanical_scan_move_pending = False
+        self._active_mechanical_scan_direction = None
+        self._active_mechanical_scan_origin_position_mm = None
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
@@ -13133,6 +13711,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._ask_recovery_after_stop)
             return
+        if self._window_closing:
+            return
         if self._tic_motor_power_ok is False:
             return
         box = QtWidgets.QMessageBox(self)
@@ -13154,6 +13734,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _show_recovery_plot_dialog(self, title: str) -> None:
         if FigureCanvas is None:
             return
+        if self._window_closing:
+            return
         self._recovery_points = []
         self._recovery_start_monotonic = time.monotonic()
         self._recovery_start_elapsed_s = 0.0
@@ -13162,6 +13744,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog = self._recovery_plot_dialog
         if dialog is None or dialog.isHidden():
             dialog = QtWidgets.QDialog(self)
+            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
             dialog.setWindowTitle(title)
             dialog.resize(820, 520)
             layout = QtWidgets.QVBoxLayout(dialog)
@@ -13169,6 +13752,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._recovery_canvas = FigureCanvas(self._recovery_figure)
             layout.addWidget(self._recovery_canvas)
             self._recovery_plot_dialog = dialog
+            dialog.destroyed.connect(lambda _obj=None: self._forget_recovery_plot_dialog())
         else:
             dialog.setWindowTitle(title)
         dialog.show()
@@ -13176,12 +13760,21 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.activateWindow()
         self._refresh_recovery_plot()
 
+    def _forget_recovery_plot_dialog(self) -> None:
+        self._recovery_plot_dialog = None
+        self._recovery_figure = None
+        self._recovery_canvas = None
+        self._restore_main_window_focus_soon()
+
     def _show_length_setup_dialog(self) -> None:
+        if self._window_closing:
+            return
         dialog = self._length_setup_dialog
         title_sample = self.edit_sample_name.text().strip() or self.edit_log_name.text().strip() or "unnamed sample"
         title = f"Mini DMA Length Setup - {title_sample}"
         if dialog is None or dialog.isHidden():
             dialog = QtWidgets.QDialog(self)
+            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
             dialog.setWindowTitle(title)
             dialog.resize(760, 520)
             layout = QtWidgets.QVBoxLayout(dialog)
@@ -13217,6 +13810,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._button_length_setup_pause = pause_button
             self._button_length_setup_stop = stop_button
             self._length_setup_dialog = dialog
+            dialog.destroyed.connect(lambda _obj=None: self._forget_length_setup_dialog())
         else:
             dialog.setWindowTitle(title)
         self._length_setup_points.clear()
@@ -13248,11 +13842,46 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._close_length_setup_dialog)
             return
-        if self._length_setup_dialog is not None:
-            self._length_setup_dialog.close()
+        dialog = self._length_setup_dialog
+        self._forget_length_setup_dialog()
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+
+    def _forget_length_setup_dialog(self) -> None:
+        self._length_setup_dialog = None
+        self._length_setup_status_label = None
         self._length_setup_progress = None
         self._button_length_setup_pause = None
         self._button_length_setup_stop = None
+        self._length_setup_figure = None
+        self._length_setup_canvas = None
+        self._restore_main_window_focus_soon()
+
+    def _close_recovery_plot_dialog(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._close_recovery_plot_dialog)
+            return
+        dialog = self._recovery_plot_dialog
+        self._forget_recovery_plot_dialog()
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+
+    def _close_transient_child_windows(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._close_transient_child_windows)
+            return
+        app = QtWidgets.QApplication.instance()
+        active_modal = app.activeModalWidget() if app is not None else None
+        if active_modal is not None and active_modal is not self:
+            active_modal.close()
+        self._close_length_setup_dialog()
+        self._close_recovery_plot_dialog()
+        for dialog_attr in ("plot_config_dialog", "_motor_step_calibration_dialog"):
+            dialog = getattr(self, dialog_attr, None)
+            if isinstance(dialog, QtWidgets.QDialog):
+                dialog.close()
 
     def _record_length_setup_point(self) -> bool:
         if self._length_setup_start_monotonic <= 0.0:
@@ -13539,6 +14168,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
         self._active_target_ramp_rate_value_s = None
+        self._active_mechanical_scan_step_index = None
+        self._active_mechanical_scan_started_s = 0.0
+        self._active_mechanical_scan_move_count = 0
+        self._active_mechanical_scan_hold_started_s = None
+        self._active_mechanical_scan_move_pending = False
+        self._active_mechanical_scan_direction = None
+        self._active_mechanical_scan_origin_position_mm = None
+        self._constant_current_step_base_position_by_note.clear()
+        self._constant_current_step_base_strain_by_note.clear()
+        self._active_constant_current_zero_position_mm = None
+        self._active_constant_current_zero_current_mA = None
         self._reset_timed_step_state()
         self._stop_automation_control_loop()
         self._stop_tic_keepalive()
@@ -13616,7 +14256,7 @@ class MainWindow(QtWidgets.QMainWindow):
             AutomationStep(
                 "ramp_target",
                 target_value=preload_stress_mpa,
-                target_start_value=0.0,
+                target_start_value=None,
                 target_end_value=preload_stress_mpa,
                 target_ramp_rate_value_s=preload_ramp_rate_mpa_s,
                 basis=HSW_BASIS_STRESS_MPA,
@@ -13903,14 +14543,115 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return steps, summary, control_interval_ms
 
+        if self._is_constant_current_strain_sweep_mode(mode):
+            basis = self._constant_current_start_basis()
+            start_target = float(self.spin_constant_current_start_target.value())
+            end_target = float(self.spin_constant_current_end_target.value())
+            mechanical_step_basis = self._constant_current_step_basis()
+            mechanical_step_value = abs(float(self.spin_constant_current_step_size.value()))
+            mechanical_step_speed_mm_s = float(self.spin_constant_current_move_speed_mm_s.value())
+            hold_s = float(self.spin_constant_current_hold_s.value())
+            current_start = float(self.spin_constant_current_start_mA.value())
+            current_end = float(self.spin_constant_current_end_mA.value())
+            current_step = abs(float(self.spin_constant_current_step_mA.value()))
+            if mechanical_step_value <= 0.0:
+                raise ValueError("Set a non-zero mechanical step size.")
+            if current_step <= 0.0:
+                raise ValueError("Set a non-zero current step.")
+            current_targets = []
+            for current_target in self._build_numeric_targets(current_start, current_end, current_step):
+                clamped_target = self._recipe_current_setpoint_mA(current_target)
+                if not current_targets or abs(clamped_target - current_targets[-1]) > 1e-12:
+                    current_targets.append(clamped_target)
+            steps = self._build_pre_measurement_setup_steps()
+            for current_index, current_mA in enumerate(current_targets, start=1):
+                note_prefix = f"{current_index}"
+                steps.append(
+                    AutomationStep(
+                        "set_current",
+                        target_value=start_target,
+                        basis=basis,
+                        current_mA=current_mA,
+                        note=f"{note_prefix}:current",
+                    )
+                )
+                steps.append(
+                    AutomationStep(
+                        "seek_target",
+                        target_value=start_target,
+                        basis=basis,
+                        current_mA=current_mA,
+                        note=f"{note_prefix}:start",
+                    )
+                )
+                steps.append(
+                    AutomationStep(
+                        "mark_current_zero",
+                        target_value=start_target,
+                        basis=basis,
+                        current_mA=current_mA,
+                        note=f"{note_prefix}:zero",
+                    )
+                )
+                steps.append(
+                    AutomationStep(
+                        "mechanical_scan",
+                        target_value=end_target,
+                        basis=basis,
+                        current_mA=current_mA,
+                        mechanical_step_basis=mechanical_step_basis,
+                        mechanical_step_value=mechanical_step_value,
+                        mechanical_step_speed_mm_s=mechanical_step_speed_mm_s,
+                        duration_s=hold_s,
+                        note=f"{note_prefix}:up",
+                    )
+                )
+                if self.check_constant_current_return_to_start.isChecked():
+                    steps.append(
+                        AutomationStep(
+                            "mechanical_scan",
+                            target_value=start_target,
+                            basis=basis,
+                            current_mA=current_mA,
+                            mechanical_step_basis=mechanical_step_basis,
+                            mechanical_step_value=mechanical_step_value,
+                            mechanical_step_speed_mm_s=mechanical_step_speed_mm_s,
+                            duration_s=hold_s,
+                            note=f"{note_prefix}:down",
+                        )
+                    )
+            steps = self._append_return_to_origin(steps)
+            suffix, _ = self._distribution_units(basis)
+            step_unit = "%" if mechanical_step_basis == HSW_BASIS_STRAIN_PCT else "mm"
+            summary = (
+                "Started constant-current stress-strain recipe: "
+                f"current {current_start:.2f} to {current_end:.2f} mA in {current_step:.2f} mA steps, "
+                f"{HSW_BASIS_LABELS.get(basis, basis)} {start_target:.4f}{suffix} to {end_target:.4f}{suffix}, "
+                f"fixed mechanical step {mechanical_step_value:.4f} {step_unit}, "
+                f"hold/log {hold_s:.2f} s after each step; {clock_summary}. "
+                "No closed-loop corrections are applied during the linear displacement legs."
+            )
+            if self.check_constant_current_return_to_start.isChecked():
+                summary += " Each current leg steps back to the start target."
+            setup_load_g = load_g_from_stress_mpa(
+                float(self.spin_setup_preload_stress_mpa.value()),
+                float(self.spin_diameter.value()),
+            )
+            load_text = "-" if setup_load_g is None else f" (~{setup_load_g:.4f} g)"
+            summary += (
+                " Includes mandatory length setup: "
+                f"{self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
+            )
+            return steps, summary, control_interval_ms
+
         if self._is_current_sweep_mode(mode):
             basis = self._current_sweep_basis()
             target_start = float(self.spin_current_sweep_target_start.value())
             target_end = float(self.spin_current_sweep_target_end.value())
             target_step = abs(float(self.spin_current_sweep_target_step.value()))
             target_ramp_rate = abs(float(self.spin_current_sweep_target_ramp_rate.value()))
-            current_start = float(self.spin_current_sweep_start_mA.value())
-            current_end = float(self.spin_current_sweep_end_mA.value())
+            current_start = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_start_mA.value()))
+            current_end = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value()))
             current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
             current_hold_enabled = self.check_current_sweep_hold_on_error.isChecked()
             first_overheating_repeat = self.check_current_sweep_first_overheating.isChecked()
@@ -14275,7 +15016,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ramp_rate_mA_s: float,
         target_mA: float,
     ) -> bool:
-        target_mA = max(0.0, self._quantize_supply_current_mA(target_mA))
+        target_mA = self._recipe_current_setpoint_mA(target_mA)
         start_mA = max(target_mA, self._current_sweep_voltage_limit_start_mA)
         if self._current_sweep_voltage_limit_started_s is None:
             self._current_sweep_voltage_limit_started_s = time.monotonic()
@@ -14315,9 +15056,158 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_started_s = 0.0
             self._active_current_sweep_wall_started_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
+            self._active_current_sweep_display_target_mA = None
+            self._active_current_sweep_display_direction = 0.0
             self._clear_current_sweep_ramp_hold()
             return True
         return False
+
+    def _mechanical_step_mm_for_step(self, step: AutomationStep) -> float:
+        step_value = abs(float(step.mechanical_step_value or 0.0))
+        if step_value <= 0.0:
+            return 0.0
+        if step.mechanical_step_basis == HSW_BASIS_STRAIN_PCT:
+            config = self._control_config()
+            length_mm = max(
+                0.001,
+                config.initial_length_mm if config is not None else float(self.spin_initial_length.value()),
+            )
+            return (step_value / 100.0) * length_mm
+        return step_value
+
+    def _handle_mechanical_scan_step(self, step: AutomationStep, step_index: int) -> bool:
+        if step.target_value is None or not step.basis:
+            self._log("Recipe stopped because the mechanical scan step is incomplete.")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        note_text = str(step.note or "")
+        note_group = note_text.split(":", 1)[0] if note_text else ""
+        if self._active_mechanical_scan_step_index != step_index:
+            self._active_mechanical_scan_step_index = step_index
+            self._active_mechanical_scan_started_s = time.monotonic()
+            self._active_mechanical_scan_move_count = 0
+            self._active_mechanical_scan_hold_started_s = None
+            self._active_mechanical_scan_move_pending = False
+            self._active_mechanical_scan_direction = None
+            if note_text.endswith(":up") and note_group:
+                self._constant_current_step_base_position_by_note.setdefault(
+                    note_group,
+                    self._relative_motion_base_mm(),
+                )
+                if note_group not in self._constant_current_step_base_strain_by_note:
+                    base_strain = self._strain_percent_for_position(self._measurement_effective_position_mm())
+                    if base_strain is not None:
+                        self._constant_current_step_base_strain_by_note[note_group] = base_strain
+            if note_text.endswith(":down") and note_group:
+                self._active_mechanical_scan_origin_position_mm = (
+                    self._constant_current_step_base_position_by_note.get(note_group)
+                )
+            else:
+                self._active_mechanical_scan_origin_position_mm = None
+
+        target_value = float(step.target_value)
+        basis = str(step.basis)
+        self._set_automation_context(phase="mechanical_scan", basis=basis, target_value=target_value, note=step.note)
+
+        hold_s = max(0.0, float(step.duration_s or 0.0))
+        if self._active_mechanical_scan_hold_started_s is not None:
+            if not self._record_scheduled_recipe_point(step):
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return True
+            if time.monotonic() - self._active_mechanical_scan_hold_started_s < hold_s:
+                return False
+            self._active_mechanical_scan_hold_started_s = None
+            self._active_mechanical_scan_move_pending = False
+
+        current_value = self._current_distribution_value(
+            basis,
+            require_after_last_move=self._active_mechanical_scan_move_pending,
+        )
+        if current_value is None:
+            self._log_waiting_for_feedback("Waiting for fresh feedback after the fixed displacement step.")
+            return False
+
+        if self._active_mechanical_scan_direction is None:
+            self._active_mechanical_scan_direction = 1.0 if target_value >= float(current_value) else -1.0
+        direction = self._active_mechanical_scan_direction
+        if (direction >= 0.0 and float(current_value) >= target_value) or (
+            direction < 0.0 and float(current_value) <= target_value
+        ):
+            self._active_mechanical_scan_step_index = None
+            self._active_mechanical_scan_started_s = 0.0
+            self._active_mechanical_scan_move_count = 0
+            self._active_mechanical_scan_hold_started_s = None
+            self._active_mechanical_scan_move_pending = False
+            self._active_mechanical_scan_direction = None
+            self._active_mechanical_scan_origin_position_mm = None
+            return True
+
+        step_mm = self._mechanical_step_mm_for_step(step)
+        if step_mm <= 0.0:
+            self._log("Recipe stopped because the mechanical scan step size is zero.")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        tension_sign = self._tension_motion_sign()
+        base_mm = self._relative_motion_base_mm()
+        target_mm = base_mm + tension_sign * direction * step_mm
+        origin_mm = self._active_mechanical_scan_origin_position_mm
+        if direction < 0.0 and origin_mm is not None:
+            current_offset_mm = (base_mm - origin_mm) * tension_sign
+            if current_offset_mm <= max(self._motor_step_mm() * 0.5, 1e-9):
+                self._active_mechanical_scan_step_index = None
+                self._active_mechanical_scan_started_s = 0.0
+                self._active_mechanical_scan_move_count = 0
+                self._active_mechanical_scan_hold_started_s = None
+                self._active_mechanical_scan_move_pending = False
+                self._active_mechanical_scan_direction = None
+                self._active_mechanical_scan_origin_position_mm = None
+                return True
+            target_offset_mm = max(0.0, current_offset_mm - step_mm)
+            target_mm = origin_mm + tension_sign * target_offset_mm
+        speed_mm_s = max(self._minimum_held_speed_mm_s(), float(step.mechanical_step_speed_mm_s or 0.05))
+        if not self._move_to_position_mm(target_mm, chain_from_last_target=True, speed_mm_s=speed_mm_s):
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        self._active_mechanical_scan_move_count += 1
+        self._active_mechanical_scan_move_pending = True
+        self._active_mechanical_scan_hold_started_s = time.monotonic() if hold_s > 0.0 else None
+        if hold_s <= 0.0 and not self._record_scheduled_recipe_point(step):
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        return False
+
+    def _handle_current_zero_mark_step(self, step: AutomationStep) -> bool:
+        note_text = str(step.note or "")
+        note_group = note_text.split(":", 1)[0] if note_text else ""
+        self._set_automation_context(
+            phase="current_zero",
+            basis=step.basis,
+            target_value=step.target_value,
+            plateau_index=int(note_group) if note_group.isdigit() else None,
+            note=step.note,
+        )
+        zero_position_mm = self._relative_motion_base_mm()
+        if note_group:
+            self._constant_current_step_base_position_by_note[note_group] = self._relative_motion_base_mm()
+            base_strain = self._strain_percent_for_position(zero_position_mm)
+            if base_strain is not None:
+                self._constant_current_step_base_strain_by_note[note_group] = base_strain
+        self._active_constant_current_zero_position_mm = zero_position_mm
+        self._active_constant_current_zero_current_mA = (
+            None if step.current_mA is None else self._recipe_current_setpoint_mA(float(step.current_mA))
+        )
+        label = HSW_BASIS_LABELS.get(str(step.basis), str(step.basis or "start"))
+        target_text = "-" if step.target_value is None else f"{float(step.target_value):.4f}"
+        current_text = (
+            "-"
+            if self._active_constant_current_zero_current_mA is None
+            else f"{self._active_constant_current_zero_current_mA:.3f} mA"
+        )
+        self._log(
+            f"Marked current-specific zero at {zero_position_mm:.6f} mm "
+            f"for {current_text} after reaching {label} {target_text}."
+        )
+        return self._record_scheduled_recipe_point(step)
 
     def _handle_current_sweep_step(self, step: AutomationStep, step_index: int) -> bool:
         if step.current_start_mA is None or step.current_end_mA is None or step.current_ramp_rate_mA_s is None:
@@ -14329,10 +15219,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
 
-        start_mA = self._quantize_supply_current_mA(float(step.current_start_mA))
-        end_mA = self._quantize_supply_current_mA(float(step.current_end_mA))
+        start_mA = self._recipe_current_setpoint_mA(float(step.current_start_mA))
+        end_mA = self._recipe_current_setpoint_mA(float(step.current_end_mA))
         ramp_rate_mA_s = max(1e-9, abs(float(step.current_ramp_rate_mA_s)))
         direction = 1.0 if end_mA >= start_mA else -1.0
+        self._active_current_sweep_display_target_mA = end_mA
+        self._active_current_sweep_display_direction = direction
 
         if self._active_current_sweep_step_index != step_index:
             now_s = time.monotonic()
@@ -14377,12 +15269,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_value=step.target_value,
                 plateau_index=plateau_index,
             )
+            point_count_before_seek = len(self._session_points)
             try:
                 self._seek_distribution_target(step.basis, step.target_value, tolerance)
             except Exception as exc:
                 self._log(f"Recipe stopped: {exc}")
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return True
+            if len(self._session_points) == point_count_before_seek:
+                self._maybe_record_scheduled_point(
+                    quiet=True,
+                    advance_heating=False,
+                    require_fresh_after_move=step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA},
+                )
             return False
 
         elapsed_s = max(0.0, now_s - self._active_current_sweep_started_s)
@@ -14401,12 +15300,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
             self._active_current_sweep_last_setpoint_mA = setpoint_mA
 
+        point_count_before_seek = len(self._session_points)
         try:
             self._seek_distribution_target(step.basis, step.target_value, tolerance)
         except Exception as exc:
             self._log(f"Recipe stopped: {exc}")
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
+        if len(self._session_points) == point_count_before_seek:
+            self._maybe_record_scheduled_point(
+                quiet=True,
+                advance_heating=False,
+                require_fresh_after_move=step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA},
+            )
 
         duration_s = abs(end_mA - start_mA) / ramp_rate_mA_s
         finished = elapsed_s >= duration_s and abs((self._active_current_sweep_last_setpoint_mA or setpoint_mA) - end_mA) < 1e-9
@@ -14416,6 +15322,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_started_s = 0.0
             self._active_current_sweep_wall_started_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
+            self._active_current_sweep_display_target_mA = None
+            self._active_current_sweep_display_direction = 0.0
             self._clear_current_sweep_ramp_hold()
             return True
         return False
@@ -14792,21 +15700,28 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._automation_active or self._automation_paused:
             return
         if self._automation_index >= len(self._automation_steps):
+            if not self._is_ui_thread():
+                self._call_on_ui_thread_sync(self._handle_auto_ramp_tick)
+                return
             is_recovery = self._is_recovery_mode()
             is_calibration = self._is_calibration_mode(self._automation_name)
             if is_calibration and self._session_active:
                 self._finalize_calibration_report()
             recovery_return_duration_s = self._setup_return_duration_s() if is_calibration else None
+            config = self._control_config()
+            return_to_origin = config.return_to_origin if config is not None else self.check_return_to_origin.isChecked()
+            if self._is_constant_current_strain_sweep_mode(self._automation_name):
+                return_to_origin = False
             self._update_recipe_progress(complete=True)
             self._stop_auto_ramp(log_completion=False, keep_progress=True)
             self._log("Recovery completed." if is_recovery else "Recipe completed.")
             if not is_recovery and self._session_active:
                 self._stop_session()
-            config = self._control_config()
-            return_to_origin = config.return_to_origin if config is not None else self.check_return_to_origin.isChecked()
             if not is_recovery and return_to_origin:
                 self._pending_recovery_return_duration_s = recovery_return_duration_s
                 self._start_recovery_position_origin()
+                return
+            self._restore_main_window_focus_soon()
             return
         step_index = self._automation_index
         step = self._automation_steps[step_index]
@@ -14867,8 +15782,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             elif not self._record_scheduled_recipe_point(step):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+        elif step.action == "mark_current_zero":
+            if not self._handle_current_zero_mark_step(step):
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
         elif step.action == "sweep_current":
             finished = self._handle_current_sweep_step(step, step_index)
+            if not finished and self._automation_active:
+                self._automation_index -= 1
+        elif step.action == "mechanical_scan":
+            finished = self._handle_mechanical_scan_step(step, step_index)
             if not finished and self._automation_active:
                 self._automation_index -= 1
         elif step.action == "starting_length_prompt":
@@ -15594,12 +16516,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("current_sweep_settle_s", self.spin_current_sweep_settle_s.value())
         self.settings.setValue("current_sweep_interval_ms", self._control_interval_ms())
         self.settings.setValue("current_sweep_log_interval_ms", self._log_interval_ms())
-        for index, tile in enumerate(self._plot_tiles):
-            prefix = f"plot_tile_{index}"
-            self.settings.setValue(f"{prefix}_visible", tile.visible.isChecked())
-            self.settings.setValue(f"{prefix}_x", tile.x_combo.currentData() or "elapsed_s")
-            self.settings.setValue(f"{prefix}_y_left", tile.y_left_combo.currentData() or "load_g")
-            self.settings.setValue(f"{prefix}_y_right", tile.y_right_combo.currentData() or "")
+        self.settings.setValue("constant_current_start_basis", self._constant_current_start_basis())
+        self.settings.setValue("constant_current_target_start", self.spin_constant_current_start_target.value())
+        self.settings.setValue("constant_current_target_end", self.spin_constant_current_end_target.value())
+        self.settings.setValue("constant_current_step_basis", self._constant_current_step_basis())
+        self.settings.setValue("constant_current_step_size", self.spin_constant_current_step_size.value())
+        self.settings.setValue("constant_current_hold_s", self.spin_constant_current_hold_s.value())
+        self.settings.setValue("constant_current_move_speed_mm_s", self.spin_constant_current_move_speed_mm_s.value())
+        self.settings.setValue("constant_current_start_mA", self.spin_constant_current_start_mA.value())
+        self.settings.setValue("constant_current_end_mA", self.spin_constant_current_end_mA.value())
+        self.settings.setValue("constant_current_step_mA", self.spin_constant_current_step_mA.value())
+        self.settings.setValue("constant_current_return_to_start", self.check_constant_current_return_to_start.isChecked())
+        self._store_default_dashboard_plot_settings_if_missing()
+        self._store_dashboard_plot_settings(write_settings=True)
         self.settings.sync()
 
     def _restore_settings(self) -> None:
@@ -16093,7 +17022,7 @@ class MainWindow(QtWidgets.QMainWindow):
             bool(self.settings.value("current_sweep_return_target", True, type=bool))
         )
         saved_current_start_mA = float(self.settings.value("current_sweep_start_mA", 1.0))
-        self.spin_current_sweep_start_mA.setValue(max(1.0, saved_current_start_mA))
+        self.spin_current_sweep_start_mA.setValue(saved_current_start_mA)
         self.spin_current_sweep_end_mA.setValue(float(self.settings.value("current_sweep_end_mA", 3.0)))
         self.spin_current_sweep_step_mA.setValue(
             float(
@@ -16201,24 +17130,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_interval.setValue(int(self.settings.value("current_sweep_interval_ms", 250)))
         self.spin_current_sweep_log_interval.setValue(int(self.settings.value("current_sweep_log_interval_ms", 500)))
         self._update_current_sweep_basis_ui()
-        for index, tile in enumerate(self._plot_tiles):
-            prefix = f"plot_tile_{index}"
-            tile.visible.setChecked(bool(self.settings.value(f"{prefix}_visible", True, type=bool)))
-            x_index = tile.x_combo.findData(self.settings.value(f"{prefix}_x", "elapsed_s", type=str))
-            if x_index >= 0:
-                tile.x_combo.setCurrentIndex(x_index)
-            y_left_index = tile.y_left_combo.findData(self.settings.value(f"{prefix}_y_left", "load_g", type=str))
-            if y_left_index >= 0:
-                tile.y_left_combo.setCurrentIndex(y_left_index)
-            y_right_index = tile.y_right_combo.findData(self.settings.value(f"{prefix}_y_right", "", type=str))
-            if y_right_index >= 0:
-                tile.y_right_combo.setCurrentIndex(y_right_index)
+        constant_basis = self.settings.value("constant_current_start_basis", HSW_BASIS_STRESS_MPA, type=str)
+        constant_basis_index = self.combo_constant_current_start_basis.findData(constant_basis)
+        if constant_basis_index >= 0:
+            self.combo_constant_current_start_basis.setCurrentIndex(constant_basis_index)
+        constant_step_basis = self.settings.value("constant_current_step_basis", MECHANICAL_STEP_DISPLACEMENT_MM, type=str)
+        constant_step_basis_index = self.combo_constant_current_step_basis.findData(constant_step_basis)
+        if constant_step_basis_index >= 0:
+            self.combo_constant_current_step_basis.setCurrentIndex(constant_step_basis_index)
+        self.spin_constant_current_start_target.setValue(float(self.settings.value("constant_current_target_start", 0.0)))
+        self.spin_constant_current_end_target.setValue(float(self.settings.value("constant_current_target_end", 500.0)))
+        self.spin_constant_current_step_size.setValue(float(self.settings.value("constant_current_step_size", 0.01)))
+        self.spin_constant_current_hold_s.setValue(float(self.settings.value("constant_current_hold_s", 1.0)))
+        self.spin_constant_current_move_speed_mm_s.setValue(
+            max(0.001, float(self.settings.value("constant_current_move_speed_mm_s", 0.05)))
+        )
+        self.spin_constant_current_start_mA.setValue(float(self.settings.value("constant_current_start_mA", 0.0)))
+        self.spin_constant_current_end_mA.setValue(float(self.settings.value("constant_current_end_mA", 100.0)))
+        self.spin_constant_current_step_mA.setValue(
+            max(0.01, float(self.settings.value("constant_current_step_mA", 10.0)))
+        )
+        self.check_constant_current_return_to_start.setChecked(
+            bool(self.settings.value("constant_current_return_to_start", True, type=bool))
+        )
+        self._update_constant_current_basis_ui()
+        self._apply_dashboard_plot_settings(str(self.combo_recipe_mode.currentData() or "ramp"))
         self._sync_auto_name_fields()
         self._update_recipe_mode_ui()
         self._settings_restore_in_progress = False
         self._settings_persistence_ready = True
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self._window_closing = True
+        self._close_transient_child_windows()
         if self._persist_settings:
             self._save_settings()
         self._stop_tic_keepalive()
