@@ -4532,21 +4532,23 @@ def export_pyplot_origin_artifacts_for_paths(
                         except Exception:
                             pass
                 graph_name = _origin_object_name(graph) or fallback_graph_name
-                descriptor = (
-                    _safe_plot_stem("_".join((descriptor_prefix, graph_name or f"{counter:02d}")))
-                    + ".oggu"
+                artifact = export_origin_graph_artifact(
+                    handles={
+                        "origin": op,
+                        "graph": graph,
+                        "legend_label": f"{display_prefix}: {graph_name}",
+                    },
+                    descriptor_stem=_safe_plot_stem(
+                        "_".join((descriptor_prefix, graph_name or f"{counter:02d}"))
+                    ),
+                    origin_dir=origin_dir,
+                    display_text=f"{display_prefix}: {graph_name}",
+                    log=log,
                 )
-                artifacts.append(
-                    OriginArtifact(
-                        descriptor=descriptor,
-                        object_path=None,
-                        graph_name=graph_name,
-                        workbook_name=None,
-                        worksheet_name=None,
-                        display_text=f"{display_prefix}: {graph_name}",
-                        clipboard_fallback=True,
-                    )
-                )
+                if artifact is not None and (
+                    artifact.object_path is not None or artifact.clipboard_fallback
+                ):
+                    artifacts.append(artifact)
             return artifacts
 
         if str(plugin_name).strip().casefold() == "r vs t" and str(plot_mode or "").strip().casefold() == "residual":
@@ -5701,7 +5703,7 @@ $result | ConvertTo-Json -Compress
                     "path": str(object_path),
                     "label": insertion.label,
                     "preferClipboard": bool(copied_to_clipboard),
-                    "allowFile": not copied_to_clipboard,
+                    "allowFile": bool(object_exists),
                 }
             ]
             payload_path.write_text(json.dumps(payload), encoding="utf-8")

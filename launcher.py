@@ -7,6 +7,7 @@ import time
 import logging
 import traceback
 import json
+import csv
 import math
 import re
 import shutil
@@ -727,6 +728,11 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         help="Skip Origin object generation for Word report CLI runs.",
     )
     parser.add_argument(
+        "--microwire-word-graphs-only",
+        action="store_true",
+        help="Only write Word reports for microwires with at least one graph source or generated graph.",
+    )
+    parser.add_argument(
         "--rows",
         choices=(("all", "filtered", "selected")),
         default="all",
@@ -1339,6 +1345,50 @@ _WORD_PROJECT_GRAPH_SOURCE_SPECS: dict[str, tuple[str, str, str, str, str]] = {
 }
 
 
+_WORD_REPORT_GRAPH_MANIFEST_SECTIONS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        "Current annealing",
+        ("_word_annealing_1000_sources", "_word_annealing_other_sources"),
+        ("Figure — 1000 mA", "Figure — other annealing", "Figure — 1000 mA (Origin)", "Figure — other annealing (Origin)"),
+    ),
+    (
+        "R vs T",
+        ("R vs T files",),
+        ("R vs T graphs", "R vs T graphs (Origin)", "R vs T residual graphs (Origin)"),
+    ),
+    (
+        "VSM temperature scan",
+        ("_word_vsm_temperature_scan_sources",),
+        ("VSM temperature scan graphs", "VSM temperature scan graphs (Origin)"),
+    ),
+    (
+        "VSM hysteresis loops",
+        ("_word_vsm_hysteresis_sources",),
+        ("VSM hysteresis graphs", "VSM hysteresis graphs (Origin)"),
+    ),
+    (
+        "DMA iso-stress",
+        ("_word_dma_iso_stress_sources",),
+        ("DMA iso-stress graphs", "DMA iso-stress graphs (Origin)"),
+    ),
+    (
+        "Mini DMA",
+        ("_word_mini_dma_sources",),
+        ("Mini DMA graphs", "Mini DMA graphs (Origin)"),
+    ),
+    (
+        "Shape memory stress/strain",
+        ("_word_shape_memory_stress_strain_sources",),
+        ("Shape memory stress/strain graphs", "Shape memory stress/strain graphs (Origin)"),
+    ),
+    (
+        "FMR",
+        ("_word_fmr_sources",),
+        ("FMR graphs", "FMR graphs (Origin)"),
+    ),
+)
+
+
 def _word_project_add_graph_sources(
     target: dict[str, Any],
     section_name: str,
@@ -1600,6 +1650,7 @@ def _load_project_word_report_frame(
         RVT_FILE_COLUMN,
         RVT_GRAPH_COLUMN,
         RVT_ORIGIN_COLUMN,
+        RVT_RESIDUAL_ORIGIN_COLUMN,
         RVT_POINT_COUNT_COLUMN,
         RVT_TEMPERATURE_RANGE_COLUMN,
         RVT_RESISTANCE_RANGE_COLUMN,
@@ -1917,6 +1968,7 @@ def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespac
         copy_dir.mkdir(parents=True, exist_ok=True)
         copied_source = copy_dir / f"{source_path.stem}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}{source_path.suffix}"
         shutil.copy2(source_path, copied_source)
+        setattr(args, "_microwire_word_copied_project", str(copied_source))
         print(f"[microwire-word] copied_project={copied_source}")
         return _load_project_word_report_frame(
             copied_source,
@@ -1942,6 +1994,191 @@ def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespac
         ),
         {},
     )
+
+
+def _microwire_word_graph_sections_for_row(row: Any) -> dict[str, dict[str, list[str]]]:
+    sections: dict[str, dict[str, list[str]]] = {}
+    for section_name, source_columns, graph_columns in _WORD_REPORT_GRAPH_MANIFEST_SECTIONS:
+        source_values: list[str] = []
+        graph_values: list[str] = []
+        for column in source_columns:
+            source_values.extend(
+                str(item)
+                for item in _word_project_value_items(row.get(column))
+                if str(item or "").strip()
+            )
+        for column in graph_columns:
+            graph_values.extend(
+                str(item)
+                for item in _word_project_value_items(row.get(column))
+                if str(item or "").strip()
+            )
+        source_values = list(dict.fromkeys(source_values))
+        graph_values = list(dict.fromkeys(graph_values))
+        if source_values or graph_values:
+            sections[section_name] = {
+                "sources": source_values,
+                "graphs": graph_values,
+            }
+    return sections
+
+
+def _filter_microwire_word_graph_rows(frame: Any):
+    if frame.empty:
+        return frame
+    keep_indices = [
+        index
+        for index, row in frame.iterrows()
+        if _microwire_word_graph_sections_for_row(row)
+    ]
+    return frame.loc[keep_indices].reset_index(drop=True)
+
+
+def _word_report_output_filenames(frame: Any) -> list[str]:
+    from microwire_data_builder.core import _word_report_filename
+
+    used_names: set[str] = set()
+    filenames: list[str] = []
+    for index, (_, row) in enumerate(frame.reset_index(drop=True).iterrows()):
+        filename = _word_report_filename(row, index)
+        stem = Path(filename).stem
+        suffix = Path(filename).suffix or ".docx"
+        candidate = filename
+        duplicate_index = 2
+        while candidate.lower() in used_names:
+            candidate = f"{stem}_{duplicate_index}{suffix}"
+            duplicate_index += 1
+        used_names.add(candidate.lower())
+        filenames.append(candidate)
+    return filenames
+
+
+def _word_manifest_stat_target(path: Path) -> Path:
+    if path.is_dir():
+        for child_name in ("measurement.csv", "metadata.json"):
+            child = path / child_name
+            if child.exists():
+                return child
+    return path
+
+
+def _word_manifest_source_entry(source: str) -> dict[str, Any]:
+    path = Path(source)
+    stat_path = _word_manifest_stat_target(path)
+    entry: dict[str, Any] = {
+        "path": str(path),
+        "stat_path": str(stat_path),
+        "exists": False,
+        "is_dir": False,
+        "mtime": None,
+        "size": None,
+    }
+    try:
+        entry["exists"] = path.exists()
+        entry["is_dir"] = path.is_dir()
+        if stat_path.exists():
+            stat = stat_path.stat()
+            entry["mtime"] = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+            entry["size"] = int(stat.st_size)
+    except OSError:
+        pass
+    return entry
+
+
+def _write_microwire_word_manifest(
+    frame: Any,
+    reports: Sequence[Path],
+    output_dir: Path,
+    *,
+    source_path: Path,
+    copied_project: str | None,
+    include_origin: bool,
+) -> tuple[Path, Path]:
+    exported_at = datetime.now(timezone.utc).isoformat()
+    rows: list[dict[str, Any]] = []
+    for index, (_, row) in enumerate(frame.reset_index(drop=True).iterrows()):
+        report_path = Path(reports[index]) if index < len(reports) else output_dir / _word_report_output_filenames(frame)[index]
+        sections = _microwire_word_graph_sections_for_row(row)
+        source_entries = {
+            section_name: [
+                _word_manifest_source_entry(source)
+                for source in section_data.get("sources", [])
+            ]
+            for section_name, section_data in sections.items()
+        }
+        rows.append(
+            {
+                "composition": str(row.get("Composition") or "").strip(),
+                "microwire": str(row.get("Microwire") or "").strip(),
+                "docx": str(report_path),
+                "docx_name": report_path.name,
+                "graph_sections": sorted(sections.keys()),
+                "sections": sections,
+                "source_files": source_entries,
+            }
+        )
+
+    manifest = {
+        "format": "microwire-docx-export-manifest-v1",
+        "exported_at": exported_at,
+        "source_project": str(source_path),
+        "copied_project": copied_project,
+        "output_dir": str(output_dir),
+        "origin_embeddings": bool(include_origin),
+        "report_count": len(rows),
+        "reports": rows,
+    }
+    json_path = output_dir / "docx_export_manifest.json"
+    csv_path = output_dir / "docx_export_manifest.csv"
+    json_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "composition",
+                "microwire",
+                "docx_name",
+                "graph_sections",
+                "source_count",
+                "sources",
+            ],
+        )
+        writer.writeheader()
+        for item in rows:
+            sources = []
+            for section_data in item["source_files"].values():
+                for source_entry in section_data:
+                    sources.append(str(source_entry.get("path") or ""))
+            writer.writerow(
+                {
+                    "composition": item["composition"],
+                    "microwire": item["microwire"],
+                    "docx_name": item["docx_name"],
+                    "graph_sections": "; ".join(item["graph_sections"]),
+                    "source_count": len(sources),
+                    "sources": "; ".join(sources),
+                }
+            )
+    return json_path, csv_path
+
+
+def _archive_existing_microwire_word_reports(frame: Any, output_dir: Path) -> list[Path]:
+    archive_dir = output_dir / "archive"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    archived: list[Path] = []
+    for filename in _word_report_output_filenames(frame):
+        path = output_dir / filename
+        if not path.exists():
+            continue
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target = archive_dir / f"{path.stem}_before_batch_{timestamp}{path.suffix}"
+        counter = 2
+        while target.exists():
+            target = archive_dir / f"{path.stem}_before_batch_{timestamp}_{counter}{path.suffix}"
+            counter += 1
+        shutil.move(str(path), str(target))
+        archived.append(target)
+    return archived
 
 
 def _disable_originpro_exit_detach() -> None:
@@ -2005,9 +2242,27 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
                 LOGGER.warning("Origin object generation skipped for Word report: %s", exc)
                 setattr(args, "microwire_word_origin", False)
         frame, origin_artifacts = _load_microwire_word_report_frame(source_path, args, output_dir)
+        if bool(getattr(args, "microwire_word_graphs_only", False)):
+            before_count = len(frame)
+            frame = _filter_microwire_word_graph_rows(frame)
+            print(f"[microwire-word] graph_rows={len(frame)}")
+            print(f"[microwire-word] skipped_graphless_rows={before_count - len(frame)}")
+        archived_reports = _archive_existing_microwire_word_reports(frame, output_dir)
+        for archived in archived_reports:
+            print(f"[microwire-word] archived={archived}")
         reports = export_word_reports(frame, output_dir, origin_artifacts=origin_artifacts, logger=LOGGER)
+        manifest_json, manifest_csv = _write_microwire_word_manifest(
+            frame,
+            reports,
+            output_dir,
+            source_path=source_path,
+            copied_project=getattr(args, "_microwire_word_copied_project", None),
+            include_origin=bool(getattr(args, "microwire_word_origin", True)),
+        )
         print(f"[microwire-word] output_dir={output_dir}")
         print(f"[microwire-word] reports={len(reports)}")
+        print(f"[microwire-word] manifest={manifest_json}")
+        print(f"[microwire-word] manifest_csv={manifest_csv}")
         for report in reports:
             print(f"[microwire-word] report={report}")
         return 0

@@ -58,6 +58,18 @@ VSM_TEMP_SCAN_COLORS = ["#dc2626", "#2563eb", "#f97316", "#16a34a"]
 VSM_TEMP_SCAN_WARM_COLORS = ["#dc2626", "#f97316", "#ea580c", "#ef4444"]
 VSM_TEMP_SCAN_COLD_COLORS = ["#2563eb", "#0ea5e9", "#1d4ed8", "#06b6d4"]
 VSM_TEMP_SCAN_NEUTRAL_COLORS = ["#6b7280", "#4b5563"]
+VSM_TEMP_SCAN_LOW_FIELD_CYCLE_COLORS = [
+    "#dc2626",
+    "#2563eb",
+    "#7c3aed",
+    "#0891b2",
+]
+VSM_TEMP_SCAN_HIGH_FIELD_CYCLE_COLORS = [
+    "#f97316",
+    "#16a34a",
+    "#ea580c",
+    "#15803d",
+]
 VSM_TEMP_SCAN_FIELD_DIRECTION_PALETTES: tuple[dict[str, list[str]], ...] = (
     {
         "up": ["#dc2626", "#ef4444", "#f87171"],   # red family
@@ -330,17 +342,28 @@ class VSMTemperatureScanProcessor:
             direction = self._series_direction(entry)
             fallback = VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)]
             field_slot = field_slots.get(round(float(entry.field), 6), idx)
-            if direction in {"up", "down"} and VSM_TEMP_SCAN_FIELD_DIRECTION_PALETTES:
+            field_bucket = self._field_bucket(float(entry.field))
+            if field_bucket == "low":
+                palette = VSM_TEMP_SCAN_LOW_FIELD_CYCLE_COLORS
+                color = palette[entry.segment_index % len(palette)]
+            elif field_bucket == "high":
+                palette = VSM_TEMP_SCAN_HIGH_FIELD_CYCLE_COLORS
+                color = palette[entry.segment_index % len(palette)]
+            elif direction in {"up", "down"} and VSM_TEMP_SCAN_FIELD_DIRECTION_PALETTES:
                 palette_group = VSM_TEMP_SCAN_FIELD_DIRECTION_PALETTES[
                     field_slot % len(VSM_TEMP_SCAN_FIELD_DIRECTION_PALETTES)
                 ]
                 palette = list(palette_group.get(direction, []))
+                counter_key = (field_slot, direction)
+                color_index = counters.get(counter_key, 0)
+                counters[counter_key] = color_index + 1
+                color = palette[color_index % len(palette)] if palette else fallback
             else:
                 palette = list(VSM_TEMP_SCAN_NEUTRAL_COLORS)
-            counter_key = (field_slot, direction)
-            color_index = counters.get(counter_key, 0)
-            counters[counter_key] = color_index + 1
-            color = palette[color_index % len(palette)] if palette else fallback
+                counter_key = (field_slot, direction)
+                color_index = counters.get(counter_key, 0)
+                counters[counter_key] = color_index + 1
+                color = palette[color_index % len(palette)] if palette else fallback
             colors[(entry.field, entry.direction, entry.segment_index)] = color
         return colors
 
@@ -373,10 +396,12 @@ class VSMTemperatureScanProcessor:
             frame, _ = self._dedupe_temperatures(entry_series.frame)
             frame = frame.sort_values("temperature")
             section_label = f"Section {entry_series.segment_index + 1}"
-            legend_text = (
-                f"{entry_series.field:.0f} Oe"
-                f"{self._direction_label(entry_series.direction, entry_series.segment_index)}"
+            direction_label = self._direction_label(
+                entry_series.direction,
+                entry_series.segment_index,
+                section=entry_series.segment_index,
             )
+            legend_text = f"{entry_series.field:.0f} Oe{direction_label}"
             color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
             color = color_map.get(color_key, VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)])
             prepared.append(
@@ -1073,8 +1098,8 @@ class VSMTemperatureScanProcessor:
         if x_span <= 0.0 or y_span <= 0.0:
             return
         for key, value in (
-            ("x", x_to - (x_span * 0.18)),
-            ("y", y_from + (y_span * 0.34)),
+            ("x", x_from + (x_span * 0.20)),
+            ("y", y_from + (y_span * 0.36)),
         ):
             try:
                 set_float(key, float(value))
@@ -1698,11 +1723,11 @@ class VSMTemperatureScanProcessor:
                 created_graphs.append(graph)
                 graph_title = self._plot_title(entry.sample, "Signal X", fields)
                 _set_origin_graph_title(origin, graph, graph_title)
-                unique_fields: list[float] = self.field_axis_order([field for field, _, _, _ in column_pairs])
-                dual_field_single_layer = (
-                    not single_origin_axis
-                    and multi_field_origin_axis
+                unique_fields: list[float] = sorted(
+                    self.field_axis_order([field for field, _, _, _ in column_pairs]),
+                    key=lambda value: abs(float(value)),
                 )
+                dual_field_single_layer = False
                 layer_map: Dict[float, Any] = {}
                 layer_number_map: Dict[float, int] = {}
                 if single_origin_axis or dual_field_single_layer:
