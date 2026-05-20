@@ -730,7 +730,7 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
     parser.add_argument(
         "--microwire-word-graphs-only",
         action="store_true",
-        help="Only write Word reports for microwires with at least one graph source or generated graph.",
+        help="Only write Word reports for microwires with at least one generated Origin graph descriptor.",
     )
     parser.add_argument(
         "--rows",
@@ -2001,6 +2001,7 @@ def _microwire_word_graph_sections_for_row(row: Any) -> dict[str, dict[str, list
     for section_name, source_columns, graph_columns in _WORD_REPORT_GRAPH_MANIFEST_SECTIONS:
         source_values: list[str] = []
         graph_values: list[str] = []
+        origin_values: list[str] = []
         for column in source_columns:
             source_values.extend(
                 str(item)
@@ -2008,17 +2009,22 @@ def _microwire_word_graph_sections_for_row(row: Any) -> dict[str, dict[str, list
                 if str(item or "").strip()
             )
         for column in graph_columns:
-            graph_values.extend(
+            values = [
                 str(item)
                 for item in _word_project_value_items(row.get(column))
                 if str(item or "").strip()
-            )
+            ]
+            graph_values.extend(values)
+            if str(column).endswith("(Origin)"):
+                origin_values.extend(values)
         source_values = list(dict.fromkeys(source_values))
         graph_values = list(dict.fromkeys(graph_values))
-        if source_values or graph_values:
+        origin_values = list(dict.fromkeys(origin_values))
+        if origin_values:
             sections[section_name] = {
                 "sources": source_values,
-                "graphs": graph_values,
+                "graphs": origin_values,
+                "references": graph_values,
             }
     return sections
 

@@ -43,6 +43,28 @@ def _ensure_app() -> QtWidgets.QApplication:
     return app
 
 
+def test_microwire_word_graph_sections_require_origin_graph_descriptors() -> None:
+    source_only = {
+        "Shape memory stress/strain graphs": [
+            "20mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
+            "30mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
+        ],
+    }
+    with_origin = {
+        "Shape memory stress/strain graphs": ["30mA"],
+        "Shape memory stress/strain graphs (Origin)": "shape_memory.oggu",
+    }
+
+    assert launcher_module._microwire_word_graph_sections_for_row(source_only) == {}
+    assert launcher_module._microwire_word_graph_sections_for_row(with_origin) == {
+        "Shape memory stress/strain": {
+            "sources": [],
+            "graphs": ["shape_memory.oggu"],
+            "references": ["30mA", "shape_memory.oggu"],
+        }
+    }
+
+
 def _wait_for_registry(window: launcher_module.MasterLauncher, app: QtWidgets.QApplication) -> None:
     for _ in range(40):
         app.processEvents()
