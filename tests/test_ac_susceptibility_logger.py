@@ -756,10 +756,154 @@ def test_run_ac_sweep_aborts_when_psu_actual_current_is_too_low(tmp_path: Path) 
         )
 
 
+def test_run_ac_sweep_warns_for_missing_zero_current_readback(tmp_path: Path) -> None:
+    class FakeLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-05-18T00:00:00Z",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def connect(self) -> None:
+            self.events.append("connect")
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            self.events.append(f"initialize:{voltage_limit_v:g}")
+
+        def set_current(self, current_a: float) -> None:
+            self.events.append(f"current:{current_a:g}")
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            self.events.append("measure")
+            return sweep.PowerSupplyMeasurement(status="FAIL", error="missing actual-current readback")
+
+        def output_off(self) -> None:
+            self.events.append("off")
+
+        def close(self) -> None:
+            self.events.append("close")
+
+    output = tmp_path / "zero-current-missing-readback.tsv"
+    psu = FakePsu()
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.0, "zero")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=62.0,
+        psu_measure_attempts=1,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=psu,
+        output_path=output,
+        sleep=lambda _seconds: None,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "\tWARN\t" in text
+    assert "\tFAIL\t" not in text
+    assert "missing actual-current readback at zero-current reference; continuing" in text
+    assert psu.events[-2:] == ["off", "close"]
+
+
+def test_run_ac_sweep_tolerates_transient_missing_psu_readback_after_current_ready(tmp_path: Path) -> None:
+    class FakeLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-05-18T00:00:00Z",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def __init__(self) -> None:
+            self.measurements = [
+                sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.0, status="OK"),
+                sweep.PowerSupplyMeasurement(status="FAIL", error="missing actual-current readback"),
+                sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.0, status="OK"),
+            ]
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return self.measurements.pop(0)
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    output = tmp_path / "transient-missing-readback.tsv"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=2,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=62.0,
+        psu_measure_attempts=1,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=FakePsu(),
+        output_path=output,
+        sleep=lambda _seconds: None,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "\tWARN\t" in text
+    assert "\tFAIL\t" not in text
+    assert "missing actual-current readback during active point; continuing" in text
+    assert text.count("\n") >= 4
+
+
 def test_psu_output_verification_allows_zero_reference_and_catches_wire_break() -> None:
     sweep._validate_psu_output(
         sweep.CurrentLoopPoint(0.0, "zero"),
-        sweep.PowerSupplyMeasurement(current_actual_a=0.0, voltage_actual_v=0.0, status="OK"),
+        sweep.PowerSupplyMeasurement(status="FAIL", error="missing actual-current readback"),
     )
 
     with pytest.raises(sweep.PsuOutputVerificationError, match="far below requested"):

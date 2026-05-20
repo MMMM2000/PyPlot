@@ -243,19 +243,22 @@ the operator explicitly asks for auto-detection.
 The sweep engine treats the supply generically: connect, identify the selected
 SCPI backend, initialize with the selected voltage limit, set current, and wait
 briefly for actual-current readback before starting LCR reads at each current
-point. If the supply keeps reporting missing or near-zero current for a
-non-zero setpoint, the run aborts and the partial file records a failure row.
-After a current has been accepted, a later drop to zero is also treated as a
-failure because it can indicate an open circuit or broken wire. On normal
-completion, user stop, or error, the shutdown sequence sets current and voltage
-to zero before turning output off. Baseline measurement does not create or
-command a power-supply backend.
+point. A missing actual-current readback during a 0 mA reference, or a brief
+missing readback after the requested non-zero current has already been accepted,
+is logged as `WARN` and the run continues. If the supply cannot prove the
+requested non-zero current before the LCR point starts, or if it later reports
+an actual current far below the requested current, the run aborts and the
+partial file records a failure row. On normal completion, user stop, or error,
+the shutdown sequence sets current and voltage to zero before turning output
+off. Baseline measurement does not create or command a power-supply backend.
 
 The wire-break guard is always enabled for non-zero current points. The actual
 current readback must stay above `max(1 mA, 25% of the requested current)`;
 0 mA reference points are exempt. This is intentionally not a casual UI toggle,
 because an overnight run should stop and shut the output down if the DC current
-path opens.
+path opens. Missing readback by itself is treated as a communication warning
+once current was already confirmed; a measured near-zero current is what trips
+the wire-break/output-off safety path.
 
 ## Live Plots
 

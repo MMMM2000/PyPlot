@@ -148,6 +148,7 @@ class AcSweepConfig:
     psu_current_ready_timeout_s: float = 3.0
     psu_current_ready_poll_s: float = 0.2
     psu_measure_attempts: int = 3
+    psu_missing_readback_warn: bool = True
 
 
 @dataclass(frozen=True)
@@ -358,6 +359,7 @@ class AcSweepTsvWriter:
                 "psu_measure_attempts": int(self.config.psu_measure_attempts),
                 "psu_current_ready_timeout_s": float(self.config.psu_current_ready_timeout_s),
                 "psu_current_ready_poll_s": float(self.config.psu_current_ready_poll_s),
+                "psu_missing_readback_warn": bool(self.config.psu_missing_readback_warn),
             },
             "lcr_slow_retry": {
                 "enabled": bool(self.config.lcr_slow_retry_enabled),
@@ -663,8 +665,55 @@ def _measure_sweep_point_once(
         point_elapsed_s = max(0.0, read_monotonic - point_started)
         psu_measurement = _measure_psu_with_retries(psu, attempts=config.psu_measure_attempts)
         error = f"retry_attempt={attempt}" if attempt > 1 else ""
+        current_set = max(0.0, float(current_point.current_a))
+        if (
+            current_set <= 1e-9
+            and psu_measurement.current_actual_a is None
+            and bool(config.psu_missing_readback_warn)
+        ):
+            message = "missing actual-current readback at zero-current reference; continuing"
+            psu_measurement = PowerSupplyMeasurement(
+                current_actual_a=psu_measurement.current_actual_a,
+                voltage_actual_v=psu_measurement.voltage_actual_v,
+                status="WARN",
+                error=_combine_messages(psu_measurement.error, message),
+            )
+            error = _combine_messages(error, message)
         try:
             _validate_psu_output(current_point, psu_measurement)
+        except MissingPsuReadbackError as exc:
+            if not bool(config.psu_missing_readback_warn):
+                raise
+            if current_set <= 1e-9:
+                message = "missing actual-current readback at zero-current reference; continuing"
+            else:
+                message = "missing actual-current readback during active point; continuing"
+            row = AcSweepRow(
+                timestamp_utc=_timestamp_utc(),
+                elapsed_s=read_monotonic - started,
+                setting_index=setting_index,
+                total_settings=len(config.lcr_settings),
+                setting=setting,
+                current_point=current_point,
+                repeat_index=repeat_index,
+                lcr_reading=reading,
+                psu_measurement=PowerSupplyMeasurement(
+                    current_actual_a=psu_measurement.current_actual_a,
+                    voltage_actual_v=psu_measurement.voltage_actual_v,
+                    status="WARN",
+                    error=_combine_messages(psu_measurement.error, message),
+                ),
+                psu_backend=psu.backend_id,
+                psu_resource=psu.resource,
+                current_point_index=current_point_index,
+                total_current_points=total_current_points,
+                point_elapsed_s=point_elapsed_s,
+                error=_combine_messages(error, str(exc), message),
+            )
+            writer.write_row(row)
+            if progress is not None:
+                progress(row)
+            continue
         except PsuOutputVerificationError as exc:
             row = AcSweepRow(
                 timestamp_utc=_timestamp_utc(),
@@ -747,6 +796,10 @@ class PsuOutputVerificationError(RuntimeError):
     """Raised when PSU readback does not prove the requested current is active."""
 
 
+class MissingPsuReadbackError(PsuOutputVerificationError):
+    """Raised when PSU actual-current readback is missing."""
+
+
 def _measure_psu_with_retries(psu: CurrentSource, *, attempts: int) -> PowerSupplyMeasurement:
     last_error = ""
     for attempt in range(1, max(1, int(attempts)) + 1):
@@ -795,19 +848,22 @@ def _wait_for_psu_current(
 
 def _validate_psu_output(current_point: CurrentLoopPoint, measurement: PowerSupplyMeasurement) -> None:
     current_set = max(0.0, float(current_point.current_a))
-    actual = measurement.current_actual_a
-    if actual is None or not math.isfinite(float(actual)):
-        raise PsuOutputVerificationError(
-            "PSU did not return an actual-current readback; aborting current sweep."
-        )
     if current_set <= 1e-9:
         return
+    actual = measurement.current_actual_a
+    if actual is None or not math.isfinite(float(actual)):
+        raise MissingPsuReadbackError("PSU did not return an actual-current readback.")
     minimum_expected = max(0.001, 0.25 * current_set)
     if float(actual) < minimum_expected:
         raise PsuOutputVerificationError(
             f"PSU actual current {float(actual) * 1000:g} mA is far below "
             f"requested {current_set * 1000:g} mA; output may be off."
         )
+
+
+def _combine_messages(*messages: str) -> str:
+    parts = [str(message).strip() for message in messages if str(message or "").strip()]
+    return "; ".join(dict.fromkeys(parts))
 
 
 def _discard_lcr_reads(
