@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
+from plotting.plugins.base import PyPlotPlugin, register_plugin
 
 from . import core
 
@@ -29,6 +29,7 @@ class MiniDmaPlugin(PyPlotPlugin):
         self._plot_tabs: list[QtWidgets.QWidget] = []
         self._summary_label: QtWidgets.QLabel | None = None
         self._zero_minimum_strain_checkbox: QtWidgets.QCheckBox | None = None
+        self._show_power_top_axis_checkbox: QtWidgets.QCheckBox | None = None
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
         container = QtWidgets.QWidget(self.host)
@@ -70,6 +71,12 @@ class MiniDmaPlugin(PyPlotPlugin):
         )
         section_layout.addWidget(zero_minimum)
         self._zero_minimum_strain_checkbox = zero_minimum
+        show_power = QtWidgets.QCheckBox("Show power top axis")
+        show_power.setToolTip(
+            "Add a top X axis with P = I^2R labels calculated from the current-sweep curves."
+        )
+        section_layout.addWidget(show_power)
+        self._show_power_top_axis_checkbox = show_power
         layout.addWidget(section)
         layout.addStretch(1)
 
@@ -141,9 +148,16 @@ class MiniDmaPlugin(PyPlotPlugin):
                     lambda current_run: core.make_strain_current_figure(
                         current_run,
                         zero_minimum_strain=zero_minimum_strain,
+                        show_power_top_axis=self._show_power_top_axis_enabled(),
                     ),
                 ),
-                ("resistance_current", core.make_resistance_current_figure),
+                (
+                    "resistance_current",
+                    lambda current_run: core.make_resistance_current_figure(
+                        current_run,
+                        show_power_top_axis=self._show_power_top_axis_enabled(),
+                    ),
+                ),
             )
             for plot_kind, figure_factory in plot_specs:
                 try:
@@ -227,6 +241,14 @@ class MiniDmaPlugin(PyPlotPlugin):
                 )
                 lines[state.key] = state
 
+        power_axis_current_mA: list[float] = []
+        power_axis_resistance_ohm: list[float] = []
+        if self._show_power_top_axis_enabled() and plot_kind in {
+            "strain_current",
+            "resistance_current",
+        }:
+            power_axis_current_mA, power_axis_resistance_ohm = core.power_axis_points(run)
+
         descriptor = window_module.TabDescriptor(
             kind="mini_dma",
             title=title,
@@ -249,6 +271,19 @@ class MiniDmaPlugin(PyPlotPlugin):
                     if plot_kind == "strain_current"
                     else False
                 ),
+                "show_power_top_axis": (
+                    self._show_power_top_axis_enabled()
+                    if plot_kind in {"strain_current", "resistance_current"}
+                    else False
+                ),
+                "power_axis_current_mA": power_axis_current_mA,
+                "power_axis_resistance_ohm": power_axis_resistance_ohm,
+                "origin_legend_position": (
+                    "inside_upper_right"
+                    if plot_kind == "strain_current"
+                    else "inside_upper_left"
+                ),
+                "origin_layer_width": 54.0,
             },
         )
         suffix = "Strain" if plot_kind == "strain_current" else "Resistance"
@@ -256,3 +291,19 @@ class MiniDmaPlugin(PyPlotPlugin):
         self.host.tab_widget.addTab(tab, tab_label)
         self.host._register_plot_tab(tab, canvas, axes, descriptor)
         self._plot_tabs.append(tab)
+
+    def _show_power_top_axis_enabled(self) -> bool:
+        checkbox = self._show_power_top_axis_checkbox
+        return bool(checkbox is not None and checkbox.isChecked())
+
+    def _set_show_power_top_axis(self, enabled: bool) -> None:
+        if self._show_power_top_axis_checkbox is None:
+            self.settings_widget()
+        if self._show_power_top_axis_checkbox is not None:
+            self._show_power_top_axis_checkbox.setChecked(bool(enabled))
+
+    def _set_zero_minimum_strain(self, enabled: bool) -> None:
+        if self._zero_minimum_strain_checkbox is None:
+            self.settings_widget()
+        if self._zero_minimum_strain_checkbox is not None:
+            self._zero_minimum_strain_checkbox.setChecked(bool(enabled))

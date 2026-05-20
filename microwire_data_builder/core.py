@@ -5,12 +5,14 @@ from __future__ import annotations
 import csv
 import hashlib
 import importlib.util
+import json
 import sys
 import logging
 import math
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import unicodedata
 from dataclasses import dataclass, field
@@ -18,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
 from xml.etree import ElementTree as ET
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
 import pandas as pd
@@ -60,6 +62,7 @@ R_CHECK_THRESHOLD = 0.05
 DEFAULT_OUTPUT_NAME = "microwire_database"
 PLOT_DIR_NAME = "plots"
 ORIGIN_DIR_NAME = "origin_objects"
+WORD_REPORT_DIR_NAME = "word_reports"
 
 
 class BuildCancelledError(Exception):
@@ -224,6 +227,7 @@ OUTPUT_COLUMNS = [
     "VSM hysteresis graphs",
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
+    "Mini DMA graphs",
     "Shape memory stress/strain graphs",
     *SHAPE_MEMORY_VALUE_COLUMNS,
     *SHAPE_MEMORY_FRACTURE_COLUMNS,
@@ -248,7 +252,13 @@ FIGURE_COLUMNS = (
 VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
+MINI_DMA_COLUMN = "Mini DMA graphs"
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
+VSM_HYSTERESIS_ORIGIN_COLUMN = "VSM hysteresis graphs (Origin)"
+VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN = "VSM temperature scan graphs (Origin)"
+DMA_ISOSTRESS_ORIGIN_COLUMN = "DMA iso-stress graphs (Origin)"
+MINI_DMA_ORIGIN_COLUMN = "Mini DMA graphs (Origin)"
+SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Shape memory stress/strain graphs (Origin)"
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Displacement (mm)"
 SHAPE_MEMORY_LOAD_COLUMN = "Load (g)"
 SHAPE_MEMORY_STRAIN_COLUMN = "Strain (%)"
@@ -257,6 +267,14 @@ SHAPE_MEMORY_FRACTURE_LOAD_COLUMN = "Fracture load (g)"
 SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN = "Fracture strain (%)"
 SHAPE_MEMORY_FRACTURE_STRESS_COLUMN = "Fracture stress (MPa)"
 FMR_COLUMN = "FMR graphs"
+FMR_ORIGIN_COLUMN = "FMR graphs (Origin)"
+RVT_FILE_COLUMN = "R vs T files"
+RVT_GRAPH_COLUMN = "R vs T graphs"
+RVT_ORIGIN_COLUMN = "R vs T graphs (Origin)"
+RVT_RESIDUAL_ORIGIN_COLUMN = "R vs T residual graphs (Origin)"
+RVT_POINT_COUNT_COLUMN = "R vs T points"
+RVT_TEMPERATURE_RANGE_COLUMN = "R vs T temperature range (deg C)"
+RVT_RESISTANCE_RANGE_COLUMN = "R vs T resistance range (Ohm)"
 
 TRANSITION_TEMP_AS_COLUMN = "As (°C)"
 TRANSITION_TEMP_AF_COLUMN = "Af (°C)"
@@ -271,10 +289,81 @@ TRANSITION_TEMP_COLUMNS = (
 
 STRAIN_COLUMN = "Legacy strain"
 
+for _graph_column, _origin_column in (
+    (VSM_HYSTERESIS_COLUMN, VSM_HYSTERESIS_ORIGIN_COLUMN),
+    (VSM_TEMPERATURE_SCAN_COLUMN, VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN),
+    (DMA_ISOSTRESS_COLUMN, DMA_ISOSTRESS_ORIGIN_COLUMN),
+    (MINI_DMA_COLUMN, MINI_DMA_ORIGIN_COLUMN),
+    (SHAPE_MEMORY_STRESS_STRAIN_COLUMN, SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN),
+    (FMR_COLUMN, FMR_ORIGIN_COLUMN),
+):
+    if _graph_column in OUTPUT_COLUMNS and _origin_column not in OUTPUT_COLUMNS:
+        OUTPUT_COLUMNS.insert(OUTPUT_COLUMNS.index(_graph_column) + 1, _origin_column)
+
 ORIGIN_FIGURE_COLUMNS = tuple(
     column
     for column in OUTPUT_COLUMNS
     if column.startswith("Figure") and "(Origin)" in column
+) + (
+    RVT_ORIGIN_COLUMN,
+    RVT_RESIDUAL_ORIGIN_COLUMN,
+    VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
+    VSM_HYSTERESIS_ORIGIN_COLUMN,
+    DMA_ISOSTRESS_ORIGIN_COLUMN,
+    MINI_DMA_ORIGIN_COLUMN,
+    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+    FMR_ORIGIN_COLUMN,
+)
+
+WORD_MICROWIRE_DATA_COLUMNS = (
+    "Composition",
+    "Microwire",
+    "e/a",
+    "Strain (%)",
+    "Stress (MPa)",
+    "Load (g)",
+    "Stress/strain current (mA)",
+    "Stress/strain current density (A/mm^2)",
+    "Fracture strain (%)",
+    "Fracture stress (MPa)",
+    "Fracture load (g)",
+    "Fracture stress/strain current (mA)",
+    "Fracture stress/strain current density (A/mm^2)",
+    DIAMETER_COLUMN,
+    GLASS_DIAMETER_COLUMN,
+    DIAMETER_RATIO_COLUMN,
+    TRANSITION_TEMP_AS_COLUMN,
+    TRANSITION_TEMP_AF_COLUMN,
+    TRANSITION_TEMP_MS_COLUMN,
+    TRANSITION_TEMP_MF_COLUMN,
+    "As1 (mA)",
+    "Af1 (mA)",
+    "Ms1 (mA)",
+    "Mf1 (mA)",
+    "As2 (mA)",
+    "Af2 (mA)",
+    "Ms2 (mA)",
+    "Mf2 (mA)",
+    "Mf2-Mf1 (mA)",
+    "As2-As1 (mA)",
+    "Mf1-Af1 (mA)",
+    "Af2-Af1 (mA)",
+    "Mf2-Af2 (mA)",
+    "Ms2-Ms1 (mA)",
+    "As current density (A/mm^2)",
+    "Ms current density (A/mm^2)",
+    "Length (m)",
+    "Production datetime",
+    "Mass (g)",
+    "Resistance (Ω)",
+    CORE_TEMPERATURE_COLUMN,
+    GLASS_TEMPERATURE_COLUMN,
+    "Winding speed (m/min)",
+    "Glass feeding (mm/min)",
+    ESTIMATED_TRANSITION_COLUMN,
+    "Underpressure",
+    GLASS_PULL_COLUMN,
+    BRITTLE_COLUMN,
 )
 
 MICROWIRE_LABEL_RE = re.compile(r"(\d+)\s*[/\-]\s*(\d+)")
@@ -627,6 +716,27 @@ class OriginArtifact:
     workbook_name: Optional[str] = None
     worksheet_name: Optional[str] = None
     display_text: Optional[str] = None
+    clipboard_fallback: bool = False
+
+
+@dataclass(frozen=True)
+class WordOleInsertion:
+    """Origin object insertion request for a generated Word report."""
+
+    bookmark_name: str
+    object_path: Path
+    label: str
+    clipboard_fallback: bool = False
+    graph_name: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class WordPictureInsertion:
+    """Image insertion request for a generated Word report."""
+
+    bookmark_name: str
+    image_path: Path
+    label: str
 
 
 @dataclass
@@ -640,6 +750,7 @@ class BuildResult:
     stats: BuildStats
     microscope_crops: Dict[str, Path] = field(default_factory=dict)
     ocr_highlights: Dict[str, Set[int]] = field(default_factory=dict)
+    word_reports: List[Path] = field(default_factory=list)
 
 
 @dataclass
@@ -688,6 +799,17 @@ class DmaIsoStressRecord:
     path: Path
     sample: str
     datasets: Dict[int, Tuple[List[float], List[float]]]
+    key: Optional[Tuple[str, int, int]] = None
+    label: Optional[str] = None
+
+
+@dataclass
+class MiniDmaRecord:
+    """Parsed Mini DMA run for a single measurement folder."""
+
+    path: Path
+    sample: str
+    data: pd.DataFrame
     key: Optional[Tuple[str, int, int]] = None
     label: Optional[str] = None
 
@@ -3723,7 +3845,7 @@ def _plot_measurement_matplotlib(
         max(int(figsize[0] * dpi_target), 200),
         max(int(figsize[1] * dpi_target), 120),
     )
-    fig, fname = plot_one(plot_df, title, target_px=target_px)
+    fig, fname = plot_one(plot_df, title, target_px=target_px, show_power_top_axis=True)
     safe_stem = _safe_plot_stem(fname)
     plot_path = plot_dir / f"{safe_stem}.png"
     plot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3972,7 +4094,7 @@ def _plot_measurement_origin(
 ) -> Optional[OriginArtifact]:
     try:
         from plotting.plugins.current_annealing.core import plot_one_origin
-        from plotting.shared.utils import format_annealing_title, schedule_origin_release
+        from plotting.shared.utils import format_annealing_title
     except ImportError as exc:  # pragma: no cover - depends on optional module
         raise RuntimeError("originpro is not available") from exc
 
@@ -3986,30 +4108,20 @@ def _plot_measurement_origin(
         plot_df,
         title,
         source.name,
+        show_power_top_axis=True,
         return_handles=True,
     )
-    try:
-        schedule_origin_release()
-    except Exception:
-        pass
 
     if not isinstance(handles, dict):
         return None
 
-    description, graph_name, workbook_name, worksheet_name = _describe_origin_handles(handles)
     safe_stem = _safe_plot_stem(source.stem)
-    origin_dir.mkdir(parents=True, exist_ok=True)
-    artifact_name = f"{safe_stem}.oggu"
-    target_path = origin_dir / artifact_name
-    exported_path = _export_origin_object(handles, target_path, log)
-
-    return OriginArtifact(
-        descriptor=artifact_name,
-        object_path=exported_path,
-        graph_name=graph_name,
-        workbook_name=workbook_name,
-        worksheet_name=worksheet_name,
-        display_text=description,
+    return export_origin_graph_artifact(
+        handles=handles,
+        descriptor_stem=safe_stem,
+        origin_dir=origin_dir,
+        display_text=None,
+        log=log,
     )
 
 
@@ -4045,6 +4157,7 @@ def _export_origin_object(
     if origin_any is None or graph is None:
         return None
 
+    target_path = target_path.resolve()
     target_path.parent.mkdir(parents=True, exist_ok=True)
     attempted: list[str] = []
 
@@ -4084,24 +4197,35 @@ def _export_origin_object(
             except Exception:
                 attempted.append(attr)
 
-    lt_exec = getattr(origin_any, "lt_exec", None)
-    if callable(lt_exec):
+    lt_executors = (
+        getattr(graph, "lt_exec", None),
+        getattr(origin_any, "lt_exec", None),
+    )
+    if any(callable(executor) for executor in lt_executors):
         graph_name = _origin_object_name(graph) or ""
         base = str(target_path)
         commands = []
         if graph_name:
+            commands.append(f"page -s \"{graph_name}\"; save -i \"{base}\";")
+            commands.append(f"page -s \"{graph_name}\"; save -ix \"{base}\";")
             commands.append(f"page -s \"{graph_name}\"; save -oggu \"{base}\";")
             commands.append(f"page -s \"{graph_name}\"; save -opju \"{base}\";")
+        commands.append(f"save -i \"{base}\";")
+        commands.append(f"save -ix \"{base}\";")
         commands.append(f"save -oggu \"{base}\";")
         commands.append(f"save -opju \"{base}\";")
         for command in commands:
-            try:
-                lt_exec(command)
-                created = _path_created()
-                if created is not None:
-                    return created
-            except Exception:
-                attempted.append(command)
+            for lt_exec in lt_executors:
+                if not callable(lt_exec):
+                    continue
+                try:
+                    lt_exec(command)
+                    created = _path_created()
+                    if created is not None:
+                        return created
+                    attempted.append(f"{command} (no file)")
+                except Exception:
+                    attempted.append(command)
 
     if log is not None:
         log.warning(
@@ -4140,6 +4264,1663 @@ def _single_asset_reference(value: Any) -> Optional[str]:
         if len(resolved) == 1:
             return resolved[0]
     return None
+
+
+def _copy_origin_graph_page(
+    graph: object,
+    log: Optional[logging.Logger] = None,
+) -> bool:
+    if graph is None:
+        return False
+    try:
+        graph.activate()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    lt_exec = getattr(graph, "lt_exec", None)
+    if callable(lt_exec):
+        try:
+            # Keep master-page items from forcing an image-only clipboard payload.
+            lt_exec("@GMC=1;")
+        except Exception:
+            pass
+    copy_page = getattr(graph, "copy_page", None)
+    if not callable(copy_page):
+        return False
+    try:
+        copy_page("OLE", ratio=85)
+        return True
+    except TypeError:
+        try:
+            copy_page("OLE")
+            return True
+        except Exception:
+            pass
+    except Exception:
+        pass
+    if log is not None:
+        log.debug("Failed to copy Origin graph page %s as OLE", _origin_object_name(graph))
+    return False
+
+
+def export_origin_graph_artifact(
+    *,
+    handles: Dict[str, object],
+    descriptor_stem: str,
+    origin_dir: Path,
+    display_text: Optional[str] = None,
+    log: Optional[logging.Logger] = None,
+) -> Optional[OriginArtifact]:
+    """Save and describe a live Origin graph page for Word/Excel embedding."""
+
+    graph = handles.get("graph")
+    if graph is None:
+        return None
+    description, graph_name, workbook_name, worksheet_name = _describe_origin_handles(handles)
+    safe_stem = _safe_plot_stem(descriptor_stem)
+    origin_dir.mkdir(parents=True, exist_ok=True)
+    artifact_name = f"{safe_stem}.oggu"
+    target_path = origin_dir / artifact_name
+    exported_path = _export_origin_object(handles, target_path, log)
+    clipboard_fallback = _copy_origin_graph_page(graph, log)
+    return OriginArtifact(
+        descriptor=artifact_name,
+        object_path=exported_path,
+        graph_name=graph_name,
+        workbook_name=workbook_name,
+        worksheet_name=worksheet_name,
+        display_text=display_text or description,
+        clipboard_fallback=clipboard_fallback,
+    )
+
+
+def _pump_qt_events(app: object, *, rounds: int = 3) -> None:
+    processor = getattr(app, "processEvents", None)
+    if not callable(processor):
+        return
+    for _ in range(max(1, int(rounds))):
+        try:
+            processor()
+        except Exception:
+            break
+
+
+def export_pyplot_origin_artifacts_for_paths(
+    *,
+    paths: Sequence[Path | str],
+    plugin_name: str,
+    origin_dir: Path,
+    descriptor_prefix: str,
+    display_prefix: str,
+    log: Optional[logging.Logger] = None,
+    plot_mode: str | None = None,
+) -> List[OriginArtifact]:
+    """Generate PyPlot graphs for paths and save them as Origin graph artifacts."""
+
+    filtered: List[Path] = []
+    seen: Set[Path] = set()
+    for raw_path in paths:
+        path = Path(raw_path)
+        if not path.exists():
+            continue
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen:
+            continue
+        seen.add(key)
+        filtered.append(path)
+    if not filtered:
+        return []
+
+    try:
+        from PyQt6 import QtWidgets
+        from plotting.pyplot.app import PyPlotWorkbench
+    except Exception as exc:  # pragma: no cover - depends on optional GUI stack
+        raise RuntimeError("PyPlot automation is unavailable.") from exc
+
+    created_app = False
+    app = QtWidgets.QApplication.instance()
+    if not isinstance(app, QtWidgets.QApplication):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication([sys.argv[0]])
+        created_app = True
+        try:
+            app.setQuitOnLastWindowClosed(False)
+        except Exception:
+            pass
+
+    window: Any | None = None
+    artifacts: List[OriginArtifact] = []
+    try:
+        window = PyPlotWorkbench(initial_plotter=plugin_name)
+        _pump_qt_events(app, rounds=4)
+        selector = getattr(window, "automation_select_plugin", None)
+        if not callable(selector):
+            raise RuntimeError("PyPlot plugin selection automation is unavailable.")
+        selector(plugin_name)
+
+        plugin_getter = getattr(window, "_plugin_instance_for_name", None)
+        plugin = plugin_getter(plugin_name) if callable(plugin_getter) else None
+        use_live_vsm_origin_export = True
+        if (
+            use_live_vsm_origin_export
+            and str(plugin_name).strip().casefold() == "vsm temperature scan"
+            and plugin is not None
+        ):
+            processor = getattr(plugin, "_processor", None)
+            for setter_name, value in (
+                ("set_show_derivative", False),
+                ("set_show_smoothed_derivative", False),
+                ("set_show_overlay_derivative", False),
+                ("set_show_smoothed", False),
+            ):
+                setter = getattr(processor, setter_name, None)
+                if callable(setter):
+                    try:
+                        setter(value)
+                    except Exception:
+                        pass
+            for attr in (
+                "show_derivative",
+                "show_smoothed_derivative",
+                "show_overlay_derivative",
+                "show_smoothed_plot",
+            ):
+                try:
+                    setattr(processor, attr, False)
+                except Exception:
+                    pass
+            try:
+                setter = getattr(processor, "set_split_directions", None)
+                if callable(setter):
+                    setter(True)
+                else:
+                    setattr(processor, "split_directions", True)
+            except Exception:
+                pass
+            try:
+                setter = getattr(processor, "set_combine_fields", None)
+                if callable(setter):
+                    setter(True)
+                else:
+                    setattr(processor, "combine_fields", True)
+            except Exception:
+                pass
+
+        plugin_key = str(plugin_name).strip().casefold()
+        if plugin is not None and plugin_key in {"current annealing", "mini dma"}:
+            try:
+                panel = getattr(plugin, "panel_widget", None)
+                if callable(panel):
+                    panel()
+            except Exception:
+                pass
+            try:
+                settings = getattr(plugin, "settings_widget", None)
+                if callable(settings):
+                    settings()
+            except Exception:
+                pass
+            setter = getattr(plugin, "_set_show_power_top_axis", None)
+            if callable(setter):
+                try:
+                    setter(True)
+                except Exception:
+                    pass
+            checkbox = getattr(plugin, "_show_power_top_axis_checkbox", None)
+            if checkbox is not None:
+                try:
+                    checkbox.setChecked(True)
+                except Exception:
+                    pass
+
+        importer = getattr(window, "automation_import_paths", None)
+        if not callable(importer):
+            raise RuntimeError("PyPlot import automation is unavailable.")
+        importer(filtered)
+
+        if (
+            use_live_vsm_origin_export
+            and str(plugin_name).strip().casefold() == "vsm temperature scan"
+            and plugin is not None
+        ):
+            processor = getattr(plugin, "_processor", None)
+            dataset = getattr(plugin, "_dataset", None)
+            if not dataset:
+                if log is not None:
+                    log.warning("No VSM temperature scan dataset was available for Origin export.")
+                return artifacts
+            try:
+                from plotting.shared.origin import _ensure_origin_sdk_on_path
+
+                _ensure_origin_sdk_on_path()
+            except Exception:
+                pass
+            try:
+                import originpro as op  # type: ignore
+            except Exception as exc:
+                raise RuntimeError("originpro is not available") from exc
+            try:
+                before_graphs = list(op.graph_list("p", True))
+            except Exception:
+                before_graphs = []
+            if processor is None or not hasattr(processor, "plot_origin"):
+                raise RuntimeError("VSM temperature scan Origin export is unavailable.")
+            try:
+                returned_graphs = processor.plot_origin(dataset, release_origin_on_exit=False)
+            except TypeError:
+                returned_graphs = processor.plot_origin(dataset)
+            _pump_qt_events(app, rounds=6)
+            if isinstance(returned_graphs, list) and returned_graphs:
+                new_graphs = returned_graphs
+            else:
+                try:
+                    after_graphs = list(op.graph_list("p", True))
+                except Exception:
+                    after_graphs = []
+                new_graphs = after_graphs[len(before_graphs) :] if len(after_graphs) >= len(before_graphs) else after_graphs
+            for counter, graph in enumerate(new_graphs, start=1):
+                fallback_graph_name = f"WRVSM{counter:02d}"
+                if _origin_object_name(graph) is None:
+                    for attr, value in (
+                        ("name", fallback_graph_name),
+                        ("lname", f"{display_prefix} {counter:02d}"),
+                    ):
+                        try:
+                            setattr(graph, attr, value)
+                        except Exception:
+                            pass
+                graph_name = _origin_object_name(graph) or fallback_graph_name
+                artifact = export_origin_graph_artifact(
+                    handles={
+                        "origin": op,
+                        "graph": graph,
+                        "legend_label": f"{display_prefix}: {graph_name}",
+                    },
+                    descriptor_stem=_safe_plot_stem(
+                        "_".join((descriptor_prefix, graph_name or f"{counter:02d}"))
+                    ),
+                    origin_dir=origin_dir,
+                    display_text=f"{display_prefix}: {graph_name}",
+                    log=log,
+                )
+                if artifact is not None and (
+                    artifact.object_path is not None or artifact.clipboard_fallback
+                ):
+                    artifacts.append(artifact)
+            return artifacts
+
+        if str(plugin_name).strip().casefold() == "r vs t" and str(plot_mode or "").strip().casefold() == "residual":
+            generator = getattr(plugin, "generate_residuals", None)
+        else:
+            generator = getattr(window, "automation_generate", None)
+        if not callable(generator):
+            raise RuntimeError("PyPlot generate automation is unavailable.")
+        generator()
+        _pump_qt_events(app, rounds=10)
+
+        pruner = getattr(window, "_prune_shared_plot_workbooks", None)
+        if callable(pruner):
+            pruner()
+        workbook_getter = getattr(window, "_shared_plot_workbooks_for_plugin", None)
+        workbooks = workbook_getter(plugin_name) if callable(workbook_getter) else []
+        if not workbooks:
+            current_tab = getattr(window, "tab_widget", None)
+            current_widget = current_tab.currentWidget() if current_tab is not None else None
+            descriptor = getattr(window, "_tab_descriptors", {}).get(current_widget)
+            registrar = getattr(window, "_register_shared_plot_workbook_for_tab", None)
+            if current_widget is not None and descriptor is not None and callable(registrar):
+                registrar(current_widget, descriptor)
+                workbooks = workbook_getter(plugin_name) if callable(workbook_getter) else []
+        if not workbooks:
+            managed_keys = getattr(plugin, "_managed_workbooks", None)
+            workbook_store = getattr(window, "_workbooks", {})
+            if managed_keys and isinstance(workbook_store, dict):
+                workbooks = [
+                    workbook_store[key]
+                    for key in sorted(managed_keys, key=str)
+                    if key in workbook_store
+                ]
+        if str(plugin_name).strip().casefold() == "vsm temperature scan":
+            workbooks = [
+                workbook
+                for workbook in workbooks
+                if "(tscan)" in str(getattr(workbook, "name", "") or "").casefold()
+                and not any(
+                    token in str(getattr(workbook, "name", "") or "").casefold()
+                    for token in ("derivative", "smoothed", "overlay")
+                )
+            ]
+        if not workbooks:
+            if log is not None:
+                log.warning("No PyPlot workbooks were available for %s Origin export.", plugin_name)
+            return artifacts
+
+        counter = 0
+
+        def _capture_artifact(
+            origin_any: object,
+            graph: object,
+            workbook: object,
+            worksheet: object,
+        ) -> None:
+            nonlocal counter
+            counter += 1
+            workbook_name = str(getattr(workbook, "name", "") or "").strip()
+            worksheet_name = str(getattr(worksheet, "name", "") or "").strip()
+            label_parts = [part for part in (display_prefix, workbook_name, worksheet_name) if part]
+            display_text = (
+                ": ".join([label_parts[0], " - ".join(label_parts[1:])])
+                if label_parts
+                else display_prefix
+            )
+            descriptor_parts = [
+                descriptor_prefix,
+                workbook_name or "graph",
+                worksheet_name or f"{counter:02d}",
+            ]
+            artifact = export_origin_graph_artifact(
+                handles={
+                    "origin": origin_any,
+                    "graph": graph,
+                    "workbook": workbook,
+                    "worksheet": worksheet,
+                    "legend_label": display_text,
+                },
+                descriptor_stem=_safe_plot_stem("_".join(descriptor_parts)),
+                origin_dir=origin_dir,
+                display_text=display_text,
+                log=log,
+            )
+            if artifact is not None and (
+                artifact.object_path is not None or artifact.clipboard_fallback
+            ):
+                artifacts.append(artifact)
+
+        pusher = getattr(window, "_push_workbooks_to_origin", None)
+        if not callable(pusher):
+            raise RuntimeError("PyPlot Origin workbook export is unavailable.")
+        _exported, _plotted, errors = pusher(
+            workbooks,
+            create_graphs=True,
+            graph_callback=_capture_artifact,
+            keep_origin_open=True,
+            release_origin_on_exit=False,
+        )
+        if log is not None:
+            for error in errors or []:
+                log.warning("%s Origin export warning: %s", plugin_name, error)
+        _pump_qt_events(app, rounds=4)
+        return artifacts
+    finally:
+        if window is not None:
+            try:
+                clear_dirty = getattr(window, "_clear_project_dirty", None)
+                if callable(clear_dirty):
+                    clear_dirty()
+            except Exception:
+                pass
+            try:
+                window.close()
+            except Exception:
+                pass
+        if isinstance(app, QtWidgets.QApplication):
+            _pump_qt_events(app, rounds=4)
+            if created_app:
+                try:
+                    app.quit()
+                except Exception:
+                    pass
+
+
+def _asset_references(value: Any) -> List[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, (list, tuple, set)):
+        resolved: List[str] = []
+        for item in value:
+            for candidate in _asset_references(item):
+                if candidate and candidate not in resolved:
+                    resolved.append(candidate)
+        return resolved
+    return []
+
+
+_WORD_REPORT_LABELS: Dict[str, str] = {
+    DIAMETER_COLUMN: "d (um)",
+    GLASS_DIAMETER_COLUMN: "D (um)",
+    DIAMETER_RATIO_COLUMN: "d/D",
+    RVT_FILE_COLUMN: "R vs T source files",
+    RVT_GRAPH_COLUMN: "R vs T graphs",
+    RVT_ORIGIN_COLUMN: "R vs T graphs (Origin)",
+    RVT_RESIDUAL_ORIGIN_COLUMN: "R vs T residual graphs (Origin)",
+    VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN: "VSM temperature scan graphs (Origin)",
+    VSM_HYSTERESIS_ORIGIN_COLUMN: "VSM hysteresis graphs (Origin)",
+    DMA_ISOSTRESS_ORIGIN_COLUMN: "DMA iso-stress graphs (Origin)",
+    MINI_DMA_ORIGIN_COLUMN: "Mini DMA graphs (Origin)",
+    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN: "Shape memory stress/strain graphs (Origin)",
+    FMR_ORIGIN_COLUMN: "FMR graphs (Origin)",
+    RVT_POINT_COUNT_COLUMN: "R vs T points",
+    RVT_TEMPERATURE_RANGE_COLUMN: "R vs T temperature range (deg C)",
+    RVT_RESISTANCE_RANGE_COLUMN: "R vs T resistance range (Ohm)",
+    CORE_TEMPERATURE_COLUMN: "Core temperature (deg C)",
+    GLASS_TEMPERATURE_COLUMN: "Glass temperature (deg C)",
+    "Resistance (Î©)": "Resistance (Ohm)",
+    "As (Â°C)": "As (deg C)",
+    "Af (Â°C)": "Af (deg C)",
+    "Ms (Â°C)": "Ms (deg C)",
+    "Mf (Â°C)": "Mf (deg C)",
+    "Figure â€” 1000 mA": "Figure - 1000 mA",
+    "Figure â€” other annealing": "Figure - other annealing",
+    "Figure â€” 1000 mA (Origin)": "Figure - 1000 mA (Origin)",
+    "Figure â€” other annealing (Origin)": "Figure - other annealing (Origin)",
+}
+
+_WORD_IDENTITY_COLUMNS: Tuple[str, ...] = (
+    "Composition",
+    "Microwire",
+    "e/a",
+    ESTIMATED_TRANSITION_COLUMN,
+)
+
+_WORD_DIMENSION_COLUMNS: Tuple[str, ...] = (
+    DIAMETER_COLUMN,
+    GLASS_DIAMETER_COLUMN,
+    DIAMETER_RATIO_COLUMN,
+)
+
+_WORD_FABRICATION_COLUMNS: Tuple[str, ...] = (
+    "Length (m)",
+    "Production datetime",
+    "Mass (g)",
+    "Resistance (Î©)",
+    CORE_TEMPERATURE_COLUMN,
+    GLASS_TEMPERATURE_COLUMN,
+    "Winding speed (m/min)",
+    "Glass feeding (mm/min)",
+    "Underpressure",
+    GLASS_PULL_COLUMN,
+    VIDEO_END_LENGTH_COLUMN,
+    VIDEO_MW_LENGTH_COLUMN,
+)
+
+_WORD_FUNCTIONAL_COLUMNS: Tuple[str, ...] = (
+    BRITTLE_COLUMN,
+    STRAIN_COLUMN,
+    "As (mA)",
+    "Ms (mA)",
+    *CURRENT_DENSITY_EXTRA_COLUMNS,
+    *TRANSITION_TEMP_COLUMNS,
+    *STRAIN_EXTRA_COLUMNS,
+    *SHAPE_MEMORY_VALUE_COLUMNS,
+    *SHAPE_MEMORY_FRACTURE_COLUMNS,
+)
+
+_WORD_PROVENANCE_COLUMNS: Tuple[str, ...] = (
+    "File 1000 mA",
+    "Other annealing files",
+    "Data source",
+    RVT_FILE_COLUMN,
+    RVT_POINT_COUNT_COLUMN,
+    RVT_TEMPERATURE_RANGE_COLUMN,
+    RVT_RESISTANCE_RANGE_COLUMN,
+)
+
+_WORD_GRAPH_COLUMNS: Tuple[str, ...] = (
+    *FIGURE_COLUMNS,
+    RVT_GRAPH_COLUMN,
+    RVT_ORIGIN_COLUMN,
+    VSM_HYSTERESIS_COLUMN,
+    VSM_HYSTERESIS_ORIGIN_COLUMN,
+    VSM_TEMPERATURE_SCAN_COLUMN,
+    VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
+    DMA_ISOSTRESS_COLUMN,
+    DMA_ISOSTRESS_ORIGIN_COLUMN,
+    MINI_DMA_COLUMN,
+    MINI_DMA_ORIGIN_COLUMN,
+    SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+    FMR_COLUMN,
+    FMR_ORIGIN_COLUMN,
+)
+
+_CURRENT_ANNEALING_ORIGIN_COLUMNS = tuple(f"{column} (Origin)" for column in FIGURE_COLUMNS)
+
+_WORD_GRAPH_SECTIONS: Tuple[
+    Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    ...,
+] = (
+    ("Current annealing", _CURRENT_ANNEALING_ORIGIN_COLUMNS, FIGURE_COLUMNS),
+    ("R vs T", (RVT_ORIGIN_COLUMN, RVT_RESIDUAL_ORIGIN_COLUMN), (RVT_GRAPH_COLUMN,)),
+    ("VSM temperature scan", (VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,), (VSM_TEMPERATURE_SCAN_COLUMN,)),
+    ("VSM hysteresis loops", (VSM_HYSTERESIS_ORIGIN_COLUMN,), (VSM_HYSTERESIS_COLUMN,)),
+    ("DMA iso-stress", (DMA_ISOSTRESS_ORIGIN_COLUMN,), (DMA_ISOSTRESS_COLUMN,)),
+    ("Mini DMA", (MINI_DMA_ORIGIN_COLUMN,), (MINI_DMA_COLUMN,)),
+    (
+        "Shape memory stress/strain",
+        (SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,),
+        (SHAPE_MEMORY_STRESS_STRAIN_COLUMN,),
+    ),
+    ("FMR", (FMR_ORIGIN_COLUMN,), (FMR_COLUMN,)),
+)
+
+_WORD_ALWAYS_OMIT_COLUMNS: Tuple[str, ...] = (
+    *_WORD_PROVENANCE_COLUMNS,
+    *_WORD_GRAPH_COLUMNS,
+    *ORIGIN_FIGURE_COLUMNS,
+    *MICROSCOPE_IMAGE_COLUMNS,
+)
+
+
+def _word_label(column: str) -> str:
+    return _WORD_REPORT_LABELS.get(column, column)
+
+
+def _word_xml_escape(value: object) -> str:
+    text = str(value)
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _word_has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        stripped = value.strip()
+        return bool(stripped) and stripped.lower() != "nan"
+    if isinstance(value, (list, tuple, set)):
+        return any(_word_has_value(item) for item in value)
+    try:
+        missing = pd.isna(value)
+    except Exception:
+        missing = False
+    if isinstance(missing, (bool, np.bool_)) and missing:
+        return False
+    return True
+
+
+def _word_format_value(value: Any) -> str:
+    if not _word_has_value(value):
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        parts = [_word_format_value(item) for item in value if _word_has_value(item)]
+        return ", ".join(part for part in parts if part)
+    if isinstance(value, (pd.Timestamp, datetime)):
+        try:
+            return value.isoformat(sep=" ", timespec="seconds")
+        except TypeError:
+            return value.isoformat()
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return ""
+        return f"{numeric:.6g}"
+    text = str(value).strip()
+    return "" if text.lower() == "nan" else text
+
+
+def _word_format_value_cells(value: Any) -> List[str]:
+    if not _word_has_value(value):
+        return [""]
+    if isinstance(value, (list, tuple, set)):
+        cells = [_word_format_value(item) for item in value if _word_has_value(item)]
+        return cells or [""]
+    return [_word_format_value(value)]
+
+
+def _word_key_values(row: pd.Series, columns: Sequence[str]) -> List[Tuple[str, str]]:
+    values: List[Tuple[str, str]] = []
+    for column in columns:
+        if column not in row.index:
+            continue
+        value = row.get(column)
+        if not _word_has_value(value):
+            continue
+        formatted = _word_format_value(value)
+        if formatted:
+            values.append((_word_label(column), formatted))
+    return values
+
+
+def _word_sample_title(row: pd.Series, fallback_index: int) -> str:
+    composition = _word_format_value(row.get("Composition"))
+    microwire = _word_format_value(row.get("Microwire"))
+    title = " ".join(part for part in (composition, microwire) if part).strip()
+    if title:
+        return title
+    return f"Sample {fallback_index + 1}"
+
+
+def _word_report_filename(row: pd.Series, fallback_index: int) -> str:
+    title = _word_sample_title(row, fallback_index).replace("/", "-")
+    return f"{_safe_plot_stem(title).replace(' ', '_')}.docx"
+
+
+def _word_run(text: str, *, bold: bool = False, size: int | None = None) -> str:
+    props: List[str] = []
+    if bold:
+        props.append("<w:b/>")
+    if size is not None:
+        props.append(f'<w:sz w:val="{int(size)}"/>')
+    prop_xml = f"<w:rPr>{''.join(props)}</w:rPr>" if props else ""
+    return f"<w:r>{prop_xml}<w:t>{_word_xml_escape(text)}</w:t></w:r>"
+
+
+def _word_paragraph(
+    text: str = "",
+    *,
+    bold: bool = False,
+    size: int | None = None,
+    spacing_after: int = 160,
+    bookmark_name: str | None = None,
+    bookmark_id: int | None = None,
+    style: str | None = None,
+) -> str:
+    style_xml = f'<w:pStyle w:val="{_word_xml_escape(style)}"/>' if style else ""
+    ppr = f'<w:pPr>{style_xml}<w:spacing w:after="{int(spacing_after)}"/></w:pPr>'
+    bookmark_start = ""
+    bookmark_end = ""
+    if bookmark_name and bookmark_id is not None:
+        safe_name = re.sub(r"[^A-Za-z0-9_]", "_", bookmark_name)
+        bookmark_start = f'<w:bookmarkStart w:id="{int(bookmark_id)}" w:name="{safe_name}"/>'
+        bookmark_end = f'<w:bookmarkEnd w:id="{int(bookmark_id)}"/>'
+    return f"<w:p>{ppr}{bookmark_start}{_word_run(text, bold=bold, size=size)}{bookmark_end}</w:p>"
+
+
+def _word_page_break() -> str:
+    return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+
+
+def _word_table(rows: Sequence[Tuple[str, str]]) -> str:
+    if not rows:
+        return ""
+    border = (
+        '<w:top w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:left w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:right w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
+        '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
+    )
+    table_rows: List[str] = []
+    for label, value in rows:
+        label_cell = (
+            '<w:tc><w:tcPr><w:tcW w:w="2600" w:type="dxa"/>'
+            '<w:shd w:fill="F3F4F6"/></w:tcPr>'
+            f'{_word_paragraph(label, bold=True, spacing_after=0)}</w:tc>'
+        )
+        value_cell = (
+            '<w:tc><w:tcPr><w:tcW w:w="6200" w:type="dxa"/></w:tcPr>'
+            f'{_word_paragraph(value, spacing_after=0)}</w:tc>'
+        )
+        table_rows.append(f"<w:tr>{label_cell}{value_cell}</w:tr>")
+    return (
+        "<w:tbl>"
+        '<w:tblPr><w:tblW w:w="0" w:type="auto"/>'
+        f"<w:tblBorders>{border}</w:tblBorders>"
+        '<w:tblCellMar><w:top w:w="90" w:type="dxa"/><w:left w:w="90" w:type="dxa"/>'
+        '<w:bottom w:w="90" w:type="dxa"/><w:right w:w="90" w:type="dxa"/></w:tblCellMar>'
+        "</w:tblPr>"
+        f"{''.join(table_rows)}"
+        "</w:tbl>"
+        + _word_paragraph("", spacing_after=120)
+    )
+
+
+def _word_microwire_data_table(rows: Sequence[Tuple[str, Sequence[str]]]) -> str:
+    if not rows:
+        return ""
+    border = (
+        '<w:top w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:left w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:right w:val="single" w:sz="4" w:space="0" w:color="D0D7DE"/>'
+        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
+        '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="E5E7EB"/>'
+    )
+    def _cell(text: str, *, label: bool = False, width: int = 2100) -> str:
+        shading = '<w:shd w:fill="F3F4F6"/>' if label else ""
+        return (
+            '<w:tc><w:tcPr>'
+            f'<w:tcW w:w="{int(width)}" w:type="dxa"/>{shading}</w:tcPr>'
+            f'{_word_paragraph(text, bold=label, size=16, spacing_after=0)}</w:tc>'
+        )
+
+    table_rows: List[str] = []
+    pending_pairs: List[Tuple[str, str]] = []
+
+    def _flush_pairs() -> None:
+        nonlocal pending_pairs
+        if not pending_pairs:
+            return
+        midpoint = (len(pending_pairs) + 1) // 2
+        left_pairs = pending_pairs[:midpoint]
+        right_pairs = pending_pairs[midpoint:]
+        pending_pairs = []
+        for index, pair in enumerate(left_pairs):
+            cells = []
+            label, value = pair
+            cells.append(_cell(label, label=True, width=1900))
+            cells.append(_cell(value, width=2500))
+            if index < len(right_pairs):
+                label, value = right_pairs[index]
+                cells.append(_cell(label, label=True, width=1900))
+                cells.append(_cell(value, width=2500))
+            while len(cells) < 4:
+                cells.append(_cell("", label=True, width=1900))
+                cells.append(_cell("", width=2500))
+            table_rows.append(f"<w:tr>{''.join(cells)}</w:tr>")
+
+    for label, raw_values in rows:
+        values = [str(value) for value in list(raw_values)[:6]]
+        if not values:
+            values = [""]
+        if len(values) == 1:
+            pending_pairs.append((label, values[0]))
+            continue
+        _flush_pairs()
+        value_width = max(1100, int(6200 / len(values)))
+        label_cell = (
+            '<w:tc><w:tcPr><w:tcW w:w="2600" w:type="dxa"/>'
+            '<w:shd w:fill="F3F4F6"/></w:tcPr>'
+            f'{_word_paragraph(label, bold=True, size=16, spacing_after=0)}</w:tc>'
+        )
+        value_cells = "".join(
+            '<w:tc><w:tcPr>'
+            f'<w:tcW w:w="{value_width}" w:type="dxa"/></w:tcPr>'
+            f'{_word_paragraph(value, size=16, spacing_after=0)}</w:tc>'
+            for value in values
+        )
+        table_rows.append(f"<w:tr>{label_cell}{value_cells}</w:tr>")
+    _flush_pairs()
+    return (
+        "<w:tbl>"
+        '<w:tblPr><w:tblW w:w="0" w:type="auto"/>'
+        f"<w:tblBorders>{border}</w:tblBorders>"
+        '<w:tblCellMar><w:top w:w="35" w:type="dxa"/><w:left w:w="45" w:type="dxa"/>'
+        '<w:bottom w:w="35" w:type="dxa"/><w:right w:w="45" w:type="dxa"/></w:tblCellMar>'
+        "</w:tblPr>"
+        f"{''.join(table_rows)}"
+        "</w:tbl>"
+        + _word_paragraph("", spacing_after=120)
+    )
+
+
+def _word_section(
+    title: str,
+    rows: Sequence[Tuple[str, str]],
+    *,
+    empty_text: str = "",
+) -> str:
+    parts = [_word_paragraph(title, bold=True, size=28, spacing_after=120, style="Heading1")]
+    if rows:
+        parts.append(_word_table(rows))
+    elif empty_text:
+        parts.append(_word_paragraph(empty_text))
+    return "".join(parts)
+
+
+def _word_microwire_data_section(row: pd.Series) -> str:
+    rows: List[Tuple[str, List[str]]] = []
+    for column in WORD_MICROWIRE_DATA_COLUMNS:
+        column_text = str(column)
+        lowered = column_text.casefold()
+        if (
+            column_text in _WORD_ALWAYS_OMIT_COLUMNS
+            or column_text.startswith("_")
+            or column_text.endswith("(Origin)")
+        ):
+            continue
+        if "file" in lowered or "path" in lowered or "image" in lowered:
+            continue
+        rows.append((_word_label(column_text), _word_format_value_cells(row.get(column))))
+    parts = [_word_paragraph("Microwire data", bold=True, size=24, spacing_after=70, style="Heading1")]
+    if rows:
+        parts.append(_word_microwire_data_table(rows))
+    else:
+        parts.append(_word_paragraph("No microwire values available."))
+    return "".join(parts)
+
+
+def _word_resolve_picture_path(
+    value: Any,
+    microscope_crops: Mapping[str, Path],
+) -> Optional[Path]:
+    for descriptor in _asset_references(value):
+        crop = microscope_crops.get(descriptor)
+        if crop is not None and Path(crop).exists():
+            return Path(crop)
+        candidate = Path(descriptor)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _word_microscope_section(
+    row: pd.Series,
+    microscope_crops: Mapping[str, Path],
+    bookmark_start: int,
+) -> Tuple[str, List[WordPictureInsertion], int]:
+    parts = [
+        _word_page_break(),
+        _word_paragraph(
+            "Microscope and dimensions",
+            bold=True,
+            size=28,
+            spacing_after=120,
+            style="Heading1",
+        )
+    ]
+    picture_insertions: List[WordPictureInsertion] = []
+    rows = _word_key_values(row, _WORD_DIMENSION_COLUMNS)
+    if rows:
+        parts.append(_word_table(rows))
+    bookmark_id = bookmark_start
+    image_labels = {
+        MICROSCOPE_IMAGE_COLUMNS[0]: "Core diameter image",
+        MICROSCOPE_IMAGE_COLUMNS[1]: "Glass diameter image",
+    }
+    added_image = False
+    for column, label in image_labels.items():
+        if column not in row.index:
+            continue
+        image_path = _word_resolve_picture_path(row.get(column), microscope_crops)
+        if image_path is None:
+            continue
+        added_image = True
+        parts.append(_word_paragraph(label, bold=True, spacing_after=60))
+        bookmark_name = f"MicroscopeImage{bookmark_id}"
+        parts.append(
+            _word_paragraph(
+                f"[Microscope image placeholder: {label}]",
+                spacing_after=220,
+                bookmark_name=bookmark_name,
+                bookmark_id=bookmark_id,
+            )
+        )
+        picture_insertions.append(
+            WordPictureInsertion(
+                bookmark_name=bookmark_name,
+                image_path=image_path,
+                label=label,
+            )
+        )
+        bookmark_id += 1
+    if not rows and not added_image:
+        parts.append(_word_paragraph("Not measured yet."))
+    return "".join(parts), picture_insertions, bookmark_id
+
+
+def _word_additional_values(row: pd.Series, used_columns: Sequence[str]) -> List[Tuple[str, str]]:
+    used = set(used_columns) | set(_WORD_ALWAYS_OMIT_COLUMNS)
+    values: List[Tuple[str, str]] = []
+    for column in row.index:
+        column_text = str(column)
+        lowered = column_text.casefold()
+        if column_text in used or column_text.startswith("_"):
+            continue
+        if "file" in lowered or "path" in lowered or "image" in lowered:
+            continue
+        value = row.get(column)
+        formatted = _word_format_value(value) if _word_has_value(value) else ""
+        values.append((_word_label(column_text), formatted))
+    return values
+
+
+def _word_assemble_values(row: pd.Series) -> List[Tuple[str, str]]:
+    values: List[Tuple[str, str]] = []
+    for column in WORD_MICROWIRE_DATA_COLUMNS:
+        column_text = str(column)
+        lowered = column_text.casefold()
+        if (
+            column_text in _WORD_ALWAYS_OMIT_COLUMNS
+            or column_text.startswith("_")
+            or column_text.endswith("(Origin)")
+        ):
+            continue
+        if "file" in lowered or "path" in lowered or "image" in lowered:
+            continue
+        value = row.get(column)
+        formatted = _word_format_value(value) if _word_has_value(value) else ""
+        values.append((_word_label(column_text), formatted))
+    return values
+
+
+def _word_graph_sections(
+    row: pd.Series,
+    origin_artifacts: Mapping[str, OriginArtifact],
+    bookmark_start: int,
+) -> Tuple[str, List[WordOleInsertion], int]:
+    parts: List[str] = []
+    insertions: List[WordOleInsertion] = []
+    bookmark_id = bookmark_start
+    for title, origin_columns, reference_columns in _WORD_GRAPH_SECTIONS:
+        parts.append(_word_page_break())
+        parts.append(_word_paragraph(title, bold=True, size=28, spacing_after=120, style="Heading1"))
+        section_has_content = False
+        section_has_origin_descriptors = False
+        missing_origin_object = False
+        for column in origin_columns:
+            if column not in row.index:
+                continue
+            for descriptor in _asset_references(row.get(column)):
+                artifact = origin_artifacts.get(descriptor)
+                display = artifact.display_text if artifact and artifact.display_text else descriptor
+                section_has_origin_descriptors = True
+                bookmark_name = f"OriginGraph{bookmark_id}"
+                parts.append(
+                    _word_paragraph(
+                        f"[Origin object placeholder: {descriptor}]",
+                        spacing_after=220,
+                        bookmark_name=bookmark_name,
+                        bookmark_id=bookmark_id,
+                    )
+                )
+                if artifact is not None and (
+                    artifact.object_path is not None
+                    or bool(getattr(artifact, "clipboard_fallback", False))
+                ):
+                    insertions.append(
+                        WordOleInsertion(
+                            bookmark_name=bookmark_name,
+                            object_path=(
+                                Path(artifact.object_path)
+                                if artifact.object_path is not None
+                                else Path(artifact.descriptor)
+                            ),
+                            label=str(display or descriptor),
+                            clipboard_fallback=bool(
+                                getattr(artifact, "clipboard_fallback", False)
+                            ),
+                            graph_name=artifact.graph_name,
+                        )
+                    )
+                else:
+                    missing_origin_object = True
+                bookmark_id += 1
+                section_has_content = True
+        reference_values: List[str] = []
+        for column in reference_columns:
+            if column not in row.index:
+                continue
+            for descriptor in _asset_references(row.get(column)):
+                if descriptor not in reference_values:
+                    reference_values.append(descriptor)
+        if reference_values and not section_has_origin_descriptors:
+            section_has_content = True
+            parts.append(_word_table([("Graphs in Assemble", ", ".join(reference_values))]))
+            parts.append(
+                _word_paragraph(
+                    "Editable Origin object was not generated for this graph yet."
+                    if origin_columns
+                    else "Editable Origin object export is not available for this graph type yet."
+                )
+            )
+        if missing_origin_object:
+            parts.append(
+                _word_paragraph(
+                    "Editable Origin object export is not available for this graph type yet."
+                )
+            )
+        if not section_has_content:
+            parts.append(_word_paragraph("Not measured yet."))
+    return "".join(parts), insertions, bookmark_id
+
+
+def _word_document_xml(
+    row: pd.Series,
+    fallback_index: int,
+    origin_artifacts: Mapping[str, OriginArtifact],
+    microscope_crops: Mapping[str, Path],
+) -> Tuple[str, List[WordOleInsertion], List[WordPictureInsertion]]:
+    title = _word_sample_title(row, fallback_index)
+    body: List[str] = [
+        _word_paragraph(title, bold=True, size=40, spacing_after=220, style="Title"),
+        _word_microwire_data_section(row),
+    ]
+    microscope_xml, picture_insertions, bookmark_id = _word_microscope_section(
+        row,
+        microscope_crops,
+        1,
+    )
+    body.append(microscope_xml)
+    origin_xml, origin_insertions, _ = _word_graph_sections(row, origin_artifacts, bookmark_id)
+    body.append(origin_xml)
+    body.append(
+        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="900" w:right="900" w:bottom="900" w:left="900" '
+        'w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+    )
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{''.join(body)}</w:body></w:document>"
+    )
+    return xml, origin_insertions, picture_insertions
+
+
+def _write_word_docx(path: Path, document_xml: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '<Override PartName="/word/styles.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+        '<Override PartName="/word/settings.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
+        '<Override PartName="/docProps/core.xml" '
+        'ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+        '<Override PartName="/docProps/app.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+        "</Types>"
+    )
+    root_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="word/document.xml"/>'
+        '<Relationship Id="rId2" '
+        'Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" '
+        'Target="docProps/core.xml"/>'
+        '<Relationship Id="rId3" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" '
+        'Target="docProps/app.xml"/>'
+        "</Relationships>"
+    )
+    document_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+        'Target="styles.xml"/>'
+        '<Relationship Id="rId2" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" '
+        'Target="settings.xml"/>'
+        "</Relationships>"
+    )
+    styles = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+        '<w:name w:val="Normal"/><w:qFormat/></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Title">'
+        '<w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
+        '<w:qFormat/><w:pPr><w:spacing w:after="220"/></w:pPr>'
+        '<w:rPr><w:b/><w:sz w:val="40"/></w:rPr></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Heading1">'
+        '<w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
+        '<w:qFormat/><w:pPr><w:keepNext/><w:outlineLvl w:val="0"/>'
+        '<w:spacing w:before="80" w:after="90"/></w:pPr>'
+        '<w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Heading2">'
+        '<w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
+        '<w:qFormat/><w:pPr><w:keepNext/><w:outlineLvl w:val="1"/>'
+        '<w:spacing w:before="120" w:after="80"/></w:pPr>'
+        '<w:rPr><w:b/><w:sz w:val="24"/></w:rPr></w:style>'
+        "</w:styles>"
+    )
+    settings = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:defaultTabStop w:val="720"/></w:settings>'
+    )
+    created = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    core_props = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:dcterms="http://purl.org/dc/terms/" '
+        'xmlns:dcmitype="http://purl.org/dc/dcmitype/" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+        "<dc:title>Microwire sample report</dc:title>"
+        "<dc:creator>PyPlot Microwire Data Builder</dc:creator>"
+        f'<dcterms:created xsi:type="dcterms:W3CDTF">{created}</dcterms:created>'
+        f'<dcterms:modified xsi:type="dcterms:W3CDTF">{created}</dcterms:modified>'
+        "</cp:coreProperties>"
+    )
+    app_props = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
+        'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+        "<Application>PyPlot</Application></Properties>"
+    )
+    with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", root_rels)
+        archive.writestr("word/document.xml", document_xml)
+        archive.writestr("word/_rels/document.xml.rels", document_rels)
+        archive.writestr("word/styles.xml", styles)
+        archive.writestr("word/settings.xml", settings)
+        archive.writestr("docProps/core.xml", core_props)
+        archive.writestr("docProps/app.xml", app_props)
+
+
+def _copy_origin_graph_to_clipboard_by_name(
+    graph_name: Optional[str],
+    log: logging.Logger,
+) -> bool:
+    name = str(graph_name or "").strip()
+    if not name:
+        return False
+    try:
+        try:
+            from plotting.shared.origin import _ensure_origin_sdk_on_path
+
+            _ensure_origin_sdk_on_path()
+        except Exception:
+            pass
+        import originpro as op  # type: ignore
+    except Exception as exc:
+        log.debug("Unable to import originpro for Word OLE copy: %s", exc)
+        return False
+    lt_int = getattr(op, "lt_int", None)
+    probe_ok = False
+    if callable(lt_int):
+        try:
+            lt_int("@V")
+            probe_ok = True
+        except Exception:
+            probe_ok = False
+    if not probe_ok:
+        log.debug("Origin automation is not active for Word OLE copy of %s", name)
+        return False
+    try:
+        op.set_show()
+    except Exception:
+        pass
+    try:
+        op.lt_exec("@GMC=1;")
+    except Exception:
+        pass
+    graph = None
+    finder = getattr(op, "find_graph", None)
+    if callable(finder):
+        try:
+            graph = finder(name)
+        except Exception:
+            graph = None
+    if graph is None:
+        graph_list = getattr(op, "graph_list", None)
+        if callable(graph_list):
+            try:
+                candidates = graph_list()
+            except Exception:
+                candidates = []
+            for candidate in candidates:
+                candidate_names = {
+                    text
+                    for text in (
+                        _origin_object_name(candidate),
+                        getattr(candidate, "name", None),
+                        getattr(candidate, "lname", None),
+                        getattr(candidate, "long_name", None),
+                        str(candidate),
+                    )
+                    if isinstance(text, str) and text.strip()
+                }
+                if name in candidate_names:
+                    graph = candidate
+                    break
+    if graph is None:
+        log.debug("Origin graph %s was not found for Word OLE copy", name)
+        return False
+    return _copy_origin_graph_page(graph, log)
+
+
+def _copy_origin_graph_file_to_clipboard(
+    object_path: Path,
+    log: logging.Logger,
+) -> bool:
+    try:
+        try:
+            from plotting.shared.origin import _ensure_origin_sdk_on_path
+
+            _ensure_origin_sdk_on_path()
+        except Exception:
+            pass
+        import originpro as op  # type: ignore
+    except Exception as exc:
+        log.debug("Unable to import originpro for Word OLE file copy: %s", exc)
+        return False
+    try:
+        opened = op.open(str(object_path), asksave=False)
+    except Exception as exc:
+        log.debug("Unable to open Origin graph %s for Word OLE copy: %s", object_path, exc)
+        return False
+    if opened is False:
+        log.debug("Origin refused to open graph %s for Word OLE copy", object_path)
+        return False
+    try:
+        op.set_show()
+    except Exception:
+        pass
+    try:
+        graphs = op.graph_list("p", True)
+    except Exception:
+        graphs = []
+    graph = graphs[-1] if graphs else None
+    if graph is None:
+        log.debug("No graph page was available after opening %s", object_path)
+        return False
+    return _copy_origin_graph_page(graph, log)
+
+
+def _embed_origin_objects_with_word(
+    docx_path: Path,
+    insertions: Sequence[WordOleInsertion],
+    log: logging.Logger,
+) -> None:
+    if not insertions:
+        return
+    docx_path = docx_path.resolve()
+    if os.name != "nt":
+        log.warning("Word OLE embedding is only available on Windows; left placeholders in %s", docx_path)
+        return
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        log.warning("PowerShell is unavailable; left Origin placeholders in %s", docx_path)
+        return
+    script = r"""
+param(
+    [Parameter(Mandatory=$true)][string]$DocxPath,
+    [Parameter(Mandatory=$true)][string]$PayloadPath
+)
+$ErrorActionPreference = 'Stop'
+$wdCollapseStart = 1
+$wdInLine = 0
+$wdPasteOLEObject = 0
+$missing = [Type]::Missing
+$result = [ordered]@{
+    inserted = 0
+    attempted = 0
+    warnings = @()
+}
+$word = $null
+$doc = $null
+try {
+    $items = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+    $word = New-Object -ComObject Word.Application
+    $word.Visible = $false
+    $doc = $word.Documents.Open($DocxPath)
+    foreach ($item in @($items)) {
+        $bookmarkName = [string]$item.bookmark
+        $objectPath = [string]$item.path
+        $preferClipboardValue = [bool]$item.preferClipboard
+        $allowFileValue = [bool]$item.allowFile
+        if ((-not $preferClipboardValue) -and (-not (Test-Path -LiteralPath $objectPath))) {
+            $result.warnings += "Object not found: " + $objectPath
+            continue
+        }
+        if (-not $doc.Bookmarks.Exists($bookmarkName)) {
+            $result.warnings += "Bookmark not found: " + $bookmarkName
+            continue
+        }
+        $result.attempted += 1
+        $bookmarkObj = $null
+        for ($bookmarkIndex = 1; $bookmarkIndex -le $doc.Bookmarks.Count; $bookmarkIndex++) {
+            $candidate = $doc.Bookmarks.Item($bookmarkIndex)
+            if ([string]$candidate.Name -eq $bookmarkName) {
+                $bookmarkObj = $candidate
+                break
+            }
+        }
+        if ($bookmarkObj -eq $null) {
+            $result.warnings += "Bookmark not found after lookup: " + $bookmarkName
+            continue
+        }
+        $insertRange = $bookmarkObj.Range
+        $insertRange.Text = ""
+        $insertRange.Collapse($wdCollapseStart)
+        $insertRange.Select() | Out-Null
+        $selection = $word.Selection
+        $shape = $null
+        if ($preferClipboardValue) {
+            try {
+                $before = $doc.InlineShapes.Count
+                try {
+                    $selection.PasteSpecial($false, $false, $wdInLine, $false, $wdPasteOLEObject, "", "") | Out-Null
+                } catch {
+                    $selection.Paste() | Out-Null
+                }
+                $after = $doc.InlineShapes.Count
+                if ($after -gt $before) {
+                    $shape = $doc.InlineShapes.Item($after)
+                }
+            } catch {
+                $result.warnings += "Clipboard paste failed for " + $bookmarkName + ": " + $_.Exception.Message
+            }
+        }
+        if ($shape -eq $null -and $allowFileValue -and (Test-Path -LiteralPath $objectPath)) {
+            $lastError = $null
+            foreach ($classType in @("Origin95.Graph", "Origin.Graph", "", $null)) {
+                try {
+                    if ($classType -eq $null) {
+                        $shape = $doc.InlineShapes.AddOLEObject($missing, $objectPath, $false, $false, $missing, $missing, $missing, $insertRange)
+                    } else {
+                        $shape = $doc.InlineShapes.AddOLEObject([string]$classType, $objectPath, $false, $false, $missing, $missing, $missing, $insertRange)
+                    }
+                    break
+                } catch {
+                    $lastError = $_
+                }
+            }
+            if ($shape -eq $null) {
+                $message = "unknown error"
+                if ($lastError -ne $null -and $lastError.Exception -ne $null) {
+                    $message = $lastError.Exception.Message
+                }
+                $result.warnings += "File insert failed for " + $bookmarkName + ": " + $message
+            }
+        }
+        if ($shape -ne $null) {
+            try {
+                $shape.LockAspectRatio = $true
+                if ($shape.Width -gt 430) {
+                    $shape.Width = 430
+                }
+                if ($shape.Height -gt 330) {
+                    $shape.Height = 330
+                }
+            } catch {
+            }
+            $result.inserted += 1
+        }
+    }
+    $doc.Save()
+} catch {
+    $line = ""
+    try {
+        $line = [string]$_.InvocationInfo.ScriptLineNumber
+    } catch {
+    }
+    if ($line) {
+        $result.warnings += "PowerShell line " + $line + ": " + $_.Exception.Message
+    } else {
+        $result.warnings += $_.Exception.Message
+    }
+} finally {
+    if ($doc -ne $null) {
+        $doc.Close($true) | Out-Null
+    }
+    if ($word -ne $null) {
+        $word.Quit() | Out-Null
+    }
+}
+$result | ConvertTo-Json -Compress
+"""
+    inserted_count = 0
+    attempted_count = 0
+    with tempfile.TemporaryDirectory(prefix="pyplot-word-ole-") as tmp:
+        tmp_path = Path(tmp)
+        payload_path = tmp_path / "origin_objects.json"
+        script_path = tmp_path / "embed_origin_objects.ps1"
+        script_path.write_text(script, encoding="utf-8")
+        for insertion in insertions:
+            object_path = insertion.object_path
+            try:
+                if object_path.exists():
+                    object_path = object_path.resolve()
+            except OSError:
+                pass
+            object_exists = object_path.exists()
+            copied_to_clipboard = False
+            if object_exists:
+                copied_to_clipboard = _copy_origin_graph_file_to_clipboard(
+                    object_path,
+                    log,
+                )
+            if not copied_to_clipboard and (insertion.clipboard_fallback or insertion.graph_name):
+                copied_to_clipboard = _copy_origin_graph_to_clipboard_by_name(
+                    insertion.graph_name,
+                    log,
+                )
+            if not object_exists and not copied_to_clipboard:
+                log.warning(
+                    "Origin object for %s is unavailable; left placeholder in %s",
+                    insertion.label,
+                    docx_path,
+                )
+                continue
+            attempted_count += 1
+            payload = [
+                {
+                    "bookmark": insertion.bookmark_name,
+                    "path": str(object_path),
+                    "label": insertion.label,
+                    "preferClipboard": bool(copied_to_clipboard),
+                    "allowFile": bool(object_exists),
+                }
+            ]
+            payload_path.write_text(json.dumps(payload), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script_path),
+                    "-DocxPath",
+                    str(docx_path),
+                    "-PayloadPath",
+                    str(payload_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+            )
+            detail = (completed.stderr or completed.stdout or "").strip()
+            if completed.returncode != 0:
+                log.warning(
+                    "Failed to embed Origin object %s into %s: %s",
+                    insertion.label,
+                    docx_path,
+                    detail or completed.returncode,
+                )
+                continue
+            result: Dict[str, Any] = {}
+            try:
+                result = json.loads(completed.stdout or "{}")
+            except Exception:
+                result = {}
+            inserted_count += int(result.get("inserted") or 0)
+            for warning in result.get("warnings") or []:
+                log.warning("Origin object embedding warning for %s: %s", docx_path, warning)
+    if attempted_count and inserted_count != attempted_count:
+        log.warning(
+            "Embedded %s of %s Origin object(s) into %s",
+            inserted_count,
+            attempted_count,
+            docx_path,
+        )
+
+
+def _embed_pictures_with_word(
+    docx_path: Path,
+    insertions: Sequence[WordPictureInsertion],
+    log: logging.Logger,
+) -> None:
+    if not insertions:
+        return
+    docx_path = docx_path.resolve()
+    if os.name != "nt":
+        log.warning("Word image embedding is only available on Windows; left placeholders in %s", docx_path)
+        return
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        log.warning("PowerShell is unavailable; left microscope image placeholders in %s", docx_path)
+        return
+    payload = [
+        {
+            "bookmark": insertion.bookmark_name,
+            "path": str(insertion.image_path),
+            "label": insertion.label,
+        }
+        for insertion in insertions
+        if insertion.image_path.exists()
+    ]
+    if not payload:
+        return
+    script = r"""
+param(
+    [Parameter(Mandatory=$true)][string]$DocxPath,
+    [Parameter(Mandatory=$true)][string]$PayloadPath
+)
+$ErrorActionPreference = 'Stop'
+$items = Get-Content -Raw -LiteralPath $PayloadPath | ConvertFrom-Json
+$word = $null
+$doc = $null
+try {
+    $word = New-Object -ComObject Word.Application
+    $word.Visible = $false
+    $doc = $word.Documents.Open($DocxPath)
+    foreach ($item in @($items)) {
+        if (-not (Test-Path -LiteralPath $item.path)) {
+            continue
+        }
+        if (-not $doc.Bookmarks.Exists($item.bookmark)) {
+            continue
+        }
+        $bookmark = $doc.Bookmarks.Item($item.bookmark)
+        $range = $bookmark.Range
+        $range.Text = ""
+        $shape = $doc.InlineShapes.AddPicture([string]$item.path, $false, $true, $range)
+        try {
+            $shape.LockAspectRatio = $true
+            if ($shape.Width -gt 260) {
+                $shape.Width = 260
+            }
+        } catch {
+        }
+    }
+    $doc.Save()
+} finally {
+    if ($doc -ne $null) {
+        $doc.Close($true) | Out-Null
+    }
+    if ($word -ne $null) {
+        $word.Quit() | Out-Null
+    }
+}
+"""
+    with tempfile.TemporaryDirectory(prefix="pyplot-word-images-") as tmp:
+        tmp_path = Path(tmp)
+        payload_path = tmp_path / "pictures.json"
+        script_path = tmp_path / "embed_pictures.ps1"
+        payload_path.write_text(json.dumps(payload), encoding="utf-8")
+        script_path.write_text(script, encoding="utf-8")
+        completed = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_path),
+                "-DocxPath",
+                str(docx_path),
+                "-PayloadPath",
+                str(payload_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        log.warning("Failed to embed microscope images into %s: %s", docx_path, detail or completed.returncode)
+
+
+def _export_word_reports(
+    dataframe: pd.DataFrame,
+    output_dir: Path,
+    origin_artifacts: Mapping[str, OriginArtifact],
+    log: logging.Logger,
+    microscope_crops: Mapping[str, Path] | None = None,
+) -> List[Path]:
+    if dataframe.empty:
+        return []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    reports: List[Path] = []
+    used_names: Set[str] = set()
+    used_live_origin_clipboard = False
+    try:
+        for index, (_, row) in enumerate(dataframe.reset_index(drop=True).iterrows()):
+            filename = _word_report_filename(row, index)
+            stem = Path(filename).stem
+            suffix = Path(filename).suffix or ".docx"
+            candidate = filename
+            duplicate_index = 2
+            while candidate.lower() in used_names:
+                candidate = f"{stem}_{duplicate_index}{suffix}"
+                duplicate_index += 1
+            used_names.add(candidate.lower())
+            report_path = output_dir / candidate
+            document_xml, origin_insertions, picture_insertions = _word_document_xml(
+                row,
+                index,
+                origin_artifacts,
+                microscope_crops or {},
+            )
+            used_live_origin_clipboard = used_live_origin_clipboard or any(
+                insertion.clipboard_fallback for insertion in origin_insertions
+            )
+            _write_word_docx(report_path, document_xml)
+            try:
+                _embed_pictures_with_word(report_path, picture_insertions, log)
+            except Exception:
+                log.exception("Failed to run Word image embedding for %s", report_path)
+            try:
+                _embed_origin_objects_with_word(report_path, origin_insertions, log)
+            except Exception:
+                log.exception("Failed to run Word OLE embedding for %s", report_path)
+            reports.append(report_path)
+    finally:
+        if used_live_origin_clipboard:
+            try:
+                from plotting.shared.origin import release_origin
+
+                release_origin()
+            except Exception:
+                log.debug("Failed to release live Origin session after Word export", exc_info=True)
+    return reports
+
+
+def export_word_reports(
+    dataframe: pd.DataFrame,
+    output_dir: Path | str,
+    *,
+    origin_artifacts: Mapping[str, OriginArtifact] | None = None,
+    microscope_crops: Mapping[str, Path] | None = None,
+    logger: logging.Logger | None = None,
+) -> List[Path]:
+    """Write one Word sample report per row without requiring the Builder UI."""
+
+    log = logger if logger is not None else logging.getLogger(LOGGER_NAME)
+    return _export_word_reports(
+        dataframe,
+        Path(output_dir),
+        origin_artifacts or {},
+        log,
+        microscope_crops=microscope_crops,
+    )
 
 
 def _embed_plots_in_excel_openpyxl(
@@ -4612,7 +6393,10 @@ def _origin_object_name(obj: object) -> Optional[str]:
     if obj is None:
         return None
     for attr in ("lt_name", "name", "lname", "long_name"):
-        value = getattr(obj, attr, None)
+        try:
+            value = getattr(obj, attr, None)
+        except Exception:
+            continue
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
@@ -4665,6 +6449,7 @@ def build_database(
     vsm_hysteresis_records: Optional[Iterable[VsmHysteresisRecord]] = None,
     vsm_temperature_scan_records: Optional[Iterable[VsmTemperatureScanRecord]] = None,
     dma_iso_stress_records: Optional[Iterable[DmaIsoStressRecord]] = None,
+    mini_dma_records: Optional[Iterable[MiniDmaRecord]] = None,
     shape_memory_stress_strain_records: Optional[
         Iterable[ShapeMemoryStressStrainRecord]
     ] = None,
@@ -4713,6 +6498,10 @@ def build_database(
 
     wants_matplotlib = "matplotlib" in plot_backends
     wants_origin_requested = "origin" in plot_backends
+    wants_word_reports = not skip_exports and any(
+        str(fmt).lower() in {"word", "docx", "word_reports"}
+        for fmt in (config.export_formats or ())
+    )
 
     fabrication_index = fabrication_index or build_fabrication_index(
         config.fabrication_files, log
@@ -4854,10 +6643,142 @@ def build_database(
     vsm_hysteresis_groups = _group_records(vsm_hysteresis_records)
     vsm_temperature_groups = _group_records(vsm_temperature_scan_records)
     dma_isostress_groups = _group_records(dma_iso_stress_records)
+    mini_dma_groups = _group_records(mini_dma_records)
     shape_memory_stress_strain_groups = _group_records(
         shape_memory_stress_strain_records
     )
     fmr_groups = _group_records(fmr_records)
+
+    def _assign_pyplot_origin_artifacts(
+        row: Dict[str, object],
+        *,
+        records: Iterable[object],
+        origin_column: str,
+        plugin_name: str,
+        display_prefix: str,
+        section_token: str,
+    ) -> None:
+        nonlocal origin_enabled, origin_disabled_reason
+        if not (origin_enabled and wants_word_reports):
+            return
+        paths: List[Path] = []
+        for record in records:
+            path_value = getattr(record, "path", None)
+            if isinstance(path_value, Path):
+                path = path_value
+            elif isinstance(path_value, str) and path_value.strip():
+                path = Path(path_value)
+            else:
+                continue
+            if path.exists() and path not in paths:
+                paths.append(path)
+        if not paths:
+            return
+        sample_title = " ".join(
+            part
+            for part in (
+                str(row.get("Composition") or "").strip(),
+                str(row.get("Microwire") or "").strip(),
+            )
+            if part
+        ).strip()
+        descriptor_prefix = _safe_plot_stem(
+            "_".join(
+                part
+                for part in (
+                    sample_title or "sample",
+                    section_token,
+                )
+                if part
+            )
+        )
+        try:
+            artifacts = export_pyplot_origin_artifacts_for_paths(
+                paths=paths,
+                plugin_name=plugin_name,
+                origin_dir=origin_dir,
+                descriptor_prefix=descriptor_prefix,
+                display_prefix=display_prefix,
+                log=log,
+            )
+        except RuntimeError as exc:
+            if origin_disabled_reason is None:
+                origin_disabled_reason = str(exc) or exc.__class__.__name__
+                log.warning("Origin plotting disabled: %s", origin_disabled_reason)
+            origin_enabled = False
+            return
+        except Exception:
+            log.exception(
+                "Failed to generate %s Origin object(s) for %s",
+                display_prefix,
+                sample_title or "sample",
+            )
+            return
+        descriptors: List[str] = []
+        for artifact in artifacts:
+            if not artifact.descriptor:
+                continue
+            descriptors.append(artifact.descriptor)
+            origin_artifacts.setdefault(artifact.descriptor, artifact)
+        collapsed = _collapse_asset_references(descriptors)
+        if collapsed is not None:
+            row[origin_column] = collapsed
+
+    def _pyplot_current_annealing_origin_artifact(
+        record: MeasurementRecord,
+    ) -> Optional[OriginArtifact]:
+        nonlocal origin_enabled, origin_disabled_reason
+        path = getattr(record, "path", None)
+        if not isinstance(path, Path) or not path.exists():
+            return None
+        cache_key = f"pyplot-current::{_measurement_cache_key(record)}"
+        cached = origin_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        sample_title = " ".join(
+            part
+            for part in (
+                str(record.metadata.composition_token or "").strip(),
+                f"{record.metadata.draw_x}/{record.metadata.piece_y}"
+                if record.metadata.draw_x is not None and record.metadata.piece_y is not None
+                else "",
+            )
+            if part
+        ).strip()
+        descriptor_prefix = _safe_plot_stem(
+            "_".join(
+                part
+                for part in (
+                    sample_title or "sample",
+                    path.stem,
+                    "current_annealing",
+                )
+                if part
+            )
+        )
+        try:
+            artifacts = export_pyplot_origin_artifacts_for_paths(
+                paths=[path],
+                plugin_name="Current Annealing",
+                origin_dir=origin_dir,
+                descriptor_prefix=descriptor_prefix,
+                display_prefix="Current annealing Origin graph",
+                log=log,
+            )
+        except RuntimeError as exc:
+            if origin_disabled_reason is None:
+                origin_disabled_reason = str(exc) or exc.__class__.__name__
+                log.warning("Origin plotting disabled: %s", origin_disabled_reason)
+            origin_enabled = False
+            return None
+        except Exception:
+            log.exception("Failed to generate current annealing Origin object for %s", path)
+            return None
+        artifact = artifacts[0] if artifacts else None
+        if artifact is not None:
+            origin_cache[cache_key] = artifact
+            origin_artifacts.setdefault(artifact.descriptor, artifact)
+        return artifact
 
     phase_points_map: Dict[str, Dict[str, float]] = {}
     if phase_points:
@@ -5474,6 +7395,14 @@ def build_database(
             labels = [_record_label(record) for record in vsm_records if _record_label(record)]
             if labels:
                 row[VSM_HYSTERESIS_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=vsm_records,
+                origin_column=VSM_HYSTERESIS_ORIGIN_COLUMN,
+                plugin_name="VSM Hysteresis Loops",
+                display_prefix="VSM hysteresis Origin graph",
+                section_token="vsm_hysteresis",
+            )
         vsm_scan_records = vsm_temperature_groups.get(key, [])
         if not vsm_scan_records:
             vsm_scan_records = vsm_temperature_groups.get((composition, draw_x, piece_y, None), [])
@@ -5483,6 +7412,14 @@ def build_database(
             labels = [_record_label(record) for record in vsm_scan_records if _record_label(record)]
             if labels:
                 row[VSM_TEMPERATURE_SCAN_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=vsm_scan_records,
+                origin_column=VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
+                plugin_name="VSM Temperature Scan",
+                display_prefix="VSM temperature scan Origin graph",
+                section_token="vsm_temperature_scan",
+            )
         dma_records = dma_isostress_groups.get(key, [])
         if not dma_records:
             dma_records = dma_isostress_groups.get((composition, draw_x, piece_y, None), [])
@@ -5492,6 +7429,31 @@ def build_database(
             labels = [_record_label(record) for record in dma_records if _record_label(record)]
             if labels:
                 row[DMA_ISOSTRESS_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=dma_records,
+                origin_column=DMA_ISOSTRESS_ORIGIN_COLUMN,
+                plugin_name="DMA Iso-Stress",
+                display_prefix="DMA iso-stress Origin graph",
+                section_token="dma_iso_stress",
+            )
+        mini_dma_entries = mini_dma_groups.get(key, [])
+        if not mini_dma_entries:
+            mini_dma_entries = mini_dma_groups.get((composition, draw_x, piece_y, None), [])
+        if not mini_dma_entries:
+            mini_dma_entries = mini_dma_groups.get((composition, draw_x, piece_y), [])
+        if mini_dma_entries:
+            labels = [_record_label(record) for record in mini_dma_entries if _record_label(record)]
+            if labels:
+                row[MINI_DMA_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=mini_dma_entries,
+                origin_column=MINI_DMA_ORIGIN_COLUMN,
+                plugin_name="Mini DMA",
+                display_prefix="Mini DMA Origin graph",
+                section_token="mini_dma",
+            )
         shape_memory_records = shape_memory_stress_strain_groups.get(key, [])
         if not shape_memory_records:
             shape_memory_records = shape_memory_stress_strain_groups.get(
@@ -5511,6 +7473,14 @@ def build_database(
             ]
             if labels:
                 row[SHAPE_MEMORY_STRESS_STRAIN_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=shape_memory_records,
+                origin_column=SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+                plugin_name="Shape Memory Stress/Strain",
+                display_prefix="Shape memory stress/strain Origin graph",
+                section_token="shape_memory_stress_strain",
+            )
         shape_memory_entry = shape_memory_entry_map.get(key_str, {})
         if shape_memory_entry:
             for column in SHAPE_MEMORY_VALUE_COLUMNS + SHAPE_MEMORY_FRACTURE_COLUMNS:
@@ -5529,6 +7499,14 @@ def build_database(
             labels = [_record_label(record) for record in fmr_entries if _record_label(record)]
             if labels:
                 row[FMR_COLUMN] = list(dict.fromkeys(labels))
+            _assign_pyplot_origin_artifacts(
+                row,
+                records=fmr_entries,
+                origin_column=FMR_ORIGIN_COLUMN,
+                plugin_name="FMR",
+                display_prefix="FMR Origin graph",
+                section_token="fmr",
+            )
         ratio_display = _parse_numeric(row["d/D"])
         if ratio_display is not None:
             row["d/D"] = round(ratio_display, 3)
@@ -5601,38 +7579,15 @@ def build_database(
                 high_cache_key = _measurement_cache_key(high_record)
                 cached_origin = origin_cache.get(high_cache_key)
                 if cached_origin is None:
-                    try:
-                        cached_origin = _plot_measurement_origin(
-                            high_record.dataframe,
-                            high_record.path,
-                            origin_dir,
-                            log,
-                        )
-                    except RuntimeError as exc:
-                        if origin_disabled_reason is None:
-                            origin_disabled_reason = str(exc) or exc.__class__.__name__
-                            log.warning("Origin plotting disabled: %s", origin_disabled_reason)
-                        origin_enabled = False
-                        cached_origin = None
-                    except Exception:
-                        log.exception("Failed to generate Origin plot for %s", high_record.path)
-                        cached_origin = None
-                    else:
+                    if wants_word_reports:
+                        cached_origin = _pyplot_current_annealing_origin_artifact(high_record)
                         if cached_origin is not None:
                             origin_cache[high_cache_key] = cached_origin
-                            origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
-                if cached_origin is not None:
-                    row["Figure — 1000 mA (Origin)"] = cached_origin.descriptor
-            if origin_enabled and other_records:
-                other_descriptors: List[str] = []
-                for record in other_records:
-                    record_cache_key = _measurement_cache_key(record)
-                    cached_origin = origin_cache.get(record_cache_key)
-                    if cached_origin is None:
+                    else:
                         try:
                             cached_origin = _plot_measurement_origin(
-                                record.dataframe,
-                                record.path,
+                                high_record.dataframe,
+                                high_record.path,
                                 origin_dir,
                                 log,
                             )
@@ -5643,12 +7598,45 @@ def build_database(
                             origin_enabled = False
                             cached_origin = None
                         except Exception:
-                            log.exception("Failed to generate Origin plot for %s", record.path)
+                            log.exception("Failed to generate Origin plot for %s", high_record.path)
                             cached_origin = None
                         else:
                             if cached_origin is not None:
-                                origin_cache[record_cache_key] = cached_origin
+                                origin_cache[high_cache_key] = cached_origin
                                 origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
+                if cached_origin is not None:
+                    row["Figure — 1000 mA (Origin)"] = cached_origin.descriptor
+            if origin_enabled and other_records:
+                other_descriptors: List[str] = []
+                for record in other_records:
+                    record_cache_key = _measurement_cache_key(record)
+                    cached_origin = origin_cache.get(record_cache_key)
+                    if cached_origin is None:
+                        if wants_word_reports:
+                            cached_origin = _pyplot_current_annealing_origin_artifact(record)
+                            if cached_origin is not None:
+                                origin_cache[record_cache_key] = cached_origin
+                        else:
+                            try:
+                                cached_origin = _plot_measurement_origin(
+                                    record.dataframe,
+                                    record.path,
+                                    origin_dir,
+                                    log,
+                                )
+                            except RuntimeError as exc:
+                                if origin_disabled_reason is None:
+                                    origin_disabled_reason = str(exc) or exc.__class__.__name__
+                                    log.warning("Origin plotting disabled: %s", origin_disabled_reason)
+                                origin_enabled = False
+                                cached_origin = None
+                            except Exception:
+                                log.exception("Failed to generate Origin plot for %s", record.path)
+                                cached_origin = None
+                            else:
+                                if cached_origin is not None:
+                                    origin_cache[record_cache_key] = cached_origin
+                                    origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
                     if cached_origin is not None:
                         other_descriptors.append(cached_origin.descriptor)
                 if other_descriptors:
@@ -5661,12 +7649,20 @@ def build_database(
                     ocr_highlights.setdefault(column, set()).add(row_index)
         stats.rows_built += 1
     if rows:
-        df_out = pd.DataFrame(rows, columns=output_columns)
+        df_full = pd.DataFrame(rows, columns=output_columns)
     else:
-        df_out = pd.DataFrame(columns=output_columns)
+        df_full = pd.DataFrame(columns=output_columns)
     column_filter = getattr(config, "column_filter", None)
     column_order = getattr(config, "column_order", None)
     sort_spec = getattr(config, "sort_spec", None)
+    df_word, _ = _apply_output_preferences(
+        df_full,
+        column_filter=None,
+        column_order=None,
+        sort_spec=sort_spec,
+        highlight_map=None,
+    )
+    df_out = df_full
     df_out, ocr_highlights = _apply_output_preferences(
         df_out,
         column_filter=column_filter,
@@ -5690,6 +7686,7 @@ def build_database(
             if config.export_formats
             else ()
         )
+    word_reports: List[Path] = []
     behaviours = {
         (key.lower() if isinstance(key, str) else ""): str(value).lower()
         for key, value in (config.export_behaviour or {}).items()
@@ -5800,6 +7797,17 @@ def build_database(
                 except Exception:
                     log.exception("Failed to embed figure images into %s", excel_path)
             exports["excel"] = excel_path
+        elif fmt_lower in {"word", "docx", "word_reports"}:
+            report_dir = output_dir / f"{output_name}_{WORD_REPORT_DIR_NAME}"
+            word_reports = _export_word_reports(
+                df_word,
+                report_dir,
+                origin_artifacts,
+                log,
+                microscope_crops=microscope_crop_map if include_crops else None,
+            )
+            if word_reports:
+                exports["word"] = report_dir
         else:
             log.warning("Unsupported export format '%s'; skipping", fmt)
     log.info(
@@ -5827,6 +7835,7 @@ def build_database(
         stats=stats,
         microscope_crops=microscope_crop_map if include_crops else {},
         ocr_highlights=ocr_highlights if highlight_ocr else {},
+        word_reports=word_reports,
     )
 
 
@@ -5835,17 +7844,28 @@ __all__ = [
     "BuildResult",
     "BuildStats",
     "OriginArtifact",
+    "WordOleInsertion",
+    "WordPictureInsertion",
+    "export_origin_graph_artifact",
+    "export_pyplot_origin_artifacts_for_paths",
     "FabricationIndex",
     "StrainRecord",
     "VsmHysteresisRecord",
     "VsmTemperatureScanRecord",
     "DmaIsoStressRecord",
+    "MiniDmaRecord",
     "ShapeMemoryStressStrainRecord",
     "FmrRecord",
     "VSM_HYSTERESIS_COLUMN",
     "VSM_TEMPERATURE_SCAN_COLUMN",
     "DMA_ISOSTRESS_COLUMN",
+    "MINI_DMA_COLUMN",
     "SHAPE_MEMORY_STRESS_STRAIN_COLUMN",
+    "VSM_HYSTERESIS_ORIGIN_COLUMN",
+    "VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN",
+    "DMA_ISOSTRESS_ORIGIN_COLUMN",
+    "MINI_DMA_ORIGIN_COLUMN",
+    "SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN",
     "SHAPE_MEMORY_DISPLACEMENT_COLUMN",
     "SHAPE_MEMORY_LOAD_COLUMN",
     "SHAPE_MEMORY_STRAIN_COLUMN",
@@ -5854,9 +7874,19 @@ __all__ = [
     "SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN",
     "SHAPE_MEMORY_FRACTURE_STRESS_COLUMN",
     "FMR_COLUMN",
+    "FMR_ORIGIN_COLUMN",
+    "RVT_FILE_COLUMN",
+    "RVT_GRAPH_COLUMN",
+    "RVT_ORIGIN_COLUMN",
+    "RVT_RESIDUAL_ORIGIN_COLUMN",
+    "RVT_POINT_COUNT_COLUMN",
+    "RVT_TEMPERATURE_RANGE_COLUMN",
+    "RVT_RESISTANCE_RANGE_COLUMN",
     "build_database",
     "build_fabrication_index",
+    "export_word_reports",
     "_compute_ea_from_composition",
     "LOGGER_NAME",
     "DEFAULT_OUTPUT_NAME",
+    "WORD_REPORT_DIR_NAME",
 ]

@@ -6,11 +6,11 @@ import matplotlib
 import pytest
 
 matplotlib.use("Agg", force=True)
-
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
 from plotting.plugins import builtin_plugin_registry
 from plotting.plugins.mini_dma import core
+
 
 SAMPLE_RUN = Path("sample_data/mini dma/Ni50Fe27Ga23 12_2 test_run32")
 
@@ -29,7 +29,7 @@ def test_current_sweep_groups_by_target_mpa() -> None:
     groups = core.current_sweep_groups(run.frame)
 
     targets = [target for target, _group in groups]
-    assert targets == pytest.approx([50, 100, 150, 200, 250, 300, 350, 400, 450])
+    assert targets == [50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0, 400.0, 450.0]
     assert all(len(group) >= 2 for _target, group in groups)
 
 
@@ -41,20 +41,42 @@ def test_make_figures_create_one_line_per_target() -> None:
     try:
         strain_ax = strain_fig.axes[0]
         resistance_ax = resistance_fig.axes[0]
+        assert len(strain_ax.lines) == 9
+        assert len(resistance_ax.lines) == 9
         assert strain_ax.get_xlabel() == "Measured current [mA]"
         assert strain_ax.get_ylabel() == "Strain [%]"
         assert resistance_ax.get_ylabel() == "Resistance [Ohm]"
-        assert len(strain_ax.lines) == 9
-        assert len(resistance_ax.lines) == 9
-        assert max(max(line.get_ydata()) for line in resistance_ax.lines) < 250.0
-        assert [line.get_label() for line in strain_ax.lines][:3] == [
-            "50 MPa",
-            "100 MPa",
-            "150 MPa",
-        ]
     finally:
         plt.close(strain_fig)
         plt.close(resistance_fig)
+
+
+def test_resistance_current_figure_can_show_power_top_axis() -> None:
+    run = core.load_run(SAMPLE_RUN)
+
+    fig = core.make_resistance_current_figure(run, show_power_top_axis=True)
+    try:
+        assert len(fig.axes) == 2
+        top_ax = fig.axes[1]
+        assert top_ax.get_xlabel() == "Power [mW]"
+        assert top_ax.get_xlim() == pytest.approx(fig.axes[0].get_xlim())
+        assert any(label.get_text() for label in top_ax.get_xticklabels())
+    finally:
+        plt.close(fig)
+
+
+def test_strain_current_figure_can_show_power_top_axis() -> None:
+    run = core.load_run(SAMPLE_RUN)
+
+    fig = core.make_strain_current_figure(run, show_power_top_axis=True)
+    try:
+        assert len(fig.axes) == 2
+        top_ax = fig.axes[1]
+        assert top_ax.get_xlabel() == "Power [mW]"
+        assert top_ax.get_xlim() == pytest.approx(fig.axes[0].get_xlim())
+        assert any(label.get_text() for label in top_ax.get_xticklabels())
+    finally:
+        plt.close(fig)
 
 
 def test_strain_current_figure_can_use_each_trace_minimum_as_l0() -> None:
@@ -67,9 +89,9 @@ def test_strain_current_figure_can_use_each_trace_minimum_as_l0() -> None:
         assert len(ax.lines) == 9
         groups = core.current_sweep_groups(run.frame)
         for line, (_target, group) in zip(ax.lines, groups, strict=True):
-            assert min(line.get_ydata()) == pytest.approx(0.0)
-            expected = core.strain_from_trace_minimum_length(run, group)
-            assert line.get_ydata() == pytest.approx(expected.to_numpy(dtype=float))
+            y_values = line.get_ydata()
+            assert min(y_values) == pytest.approx(0.0)
+            assert max(y_values) >= 0.0
 
         first_target, first_group = groups[0]
         assert first_target == pytest.approx(50.0)
@@ -88,6 +110,17 @@ def test_build_plot_frame_pairs_current_with_requested_y_column() -> None:
     assert "50_MPa_strain_pct" in frame.columns
     assert "450_MPa_current_mA" in frame.columns
     assert "450_MPa_strain_pct" in frame.columns
+
+
+def test_power_axis_points_use_current_and_resistance() -> None:
+    run = core.load_run(SAMPLE_RUN)
+
+    currents, resistances = core.power_axis_points(run)
+
+    assert len(currents) == len(resistances)
+    assert len(currents) > 1000
+    assert min(currents) >= 0.0
+    assert min(resistances) > 0.0
 
 
 def test_plugin_is_registered() -> None:

@@ -49,6 +49,145 @@ def _find_tree_item_by_object(tree: QtWidgets.QTreeWidget, target: object) -> bo
     return False
 
 
+def test_origin_secondary_export_layer_hides_redundant_top_x_axis() -> None:
+    class _Layer:
+        def __init__(self) -> None:
+            self.ints: dict[str, int] = {}
+            self.commands: list[str] = []
+
+        def set_int(self, key: str, value: int) -> None:
+            self.ints[key] = int(value)
+
+        def lt_exec(self, command: str) -> bool:
+            self.commands.append(command)
+            return True
+
+    window = PyPlotWorkbench.__new__(PyPlotWorkbench)
+    layer = _Layer()
+
+    window._configure_origin_layer_axes(layer, secondary_axes_only=True)  # noqa: SLF001
+
+    assert layer.ints["x.showAxes"] == 0
+    assert layer.ints["x2.showlabel"] == 0
+    assert layer.ints["y.showAxes"] == 2
+    assert layer.ints["y2.showlabel"] == 1
+    assert "layer.x2.showlabel=0;" in layer.commands
+    assert 'layer.x2.title$="";' in layer.commands
+
+
+def test_origin_secondary_export_layer_can_show_real_top_x_axis() -> None:
+    class _Layer:
+        def __init__(self) -> None:
+            self.ints: dict[str, int] = {}
+            self.commands: list[str] = []
+
+        def set_int(self, key: str, value: int) -> None:
+            self.ints[key] = int(value)
+
+        def lt_exec(self, command: str) -> bool:
+            self.commands.append(command)
+            return True
+
+    window = PyPlotWorkbench.__new__(PyPlotWorkbench)
+    layer = _Layer()
+
+    window._configure_origin_layer_axes(  # noqa: SLF001
+        layer,
+        secondary_axes_only=True,
+        show_top_x=True,
+    )
+
+    assert layer.ints["x.showAxes"] == 2
+    assert layer.ints["x.showlabel"] == 0
+    assert layer.ints["x2.showlabel"] == 1
+    assert layer.ints["x.showLabels"] == 2
+    assert layer.ints["x2.showLabels"] == 2
+    assert "axis -ps X A 2;" in layer.commands
+    assert "axis -ps X L 2;" in layer.commands
+    assert "layer.x.showAxes=2;" in layer.commands
+    assert "layer.x.showlabel=0;" in layer.commands
+    assert "layer.x2.showlabel=1;" in layer.commands
+    assert "layer.x.showLabels=2;" in layer.commands
+    assert "layer.x2.showLabels=2;" in layer.commands
+    assert "layer.x.ticks=10;" in layer.commands
+    assert "layer.x2.ticks=10;" in layer.commands
+    assert "layer.y.ticks=10;" in layer.commands
+    assert "layer.y2.ticks=10;" in layer.commands
+    assert 'layer.x2.title$="";' not in layer.commands
+
+
+def test_origin_export_layer_frame_uses_page_units_and_safe_margins() -> None:
+    class _Layer:
+        def __init__(self) -> None:
+            self.floats: dict[str, float] = {}
+            self.commands: list[str] = []
+
+        def set_float(self, key: str, value: float) -> None:
+            self.floats[key] = float(value)
+
+        def lt_exec(self, command: str) -> bool:
+            self.commands.append(command)
+            return True
+
+    window = PyPlotWorkbench.__new__(PyPlotWorkbench)
+    layer = _Layer()
+
+    window._set_origin_layer_frame(layer)  # noqa: SLF001
+
+    assert layer.floats == {
+        "top": 20.0,
+        "left": 17.0,
+        "width": 62.0,
+        "height": 56.0,
+    }
+    assert (
+        "layer -u 1; layer 62.000 56.000 17.000 20.000; "
+        "layer.top=20.000; layer.left=17.000; "
+        "layer.width=62.000; layer.height=56.000;"
+    ) in layer.commands
+
+
+def test_origin_export_legend_is_shrunk_and_placed_away_from_right_edge() -> None:
+    class _Legend:
+        def __init__(self) -> None:
+            self.floats: dict[str, float] = {}
+            self.ints: dict[str, int] = {}
+
+        def set_float(self, key: str, value: float) -> None:
+            self.floats[key] = float(value)
+
+        def set_int(self, key: str, value: int) -> None:
+            self.ints[key] = int(value)
+
+    class _Layer:
+        def __init__(self) -> None:
+            self.legend = _Legend()
+            self.activated = False
+            self.commands: list[str] = []
+
+        def activate(self) -> None:
+            self.activated = True
+
+        def label(self, name: str) -> object | None:
+            return self.legend if name == "Legend" else None
+
+        def lt_exec(self, command: str) -> bool:
+            self.commands.append(command)
+            return True
+
+    window = PyPlotWorkbench.__new__(PyPlotWorkbench)
+    layer = _Layer()
+
+    window._style_origin_legend_for_export(layer)  # noqa: SLF001
+
+    assert layer.activated is True
+    assert layer.legend.floats["fsize"] == 8.0
+    assert layer.legend.ints["show"] == 1
+    assert "legend.fsize=8;" in layer.commands
+    assert "legend.x=layer.x.from + legend.dx / 2;" in layer.commands
+    assert "legend.y=layer.y.to - legend.dy / 2;" in layer.commands
+
+
 def test_blank_graph_supports_text_annotations_and_mathtext_formatting(monkeypatch) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench(plotters={})

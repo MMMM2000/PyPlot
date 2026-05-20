@@ -8,6 +8,8 @@ from typing import Iterable
 import pandas as pd
 from matplotlib.figure import Figure
 
+from plotting.shared.power_axis import add_power_top_axis
+
 MEASUREMENT_FILE = "measurement.csv"
 PLOT_PHASES = {"current"}
 REQUIRED_COLUMNS = {
@@ -111,7 +113,12 @@ def current_sweep_groups(frame: pd.DataFrame) -> list[tuple[float, pd.DataFrame]
     return groups
 
 
-def make_strain_current_figure(run: MiniDmaRun, *, zero_minimum_strain: bool = False) -> Figure:
+def make_strain_current_figure(
+    run: MiniDmaRun,
+    *,
+    zero_minimum_strain: bool = False,
+    show_power_top_axis: bool = False,
+) -> Figure:
     return _make_current_figure(
         run,
         y_column="strain_pct",
@@ -122,16 +129,22 @@ def make_strain_current_figure(run: MiniDmaRun, *, zero_minimum_strain: bool = F
         ),
         title_suffix="Strain vs Current",
         zero_minimum_y=zero_minimum_strain,
+        show_power_top_axis=show_power_top_axis,
     )
 
 
-def make_resistance_current_figure(run: MiniDmaRun) -> Figure:
+def make_resistance_current_figure(
+    run: MiniDmaRun,
+    *,
+    show_power_top_axis: bool = False,
+) -> Figure:
     return _make_current_figure(
         run,
         y_column="resistance_ohm",
         y_label="Resistance [Ohm]",
         title_suffix="Resistance vs Current",
         filter_resistance_outliers=True,
+        show_power_top_axis=show_power_top_axis,
     )
 
 
@@ -143,6 +156,7 @@ def _make_current_figure(
     title_suffix: str,
     filter_resistance_outliers: bool = False,
     zero_minimum_y: bool = False,
+    show_power_top_axis: bool = False,
 ) -> Figure:
     groups = current_sweep_groups(run.frame)
     if not groups:
@@ -150,11 +164,16 @@ def _make_current_figure(
 
     fig = Figure(figsize=(8.0, 5.0), constrained_layout=True)
     ax = fig.add_subplot(111)
+    power_currents: list[float] = []
+    power_resistances: list[float] = []
     for target, group in groups:
         if filter_resistance_outliers:
             group = _drop_resistance_outliers(group)
         if len(group) < MIN_POINTS_PER_TARGET:
             continue
+        if show_power_top_axis:
+            power_currents.extend(group["current_mA"].to_numpy(dtype=float).tolist())
+            power_resistances.extend(group["resistance_ohm"].to_numpy(dtype=float).tolist())
         y_values = group[y_column].to_numpy(dtype=float)
         if zero_minimum_y and len(y_values):
             y_values = _strain_from_trace_minimum_length(run, group)
@@ -168,7 +187,16 @@ def _make_current_figure(
     ax.set_xlabel("Measured current [mA]")
     ax.set_ylabel(y_label)
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="best", fontsize=8, title="Target stress")
+    if show_power_top_axis:
+        add_power_top_axis(
+            ax,
+            power_currents,
+            power_resistances,
+            label="Power [mW]",
+            label_size=11,
+            tick_size=9,
+        )
+    ax.legend(loc="best", fontsize=9, title="Target stress", title_fontsize=9)
     return fig
 
 
@@ -183,6 +211,19 @@ def build_plot_frame(run: MiniDmaRun, *, y_column: str) -> pd.DataFrame:
         columns[f"{token}_current_mA"] = pd.Series(group["current_mA"].to_numpy(dtype=float))
         columns[f"{token}_{y_column}"] = pd.Series(group[y_column].to_numpy(dtype=float))
     return pd.DataFrame(columns)
+
+
+def power_axis_points(run: MiniDmaRun, *, filter_resistance_outliers: bool = True) -> tuple[list[float], list[float]]:
+    currents: list[float] = []
+    resistances: list[float] = []
+    for _target, group in current_sweep_groups(run.frame):
+        if filter_resistance_outliers:
+            group = _drop_resistance_outliers(group)
+        if len(group) < MIN_POINTS_PER_TARGET:
+            continue
+        currents.extend(group["current_mA"].to_numpy(dtype=float).tolist())
+        resistances.extend(group["resistance_ohm"].to_numpy(dtype=float).tolist())
+    return currents, resistances
 
 
 def strain_from_trace_minimum_length(run: MiniDmaRun, group: pd.DataFrame) -> pd.Series:

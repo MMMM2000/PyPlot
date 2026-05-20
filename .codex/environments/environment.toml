@@ -8,12 +8,12 @@ script = ""
 [setup.darwin]
 script = '''
 set -e
-if [ -d .venv ]; then
-  .venv/bin/python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)" || {
-    echo "Existing .venv is not Python 3.14. Remove .venv and rerun worktree setup." >&2
-    exit 1
-  }
-else
+if [ -d .venv ] && ! .venv/bin/python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)"; then
+  echo "Existing .venv is not Python 3.14; recreating it for this worktree." >&2
+  rm -rf .venv
+fi
+
+if [ ! -d .venv ]; then
   command -v python3.14 >/dev/null 2>&1 || {
     echo "python3.14 is required for this project. Install it and retry." >&2
     exit 1
@@ -35,22 +35,23 @@ $venvPython = Join-Path $PWD ".venv\Scripts\python.exe"
 if (Test-Path $venvPython) {
     & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)"
     if ($LASTEXITCODE -ne 0) {
-        throw "Existing .venv is not Python 3.14. Remove .venv and rerun worktree setup."
+        Write-Host "Existing .venv is not Python 3.14; recreating it for this worktree."
+        Remove-Item -LiteralPath ".venv" -Recurse -Force
     }
-} else {
-    $localPython314 = Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"
-    $createdVenv = $false
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        py -3.14 -m venv .venv
-        $createdVenv = ($LASTEXITCODE -eq 0)
+} elseif (Test-Path ".venv") {
+    Write-Host "Existing .venv is incomplete; recreating it for this worktree."
+    Remove-Item -LiteralPath ".venv" -Recurse -Force
+}
+
+if (-not (Test-Path $venvPython)) {
+    if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
+        throw "The Windows Python launcher 'py' is required for setup. Install Python 3.14 and ensure py -0p lists it, then retry."
     }
-    if (-not $createdVenv -and (Test-Path $localPython314)) {
-        & $localPython314 -m venv .venv
-        $createdVenv = ($LASTEXITCODE -eq 0)
+    py -3.14 --version
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python 3.14 is required for this project. Install it and ensure py -0p lists a 3.14 interpreter, then retry."
     }
-    if (-not $createdVenv) {
-        throw "Python 3.14 is required for this project. Install it and retry."
-    }
+    py -3.14 -m venv .venv
     $venvPython = Join-Path $PWD ".venv\Scripts\python.exe"
     & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)"
     if ($LASTEXITCODE -ne 0) {
@@ -59,6 +60,7 @@ if (Test-Path $venvPython) {
 }
 
 & $venvPython -m pip install --upgrade pip
+& $venvPython -m pip install -r requirements.txt
 & $venvPython -m pip install -r requirements-win.txt
 & $venvPython -m pip install -e ".[test]"
 '''

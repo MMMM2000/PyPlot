@@ -19,8 +19,10 @@ from plotting.shared.utils import save_figure, show_plots, schedule_origin_relea
 from plotting.shared.origin import (
     origin_session,
     hide_origin_workbook,
+    set_origin_axis_title as shared_set_origin_axis_title,
     set_origin_graph_title as shared_set_origin_graph_title,
 )
+from plotting.shared.power_axis import add_power_top_axis
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.toolkit import format_annealing_title
 
@@ -350,6 +352,48 @@ def _set_graph_title(
     _ = applied
 
 
+def _place_current_annealing_title(layer: Any, text: str) -> None:
+    label_method = getattr(layer, "label", None)
+    title_label = None
+    if callable(label_method):
+        try:
+            title_label = label_method("Title")
+        except Exception:
+            title_label = None
+    if title_label is None:
+        return
+    try:
+        title_label.text = text
+    except Exception:
+        pass
+    _set_visibility(title_label, True)
+    _set_text_size(title_label, max(11, min(TITLE_SIZE, 12)))
+    get_float = getattr(layer, "get_float", None)
+    set_float = getattr(title_label, "set_float", None)
+    if not callable(get_float) or not callable(set_float):
+        return
+    try:
+        x_from = float(get_float("x.from"))
+        x_to = float(get_float("x.to"))
+        y_from = float(get_float("y.from"))
+        y_to = float(get_float("y.to"))
+    except Exception:
+        return
+    if not all(math.isfinite(value) for value in (x_from, x_to, y_from, y_to)):
+        return
+    y_span = y_to - y_from
+    if y_span <= 0:
+        return
+    for key, value in (
+        ("x", (x_from + x_to) / 2.0),
+        ("y", y_to + (y_span * 0.34)),
+    ):
+        try:
+            set_float(key, float(value))
+        except Exception:
+            pass
+
+
 def _assign_long_name(target: Any | None, name: str) -> None:
     if target is None:
         return
@@ -432,6 +476,80 @@ def _apply_axis_labels(layer: Any, x_label: str, y_label: str) -> None:
                 sub = getattr(axis_obj, attr, None)
                 if sub is not None:
                     _set_visibility(sub, False)
+
+
+def _apply_origin_power_top_axis(
+    layer: Any,
+    workbook: Any | None,
+    worksheet: Any | None,
+    currents: np.ndarray,
+    resistances: np.ndarray,
+) -> None:
+    finite_current = np.asarray(currents, dtype=float)
+    finite_current = finite_current[np.isfinite(finite_current)]
+    if finite_current.size < 2:
+        return
+    current_min = float(np.nanmin(finite_current))
+    current_max = float(np.nanmax(finite_current))
+    if not math.isfinite(current_min) or not math.isfinite(current_max):
+        return
+    if math.isclose(current_min, current_max, abs_tol=1e-12):
+        return
+    finite_mask = np.isfinite(np.asarray(currents, dtype=float)) & np.isfinite(
+        np.asarray(resistances, dtype=float)
+    )
+    if not finite_mask.any():
+        return
+    power_values = (np.asarray(currents, dtype=float)[finite_mask] ** 2) * np.asarray(
+        resistances, dtype=float
+    )[finite_mask] / 1000.0
+    current_values = np.asarray(currents, dtype=float)[finite_mask]
+    grouped = pd.DataFrame({"current": current_values, "power": power_values}).groupby(
+        "current", sort=True, as_index=False
+    )["power"].median()
+    if len(grouped) < 2:
+        return
+    try:
+        x_values = grouped["current"].to_numpy(dtype=float)
+        p_values = grouped["power"].to_numpy(dtype=float)
+        denominator = float(np.sum(x_values**4))
+        if math.isclose(denominator, 0.0, abs_tol=1e-12):
+            return
+        quad = float(np.sum((x_values**2) * p_values) / denominator)
+    except Exception:
+        return
+    formula = f"({quad:.12g})*x^2"
+    lt_exec = getattr(layer, "lt_exec", None)
+    if not callable(lt_exec):
+        return
+    commands = [
+        "axis -ps X A 3;",
+        "axis -ps X L 3;",
+        "layer.x.showAxes=3;",
+        "layer.x.showlabel=1;",
+        "layer.x.showLabels=3;",
+        "layer.x2.showlabel=1;",
+        "layer.x2.showLabels=3;",
+        "layer.x2.label.type=1;",
+        "layer.x2.labelType=1;",
+        f'layer.x2.label.formula$="{formula}";',
+        "layer.x2.label.decPlaces=1;",
+        "layer.x.ticks=10;",
+        "layer.x2.ticks=10;",
+        "layer.x2.label.fsize=10;",
+    ]
+    for command in commands:
+        try:
+            lt_exec(command)
+        except Exception:
+            continue
+    try:
+        shared_set_origin_axis_title(layer, "x2", "Power [mW]")
+    except Exception:
+        try:
+            lt_exec('label -s -xt "Power [mW]";')
+        except Exception:
+            pass
 
 
 def _apply_tick_settings(layer: Any, axis_name: str, axis_obj: Any | None) -> None:
@@ -600,6 +718,104 @@ def _apply_origin_readability(layer: Any, graph: Any | None) -> None:
             pass
 
 
+def _style_origin_report_layout(layer: Any, *, outside_legend: bool = False) -> None:
+    """Reserve page space for native Origin labels and place the legend predictably."""
+    if layer is None:
+        return
+    lt_exec = getattr(layer, "lt_exec", None)
+    if not callable(lt_exec):
+        return
+    layer_box = (
+        "layer -u 1; layer 50 46 26 30; "
+        "layer.top=30; layer.left=26; layer.width=50; layer.height=46;"
+        if outside_legend
+        else "layer -u 1; layer 58 46 23 30; "
+        "layer.top=30; layer.left=23; layer.width=58; layer.height=46;"
+    )
+    commands = [
+        layer_box,
+        "layer.x.ticks=10;",
+        "layer.x2.ticks=10;",
+        "layer.x.label.fsize=10;",
+        "layer.x2.label.fsize=10;",
+        "layer.y.label.fsize=10;",
+        "layer.x.title.fsize=12;",
+        "layer.x2.title.fsize=12;",
+        "layer.y.title.fsize=12;",
+        "legend.fsize=10;",
+    ]
+    if outside_legend:
+        commands.extend(
+            [
+                "legend.x=layer.x.to + legend.dx / 2 + abs(layer.x.to - layer.x.from) * 0.04;",
+                "legend.y=layer.y.to - legend.dy / 2;",
+            ]
+        )
+    else:
+        commands.extend(
+            [
+                "legend.x=layer.x.from + legend.dx / 2;",
+                "legend.y=layer.y.to - legend.dy / 2;",
+            ]
+        )
+    for command in commands:
+        try:
+            lt_exec(command)
+        except Exception:
+            continue
+
+
+def _apply_origin_curve_color(plot_any: Any, color: str) -> None:
+    set_cmd = getattr(plot_any, "set_cmd", None)
+    if callable(set_cmd):
+        try:
+            red = int(color[1:3], 16)
+            green = int(color[3:5], 16)
+            blue = int(color[5:7], 16)
+            origin_color = f"color({red},{green},{blue})"
+            origin_html_color = f'color("{color}")'
+            for command in (
+                f"-c {origin_color}",
+                f"-cse {origin_html_color}",
+                f"-csf {origin_html_color}",
+                f"-cr {origin_color}",
+                f"-cser {origin_color}",
+                f"-csfr {origin_color}",
+                f"-cf {origin_color}",
+                "-kf 0",
+            ):
+                try:
+                    set_cmd(command)
+                except TypeError:
+                    set_cmd(command, "")
+        except Exception:
+            pass
+    for attr, value in (
+        ("color", color),
+        ("line_color", color),
+        ("symbol_color", color),
+        ("symbol_edge_color", color),
+        ("symbol_fill_color", color),
+        ("symbol_interior", 1),
+    ):
+        try:
+            setattr(plot_any, attr, value)
+        except Exception:
+            pass
+    symbol = getattr(plot_any, "symbol", None)
+    if symbol is not None:
+        for attr, value in (
+            ("color", color),
+            ("edge_color", color),
+            ("fill_color", color),
+            ("symbol_color", color),
+        ):
+            try:
+                setattr(symbol, attr, value)
+            except Exception:
+                pass
+
+
 def _plot_origin_simple(
     workbook: Any | None,
     worksheet: Any | None,
@@ -616,12 +832,10 @@ def _plot_origin_simple(
     plot_any = cast(Any, plot_obj)
     color = '#000000'
     try:
-        plot_any.color = color
+        _apply_origin_curve_color(plot_any, color)
         plot_any.line_width = 1.5
         plot_any.symbol_shape = 2
         plot_any.symbol_size = 4
-        plot_any.symbol_edge_color = color
-        plot_any.symbol_fill_color = color
         plot_any.legend = line_label
     except Exception:
         try:
@@ -750,6 +964,7 @@ def _plot_origin_experimental(
         if not isinstance(dataset_index, int):
             dataset_index = len(legend_entries) + 1
         legend_entries.append((dataset_index, label))
+        _apply_origin_curve_color(plot_any, color)
 
     try:
         worksheet.header_rows("LUC")
@@ -815,6 +1030,7 @@ def plot_one(
     *,
     figsize: Tuple[float, float] | None = None,
     target_px: Tuple[int, int] | None = None,
+    show_power_top_axis: bool = False,
 ) -> Tuple[Figure, str]:
     if target_px is not None:
         target_width, target_height = target_px
@@ -907,6 +1123,15 @@ def plot_one(
     ax.set_ylabel("Resistance [Ω]", fontsize=AXIS_LABEL_SIZE)
     ax.set_title(title, fontsize=TITLE_SIZE, pad=10)
     ax.grid(True, ls="--", alpha=0.3)
+    if show_power_top_axis:
+        add_power_top_axis(
+            ax,
+            currents,
+            resistances,
+            label="Power [mW]",
+            label_size=AXIS_LABEL_SIZE,
+            tick_size=TICK_SIZE,
+        )
     if legend_handles:
         legend = ax.legend(
             handles=legend_handles,
@@ -967,6 +1192,7 @@ def plot_one_origin(
     source_name: str,
     mode: str | None = None,
     *,
+    show_power_top_axis: bool = False,
     return_handles: bool = False,
 ) -> dict[str, object] | None:
     currents = df["I_mA"].to_numpy(dtype=float)
@@ -1008,6 +1234,11 @@ def plot_one_origin(
     hide_origin_workbook(origin_any, workbook, graph)
 
     _apply_origin_readability(layer, graph)
+    if show_power_top_axis:
+        _apply_origin_power_top_axis(layer, workbook, worksheet, currents, resistances)
+    _style_origin_report_layout(layer)
+    _set_graph_title(layer, display_label, graph=graph, origin_any=origin_any)
+    _place_current_annealing_title(layer, display_label)
 
     if return_handles:
         handles["graph"] = graph
