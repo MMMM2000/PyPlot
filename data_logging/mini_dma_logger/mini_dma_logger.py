@@ -796,6 +796,16 @@ class ScaleIntervalSummary:
     sample_rate_hz: float | None
 
 
+@dataclass(frozen=True)
+class ScaleControlSignal:
+    value: float
+    latest_value: float
+    noise: float
+    slope_per_s: float
+    sample_count: int
+    timestamp_s: float
+
+
 class ScaleSignalBuffer:
     def __init__(self, *, window_s: float = 10.0) -> None:
         self.window_s = max(1.0, float(window_s))
@@ -839,6 +849,12 @@ class ScaleSignalBuffer:
             latest = self.latest()
             now_s = latest.timestamp_s if latest is not None else time.time()
         return self.interval_summary(since_s=now_s - max(0.001, float(window_s)), until_s=now_s)
+
+    def recent_samples(self, *, now_s: float | None = None, window_s: float = 1.0) -> list[ScaleSample]:
+        if now_s is None:
+            latest = self.latest()
+            now_s = latest.timestamp_s if latest is not None else time.time()
+        return self._select_samples(since_s=now_s - max(0.001, float(window_s)), until_s=now_s)
 
     def sample_rate_hz(self, *, now_s: float | None = None, window_s: float = 2.0) -> float | None:
         return self.recent_summary(now_s=now_s, window_s=window_s).sample_rate_hz
@@ -2509,6 +2525,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_live_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._seek_travel_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_pending_reversal_by_key: dict[tuple[str, int, float], tuple[float, float | None]] = {}
         self._setup_preload_engaged_seek_keys: set[tuple[str, int, float]] = set()
         self._seek_live_stiffness_g_per_mm: float | None = None
         self._seek_last_stiffness_value_by_basis: dict[str, float] = {}
@@ -9130,6 +9147,71 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_effective_position_by_key.pop(seek_key, None)
         self._seek_no_response_count_by_key.pop(seek_key, None)
         self._seek_travel_by_key.pop(seek_key, None)
+        self._seek_pending_reversal_by_key.pop(seek_key, None)
+
+    def _scale_control_signal_for_basis(self, basis: str, *, window_s: float | None = None) -> ScaleControlSignal | None:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return None
+        latest = self._scale_signal_buffer.latest()
+        if latest is None:
+            return None
+        window = (
+            self._current_sweep_hold_filter_window_s()
+            if window_s is None
+            else max(0.001, float(window_s))
+        )
+        samples = self._scale_signal_buffer.recent_samples(
+            now_s=latest.timestamp_s,
+            window_s=window,
+        )
+        if len(samples) < 3:
+            return None
+        loads = [float(sample.applied_load_g) for sample in samples]
+        median_load = statistics.median(loads)
+        deviations = [abs(value - median_load) for value in loads]
+        mad_load = statistics.median(deviations) if deviations else 0.0
+        robust_noise_load = 1.4826 * mad_load
+        mean_time = sum(sample.timestamp_s for sample in samples) / len(samples)
+        mean_load = sum(loads) / len(loads)
+        denominator = sum((sample.timestamp_s - mean_time) ** 2 for sample in samples)
+        slope_load_s = 0.0
+        if denominator > 0.0:
+            slope_load_s = sum(
+                (sample.timestamp_s - mean_time) * (load - mean_load)
+                for sample, load in zip(samples, loads, strict=False)
+            ) / denominator
+        if basis == HSW_BASIS_LOAD_G:
+            return ScaleControlSignal(
+                value=float(median_load),
+                latest_value=float(loads[-1]),
+                noise=max(0.0, float(robust_noise_load)),
+                slope_per_s=float(slope_load_s),
+                sample_count=len(samples),
+                timestamp_s=float(latest.timestamp_s),
+            )
+        config = self._control_config()
+        diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+        median_stress = stress_mpa_from_load_g(float(median_load), diameter_mm)
+        latest_stress = stress_mpa_from_load_g(float(loads[-1]), diameter_mm)
+        noise_stress = stress_mpa_from_load_g(max(0.0, float(robust_noise_load)), diameter_mm)
+        slope_stress = stress_mpa_from_load_g(float(slope_load_s), diameter_mm)
+        if median_stress is None or latest_stress is None:
+            return None
+        return ScaleControlSignal(
+            value=float(median_stress),
+            latest_value=float(latest_stress),
+            noise=0.0 if noise_stress is None else abs(float(noise_stress)),
+            slope_per_s=0.0 if slope_stress is None else float(slope_stress),
+            sample_count=len(samples),
+            timestamp_s=float(latest.timestamp_s),
+        )
+
+    def _seek_filtered_control_signal(self, basis: str) -> ScaleControlSignal | None:
+        if not self._is_current_sweep_mode(self._automation_name):
+            return None
+        if self._automation_phase not in {"current", "current_hold"}:
+            return None
+        return self._scale_control_signal_for_basis(basis)
 
     def _seek_step_mm(self, error_value: float, tolerance: float, *, basis: str | None = None) -> float:
         if self._automation_name == RECOVERY_LOAD:
@@ -9878,6 +9960,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return False
             current_value = 0.0
+        filtered_signal = self._seek_filtered_control_signal(basis)
+        if filtered_signal is not None:
+            current_value = filtered_signal.value
         setup_preload_relaxation = self._setup_preload_relaxation_active(
             basis,
             current_value,
@@ -9981,6 +10066,29 @@ class MainWindow(QtWidgets.QMainWindow):
                     tolerance=effective_tolerance,
                     sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
                     result="reached",
+                )
+                return True
+        if filtered_signal is not None:
+            noise_band = max(
+                effective_tolerance,
+                filtered_signal.noise * self._current_sweep_hold_noise_sigma(),
+                self._current_sweep_hold_min_band_for_basis(
+                    basis,
+                    self._current_sweep_hold_min_resume_stress_mpa(),
+                ),
+            )
+            if abs(delta_value) <= noise_band:
+                self._clear_seek_state(seek_key)
+                self._write_control_trace(
+                    decision="accept",
+                    basis=basis,
+                    target_value=target_value,
+                    current_value=current_value,
+                    error_value=delta_value,
+                    tolerance=max(effective_tolerance, noise_band),
+                    sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                    result="filtered_noise_band",
+                    reason="filtered_control_signal",
                 )
                 return True
         if abs(delta_value) <= effective_tolerance and self._zero_return_requires_true_zero(basis, target_value):
@@ -10127,6 +10235,49 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         overshot_target = previous_error is not None and previous_error * delta_value < 0.0
         if overshot_target:
+            if (
+                filtered_signal is not None
+                and self._is_current_sweep_mode(self._automation_name)
+                and self._automation_phase in {"current", "current_hold"}
+            ):
+                reversal_sign = math.copysign(1.0, delta_value)
+                pending_sign, pending_timestamp_s = self._seek_pending_reversal_by_key.get(
+                    seek_key,
+                    (0.0, None),
+                )
+                confirmed = (
+                    pending_sign == reversal_sign
+                    and pending_timestamp_s is not None
+                    and filtered_signal.timestamp_s - float(pending_timestamp_s) >= 0.5
+                )
+                if not confirmed:
+                    self._seek_pending_reversal_by_key[seek_key] = (
+                        reversal_sign,
+                        filtered_signal.timestamp_s,
+                    )
+                    self._seek_last_error_by_key[seek_key] = delta_value
+                    self._seek_last_value_by_key[seek_key] = current_value
+                    self._seek_last_time_by_key[seek_key] = seek_sample_time_s
+                    latest_scale_sample_time_s = self._latest_scale_sample_time_s()
+                    if latest_scale_sample_time_s is not None:
+                        self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
+                        self._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = latest_scale_sample_time_s
+                    self._log_waiting_for_feedback(
+                        "Confirming filtered reversal before sending the opposite load/stress correction."
+                    )
+                    self._write_control_trace(
+                        decision="wait",
+                        basis=basis,
+                        target_value=target_value,
+                        current_value=current_value,
+                        error_value=delta_value,
+                        tolerance=effective_tolerance,
+                        sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                        result="waiting",
+                        reason="filtered_reversal_confirmation",
+                    )
+                    return False
+                self._seek_pending_reversal_by_key.pop(seek_key, None)
             if self._target_reversal_is_practical_hold(
                 basis,
                 delta_value,
@@ -13369,6 +13520,69 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         if self._length_setup_progress is None:
             return
+        sample_count = len(self._length_setup_points)
+        current_step = (
+            self._automation_steps[self._automation_index]
+            if 0 <= self._automation_index < len(self._automation_steps)
+            else None
+        )
+        if complete:
+            self._length_setup_progress.setRange(0, 1000)
+            self._length_setup_progress.setValue(1000)
+            self._length_setup_progress.setFormat(f"Setup progress: complete ({sample_count} samples)")
+            return
+        if self._automation_active and current_step is not None:
+            phase_text = ""
+            phase_fraction: float | None = None
+            if current_step.action == "ramp_target" and current_step.note == "setup_preload":
+                phase_text = "Preload ramp"
+                start_value = self._active_target_ramp_start_value
+                rate_value_s = self._active_target_ramp_rate_value_s
+                target_value = (
+                    current_step.target_end_value
+                    if current_step.target_end_value is not None
+                    else current_step.target_value
+                )
+                if (
+                    start_value is not None
+                    and rate_value_s is not None
+                    and target_value is not None
+                    and abs(float(rate_value_s)) > 0.0
+                ):
+                    duration_s = abs(float(start_value) - float(target_value)) / abs(float(rate_value_s))
+                    if duration_s > 0.0:
+                        phase_fraction = (time.monotonic() - self._active_target_ramp_started_s) / duration_s
+            elif current_step.action == "settle" and current_step.note == "setup_preload":
+                phase_text = "Preload settle"
+                duration_s = max(0.001, float(current_step.duration_s or 0.0))
+                phase_fraction = self._timed_step_elapsed_s(self._automation_index) / duration_s
+            elif current_step.action == "measure_length_prompt":
+                phase_text = "Waiting for length"
+                phase_fraction = 0.0
+            elif current_step.action == "seek_target" and current_step.note == "setup_return_zero":
+                phase_text = "Return load to zero"
+                phase_fraction = None
+            elif current_step.action == "settle" and current_step.note == "setup_return_zero":
+                phase_text = "Zero-load settle"
+                duration_s = max(0.001, float(current_step.duration_s or 0.0))
+                phase_fraction = self._timed_step_elapsed_s(self._automation_index) / duration_s
+            elif current_step.action == "apply_length_setup":
+                phase_text = "Apply length"
+                phase_fraction = 0.0
+            if phase_text:
+                if phase_fraction is None:
+                    self._length_setup_progress.setRange(0, 0)
+                    self._length_setup_progress.setFormat(
+                        f"Setup progress: {phase_text} ({sample_count} samples)"
+                    )
+                else:
+                    phase_percent = int(round(max(0.0, min(1.0, phase_fraction)) * 100.0))
+                    self._length_setup_progress.setRange(0, 1000)
+                    self._length_setup_progress.setValue(max(0, min(1000, phase_percent * 10)))
+                    self._length_setup_progress.setFormat(
+                        f"Setup progress: {phase_text} {phase_percent}% ({sample_count} samples)"
+                    )
+                return
         setup_total = 0
         for step in self._automation_steps:
             if step.action == "start_session":
@@ -13381,10 +13595,7 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_percent = int(round((setup_value / max(1, setup_total)) * 100.0))
         self._length_setup_progress.setRange(0, setup_total)
         self._length_setup_progress.setValue(max(0, min(setup_value, setup_total)))
-        sample_count = len(self._length_setup_points)
-        if complete:
-            self._length_setup_progress.setFormat(f"Setup progress: complete ({sample_count} samples)")
-        elif self._automation_active:
+        if self._automation_active:
             self._length_setup_progress.setFormat(
                 f"Setup progress: {setup_percent}% ({setup_value}/{setup_total} steps, {sample_count} samples)"
             )
@@ -14866,26 +15077,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return float(current_value), 0.0
-        latest = self._scale_signal_buffer.latest()
-        if latest is None:
+        signal = self._scale_control_signal_for_basis(basis)
+        if signal is None:
             return float(current_value), 0.0
-        summary = self._scale_signal_buffer.recent_summary(
-            now_s=latest.timestamp_s,
-            window_s=self._current_sweep_hold_filter_window_s(),
-        )
-        if summary.sample_count < 3 or summary.load_mean_g is None:
-            return float(current_value), 0.0
-        mean_load_g = float(summary.load_mean_g)
-        noise_load_g = 0.0 if summary.load_std_g is None else max(0.0, float(summary.load_std_g))
-        if basis == HSW_BASIS_LOAD_G:
-            return mean_load_g, noise_load_g
-        config = self._control_config()
-        diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
-        mean_stress = stress_mpa_from_load_g(mean_load_g, diameter_mm)
-        noise_stress = stress_mpa_from_load_g(noise_load_g, diameter_mm)
-        if mean_stress is None:
-            return float(current_value), 0.0
-        return float(mean_stress), 0.0 if noise_stress is None else abs(float(noise_stress))
+        return signal.value, signal.noise
 
     def _current_sweep_target_error_and_tolerance(
         self,
@@ -15357,6 +15552,19 @@ class MainWindow(QtWidgets.QMainWindow):
             if start_value is None:
                 start_value = self._current_distribution_value(step.basis)
             self._active_target_ramp_start_value = float(end_value if start_value is None else start_value)
+            if (
+                step.target_start_value is None
+                and step.note == "setup_preload"
+                and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            ):
+                duration_s = max(
+                    0.1,
+                    config.setup_preload_duration_s
+                    if config is not None
+                    else float(self.spin_setup_preload_duration_s.value()),
+                )
+                live_delta = abs(float(self._active_target_ramp_start_value) - end_value)
+                self._active_target_ramp_rate_value_s = max(1e-9, live_delta / duration_s)
             self._end_zero_fallback_armed = False
             self._end_zero_fallback_return_position_mm = None
             self._end_zero_fallback_raw_g = None

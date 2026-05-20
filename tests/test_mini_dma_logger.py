@@ -2419,11 +2419,11 @@ def test_long_recipe_estimates_use_minutes_and_show_progress(tmp_path: Path, qtb
         window.spin_current_sweep_interval.setValue(500)
         window._update_recipe_mode_ui()
 
-        assert "Estimated duration: 8.3 min" in window.label_recipe_estimate.text()
+        assert "Estimated duration: 8.1 min" in window.label_recipe_estimate.text()
         assert window.recipe_progress.maximum() > 100
         assert window.recipe_progress.value() == 0
         assert "Estimated:" in window.recipe_progress.format()
-        assert "8.3 min" in window.recipe_progress.format()
+        assert "8.1 min" in window.recipe_progress.format()
     finally:
         _close_test_window(window)
 
@@ -2494,8 +2494,8 @@ def test_current_sweep_estimate_includes_hold_allowance(tmp_path: Path, qtbot) -
 
         points, ticks = window._estimate_recipe_points_and_ticks([step], 1000)
 
-        assert ticks == 75
-        assert points == 75
+        assert ticks == 74
+        assert points == 74
     finally:
         _close_test_window(window)
 
@@ -2540,7 +2540,7 @@ def test_live_eta_projects_learned_current_sweep_overhead(tmp_path: Path, qtbot)
 
         learned_extra_s = window._learned_current_sweep_extra_remaining_s()
 
-        assert learned_extra_s == pytest.approx(210.0)
+        assert learned_extra_s == pytest.approx(210.5)
     finally:
         _close_test_window(window)
 
@@ -3978,6 +3978,50 @@ def test_setup_preload_target_ramp_above_target_ramps_down_from_live_value(
         _close_test_window(window)
 
 
+def test_setup_preload_live_start_duration_controls_high_preload_relaxation(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [100.0]
+    captured_targets: list[float] = []
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+
+    try:
+        window.spin_setup_preload_duration_s.setValue(5.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._active_control_config = window._freeze_control_config()
+        window._current_distribution_value = lambda *_args, **_kwargs: 320.0  # type: ignore[method-assign]
+
+        def _capture_seek(_basis: str, target_value: float, _tolerance: float) -> bool:
+            captured_targets.append(target_value)
+            return False
+
+        window._seek_distribution_target = _capture_seek  # type: ignore[method-assign]
+        step = mini_dma_mod.AutomationStep(
+            "ramp_target",
+            target_value=20.0,
+            target_start_value=None,
+            target_end_value=20.0,
+            target_ramp_rate_value_s=4.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            note="setup_preload",
+        )
+
+        assert window._handle_target_ramp_step(step, 4) is False
+        now_s[0] = 102.5
+        assert window._handle_target_ramp_step(step, 4) is False
+
+        assert captured_targets == [pytest.approx(320.0), pytest.approx(170.0)]
+        assert window._active_target_ramp_rate_value_s == pytest.approx(60.0)
+    finally:
+        window._active_control_config = None
+        _close_test_window(window)
+
+
 def test_setup_preload_target_ramp_finishes_inside_automatic_tolerance(
     tmp_path: Path,
     qtbot,
@@ -4502,6 +4546,56 @@ def test_length_setup_dialog_has_local_pause_stop_and_progress(tmp_path: Path, q
 
         assert window._automation_active is False
         assert window._length_setup_dialog is None or not window._length_setup_dialog.isVisible()
+    finally:
+        _close_test_window(window)
+
+
+def test_length_setup_progress_tracks_active_ramp_phase_without_tick_counts(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [102.5]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+
+    try:
+        window._automation_active = True
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep("starting_length_prompt", note="setup_start_length"),
+            mini_dma_mod.AutomationStep(
+                "ramp_target",
+                target_value=20.0,
+                target_end_value=20.0,
+                basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                note="setup_preload",
+            ),
+            mini_dma_mod.AutomationStep("settle", duration_s=3.0, note="setup_preload"),
+            mini_dma_mod.AutomationStep("measure_length_prompt", note="setup_length"),
+            mini_dma_mod.AutomationStep("seek_target", note="setup_return_zero"),
+            mini_dma_mod.AutomationStep("settle", duration_s=3.0, note="setup_return_zero"),
+            mini_dma_mod.AutomationStep("apply_length_setup", note="setup_apply_l0"),
+            mini_dma_mod.AutomationStep("start_session", note="recipe_start"),
+        ]
+        window._automation_index = 1
+        window._automation_total_steps = 20000
+        window._automation_completed_ticks = 1234
+        window._active_target_ramp_step_index = 1
+        window._active_target_ramp_started_s = 100.0
+        window._active_target_ramp_start_value = 320.0
+        window._active_target_ramp_rate_value_s = 60.0
+        window._show_length_setup_dialog()
+
+        window._update_length_setup_progress()
+
+        assert window._length_setup_progress is not None
+        assert window._length_setup_progress.maximum() == 1000
+        assert 490 <= window._length_setup_progress.value() <= 510
+        text = window._length_setup_progress.format()
+        assert "Preload ramp" in text
+        assert "50%" in text
+        assert "20000" not in text
+        assert "1234" not in text
     finally:
         _close_test_window(window)
 
@@ -5163,6 +5257,126 @@ def test_current_sweep_hold_requires_filtered_error_above_noise_band(
         holding, stopped = window._update_current_sweep_ramp_hold(step, 4, now_s=101.0)
         assert holding is True
         assert stopped is False
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_seek_uses_filtered_scale_signal_to_ignore_single_sample_spike(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.time()
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.check_tension_load_positive.setChecked(False)
+    window.spin_diameter.setValue(0.014)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    for index, stress_mpa in enumerate([49.6, 50.1, 50.2, 49.9, 80.0]):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+    window._last_motion_command_time_s = None
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.5,
+        )
+
+        assert reached is True
+        assert moves == []
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_reversal_waits_for_confirmed_filtered_sign(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.time()
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_diameter.setValue(0.014)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(40.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        300.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = 40.0
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = 8.0
+    window._current_position_mm = 1.0
+    window._effective_position_mm = 1.0
+    window._last_move_target_mm = 1.0
+    window._last_effective_move_target_mm = 1.0
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+
+    def _add_filtered_samples(stress_values: list[float], *, start_s: float) -> None:
+        for index, stress_mpa in enumerate(stress_values):
+            load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
+            assert load_g is not None
+            timestamp_s = start_s + index * 0.25
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=timestamp_s,
+                raw_g=load_g,
+                applied_load_g=load_g,
+                raw_text=f"{load_g:.5f} g",
+            )
+            window._latest_scale_timestamp = timestamp_s
+            window._latest_scale_value_g = load_g
+
+    try:
+        _add_filtered_samples([56.0, 55.7, 55.4, 55.2, 55.0], start_s=now_s)
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.5,
+        )
+
+        assert reached is False
+        assert moves == []
+        assert "confirming filtered reversal" in window.log_output.toPlainText().lower()
+
+        _add_filtered_samples([55.1, 55.3, 55.2], start_s=now_s + 2.0)
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.5,
+        )
+
+        assert reached is False
+        assert moves
     finally:
         _close_test_window(window)
 
