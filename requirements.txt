@@ -24,6 +24,8 @@ ifaddr==0.2.0
     # via zeroconf
 kiwisolver==1.4.9
     # via matplotlib
+lxml==6.1.0
+    # via python-pptx
 libusb-package==1.0.26.1
     # via python-plot (pyproject.toml)
 matplotlib==3.10.9
@@ -59,6 +61,7 @@ pefile==2024.8.26
 pillow==12.0.0
     # via
     #   matplotlib
+    #   python-pptx
     #   reportlab
 plotly==6.7.0
     # via python-plot (pyproject.toml)
@@ -73,6 +76,8 @@ pyparsing==3.2.5
 pypdf==6.10.2
     # via python-plot (pyproject.toml)
 pypdfium2==5.7.1
+    # via python-plot (pyproject.toml)
+python-pptx==1.0.2
     # via python-plot (pyproject.toml)
 pyqt6==6.11.0
     # via python-plot (pyproject.toml)
@@ -100,10 +105,14 @@ six==1.17.0
     # via python-dateutil
 tqdm==4.67.3
     # via python-plot (pyproject.toml)
+typing-extensions==4.15.0
+    # via python-pptx
 tzdata==2026.1
     # via pandas
 xlsxwriter==3.2.9
-    # via python-plot (pyproject.toml)
+    # via
+    #   python-plot (pyproject.toml)
+    #   python-pptx
 zeroconf==0.148.0
     # via python-plot (pyproject.toml)
 

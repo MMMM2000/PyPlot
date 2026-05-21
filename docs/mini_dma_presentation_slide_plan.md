@@ -20,7 +20,7 @@ Current generated deck:
 - `docs/assets/presentations/mini_dma_colloquium_2026-05-21_revised.pptx`
 - Branch used on 2026-05-21: `codex/mini-dma-presentation-story`
 - Last known synced commit on the Mac: `d91b1ec Refine presentation slides and comparison visuals`
-- Current Windows rebuild: 11 slides, speaker notes on every slide, programme-aware 15-minute flow.
+- Current Windows repair: restored the 15-slide MacBook deck as the main PPTX and fixed distorted picture aspect ratios.
 
 Source-folder context reviewed from:
 
@@ -38,16 +38,15 @@ Commercial DMA is a precise and valuable way to identify transition behavior and
 
 The presentation should move from microwire motivation to measurement bottleneck, then from purpose-built solution to first evidence, and finally to the broader point: AI-assisted engineering made it realistic for one researcher to build an instrument that would previously have needed a larger team and more time.
 
-## Final 11-Slide Deck, 2026-05-21
+## Current Revised Deck, 2026-05-21
 
 The current authoritative PPTX is
 `docs/assets/presentations/mini_dma_colloquium_2026-05-21_revised.pptx`.
-It now follows the `Preferred 15-Minute Flow After Programme Update` section
-below: 11 slides, sparse visible text, and spoken notes for the real narrative.
+It is the 15-slide MacBook-built deck from commit `d91b1ec`, repaired on
+Windows so real photos and plots keep their original aspect ratio.
 
-Older 15-slide draft notes are retained below as planning history. Do not treat
-that older slide-by-slide list as the active deck unless the PPTX is intentionally
-expanded again.
+The 11-slide outline in `Preferred 15-Minute Flow After Programme Update` is a
+possible compression guide, not the active PPTX.
 
 Global decisions from the final review:
 
