@@ -13,13 +13,17 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from importlib import import_module
 from pathlib import Path
 from threading import Condition, Event, RLock, Thread, current_thread, get_ident
 from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+try:
+    import pyqtgraph as pg
+    pg.setConfigOptions(antialias=False)
+except Exception:  # pragma: no cover - import guard
+    pg = None  # type: ignore[assignment]
 
 from plotting.shared.logfiles import append_text_with_rotation
 from plotting.shared.utils import ensure_app_theme, install_standard_menu
@@ -32,30 +36,6 @@ except Exception:  # pragma: no cover - import guard
     serial = None  # type: ignore[assignment]
     SerialException = Exception  # type: ignore[assignment]
     list_ports = None  # type: ignore[assignment]
-
-try:
-    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-except Exception:
-    try:
-        FigureCanvas = getattr(
-            import_module("matplotlib.backends.backend_qt5agg"),
-            "FigureCanvasQTAgg",
-        )
-    except Exception:  # pragma: no cover - optional backend fallback
-        FigureCanvas = None  # type: ignore[assignment]
-
-try:
-    from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToolbar
-except Exception:
-    try:
-        NavigationToolbar = getattr(
-            import_module("matplotlib.backends.backend_qt5agg"),
-            "NavigationToolbar2QT",
-        )
-    except Exception:  # pragma: no cover - optional backend fallback
-        NavigationToolbar = None  # type: ignore[assignment]
-
-from matplotlib.figure import Figure
 
 
 APP_NAME = "Mini DMA Logger"
@@ -1316,6 +1296,16 @@ class PlotTileWidgets:
     x_combo: QtWidgets.QComboBox
     y_left_combo: QtWidgets.QComboBox
     y_right_combo: QtWidgets.QComboBox
+
+
+@dataclass
+class PyqtGraphPlotBundle:
+    widget: Any
+    plot_item: Any
+    left_curve: Any
+    right_view: Any | None = None
+    right_curve: Any | None = None
+    sync_right_view: Callable[[], None] | None = None
 
 
 @dataclass
@@ -2654,8 +2644,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_progress: QtWidgets.QProgressBar | None = None
         self._button_length_setup_pause: QtWidgets.QPushButton | None = None
         self._button_length_setup_stop: QtWidgets.QPushButton | None = None
-        self._length_setup_figure: Figure | None = None
-        self._length_setup_canvas: Any = None
+        self._length_setup_stress_plot: PyqtGraphPlotBundle | None = None
+        self._length_setup_displacement_plot: PyqtGraphPlotBundle | None = None
+        self._length_setup_stress_plot_widget: Any | None = None
+        self._length_setup_displacement_plot_widget: Any | None = None
+        self._length_setup_stress_curve: Any | None = None
+        self._length_setup_load_curve: Any | None = None
+        self._length_setup_displacement_curve: Any | None = None
         self._length_setup_start_monotonic = 0.0
         self._length_setup_last_record_scale_timestamp: float | None = None
         self._last_length_setup_plot_refresh_s: float | None = None
@@ -2676,6 +2671,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._diameter_imported = False
         self._builder_import_in_progress = False
         self._plot_tiles: list[PlotTileWidgets] = []
+        self._dashboard_plot_bundles: list[PyqtGraphPlotBundle] = []
+        self._dashboard_plot_widgets: list[Any] = []
+        self._dashboard_left_curves: list[Any] = []
+        self._dashboard_right_curves: list[Any] = []
         self._dashboard_plot_settings_by_mode: dict[str, list[dict[str, object]]] = {}
         self._plot_settings_restore_in_progress = False
         self._dashboard_value_labels: dict[str, QtWidgets.QLabel] = {}
@@ -2709,8 +2708,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_control_error: str | None = None
         self._active_control_config: MiniDmaControlConfig | None = None
         self._recovery_plot_dialog: QtWidgets.QDialog | None = None
-        self._recovery_figure: Figure | None = None
-        self._recovery_canvas: Any = None
+        self._recovery_plot: PyqtGraphPlotBundle | None = None
+        self._recovery_plot_widget: Any | None = None
+        self._recovery_left_curve: Any | None = None
+        self._recovery_right_curve: Any | None = None
         self._recovery_start_elapsed_s: float | None = None
         self._recovery_start_monotonic = 0.0
         self._recovery_last_record_scale_timestamp: float | None = None
@@ -5045,12 +5046,32 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_canvas_layout = QtWidgets.QVBoxLayout(plot_canvas_container)
         plot_canvas_layout.setContentsMargins(0, 0, 0, 0)
         plot_canvas_layout.setSpacing(6)
-        self.figure = Figure(figsize=(10.5, 7.0))
-        self.canvas = FigureCanvas(self.figure) if FigureCanvas is not None else None
-        if NavigationToolbar is not None and self.canvas is not None:
-            plot_canvas_layout.addWidget(NavigationToolbar(self.canvas, plot_canvas_container))
-        if self.canvas is not None:
-            plot_canvas_layout.addWidget(self.canvas, stretch=1)
+        self._dashboard_plot_grid = QtWidgets.QGridLayout()
+        self._dashboard_plot_grid.setContentsMargins(0, 0, 0, 0)
+        self._dashboard_plot_grid.setHorizontalSpacing(8)
+        self._dashboard_plot_grid.setVerticalSpacing(8)
+        plot_canvas_layout.addLayout(self._dashboard_plot_grid, stretch=1)
+        self._dashboard_plot_bundles = []
+        self._dashboard_plot_widgets = []
+        self._dashboard_left_curves = []
+        self._dashboard_right_curves = []
+        if pg is not None:
+            for plot_index in range(4):
+                bundle = self._create_pyqtgraph_plot(
+                    parent=plot_canvas_container,
+                    title=f"Plot {plot_index + 1}",
+                    x_label="Time (s)",
+                    left_label="Applied tensile load (g)",
+                    right_label="Right Y",
+                )
+                row, column = divmod(plot_index, 2)
+                self._dashboard_plot_grid.addWidget(bundle.widget, row, column)
+                self._dashboard_plot_bundles.append(bundle)
+                self._dashboard_plot_widgets.append(bundle.widget)
+                self._dashboard_left_curves.append(bundle.left_curve)
+                self._dashboard_right_curves.append(bundle.right_curve)
+        else:
+            plot_canvas_layout.addWidget(QtWidgets.QLabel("pyqtgraph is not available; live plots are disabled.", plot_canvas_container))
 
         log_container = QtWidgets.QWidget(plot_splitter)
         log_layout = QtWidgets.QVBoxLayout(log_container)
@@ -14109,7 +14130,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._start_recovery_load_zero()
 
     def _show_recovery_plot_dialog(self, title: str) -> None:
-        if FigureCanvas is None:
+        if pg is None:
             return
         if self._window_closing:
             return
@@ -14125,9 +14146,20 @@ class MainWindow(QtWidgets.QMainWindow):
             dialog.setWindowTitle(title)
             dialog.resize(820, 520)
             layout = QtWidgets.QVBoxLayout(dialog)
-            self._recovery_figure = Figure(figsize=(8.0, 4.8))
-            self._recovery_canvas = FigureCanvas(self._recovery_figure)
-            layout.addWidget(self._recovery_canvas)
+            self._recovery_plot = self._create_pyqtgraph_plot(
+                parent=dialog,
+                title="Recovery load + displacement vs time",
+                x_label="Recovery time (s)",
+                left_label="Applied tensile load (g)",
+                right_label="Tensile displacement (mm)",
+                left_color="#38bdf8",
+                right_color="#f59e0b",
+                symbols=True,
+            )
+            self._recovery_plot_widget = self._recovery_plot.widget
+            self._recovery_left_curve = self._recovery_plot.left_curve
+            self._recovery_right_curve = self._recovery_plot.right_curve
+            layout.addWidget(self._recovery_plot_widget)
             self._recovery_plot_dialog = dialog
             dialog.destroyed.connect(lambda _obj=None: self._forget_recovery_plot_dialog())
         else:
@@ -14139,8 +14171,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _forget_recovery_plot_dialog(self) -> None:
         self._recovery_plot_dialog = None
-        self._recovery_figure = None
-        self._recovery_canvas = None
+        self._recovery_plot = None
+        self._recovery_plot_widget = None
+        self._recovery_left_curve = None
+        self._recovery_right_curve = None
         self._restore_main_window_focus_soon()
 
     def _show_length_setup_dialog(self) -> None:
@@ -14164,10 +14198,33 @@ class MainWindow(QtWidgets.QMainWindow):
             progress.setTextVisible(True)
             progress.setFormat("Setup progress: idle")
             layout.addWidget(progress)
-            if FigureCanvas is not None:
-                self._length_setup_figure = Figure(figsize=(7.0, 3.8))
-                self._length_setup_canvas = FigureCanvas(self._length_setup_figure)
-                layout.addWidget(self._length_setup_canvas, stretch=1)
+            if pg is not None:
+                self._length_setup_stress_plot = self._create_pyqtgraph_plot(
+                    parent=dialog,
+                    title="Length setup load and stress",
+                    x_label="Setup time (s)",
+                    left_label="Stress (MPa)",
+                    right_label="Load (g)",
+                    left_color="#f87171",
+                    right_color="#38bdf8",
+                    symbols=True,
+                )
+                self._length_setup_displacement_plot = self._create_pyqtgraph_plot(
+                    parent=dialog,
+                    title="Length setup displacement",
+                    x_label="Setup time (s)",
+                    left_label="Displacement (mm)",
+                    right_label=None,
+                    left_color="#a78bfa",
+                    symbols=True,
+                )
+                self._length_setup_stress_plot_widget = self._length_setup_stress_plot.widget
+                self._length_setup_displacement_plot_widget = self._length_setup_displacement_plot.widget
+                self._length_setup_stress_curve = self._length_setup_stress_plot.left_curve
+                self._length_setup_load_curve = self._length_setup_stress_plot.right_curve
+                self._length_setup_displacement_curve = self._length_setup_displacement_plot.left_curve
+                layout.addWidget(self._length_setup_stress_plot_widget, stretch=1)
+                layout.addWidget(self._length_setup_displacement_plot_widget, stretch=1)
             control_row = QtWidgets.QHBoxLayout()
             pause_button = QtWidgets.QPushButton("Pause setup", dialog)
             pause_button.clicked.connect(self._toggle_recipe_pause)
@@ -14231,8 +14288,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_progress = None
         self._button_length_setup_pause = None
         self._button_length_setup_stop = None
-        self._length_setup_figure = None
-        self._length_setup_canvas = None
+        self._length_setup_stress_plot = None
+        self._length_setup_displacement_plot = None
+        self._length_setup_stress_plot_widget = None
+        self._length_setup_displacement_plot_widget = None
+        self._length_setup_stress_curve = None
+        self._length_setup_load_curve = None
+        self._length_setup_displacement_curve = None
         self._restore_main_window_focus_soon()
 
     def _close_recovery_plot_dialog(self) -> None:
@@ -14289,67 +14351,175 @@ class MainWindow(QtWidgets.QMainWindow):
         interval_s = max(0.1, float(self._graph_refresh_interval_ms()) / 1000.0)
         return now_s - float(last_refresh_s) >= interval_s
 
-    def _style_plot_axis(self, axis: Any, theme: Mapping[str, Any]) -> None:
-        axis.set_facecolor(theme["axes_rgb"])
-        for spine in axis.spines.values():
-            spine.set_color(theme["text_rgb"])
-        axis.tick_params(colors=theme["text_rgb"])
-        axis.yaxis.label.set_color(theme["text_rgb"])
-        axis.xaxis.label.set_color(theme["text_rgb"])
-        axis.title.set_color(theme["text_rgb"])
-        axis.grid(True, color=theme["grid_rgba"], alpha=0.6)
+    def _qcolor_from_rgb(self, rgb: Sequence[float]) -> QtGui.QColor:
+        red, green, blue = rgb[:3]
+        return QtGui.QColor.fromRgbF(float(red), float(green), float(blue))
+
+    def _create_pyqtgraph_plot(
+        self,
+        *,
+        parent: QtWidgets.QWidget,
+        title: str,
+        x_label: str,
+        left_label: str,
+        right_label: str | None,
+        left_color: str = "#38bdf8",
+        right_color: str = "#f59e0b",
+        symbols: bool = False,
+    ) -> PyqtGraphPlotBundle:
+        if pg is None:  # pragma: no cover - guarded by caller in normal app use
+            raise RuntimeError("pyqtgraph is not available")
+        widget = pg.PlotWidget(parent=parent)
+        widget.setMouseEnabled(x=True, y=True)
+        plot_item = widget.getPlotItem()
+        plot_item.showGrid(x=True, y=True, alpha=0.28)
+        plot_item.setClipToView(True)
+        left_curve_kwargs: dict[str, Any] = {"pen": pg.mkPen(left_color, width=1.35)}
+        if symbols:
+            left_curve_kwargs.update(
+                {
+                    "symbol": "o",
+                    "symbolSize": 4,
+                    "symbolBrush": left_color,
+                    "symbolPen": left_color,
+                }
+            )
+        left_curve = plot_item.plot([], [], **left_curve_kwargs)
+        bundle = PyqtGraphPlotBundle(widget=widget, plot_item=plot_item, left_curve=left_curve)
+        if right_label is not None:
+            right_view = pg.ViewBox()
+            right_curve_kwargs: dict[str, Any] = {"pen": pg.mkPen(right_color, width=1.2)}
+            if symbols:
+                right_curve_kwargs.update(
+                    {
+                        "symbol": "s",
+                        "symbolSize": 4,
+                        "symbolBrush": right_color,
+                        "symbolPen": right_color,
+                    }
+                )
+            right_curve = pg.PlotDataItem([], [], **right_curve_kwargs)
+            plot_item.showAxis("right")
+            plot_item.scene().addItem(right_view)
+            plot_item.getAxis("right").linkToView(right_view)
+            right_view.setXLink(plot_item)
+            right_view.addItem(right_curve)
+
+            def _sync_right_view() -> None:
+                right_view.setGeometry(plot_item.vb.sceneBoundingRect())
+                right_view.linkedViewChanged(plot_item.vb, right_view.XAxis)
+
+            plot_item.vb.sigResized.connect(_sync_right_view)
+            _sync_right_view()
+            bundle.right_view = right_view
+            bundle.right_curve = right_curve
+            bundle.sync_right_view = _sync_right_view
+        self._style_pyqtgraph_plot(
+            bundle,
+            title=title,
+            x_label=x_label,
+            left_label=left_label,
+            right_label=right_label,
+        )
+        return bundle
+
+    def _style_pyqtgraph_plot(
+        self,
+        bundle: PyqtGraphPlotBundle,
+        *,
+        title: str,
+        x_label: str,
+        left_label: str,
+        right_label: str | None,
+    ) -> None:
+        if pg is None:
+            return
+        theme = self._plot_theme()
+        text_color = self._qcolor_from_rgb(theme["text_rgb"])
+        background_color = self._qcolor_from_rgb(theme["axes_rgb"])
+        bundle.widget.setBackground(background_color)
+        bundle.plot_item.setTitle(title, color=text_color.name(), size="9pt")
+        bundle.plot_item.setLabel("bottom", x_label, color=text_color.name())
+        bundle.plot_item.setLabel("left", left_label, color=text_color.name())
+        for axis_name in ("bottom", "left", "right"):
+            axis = bundle.plot_item.getAxis(axis_name)
+            axis.setPen(pg.mkPen(text_color))
+            axis.setTextPen(pg.mkPen(text_color))
+            axis.setGrid(80)
+        bundle.plot_item.getAxis("bottom").setStyle(tickTextOffset=4)
+        bundle.plot_item.getAxis("left").setStyle(tickTextOffset=4)
+        bundle.plot_item.showGrid(x=True, y=True, alpha=0.28)
+        if right_label is None:
+            bundle.plot_item.hideAxis("right")
+        else:
+            bundle.plot_item.showAxis("right")
+            bundle.plot_item.setLabel("right", right_label, color=text_color.name())
+
+    def _set_pyqtgraph_curve_data(
+        self,
+        curve: Any | None,
+        x_values: Sequence[float],
+        y_values: Sequence[float],
+    ) -> None:
+        if curve is not None:
+            curve.setData(list(x_values), list(y_values))
+
+    def _plot_xy_values(
+        self,
+        points: Sequence[MeasurementPoint],
+        x_channel: PlotChannel,
+        y_channel: PlotChannel,
+    ) -> tuple[list[float], list[float]]:
+        x_values: list[float] = []
+        y_values: list[float] = []
+        for point in points:
+            x_value = x_channel.getter(point)
+            y_value = y_channel.getter(point)
+            if x_value is None or y_value is None:
+                continue
+            x_values.append(float(x_value))
+            y_values.append(float(y_value))
+        return x_values, y_values
 
     def _refresh_length_setup_plot(self) -> None:
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._refresh_length_setup_plot)
             return
-        if self._length_setup_figure is None or self._length_setup_canvas is None:
+        if self._length_setup_stress_plot is None or self._length_setup_displacement_plot is None:
             return
-        theme = self._plot_theme()
-        figure = self._length_setup_figure
-        figure.clear()
-        figure.set_facecolor(theme["figure_rgb"])
-        stress_axis = figure.add_subplot(211)
-        load_axis = stress_axis.twinx()
-        displacement_axis = figure.add_subplot(212, sharex=stress_axis)
-        for axis in (stress_axis, displacement_axis):
-            self._style_plot_axis(axis, theme)
-        load_axis.set_facecolor((0, 0, 0, 0))
-        for spine in load_axis.spines.values():
-            spine.set_color(theme["text_rgb"])
-        load_axis.tick_params(colors=theme["text_rgb"])
-        load_axis.yaxis.label.set_color(theme["text_rgb"])
         points = tuple(self._length_setup_points)
-        if points:
-            x_values = [point.elapsed_s for point in points]
-            stress_values = [float("nan") if point.stress_mpa is None else point.stress_mpa for point in points]
-            stress_axis.plot(x_values, stress_values, color="#f87171", marker="o", markersize=2, label="stress")
-            load_axis.plot(x_values, [point.load_g for point in points], color="#38bdf8", marker=".", markersize=3, label="load")
-            displacement_axis.plot(
-                x_values,
-                [point.position_mm for point in points],
-                color="#a78bfa",
-                marker="s",
-                markersize=2,
-                label="displacement",
-            )
-        else:
-            stress_axis.text(
-                0.5,
-                0.5,
-                "Waiting for setup samples",
-                ha="center",
-                va="center",
-                color=theme["text_rgb"],
-                transform=stress_axis.transAxes,
-            )
-        stress_axis.set_ylabel("Stress (MPa)")
-        load_axis.set_ylabel("Load (g)")
-        displacement_axis.set_ylabel("Displacement (mm)")
-        displacement_axis.set_xlabel("Setup time (s)")
-        stress_axis.set_title("Length setup load, stress, and displacement")
-        figure.tight_layout()
-        self._length_setup_canvas.draw_idle()
+        self._style_pyqtgraph_plot(
+            self._length_setup_stress_plot,
+            title="Length setup load and stress",
+            x_label="Setup time (s)",
+            left_label="Stress (MPa)",
+            right_label="Load (g)",
+        )
+        self._style_pyqtgraph_plot(
+            self._length_setup_displacement_plot,
+            title="Length setup displacement",
+            x_label="Setup time (s)",
+            left_label="Displacement (mm)",
+            right_label=None,
+        )
+        x_values = [point.elapsed_s for point in points]
+        stress_values = [
+            float("nan") if point.stress_mpa is None else float(point.stress_mpa)
+            for point in points
+        ]
+        load_values = [float(point.load_g) for point in points]
+        displacement_values = [float(point.position_mm) for point in points]
+        self._set_pyqtgraph_curve_data(self._length_setup_stress_curve, x_values, stress_values)
+        self._set_pyqtgraph_curve_data(self._length_setup_load_curve, x_values, load_values)
+        self._set_pyqtgraph_curve_data(
+            self._length_setup_displacement_curve,
+            x_values,
+            displacement_values,
+        )
+        if self._length_setup_stress_plot.sync_right_view is not None:
+            self._length_setup_stress_plot.sync_right_view()
+        if self._length_setup_stress_plot.right_view is not None:
+            self._length_setup_stress_plot.right_view.enableAutoRange()
 
     def _refresh_recovery_plot(self) -> None:
         if not self._is_ui_thread():
@@ -14357,68 +14527,31 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._recovery_plot_dialog is None or self._recovery_plot_dialog.isHidden():
             return
-        if self._recovery_figure is None or self._recovery_canvas is None:
+        if self._recovery_plot is None:
             return
-        theme = self._plot_theme()
-        self._recovery_figure.clear()
-        axis = self._recovery_figure.add_subplot(111)
-        twin = axis.twinx()
-        self._recovery_figure.set_facecolor(theme["figure_rgb"])
-        axis.set_facecolor(theme["axes_rgb"])
-        twin.set_facecolor((0, 0, 0, 0))
-        for plot_axis in (axis, twin):
-            for spine in plot_axis.spines.values():
-                spine.set_color(theme["text_rgb"])
-            plot_axis.tick_params(colors=theme["text_rgb"])
-            plot_axis.yaxis.label.set_color(theme["text_rgb"])
-            plot_axis.xaxis.label.set_color(theme["text_rgb"])
+        self._style_pyqtgraph_plot(
+            self._recovery_plot,
+            title="Recovery load + displacement vs time",
+            x_label="Recovery time (s)",
+            left_label="Applied tensile load (g)",
+            right_label="Tensile displacement (mm)",
+        )
         points = self._recovery_points
-        if points:
-            x_values = [point.elapsed_s for point in points]
-            load_line = axis.plot(
-                x_values,
-                [point.load_g for point in points],
-                color="#38bdf8",
-                marker="o",
-                markersize=3,
-                label="load",
-            )[0]
-            displacement_line = twin.plot(
-                x_values,
-                [point.position_mm for point in points],
-                color="#f59e0b",
-                marker="s",
-                markersize=3,
-                label="displacement",
-            )[0]
-            legend = axis.legend(
-                [load_line, displacement_line],
-                ["load", "displacement"],
-                loc="best",
-                fontsize=8,
-                facecolor=theme["axes_rgb"],
-                edgecolor=theme["text_rgb"],
-            )
-            for text in legend.get_texts():
-                text.set_color(theme["text_rgb"])
-        else:
-            axis.text(
-                0.5,
-                0.5,
-                "Waiting for recovery samples",
-                ha="center",
-                va="center",
-                color=theme["text_rgb"],
-                transform=axis.transAxes,
-            )
-        axis.set_xlabel("Recovery time (s)")
-        axis.set_ylabel("Applied tensile load (g)")
-        twin.set_ylabel("Tensile displacement (mm)")
-        axis.set_title("Recovery load + displacement vs time")
-        axis.title.set_color(theme["text_rgb"])
-        axis.grid(True, color=theme["grid_rgba"], alpha=0.6)
-        self._recovery_figure.tight_layout()
-        self._recovery_canvas.draw_idle()
+        x_values = [point.elapsed_s for point in points]
+        self._set_pyqtgraph_curve_data(
+            self._recovery_left_curve,
+            x_values,
+            [float(point.load_g) for point in points],
+        )
+        self._set_pyqtgraph_curve_data(
+            self._recovery_right_curve,
+            x_values,
+            [float(point.position_mm) for point in points],
+        )
+        if self._recovery_plot.sync_right_view is not None:
+            self._recovery_plot.sync_right_view()
+        if self._recovery_plot.right_view is not None:
+            self._recovery_plot.right_view.enableAutoRange()
 
     def _start_recovery_position_target(self, target_mm: float, label: str) -> None:
         distance_mm = abs(target_mm - self._current_position_mm)
@@ -16524,91 +16657,49 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._setup_dialog_visible():
             return
-        theme = self._plot_theme()
-        self.figure.clear()
-        self.figure.set_facecolor(theme["figure_rgb"])
-        grid = self.figure.add_gridspec(2, 2, hspace=0.46, wspace=0.34)
+        if not self._dashboard_plot_bundles:
+            self._refresh_recovery_plot()
+            return
         display_points = self._display_plot_points()
         active_tiles = [tile for tile in self._plot_tiles if tile.visible.isChecked()]
         if not active_tiles:
             active_tiles = list(self._plot_tiles[:1])
         for tile_index, tile in enumerate(active_tiles[:4]):
-            row, column = divmod(tile_index, 2)
-            axis = self.figure.add_subplot(grid[row, column])
-            axis.set_facecolor(theme["axes_rgb"])
-            for spine in axis.spines.values():
-                spine.set_color(theme["text_rgb"])
-            axis.tick_params(colors=theme["text_rgb"])
-            axis.xaxis.label.set_color(theme["text_rgb"])
-            axis.yaxis.label.set_color(theme["text_rgb"])
-            axis.title.set_color(theme["text_rgb"])
-            axis.grid(True, color=theme["grid_rgba"], alpha=0.6)
-
+            bundle = self._dashboard_plot_bundles[tile_index]
+            bundle.widget.show()
             x_channel = self._plot_channel(str(tile.x_combo.currentData() or "elapsed_s"))
             y_left_channel = self._plot_channel(str(tile.y_left_combo.currentData() or "load_g"))
             y_right_channel = self._plot_channel(str(tile.y_right_combo.currentData() or ""))
             if x_channel is None or y_left_channel is None:
+                self._set_pyqtgraph_curve_data(bundle.left_curve, [], [])
+                self._set_pyqtgraph_curve_data(bundle.right_curve, [], [])
                 continue
 
-            axis.set_xlabel(x_channel.label, fontsize=9, labelpad=4)
-            axis.set_ylabel(y_left_channel.label, fontsize=8, labelpad=3)
-            axis.set_title(self._plot_title(x_channel, y_left_channel, y_right_channel), fontsize=9, pad=8)
-
-            left_pairs = [
-                (x_channel.getter(point), y_left_channel.getter(point))
-                for point in display_points
-            ]
-            left_pairs = [(x_value, y_value) for x_value, y_value in left_pairs if x_value is not None and y_value is not None]
-            if left_pairs:
-                axis.plot(
-                    [x_value for x_value, _ in left_pairs],
-                    [y_value for _, y_value in left_pairs],
-                    color=y_left_channel.color,
-                    linewidth=1.15,
-                    marker="o",
-                    markersize=1.9,
-                )
-            else:
-                axis.text(
-                    0.5,
-                    0.5,
-                    "No data for selected channels",
-                    ha="center",
-                    va="center",
-                    color=theme["text_rgb"],
-                    transform=axis.transAxes,
-                )
-
+            self._style_pyqtgraph_plot(
+                bundle,
+                title=self._plot_title(x_channel, y_left_channel, y_right_channel),
+                x_label=x_channel.label,
+                left_label=y_left_channel.label,
+                right_label=y_right_channel.label if y_right_channel is not None else None,
+            )
+            bundle.left_curve.setPen(pg.mkPen(y_left_channel.color, width=1.35))
+            left_x, left_y = self._plot_xy_values(display_points, x_channel, y_left_channel)
+            self._set_pyqtgraph_curve_data(bundle.left_curve, left_x, left_y)
             if y_right_channel is not None:
-                twin = axis.twinx()
-                twin.set_facecolor((0, 0, 0, 0))
-                for spine in twin.spines.values():
-                    spine.set_color(theme["text_rgb"])
-                twin.tick_params(colors=theme["text_rgb"])
-                twin.yaxis.label.set_color(theme["text_rgb"])
-                twin.set_ylabel(y_right_channel.label, fontsize=8, labelpad=3)
-                right_pairs = [
-                    (x_channel.getter(point), y_right_channel.getter(point))
-                    for point in display_points
-                ]
-                right_pairs = [
-                    (x_value, y_value)
-                    for x_value, y_value in right_pairs
-                    if x_value is not None and y_value is not None
-                ]
-                if right_pairs:
-                    twin.plot(
-                        [x_value for x_value, _ in right_pairs],
-                        [y_value for _, y_value in right_pairs],
-                        color=y_right_channel.color,
-                        linewidth=1.05,
-                        marker="s",
-                        markersize=1.8,
-                    )
-        self.figure.subplots_adjust(left=0.07, right=0.94, top=0.90, bottom=0.12, hspace=0.50, wspace=0.34)
-
-        if self.canvas is not None:
-            self.canvas.draw_idle()
+                if bundle.right_curve is not None:
+                    bundle.right_curve.setPen(pg.mkPen(y_right_channel.color, width=1.2))
+                right_x, right_y = self._plot_xy_values(display_points, x_channel, y_right_channel)
+                self._set_pyqtgraph_curve_data(bundle.right_curve, right_x, right_y)
+                if bundle.sync_right_view is not None:
+                    bundle.sync_right_view()
+                if bundle.right_view is not None:
+                    bundle.right_view.enableAutoRange()
+            else:
+                self._set_pyqtgraph_curve_data(bundle.right_curve, [], [])
+        for bundle in self._dashboard_plot_bundles[len(active_tiles[:4]):]:
+            bundle.widget.hide()
+            self._set_pyqtgraph_curve_data(bundle.left_curve, [], [])
+            self._set_pyqtgraph_curve_data(bundle.right_curve, [], [])
         self._refresh_recovery_plot()
 
     def _display_plot_points(self) -> list[MeasurementPoint]:

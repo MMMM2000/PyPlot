@@ -1370,42 +1370,82 @@ def test_recovery_load_zero_plateau_fallback_accepts_near_zero_load(
         _close_test_window(window)
 
 
-def test_recovery_plot_shows_load_and_displacement_legend(tmp_path: Path, qtbot) -> None:
+def test_recovery_plot_updates_pyqtgraph_curves(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
-    dialog = mini_dma_mod.QtWidgets.QDialog(window)
-    qtbot.addWidget(dialog)
-    window._recovery_plot_dialog = dialog
-    window._recovery_figure = mini_dma_mod.Figure(figsize=(4.0, 3.0))
-    window._recovery_canvas = window.canvas
-    window._recovery_points = [
+
+    try:
+        window._show_recovery_plot_dialog("Recovery test")
+        window._recovery_points = [
+            window._capture_measurement_point(
+                elapsed_s=0.0,
+                position_mm=0.0,
+                effective_position_mm=0.0,
+                raw_load_g=1.0,
+                load_g=1.0,
+            ),
+            window._capture_measurement_point(
+                elapsed_s=1.0,
+                position_mm=-0.1,
+                effective_position_mm=-0.1,
+                raw_load_g=0.1,
+                load_g=0.1,
+            ),
+        ]
+        window._refresh_recovery_plot()
+
+        assert window._recovery_plot_widget is not None
+        assert isinstance(window._recovery_plot_widget, mini_dma_mod.pg.PlotWidget)
+        assert window._recovery_left_curve is not None
+        assert window._recovery_right_curve is not None
+        left_x, left_y = window._recovery_left_curve.getData()
+        right_x, right_y = window._recovery_right_curve.getData()
+        assert list(left_x) == pytest.approx([0.0, 1.0])
+        assert list(left_y) == pytest.approx([1.0, 0.1])
+        assert list(right_x) == pytest.approx([0.0, 1.0])
+        assert list(right_y) == pytest.approx([point.position_mm for point in window._recovery_points])
+    finally:
+        _close_test_window(window)
+
+
+def test_dashboard_plot_updates_pyqtgraph_left_and_right_curves(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._session_points = [
         window._capture_measurement_point(
             elapsed_s=0.0,
             position_mm=0.0,
             effective_position_mm=0.0,
-            raw_load_g=1.0,
-            load_g=1.0,
+            raw_load_g=21.2,
+            load_g=0.0,
         ),
         window._capture_measurement_point(
             elapsed_s=1.0,
-            position_mm=-0.1,
-            effective_position_mm=-0.1,
-            raw_load_g=0.1,
-            load_g=0.1,
+            position_mm=0.2,
+            effective_position_mm=0.2,
+            raw_load_g=22.0,
+            load_g=0.8,
         ),
     ]
 
     try:
-        dialog.show()
-        window._refresh_recovery_plot()
+        window._plot_tiles[0].y_right_combo.setCurrentIndex(
+            window._plot_tiles[0].y_right_combo.findData("position_mm")
+        )
+        window._refresh_plots()
 
-        legend = window._recovery_figure.axes[0].get_legend()
-        assert legend is not None
-        assert [text.get_text() for text in legend.get_texts()] == ["load", "displacement"]
-        axes = window._recovery_figure.axes
-        assert axes[0].lines[0].get_color() != axes[1].lines[0].get_color()
-        assert axes[0].xaxis.label.get_color() == window._plot_theme()["text_rgb"]
+        assert window._dashboard_plot_widgets
+        assert isinstance(window._dashboard_plot_widgets[0], mini_dma_mod.pg.PlotWidget)
+        assert window._dashboard_left_curves[0] is not None
+        assert window._dashboard_right_curves[0] is not None
+        assert window._dashboard_plot_bundles[0].right_view is not None
+        x_values, y_values = window._dashboard_left_curves[0].getData()
+        right_x_values, right_y_values = window._dashboard_right_curves[0].getData()
+        assert list(x_values) == pytest.approx([0.0, 1.0])
+        assert list(y_values) == pytest.approx([0.0, 0.8])
+        assert list(right_x_values) == pytest.approx([0.0, 1.0])
+        assert list(right_y_values) == pytest.approx(
+            [point.position_mm for point in window._session_points]
+        )
     finally:
-        dialog.close()
         _close_test_window(window)
 
 
@@ -4243,20 +4283,35 @@ def test_length_setup_dialog_contains_live_graph_and_records_setup_points(tmp_pa
     try:
         window._show_length_setup_dialog()
 
-        assert window._length_setup_canvas is not None
-        assert window._length_setup_figure is not None
+        assert window._length_setup_stress_plot_widget is not None
+        assert isinstance(window._length_setup_stress_plot_widget, mini_dma_mod.pg.PlotWidget)
+        assert window._length_setup_displacement_plot_widget is not None
+        assert isinstance(window._length_setup_displacement_plot_widget, mini_dma_mod.pg.PlotWidget)
 
         window._latest_scale_value_g = 21.5
         window._latest_scale_timestamp = time.time()
         window.spin_zero_load_scale_g.setValue(21.2)
         window.check_tension_load_positive.setChecked(False)
         window._current_position_mm = -0.2
+        window._effective_position_mm = -0.2
         window._record_length_setup_point()
 
         assert len(window._length_setup_points) == 1
         point = window._length_setup_points[0]
         assert point.load_g == pytest.approx(0.3)
         assert point.stress_mpa is not None
+        assert window._length_setup_stress_curve is not None
+        assert window._length_setup_load_curve is not None
+        assert window._length_setup_displacement_curve is not None
+        stress_x, stress_y = window._length_setup_stress_curve.getData()
+        load_x, load_y = window._length_setup_load_curve.getData()
+        displacement_x, displacement_y = window._length_setup_displacement_curve.getData()
+        assert len(stress_x) == 1
+        assert len(load_x) == 1
+        assert len(displacement_x) == 1
+        assert list(stress_y) == pytest.approx([point.stress_mpa])
+        assert list(load_y) == pytest.approx([0.3])
+        assert list(displacement_y) == pytest.approx([point.position_mm])
     finally:
         _close_test_window(window)
 

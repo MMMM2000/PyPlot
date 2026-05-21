@@ -20,7 +20,7 @@ The detailed control-law reference for ramp speed, target seeking, live stiffnes
 - `Recipe`: normal bench operation, current sample reminder, recipe selection, per-recipe speed controls, global control/log/UI timing, zero-load reference capture, estimated points/duration, progress bar, auto-connect start button, and manual move/record actions.
 - `Sample`: naming, diameter, `.pydpj` import, output folder, and base filename. The recipe-start setup measures the preloaded length and computes unloaded `l0`.
 - `Hardware`: lower-priority scale, motor, power-supply, safety, and advanced serial/motor-driver settings for bring-up or troubleshooting.
-- Right dashboard: header live values, live plot, run log, and plot presets. The duplicate status-bar echo is hidden so log lines only appear once.
+- Right dashboard: header live values, pyqtgraph live plots, run log, and plot presets. The duplicate status-bar echo is hidden so log lines only appear once.
 
 The UI should stay operational and scan-friendly. The left settings panel must not horizontally scroll, and mouse-wheel scrolling over spin boxes or drop-downs must not silently change values.
 
