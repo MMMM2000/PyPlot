@@ -20,7 +20,7 @@ Current generated deck:
 - `docs/assets/presentations/mini_dma_colloquium_2026-05-21_revised.pptx`
 - Branch used on 2026-05-21: `codex/mini-dma-presentation-story`
 - Last known synced commit on the Mac: `d91b1ec Refine presentation slides and comparison visuals`
-- Current Windows repair: restored the 15-slide MacBook deck as the main PPTX and fixed distorted picture aspect ratios.
+- Current Windows repair: restored the MacBook deck as the main PPTX, removed the old comparison slide 5, fixed distorted picture aspect ratios, replotted key graphs with PyPlot logic, and replaced the next-step hardware photo with a thermal-camera frame.
 
 Source-folder context reviewed from:
 
@@ -42,8 +42,11 @@ The presentation should move from microwire motivation to measurement bottleneck
 
 The current authoritative PPTX is
 `docs/assets/presentations/mini_dma_colloquium_2026-05-21_revised.pptx`.
-It is the 15-slide MacBook-built deck from commit `d91b1ec`, repaired on
-Windows so real photos and plots keep their original aspect ratio.
+It is the MacBook-built deck from commit `d91b1ec`, repaired on Windows into a
+14-slide version: real photos and plots keep their original aspect ratio, the
+manual stress-strain graph uses PyPlot cycle coloring, the first Mini DMA result
+uses the PyPlot power top axis, and the next-step slide uses the thermal-camera
+frame.
 
 The 11-slide outline in `Preferred 15-Minute Flow After Programme Update` is a
 possible compression guide, not the active PPTX.
