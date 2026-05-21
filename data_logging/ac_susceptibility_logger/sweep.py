@@ -713,6 +713,14 @@ def _measure_sweep_point_once(
             writer.write_row(row)
             if progress is not None:
                 progress(row)
+            if _sweep_point_complete(
+                point_duration=point_duration,
+                fallback_repeats=fallback_repeats,
+                repeat_index=repeat_index,
+                point_started=point_started,
+                read_monotonic=read_monotonic,
+            ):
+                break
             continue
         except PsuOutputVerificationError as exc:
             row = AcSweepRow(
@@ -770,11 +778,27 @@ def _measure_sweep_point_once(
                 rate_hz = completed_intervals / active_elapsed
                 if rate_hz < float(config.lcr_slow_retry_min_rate_hz):
                     raise SlowLcrCadenceError(rate_hz=rate_hz, reads=repeat_index)
-        if point_duration > 0.0:
-            if read_monotonic - point_started >= point_duration:
-                break
-        elif repeat_index >= fallback_repeats:
+        if _sweep_point_complete(
+            point_duration=point_duration,
+            fallback_repeats=fallback_repeats,
+            repeat_index=repeat_index,
+            point_started=point_started,
+            read_monotonic=read_monotonic,
+        ):
             break
+
+
+def _sweep_point_complete(
+    *,
+    point_duration: float,
+    fallback_repeats: int,
+    repeat_index: int,
+    point_started: float,
+    read_monotonic: float,
+) -> bool:
+    if point_duration > 0.0:
+        return read_monotonic - point_started >= point_duration
+    return repeat_index >= fallback_repeats
 
 
 def _should_check_lcr_cadence(config: AcSweepConfig, setting: Lcr6000Settings) -> bool:
