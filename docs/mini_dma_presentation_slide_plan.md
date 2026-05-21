@@ -15,6 +15,12 @@ Supporting repo context:
 - `docs/mini_dma_speed_control.md`
 - `docs/mini_dma_measurement_plan.md`
 
+Current generated deck:
+
+- `docs/assets/presentations/mini_dma_colloquium_2026-05-21_revised.pptx`
+- Branch used on 2026-05-21: `codex/mini-dma-presentation-story`
+- Last known synced commit on the Mac: `d91b1ec Refine presentation slides and comparison visuals`
+
 Source-folder context reviewed from:
 
 - `Prezentacia Praha 1. mesiac/prezentacia.pptx`
@@ -30,6 +36,254 @@ Source-folder context reviewed from:
 Commercial DMA is a precise and valuable way to identify transition behavior and strain response, but it is slow, resource-intensive, and not ideal when many shape-memory microwire samples need fast iteration. Mini DMA is a focused, low-cost, feedback-controlled instrument built for the specific experiment we need: controlled tensile load, strain/stress calculation, electrical heating, synchronized logging, and enough audit data to understand every run.
 
 The presentation should move from microwire motivation to measurement bottleneck, then from purpose-built solution to first evidence, and finally to the broader point: AI-assisted engineering made it realistic for one researcher to build an instrument that would previously have needed a larger team and more time.
+
+## Current Revised Deck, 2026-05-21
+
+This is the current authoritative slide plan for
+`docs/assets/presentations/mini_dma_colloquium_2026-05-21_revised.pptx`.
+Older flow sections below are planning history and should not be treated as the
+latest deck unless this section is intentionally revised.
+
+Global decisions from the final review:
+
+- Use simple, normal slide titles. Avoid poetic phrasing such as `two speeds instead of one bottleneck`.
+- Keep text large and sparse. The audience should not need to read dense paragraphs.
+- Include page numbers.
+- Do not describe the Mini DMA as a replacement for commercial DMA. It is a cheap screening and protocol-development tool before final validation.
+- Do not say `validation remains experimental` in the closing. The final slide should hype the practical Codex/AI-assisted instrument-development story.
+- Do not use a made-up thermocamera plot. Only use the real thermal-camera frame if it is found; otherwise keep the thermal-camera slide as a next-step slide using real hardware.
+- Slide 3 should not mention `EDA`, because that label is not important for the talk. It should visually communicate that many preparation, geometry, temperature, stress, and strain parameters are being compared.
+- The cost comparison should make the approximate order-of-magnitude contrast obvious: `300€` versus `30000€`. The speaker can say "approximately" out loud.
+
+### Slide 1 - Mini DMA for Microwire Screening
+
+Purpose:
+
+- Open with the real setup photo and the actual theme: fast iso-stress measurements before commercial DMA validation.
+
+Talk out loud:
+
+- "Limpat has already introduced the microwires themselves, so I will focus on the measurement workflow."
+- "The question is how to prepare good wires reproducibly and measure enough of them quickly enough to learn the preparation rules."
+
+### Slide 2 - The Goal Is Better Preparation, Not One Perfect Plot
+
+Visible logic:
+
+- `Many samples`
+- `Fast feedback`
+- `Selected validation`
+
+Talk out loud:
+
+- "The goal is not one beautiful graph. The goal is learning which preparation choices produce useful wires."
+- "Commercial DMA is the reference step, but not the first step for every sample."
+
+### Slide 3 - Many Variables Can Be Compared At Once
+
+Current visual:
+
+- Dense parameter-to-parameter correlation heatmap from the microwire dataset.
+- It is intentionally not meant to be fully readable in the room. Its job is to show the large number of parameters and relationships being compared.
+- Avoid the term `EDA` on the slide and in the spoken explanation unless someone asks.
+
+Talk out loud:
+
+- "Our broader goal is to connect preparation data with experimental results."
+- "We want to understand how to prepare wires with high strain that can also survive high stress."
+- "This means comparing many variables with each other: preparation conditions, geometry, transformation indicators, stress, strain, and failure-related values."
+- "I will not go into this graph in detail; it is here to show the scale of the correlation problem."
+
+### Slide 4 - Manual Stress-Strain Measurements Were Useful But Slow
+
+Current visual:
+
+- Manual stress-strain measurement for `Ni50Fe27Ga23 5_4, 50 mA`.
+- The 50 mA version is preferred because the 87 mA measurement was too high-current: the wire stayed in austenite and did not clearly transform back to martensite.
+
+Talk out loud:
+
+- "Before the Mini DMA setup, I did some stress-strain measurements manually."
+- "They were useful, but slow and annoying. One current value could take about half an hour of manual work."
+- "Manual stress-strain is a snapshot at one current. For screening transformation behavior, iso-stress sweeps are a better first measurement."
+
+### Slide 5 - Iso-Stress Sweeps Match The Question Better
+
+Purpose:
+
+- Explain why the new setup is not just motorized stress-strain measurement.
+
+Talk out loud:
+
+- "Manual stress-strain is not wrong; it answers a different question."
+- "For screening, I want to hold the stress target and see how the wire contracts as current changes."
+- "That gives a more direct view of transformation behavior under controlled stress."
+
+### Slide 6 - Commercial DMA Is The Precise Reference Measurement
+
+Current visual:
+
+- Commercial DMA graph.
+
+Talk out loud:
+
+- "Commercial DMA is still the precise reference tool."
+- "It is good for selected samples and final validation."
+- "The bottleneck is using it as the first filter for every preparation variant."
+
+### Slide 7 - Use Mini DMA Before Commercial DMA
+
+Visible logic:
+
+- Mini DMA screening -> promising wires -> DMA validation.
+
+Talk out loud:
+
+- "The Mini DMA is a decision tool."
+- "It helps decide which wires deserve slow, careful commercial DMA time."
+
+### Slide 8 - Mini DMA Hardware
+
+Current visual:
+
+- Stepper motor / linear motion.
+- Scale.
+- Control software.
+
+Important hardware points:
+
+- Smallest motor step: about `10 µm`.
+- Scale precision: `0.05 g` for this presentation framing.
+- Scale latency: about `200 ms`.
+- Power supply provides current heating.
+- Load is measured using a `20 g` weight on the scale: lifting part of the weight corresponds to load applied to the wire.
+
+Talk out loud:
+
+- "The motor provides displacement, the scale measures load, and the power supply heats the wire by current."
+- "The hardware is simple; the important part is making the pieces work together as one controlled experiment."
+
+### Slide 9 - How The Iso-Stress Measurement Works
+
+Current visual:
+
+- Software screenshot / photo.
+- Step sequence for target stress, current heating, wire contraction, and motor correction.
+
+Talk out loud:
+
+- "I set a target stress, similar to an iso-stress DMA measurement."
+- "As current increases, the wire heats and contracts during transformation."
+- "That increases the stress, so the motor moves down to bring the stress back to the target."
+- "Because we know how much the motor moved, we can calculate strain."
+- "During cooling, the wire elongates again and the motor moves in the opposite direction to hold the same stress."
+
+### Slide 10 - The Run Starts By Defining The Real Zero Length
+
+Current visual:
+
+- Baseline and initial-length plot.
+
+Talk out loud:
+
+- "The setup measures displacement, not absolute wire length."
+- "At the start, it first moves to a known stress target, for example 20 MPa, and asks me to enter the measured wire length."
+- "Then it moves back toward zero load."
+- "The wire can still pull slightly even when it is not fully straight, so the software estimates the zero-load baseline from where load stops following the linear displacement trend."
+- "Since we know the displacement from the measured target state to this baseline, we get the effective initial length."
+
+### Slide 11 - The Motor Approaches The Target In Two Modes
+
+Current visual:
+
+- Target approach plot.
+
+Talk out loud:
+
+- "To be precise but not painfully slow, the speed changes dynamically."
+- "Far from the target, it takes larger steps and can use a continuous cruise mode."
+- "Because the scale value is delayed by about 200 ms, the controller checks retrospectively whether it is approaching correctly."
+- "Near the target, it switches to gated corrections: move, wait for a fresh scale value, then move again."
+- "Near the final target it uses single 10 micrometer steps."
+
+### Slide 12 - First Mini DMA Current Sweeps
+
+Current visual:
+
+- Real Mini DMA current sweep with only the lower stress curves, `50-200 MPa`, to avoid clutter.
+
+Talk out loud:
+
+- "This is a real measurement from the setup."
+- "The high-stress curves were removed on this slide only to keep it readable."
+- "Because current is measured, we can also estimate the power needed to reach a chosen contraction, for example 10 percent, which matters for practical actuator applications."
+
+### Slide 13 - Mini DMA Vs Commercial DMA
+
+Current visual:
+
+- Mini DMA graph and commercial DMA graph side by side.
+- Large price contrast underneath: `300€` and `30000€`.
+
+Talk out loud:
+
+- "These prices are approximate, but the order of magnitude is the point."
+- "Commercial DMA is still the better validation instrument."
+- "A few-hundred-euro screening setup changes which experiments are practical to try."
+
+### Slide 14 - Next Step: Add Temperature To The Same Run
+
+Current visual:
+
+- Real thermal-camera hardware photo, not a synthetic thermal trace.
+
+Important missing asset:
+
+- The user remembers an actual thermocamera frame from an older presentation, showing a heated wire. It was not found locally in the repo during the 2026-05-20 search.
+- If that image is found, it should replace or supplement the current hardware-only thermal slide.
+
+Talk out loud:
+
+- "Right now we measure current and can calculate electrical input."
+- "The next step is to add actual wire temperature during the same run."
+- "That would let us connect current, power, strain, and temperature, and later also look at the elastocaloric effect during transformation."
+
+### Slide 15 - Codex Made This A One-Person Prototype
+
+Purpose:
+
+- End with a positive AI-assisted instrument-development message.
+
+Talk out loud:
+
+- "This experiment was built largely with AI help."
+- "ChatGPT helped choose the components and explained the wiring very concretely, even down to which cable goes to which pin."
+- "After connecting the hardware to the PC, Codex wrote the software, installed the correct drivers, and helped get the setup running."
+- "The whole prototype came together in about two weeks."
+- "A few years ago I would probably need someone for electronics and someone else for software. Now, if someone has a small experimental idea, they can get surprisingly far by themselves."
+
+## Immediate Continuation Notes For Windows Laptop
+
+To continue from another machine:
+
+```text
+git fetch --all --prune
+git switch codex/mini-dma-presentation-story
+git pull --ff-only
+```
+
+Then open:
+
+```text
+docs/assets/presentations/mini_dma_colloquium_2026-05-21_revised.pptx
+```
+
+Final checks to do in PowerPoint:
+
+- Verify no text is cropped or overlapping.
+- Check slide 3 visually: it should communicate "many variables and correlations", not require reading.
+- Check slide 13: the graph-plus-price comparison should remain clear at presentation scale.
+- If the real thermocamera frame is found, replace the slide 14 hardware-only visual.
 
 ## Source-Folder Takeaways
 
