@@ -5469,6 +5469,10 @@ class MainWindow(QtWidgets.QMainWindow):
             PlotChannel("power_W", "Power (W)", "#c084fc", lambda point: point.power_W),
         ]
 
+    def _plot_channel_color(self, key: str, fallback: str = "#38bdf8") -> str:
+        channel = self._plot_channel(key)
+        return fallback if channel is None else channel.color
+
     def _plot_nonzero_current_mA(self, value_mA: float | None) -> float | None:
         if value_mA is None:
             return None
@@ -14280,8 +14284,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_label="Recovery time (s)",
                 left_label="Applied tensile load (g)",
                 right_label="Tensile displacement (mm)",
-                left_color="#38bdf8",
-                right_color="#f59e0b",
+                left_color=self._plot_channel_color("load_g"),
+                right_color=self._plot_channel_color("position_mm"),
                 symbols=True,
             )
             self._recovery_plot_widget = self._recovery_plot.widget
@@ -14333,8 +14337,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     x_label="Setup time (s)",
                     left_label="Stress (MPa)",
                     right_label="Load (g)",
-                    left_color="#f87171",
-                    right_color="#38bdf8",
+                    left_color=self._plot_channel_color("stress_mpa"),
+                    right_color=self._plot_channel_color("load_g"),
                     symbols=True,
                 )
                 self._length_setup_displacement_plot = self._create_pyqtgraph_plot(
@@ -14343,7 +14347,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     x_label="Setup time (s)",
                     left_label="Displacement (mm)",
                     right_label=None,
-                    left_color="#a78bfa",
+                    left_color=self._plot_channel_color("position_mm"),
                     symbols=True,
                 )
                 self._length_setup_stress_plot_widget = self._length_setup_stress_plot.widget
@@ -14673,8 +14677,8 @@ class MainWindow(QtWidgets.QMainWindow):
             x_label="Setup time (s)",
             left_label="Stress (MPa)",
             right_label="Load (g)",
-            left_color="#f87171",
-            right_color="#38bdf8",
+            left_color=self._plot_channel_color("stress_mpa"),
+            right_color=self._plot_channel_color("load_g"),
         )
         self._style_pyqtgraph_plot(
             self._length_setup_displacement_plot,
@@ -14682,7 +14686,7 @@ class MainWindow(QtWidgets.QMainWindow):
             x_label="Setup time (s)",
             left_label="Displacement (mm)",
             right_label=None,
-            left_color="#a78bfa",
+            left_color=self._plot_channel_color("position_mm"),
         )
         x_values = [point.elapsed_s for point in points]
         stress_values = [
@@ -14717,8 +14721,8 @@ class MainWindow(QtWidgets.QMainWindow):
             x_label="Recovery time (s)",
             left_label="Applied tensile load (g)",
             right_label="Tensile displacement (mm)",
-            left_color="#38bdf8",
-            right_color="#f59e0b",
+            left_color=self._plot_channel_color("load_g"),
+            right_color=self._plot_channel_color("position_mm"),
         )
         points = self._recovery_points
         x_values = [point.elapsed_s for point in points]
@@ -15635,7 +15639,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         resume_band = max(
             tolerance * resume_factor,
-            noise_value * self._current_sweep_hold_noise_sigma() * 0.5,
             self._current_sweep_hold_min_band_for_basis(
                 step.basis,
                 self._current_sweep_hold_min_resume_stress_mpa(),

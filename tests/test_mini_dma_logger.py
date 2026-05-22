@@ -1403,6 +1403,8 @@ def test_recovery_plot_updates_pyqtgraph_curves(tmp_path: Path, qtbot) -> None:
         assert list(left_y) == pytest.approx([1.0, 0.1])
         assert list(right_x) == pytest.approx([0.0, 1.0])
         assert list(right_y) == pytest.approx([point.position_mm for point in window._recovery_points])
+        assert window._recovery_left_curve.opts["pen"].color().name().lower() == "#38bdf8"
+        assert window._recovery_right_curve.opts["pen"].color().name().lower() == "#60a5fa"
     finally:
         _close_test_window(window)
 
@@ -8977,6 +8979,40 @@ def test_recovery_load_zero_does_not_accept_backlash_limited_residual_load(
         assert reached is False
         assert moves
         assert "backlash-limited tolerance" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_resume_band_does_not_expand_with_transformation_noise(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_active = True
+    window._active_control_config = window._freeze_control_config()
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._current_sweep_ramp_hold_step_index = 0
+    window._current_sweep_ramp_hold_started_s = 10.0
+    window._current_sweep_ramp_hold_in_band_since_s = 10.0
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_hold_enabled=True,
+    )
+    monkeypatch.setattr(
+        window,
+        "_current_sweep_target_error_and_tolerance",
+        lambda *_args, **_kwargs: (10.0, 10.0, 0.2, 100.0),
+    )
+
+    try:
+        holding, _changed = window._update_current_sweep_ramp_hold(step, 0, now_s=11.0)
+
+        assert holding is True
+        assert window._current_sweep_ramp_hold_step_index == 0
+        assert "Resumed current ramp" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 

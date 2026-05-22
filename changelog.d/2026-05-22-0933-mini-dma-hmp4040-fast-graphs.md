@@ -9,3 +9,4 @@
 - Mini DMA dashboard plot widgets now shrink correctly in the available panel height and keep the run log shorter so the lower-right graph stays inside the visible window.
 - Mini DMA recovery-to-zero now keeps correcting when the measured load is still above the true zero-load tolerance instead of accepting a backlash-limited residual load.
 - Mini DMA pyqtgraph tiles now remove gridlines, disable SI-prefix axis scaling for fixed engineering units, and use thin line+symbol traces.
+- Mini DMA recovery/setup plots now reuse the same per-quantity colors as the dashboard, and current-hold resume no longer expands its resume band from noisy transformation data.
