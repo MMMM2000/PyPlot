@@ -14492,6 +14492,13 @@ class MainWindow(QtWidgets.QMainWindow):
         bottom_axis.setTickPen(pg.mkPen(text_color, width=0.6))
         bottom_axis.setGrid(30)
         bottom_axis.setStyle(maxTickLevel=0, maxTextLevel=0)
+        top_axis = bundle.plot_item.getAxis("top")
+        top_axis.setPen(pg.mkPen(text_color, width=0.8))
+        top_axis.setTextPen(pg.mkPen(text_color))
+        top_axis.setTickPen(pg.mkPen(text_color, width=0.0))
+        top_axis.setGrid(False)
+        top_axis.setLabel("")
+        top_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
         left_axis = bundle.plot_item.getAxis("left")
         left_axis.setPen(pg.mkPen(left_color, width=0.9))
         left_axis.setTextPen(pg.mkPen(left_color))
@@ -14506,12 +14513,16 @@ class MainWindow(QtWidgets.QMainWindow):
         right_axis.setStyle(maxTickLevel=0, maxTextLevel=0)
         bundle.plot_item.getAxis("bottom").setStyle(tickTextOffset=4)
         bundle.plot_item.getAxis("left").setStyle(tickTextOffset=4)
+        bundle.plot_item.showAxis("top")
         bundle.plot_item.showGrid(x=True, y=True, alpha=0.14)
         if right_label is None:
-            bundle.plot_item.hideAxis("right")
+            bundle.plot_item.showAxis("right")
+            right_axis.setLabel("")
+            right_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
         else:
             bundle.plot_item.showAxis("right")
             bundle.plot_item.setLabel("right", right_label, color=right_color)
+            right_axis.setStyle(showValues=True, tickLength=-5, maxTickLevel=0, maxTextLevel=0)
 
     def _set_pyqtgraph_curve_data(
         self,

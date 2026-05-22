@@ -1489,6 +1489,34 @@ def test_dashboard_pyqtgraph_axes_match_curve_colors_and_use_major_grid_only(
         _close_test_window(window)
 
 
+def test_dashboard_pyqtgraph_empty_top_and_right_axes_are_frame_lines(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._plot_tiles[0].y_right_combo.setCurrentIndex(
+            window._plot_tiles[0].y_right_combo.findData("")
+        )
+        window._refresh_plots()
+
+        bundle = window._dashboard_plot_bundles[0]
+        top_axis = bundle.plot_item.getAxis("top")
+        right_axis = bundle.plot_item.getAxis("right")
+
+        assert top_axis.isVisible()
+        assert right_axis.isVisible()
+        assert top_axis.style["showValues"] is False
+        assert right_axis.style["showValues"] is False
+        assert top_axis.style["tickLength"] == 0
+        assert right_axis.style["tickLength"] == 0
+        assert top_axis.labelText == ""
+        assert right_axis.labelText == ""
+    finally:
+        _close_test_window(window)
+
+
 def test_apply_length_setup_uses_plateau_zero_position_after_return_fallback(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_positive_motion_is_tension.setChecked(False)
