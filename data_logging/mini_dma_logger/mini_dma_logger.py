@@ -5101,7 +5101,7 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_canvas_container.setMinimumHeight(0)
         plot_canvas_layout = QtWidgets.QVBoxLayout(plot_canvas_container)
         self._dashboard_plot_canvas_layout = plot_canvas_layout
-        plot_canvas_layout.setContentsMargins(0, 0, 12, 0)
+        plot_canvas_layout.setContentsMargins(4, 0, 28, 0)
         plot_canvas_layout.setSpacing(6)
         self._dashboard_plot_grid = QtWidgets.QGridLayout()
         self._dashboard_plot_grid.setContentsMargins(0, 0, 0, 0)
@@ -5155,7 +5155,6 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_splitter.setStretchFactor(0, 8)
         plot_splitter.setStretchFactor(1, 1)
         plot_splitter.setSizes([960, 96])
-        self._fit_dashboard_plot_tiles_to_panel()
         splitter.addWidget(plot_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -5745,25 +5744,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "text_rgb": text.getRgbF()[:3],
             "grid_rgba": grid.getRgbF(),
         }
-
-    def _fit_dashboard_plot_tiles_to_panel(self) -> None:
-        plot_widgets = list(getattr(self, "_dashboard_plot_widgets", []) or [])
-        if not plot_widgets:
-            return
-        splitter = getattr(self, "_dashboard_plot_splitter", None)
-        log_container = getattr(self, "_dashboard_log_container", None)
-        plot_layout = getattr(self, "_dashboard_plot_canvas_layout", None)
-        grid = getattr(self, "_dashboard_plot_grid", None)
-        splitter_height = int(splitter.height()) if splitter is not None else 0
-        if splitter_height <= 0:
-            splitter_height = 760
-        log_limit = int(log_container.maximumHeight()) if log_container is not None else 96
-        spacing = int(grid.verticalSpacing()) if grid is not None else 8
-        margins = plot_layout.contentsMargins() if plot_layout is not None else QtCore.QMargins()
-        reserved_height = log_limit + spacing + margins.top() + margins.bottom() + 24
-        tile_height = max(90, min(240, (splitter_height - reserved_height) // 2))
-        for widget in plot_widgets:
-            widget.setMaximumHeight(tile_height)
 
     def _show_plot_config_dialog(self) -> None:
         if self.plot_config_dialog.isHidden():
@@ -14746,7 +14726,8 @@ class MainWindow(QtWidgets.QMainWindow):
             raise RuntimeError("pyqtgraph is not available")
         widget = pg.PlotWidget(parent=parent)
         widget.setMinimumHeight(0)
-        widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Ignored)
+        widget.setMaximumHeight(16777215)
+        widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
         widget.setMouseEnabled(x=True, y=True)
         plot_item = widget.getPlotItem()
         plot_item.showGrid(x=True, y=True, alpha=0.28)
@@ -14857,6 +14838,9 @@ class MainWindow(QtWidgets.QMainWindow):
         bundle.plot_item.showGrid(x=False, y=False)
         if right_label is None:
             bundle.plot_item.showAxis("right")
+            right_axis.setPen(pg.mkPen(text_color, width=0.8))
+            right_axis.setTextPen(pg.mkPen(text_color))
+            right_axis.setTickPen(pg.mkPen(text_color, width=0.0))
             right_axis.setLabel("")
             right_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
         else:
@@ -17109,7 +17093,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._dashboard_plot_bundles:
             self._refresh_recovery_plot()
             return
-        self._fit_dashboard_plot_tiles_to_panel()
         display_points = self._display_plot_points()
         active_tiles = [tile for tile in self._plot_tiles if tile.visible.isChecked()]
         if not active_tiles:
@@ -18166,8 +18149,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        if hasattr(self, "_dashboard_plot_widgets"):
-            self._fit_dashboard_plot_tiles_to_panel()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._window_closing = True

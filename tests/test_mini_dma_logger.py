@@ -1458,40 +1458,15 @@ def test_dashboard_plot_panel_keeps_right_edge_padding_and_compact_log(tmp_path:
 
     try:
         margins = window._dashboard_plot_canvas_layout.contentsMargins()
-        assert margins.right() >= 10
+        assert margins.right() >= 24
         assert window.log_output.maximumHeight() <= 96
         assert window._dashboard_plot_splitter.childrenCollapsible() is False
         assert all(
-            widget.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Policy.Ignored
+            widget.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Policy.Expanding
             for widget in window._dashboard_plot_widgets
         )
-        assert all(widget.maximumHeight() <= 240 for widget in window._dashboard_plot_widgets)
-    finally:
-        _close_test_window(window)
-
-
-def test_dashboard_plot_tile_height_can_shrink_below_old_minimum(tmp_path: Path, qtbot) -> None:
-    window = _build_window(tmp_path, qtbot)
-
-    try:
-        window._dashboard_plot_splitter.resize(1200, 420)
-        window._fit_dashboard_plot_tiles_to_panel()
-
         assert window._dashboard_plot_widgets
-        assert all(widget.maximumHeight() <= 150 for widget in window._dashboard_plot_widgets)
-    finally:
-        _close_test_window(window)
-
-
-def test_dashboard_plot_tile_height_is_capped_after_resize(tmp_path: Path, qtbot) -> None:
-    window = _build_window(tmp_path, qtbot)
-
-    try:
-        window.resize(1919, 1080)
-        window._fit_dashboard_plot_tiles_to_panel()
-
-        assert window._dashboard_plot_widgets
-        assert all(widget.maximumHeight() <= 240 for widget in window._dashboard_plot_widgets)
+        assert all(widget.maximumHeight() > 10000 for widget in window._dashboard_plot_widgets)
     finally:
         _close_test_window(window)
 
@@ -1559,6 +1534,8 @@ def test_dashboard_pyqtgraph_empty_top_and_right_axes_are_frame_lines(
         assert right_axis.style["tickLength"] == 0
         assert top_axis.labelText == ""
         assert right_axis.labelText == ""
+        assert right_axis.pen().color().name().lower() == right_axis.textPen().color().name().lower()
+        assert right_axis.pen().color().name().lower() != "#f59e0b"
     finally:
         _close_test_window(window)
 

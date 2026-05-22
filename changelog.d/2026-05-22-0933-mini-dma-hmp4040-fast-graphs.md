@@ -18,3 +18,4 @@
 - Mini DMA current-hold stress recovery now requires a same-direction out-of-band filtered error to persist briefly before moving, so noisy one-window excursions do not immediately become motor corrections.
 - Mini DMA metadata now records the app source-control snapshot, including branch, commit, dirty state, short status, and origin URL when git is available.
 - Mini DMA metadata now records a control-logic version/profile and a SHA-256 fingerprint over decision-relevant control constants and settings, so runs can be compared by control semantics independent of branch names.
+- Mini DMA pyqtgraph dashboard tiles now expand with the available panel height again, keep extra right-edge breathing room for colored axes, and draw unused right axes as neutral frame lines.
