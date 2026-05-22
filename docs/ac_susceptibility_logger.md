@@ -228,12 +228,15 @@ unit. Older saved OWON defaults such as `5 V`, `60 V`, or `62 V` are lifted or
 lowered to `61 V` when OWON is selected; non-OWON supplies keep their own lower
 defaults.
 
-Use **Auto-detect instruments** to refresh LCR ports, scan serial ports with the safe
-`*IDN?` query, ignore the LCR meter as a PSU candidate, and select a recognized
-HMP4030 or OWON SPE6102 backend automatically. The scan does not enable output
-or change current. If no supported PSU responds, the status text reports which
-ports were tried and leaves the AC current-supply controls available for manual
-selection. If the AC current-supply connection is already open, auto-detect
+Use **Auto-connect hardware** as the normal setup action. It refreshes LCR ports,
+connects to the detected LCR-6200, scans serial ports with the safe `*IDN?`
+query, ignores the LCR meter as a PSU candidate, and selects a recognized HMP4030
+or OWON SPE6102 backend automatically. The scan does not enable PSU output or
+change current. COM ports, baud rate, and backend selection are kept in a
+collapsed hardware-details panel for troubleshooting, but they are not part of
+the normal workflow. If no supported PSU responds, the status text reports which
+ports were tried and leaves the advanced hardware controls available for manual
+selection. If the AC current-supply connection is already open, auto-connect
 trusts that connected selection instead of trying to open the same COM port a
 second time.
 

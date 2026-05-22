@@ -1674,12 +1674,7 @@ class MainWindow(CurrentAnnealingWindow):
 
         serial_group = getattr(self.ui, "groupBox_serial_settings", None)
         if isinstance(serial_group, QtWidgets.QGroupBox):
-            serial_group.setTitle("PSU connection")
-            serial_group.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Preferred,
-                QtWidgets.QSizePolicy.Policy.Fixed,
-            )
-            serial_group.setMaximumHeight(72)
+            serial_group.hide()
 
         group = QtWidgets.QGroupBox("Instrument setup", frame)
         outer = QtWidgets.QVBoxLayout(group)
@@ -1716,21 +1711,61 @@ class MainWindow(CurrentAnnealingWindow):
         output_grid.addWidget(self.label_ac_baseline_file, 2, 1, 1, 2)
         outer.addWidget(output_group)
 
-        row = QtWidgets.QHBoxLayout()
+        hardware_group = QtWidgets.QGroupBox("Hardware", group)
+        hardware_layout = QtWidgets.QVBoxLayout(hardware_group)
+        hardware_layout.setContentsMargins(8, 8, 8, 8)
+        hardware_layout.setSpacing(8)
+        hardware_top = QtWidgets.QHBoxLayout()
+        hardware_top.setContentsMargins(0, 0, 0, 0)
+        self.label_ac_hardware_status = QtWidgets.QLabel("Hardware not connected", hardware_group)
+        self.label_ac_hardware_status.setWordWrap(True)
+        self.pushButton_auto_setup = QtWidgets.QPushButton("Auto-connect hardware", hardware_group)
+        self.pushButton_ac_hardware_details = QtWidgets.QToolButton(hardware_group)
+        self.pushButton_ac_hardware_details.setText("Show hardware details")
+        self.pushButton_ac_hardware_details.setCheckable(True)
+        self.pushButton_ac_hardware_details.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        hardware_top.addWidget(self.label_ac_hardware_status, stretch=1)
+        hardware_top.addWidget(self.pushButton_auto_setup)
+        hardware_top.addWidget(self.pushButton_ac_hardware_details)
+        hardware_layout.addLayout(hardware_top)
+
+        self.frame_ac_hardware_details = QtWidgets.QFrame(hardware_group)
+        details_grid = QtWidgets.QGridLayout(self.frame_ac_hardware_details)
+        details_grid.setContentsMargins(0, 0, 0, 0)
+        details_grid.setColumnStretch(1, 1)
+        details_grid.setColumnStretch(3, 1)
+        supply_combo = getattr(self.ui, "comboBox_supply", None)
+        psu_port_combo = getattr(self.ui, "comboBox_port", None)
+        baud_combo = getattr(self.ui, "comboBox_baudrate", None)
+        if isinstance(supply_combo, QtWidgets.QComboBox):
+            details_grid.addWidget(QtWidgets.QLabel("PSU:", self.frame_ac_hardware_details), 0, 0)
+            details_grid.addWidget(supply_combo, 0, 1)
+        if isinstance(psu_port_combo, QtWidgets.QComboBox):
+            details_grid.addWidget(QtWidgets.QLabel("PSU port:", self.frame_ac_hardware_details), 0, 2)
+            details_grid.addWidget(psu_port_combo, 0, 3)
+        if isinstance(baud_combo, QtWidgets.QComboBox):
+            details_grid.addWidget(QtWidgets.QLabel("Baud:", self.frame_ac_hardware_details), 1, 0)
+            details_grid.addWidget(baud_combo, 1, 1)
+        connect_port_button = getattr(self.ui, "pushButton_connect_port", None)
+        if isinstance(connect_port_button, QtWidgets.QPushButton):
+            connect_port_button.hide()
         self.comboBox_lcr_port = QtWidgets.QComboBox(group)
         self.pushButton_refresh_lcr_ports = QtWidgets.QPushButton("Refresh", group)
         self.pushButton_connect_lcr = QtWidgets.QPushButton("Connect LCR", group)
         self.pushButton_identify_lcr = QtWidgets.QPushButton("Identify", group)
-        self.pushButton_auto_setup = QtWidgets.QPushButton("Auto-detect instruments", group)
-        row.addWidget(QtWidgets.QLabel("Port:", group))
-        row.addWidget(self.comboBox_lcr_port, stretch=1)
-        row.addWidget(self.pushButton_refresh_lcr_ports)
-        row.addWidget(self.pushButton_connect_lcr)
-        row.addWidget(self.pushButton_identify_lcr)
-        row.addWidget(self.pushButton_auto_setup)
-        self.pushButton_refresh_lcr_ports.hide()
+        details_grid.addWidget(QtWidgets.QLabel("LCR port:", self.frame_ac_hardware_details), 1, 2)
+        details_grid.addWidget(self.comboBox_lcr_port, 1, 3)
+        lcr_button_row = QtWidgets.QHBoxLayout()
+        lcr_button_row.setContentsMargins(0, 0, 0, 0)
+        lcr_button_row.addWidget(self.pushButton_refresh_lcr_ports)
+        lcr_button_row.addWidget(self.pushButton_connect_lcr)
+        lcr_button_row.addWidget(self.pushButton_identify_lcr)
+        details_grid.addLayout(lcr_button_row, 2, 2, 1, 2)
         self.pushButton_identify_lcr.hide()
-        outer.addLayout(row)
+        self.frame_ac_hardware_details.hide()
+        hardware_layout.addWidget(self.frame_ac_hardware_details)
+        outer.addWidget(hardware_group)
+        self.groupBox_ac_hardware = hardware_group
 
         grid = QtWidgets.QGridLayout()
         grid.setColumnStretch(1, 1)
@@ -1844,8 +1879,6 @@ class MainWindow(CurrentAnnealingWindow):
         plan_grid = QtWidgets.QGridLayout(plan_group)
         plan_grid.setColumnStretch(1, 1)
         plan_grid.setColumnStretch(3, 1)
-        plan_grid.addWidget(QtWidgets.QLabel("PSU:", plan_group), 0, 0)
-        plan_grid.addWidget(self.label_ac_psu_status, 0, 1, 1, 3)
         self.label_ac_voltage_limit = QtWidgets.QLabel("Voltage limit:", plan_group)
         self.label_ac_current_start = QtWidgets.QLabel("Current start:", plan_group)
         self.label_ac_current_stop = QtWidgets.QLabel("Current stop:", plan_group)
@@ -1853,22 +1886,22 @@ class MainWindow(CurrentAnnealingWindow):
         self.label_ac_direction = QtWidgets.QLabel("Direction:", plan_group)
         self.label_ac_settle_time = QtWidgets.QLabel("Settle time:", plan_group)
         self.label_ac_point_duration = QtWidgets.QLabel("Measure time/point:", plan_group)
-        plan_grid.addWidget(self.label_ac_voltage_limit, 1, 0)
-        plan_grid.addWidget(self.spinBox_ac_voltage_limit, 1, 1)
-        plan_grid.addWidget(self.label_ac_point_duration, 1, 2)
-        plan_grid.addWidget(self.spinBox_ac_point_duration, 1, 3)
-        plan_grid.addWidget(self.label_ac_current_start, 2, 0)
-        plan_grid.addWidget(self.spinBox_ac_current_start, 2, 1)
-        plan_grid.addWidget(self.label_ac_current_stop, 2, 2)
-        plan_grid.addWidget(self.spinBox_ac_current_stop, 2, 3)
-        plan_grid.addWidget(self.label_ac_current_step, 3, 0)
-        plan_grid.addWidget(self.spinBox_ac_current_step, 3, 1)
-        plan_grid.addWidget(self.label_ac_direction, 3, 2)
-        plan_grid.addWidget(self.comboBox_ac_direction, 3, 3)
-        plan_grid.addWidget(self.label_ac_settle_time, 4, 0)
-        plan_grid.addWidget(self.spinBox_ac_dwell, 4, 1)
-        plan_grid.addWidget(self.checkBox_ac_include_zero_current, 4, 2, 1, 2)
-        plan_grid.addWidget(self.label_ac_sweep_estimate, 5, 0, 1, 4)
+        plan_grid.addWidget(self.label_ac_voltage_limit, 0, 0)
+        plan_grid.addWidget(self.spinBox_ac_voltage_limit, 0, 1)
+        plan_grid.addWidget(self.label_ac_point_duration, 0, 2)
+        plan_grid.addWidget(self.spinBox_ac_point_duration, 0, 3)
+        plan_grid.addWidget(self.label_ac_current_start, 1, 0)
+        plan_grid.addWidget(self.spinBox_ac_current_start, 1, 1)
+        plan_grid.addWidget(self.label_ac_current_stop, 1, 2)
+        plan_grid.addWidget(self.spinBox_ac_current_stop, 1, 3)
+        plan_grid.addWidget(self.label_ac_current_step, 2, 0)
+        plan_grid.addWidget(self.spinBox_ac_current_step, 2, 1)
+        plan_grid.addWidget(self.label_ac_direction, 2, 2)
+        plan_grid.addWidget(self.comboBox_ac_direction, 2, 3)
+        plan_grid.addWidget(self.label_ac_settle_time, 3, 0)
+        plan_grid.addWidget(self.spinBox_ac_dwell, 3, 1)
+        plan_grid.addWidget(self.checkBox_ac_include_zero_current, 3, 2, 1, 2)
+        plan_grid.addWidget(self.label_ac_sweep_estimate, 4, 0, 1, 4)
         action_row = QtWidgets.QHBoxLayout()
         action_row.addWidget(self.pushButton_measure_lcr_baseline)
         action_row.addWidget(self.pushButton_run_ac_sweep)
@@ -1876,7 +1909,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.frame_ac_plan_actions = QtWidgets.QFrame(plan_group)
         self.frame_ac_plan_actions.setLayout(action_row)
         self.frame_ac_plan_actions.hide()
-        plan_grid.addWidget(self.frame_ac_plan_actions, 6, 0, 1, 4)
+        plan_grid.addWidget(self.frame_ac_plan_actions, 5, 0, 1, 4)
         outer.addWidget(plan_group)
         self.groupBox_ac_plan = plan_group
 
@@ -1891,6 +1924,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_connect_lcr.clicked.connect(self.handle_connect_lcr_clicked)
         self.pushButton_identify_lcr.clicked.connect(self.handle_identify_lcr_clicked)
         self.pushButton_auto_setup.clicked.connect(self.handle_auto_setup_clicked)
+        self.pushButton_ac_hardware_details.toggled.connect(self._set_ac_hardware_details_visible)
         self.pushButton_apply_lcr_setting.clicked.connect(self.handle_apply_lcr_setting_clicked)
         self.pushButton_measure_lcr_baseline.clicked.connect(self.handle_measure_lcr_baseline_clicked)
         self.pushButton_run_ac_sweep.clicked.connect(self.handle_run_ac_sweep_clicked)
@@ -2142,6 +2176,22 @@ class MainWindow(CurrentAnnealingWindow):
     def handle_auto_setup_clicked(self) -> None:
         self.populate_lcr_ports()
         candidates = self.auto_detect_power_supply()
+        lcr_connected = False
+        if self.lcr_meter is None or not self.lcr_meter.is_open:
+            port = str(self.comboBox_lcr_port.currentData() or "").strip()
+            if port:
+                try:
+                    self.lcr_meter = Lcr6000Serial(port, baudrate=DEFAULT_BAUDRATE)
+                    idn = self.lcr_meter.identify()
+                    self.pushButton_connect_lcr.setText("Disconnect LCR")
+                    self.label_lcr_status.setText(f"Connected: {idn or port}")
+                    self._configure_lcr_for_current_index()
+                    lcr_connected = True
+                except Exception as exc:
+                    self.lcr_meter = None
+                    self.label_lcr_status.setText(f"LCR connection failed: {exc}")
+        else:
+            lcr_connected = True
         if not candidates:
             backend = self._selected_ac_psu_backend()
             resource = self._selected_ac_psu_resource()
@@ -2171,6 +2221,8 @@ class MainWindow(CurrentAnnealingWindow):
         self.checkBox_lcr_model_lprp.setChecked(False)
         self._store_lcr_settings()
         self._update_ac_sweep_estimate()
+        self._refresh_ac_psu_status()
+        self._refresh_ac_hardware_status(lcr_connected=lcr_connected)
 
     def handle_connect_lcr_clicked(self) -> None:
         if self.lcr_meter is not None and self.lcr_meter.is_open:
@@ -2178,6 +2230,7 @@ class MainWindow(CurrentAnnealingWindow):
             self.lcr_meter = None
             self.pushButton_connect_lcr.setText("Connect LCR")
             self.label_lcr_status.setText("LCR disconnected")
+            self._refresh_ac_hardware_status()
             return
         port = str(self.comboBox_lcr_port.currentData() or "").strip()
         if not port:
@@ -2194,6 +2247,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_connect_lcr.setText("Disconnect LCR")
         self.label_lcr_status.setText(f"Connected: {idn or port}")
         self._configure_lcr_for_current_index()
+        self._refresh_ac_hardware_status()
 
     def handle_identify_lcr_clicked(self) -> None:
         meter = self.lcr_meter
@@ -3056,6 +3110,35 @@ class MainWindow(CurrentAnnealingWindow):
         resource = str(getattr(self, "_ac_psu_resource", "") or "") or "no port selected"
         baudrate = int(getattr(self, "_ac_psu_baudrate", 115200) or 115200)
         label.setText(f"AC current supply: {backend_label}, {resource}, {baudrate} baud")
+        self._refresh_ac_hardware_status()
+
+    def _set_ac_hardware_details_visible(self, checked: bool) -> None:
+        details = getattr(self, "frame_ac_hardware_details", None)
+        if isinstance(details, QtWidgets.QWidget):
+            details.setVisible(bool(checked))
+        button = getattr(self, "pushButton_ac_hardware_details", None)
+        if isinstance(button, QtWidgets.QToolButton):
+            button.setText("Hide hardware details" if checked else "Show hardware details")
+
+    def _refresh_ac_hardware_status(self, *, lcr_connected: bool | None = None) -> None:
+        try:
+            label = getattr(self, "label_ac_hardware_status", None)
+        except RuntimeError:
+            return
+        if not isinstance(label, QtWidgets.QLabel):
+            return
+        if lcr_connected is None:
+            lcr = getattr(self, "lcr_meter", None)
+            lcr_connected = bool(lcr is not None and getattr(lcr, "is_open", False))
+        backend = str(getattr(self, "_ac_psu_backend", "") or "owon_spe6102")
+        if backend not in sweep.POWER_SUPPLY_PROFILES:
+            backend = "owon_spe6102"
+        profile = sweep.POWER_SUPPLY_PROFILES.get(backend, {})
+        backend_label = str(profile.get("label", backend))
+        resource = str(getattr(self, "_ac_psu_resource", "") or "")
+        psu_text = f"{backend_label} on {resource}" if resource else f"{backend_label}, no port selected"
+        lcr_text = "LCR connected" if lcr_connected else "LCR not connected"
+        label.setText(f"{lcr_text}; PSU {psu_text}")
 
     def _install_ac_wheel_guard(self, control_root: QtWidgets.QWidget) -> None:
         self._ac_lcr_scroll_area = self._find_parent_scroll_area(control_root)

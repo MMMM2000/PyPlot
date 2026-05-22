@@ -1687,7 +1687,16 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert all("anneal" not in text.lower() for text in sticky_texts)
         assert all("history" not in text.lower() for text in sticky_texts)
         assert all("reverse" not in text.lower() for text in sticky_texts)
-        assert window.pushButton_auto_setup.text() == "Auto-detect instruments"
+        assert window.pushButton_auto_setup.text() == "Auto-connect hardware"
+        assert window.groupBox_ac_hardware.title() == "Hardware"
+        assert window.ui.groupBox_serial_settings.isHidden()
+        assert window.frame_ac_hardware_details.isHidden()
+        assert window.pushButton_ac_hardware_details.text() == "Show hardware details"
+        window.pushButton_ac_hardware_details.setChecked(True)
+        assert not window.frame_ac_hardware_details.isHidden()
+        assert window.pushButton_ac_hardware_details.text() == "Hide hardware details"
+        window.pushButton_ac_hardware_details.setChecked(False)
+        assert window.frame_ac_hardware_details.isHidden()
         assert window.pushButton_identify_lcr.isHidden()
         assert window.ui.label_log_file.text() == "Microwire sweep base:"
         assert window.ui.label_extension.text() == ".tsv"
