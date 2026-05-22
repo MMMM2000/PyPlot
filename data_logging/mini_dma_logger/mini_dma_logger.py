@@ -2547,6 +2547,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_error_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_value_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_time_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_last_filtered_value_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_scale_timestamp_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_scale_timestamp_by_clock: dict[tuple[str, int], float] = {}
         self._seek_post_move_sample_count_by_key: dict[tuple[str, int, float], int] = {}
@@ -5437,7 +5438,7 @@ class MainWindow(QtWidgets.QMainWindow):
             PlotChannel("raw_position_mm", "Raw Tic position (mm)", "#93c5fd", lambda point: point.raw_position_mm),
             PlotChannel("position_mm", "Tensile displacement (mm)", "#60a5fa", lambda point: point.position_mm),
             PlotChannel("raw_load_g", "Raw scale signed (g)", "#f59e0b", lambda point: point.raw_load_g),
-            PlotChannel("load_g", "Applied tensile load (g)", "#38bdf8", lambda point: point.load_g),
+            PlotChannel("load_g", "Applied tensile load (g)", "#fbbf24", lambda point: point.load_g),
             PlotChannel(
                 "strain_pct",
                 "Strain (%)",
@@ -5739,13 +5740,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if splitter_height <= 0:
             splitter_height = 760
         log_limit = int(log_container.maximumHeight()) if log_container is not None else 96
-        log_height = int(log_container.height()) if log_container is not None else log_limit
-        if log_height <= 0:
-            log_height = log_limit
         spacing = int(grid.verticalSpacing()) if grid is not None else 8
         margins = plot_layout.contentsMargins() if plot_layout is not None else QtCore.QMargins()
-        reserved_height = min(log_height, log_limit) + spacing + margins.top() + margins.bottom() + 24
-        tile_height = max(180, min(300, (splitter_height - reserved_height) // 2))
+        reserved_height = log_limit + spacing + margins.top() + margins.bottom() + 24
+        tile_height = max(90, min(300, (splitter_height - reserved_height) // 2))
         for widget in plot_widgets:
             widget.setMaximumHeight(tile_height)
 
@@ -9402,12 +9400,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_error_by_key.pop(seek_key, None)
         self._seek_last_value_by_key.pop(seek_key, None)
         self._seek_last_time_by_key.pop(seek_key, None)
+        self._seek_last_filtered_value_by_key.pop(seek_key, None)
         self._seek_last_scale_timestamp_by_key.pop(seek_key, None)
         self._seek_post_move_sample_count_by_key.pop(seek_key, None)
         self._seek_last_effective_position_by_key.pop(seek_key, None)
         self._seek_no_response_count_by_key.pop(seek_key, None)
         self._seek_travel_by_key.pop(seek_key, None)
         self._seek_pending_reversal_by_key.pop(seek_key, None)
+
+    def _filtered_signal_changed_after_last_correction(
+        self,
+        seek_key: tuple[str, int, float],
+        filtered_signal: ScaleControlSignal | None,
+        effective_tolerance: float,
+    ) -> bool:
+        if filtered_signal is None or seek_key not in self._seek_last_filtered_value_by_key:
+            return True
+        previous_value = self._seek_last_filtered_value_by_key[seek_key]
+        change = abs(float(filtered_signal.value) - float(previous_value))
+        required_change = max(
+            abs(float(effective_tolerance)) * 0.25,
+            abs(float(filtered_signal.noise)) * 0.25,
+            1e-9,
+        )
+        return change > required_change
 
     def _scale_control_signal_for_basis(self, basis: str, *, window_s: float | None = None) -> ScaleControlSignal | None:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
@@ -10385,6 +10401,26 @@ class MainWindow(QtWidgets.QMainWindow):
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             and self._last_motion_command_time_s is not None
         ):
+            if not self._filtered_signal_changed_after_last_correction(
+                seek_key,
+                filtered_signal,
+                effective_tolerance,
+            ):
+                self._log_waiting_for_feedback(
+                    "Waiting for the filtered control signal to update before repeating the load/stress correction."
+                )
+                self._write_control_trace(
+                    decision="wait",
+                    basis=basis,
+                    target_value=target_value,
+                    current_value=current_value,
+                    error_value=delta_value,
+                    tolerance=effective_tolerance,
+                    sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                    result="waiting",
+                    reason="filtered_signal_unchanged",
+                )
+                return False
             required_samples = self._seek_required_post_move_samples(
                 basis,
                 delta_value,
@@ -10523,6 +10559,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._seek_last_error_by_key[seek_key] = delta_value
                     self._seek_last_value_by_key[seek_key] = current_value
                     self._seek_last_time_by_key[seek_key] = seek_sample_time_s
+                    self._seek_last_filtered_value_by_key[seek_key] = filtered_signal.value
                     latest_scale_sample_time_s = self._latest_scale_sample_time_s()
                     if latest_scale_sample_time_s is not None:
                         self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
@@ -10667,6 +10704,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._seek_last_error_by_key[seek_key] = delta_value
             self._seek_last_value_by_key[seek_key] = current_value
             self._seek_last_time_by_key[seek_key] = seek_sample_time_s
+            if filtered_signal is not None:
+                self._seek_last_filtered_value_by_key[seek_key] = filtered_signal.value
             latest_scale_sample_time_s = self._latest_scale_sample_time_s()
             if latest_scale_sample_time_s is not None:
                 self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
@@ -10769,6 +10808,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_error_by_key[seek_key] = delta_value
         self._seek_last_value_by_key[seek_key] = current_value
         self._seek_last_time_by_key[seek_key] = seek_sample_time_s
+        if filtered_signal is not None:
+            self._seek_last_filtered_value_by_key[seek_key] = filtered_signal.value
         latest_scale_sample_time_s = self._latest_scale_sample_time_s()
         if latest_scale_sample_time_s is not None:
             self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
@@ -14163,6 +14204,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
         self._seek_last_time_by_key.clear()
+        self._seek_last_filtered_value_by_key.clear()
         self._seek_last_scale_timestamp_by_key.clear()
         self._seek_last_scale_timestamp_by_clock.clear()
         self._seek_last_effective_position_by_key.clear()
@@ -14520,8 +14562,8 @@ class MainWindow(QtWidgets.QMainWindow):
         x_label: str,
         left_label: str,
         right_label: str | None,
-        left_color: str = "#38bdf8",
-        right_color: str = "#f59e0b",
+        left_color: str = "#fbbf24",
+        right_color: str = "#60a5fa",
         symbols: bool = True,
     ) -> PyqtGraphPlotBundle:
         if pg is None:  # pragma: no cover - guarded by caller in normal app use
@@ -14592,8 +14634,8 @@ class MainWindow(QtWidgets.QMainWindow):
         x_label: str,
         left_label: str,
         right_label: str | None,
-        left_color: str = "#38bdf8",
-        right_color: str = "#f59e0b",
+        left_color: str = "#fbbf24",
+        right_color: str = "#60a5fa",
     ) -> None:
         if pg is None:
             return
@@ -14610,7 +14652,7 @@ class MainWindow(QtWidgets.QMainWindow):
         bottom_axis.setTickPen(pg.mkPen(text_color, width=0.6))
         bottom_axis.setGrid(False)
         bottom_axis.setStyle(maxTickLevel=0, maxTextLevel=0)
-        bottom_axis.enableAutoSIPrefix(False)
+        self._disable_pyqtgraph_axis_scaling(bottom_axis)
         top_axis = bundle.plot_item.getAxis("top")
         top_axis.setPen(pg.mkPen(text_color, width=0.8))
         top_axis.setTextPen(pg.mkPen(text_color))
@@ -14618,21 +14660,21 @@ class MainWindow(QtWidgets.QMainWindow):
         top_axis.setGrid(False)
         top_axis.setLabel("")
         top_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
-        top_axis.enableAutoSIPrefix(False)
+        self._disable_pyqtgraph_axis_scaling(top_axis)
         left_axis = bundle.plot_item.getAxis("left")
         left_axis.setPen(pg.mkPen(left_color, width=0.9))
         left_axis.setTextPen(pg.mkPen(left_color))
         left_axis.setTickPen(pg.mkPen(left_color, width=0.7))
         left_axis.setGrid(False)
         left_axis.setStyle(maxTickLevel=0, maxTextLevel=0)
-        left_axis.enableAutoSIPrefix(False)
+        self._disable_pyqtgraph_axis_scaling(left_axis)
         right_axis = bundle.plot_item.getAxis("right")
         right_axis.setPen(pg.mkPen(right_color, width=0.9))
         right_axis.setTextPen(pg.mkPen(right_color))
         right_axis.setTickPen(pg.mkPen(right_color, width=0.7))
         right_axis.setGrid(False)
         right_axis.setStyle(maxTickLevel=0, maxTextLevel=0)
-        right_axis.enableAutoSIPrefix(False)
+        self._disable_pyqtgraph_axis_scaling(right_axis)
         bundle.plot_item.getAxis("bottom").setStyle(tickTextOffset=4)
         bundle.plot_item.getAxis("left").setStyle(tickTextOffset=4)
         bundle.plot_item.showAxis("top")
@@ -14654,6 +14696,22 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         if curve is not None:
             curve.setData(list(x_values), list(y_values))
+
+    def _disable_pyqtgraph_axis_scaling(self, axis: Any) -> None:
+        try:
+            axis.enableAutoSIPrefix(False)
+        except Exception:
+            pass
+        try:
+            axis.setScale(1.0)
+        except Exception:
+            pass
+        if hasattr(axis, "autoSIPrefix"):
+            axis.autoSIPrefix = False
+        if hasattr(axis, "autoSIPrefixScale"):
+            axis.autoSIPrefixScale = 1.0
+        if hasattr(axis, "labelUnitPrefix"):
+            axis.labelUnitPrefix = ""
 
     def _set_pyqtgraph_curve_style(
         self,
@@ -14873,6 +14931,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_error_by_key.clear()
         self._seek_last_value_by_key.clear()
         self._seek_last_time_by_key.clear()
+        self._seek_last_filtered_value_by_key.clear()
         self._seek_last_scale_timestamp_by_key.clear()
         self._seek_last_scale_timestamp_by_clock.clear()
         self._seek_last_effective_position_by_key.clear()
@@ -17528,9 +17587,12 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         self.spin_ui_interval.setValue(int(self.settings.value("ui_refresh_interval_ms", DEFAULT_UI_REFRESH_INTERVAL_MS)))
-        self.spin_graph_interval.setValue(
-            int(self.settings.value("graph_refresh_interval_ms", DEFAULT_GRAPH_REFRESH_INTERVAL_MS))
+        saved_graph_interval_ms = int(
+            self.settings.value("graph_refresh_interval_ms", DEFAULT_GRAPH_REFRESH_INTERVAL_MS)
         )
+        if saved_graph_interval_ms == 1000:
+            saved_graph_interval_ms = DEFAULT_GRAPH_REFRESH_INTERVAL_MS
+        self.spin_graph_interval.setValue(saved_graph_interval_ms)
         self._apply_ui_refresh_interval()
         self.spin_supply_read_interval.setValue(
             int(self.settings.value("supply_read_interval_ms", DEFAULT_SUPPLY_READ_INTERVAL_MS))

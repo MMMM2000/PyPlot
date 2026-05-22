@@ -1403,7 +1403,7 @@ def test_recovery_plot_updates_pyqtgraph_curves(tmp_path: Path, qtbot) -> None:
         assert list(left_y) == pytest.approx([1.0, 0.1])
         assert list(right_x) == pytest.approx([0.0, 1.0])
         assert list(right_y) == pytest.approx([point.position_mm for point in window._recovery_points])
-        assert window._recovery_left_curve.opts["pen"].color().name().lower() == "#38bdf8"
+        assert window._recovery_left_curve.opts["pen"].color().name().lower() == "#fbbf24"
         assert window._recovery_right_curve.opts["pen"].color().name().lower() == "#60a5fa"
     finally:
         _close_test_window(window)
@@ -1468,6 +1468,19 @@ def test_dashboard_plot_panel_keeps_right_edge_padding_and_compact_log(tmp_path:
         _close_test_window(window)
 
 
+def test_dashboard_plot_tile_height_can_shrink_below_old_minimum(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._dashboard_plot_splitter.resize(1200, 420)
+        window._fit_dashboard_plot_tiles_to_panel()
+
+        assert window._dashboard_plot_widgets
+        assert all(widget.maximumHeight() <= 150 for widget in window._dashboard_plot_widgets)
+    finally:
+        _close_test_window(window)
+
+
 def test_dashboard_plot_tile_height_is_capped_after_resize(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -1497,16 +1510,21 @@ def test_dashboard_pyqtgraph_axes_match_curve_colors_and_use_major_grid_only(
         left_axis = bundle.plot_item.getAxis("left")
         right_axis = bundle.plot_item.getAxis("right")
 
-        assert left_axis.textPen().color().name().lower() == "#38bdf8"
-        assert left_axis.pen().color().name().lower() == "#38bdf8"
+        assert left_axis.textPen().color().name().lower() == "#fbbf24"
+        assert left_axis.pen().color().name().lower() == "#fbbf24"
         assert right_axis.textPen().color().name().lower() == "#60a5fa"
         assert right_axis.pen().color().name().lower() == "#60a5fa"
+        assert left_axis.pen().color().name().lower() != right_axis.pen().color().name().lower()
         assert left_axis.style["maxTickLevel"] == 0
         assert right_axis.style["maxTickLevel"] == 0
         assert left_axis.grid is False
         assert right_axis.grid is False
         assert left_axis.autoSIPrefix is False
         assert right_axis.autoSIPrefix is False
+        assert left_axis.autoSIPrefixScale == 1.0
+        assert right_axis.autoSIPrefixScale == 1.0
+        assert left_axis.labelUnitPrefix == ""
+        assert right_axis.labelUnitPrefix == ""
         assert bundle.left_curve.opts["symbol"] == "o"
         assert bundle.right_curve.opts["symbol"] == "s"
         assert bundle.left_curve.opts["pen"].widthF() <= 0.9
@@ -8671,6 +8689,88 @@ def test_current_sweep_hold_uses_gated_small_stress_correction(
         _close_test_window(window)
 
 
+def test_current_sweep_hold_waits_for_filtered_signal_to_change_before_repeating_correction(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.time()
+
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
+        moves.append(float(target_mm))
+        command_s = time.time() - 0.4
+        window._last_motion_command_time_s = command_s
+        window._last_motion_expected_complete_time_s = command_s
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        500.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    for index in range(5):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(35.0, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+        assert reached is False
+        assert len(moves) == 1
+
+        load_g = mini_dma_mod.load_g_from_stress_mpa(35.0, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s + 1.50
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert len(moves) == 1
+        assert "filtered control signal" in window.log_output.toPlainText().lower()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_uses_smooth_dynamic_stress_cap(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -10679,6 +10779,22 @@ def test_current_sweep_saved_20_mpa_hold_cap_migrates_to_30_mpa(tmp_path: Path, 
 
     try:
         assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(30.0)
+    finally:
+        _close_test_window(window)
+        _restore_settings(snapshot)
+
+
+def test_saved_old_graph_interval_migrates_to_500_ms(tmp_path: Path, qtbot) -> None:
+    settings = _test_settings()
+    snapshot = _snapshot_settings()
+    settings.clear()
+    settings.setValue("graph_refresh_interval_ms", 1000)
+    settings.sync()
+
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
+
+    try:
+        assert window.spin_graph_interval.value() == 500
     finally:
         _close_test_window(window)
         _restore_settings(snapshot)
