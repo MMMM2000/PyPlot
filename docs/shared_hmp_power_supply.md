@@ -2,7 +2,7 @@
 
 The shared HMP broker is the foundation for running multiple bench tools against one multi-channel HMP supply without letting independent programs write to the same serial command stream. It supports HMP4030 and HMP4040 supplies through the same HMP40xx model layer.
 
-The first implementation adds the broker, JSON-line localhost protocol, fake-driver tests, and a setup utility. Mini DMA Logger and Current Annealing Logger still use their existing direct power-supply paths until their later integration PRs.
+The first implementation adds the broker, JSON-line localhost protocol, fake-driver tests, and a setup utility. Current Annealing Logger can also opt into the shared broker path while keeping its existing direct serial supply mode. Mini DMA Logger still uses its existing direct power-supply path until a later integration PR.
 
 ## Safety Model
 
@@ -59,4 +59,6 @@ The broker API is intentionally channel-scoped. Future logger integration should
 - `measure_channel`
 - `snapshot`
 
-Mini DMA should be integrated first because it already has a single `PowerSupplyController` boundary. Current Annealing Logger should follow after its raw serial command templates are replaced with broker operations.
+Current Annealing Logger exposes **Shared HMP broker** as an optional supply profile. In that mode it leases the selected channel with the `Current annealing` role, configures only that channel on start, reads broker voltage/current snapshots, sends current setpoints through the broker, and turns off/releases only the leased channel on stop. Its raw serial command box is disabled in broker mode.
+
+Mini DMA should be integrated after the broker-backed current annealing path is exercised, because Mini DMA's open PR already has evolving HMP4040 channel assumptions.

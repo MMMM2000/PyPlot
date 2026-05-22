@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import socketserver
 from threading import Thread
 from typing import Any
@@ -99,3 +100,61 @@ def start_broker_server(
     thread = Thread(target=server.serve_forever, name="shared-hmp-broker", daemon=True)
     thread.start()
     return server, thread
+
+
+class BrokerJsonClient:
+    """Small JSON-line client for the local shared HMP broker."""
+
+    def __init__(self, *, host: str = "127.0.0.1", port: int) -> None:
+        self.host = str(host or "127.0.0.1")
+        self.port = int(port)
+
+    def request(self, action: str, **payload: Any) -> dict[str, Any]:
+        request = {"action": action, **payload}
+        with socket.create_connection((self.host, self.port), timeout=2.0) as client:
+            client.sendall((json.dumps(request) + "\n").encode("utf-8"))
+            chunks: list[bytes] = []
+            while True:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                if b"\n" in chunk:
+                    break
+        response = json.loads(b"".join(chunks).decode("utf-8"))
+        if not response.get("ok"):
+            raise RuntimeError(str(response.get("error") or "Shared HMP broker request failed."))
+        return response
+
+    def lease(self, *, channel: int, owner: str, role: str) -> dict[str, Any]:
+        return dict(self.request("lease", channel=channel, owner=owner, role=role)["lease"])
+
+    def release(self, *, channel: int, lease_id: str) -> None:
+        self.request("release", channel=channel, lease_id=lease_id)
+
+    def configure_channel(
+        self,
+        *,
+        channel: int,
+        lease_id: str,
+        voltage_v: float,
+        current_a: float,
+        output_on: bool,
+    ) -> None:
+        self.request(
+            "configure_channel",
+            channel=channel,
+            lease_id=lease_id,
+            voltage_v=voltage_v,
+            current_a=current_a,
+            output_on=output_on,
+        )
+
+    def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+        self.request("set_current", channel=channel, lease_id=lease_id, current_mA=current_mA)
+
+    def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:
+        self.request("set_output", channel=channel, lease_id=lease_id, output_on=output_on)
+
+    def measure_channel(self, *, channel: int) -> dict[str, float | None]:
+        return dict(self.request("measure_channel", channel=channel)["readback"])
