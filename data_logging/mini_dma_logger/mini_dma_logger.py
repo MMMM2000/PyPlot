@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
@@ -50,6 +51,20 @@ SESSION_CONTROL_TRACE_CSV = "control_trace.csv"
 SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
+CONTROL_LOGIC_NAME = "mini_dma_control"
+CONTROL_LOGIC_VERSION = "2026-05-22.2"
+CONTROL_LOGIC_PROFILE = "filtered-current-hold-persistent-error"
+CONTROL_LOGIC_FEATURES = [
+    "mandatory_setup_length_refreeze",
+    "setup_slack_stress_cap",
+    "setup_zero_plateau_accept_current_position",
+    "current_hold_filtered_scale_signal",
+    "current_hold_filtered_signal_change_gate",
+    "current_hold_persistent_error_gate",
+    "current_hold_noise_band_resume",
+    "adaptive_current_hold_response_stiffness",
+    "zero_load_reference_sidecar",
+]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
     "timestamp_utc",
@@ -12423,6 +12438,89 @@ class MainWindow(QtWidgets.QMainWindow):
             "remote_url": _git_text("config", "--get", "remote.origin.url"),
         }
 
+    def _control_logic_fingerprint_payload(self) -> dict[str, Any]:
+        return {
+            "name": CONTROL_LOGIC_NAME,
+            "version": CONTROL_LOGIC_VERSION,
+            "profile": CONTROL_LOGIC_PROFILE,
+            "features": list(CONTROL_LOGIC_FEATURES),
+            "constants": {
+                "servo_current_sweep_defaults_version": SERVO_CURRENT_SWEEP_DEFAULTS_VERSION,
+                "setup_zero_fallback_min_points": SETUP_ZERO_FALLBACK_MIN_POINTS,
+                "setup_zero_fallback_min_time_s": SETUP_ZERO_FALLBACK_MIN_TIME_S,
+                "setup_zero_fallback_min_strain_pct": SETUP_ZERO_FALLBACK_MIN_STRAIN_PCT,
+                "setup_zero_fallback_raw_span_g": SETUP_ZERO_FALLBACK_RAW_SPAN_G,
+                "setup_zero_fallback_min_residual_g": SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G,
+                "setup_zero_fallback_max_residual_g": SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G,
+                "current_sweep_error_gain_per_s": SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S,
+                "current_sweep_rate_gain": SERVO_CURRENT_SWEEP_RATE_GAIN,
+                "current_sweep_dynamic_min_fraction": SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION,
+                "current_sweep_dynamic_max_fraction": SERVO_CURRENT_SWEEP_DYNAMIC_MAX_FRACTION,
+                "current_sweep_dynamic_scale_mpa": SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA,
+                "current_hold_adaptive_min_fraction": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION,
+                "current_hold_adaptive_max_fraction": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION,
+                "current_hold_adaptive_large_error_mpa": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA,
+                "current_hold_adaptive_max_command_mm": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_MM,
+                "current_hold_adaptive_max_command_strain_pct": (
+                    SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
+                ),
+                "current_hold_adaptive_min_samples": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES,
+                "current_hold_correction_confirm_s": SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S,
+            },
+            "settings": {
+                "control_interval_ms": self._control_interval_ms(),
+                "setup_preload_stress_mpa": float(self.spin_setup_preload_stress_mpa.value()),
+                "setup_preload_duration_s": float(self.spin_setup_preload_duration_s.value()),
+                "setup_return_duration_s": float(self.spin_setup_return_duration_s.value()),
+                "setup_slack_speed_strain_pct_s": float(self.spin_setup_slack_speed_strain_pct_s.value()),
+                "setup_slack_step_cap_stress_mpa": float(self.spin_setup_slack_step_cap_stress_mpa.value()),
+                "setup_zero_tolerance_g": float(self._auto_requested_tolerance_for_basis(HSW_BASIS_LOAD_G)),
+                "setup_zero_stable_s": float(self.spin_setup_zero_stable_s.value()),
+                "target_ramp_rate_value_s": float(self.spin_current_sweep_target_ramp_rate.value()),
+                "target_ramp_stage_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
+                "correction_max_strain_pct": float(self.spin_current_sweep_max_correction_strain_pct.value()),
+                "correction_max_strain_rate_pct_s": float(self.spin_current_sweep_correction_rate_pct_s.value()),
+                "correction_max_stress_mpa": self._current_sweep_max_correction_stress_mpa(),
+                "correction_hold_max_stress_mpa": self._current_sweep_hold_correction_stress_mpa(),
+                "correction_mid_stress_mpa": self._current_sweep_mid_correction_stress_mpa(),
+                "correction_near_stress_mpa": self._current_sweep_near_correction_stress_mpa(),
+                "current_ramp_hold_on_error": self.check_current_sweep_hold_on_error.isChecked(),
+                "current_ramp_hold_pause_factor": float(self.spin_current_sweep_hold_pause_factor.value()),
+                "current_ramp_hold_resume_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
+                "current_ramp_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
+                "current_hold_filter_window_s": self._current_sweep_hold_filter_window_s(),
+                "current_hold_noise_sigma": self._current_sweep_hold_noise_sigma(),
+                "current_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
+                "current_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
+                "max_correction_travel_mm": float(self.spin_current_sweep_max_seek_mm.value()),
+            },
+        }
+
+    def _control_logic_metadata(self) -> dict[str, Any]:
+        payload = self._control_logic_fingerprint_payload()
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        fingerprint = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+        return {
+            "name": CONTROL_LOGIC_NAME,
+            "version": CONTROL_LOGIC_VERSION,
+            "profile": CONTROL_LOGIC_PROFILE,
+            "features": list(CONTROL_LOGIC_FEATURES),
+            "fingerprint": fingerprint,
+            "fingerprint_algorithm": "sha256-json-v1",
+            "fingerprint_fields": [
+                "control_logic_name",
+                "control_logic_version",
+                "control_logic_profile",
+                "features",
+                "control_constants",
+                "setup_control_settings",
+                "current_sweep_correction_settings",
+                "current_hold_filter_window_s",
+                "current_hold_noise_sigma",
+                "current_hold_persistent_error_gate",
+            ],
+        }
+
     def _session_metadata(self) -> dict[str, Any]:
         calibration_metadata = {
             "baseline_s": float(self.spin_calibration_baseline_s.value()),
@@ -12538,6 +12636,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "recipe_summary": self._last_recipe_summary,
             "recipe_estimated_points": int(self._recipe_estimated_points),
             "source_control": self._source_control_metadata(),
+            "control_logic": self._control_logic_metadata(),
             "hsw_distribution": {
                 "basis": self._distribution_basis(),
                 "start": float(self.spin_distribution_start.value()),

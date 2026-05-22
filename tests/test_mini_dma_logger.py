@@ -10494,6 +10494,41 @@ def test_session_metadata_records_source_control_snapshot(
         _close_test_window(window)
 
 
+def test_session_metadata_records_control_logic_version_and_fingerprint(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_control_logic")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        assert window._session_json_path is not None
+        first_payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        first_logic = first_payload["control_logic"]
+
+        assert first_logic["name"] == "mini_dma_control"
+        assert first_logic["version"]
+        assert first_logic["profile"] == "filtered-current-hold-persistent-error"
+        assert first_logic["fingerprint"].startswith("sha256:")
+        assert len(first_logic["fingerprint"]) == len("sha256:") + 64
+        assert "current_hold_persistent_error_gate" in first_logic["features"]
+        assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
+
+        old_fingerprint = first_logic["fingerprint"]
+        window.spin_current_sweep_hold_noise_sigma.setValue(
+            window.spin_current_sweep_hold_noise_sigma.value() + 1.0
+        )
+        window._write_session_metadata()
+        second_payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+
+        assert second_payload["control_logic"]["fingerprint"] != old_fingerprint
+    finally:
+        window._stop_session()
+        _close_test_window(window)
+
+
 def test_recipe_sample_header_tracks_sample_name(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
