@@ -162,12 +162,13 @@ DEFAULT_CONTROL_INTERVAL_MS = 50
 DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
 DEFAULT_UI_HEARTBEAT_INTERVAL_MS = 16
-DEFAULT_GRAPH_REFRESH_INTERVAL_MS = 1000
+DEFAULT_GRAPH_REFRESH_INTERVAL_MS = 500
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 LIVE_PLOT_MAX_POINTS = 3000
 DISPLAY_PLOT_MAX_POINTS = 1500
 DISPLAY_PLOT_RECENT_POINTS = 600
 DISPLAY_PLOT_BASE_BUCKET_S = 1.0
+DISPLAY_PLOT_OLD_CACHE_GRANULARITY = 1000
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 SETUP_ZERO_FALLBACK_MIN_POINTS = 4
 SETUP_ZERO_FALLBACK_MIN_TIME_S = 0.8
@@ -204,6 +205,22 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "min_start_current_mA": 1.0,
         "max_voltage": 32.05,
         "channel_select": 3,
+        "motor_supply_channel": 2,
+        "channel_count": 3,
+        "baudrate": 115200,
+        "reset_on_start": True,
+        "voltage_first": False,
+        "current_resolution_mA": 0.2,
+    },
+    "hmp4040": {
+        "label": "HMP4040 (4-channel)",
+        "start_current_mA": 1.0,
+        "min_start_current_mA": 1.0,
+        "max_voltage": 32.05,
+        "channel_select": 4,
+        "motor_supply_channel": 3,
+        "channel_count": 4,
+        "baudrate": 115200,
         "reset_on_start": True,
         "voltage_first": False,
         "current_resolution_mA": 0.2,
@@ -214,6 +231,9 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "min_start_current_mA": 10.0,
         "max_voltage": 62.0,
         "channel_select": 0,
+        "motor_supply_channel": 0,
+        "channel_count": 1,
+        "baudrate": 115200,
         "reset_on_start": False,
         "voltage_first": True,
         "current_resolution_mA": 1.0,
@@ -544,6 +564,17 @@ def _parse_first_float(text: str) -> float | None:
         return float(token)
     except ValueError:
         return None
+
+
+def _supply_profile_id_from_idn(idn_text: str) -> str | None:
+    upper_raw = str(idn_text or "").upper()
+    if "HMP4040" in upper_raw:
+        return "hmp4040"
+    if "HMP4030" in upper_raw or "HAMEG" in upper_raw:
+        return "hmp4030"
+    if "OWON" in upper_raw or "SPE6102" in upper_raw:
+        return "owon_spe6102"
+    return None
 
 
 def _safe_float(value: Any) -> float | None:
@@ -2533,6 +2564,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_points: list[MeasurementPoint] = []
         self._live_plot_points: list[MeasurementPoint] = []
         self._last_live_plot_scale_timestamp: float | None = None
+        self._display_plot_old_cache_key: tuple[object, ...] | None = None
+        self._display_plot_old_cache: list[MeasurementPoint] = []
         self._session_active = False
         self._session_start_monotonic = 0.0
         self._session_created_utc: str | None = None
@@ -3707,8 +3740,8 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form.addRow("", self.check_motor_supply_power)
         motor_supply_row = QtWidgets.QHBoxLayout()
         self.combo_motor_supply_channel = QtWidgets.QComboBox(supply_box)
-        self.combo_motor_supply_channel.addItem("CH1", 1)
-        self.combo_motor_supply_channel.addItem("CH2", 2)
+        for channel in range(1, 5):
+            self.combo_motor_supply_channel.addItem(f"CH{channel}", channel)
         self.combo_motor_supply_channel.setCurrentIndex(self.combo_motor_supply_channel.findData(2))
         self.spin_motor_supply_voltage = CompactDoubleSpinBox(supply_box)
         self.spin_motor_supply_voltage.setDecimals(2)
@@ -5709,12 +5742,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             if not raw:
                 continue
-            upper_raw = raw.upper()
-            profile_id = None
-            if "HMP4030" in upper_raw or "HAMEG" in upper_raw:
-                profile_id = "hmp4030"
-            elif "OWON" in upper_raw or "SPE6102" in upper_raw:
-                profile_id = "owon_spe6102"
+            profile_id = _supply_profile_id_from_idn(raw)
             if profile_id:
                 return {
                     "port": port_name,
@@ -5987,6 +6015,14 @@ class MainWindow(QtWidgets.QMainWindow):
         profile = SUPPLY_PROFILES.get(profile_id, SUPPLY_PROFILES["hmp4030"])
         self.spin_supply_voltage_limit.setValue(float(profile.get("max_voltage", 32.05)))
         self.spin_supply_manual_current.setValue(float(profile.get("start_current_mA", 1.0)))
+        current_channel = int(profile.get("channel_select", 0) or 0)
+        current_channel_index = self.combo_current_sweep_supply_channel.findData(current_channel)
+        if current_channel_index >= 0:
+            self.combo_current_sweep_supply_channel.setCurrentIndex(current_channel_index)
+        motor_channel = int(profile.get("motor_supply_channel", 0) or 0)
+        motor_channel_index = self.combo_motor_supply_channel.findData(motor_channel)
+        if motor_channel_index >= 0:
+            self.combo_motor_supply_channel.setCurrentIndex(motor_channel_index)
 
     def _connect_supply(self, checked: bool = False, *, show_errors: bool = True) -> bool:
         self._disconnect_supply()
@@ -13234,7 +13270,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ok = True
 
         if not self._ensure_supply_ready_for_recipe():
-            statuses.append("FAIL: HMP4030 supply is not connected.")
+            statuses.append("FAIL: HMP supply is not connected.")
             ok = False
         else:
             try:
@@ -16711,17 +16747,50 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _downsample_display_plot_points(self, points: list[MeasurementPoint]) -> list[MeasurementPoint]:
         if len(points) <= DISPLAY_PLOT_MAX_POINTS:
+            self._display_plot_old_cache_key = None
+            self._display_plot_old_cache = []
             return points
         recent_count = min(DISPLAY_PLOT_RECENT_POINTS, DISPLAY_PLOT_MAX_POINTS, len(points))
         old_budget = max(0, DISPLAY_PLOT_MAX_POINTS - recent_count)
         if old_budget <= 0:
+            self._display_plot_old_cache_key = None
+            self._display_plot_old_cache = []
             return points[-DISPLAY_PLOT_MAX_POINTS:]
         older_points = points[:-recent_count]
         recent_points = points[-recent_count:]
         if len(older_points) <= old_budget:
+            self._display_plot_old_cache_key = None
+            self._display_plot_old_cache = []
             return older_points + recent_points
-        sampled_older = self._stable_downsample_older_plot_points(older_points, old_budget)
+        sampled_older = self._cached_stable_downsample_older_plot_points(older_points, old_budget)
         return sampled_older + recent_points
+
+    def _cached_stable_downsample_older_plot_points(
+        self,
+        points: list[MeasurementPoint],
+        budget: int,
+    ) -> list[MeasurementPoint]:
+        if not points:
+            return []
+        first_elapsed_s = float(points[0].elapsed_s)
+        granularity = max(1, DISPLAY_PLOT_OLD_CACHE_GRANULARITY)
+        bucket = len(points) // granularity
+        boundary_index = min(len(points) - 1, max(0, (bucket * granularity) - 1))
+        boundary_point = points[boundary_index]
+        cache_key = (
+            budget,
+            bucket,
+            id(points[0]),
+            first_elapsed_s,
+            id(boundary_point),
+            float(boundary_point.elapsed_s),
+        )
+        if self._display_plot_old_cache_key == cache_key:
+            return list(self._display_plot_old_cache)
+        sampled = self._stable_downsample_older_plot_points(points, budget)
+        self._display_plot_old_cache_key = cache_key
+        self._display_plot_old_cache = list(sampled)
+        return sampled
 
     def _stable_downsample_older_plot_points(
         self,
@@ -17028,21 +17097,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_scale_interval.setValue(saved_scale_interval_ms)
         self.edit_scale_request.setText(scale_request)
         self.edit_scale_terminator.setText(scale_terminator)
-        supply_baud = self.settings.value("supply_baud", "9600", type=str)
-        if self.combo_supply_baud.findText(supply_baud) >= 0:
-            self.combo_supply_baud.setCurrentText(supply_baud)
         supply_profile = self.settings.value("supply_profile", "hmp4030", type=str)
         supply_profile_index = self.combo_supply_profile.findData(supply_profile)
         if supply_profile_index >= 0:
             self.combo_supply_profile.setCurrentIndex(supply_profile_index)
-        current_sweep_channel = int(self.settings.value("current_sweep_supply_channel", SUPPLY_PROFILES["hmp4030"]["channel_select"]))
+        supply_profile_defaults = SUPPLY_PROFILES.get(str(self.combo_supply_profile.currentData() or supply_profile), SUPPLY_PROFILES["hmp4030"])
+        supply_baud = self.settings.value(
+            "supply_baud",
+            str(int(supply_profile_defaults.get("baudrate", 9600) or 9600)),
+            type=str,
+        )
+        if self.combo_supply_baud.findText(supply_baud) >= 0:
+            self.combo_supply_baud.setCurrentText(supply_baud)
+        current_sweep_channel = int(
+            self.settings.value(
+                "current_sweep_supply_channel",
+                int(supply_profile_defaults.get("channel_select", SUPPLY_PROFILES["hmp4030"]["channel_select"]) or 0),
+            )
+        )
         current_sweep_channel_index = self.combo_current_sweep_supply_channel.findData(current_sweep_channel)
         if current_sweep_channel_index >= 0:
             self.combo_current_sweep_supply_channel.setCurrentIndex(current_sweep_channel_index)
         self.spin_supply_voltage_limit.setValue(
-            float(self.settings.value("supply_voltage_limit_v", SUPPLY_PROFILES["hmp4030"]["max_voltage"]))
+            float(self.settings.value("supply_voltage_limit_v", supply_profile_defaults.get("max_voltage", SUPPLY_PROFILES["hmp4030"]["max_voltage"])))
         )
-        self.spin_supply_manual_current.setValue(float(self.settings.value("supply_manual_current_mA", 1.0)))
+        self.spin_supply_manual_current.setValue(
+            float(self.settings.value("supply_manual_current_mA", supply_profile_defaults.get("start_current_mA", 1.0)))
+        )
         self.check_continuity_monitor.setChecked(
             bool(self.settings.value("continuity_monitor_enabled", True, type=bool))
         )
@@ -17050,7 +17131,12 @@ class MainWindow(QtWidgets.QMainWindow):
             float(self.settings.value("continuity_current_mA", CONTINUITY_CURRENT_DEFAULT_MA))
         )
         self.check_motor_supply_power.setChecked(bool(self.settings.value("motor_supply_enabled", False, type=bool)))
-        motor_channel = int(self.settings.value("motor_supply_channel", 2))
+        motor_channel = int(
+            self.settings.value(
+                "motor_supply_channel",
+                int(supply_profile_defaults.get("motor_supply_channel", 2) or 2),
+            )
+        )
         motor_channel_index = self.combo_motor_supply_channel.findData(motor_channel)
         if motor_channel_index >= 0:
             self.combo_motor_supply_channel.setCurrentIndex(motor_channel_index)

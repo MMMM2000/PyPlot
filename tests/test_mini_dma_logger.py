@@ -4146,6 +4146,7 @@ def test_timing_controls_are_opened_from_settings_menu(tmp_path: Path, qtbot) ->
         assert window.spin_log_interval.isHidden()
         assert window.spin_ui_interval.isHidden()
         assert window.spin_graph_interval.isHidden()
+        assert window.spin_graph_interval.value() == 500
         assert window.spin_scale_interval.isHidden()
         assert window.spin_tic_status_interval.isHidden()
         assert window.spin_tic_keepalive_interval.isHidden()
@@ -4228,6 +4229,88 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
         assert int(settings.value("current_sweep_supply_channel")) == 2
     finally:
         _close_test_window(window)
+
+
+def test_hmp4040_profile_defaults_to_ch4_current_and_ch3_motor(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        profile_index = window.combo_supply_profile.findData("hmp4040")
+        assert profile_index >= 0
+
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+
+        assert window.combo_current_sweep_supply_channel.currentData() == 4
+        assert window.combo_motor_supply_channel.currentData() == 3
+        assert window._build_supply_controller().selected_channel() == 4
+    finally:
+        _close_test_window(window)
+
+
+def test_hmp4040_restored_profile_uses_profile_channel_defaults(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("supply_profile", "hmp4040")
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+
+    try:
+        assert window.combo_supply_profile.currentData() == "hmp4040"
+        assert window.combo_supply_baud.currentText() == "115200"
+        assert window.combo_current_sweep_supply_channel.currentData() == 4
+        assert window.combo_motor_supply_channel.currentData() == 3
+        assert window.spin_supply_voltage_limit.value() == pytest.approx(32.05)
+    finally:
+        _close_test_window(window)
+
+
+def test_auto_detect_supply_port_identifies_hmp4040(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        monkeypatch.setattr(
+            mini_dma_mod.list_ports,
+            "comports",
+            lambda: [SimpleNamespace(device="COM7", description="Rohde supply")],
+        )
+
+        def _probe_supply(port_name: str):
+            assert port_name == "COM7"
+            return {
+                "port": "COM7",
+                "baudrate": 115200,
+                "profile_id": "hmp4040",
+                "idn_text": "Rohde&Schwarz,HMP4040,123456,HW1.0/SW3.0",
+            }
+
+        monkeypatch.setattr(window, "_probe_supply_candidate", _probe_supply)
+
+        window._refresh_supply_ports()
+        detected = window._auto_detect_supply_port()
+
+        assert detected is True
+        assert window.combo_supply_port.currentData() == "COM7"
+        assert window.combo_supply_baud.currentText() == "115200"
+        assert window.combo_supply_profile.currentData() == "hmp4040"
+        assert window.combo_current_sweep_supply_channel.currentData() == 4
+        assert window.combo_motor_supply_channel.currentData() == 3
+    finally:
+        _close_test_window(window)
+
+
+def test_supply_idn_parser_distinguishes_hmp4040_from_hmp4030() -> None:
+    assert (
+        mini_dma_mod._supply_profile_id_from_idn("Rohde&Schwarz,HMP4040,123456,HW1.0/SW3.0")
+        == "hmp4040"
+    )
+    assert (
+        mini_dma_mod._supply_profile_id_from_idn("HAMEG,HMP4030,022982747,HW50020001/SW2.50")
+        == "hmp4030"
+    )
 
 
 def test_load_target_ramp_waits_for_feedback_between_moves(tmp_path: Path, qtbot) -> None:
@@ -4547,6 +4630,72 @@ def test_display_plot_points_keep_older_downsample_stable_as_new_samples_arrive(
             float(index)
             for index in range(second_total - mini_dma_mod.DISPLAY_PLOT_RECENT_POINTS, second_total)
         ]
+    finally:
+        _close_test_window(window)
+
+
+def test_display_plot_points_reuses_cached_old_history_for_repeated_refreshes(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    calls: list[int] = []
+
+    def _point(elapsed_s: float) -> mini_dma_mod.MeasurementPoint:
+        return mini_dma_mod.MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc="2026-05-11 00:00:00",
+            raw_position_mm=elapsed_s,
+            position_mm=elapsed_s,
+            raw_load_g=elapsed_s,
+            load_g=elapsed_s,
+            preload_state=mini_dma_mod.PRELOAD_DISABLED,
+            strain_pct=None,
+            stress_mpa=None,
+            current_set_mA=None,
+            current_measured_mA=None,
+            voltage_V=None,
+            resistance_ohm=None,
+            power_W=None,
+            automation_phase="current",
+            automation_basis=None,
+            automation_target_value=None,
+            plateau_index=None,
+            plateau_label=None,
+        )
+
+    original_sampler = window._stable_downsample_older_plot_points
+
+    def _counting_sampler(points: list[mini_dma_mod.MeasurementPoint], budget: int):
+        calls.append(len(points))
+        return original_sampler(points, budget)
+
+    monkeypatch.setattr(window, "_stable_downsample_older_plot_points", _counting_sampler)
+
+    try:
+        total_points = mini_dma_mod.DISPLAY_PLOT_MAX_POINTS + 5000
+        window._session_points = [_point(float(index)) for index in range(total_points)]
+
+        first_display = window._display_plot_points()
+        second_display = window._display_plot_points()
+
+        assert len(calls) == 1
+        assert [point.elapsed_s for point in second_display] == [
+            point.elapsed_s for point in first_display
+        ]
+
+        window._session_points.append(_point(float(total_points)))
+        third_display = window._display_plot_points()
+
+        assert len(calls) == 1
+        assert third_display[-1].elapsed_s == pytest.approx(float(total_points))
+
+        window._session_points = [_point(float(index) + 0.25) for index in range(total_points)]
+        replacement_display = window._display_plot_points()
+
+        assert len(calls) == 2
+        assert replacement_display[0].elapsed_s == pytest.approx(0.25)
     finally:
         _close_test_window(window)
 

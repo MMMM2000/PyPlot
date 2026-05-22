@@ -8,7 +8,7 @@ The detailed control-law reference for ramp speed, target seeking, live stiffnes
 
 - Scale communication: G&G balance on serial, including live real-gram reads and zero-load reference capture.
 - Motion communication: Pololu Tic T500 through native PyUSB/libusb control transfers when available, with `ticcmd` as fallback. Position zero, jog, halt, keepalive, and recipe-driven position moves are routed through a persistent in-app dispatcher that coalesces stale target moves and lets closed-loop load/stress seeking continue from the last commanded target without waiting for a slower status poll.
-- Supply communication: HMP4030/Owon-style SCPI supply, including current setpoint, output control, and measured voltage/current.
+- Supply communication: HMP4030/HMP4040/Owon-style SCPI supply, including current setpoint, output control, and measured voltage/current.
 - `.pydpj` import: the Sample tab remembers the last Microwire Data Builder project, auto-imports diameter/current when the current naming fields match a row, and marks the diameter control red until the diameter came from the project. Manual diameter edits remain possible.
 - Stress calculation: stress is calculated from effective load and wire diameter.
 - Strain calculation: strain is calculated from displacement and `l0`, and can be delayed until the preload threshold is reached so slack take-up does not pollute strain zero.
@@ -55,7 +55,7 @@ Target experiment:
 - Near target, the controller should avoid immediate reversal if the target was crossed by less than the physical reversal band. With backlash and slow scale feedback, one small overshoot is better than repeatedly taking up backlash and hunting around the target.
 - A wire break during a current sweep should stop immediately when the supply is at voltage limit and measured current collapses near zero, then offer displacement recovery instead of treating the event as a normal voltage-limit unwind.
 - Log resistance, current, voltage, stress, strain, load, displacement, and phase/step labels.
-- For the HMP4030, treat current as 0.2 mA-resolution setpoints below 1 A; the software should time the ramp from elapsed time and keep supply readbacks paced so reads do not slow current updates.
+- For HMP4030/HMP4040 supplies, treat current as 0.2 mA-resolution setpoints below 1 A; the software should time the ramp from elapsed time and keep supply readbacks paced so reads do not slow current updates.
 
 The important control loop is "hold target stress, sweep current." The stage changes strain as needed while the supply changes current.
 
