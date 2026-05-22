@@ -11,5 +11,6 @@
 - Mini DMA pyqtgraph tiles now remove gridlines, disable SI-prefix axis scaling for fixed engineering units, and use thin line+symbol traces.
 - Mini DMA recovery/setup plots now reuse the same per-quantity colors as the dashboard, and current-hold resume no longer expands its resume band from noisy transformation data.
 - Mini DMA dashboard plot tiles now re-cap their maximum height after window resizes so the lower-right graph cannot spill below the visible panel.
+- Mini DMA dashboard plot tiles now use a stricter 240 px height cap so all four plots and the run log fit comfortably in a 1080p maximized window.
 - Mini DMA migrates saved 1000 ms graph refresh settings to the new 500 ms default so older local settings do not silently keep setup/recovery graphs slow.
 - Mini DMA load/stress seeking now waits for the filtered scale-control signal to change after a correction before repeating another load/stress move, reducing chatter from stale median/MAD windows.

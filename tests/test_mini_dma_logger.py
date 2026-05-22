@@ -1463,7 +1463,7 @@ def test_dashboard_plot_panel_keeps_right_edge_padding_and_compact_log(tmp_path:
             widget.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Policy.Ignored
             for widget in window._dashboard_plot_widgets
         )
-        assert all(widget.maximumHeight() <= 300 for widget in window._dashboard_plot_widgets)
+        assert all(widget.maximumHeight() <= 240 for widget in window._dashboard_plot_widgets)
     finally:
         _close_test_window(window)
 
@@ -1489,7 +1489,7 @@ def test_dashboard_plot_tile_height_is_capped_after_resize(tmp_path: Path, qtbot
         window._fit_dashboard_plot_tiles_to_panel()
 
         assert window._dashboard_plot_widgets
-        assert all(widget.maximumHeight() <= 300 for widget in window._dashboard_plot_widgets)
+        assert all(widget.maximumHeight() <= 240 for widget in window._dashboard_plot_widgets)
     finally:
         _close_test_window(window)
 

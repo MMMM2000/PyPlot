@@ -5743,7 +5743,7 @@ class MainWindow(QtWidgets.QMainWindow):
         spacing = int(grid.verticalSpacing()) if grid is not None else 8
         margins = plot_layout.contentsMargins() if plot_layout is not None else QtCore.QMargins()
         reserved_height = log_limit + spacing + margins.top() + margins.bottom() + 24
-        tile_height = max(90, min(300, (splitter_height - reserved_height) // 2))
+        tile_height = max(90, min(240, (splitter_height - reserved_height) // 2))
         for widget in plot_widgets:
             widget.setMaximumHeight(tile_height)
 
