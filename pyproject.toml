@@ -39,7 +39,18 @@ test = [
 launcher = "launcher:main"
 
 [tool.setuptools.packages.find]
-include = ["data_logging", "plotting", "emulators", "microwire_data_builder", "microwire_eda"]
+include = [
+    "data_logging",
+    "data_logging.*",
+    "plotting",
+    "plotting.*",
+    "emulators",
+    "emulators.*",
+    "microwire_data_builder",
+    "microwire_data_builder.*",
+    "microwire_eda",
+    "microwire_eda.*",
+]
 
 [tool.setuptools.package-data]
 plotting = ["default_config.json"]
