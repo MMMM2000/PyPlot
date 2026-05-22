@@ -27,6 +27,8 @@ from .ui_en import Ui_MainWindow
 from plotting.shared.utils import ensure_app_theme, format_annealing_title, show_plots, install_standard_menu
 from data_logging.naming_history import LineEditHistory
 from data_logging.data_logger.file_name_builder import composition_warning_state
+from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING
+from data_logging.shared_power_supply.protocol import BrokerJsonClient
 
 import numpy as np
 import matplotlib
@@ -132,6 +134,16 @@ SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
         "channel_select": 0,
         "reset_on_start": False,
         "voltage_first": True,
+    },
+    "shared_hmp_broker": {
+        "label": "Shared HMP broker",
+        "start_current_mA": 1,
+        "min_start_current_mA": 1,
+        "max_voltage": 30.0,
+        "channel_select": 1,
+        "reset_on_start": False,
+        "voltage_first": False,
+        "shared_broker": True,
     },
 }
 
@@ -276,6 +288,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.max_voltage = 30.0
         self.reset_on_start = True
         self.channel_select = 3
+        self._shared_broker_client: Any = None
+        self._shared_broker_lease_id: str | None = None
+        self._shared_broker_owner = "current_annealing_logger"
         self._init_supply_profile()
         self.max_voltage_action: str = MAX_VOLTAGE_DEFAULT_ACTION
         self._init_max_voltage_action()
@@ -424,6 +439,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.pushButton_refresh_ports.clicked.connect(self.populate_ports)
         if hasattr(self.ui, 'comboBox_supply'):
             self.ui.comboBox_supply.currentIndexChanged.connect(self.handle_supply_profile_changed)
+        if hasattr(self.ui, 'lineEdit_broker_host'):
+            self.ui.lineEdit_broker_host.textChanged.connect(self.handle_broker_settings_changed)
+        if hasattr(self.ui, 'spinBox_broker_port'):
+            self.ui.spinBox_broker_port.valueChanged.connect(self.handle_broker_settings_changed)
         if hasattr(self.ui, 'pushButton_browse_dir'):
             self.ui.pushButton_browse_dir.clicked.connect(self.handle_browse_log_dir)
         if hasattr(self.ui, 'pushButton_open_dir'):
@@ -1049,6 +1068,144 @@ class MainWindow(QtWidgets.QMainWindow):
             if w is not None:
                 w.setEnabled(enabled)
 
+    def _set_broker_controls_visible(self, visible: bool) -> None:
+        for name in ('label_broker_host', 'lineEdit_broker_host', 'spinBox_broker_port'):
+            widget = getattr(self.ui, name, None)
+            if widget is not None:
+                widget.setVisible(visible)
+
+    def _using_shared_broker(self) -> bool:
+        return str(getattr(self, "supply_profile_id", "")) == "shared_hmp_broker"
+
+    def _shared_broker_channel(self) -> int:
+        channel = int(getattr(self, "channel_select", 0) or 0)
+        if channel <= 0:
+            raise RuntimeError("Select a confirmed shared HMP broker channel first.")
+        return channel
+
+    def _shared_broker_port(self) -> int:
+        widget = getattr(self.ui, "spinBox_broker_port", None)
+        if isinstance(widget, QtWidgets.QSpinBox):
+            return int(widget.value())
+        return 8765
+
+    def _shared_broker_host(self) -> str:
+        widget = getattr(self.ui, "lineEdit_broker_host", None)
+        if isinstance(widget, QtWidgets.QLineEdit):
+            return widget.text().strip() or "127.0.0.1"
+        return "127.0.0.1"
+
+    def _get_shared_broker_client(self) -> Any:
+        if self._shared_broker_client is None:
+            self._shared_broker_client = BrokerJsonClient(
+                host=self._shared_broker_host(),
+                port=self._shared_broker_port(),
+            )
+        return self._shared_broker_client
+
+    def handle_broker_settings_changed(self) -> None:
+        self._shared_broker_client = None
+        try:
+            self.settings.setValue("shared_broker_host", self._shared_broker_host())
+            self.settings.setValue("shared_broker_port", self._shared_broker_port())
+        except Exception:
+            pass
+
+    def _connect_shared_broker_mode(self) -> None:
+        self.is_connected = True
+        self.ui.pushButton_connect_port.setText("Disconnect broker")
+        self._set_port_controls_enabled(False)
+        self.ui.frame_command_and_response.setEnabled(False)
+        self.ui.frame_process_settings.setEnabled(True)
+        self._show_connect_overlay(False)
+        self.handle_mode_changed(self.operation_mode)
+        self._update_mode_action_state()
+
+    def _disconnect_shared_broker_mode(self) -> None:
+        if self.process_running:
+            self.handle_toggle_process_clicked()
+        else:
+            self.send_safe_end_commands()
+        self.is_connected = False
+        self._shared_broker_client = None
+        self._shared_broker_lease_id = None
+        self.ui.pushButton_connect_port.setText("Connect to broker")
+        self._set_port_controls_enabled(True)
+        self.ui.frame_command_and_response.setEnabled(False)
+        self.ui.frame_process_settings.setEnabled(False)
+        self._show_connect_overlay(True)
+        self._update_mode_action_state()
+
+    def _ensure_shared_broker_lease(self) -> str:
+        if self._shared_broker_lease_id:
+            return self._shared_broker_lease_id
+        channel = self._shared_broker_channel()
+        lease = self._get_shared_broker_client().lease(
+            channel=channel,
+            owner=self._shared_broker_owner,
+            role=ROLE_CURRENT_ANNEALING,
+        )
+        lease_id = str(lease.get("lease_id") or "")
+        if not lease_id:
+            raise RuntimeError("Shared HMP broker did not return a lease id.")
+        self._shared_broker_lease_id = lease_id
+        return lease_id
+
+    def _initialize_shared_broker_output(self) -> None:
+        channel = self._shared_broker_channel()
+        lease_id = self._ensure_shared_broker_lease()
+        self._get_shared_broker_client().configure_channel(
+            channel=channel,
+            lease_id=lease_id,
+            voltage_v=self._voltage_limit_value(),
+            current_a=max(0.0, float(self.current_current_set)),
+            output_on=True,
+        )
+
+    def _read_shared_broker_sample(self) -> bool:
+        channel = self._shared_broker_channel()
+        readback = self._get_shared_broker_client().measure_channel(channel=channel)
+        voltage = readback.get("voltage_V")
+        current_mA = readback.get("current_mA")
+        if voltage is None or current_mA is None:
+            return False
+        self.current_voltage = float(voltage)
+        self.current_current_read = float(current_mA) / 1000.0
+        if abs(self.current_current_read) < 1e-12:
+            self._skip_current_sample = True
+            self.sample_ready = True
+            return True
+        self._skip_current_sample = False
+        self._zero_current_count = 0
+        self._contact_lost = False
+        self._nonzero_current_seen = True
+        self.current_resistance = self.current_voltage / self.current_current_read
+        self.serial_response = (
+            f"broker CH{channel}: {self.current_voltage:.6g} V, "
+            f"{float(current_mA):.6g} mA"
+        )
+        self.sample_ready = True
+        return True
+
+    def _set_shared_broker_current(self) -> None:
+        channel = self._shared_broker_channel()
+        lease_id = self._ensure_shared_broker_lease()
+        self._get_shared_broker_client().set_current(
+            channel=channel,
+            lease_id=lease_id,
+            current_mA=max(0.0, float(self.current_current_set) * 1000.0),
+        )
+
+    def _shutdown_shared_broker_output(self) -> None:
+        lease_id = self._shared_broker_lease_id
+        if not lease_id:
+            return
+        channel = self._shared_broker_channel()
+        client = self._get_shared_broker_client()
+        client.set_output(channel=channel, lease_id=lease_id, output_on=False)
+        client.release(channel=channel, lease_id=lease_id)
+        self._shared_broker_lease_id = None
+
     def _handle_loop_value_changed(self, value: int) -> None:
         try:
             loops = max(1, int(value))
@@ -1197,6 +1354,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # Connect signals and slots
     def handle_connect_port_clicked(self):
+        if self._using_shared_broker():
+            if not self.is_connected:
+                self._connect_shared_broker_mode()
+            else:
+                self._disconnect_shared_broker_mode()
+            return
         if not self.is_connected:
             # Use selected port name from dropdown if available
             port_name = ''
@@ -1759,6 +1922,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.settings.setValue("supply_profile", profile_id)
         except Exception:
             pass
+        shared = self._using_shared_broker()
+        self._set_broker_controls_visible(shared)
+        for name in (
+            "lineEdit_serial_command",
+            "pushButton_send_serial_command",
+            "comboBox_port",
+            "comboBox_baudrate",
+            "pushButton_refresh_ports",
+        ):
+            widget = getattr(self.ui, name, None)
+            if widget is not None:
+                widget.setEnabled(not shared)
+        if hasattr(self.ui, "lineEdit_broker_host"):
+            self.ui.lineEdit_broker_host.setText(
+                self.settings.value("shared_broker_host", "127.0.0.1", type=str)
+            )
+        if hasattr(self.ui, "spinBox_broker_port"):
+            self.ui.spinBox_broker_port.setValue(
+                int(self.settings.value("shared_broker_port", 8765, type=int))
+            )
+        if not shared:
+            self._shared_broker_lease_id = None
         self._refresh_command_profiles()
 
     def handle_supply_profile_changed(self) -> None:
@@ -2142,12 +2327,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.send_serial_command()
         
     def send_serial_command(self):
+        if self._using_shared_broker():
+            raise RuntimeError("Raw serial commands are disabled in shared HMP broker mode.")
         self.ser_mcu.write(bytes(self.serial_command, encoding='ascii'))
         self.ui.label_last_command.setText(self.serial_command)
 
     def _send_current_setpoint(self) -> None:
         """Apply the next current setpoint, refreshing voltage first when required."""
 
+        if self._using_shared_broker():
+            self._set_shared_broker_current()
+            self.ui.label_last_command.setText(
+                f"broker set CH{self._shared_broker_channel()} current "
+                f"{self.current_current_set * 1000.0:.1f} mA"
+            )
+            return
         if bool(getattr(self, "voltage_first", False)):
             limit_v = self._voltage_limit_value()
             self.serial_command = f"VOLT {limit_v:.1f}\n"
@@ -2550,22 +2744,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.f_out = None
         if self.operation_mode == 1:
             self.ui.pushButton_hold_current.setText("Hold current now!")
-        # Immediately ramp the supply to zero before running the shutdown sequence
-        try:
-            channel = int(getattr(self, "channel_select", 0) or 0)
-        except Exception:
-            channel = 0
-        try:
-            ramp_cmds = []
-            if channel > 0:
-                ramp_cmds.append(f"INST:NSEL {channel}\n")
-            ramp_cmds.extend(["CURR 0.000\n", "OUTP OFF\n"])
-            for cmd in ramp_cmds:
-                self.serial_command = cmd
-                self.send_serial_command()
-                self.simple_delay(100)
-        except Exception:
-            pass
+        if not self._using_shared_broker():
+            # Immediately ramp the supply to zero before running the shutdown sequence
+            try:
+                channel = int(getattr(self, "channel_select", 0) or 0)
+            except Exception:
+                channel = 0
+            try:
+                ramp_cmds = []
+                if channel > 0:
+                    ramp_cmds.append(f"INST:NSEL {channel}\n")
+                ramp_cmds.extend(["CURR 0.000\n", "OUTP OFF\n"])
+                for cmd in ramp_cmds:
+                    self.serial_command = cmd
+                    self.send_serial_command()
+                    self.simple_delay(100)
+            except Exception:
+                pass
         try:
             self.send_safe_end_commands()
         except Exception:
@@ -2600,28 +2795,33 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.operation_mode == 1:
             self.sample_ready = False
             self.expecting_voltage = True
-            self.serial_command = "MEAS:VOLT?\n"
-            # Use this command for the simulator; use the first for real hardware
-            #self.serial_command = "*RRAWO\n"
-            self.send_serial_command()
-            # wait boundedly, allow stopping
-            if not self.wait_for_sample(3000):
-                if not self.process_running:
+            if self._using_shared_broker():
+                if not self._read_shared_broker_sample():
+                    self.warn_no_response_and_abort()
                     return
-                self.warn_no_response_and_abort()
-                return
-                
-            self.sample_ready = False
-            self.expecting_voltage = False
-            self.serial_command = "MEAS:CURR?\n"
-            # Use this command for the simulator; use the first for real hardware
-            #self.serial_command = "*RRAWO\n"
-            self.send_serial_command()
-            if not self.wait_for_sample(3000):
-                if not self.process_running:
+            else:
+                self.serial_command = "MEAS:VOLT?\n"
+                # Use this command for the simulator; use the first for real hardware
+                #self.serial_command = "*RRAWO\n"
+                self.send_serial_command()
+                # wait boundedly, allow stopping
+                if not self.wait_for_sample(3000):
+                    if not self.process_running:
+                        return
+                    self.warn_no_response_and_abort()
                     return
-                self.warn_no_response_and_abort()
-                return
+
+                self.sample_ready = False
+                self.expecting_voltage = False
+                self.serial_command = "MEAS:CURR?\n"
+                # Use this command for the simulator; use the first for real hardware
+                #self.serial_command = "*RRAWO\n"
+                self.send_serial_command()
+                if not self.wait_for_sample(3000):
+                    if not self.process_running:
+                        return
+                    self.warn_no_response_and_abort()
+                    return
                 
             self.curr_value_x = self.current_current_read * 1000.0
             self.curr_value_y = self.current_resistance
@@ -2655,27 +2855,32 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self.operation_mode == 2:
             self.sample_ready = False
             self.expecting_voltage = True
-            self.serial_command = "MEAS:VOLT?\n"
-            # Use this command for the simulator; use the first for real hardware
-            #self.serial_command = "*RRAWO\n"
-            self.send_serial_command()
-            if not self.wait_for_sample(3000):
-                if not self.process_running:
+            if self._using_shared_broker():
+                if not self._read_shared_broker_sample():
+                    self.warn_no_response_and_abort()
                     return
-                self.warn_no_response_and_abort()
-                return
-                
-            self.sample_ready = False
-            self.expecting_voltage = False
-            self.serial_command = "MEAS:CURR?\n"
-            # Use this command for the simulator; use the first for real hardware
-            #self.serial_command = "*RRAWO\n"
-            self.send_serial_command()
-            if not self.wait_for_sample(3000):
-                if not self.process_running:
+            else:
+                self.serial_command = "MEAS:VOLT?\n"
+                # Use this command for the simulator; use the first for real hardware
+                #self.serial_command = "*RRAWO\n"
+                self.send_serial_command()
+                if not self.wait_for_sample(3000):
+                    if not self.process_running:
+                        return
+                    self.warn_no_response_and_abort()
                     return
-                self.warn_no_response_and_abort()
-                return
+
+                self.sample_ready = False
+                self.expecting_voltage = False
+                self.serial_command = "MEAS:CURR?\n"
+                # Use this command for the simulator; use the first for real hardware
+                #self.serial_command = "*RRAWO\n"
+                self.send_serial_command()
+                if not self.wait_for_sample(3000):
+                    if not self.process_running:
+                        return
+                    self.warn_no_response_and_abort()
+                    return
                 
             self.curr_value_x = self.current_current_read * 1000.0
             self.curr_value_y = self.current_resistance
@@ -2755,6 +2960,10 @@ class MainWindow(QtWidgets.QMainWindow):
         
 
     def send_safe_end_commands(self):
+        if self._using_shared_broker():
+            self._shutdown_shared_broker_output()
+            self.ui.label_last_command.setText("broker output off")
+            return
         for i in range(0, len(self.commands_safe_end)):
             self.serial_command = self.commands_safe_end[i]
             self.send_serial_command()
@@ -2762,6 +2971,13 @@ class MainWindow(QtWidgets.QMainWindow):
             
 
     def send_init_commands(self):
+        if self._using_shared_broker():
+            if self.process_running:
+                self._initialize_shared_broker_output()
+            self.ui.label_last_command.setText(
+                f"broker lease CH{self._shared_broker_channel()}"
+            )
+            return
         for cmd in self.commands_init:
             if not self.process_running:
                 break

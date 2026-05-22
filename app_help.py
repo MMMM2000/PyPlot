@@ -448,6 +448,9 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * Click **Start annealing process** to begin. Voltage and current readings are sampled
               continuously, resistance plots update live, and every sample is written to the chosen
               logfile.
+            * When the shared HMP broker is running, choose **Shared HMP broker** as the supply,
+              enter the broker host/port, and select the channel confirmed for current annealing.
+              Raw serial commands are disabled in this mode.
             * Contact-loss detection waits for the first non-zero current, applies a short grace
               period, and then requires several consecutive zero readings before halting. If the
               supply reaches 30 V a dialog lets you hold, reverse, or abort the ramp safely.
