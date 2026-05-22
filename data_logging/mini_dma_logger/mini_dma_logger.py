@@ -2730,6 +2730,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_pending_mm = 0.0
         self._manual_jog_timer_moves = 0
         self._manual_jog_click_suppressed = False
+        self._manual_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._last_motion_command_time_s: float | None = None
         self._last_motion_expected_complete_time_s: float | None = None
         self._last_commanded_speed_mm_s = 0.0
@@ -11470,6 +11471,35 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._jog_relative(direction, force_step=True)
 
+    def _show_manual_auto_connect_progress(self) -> None:
+        progress = QtWidgets.QProgressDialog("Connecting hardware...", "", 0, 0, self)
+        progress.setWindowTitle("Auto-connect hardware")
+        progress.setCancelButton(None)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.setValue(0)
+        progress.show()
+        self._manual_auto_connect_progress = progress
+        QtWidgets.QApplication.processEvents()
+
+    def _set_manual_auto_connect_progress(self, label: str, value: int, maximum: int) -> None:
+        progress = self._manual_auto_connect_progress
+        if progress is None:
+            return
+        progress.setRange(0, max(0, int(maximum)))
+        progress.setValue(max(0, min(int(value), max(0, int(maximum)))))
+        progress.setLabelText(label)
+        QtWidgets.QApplication.processEvents()
+
+    def _close_manual_auto_connect_progress(self) -> None:
+        progress = self._manual_auto_connect_progress
+        self._manual_auto_connect_progress = None
+        if progress is not None:
+            progress.close()
+            progress.deleteLater()
+
     def _auto_connect_manual_hardware(self) -> bool:
         if getattr(self, "_manual_auto_connect_active", False):
             return False
@@ -11477,28 +11507,40 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "button_manual_auto_connect"):
             self.button_manual_auto_connect.setEnabled(False)
             self.button_manual_auto_connect.setText("Auto-connecting...")
+        self._show_manual_auto_connect_progress()
         self._log("Manual hardware auto-connect started.")
         QtCore.QTimer.singleShot(0, self._run_manual_auto_connect_hardware)
         return True
 
     def _run_manual_auto_connect_hardware(self) -> None:
         connected = True
+        steps = 2 + (1 if self._motor_supply_enabled() else 0)
+        completed_steps = 0
         try:
+            self._set_manual_auto_connect_progress("Connecting motor controller...", completed_steps, steps)
             if not self._ensure_tic_ready_for_recipe():
                 connected = False
+            completed_steps += 1
+            self._set_manual_auto_connect_progress("Connecting scale...", completed_steps, steps)
             if self._scale_thread is None:
                 connected = self._ensure_scale_ready_for_recipe() and connected
+            completed_steps += 1
             if self._motor_supply_enabled():
+                self._set_manual_auto_connect_progress("Preparing motor power supply...", completed_steps, steps)
                 if not self._ensure_supply_ready_for_recipe():
                     connected = False
                 elif not self._enable_motor_supply_output():
                     connected = False
+                completed_steps += 1
             if connected:
+                self._set_manual_auto_connect_progress("Hardware auto-connect completed.", steps, steps)
                 self._log("Manual hardware auto-connect completed.")
             else:
+                self._set_manual_auto_connect_progress("Hardware auto-connect needs attention.", completed_steps, steps)
                 self._log("Manual hardware auto-connect did not complete; check the hardware status cards.")
             self._refresh_live_labels()
         finally:
+            self._close_manual_auto_connect_progress()
             self._manual_auto_connect_active = False
             if hasattr(self, "button_manual_auto_connect"):
                 self.button_manual_auto_connect.setEnabled(True)

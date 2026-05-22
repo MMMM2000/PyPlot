@@ -2393,6 +2393,31 @@ def test_manual_auto_connect_button_disables_while_queued(tmp_path: Path, qtbot)
         _close_test_window(window)
 
 
+def test_manual_auto_connect_shows_progress_dialog_while_queued(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+
+    try:
+        button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
+
+        assert button is not None
+
+        button.clicked.emit()
+
+        progress = window._manual_auto_connect_progress
+        assert progress is not None
+        assert progress.isVisible()
+        assert progress.minimum() == 0
+        assert progress.maximum() == 0
+        assert "Connecting hardware" in progress.labelText()
+
+        qtbot.waitUntil(lambda: button.isEnabled(), timeout=1000)
+        assert window._manual_auto_connect_progress is None
+    finally:
+        _close_test_window(window)
+
+
 def test_microwire_entry_does_not_insert_slash_before_fourth_digit(qtbot) -> None:
     edit = mini_dma_mod.MicrowireLineEdit()
     qtbot.addWidget(edit)
