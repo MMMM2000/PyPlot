@@ -5073,11 +5073,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         plot_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical, plot_panel)
         plot_splitter.setChildrenCollapsible(False)
+        self._dashboard_plot_splitter = plot_splitter
         plot_layout.addWidget(plot_splitter, stretch=1)
 
         plot_canvas_container = QtWidgets.QWidget(plot_splitter)
         plot_canvas_layout = QtWidgets.QVBoxLayout(plot_canvas_container)
-        plot_canvas_layout.setContentsMargins(0, 0, 0, 0)
+        self._dashboard_plot_canvas_layout = plot_canvas_layout
+        plot_canvas_layout.setContentsMargins(0, 0, 12, 0)
         plot_canvas_layout.setSpacing(6)
         self._dashboard_plot_grid = QtWidgets.QGridLayout()
         self._dashboard_plot_grid.setContentsMargins(0, 0, 0, 0)
@@ -5107,6 +5109,7 @@ class MainWindow(QtWidgets.QMainWindow):
             plot_canvas_layout.addWidget(QtWidgets.QLabel("pyqtgraph is not available; live plots are disabled.", plot_canvas_container))
 
         log_container = QtWidgets.QWidget(plot_splitter)
+        log_container.setMaximumHeight(170)
         log_layout = QtWidgets.QVBoxLayout(log_container)
         log_layout.setContentsMargins(0, 0, 0, 0)
         log_layout.setSpacing(4)
@@ -5117,14 +5120,16 @@ class MainWindow(QtWidgets.QMainWindow):
         log_layout.addWidget(log_label)
         self.log_output = QtWidgets.QPlainTextEdit(log_container)
         self.log_output.setReadOnly(True)
+        self.log_output.setMaximumHeight(140)
         self.log_output.setMaximumBlockCount(1000)
         self.log_output.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.log_output.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.log_output.setPlaceholderText("Mini DMA log output")
         log_layout.addWidget(self.log_output, stretch=1)
         self.statusBar().hide()
-        plot_splitter.setStretchFactor(0, 5)
-        plot_splitter.setStretchFactor(1, 2)
+        plot_splitter.setStretchFactor(0, 8)
+        plot_splitter.setStretchFactor(1, 1)
+        plot_splitter.setSizes([900, 140])
         splitter.addWidget(plot_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -14456,6 +14461,8 @@ class MainWindow(QtWidgets.QMainWindow):
             x_label=x_label,
             left_label=left_label,
             right_label=right_label,
+            left_color=left_color,
+            right_color=right_color,
         )
         return bundle
 
@@ -14467,6 +14474,8 @@ class MainWindow(QtWidgets.QMainWindow):
         x_label: str,
         left_label: str,
         right_label: str | None,
+        left_color: str = "#38bdf8",
+        right_color: str = "#f59e0b",
     ) -> None:
         if pg is None:
             return
@@ -14476,20 +14485,33 @@ class MainWindow(QtWidgets.QMainWindow):
         bundle.widget.setBackground(background_color)
         bundle.plot_item.setTitle(title, color=text_color.name(), size="9pt")
         bundle.plot_item.setLabel("bottom", x_label, color=text_color.name())
-        bundle.plot_item.setLabel("left", left_label, color=text_color.name())
-        for axis_name in ("bottom", "left", "right"):
-            axis = bundle.plot_item.getAxis(axis_name)
-            axis.setPen(pg.mkPen(text_color))
-            axis.setTextPen(pg.mkPen(text_color))
-            axis.setGrid(80)
+        bundle.plot_item.setLabel("left", left_label, color=left_color)
+        bottom_axis = bundle.plot_item.getAxis("bottom")
+        bottom_axis.setPen(pg.mkPen(text_color, width=0.8))
+        bottom_axis.setTextPen(pg.mkPen(text_color))
+        bottom_axis.setTickPen(pg.mkPen(text_color, width=0.6))
+        bottom_axis.setGrid(30)
+        bottom_axis.setStyle(maxTickLevel=0, maxTextLevel=0)
+        left_axis = bundle.plot_item.getAxis("left")
+        left_axis.setPen(pg.mkPen(left_color, width=0.9))
+        left_axis.setTextPen(pg.mkPen(left_color))
+        left_axis.setTickPen(pg.mkPen(left_color, width=0.7))
+        left_axis.setGrid(30)
+        left_axis.setStyle(maxTickLevel=0, maxTextLevel=0)
+        right_axis = bundle.plot_item.getAxis("right")
+        right_axis.setPen(pg.mkPen(right_color, width=0.9))
+        right_axis.setTextPen(pg.mkPen(right_color))
+        right_axis.setTickPen(pg.mkPen(right_color, width=0.7))
+        right_axis.setGrid(30)
+        right_axis.setStyle(maxTickLevel=0, maxTextLevel=0)
         bundle.plot_item.getAxis("bottom").setStyle(tickTextOffset=4)
         bundle.plot_item.getAxis("left").setStyle(tickTextOffset=4)
-        bundle.plot_item.showGrid(x=True, y=True, alpha=0.28)
+        bundle.plot_item.showGrid(x=True, y=True, alpha=0.14)
         if right_label is None:
             bundle.plot_item.hideAxis("right")
         else:
             bundle.plot_item.showAxis("right")
-            bundle.plot_item.setLabel("right", right_label, color=text_color.name())
+            bundle.plot_item.setLabel("right", right_label, color=right_color)
 
     def _set_pyqtgraph_curve_data(
         self,
@@ -14530,6 +14552,8 @@ class MainWindow(QtWidgets.QMainWindow):
             x_label="Setup time (s)",
             left_label="Stress (MPa)",
             right_label="Load (g)",
+            left_color="#f87171",
+            right_color="#38bdf8",
         )
         self._style_pyqtgraph_plot(
             self._length_setup_displacement_plot,
@@ -14537,6 +14561,7 @@ class MainWindow(QtWidgets.QMainWindow):
             x_label="Setup time (s)",
             left_label="Displacement (mm)",
             right_label=None,
+            left_color="#a78bfa",
         )
         x_values = [point.elapsed_s for point in points]
         stress_values = [
@@ -14571,6 +14596,8 @@ class MainWindow(QtWidgets.QMainWindow):
             x_label="Recovery time (s)",
             left_label="Applied tensile load (g)",
             right_label="Tensile displacement (mm)",
+            left_color="#38bdf8",
+            right_color="#f59e0b",
         )
         points = self._recovery_points
         x_values = [point.elapsed_s for point in points]
@@ -16717,6 +16744,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_label=x_channel.label,
                 left_label=y_left_channel.label,
                 right_label=y_right_channel.label if y_right_channel is not None else None,
+                left_color=y_left_channel.color,
+                right_color=y_right_channel.color if y_right_channel is not None else "#f59e0b",
             )
             bundle.left_curve.setPen(pg.mkPen(y_left_channel.color, width=1.35))
             left_x, left_y = self._plot_xy_values(display_points, x_channel, y_left_channel)

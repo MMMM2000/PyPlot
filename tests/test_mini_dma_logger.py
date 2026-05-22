@@ -1449,6 +1449,46 @@ def test_dashboard_plot_updates_pyqtgraph_left_and_right_curves(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_dashboard_plot_panel_keeps_right_edge_padding_and_compact_log(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        margins = window._dashboard_plot_canvas_layout.contentsMargins()
+        assert margins.right() >= 10
+        assert window.log_output.maximumHeight() <= 150
+        assert window._dashboard_plot_splitter.childrenCollapsible() is False
+    finally:
+        _close_test_window(window)
+
+
+def test_dashboard_pyqtgraph_axes_match_curve_colors_and_use_major_grid_only(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._plot_tiles[0].y_right_combo.setCurrentIndex(
+            window._plot_tiles[0].y_right_combo.findData("position_mm")
+        )
+        window._refresh_plots()
+
+        bundle = window._dashboard_plot_bundles[0]
+        left_axis = bundle.plot_item.getAxis("left")
+        right_axis = bundle.plot_item.getAxis("right")
+
+        assert left_axis.textPen().color().name().lower() == "#38bdf8"
+        assert left_axis.pen().color().name().lower() == "#38bdf8"
+        assert right_axis.textPen().color().name().lower() == "#60a5fa"
+        assert right_axis.pen().color().name().lower() == "#60a5fa"
+        assert left_axis.style["maxTickLevel"] == 0
+        assert right_axis.style["maxTickLevel"] == 0
+        assert left_axis.grid <= 35
+        assert right_axis.grid <= 35
+    finally:
+        _close_test_window(window)
+
+
 def test_apply_length_setup_uses_plateau_zero_position_after_return_fallback(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_positive_motion_is_tension.setChecked(False)
