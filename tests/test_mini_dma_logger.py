@@ -2357,6 +2357,8 @@ def test_manual_auto_connect_button_runs_manual_preflight(tmp_path: Path, qtbot)
     called: list[str] = []
     window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
 
     try:
         button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
@@ -2365,8 +2367,8 @@ def test_manual_auto_connect_button_runs_manual_preflight(tmp_path: Path, qtbot)
 
         button.clicked.emit()
 
-        qtbot.waitUntil(lambda: called == ["tic", "scale"], timeout=1000)
-        assert called == ["tic", "scale"]
+        qtbot.waitUntil(lambda: called == ["tic", "scale", "supply", "current"], timeout=1000)
+        assert called == ["tic", "scale", "supply", "current"]
         assert button.isEnabled()
         assert button.text() == "Auto-connect hardware"
     finally:
@@ -2378,6 +2380,8 @@ def test_manual_auto_connect_button_disables_while_queued(tmp_path: Path, qtbot)
     called: list[str] = []
     window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
 
     try:
         button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
@@ -2397,6 +2401,8 @@ def test_manual_auto_connect_shows_progress_dialog_while_queued(tmp_path: Path, 
     window = _build_window(tmp_path, qtbot)
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: True  # type: ignore[method-assign]
 
     try:
         button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
@@ -2414,6 +2420,54 @@ def test_manual_auto_connect_shows_progress_dialog_while_queued(tmp_path: Path, 
 
         qtbot.waitUntil(lambda: button.isEnabled(), timeout=1000)
         assert window._manual_auto_connect_progress is None
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_auto_connect_prepares_current_sweep_channel_without_enabling_output(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    configured: list[tuple[int, float, float, bool]] = []
+    selected: list[int | None] = []
+
+    class _FakeSupply:
+        def is_connected(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            pass
+
+        def configure_channel(self, *, channel: int, voltage_v: float, current_a: float, output_on: bool) -> None:
+            configured.append((channel, voltage_v, current_a, output_on))
+
+        def select_channel(self, channel: int | None = None) -> None:
+            selected.append(channel)
+
+    window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+    window.combo_supply_profile.setCurrentIndex(window.combo_supply_profile.findData("hmp4040"))
+    window.combo_current_sweep_supply_channel.setCurrentIndex(
+        window.combo_current_sweep_supply_channel.findData(4)
+    )
+    window.spin_supply_voltage_limit.setValue(32.05)
+    window.spin_supply_manual_current.setValue(1.0)
+
+    try:
+        button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
+
+        assert button is not None
+
+        button.clicked.emit()
+
+        qtbot.waitUntil(lambda: button.isEnabled(), timeout=1000)
+        assert configured == [(4, pytest.approx(32.05), pytest.approx(0.001), False)]
+        assert selected[-1] is None
+        assert window._supply_output_enabled is False
+        assert window._supply_last_setpoint_mA == pytest.approx(1.0)
     finally:
         _close_test_window(window)
 

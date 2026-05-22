@@ -6130,6 +6130,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(f"Motor supply CH{channel} disabled.")
         return True
 
+    def _prepare_current_sweep_supply_channel(self) -> bool:
+        if self._supply_controller is None or not self._supply_controller.is_connected():
+            return False
+        channel = self._current_sweep_supply_channel()
+        if channel is None:
+            return True
+        current_mA = float(self.spin_supply_manual_current.value())
+        try:
+            self._supply_controller.configure_channel(
+                channel=channel,
+                voltage_v=float(self.spin_supply_voltage_limit.value()),
+                current_a=max(0.0, current_mA) / 1000.0,
+                output_on=False,
+            )
+            self._supply_controller.select_channel()
+        except Exception as exc:
+            self._log(f"Current-sweep channel setup failed: {exc}")
+            return False
+        self._supply_output_enabled = False
+        self._supply_last_setpoint_mA = current_mA
+        self._heating_program_current_mA = current_mA
+        self._log(
+            f"Current-sweep CH{channel} prepared at "
+            f"{_format_compact_unit(self.spin_supply_voltage_limit.value(), 'V', decimals=2)} / "
+            f"{_format_compact_unit(current_mA, 'mA', decimals=2)} with output off."
+        )
+        return True
+
     def _refresh_supply_snapshot(self, force: bool = False) -> dict[str, float | None]:
         if self._supply_controller is None or not self._supply_controller.is_connected():
             self._refresh_supply_live_label()
@@ -11514,7 +11542,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _run_manual_auto_connect_hardware(self) -> None:
         connected = True
-        steps = 2 + (1 if self._motor_supply_enabled() else 0)
+        steps = 3 + (1 if self._motor_supply_enabled() else 0)
         completed_steps = 0
         try:
             self._set_manual_auto_connect_progress("Connecting motor controller...", completed_steps, steps)
@@ -11524,6 +11552,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_manual_auto_connect_progress("Connecting scale...", completed_steps, steps)
             if self._scale_thread is None:
                 connected = self._ensure_scale_ready_for_recipe() and connected
+            completed_steps += 1
+            self._set_manual_auto_connect_progress("Preparing current-sweep supply channel...", completed_steps, steps)
+            if not self._ensure_supply_ready_for_recipe():
+                connected = False
+            elif not self._prepare_current_sweep_supply_channel():
+                connected = False
             completed_steps += 1
             if self._motor_supply_enabled():
                 self._set_manual_auto_connect_progress("Preparing motor power supply...", completed_steps, steps)
