@@ -363,6 +363,7 @@ SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_MM = 0.20
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES = 3
+SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S = 1.0
 SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA = 1.0
@@ -2548,6 +2549,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_value_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_time_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_filtered_value_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_out_of_band_since_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_out_of_band_sign_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_scale_timestamp_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_scale_timestamp_by_clock: dict[tuple[str, int], float] = {}
         self._seek_post_move_sample_count_by_key: dict[tuple[str, int, float], int] = {}
@@ -9401,6 +9404,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_value_by_key.pop(seek_key, None)
         self._seek_last_time_by_key.pop(seek_key, None)
         self._seek_last_filtered_value_by_key.pop(seek_key, None)
+        self._seek_out_of_band_since_by_key.pop(seek_key, None)
+        self._seek_out_of_band_sign_by_key.pop(seek_key, None)
         self._seek_last_scale_timestamp_by_key.pop(seek_key, None)
         self._seek_post_move_sample_count_by_key.pop(seek_key, None)
         self._seek_last_effective_position_by_key.pop(seek_key, None)
@@ -9424,6 +9429,43 @@ class MainWindow(QtWidgets.QMainWindow):
             1e-9,
         )
         return change > required_change
+
+    def _current_hold_error_is_persistent(
+        self,
+        seek_key: tuple[str, int, float],
+        basis: str,
+        error_value: float,
+        effective_tolerance: float,
+        filtered_signal: ScaleControlSignal | None,
+    ) -> bool:
+        if (
+            not self._is_current_sweep_mode(self._automation_name)
+            or self._automation_phase != "current_hold"
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+        ):
+            return True
+        if filtered_signal is None:
+            return False
+        out_of_band_floor = self._current_sweep_hold_min_band_for_basis(
+            basis,
+            self._current_sweep_hold_min_pause_stress_mpa(),
+        )
+        if abs(float(error_value)) <= max(abs(float(effective_tolerance)), out_of_band_floor):
+            self._seek_out_of_band_since_by_key.pop(seek_key, None)
+            self._seek_out_of_band_sign_by_key.pop(seek_key, None)
+            return True
+        sign = math.copysign(1.0, float(error_value))
+        previous_sign = self._seek_out_of_band_sign_by_key.get(seek_key)
+        timestamp_s = float(filtered_signal.timestamp_s)
+        if previous_sign != sign:
+            self._seek_out_of_band_sign_by_key[seek_key] = sign
+            self._seek_out_of_band_since_by_key[seek_key] = timestamp_s
+            return False
+        since_s = self._seek_out_of_band_since_by_key.get(seek_key)
+        if since_s is None:
+            self._seek_out_of_band_since_by_key[seek_key] = timestamp_s
+            return False
+        return timestamp_s - float(since_s) >= SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S
 
     def _scale_control_signal_for_basis(self, basis: str, *, window_s: float | None = None) -> ScaleControlSignal | None:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
@@ -10086,9 +10128,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         self._set_run_zero_load_scale_reference(float(plateau_raw_g), reason="setup zero-load plateau")
-        self._setup_zero_position_mm = plateau_first_position_mm
+        self._setup_zero_position_mm = float(self._current_position_mm)
         self._setup_zero_fallback_raw_g = float(plateau_raw_g)
-        self._setup_zero_fallback_return_position_mm = plateau_first_position_mm
+        self._setup_zero_fallback_return_position_mm = None
         self._setup_zero_fallback_reason = "zero_load_plateau"
         self._log(
             "Detected zero-load plateau at "
@@ -10097,19 +10139,9 @@ class MainWindow(QtWidgets.QMainWindow):
             f"over {_format_duration(elapsed_s)} "
             f"(threshold {_format_compact_unit(min_travel_mm, 'mm')} and "
             f"{_format_duration(SETUP_ZERO_FALLBACK_MIN_TIME_S)}); "
-            "using it as this run's zero-load reference and returning to "
-            f"{_format_compact_unit(plateau_first_position_mm, 'mm')} for l0."
+            "using it as this run's zero-load reference and accepting the current "
+            f"{_format_compact_unit(float(self._current_position_mm), 'mm')} position for l0."
         )
-        if not self._move_to_position_mm(
-            plateau_first_position_mm,
-            speed_mm_s=self._setup_return_speed_for_distance_mm_s(
-                abs(float(self._current_position_mm) - plateau_first_position_mm)
-            ),
-        ):
-            if abs(float(self._current_position_mm) - plateau_first_position_mm) <= self._motor_step_mm():
-                self._setup_zero_fallback_return_position_mm = None
-                return True
-            return False
         return True
 
     def _end_zero_fallback_is_pending(self) -> bool:
@@ -10190,7 +10222,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._set_run_zero_load_scale_reference(float(plateau_raw_g), reason="zero-load plateau return")
         self._end_zero_fallback_raw_g = float(plateau_raw_g)
-        self._end_zero_fallback_return_position_mm = plateau_first_position_mm
+        self._end_zero_fallback_return_position_mm = None
+        self._end_zero_fallback_armed = False
         self._log(
             "Detected zero-load plateau at "
             f"{float(plateau_raw_g):.5f} g after "
@@ -10198,18 +10231,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f"over {_format_duration(elapsed_s)} "
             f"(threshold {_format_compact_unit(min_travel_mm, 'mm')} and "
             f"{_format_duration(SETUP_ZERO_FALLBACK_MIN_TIME_S)}); "
-            "using it as the corrected zero-load reference and returning to "
-            f"{_format_compact_unit(plateau_first_position_mm, 'mm')}."
+            "using it as the corrected zero-load reference and accepting the current position."
         )
-        if not self._move_to_position_mm(
-            plateau_first_position_mm,
-            speed_mm_s=self._motion_speed_for_current_context(manual_jog=False),
-        ):
-            if abs(float(self._current_position_mm) - plateau_first_position_mm) <= self._motor_step_mm():
-                self._end_zero_fallback_return_position_mm = None
-                self._end_zero_fallback_armed = False
-                return True
-            return False
         return True
 
     def _seek_distribution_target(self, basis: str, target_value: float, tolerance: float) -> bool:
@@ -10394,6 +10417,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
                 result="waiting",
                 reason="new_scale_sample",
+            )
+            return False
+        if not self._current_hold_error_is_persistent(
+            seek_key,
+            basis,
+            delta_value,
+            effective_tolerance,
+            filtered_signal,
+        ):
+            self._log_waiting_for_feedback(
+                "Waiting for the current-hold load/stress error to persist before correcting."
+            )
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=effective_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                result="waiting",
+                reason="hold_error_not_persistent",
             )
             return False
         if (
@@ -12349,6 +12394,35 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return self._session_raw_scale_count / elapsed_s
 
+    def _source_control_metadata(self) -> dict[str, Any]:
+        repo_root = Path(__file__).resolve().parents[2]
+
+        def _git_text(*args: str) -> str | None:
+            try:
+                completed = subprocess.run(
+                    ["git", "-C", str(repo_root), *args],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                    check=False,
+                )
+            except Exception:
+                return None
+            if completed.returncode != 0:
+                return None
+            text = completed.stdout.strip()
+            return text or None
+
+        status = _git_text("status", "--short")
+        return {
+            "repo_root": str(repo_root),
+            "branch": _git_text("branch", "--show-current"),
+            "commit": _git_text("rev-parse", "HEAD"),
+            "is_dirty": bool(status),
+            "status_short": status or "",
+            "remote_url": _git_text("config", "--get", "remote.origin.url"),
+        }
+
     def _session_metadata(self) -> dict[str, Any]:
         calibration_metadata = {
             "baseline_s": float(self.spin_calibration_baseline_s.value()),
@@ -12463,6 +12537,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
             "recipe_summary": self._last_recipe_summary,
             "recipe_estimated_points": int(self._recipe_estimated_points),
+            "source_control": self._source_control_metadata(),
             "hsw_distribution": {
                 "basis": self._distribution_basis(),
                 "start": float(self.spin_distribution_start.value()),
@@ -14205,6 +14280,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_value_by_key.clear()
         self._seek_last_time_by_key.clear()
         self._seek_last_filtered_value_by_key.clear()
+        self._seek_out_of_band_since_by_key.clear()
+        self._seek_out_of_band_sign_by_key.clear()
         self._seek_last_scale_timestamp_by_key.clear()
         self._seek_last_scale_timestamp_by_clock.clear()
         self._seek_last_effective_position_by_key.clear()
@@ -14932,6 +15009,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_value_by_key.clear()
         self._seek_last_time_by_key.clear()
         self._seek_last_filtered_value_by_key.clear()
+        self._seek_out_of_band_since_by_key.clear()
+        self._seek_out_of_band_sign_by_key.clear()
         self._seek_last_scale_timestamp_by_key.clear()
         self._seek_last_scale_timestamp_by_clock.clear()
         self._seek_last_effective_position_by_key.clear()

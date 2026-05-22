@@ -930,7 +930,7 @@ def test_starting_length_prompt_updates_stiffness_prior_length(
         _close_test_window(window)
 
 
-def test_setup_zero_plateau_fallback_updates_reference_and_returns_to_first_plateau_position(
+def test_setup_zero_plateau_fallback_updates_reference_and_accepts_current_position(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -974,9 +974,9 @@ def test_setup_zero_plateau_fallback_updates_reference_and_returns_to_first_plat
         assert reached is False
         assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
         assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
-        assert targets == [pytest.approx(7.000)]
-        assert window._setup_zero_fallback_return_position_mm == pytest.approx(7.000)
-        assert window._setup_zero_position_mm == pytest.approx(7.000)
+        assert targets == []
+        assert window._setup_zero_fallback_return_position_mm is None
+        assert window._setup_zero_position_mm == pytest.approx(7.072)
         assert "zero-load plateau" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -1020,7 +1020,7 @@ def test_setup_zero_plateau_fallback_accepts_short_stable_zero_travel(
 
         assert reached is False
         assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
-        assert targets == [pytest.approx(7.000)]
+        assert targets == []
     finally:
         _close_test_window(window)
 
@@ -1107,7 +1107,7 @@ def test_setup_zero_plateau_fallback_scales_travel_with_wire_length(
 
         assert reached is False
         assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
-        assert targets == [pytest.approx(7.000)]
+        assert targets == []
         assert "zero-load plateau" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -1307,8 +1307,9 @@ def test_current_sweep_final_zero_plateau_fallback_accepts_near_zero_load(
         assert reached is False
         assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
         assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
-        assert targets == [pytest.approx(7.000)]
-        assert window._end_zero_fallback_return_position_mm == pytest.approx(7.000)
+        assert targets == []
+        assert window._end_zero_fallback_return_position_mm is None
+        assert window._end_zero_fallback_armed is False
         assert "zero-load plateau" in window.log_output.toPlainText()
     finally:
         window._session_active = False
@@ -1364,8 +1365,9 @@ def test_recovery_load_zero_plateau_fallback_accepts_near_zero_load(
         assert reached is False
         assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
         assert window._zero_load_scale_reference_g() == pytest.approx(21.17, abs=0.001)
-        assert targets == [pytest.approx(7.000)]
-        assert window._end_zero_fallback_return_position_mm == pytest.approx(7.000)
+        assert targets == []
+        assert window._end_zero_fallback_return_position_mm is None
+        assert window._end_zero_fallback_armed is False
     finally:
         _close_test_window(window)
 
@@ -7884,7 +7886,7 @@ def test_setup_zero_plateau_fallback_runs_before_target_acceptance(tmp_path: Pat
         assert reached is False
         assert window.spin_zero_load_scale_g.value() == pytest.approx(21.17)
         assert window._zero_load_scale_reference_g() == pytest.approx(21.1625)
-        assert moves == [pytest.approx(37.65)]
+        assert moves == []
         assert "Detected zero-load plateau" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -7937,7 +7939,8 @@ def test_recovery_zero_plateau_fallback_runs_before_target_acceptance(tmp_path: 
         assert reached is False
         assert window.spin_zero_load_scale_g.value() == pytest.approx(21.17)
         assert window._zero_load_scale_reference_g() == pytest.approx(21.1625)
-        assert moves == [pytest.approx(37.65)]
+        assert moves == []
+        assert window._end_zero_fallback_armed is False
     finally:
         _close_test_window(window)
 
@@ -8524,10 +8527,24 @@ def test_current_sweep_near_target_reversal_does_not_send_backlash_only_move(
     window._last_move_target_mm = 6.94
     window._last_effective_move_target_mm = 6.94
     window._latest_scale_timestamp = time.time()
-    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(
+    load_g = mini_dma_mod.load_g_from_stress_mpa(
         54.0,
         window.spin_diameter.value(),
     )
+    assert load_g is not None
+    for index in range(5):
+        timestamp_s = time.time() - 1.2 + index * 0.3
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+    window._seek_out_of_band_sign_by_key[seek_key] = -1.0
+    window._seek_out_of_band_since_by_key[seek_key] = time.time() - 2.0
+    window._seek_pending_reversal_by_key[seek_key] = (-1.0, window._latest_scale_timestamp - 1.0)
 
     try:
         reached = window._seek_distribution_target(
@@ -8660,15 +8677,25 @@ def test_current_sweep_hold_uses_gated_small_stress_correction(
     window._seek_last_value_by_key[seek_key] = 38.0
     window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.3
     window._seek_last_effective_position_by_key[seek_key] = 6.7
+    window._seek_out_of_band_sign_by_key[seek_key] = 1.0
+    window._seek_out_of_band_since_by_key[seek_key] = time.time() - 2.0
     window._current_position_mm = 6.7
     window._effective_position_mm = 6.7
     window._last_move_target_mm = 6.7
     window._last_effective_move_target_mm = 6.7
-    window._latest_scale_timestamp = time.time()
-    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(
-        38.0,
-        window.spin_diameter.value(),
-    )
+    now_s = time.time()
+    load_g = mini_dma_mod.load_g_from_stress_mpa(38.0, window.spin_diameter.value())
+    assert load_g is not None
+    for index in range(5):
+        timestamp_s = now_s - 1.2 + index * 0.3
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
 
     try:
         assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_STRESS_MPA) is False
@@ -8724,6 +8751,9 @@ def test_current_sweep_hold_waits_for_filtered_signal_to_change_before_repeating
         target_value=50.0,
         plateau_index=1,
     )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_out_of_band_sign_by_key[seek_key] = 1.0
+    window._seek_out_of_band_since_by_key[seek_key] = now_s - 2.0
     for index in range(5):
         load_g = mini_dma_mod.load_g_from_stress_mpa(35.0, window.spin_diameter.value())
         assert load_g is not None
@@ -8767,6 +8797,60 @@ def test_current_sweep_hold_waits_for_filtered_signal_to_change_before_repeating
         assert reached is False
         assert len(moves) == 1
         assert "filtered control signal" in window.log_output.toPlainText().lower()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_requires_persistent_out_of_band_error_before_correction(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.time()
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        500.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    load_g = mini_dma_mod.load_g_from_stress_mpa(35.0, window.spin_diameter.value())
+    assert load_g is not None
+    for index in range(5):
+        timestamp_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert moves == []
+        assert "persist" in window.log_output.toPlainText().lower()
     finally:
         _close_test_window(window)
 
@@ -10368,6 +10452,45 @@ def test_session_metadata_keeps_original_created_timestamp(
         assert first_payload["created_utc"] == second_payload["created_utc"]
         window._stop_session()
     finally:
+        _close_test_window(window)
+
+
+def test_session_metadata_records_source_control_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_git")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+
+    replies = {
+        ("branch", "--show-current"): "codex/test-branch\n",
+        ("rev-parse", "HEAD"): "abc123\n",
+        ("status", "--short"): " M data_logging/mini_dma_logger/mini_dma_logger.py\n",
+        ("config", "--get", "remote.origin.url"): "https://example.test/repo.git\n",
+    }
+
+    def _fake_run(args: list[str], **_kwargs: object) -> object:
+        class Result:
+            returncode = 0
+            stdout = replies[tuple(args[3:])]
+
+        return Result()
+
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    try:
+        window._start_session()
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+
+        assert payload["source_control"]["branch"] == "codex/test-branch"
+        assert payload["source_control"]["commit"] == "abc123"
+        assert payload["source_control"]["is_dirty"] is True
+        assert payload["source_control"]["remote_url"] == "https://example.test/repo.git"
+    finally:
+        window._stop_session()
         _close_test_window(window)
 
 

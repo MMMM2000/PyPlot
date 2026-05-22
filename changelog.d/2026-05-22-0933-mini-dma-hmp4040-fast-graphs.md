@@ -14,3 +14,6 @@
 - Mini DMA dashboard plot tiles now use a stricter 240 px height cap so all four plots and the run log fit comfortably in a 1080p maximized window.
 - Mini DMA migrates saved 1000 ms graph refresh settings to the new 500 ms default so older local settings do not silently keep setup/recovery graphs slow.
 - Mini DMA load/stress seeking now waits for the filtered scale-control signal to change after a correction before repeating another load/stress move, reducing chatter from stale median/MAD windows.
+- Mini DMA zero-load plateau recovery now accepts the current stable zero-load position instead of driving back through the plateau before finishing.
+- Mini DMA current-hold stress recovery now requires a same-direction out-of-band filtered error to persist briefly before moving, so noisy one-window excursions do not immediately become motor corrections.
+- Mini DMA metadata now records the app source-control snapshot, including branch, commit, dirty state, short status, and origin URL when git is available.
