@@ -147,6 +147,9 @@ class AcSweepConfig:
     lcr_slow_retry_max_attempts: int = 2
     psu_current_ready_timeout_s: float = 3.0
     psu_current_ready_poll_s: float = 0.2
+    psu_current_ready_tolerance_a: float = 0.0015
+    psu_current_feedback_enabled: bool = True
+    psu_current_feedback_resistance_ohm: float = 390.0
     psu_measure_attempts: int = 3
     psu_missing_readback_warn: bool = True
 
@@ -185,6 +188,8 @@ class CurrentSource(Protocol):
     def initialize(self, *, voltage_limit_v: float) -> None: ...
 
     def set_current(self, current_a: float) -> None: ...
+
+    def set_voltage_limit(self, voltage_v: float) -> None: ...
 
     def measure(self) -> PowerSupplyMeasurement: ...
 
@@ -327,6 +332,9 @@ class AcSweepTsvWriter:
             f"dwell_s={self.config.dwell_s:g} "
             f"point_duration_s={self.config.point_duration_s:g} "
             f"repeats={max(1, int(self.config.repeats))} "
+            f"psu_current_feedback_enabled={self.config.psu_current_feedback_enabled} "
+            f"psu_current_ready_tolerance_a={self.config.psu_current_ready_tolerance_a:g} "
+            f"psu_current_feedback_resistance_ohm={self.config.psu_current_feedback_resistance_ohm:g} "
             f"lcr_slow_retry_enabled={self.config.lcr_slow_retry_enabled} "
             f"lcr_slow_retry_min_frequency_hz={self.config.lcr_slow_retry_min_frequency_hz:g} "
             f"lcr_slow_retry_min_rate_hz={self.config.lcr_slow_retry_min_rate_hz:g}"
@@ -359,6 +367,9 @@ class AcSweepTsvWriter:
                 "psu_measure_attempts": int(self.config.psu_measure_attempts),
                 "psu_current_ready_timeout_s": float(self.config.psu_current_ready_timeout_s),
                 "psu_current_ready_poll_s": float(self.config.psu_current_ready_poll_s),
+                "psu_current_ready_tolerance_a": float(self.config.psu_current_ready_tolerance_a),
+                "psu_current_feedback_enabled": bool(self.config.psu_current_feedback_enabled),
+                "psu_current_feedback_resistance_ohm": float(self.config.psu_current_feedback_resistance_ohm),
                 "psu_missing_readback_warn": bool(self.config.psu_missing_readback_warn),
             },
             "lcr_slow_retry": {
@@ -453,6 +464,7 @@ def run_ac_sweep(
         writer.write_metadata()
         psu.connect()
         psu.initialize(voltage_limit_v=config.voltage_limit_v)
+        resistance_estimate_ohm = max(1.0, float(config.psu_current_feedback_resistance_ohm))
         for setting_index, setting in enumerate(config.lcr_settings, start=1):
             if stop_requested is not None and stop_requested():
                 raise RuntimeError("AC sweep stopped by user")
@@ -461,16 +473,23 @@ def run_ac_sweep(
             for current_point_index, current_point in enumerate(config.current_points, start=1):
                 if stop_requested is not None and stop_requested():
                     raise RuntimeError("AC sweep stopped by user")
+                _set_initial_psu_voltage_for_current(
+                    config=config,
+                    psu=psu,
+                    current_point=current_point,
+                    resistance_estimate_ohm=resistance_estimate_ohm,
+                )
                 psu.set_current(current_point.current_a)
                 try:
-                    _wait_for_psu_current(
+                    ready_measurement = _wait_for_psu_current(
                         config=config,
                         psu=psu,
                         current_point=current_point,
+                        resistance_estimate_ohm=resistance_estimate_ohm,
                         stop_requested=stop_requested,
                         sleep=sleep,
                     )
-                except PsuOutputVerificationError as exc:
+                except MissingPsuReadbackError as exc:
                     _write_sweep_failure_row(
                         config=config,
                         psu=psu,
@@ -485,6 +504,25 @@ def run_ac_sweep(
                         progress=progress,
                     )
                     raise
+                if ready_measurement.resistance_ohm is not None:
+                    resistance_estimate_ohm = _smoothed_resistance_estimate(
+                        previous_ohm=resistance_estimate_ohm,
+                        measurement_ohm=ready_measurement.resistance_ohm,
+                    )
+                if ready_measurement.status.upper() == "WARN" or ready_measurement.error.strip():
+                    _write_sweep_warning_row(
+                        config=config,
+                        psu=psu,
+                        writer=writer,
+                        started=started,
+                        setting_index=setting_index,
+                        setting=setting,
+                        current_point=current_point,
+                        current_point_index=current_point_index,
+                        total_current_points=total_current_points,
+                        message=ready_measurement.error or ready_measurement.status,
+                        progress=progress,
+                    )
                 dwell = max(0.0, float(config.dwell_s))
                 if dwell:
                     sleep(dwell)
@@ -680,7 +718,11 @@ def _measure_sweep_point_once(
             )
             error = _combine_messages(error, message)
         try:
-            _validate_psu_output(current_point, psu_measurement)
+            _validate_psu_output(
+                current_point,
+                psu_measurement,
+                tolerance_a=config.psu_current_ready_tolerance_a,
+            )
         except MissingPsuReadbackError as exc:
             if not bool(config.psu_missing_readback_warn):
                 raise
@@ -723,6 +765,7 @@ def _measure_sweep_point_once(
                 break
             continue
         except PsuOutputVerificationError as exc:
+            message = f"PSU current not at target during active point; continuing: {exc}"
             row = AcSweepRow(
                 timestamp_utc=_timestamp_utc(),
                 elapsed_s=read_monotonic - started,
@@ -735,20 +778,28 @@ def _measure_sweep_point_once(
                 psu_measurement=PowerSupplyMeasurement(
                     current_actual_a=psu_measurement.current_actual_a,
                     voltage_actual_v=psu_measurement.voltage_actual_v,
-                    status="FAIL",
-                    error=psu_measurement.error,
+                    status="WARN",
+                    error=_combine_messages(psu_measurement.error, message),
                 ),
                 psu_backend=psu.backend_id,
                 psu_resource=psu.resource,
                 current_point_index=current_point_index,
                 total_current_points=total_current_points,
                 point_elapsed_s=point_elapsed_s,
-                error=f"{error}; {exc}" if error else str(exc),
+                error=_combine_messages(error, message),
             )
             writer.write_row(row)
             if progress is not None:
                 progress(row)
-            raise
+            if _sweep_point_complete(
+                point_duration=point_duration,
+                fallback_repeats=fallback_repeats,
+                repeat_index=repeat_index,
+                point_started=point_started,
+                read_monotonic=read_monotonic,
+            ):
+                break
+            continue
         row = AcSweepRow(
             timestamp_utc=_timestamp_utc(),
             elapsed_s=read_monotonic - started,
@@ -840,11 +891,33 @@ def _measure_psu_with_retries(psu: CurrentSource, *, attempts: int) -> PowerSupp
     return PowerSupplyMeasurement(status="FAIL", error=last_error)
 
 
+def _set_initial_psu_voltage_for_current(
+    *,
+    config: AcSweepConfig,
+    psu: CurrentSource,
+    current_point: CurrentLoopPoint,
+    resistance_estimate_ohm: float,
+) -> None:
+    if not bool(config.psu_current_feedback_enabled):
+        return
+    if not _supports_voltage_control(psu):
+        return
+    current_a = max(0.0, float(current_point.current_a))
+    if current_a <= 1e-9:
+        _set_psu_voltage_limit(psu, 0.0)
+        return
+    voltage_limit = effective_power_supply_voltage_limit(config.psu_backend, config.voltage_limit_v)
+    estimated_voltage = current_a * max(1.0, float(resistance_estimate_ohm))
+    initial_voltage = min(voltage_limit, max(1.0, estimated_voltage * 0.9))
+    _set_psu_voltage_limit(psu, initial_voltage)
+
+
 def _wait_for_psu_current(
     *,
     config: AcSweepConfig,
     psu: CurrentSource,
     current_point: CurrentLoopPoint,
+    resistance_estimate_ohm: float,
     stop_requested: Callable[[], bool] | None,
     sleep: Callable[[float], None],
 ) -> PowerSupplyMeasurement:
@@ -852,37 +925,126 @@ def _wait_for_psu_current(
         return _measure_psu_with_retries(psu, attempts=config.psu_measure_attempts)
     deadline = time.monotonic() + max(0.1, float(config.psu_current_ready_timeout_s))
     last_error = "PSU current readback was not checked"
+    last_measurement = PowerSupplyMeasurement(status="FAIL", error=last_error)
     while True:
         if stop_requested is not None and stop_requested():
             raise RuntimeError("AC sweep stopped by user")
         measurement = _measure_psu_with_retries(psu, attempts=config.psu_measure_attempts)
+        last_measurement = measurement
         try:
-            _validate_psu_output(current_point, measurement)
+            _validate_psu_output(
+                current_point,
+                measurement,
+                tolerance_a=config.psu_current_ready_tolerance_a,
+            )
         except PsuOutputVerificationError as exc:
             last_error = str(exc)
         else:
             return measurement
+        if _can_adjust_psu_voltage(config=config, psu=psu, measurement=measurement):
+            _adjust_psu_voltage_toward_current(
+                config=config,
+                psu=psu,
+                current_point=current_point,
+                measurement=measurement,
+                resistance_estimate_ohm=resistance_estimate_ohm,
+            )
         if time.monotonic() >= deadline:
-            raise PsuOutputVerificationError(
-                f"PSU did not reach requested current within "
-                f"{float(config.psu_current_ready_timeout_s):g} s: {last_error}"
+            if last_measurement.current_actual_a is None:
+                raise MissingPsuReadbackError(
+                    f"PSU did not reach requested current within "
+                    f"{float(config.psu_current_ready_timeout_s):g} s: "
+                    "PSU did not return an actual-current readback."
+                )
+            return PowerSupplyMeasurement(
+                current_actual_a=last_measurement.current_actual_a,
+                voltage_actual_v=last_measurement.voltage_actual_v,
+                status="WARN",
+                error=(
+                    f"PSU did not reach requested current within "
+                    f"{float(config.psu_current_ready_timeout_s):g} s: {last_error}"
+                ),
             )
         sleep(max(0.02, float(config.psu_current_ready_poll_s)))
 
 
-def _validate_psu_output(current_point: CurrentLoopPoint, measurement: PowerSupplyMeasurement) -> None:
+def _validate_psu_output(
+    current_point: CurrentLoopPoint,
+    measurement: PowerSupplyMeasurement,
+    *,
+    tolerance_a: float = 0.0015,
+) -> None:
     current_set = max(0.0, float(current_point.current_a))
     if current_set <= 1e-9:
         return
     actual = measurement.current_actual_a
     if actual is None or not math.isfinite(float(actual)):
         raise MissingPsuReadbackError("PSU did not return an actual-current readback.")
-    minimum_expected = max(0.001, 0.25 * current_set)
-    if float(actual) < minimum_expected:
+    tolerance_a = max(0.0, float(tolerance_a))
+    if abs(float(actual) - current_set) > tolerance_a + 1e-12:
         raise PsuOutputVerificationError(
-            f"PSU actual current {float(actual) * 1000:g} mA is far below "
-            f"requested {current_set * 1000:g} mA; output may be off."
+            f"PSU actual current {float(actual) * 1000:g} mA is not within "
+            f"{tolerance_a * 1000:g} mA of requested {current_set * 1000:g} mA."
         )
+
+
+def _can_adjust_psu_voltage(
+    *,
+    config: AcSweepConfig,
+    psu: CurrentSource,
+    measurement: PowerSupplyMeasurement,
+) -> bool:
+    if not bool(config.psu_current_feedback_enabled):
+        return False
+    if not _supports_voltage_control(psu):
+        return False
+    actual = measurement.current_actual_a
+    return actual is not None and math.isfinite(float(actual))
+
+
+def _adjust_psu_voltage_toward_current(
+    *,
+    config: AcSweepConfig,
+    psu: CurrentSource,
+    current_point: CurrentLoopPoint,
+    measurement: PowerSupplyMeasurement,
+    resistance_estimate_ohm: float,
+) -> None:
+    actual_current = measurement.current_actual_a
+    if actual_current is None or not math.isfinite(float(actual_current)):
+        return
+    target_current = max(0.0, float(current_point.current_a))
+    error_a = target_current - float(actual_current)
+    if abs(error_a) <= max(0.0001, float(config.psu_current_ready_tolerance_a) * 0.5):
+        return
+    measured_voltage = measurement.voltage_actual_v
+    if measured_voltage is None or not math.isfinite(float(measured_voltage)):
+        measured_voltage = target_current * max(1.0, float(resistance_estimate_ohm))
+    correction_v = error_a * max(1.0, float(resistance_estimate_ohm)) * 0.75
+    correction_v = max(-3.5, min(3.5, correction_v))
+    if abs(correction_v) < 0.15:
+        correction_v = 0.15 if correction_v > 0 else -0.15
+    voltage_limit = effective_power_supply_voltage_limit(config.psu_backend, config.voltage_limit_v)
+    next_voltage = max(0.0, min(voltage_limit, float(measured_voltage) + correction_v))
+    _set_psu_voltage_limit(psu, next_voltage)
+
+
+def _supports_voltage_control(psu: CurrentSource) -> bool:
+    return callable(getattr(psu, "set_voltage_limit", None))
+
+
+def _set_psu_voltage_limit(psu: CurrentSource, voltage_v: float) -> None:
+    setter = getattr(psu, "set_voltage_limit", None)
+    if callable(setter):
+        setter(float(voltage_v))
+
+
+def _smoothed_resistance_estimate(*, previous_ohm: float, measurement_ohm: float) -> float:
+    if not math.isfinite(float(measurement_ohm)) or float(measurement_ohm) <= 0.0:
+        return previous_ohm
+    if not math.isfinite(float(previous_ohm)) or float(previous_ohm) <= 0.0:
+        return float(measurement_ohm)
+    return 0.8 * float(previous_ohm) + 0.2 * float(measurement_ohm)
 
 
 def _combine_messages(*messages: str) -> str:
@@ -1062,6 +1224,11 @@ class SerialScpiCurrentSource:
         resolution = max(1e-6, float(self.profile.get("current_resolution_a", 0.001)))
         current = max(0.0, round(float(current_a) / resolution) * resolution)
         self.command(f"CURR {current:.4f}", settle_s=0.03)
+
+    def set_voltage_limit(self, voltage_v: float) -> None:
+        self.select_channel()
+        voltage = effective_power_supply_voltage_limit(self.backend_id, voltage_v)
+        self.command(f"VOLT {voltage:.3f}", settle_s=0.03)
 
     def measure(self) -> PowerSupplyMeasurement:
         self.select_channel()

@@ -258,22 +258,25 @@ the operator explicitly asks for auto-detection.
 The sweep engine treats the supply generically: connect, identify the selected
 SCPI backend, initialize with the selected voltage limit, set current, and wait
 briefly for actual-current readback before starting LCR reads at each current
-point. A missing actual-current readback during a 0 mA reference, or a brief
-missing readback after the requested non-zero current has already been accepted,
-is logged as `WARN` and the run continues. If the supply cannot prove the
-requested non-zero current before the LCR point starts, or if it later reports
-an actual current far below the requested current, the run aborts and the
-partial file records a failure row. On normal completion, user stop, or error,
-the shutdown sequence sets current and voltage to zero before turning output
-off. Baseline measurement does not create or command a power-supply backend.
+point. For supplies that expose voltage control, especially the OWON SPE6102,
+the voltage limit is treated as an automatic compliance value rather than a
+fixed experiment setting. Before each current point the logger estimates a
+reasonable voltage from the last measured wire resistance, then trims the
+voltage from PSU readback until the measured current is close to the requested
+current. If the requested current cannot be reached before the short ready
+timeout, the run logs a `WARN` row and continues with the measured current
+rather than stopping the overnight sweep.
 
-The wire-break guard is always enabled for non-zero current points. The actual
-current readback must stay above `max(1 mA, 25% of the requested current)`;
-0 mA reference points are exempt. This is intentionally not a casual UI toggle,
-because an overnight run should stop and shut the output down if the DC current
-path opens. Missing readback by itself is treated as a communication warning
-once current was already confirmed; a measured near-zero current is what trips
-the wire-break/output-off safety path.
+The logged `current_actual_a`, `voltage_actual_v`, PSU resistance, and PSU power
+columns are the source of truth for later analysis; the requested current is
+recorded separately as `current_set_a`. A missing actual-current readback during
+a 0 mA reference, or a brief missing readback after the requested non-zero
+current has already been accepted, is logged as `WARN` and the run continues.
+If the supply never returns actual-current readback before the point starts, the
+run aborts because the logger cannot know whether output is active. On normal
+completion, user stop, or error, the shutdown sequence sets current and voltage
+to zero before turning output off. Baseline measurement does not create or
+command a power-supply backend.
 
 ## Live Plots
 

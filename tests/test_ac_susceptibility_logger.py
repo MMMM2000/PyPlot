@@ -703,7 +703,94 @@ def test_run_ac_sweep_aborts_when_psu_actual_current_is_missing(tmp_path: Path) 
     assert "measure" in psu.events
 
 
-def test_run_ac_sweep_aborts_when_psu_actual_current_is_too_low(tmp_path: Path) -> None:
+def test_run_ac_sweep_adjusts_owon_voltage_until_measured_current_is_ready(tmp_path: Path) -> None:
+    class FakeLcr:
+        def __init__(self) -> None:
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-05-18T00:00:00Z",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def __init__(self) -> None:
+            self.events: list[str] = []
+            self.measurements = [
+                sweep.PowerSupplyMeasurement(current_actual_a=0.006, voltage_actual_v=2.0, status="OK"),
+                sweep.PowerSupplyMeasurement(current_actual_a=0.012, voltage_actual_v=4.0, status="OK"),
+                sweep.PowerSupplyMeasurement(current_actual_a=0.019, voltage_actual_v=7.4, status="OK"),
+                sweep.PowerSupplyMeasurement(current_actual_a=0.020, voltage_actual_v=7.5, status="OK"),
+            ]
+
+        def connect(self) -> None:
+            self.events.append("connect")
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            self.events.append(f"initialize:{voltage_limit_v:g}")
+
+        def set_current(self, current_a: float) -> None:
+            self.events.append(f"current:{current_a:g}")
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            self.events.append(f"voltage:{voltage_v:.3f}")
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            self.events.append("measure")
+            if self.measurements:
+                return self.measurements.pop(0)
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.020, voltage_actual_v=7.5, status="OK")
+
+        def output_off(self) -> None:
+            self.events.append("off")
+
+        def close(self) -> None:
+            self.events.append("close")
+
+    lcr = FakeLcr()
+    psu = FakePsu()
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=62.0,
+        psu_current_ready_timeout_s=1.0,
+        psu_current_ready_poll_s=0.01,
+        psu_measure_attempts=1,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=lcr,
+        psu=psu,
+        output_path=tmp_path / "feedback-current.tsv",
+        sleep=lambda _seconds: None,
+    )
+
+    assert lcr.fetch_count == 1
+    voltage_events = [event for event in psu.events if event.startswith("voltage:")]
+    assert voltage_events
+    assert psu.events[-2:] == ["off", "close"]
+
+
+def test_run_ac_sweep_continues_with_warning_when_owon_current_stays_low(tmp_path: Path) -> None:
     class FakeLcr:
         def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
             return None
@@ -723,27 +810,36 @@ def test_run_ac_sweep_aborts_when_psu_actual_current_is_too_low(tmp_path: Path) 
         backend_id = "owon_spe6102"
         resource = "COM7"
 
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
         def connect(self) -> None:
-            return None
+            self.events.append("connect")
 
         def initialize(self, *, voltage_limit_v: float) -> None:
-            return None
+            self.events.append(f"initialize:{voltage_limit_v:g}")
 
         def set_current(self, current_a: float) -> None:
-            return None
+            self.events.append(f"current:{current_a:g}")
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            self.events.append(f"voltage:{voltage_v:.3f}")
 
         def measure(self) -> sweep.PowerSupplyMeasurement:
-            return sweep.PowerSupplyMeasurement(current_actual_a=0.0, voltage_actual_v=0.0, status="OK")
+            self.events.append("measure")
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.0, voltage_actual_v=3.5, status="OK")
 
         def output_off(self) -> None:
-            return None
+            self.events.append("off")
 
         def close(self) -> None:
-            return None
+            self.events.append("close")
 
+    output = tmp_path / "low-current-continues.tsv"
+    psu = FakePsu()
     config = sweep.AcSweepConfig(
         lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
-        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        current_points=[sweep.CurrentLoopPoint(0.01, "up")],
         point_duration_s=0.0,
         repeats=1,
         dwell_s=0.0,
@@ -755,14 +851,19 @@ def test_run_ac_sweep_aborts_when_psu_actual_current_is_too_low(tmp_path: Path) 
         psu_measure_attempts=1,
     )
 
-    with pytest.raises(sweep.PsuOutputVerificationError, match="did not reach requested current"):
-        sweep.run_ac_sweep(
-            config=config,
-            lcr=FakeLcr(),
-            psu=FakePsu(),
-            output_path=tmp_path / "low-current.tsv",
-            sleep=lambda _seconds: None,
-        )
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=psu,
+        output_path=output,
+        sleep=lambda _seconds: None,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "\tWARN\t" in text
+    assert "\tFAIL\t" not in text
+    assert "PSU did not reach requested current" in text
+    assert psu.events[-2:] == ["off", "close"]
 
 
 def test_run_ac_sweep_warns_for_missing_zero_current_readback(tmp_path: Path) -> None:
@@ -991,19 +1092,19 @@ def test_run_ac_sweep_missing_psu_readback_still_obeys_point_duration(tmp_path: 
     assert psu.events[-2:] == ["off", "close"]
 
 
-def test_psu_output_verification_allows_zero_reference_and_catches_wire_break() -> None:
+def test_psu_output_verification_allows_zero_reference_and_reports_current_error() -> None:
     sweep._validate_psu_output(
         sweep.CurrentLoopPoint(0.0, "zero"),
         sweep.PowerSupplyMeasurement(status="FAIL", error="missing actual-current readback"),
     )
 
-    with pytest.raises(sweep.PsuOutputVerificationError, match="far below requested"):
+    with pytest.raises(sweep.PsuOutputVerificationError, match="not within"):
         sweep._validate_psu_output(
             sweep.CurrentLoopPoint(0.02, "up"),
             sweep.PowerSupplyMeasurement(current_actual_a=0.0, voltage_actual_v=0.0, status="OK"),
         )
 
-    with pytest.raises(sweep.PsuOutputVerificationError, match="far below requested"):
+    with pytest.raises(sweep.PsuOutputVerificationError, match="not within"):
         sweep._validate_psu_output(
             sweep.CurrentLoopPoint(0.08, "up"),
             sweep.PowerSupplyMeasurement(current_actual_a=0.015, voltage_actual_v=1.0, status="OK"),
