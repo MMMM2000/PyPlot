@@ -5078,6 +5078,7 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_layout.addWidget(plot_splitter, stretch=1)
 
         plot_canvas_container = QtWidgets.QWidget(plot_splitter)
+        plot_canvas_container.setMinimumHeight(0)
         plot_canvas_layout = QtWidgets.QVBoxLayout(plot_canvas_container)
         self._dashboard_plot_canvas_layout = plot_canvas_layout
         plot_canvas_layout.setContentsMargins(0, 0, 12, 0)
@@ -5102,6 +5103,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 row, column = divmod(plot_index, 2)
                 self._dashboard_plot_grid.addWidget(bundle.widget, row, column)
+                self._dashboard_plot_grid.setRowStretch(row, 1)
+                self._dashboard_plot_grid.setColumnStretch(column, 1)
                 self._dashboard_plot_bundles.append(bundle)
                 self._dashboard_plot_widgets.append(bundle.widget)
                 self._dashboard_left_curves.append(bundle.left_curve)
@@ -5110,7 +5113,7 @@ class MainWindow(QtWidgets.QMainWindow):
             plot_canvas_layout.addWidget(QtWidgets.QLabel("pyqtgraph is not available; live plots are disabled.", plot_canvas_container))
 
         log_container = QtWidgets.QWidget(plot_splitter)
-        log_container.setMaximumHeight(170)
+        log_container.setMaximumHeight(118)
         log_layout = QtWidgets.QVBoxLayout(log_container)
         log_layout.setContentsMargins(0, 0, 0, 0)
         log_layout.setSpacing(4)
@@ -5121,7 +5124,7 @@ class MainWindow(QtWidgets.QMainWindow):
         log_layout.addWidget(log_label)
         self.log_output = QtWidgets.QPlainTextEdit(log_container)
         self.log_output.setReadOnly(True)
-        self.log_output.setMaximumHeight(140)
+        self.log_output.setMaximumHeight(96)
         self.log_output.setMaximumBlockCount(1000)
         self.log_output.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.log_output.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -5130,7 +5133,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().hide()
         plot_splitter.setStretchFactor(0, 8)
         plot_splitter.setStretchFactor(1, 1)
-        plot_splitter.setSizes([900, 140])
+        plot_splitter.setSizes([960, 96])
         splitter.addWidget(plot_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -14487,6 +14490,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if pg is None:  # pragma: no cover - guarded by caller in normal app use
             raise RuntimeError("pyqtgraph is not available")
         widget = pg.PlotWidget(parent=parent)
+        widget.setMinimumHeight(0)
+        widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Ignored)
         widget.setMouseEnabled(x=True, y=True)
         plot_item = widget.getPlotItem()
         plot_item.showGrid(x=True, y=True, alpha=0.28)

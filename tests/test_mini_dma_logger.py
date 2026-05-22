@@ -1455,8 +1455,12 @@ def test_dashboard_plot_panel_keeps_right_edge_padding_and_compact_log(tmp_path:
     try:
         margins = window._dashboard_plot_canvas_layout.contentsMargins()
         assert margins.right() >= 10
-        assert window.log_output.maximumHeight() <= 150
+        assert window.log_output.maximumHeight() <= 96
         assert window._dashboard_plot_splitter.childrenCollapsible() is False
+        assert all(
+            widget.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Policy.Ignored
+            for widget in window._dashboard_plot_widgets
+        )
     finally:
         _close_test_window(window)
 
