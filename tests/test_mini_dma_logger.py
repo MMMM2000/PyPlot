@@ -1487,8 +1487,14 @@ def test_dashboard_pyqtgraph_axes_match_curve_colors_and_use_major_grid_only(
         assert right_axis.pen().color().name().lower() == "#60a5fa"
         assert left_axis.style["maxTickLevel"] == 0
         assert right_axis.style["maxTickLevel"] == 0
-        assert left_axis.grid <= 35
-        assert right_axis.grid <= 35
+        assert left_axis.grid is False
+        assert right_axis.grid is False
+        assert left_axis.autoSIPrefix is False
+        assert right_axis.autoSIPrefix is False
+        assert bundle.left_curve.opts["symbol"] == "o"
+        assert bundle.right_curve.opts["symbol"] == "s"
+        assert bundle.left_curve.opts["pen"].widthF() <= 0.9
+        assert bundle.right_curve.opts["pen"].widthF() <= 0.9
     finally:
         _close_test_window(window)
 
@@ -8930,6 +8936,47 @@ def test_recovery_load_zero_accepts_before_two_sample_correction_gate(
 
         assert reached is True
         assert "2 fresh scale samples" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_recovery_load_zero_does_not_accept_backlash_limited_residual_load(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.02)
+    window._last_move_direction = -1.0
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.RECOVERY_LOAD
+    window._active_control_config = window._freeze_control_config()
+    window._set_automation_context(
+        phase="recovery",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=0.0,
+    )
+    window._latest_scale_timestamp = time.time()
+    window._latest_scale_value_g = -0.815
+    window._basis_sensitivity_per_mm = lambda *args, **kwargs: 100.0  # type: ignore[method-assign]
+    window._move_to_position_mm = (  # type: ignore[method-assign]
+        lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=0.0,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+        )
+
+        assert reached is False
+        assert moves
+        assert "backlash-limited tolerance" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 

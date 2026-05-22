@@ -10407,6 +10407,11 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         if nudge_mm <= 0.0:
             raise ValueError("Set a non-zero correction step.")
+        zero_return_needs_more_motion = (
+            self._zero_return_requires_true_zero(basis, target_value)
+            and self._zero_return_current_load_g(basis, current_value)
+            > self._zero_return_acceptance_tolerance_g()
+        )
         previous_error = self._seek_last_error_by_key.get(seek_key)
         preliminary_speed_mm_s = self._seek_speed_mm_s(
             delta_value,
@@ -10509,11 +10514,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                     return False
                 self._seek_pending_reversal_by_key.pop(seek_key, None)
-            if self._target_reversal_is_practical_hold(
+            if (
+                not zero_return_needs_more_motion
+                and self._target_reversal_is_practical_hold(
                 basis,
                 delta_value,
                 effective_tolerance,
                 seek_key=seek_key,
+                )
             ):
                 self._clear_seek_state(seek_key)
                 self._log(
@@ -10580,7 +10588,7 @@ class MainWindow(QtWidgets.QMainWindow):
             and nudge_mm <= self._motor_step_mm() + 1e-12
         ):
             backlash_takeup_mm = 0.0
-        if not self._reverse_correction_is_worthwhile(
+        if not zero_return_needs_more_motion and not self._reverse_correction_is_worthwhile(
             basis,
             delta_value,
             effective_tolerance,
@@ -14485,7 +14493,7 @@ class MainWindow(QtWidgets.QMainWindow):
         right_label: str | None,
         left_color: str = "#38bdf8",
         right_color: str = "#f59e0b",
-        symbols: bool = False,
+        symbols: bool = True,
     ) -> PyqtGraphPlotBundle:
         if pg is None:  # pragma: no cover - guarded by caller in normal app use
             raise RuntimeError("pyqtgraph is not available")
@@ -14496,7 +14504,7 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_item = widget.getPlotItem()
         plot_item.showGrid(x=True, y=True, alpha=0.28)
         plot_item.setClipToView(True)
-        left_curve_kwargs: dict[str, Any] = {"pen": pg.mkPen(left_color, width=1.35)}
+        left_curve_kwargs: dict[str, Any] = {"pen": pg.mkPen(left_color, width=0.8)}
         if symbols:
             left_curve_kwargs.update(
                 {
@@ -14510,7 +14518,7 @@ class MainWindow(QtWidgets.QMainWindow):
         bundle = PyqtGraphPlotBundle(widget=widget, plot_item=plot_item, left_curve=left_curve)
         if right_label is not None:
             right_view = pg.ViewBox()
-            right_curve_kwargs: dict[str, Any] = {"pen": pg.mkPen(right_color, width=1.2)}
+            right_curve_kwargs: dict[str, Any] = {"pen": pg.mkPen(right_color, width=0.75)}
             if symbols:
                 right_curve_kwargs.update(
                     {
@@ -14571,8 +14579,9 @@ class MainWindow(QtWidgets.QMainWindow):
         bottom_axis.setPen(pg.mkPen(text_color, width=0.8))
         bottom_axis.setTextPen(pg.mkPen(text_color))
         bottom_axis.setTickPen(pg.mkPen(text_color, width=0.6))
-        bottom_axis.setGrid(30)
+        bottom_axis.setGrid(False)
         bottom_axis.setStyle(maxTickLevel=0, maxTextLevel=0)
+        bottom_axis.enableAutoSIPrefix(False)
         top_axis = bundle.plot_item.getAxis("top")
         top_axis.setPen(pg.mkPen(text_color, width=0.8))
         top_axis.setTextPen(pg.mkPen(text_color))
@@ -14580,22 +14589,25 @@ class MainWindow(QtWidgets.QMainWindow):
         top_axis.setGrid(False)
         top_axis.setLabel("")
         top_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
+        top_axis.enableAutoSIPrefix(False)
         left_axis = bundle.plot_item.getAxis("left")
         left_axis.setPen(pg.mkPen(left_color, width=0.9))
         left_axis.setTextPen(pg.mkPen(left_color))
         left_axis.setTickPen(pg.mkPen(left_color, width=0.7))
-        left_axis.setGrid(30)
+        left_axis.setGrid(False)
         left_axis.setStyle(maxTickLevel=0, maxTextLevel=0)
+        left_axis.enableAutoSIPrefix(False)
         right_axis = bundle.plot_item.getAxis("right")
         right_axis.setPen(pg.mkPen(right_color, width=0.9))
         right_axis.setTextPen(pg.mkPen(right_color))
         right_axis.setTickPen(pg.mkPen(right_color, width=0.7))
-        right_axis.setGrid(30)
+        right_axis.setGrid(False)
         right_axis.setStyle(maxTickLevel=0, maxTextLevel=0)
+        right_axis.enableAutoSIPrefix(False)
         bundle.plot_item.getAxis("bottom").setStyle(tickTextOffset=4)
         bundle.plot_item.getAxis("left").setStyle(tickTextOffset=4)
         bundle.plot_item.showAxis("top")
-        bundle.plot_item.showGrid(x=True, y=True, alpha=0.14)
+        bundle.plot_item.showGrid(x=False, y=False)
         if right_label is None:
             bundle.plot_item.showAxis("right")
             right_axis.setLabel("")
@@ -14613,6 +14625,23 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         if curve is not None:
             curve.setData(list(x_values), list(y_values))
+
+    def _set_pyqtgraph_curve_style(
+        self,
+        curve: Any | None,
+        color: str,
+        *,
+        width: float,
+        symbol: str | None,
+    ) -> None:
+        if curve is None or pg is None:
+            return
+        curve.setPen(pg.mkPen(color, width=width))
+        curve.setSymbol(symbol)
+        if symbol is not None:
+            curve.setSymbolSize(4)
+            curve.setSymbolBrush(color)
+            curve.setSymbolPen(color)
 
     def _plot_xy_values(
         self,
@@ -16839,12 +16868,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 left_color=y_left_channel.color,
                 right_color=y_right_channel.color if y_right_channel is not None else "#f59e0b",
             )
-            bundle.left_curve.setPen(pg.mkPen(y_left_channel.color, width=1.35))
+            self._set_pyqtgraph_curve_style(
+                bundle.left_curve,
+                y_left_channel.color,
+                width=0.8,
+                symbol="o",
+            )
             left_x, left_y = self._plot_xy_values(display_points, x_channel, y_left_channel)
             self._set_pyqtgraph_curve_data(bundle.left_curve, left_x, left_y)
             if y_right_channel is not None:
-                if bundle.right_curve is not None:
-                    bundle.right_curve.setPen(pg.mkPen(y_right_channel.color, width=1.2))
+                self._set_pyqtgraph_curve_style(
+                    bundle.right_curve,
+                    y_right_channel.color,
+                    width=0.75,
+                    symbol="s",
+                )
                 right_x, right_y = self._plot_xy_values(display_points, x_channel, y_right_channel)
                 self._set_pyqtgraph_curve_data(bundle.right_curve, right_x, right_y)
                 if bundle.sync_right_view is not None:
