@@ -19,3 +19,6 @@
 - Mini DMA metadata now records the app source-control snapshot, including branch, commit, dirty state, short status, and origin URL when git is available.
 - Mini DMA metadata now records a control-logic version/profile and a SHA-256 fingerprint over decision-relevant control constants and settings, so runs can be compared by control semantics independent of branch names.
 - Mini DMA pyqtgraph dashboard tiles now expand with the available panel height again, keep extra right-edge breathing room for colored axes, and draw unused right axes as neutral frame lines.
+- Mini DMA removes the old recipe/session-start zero-load capture checkbox; mandatory setup remains the single source of truth for the zero-load baseline.
+- Mini DMA current-hold entry now requires a sustained filtered load/stress error beyond a transformation-sized band, so ordinary target fluctuations keep the current ramp moving.
+- Mini DMA current-hold adaptive recovery caps are now expressed through strain/recipe limits rather than a fixed millimeter command cap.

@@ -52,8 +52,8 @@ SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-22.2"
-CONTROL_LOGIC_PROFILE = "filtered-current-hold-persistent-error"
+CONTROL_LOGIC_VERSION = "2026-05-22.3"
+CONTROL_LOGIC_PROFILE = "filtered-current-hold-transformation-gated"
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
     "setup_slack_stress_cap",
@@ -61,6 +61,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_filtered_scale_signal",
     "current_hold_filtered_signal_change_gate",
     "current_hold_persistent_error_gate",
+    "current_hold_transformation_entry_gate",
     "current_hold_noise_band_resume",
     "adaptive_current_hold_response_stiffness",
     "zero_load_reference_sidecar",
@@ -375,7 +376,6 @@ SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA = 25.0
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION = 0.50
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
-SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_MM = 0.20
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES = 3
 SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S = 1.0
@@ -383,6 +383,9 @@ SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA = 3.0
+SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA = 8.0
+SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S = 1.0
+SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S = 1.0
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
@@ -2665,6 +2668,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_step_index: int | None = None
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s: float | None = None
+        self._current_sweep_ramp_hold_candidate_step_index: int | None = None
+        self._current_sweep_ramp_hold_candidate_sign = 0.0
+        self._current_sweep_ramp_hold_candidate_since_s: float | None = None
         self._current_sweep_voltage_limit_step_index: int | None = None
         self._current_sweep_voltage_limit_started_s: float | None = None
         self._current_sweep_voltage_limit_start_mA = 0.0
@@ -3907,15 +3913,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.check_tare_on_start.setChecked(False)
         self.check_tare_on_start.setVisible(False)
-        self.check_hardware_tare_on_start = QtWidgets.QCheckBox(
-            "Capture zero-load reference at recipe/session start",
-            logging_box,
-        )
-        self.check_hardware_tare_on_start.setChecked(False)
-        self.check_hardware_tare_on_start.setToolTip(
-            "Normally leave this off and type the known hanging-weight reading. "
-            "Turn it on only when the current raw scale reading is definitely 0 g applied load."
-        )
 
         self.button_start_session = QtWidgets.QPushButton("Start session", logging_box)
         self.button_start_session.clicked.connect(self._start_session)
@@ -4399,8 +4396,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis_label is not None:
             basis_label.setVisible(False)
         self.combo_current_sweep_basis.setVisible(False)
-        self.check_hardware_tare_on_start.setParent(current_sweep_page)
-        current_sweep_form.addRow("", self.check_hardware_tare_on_start)
         self.spin_current_sweep_target_start = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_start.setDecimals(3)
         self.spin_current_sweep_target_start.setRange(-100000.0, 100000.0)
@@ -8354,11 +8349,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return max(
             self._motor_step_mm(),
-            min(
-                SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_MM,
-                strain_cap_mm,
-                self._current_sweep_max_correction_mm(),
-            ),
+            min(strain_cap_mm, self._current_sweep_max_correction_mm()),
         )
 
     def _current_sweep_hold_response_sensitivity_per_mm(
@@ -10371,6 +10362,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._current_sweep_hold_min_resume_stress_mpa(),
                 ),
             )
+            if self._automation_phase == "current_hold":
+                noise_band = max(
+                    noise_band,
+                    self._current_sweep_hold_transformation_band_for_basis(basis),
+                )
             if abs(delta_value) <= noise_band:
                 self._clear_seek_state(seek_key)
                 self._write_control_trace(
@@ -12440,12 +12436,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_adaptive_min_fraction": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION,
                 "current_hold_adaptive_max_fraction": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION,
                 "current_hold_adaptive_large_error_mpa": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA,
-                "current_hold_adaptive_max_command_mm": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_MM,
                 "current_hold_adaptive_max_command_strain_pct": (
                     SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
                 ),
                 "current_hold_adaptive_min_samples": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES,
                 "current_hold_correction_confirm_s": SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S,
+                "current_hold_transformation_min_stress_mpa": (
+                    SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA
+                ),
+                "current_hold_entry_confirm_s": SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S,
+                "current_hold_min_away_slope_mpa_s": (
+                    SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S
+                ),
             },
             "settings": {
                 "control_interval_ms": self._control_interval_ms(),
@@ -12767,8 +12769,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.check_zero_position_on_start.isChecked():
             self._zero_tic_position()
         try:
-            if self.check_hardware_tare_on_start.isChecked() and not self._capture_zero_load_scale_reference():
-                raise RuntimeError("Session start cancelled because zero-load reference capture failed.")
             if self.check_tare_on_start.isChecked():
                 signed_load = self._load_sign() * (
                     self._latest_scale_value_g - self._zero_load_scale_reference_g()
@@ -13480,8 +13480,6 @@ class MainWindow(QtWidgets.QMainWindow):
         return any(step.action in {"move", "seek_target", "ramp_target", "calibration_move", "mechanical_scan"} for step in steps)
 
     def _recipe_requires_scale(self, steps: Sequence[AutomationStep]) -> bool:
-        if self.check_hardware_tare_on_start.isChecked():
-            return True
         if any(step.action in {"calibration_record", "calibration_move"} for step in steps):
             return True
         return any(
@@ -15763,6 +15761,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_step_index = None
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s = None
+        self._current_sweep_ramp_hold_candidate_step_index = None
+        self._current_sweep_ramp_hold_candidate_sign = 0.0
+        self._current_sweep_ramp_hold_candidate_since_s = None
 
     def _current_sweep_hold_setting(
         self,
@@ -15806,6 +15807,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0.0 if load_g is None else abs(float(load_g))
         return 0.0
 
+    def _current_sweep_hold_transformation_band_for_basis(self, basis: str) -> float:
+        return self._current_sweep_hold_min_band_for_basis(
+            basis,
+            SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA,
+        )
+
+    def _reset_current_sweep_ramp_hold_candidate(self) -> None:
+        self._current_sweep_ramp_hold_candidate_step_index = None
+        self._current_sweep_ramp_hold_candidate_sign = 0.0
+        self._current_sweep_ramp_hold_candidate_since_s = None
+
     def _current_sweep_hold_filtered_value_and_noise(self, basis: str) -> tuple[float, float] | None:
         current_value = self._current_distribution_value(basis, require_after_last_move=False)
         if current_value is None:
@@ -15848,6 +15860,56 @@ class MainWindow(QtWidgets.QMainWindow):
         signed_error = current_value - float(step.target_value)
         return signed_error, abs(signed_error), max(1e-12, abs(float(effective_tolerance))), max(0.0, noise_value)
 
+    def _current_sweep_hold_entry_confirmed(
+        self,
+        step: AutomationStep,
+        step_index: int,
+        signed_error: float,
+        pause_band: float,
+        filtered_signal: ScaleControlSignal | None,
+    ) -> bool:
+        if step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return True
+        if filtered_signal is None:
+            self._reset_current_sweep_ramp_hold_candidate()
+            return False
+        transformation_band = max(
+            abs(float(pause_band)),
+            self._current_sweep_hold_transformation_band_for_basis(step.basis),
+        )
+        if abs(float(signed_error)) <= transformation_band:
+            self._reset_current_sweep_ramp_hold_candidate()
+            return False
+        slope = float(filtered_signal.slope_per_s)
+        if step.basis == HSW_BASIS_LOAD_G:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            slope_mpa = stress_mpa_from_load_g(slope, diameter_mm)
+            slope = 0.0 if slope_mpa is None else float(slope_mpa)
+        away_slope_floor = max(
+            SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S,
+            transformation_band / max(self._current_sweep_hold_filter_window_s(), 1e-9),
+        )
+        moving_away = float(signed_error) * slope > 0.0 and abs(slope) >= away_slope_floor
+        if not moving_away and abs(float(signed_error)) <= transformation_band * 2.5:
+            self._reset_current_sweep_ramp_hold_candidate()
+            return False
+        sign = math.copysign(1.0, float(signed_error))
+        timestamp_s = float(filtered_signal.timestamp_s)
+        if (
+            self._current_sweep_ramp_hold_candidate_step_index != step_index
+            or self._current_sweep_ramp_hold_candidate_sign != sign
+        ):
+            self._current_sweep_ramp_hold_candidate_step_index = step_index
+            self._current_sweep_ramp_hold_candidate_sign = sign
+            self._current_sweep_ramp_hold_candidate_since_s = timestamp_s
+            return False
+        since_s = self._current_sweep_ramp_hold_candidate_since_s
+        if since_s is None:
+            self._current_sweep_ramp_hold_candidate_since_s = timestamp_s
+            return False
+        return timestamp_s - float(since_s) >= SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S
+
     def _update_current_sweep_ramp_hold(
         self,
         step: AutomationStep,
@@ -15863,7 +15925,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if error_state is None:
             return self._current_sweep_ramp_hold_step_index == step_index, False
 
-        _signed_error, error_value, tolerance, noise_value = error_state
+        signed_error, error_value, tolerance, noise_value = error_state
+        filtered_signal = (
+            self._scale_control_signal_for_basis(step.basis)
+            if step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            else None
+        )
         pause_factor = max(
             1e-12,
             self._current_sweep_hold_setting(
@@ -15896,9 +15963,18 @@ class MainWindow(QtWidgets.QMainWindow):
         error_label = "filtered absolute target error"
 
         if not holding and pause_error > pause_band:
+            if not self._current_sweep_hold_entry_confirmed(
+                step,
+                step_index,
+                signed_error,
+                pause_band,
+                filtered_signal,
+            ):
+                return False, False
             self._current_sweep_ramp_hold_step_index = step_index
             self._current_sweep_ramp_hold_started_s = now_s
             self._current_sweep_ramp_hold_in_band_since_s = None
+            self._reset_current_sweep_ramp_hold_candidate()
             setpoint = self._active_current_sweep_last_setpoint_mA
             self._log(
                 "Holding current ramp"
@@ -15909,6 +15985,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return True, False
 
         if not holding:
+            self._reset_current_sweep_ramp_hold_candidate()
             return False, False
 
         held_s = max(0.0, now_s - self._current_sweep_ramp_hold_started_s)
@@ -17336,7 +17413,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("log_dir", log_dir_to_save)
         self.settings.setValue("log_name", _clean_session_basename(self.edit_log_name.text()))
         self.settings.setValue("tare_on_start", self.check_tare_on_start.isChecked())
-        self.settings.setValue("capture_zero_load_reference_on_start", self.check_hardware_tare_on_start.isChecked())
         self.settings.setValue("developer_run_log_mirror_enabled", self._run_log_mirror_enabled)
         self.settings.setValue("developer_run_log_mirror_path", str(self._run_log_mirror_path))
         self.settings.setValue("recipe_mode", self.combo_recipe_mode.currentData())
@@ -17715,9 +17791,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_zero_position_on_start.setChecked(False)
         self.check_tare_on_start.setChecked(
             bool(self.settings.value("tare_on_start", False, type=bool))
-        )
-        self.check_hardware_tare_on_start.setChecked(
-            bool(self.settings.value("capture_zero_load_reference_on_start", False, type=bool))
         )
         recipe_mode = self.settings.value("recipe_mode", "ramp", type=str)
         if recipe_mode == LEGACY_CURRENT_SWEEP:
