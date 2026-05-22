@@ -33,6 +33,7 @@ from .lcr6000 import (
     Lcr6000Reading,
     Lcr6000Serial,
     Lcr6000Settings,
+    LCR_FRONT_PANEL_CURRENT_PRESETS_A as _LCR_FRONT_PANEL_CURRENT_PRESETS_A,
     LCR_FRONT_PANEL_VOLTAGE_PRESETS_V as _LCR_FRONT_PANEL_VOLTAGE_PRESETS_V,
     SUPPORTED_FUNCTIONS,
     SUPPORTED_MONITORS,
@@ -40,6 +41,7 @@ from .lcr6000 import (
     build_settings_plan,
     commands_for_settings,
     parse_numeric_list,
+    parse_numeric_token,
 )
 from . import sweep
 
@@ -77,6 +79,7 @@ PRACTICAL_FREQUENCY_PRESETS_HZ = [
 
 DEFAULT_FREQUENCY_PRESETS_HZ = list(PRACTICAL_FREQUENCY_PRESETS_HZ)
 LCR_FRONT_PANEL_VOLTAGE_PRESETS_V = list(_LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
+LCR_FRONT_PANEL_CURRENT_PRESETS_MA = [value * 1000.0 for value in _LCR_FRONT_PANEL_CURRENT_PRESETS_A]
 OWON_DEFAULT_VOLTAGE_LIMIT_V = 61.0
 HMP_DEFAULT_VOLTAGE_LIMIT_V = 30.0
 AC_DEFAULT_LOG_DIR = Path.home() / "Downloads" / "ac_susceptibility"
@@ -106,6 +109,8 @@ LEGACY_DEFAULT_FREQUENCY_TEXTS = {
     "100, 1000, 10000, 100000",
 }
 LEGACY_DEFAULT_LEVEL_TEXTS = {"0.1, 0.3, 1.0", "0.1, 0.3, 1"}
+DEFAULT_CURRENT_LEVEL_TEXT = ", ".join(f"{value:g}" for value in LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
+DEFAULT_VOLTAGE_LEVEL_TEXT = ", ".join(f"{value:g}" for value in LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
 
 
 class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
@@ -138,6 +143,7 @@ class AcPlotPoint:
     current_actual_mA: float | None = None
     wire_resistance_ohm: float | None = None
     psu_power_w: float | None = None
+    excitation_current_mA: float = math.nan
 
 
 @dataclass
@@ -230,6 +236,7 @@ def _plot_point_from_lcr_reading(
         model=setting.function,
         frequency_hz=float(setting.frequency_hz),
         amplitude_v=float(setting.level_value if setting.level_mode == "voltage" else math.nan),
+        excitation_current_mA=float(setting.level_value * 1000.0 if setting.level_mode == "current" else math.nan),
         current_mA=float(current_mA),
         ls_h=ls_h,
         rs_ohm=rs_ohm,
@@ -635,7 +642,7 @@ class MainWindow(CurrentAnnealingWindow):
             (True, "elapsed_s", "rs_ohm", "ls_h", ""),
             (True, "current_actual_mA", "rs_ohm", "ls_h", "wire_resistance_ohm"),
             (True, "frequency_hz", "rs_ohm", "ls_h", ""),
-            (True, "amplitude_v", "rs_ohm", "ls_h", ""),
+            (True, "excitation_current_mA", "rs_ohm", "ls_h", ""),
         ]
         for tile_index, (visible_default, x_default, y_default, right_default, extra_default) in enumerate(defaults):
             visible = QtWidgets.QCheckBox(config_box)
@@ -762,6 +769,12 @@ class MainWindow(CurrentAnnealingWindow):
             AcPlotChannel("current_set_mA", "Current set [mA]", "#fb923c", lambda point: point.current_mA),
             AcPlotChannel("frequency_hz", "Frequency [Hz]", "#60a5fa", lambda point: point.frequency_hz),
             AcPlotChannel("amplitude_v", "Amplitude [V]", "#facc15", lambda point: point.amplitude_v),
+            AcPlotChannel(
+                "excitation_current_mA",
+                "LCR excitation [mA]",
+                "#facc15",
+                lambda point: point.excitation_current_mA,
+            ),
             AcPlotChannel("rs_ohm", "Rs [Ohm]", "#14b8a6", lambda point: point.rs_ohm),
             AcPlotChannel("ls_h", "Ls [H]", "#a78bfa", lambda point: point.ls_h),
             AcPlotChannel("wire_resistance_ohm", "Wire R [Ohm]", "#f59e0b", lambda point: point.wire_resistance_ohm),
@@ -816,11 +829,11 @@ class MainWindow(CurrentAnnealingWindow):
                 (True, "elapsed_s", "rs_ohm", "ls_h", ""),
                 (True, "current_actual_mA", "rs_ohm", "ls_h", "wire_resistance_ohm"),
                 (True, "frequency_hz", "rs_ohm", "ls_h", ""),
-                (True, "amplitude_v", "rs_ohm", "ls_h", ""),
+                (True, "excitation_current_mA", "rs_ohm", "ls_h", ""),
             ],
             "frequency": [
                 (True, "frequency_hz", "rs_ohm", "ls_h", ""),
-                (True, "amplitude_v", "rs_ohm", "ls_h", ""),
+                (True, "excitation_current_mA", "rs_ohm", "ls_h", ""),
                 (True, "elapsed_s", "rs_ohm", "ls_h", ""),
                 (True, "current_actual_mA", "rs_ohm", "ls_h", "wire_resistance_ohm"),
             ],
@@ -1386,7 +1399,7 @@ class MainWindow(CurrentAnnealingWindow):
         points: Sequence[AcPlotPoint],
         x_channel: AcPlotChannel,
     ) -> list[tuple[float, float]]:
-        grouped: dict[tuple[str, float, float, float], list[tuple[float, float]]] = {}
+        grouped: dict[tuple[str, float | None, float | None, float | None, float | None], list[tuple[float, float]]] = {}
         for point in points:
             x_value = x_channel.getter(point)
             y_value = point.wire_resistance_ohm
@@ -1399,9 +1412,10 @@ class MainWindow(CurrentAnnealingWindow):
                 continue
             key = (
                 point.model,
-                round(float(point.frequency_hz), 12),
-                round(float(point.amplitude_v), 12),
-                round(float(point.current_mA), 12),
+                self._plot_key_value(point.frequency_hz),
+                self._plot_key_value(point.amplitude_v),
+                self._plot_key_value(point.excitation_current_mA),
+                self._plot_key_value(point.current_mA),
             )
             grouped.setdefault(key, []).append((float(x_value), float(y_value)))
         pairs = [
@@ -1422,9 +1436,25 @@ class MainWindow(CurrentAnnealingWindow):
             return ordered[middle]
         return (ordered[middle - 1] + ordered[middle]) / 2.0
 
+    @staticmethod
+    def _plot_key_value(value: float | None) -> float | None:
+        if value is None:
+            return None
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return None
+        return round(numeric, 12)
+
     def _jitter_plot_x_values(self, axis: Any, x_key: str, x_values: Sequence[float]) -> list[float]:
         values = [float(value) for value in x_values]
-        if x_key not in {"current_actual_mA", "current_set_mA", "current_mA", "frequency_hz", "amplitude_v"}:
+        if x_key not in {
+            "current_actual_mA",
+            "current_set_mA",
+            "current_mA",
+            "frequency_hz",
+            "amplitude_v",
+            "excitation_current_mA",
+        }:
             return values
         spread_px = self._plot_spread_pixels()
         if spread_px <= 0.0:
@@ -1487,15 +1517,16 @@ class MainWindow(CurrentAnnealingWindow):
             x_key = "current_actual_mA"
         if x_key in {"elapsed_s", "current_actual_mA", "current_set_mA"}:
             return points[-AC_PLOT_RECENT_POINTS:]
-        if x_key not in {"frequency_hz", "amplitude_v"}:
+        if x_key not in {"frequency_hz", "amplitude_v", "excitation_current_mA"}:
             return points[-AC_PLOT_RECENT_POINTS:]
-        grouped: dict[tuple[str, float, float, float], list[AcPlotPoint]] = {}
+        grouped: dict[tuple[str, float | None, float | None, float | None, float | None], list[AcPlotPoint]] = {}
         for point in points:
             key = (
                 point.model,
-                round(point.frequency_hz, 12),
-                round(point.amplitude_v, 12),
-                round(point.current_mA, 12),
+                self._plot_key_value(point.frequency_hz),
+                self._plot_key_value(point.amplitude_v),
+                self._plot_key_value(point.excitation_current_mA),
+                self._plot_key_value(point.current_mA),
             )
             grouped.setdefault(key, []).append(point)
         selected: list[AcPlotPoint] = []
@@ -1773,8 +1804,8 @@ class MainWindow(CurrentAnnealingWindow):
         self.lineEdit_lcr_frequencies = QtWidgets.QLineEdit(group)
         self.lineEdit_lcr_levels = QtWidgets.QLineEdit(group)
         self.comboBox_lcr_level_mode = QtWidgets.QComboBox(group)
+        self.comboBox_lcr_level_mode.addItem("Current (recommended)", "current")
         self.comboBox_lcr_level_mode.addItem("Voltage", "voltage")
-        self.comboBox_lcr_level_mode.hide()
         self.comboBox_lcr_function = QtWidgets.QComboBox(group)
         self.comboBox_lcr_function.addItems(list(SUPPORTED_FUNCTIONS))
         self.comboBox_lcr_function.setCurrentText("Ls-Rs")
@@ -1797,7 +1828,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_apply_lcr_setting.hide()
         self.pushButton_lcr_default_presets = QtWidgets.QPushButton("Default full scan", group)
         self.pushButton_lcr_all_frequencies = QtWidgets.QPushButton("All practical frequencies", group)
-        self.pushButton_lcr_all_levels = QtWidgets.QPushButton("All amplitudes", group)
+        self.pushButton_lcr_all_levels = QtWidgets.QPushButton("All currents", group)
         self.pushButton_measure_lcr_baseline = QtWidgets.QPushButton("Measure empty-coil baseline", group)
         self.label_ac_psu_status = QtWidgets.QLabel("", group)
         self.label_ac_psu_status.setWordWrap(True)
@@ -1846,7 +1877,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_stop_ac_sweep.setEnabled(False)
 
         self.lineEdit_lcr_frequencies.setPlaceholderText("10, 20, 50, 100, 200, 500, 1k, 2k, 5k, 10k, 20k, 50k, 100k, 200k")
-        self.lineEdit_lcr_levels.setPlaceholderText("0.01, 0.1, 0.3, 0.5, 1.0, 1.5, 2.0")
+        self.lineEdit_lcr_levels.setPlaceholderText("0.1, 0.5, 1, 5, 10, 20 mA")
 
         grid.addWidget(QtWidgets.QLabel("Frequencies:", group), 0, 0)
         grid.addWidget(self.lineEdit_lcr_frequencies, 0, 1, 1, 3)
@@ -1856,7 +1887,8 @@ class MainWindow(CurrentAnnealingWindow):
         preset_row.addWidget(self.pushButton_lcr_all_levels)
         preset_row.addStretch(1)
         grid.addLayout(preset_row, 1, 1, 1, 3)
-        grid.addWidget(QtWidgets.QLabel("Amplitudes:", group), 2, 0)
+        self.label_lcr_levels = QtWidgets.QLabel("LCR excitation current:", group)
+        grid.addWidget(self.label_lcr_levels, 2, 0)
         grid.addWidget(self.lineEdit_lcr_levels, 2, 1, 1, 3)
         grid.addWidget(QtWidgets.QLabel("Model:", group), 3, 0)
         model_label = QtWidgets.QLabel("Ls-Rs", group)
@@ -1868,10 +1900,11 @@ class MainWindow(CurrentAnnealingWindow):
         grid.addWidget(QtWidgets.QLabel("Monitor 1:", group), 4, 2)
         grid.addWidget(self.comboBox_lcr_monitor1, 4, 3)
         self.comboBox_lcr_monitor2.hide()
-        grid.addWidget(self.comboBox_lcr_level_mode, 5, 0)
-        grid.addWidget(self.comboBox_lcr_function, 5, 1)
-        grid.addWidget(self.checkBox_lcr_model_lsrs, 5, 2)
-        grid.addWidget(self.checkBox_ac_plan_loops, 5, 3)
+        grid.addWidget(QtWidgets.QLabel("Excitation mode:", group), 5, 0)
+        grid.addWidget(self.comboBox_lcr_level_mode, 5, 1)
+        grid.addWidget(self.comboBox_lcr_function, 5, 2)
+        grid.addWidget(self.checkBox_lcr_model_lsrs, 5, 3)
+        grid.addWidget(self.checkBox_ac_plan_loops, 6, 0)
         grid.addWidget(self.pushButton_apply_lcr_setting, 6, 3)
         outer.addLayout(grid)
 
@@ -1932,6 +1965,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_lcr_default_presets.clicked.connect(self.apply_default_lcr_presets)
         self.pushButton_lcr_all_frequencies.clicked.connect(self.apply_all_lcr_frequencies)
         self.pushButton_lcr_all_levels.clicked.connect(self.apply_all_lcr_levels)
+        self.comboBox_lcr_level_mode.currentIndexChanged.connect(lambda *_args: self._handle_lcr_level_mode_changed())
         for shared in (
             getattr(self.ui, "comboBox_supply", None),
             getattr(self.ui, "comboBox_port", None),
@@ -2027,9 +2061,9 @@ class MainWindow(CurrentAnnealingWindow):
                 self.ac_settings.value("frequencies", self._format_numeric_list(DEFAULT_FREQUENCY_PRESETS_HZ), type=str)
             )
             self.lineEdit_lcr_levels.setText(
-                self.ac_settings.value("levels", self._format_numeric_list(LCR_FRONT_PANEL_VOLTAGE_PRESETS_V), type=str)
+                self.ac_settings.value("levels", DEFAULT_CURRENT_LEVEL_TEXT, type=str)
             )
-            self._set_combo_data(self.comboBox_lcr_level_mode, self.ac_settings.value("level_mode", "voltage", type=str))
+            self._set_combo_data(self.comboBox_lcr_level_mode, self.ac_settings.value("level_mode", "current", type=str))
             self._set_combo_text(self.comboBox_lcr_function, "Ls-Rs")
             models = str(self.ac_settings.value("models", "Ls-Rs", type=str))
             model_tokens = {token.strip().lower() for token in re.split(r"[,;\s]+", models) if token.strip()}
@@ -2043,7 +2077,7 @@ class MainWindow(CurrentAnnealingWindow):
                 self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(PRACTICAL_FREQUENCY_PRESETS_HZ))
             stored_levels = self.lineEdit_lcr_levels.text().strip()
             if not stored_levels or stored_levels in LEGACY_DEFAULT_LEVEL_TEXTS:
-                self.lineEdit_lcr_levels.setText(self._format_numeric_list(LCR_FRONT_PANEL_VOLTAGE_PRESETS_V))
+                self.lineEdit_lcr_levels.setText(self._default_lcr_level_text())
             plan_loops = self.ac_settings.value("plan_loops", 1)
             self.checkBox_ac_plan_loops.setChecked(str(plan_loops).lower() not in {"0", "false", "no"})
             self._set_combo_data(self.comboBox_ac_direction, self.ac_settings.value("direction", "up-down", type=str))
@@ -2061,6 +2095,7 @@ class MainWindow(CurrentAnnealingWindow):
             self._refresh_ac_psu_status()
             include_zero = self.ac_settings.value("include_zero_current", 0)
             self.checkBox_ac_include_zero_current.setChecked(str(include_zero).lower() in {"1", "true", "yes"})
+            self._refresh_lcr_level_mode_ui(reset_levels=False)
         finally:
             self._ac_loading_settings = False
 
@@ -2101,6 +2136,54 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("dwell_s", float(self.spinBox_ac_dwell.value()))
         self.ac_settings.setValue("point_duration_s", float(self.spinBox_ac_point_duration.value()))
         self.ac_settings.setValue("include_zero_current", int(self.checkBox_ac_include_zero_current.isChecked()))
+
+    def _handle_lcr_level_mode_changed(self) -> None:
+        if not bool(getattr(self, "_ac_loading_settings", False)):
+            self._refresh_lcr_level_mode_ui(reset_levels=True)
+            self._store_lcr_settings()
+            self._update_ac_sweep_estimate()
+
+    def _default_lcr_level_text(self) -> str:
+        mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
+        if mode == "current":
+            return self._format_numeric_list(LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
+        return self._format_numeric_list(LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
+
+    @staticmethod
+    def _parse_lcr_current_levels(text: str) -> list[float]:
+        chunks = [part.strip() for part in re.split(r"[,;]+", text.strip()) if part.strip()]
+        if not chunks:
+            raise ValueError("enter at least one LCR excitation current")
+        levels: list[float] = []
+        for chunk in chunks:
+            if re.search(r"[A-Za-z]", chunk):
+                levels.append(parse_numeric_token(re.sub(r"\s+", "", chunk), quantity="current"))
+                continue
+            for token in [part for part in chunk.split() if part]:
+                levels.append(float(token) * 1e-3)
+        return levels
+
+    def _parse_lcr_levels(self, text: str, *, level_mode: str) -> list[float]:
+        if level_mode == "current":
+            return self._parse_lcr_current_levels(text)
+        return parse_numeric_list(text, quantity="generic")
+
+    def _refresh_lcr_level_mode_ui(self, *, reset_levels: bool) -> None:
+        mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
+        if mode == "current":
+            self.label_lcr_levels.setText("LCR excitation current:")
+            self.lineEdit_lcr_levels.setPlaceholderText("0.1, 0.5, 1, 5, 10, 20 mA")
+            self.pushButton_lcr_all_levels.setText("All currents")
+            self.comboBox_lcr_monitor1.setCurrentText("IAC")
+            self.comboBox_lcr_monitor2.setCurrentText("VAC")
+        else:
+            self.label_lcr_levels.setText("LCR excitation voltage:")
+            self.lineEdit_lcr_levels.setPlaceholderText("0.01, 0.1, 0.3, 0.5, 1, 1.5, 2 V")
+            self.pushButton_lcr_all_levels.setText("All voltages")
+            self.comboBox_lcr_monitor1.setCurrentText("VAC")
+            self.comboBox_lcr_monitor2.setCurrentText("IAC")
+        if reset_levels:
+            self.lineEdit_lcr_levels.setText(self._default_lcr_level_text())
 
     def populate_lcr_ports(self) -> None:
         self.comboBox_lcr_port.clear()
@@ -2644,10 +2727,9 @@ class MainWindow(CurrentAnnealingWindow):
 
     def _prepare_lcr_plan(self) -> list[Lcr6000Settings]:
         self._store_lcr_settings()
-        level_mode = str(self.comboBox_lcr_level_mode.currentData() or "voltage")
-        quantity = "current" if level_mode == "current" else "generic"
+        level_mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
         frequencies = parse_numeric_list(self.lineEdit_lcr_frequencies.text(), quantity="frequency")
-        levels = parse_numeric_list(self.lineEdit_lcr_levels.text(), quantity=quantity)
+        levels = self._parse_lcr_levels(self.lineEdit_lcr_levels.text(), level_mode=level_mode)
         self._lcr_plan = sweep.build_ac_settings_plan(
             models=self._selected_lcr_models(),
             frequencies_hz=frequencies,
@@ -2784,6 +2866,7 @@ class MainWindow(CurrentAnnealingWindow):
             model=row.setting.function,
             frequency_hz=float(row.setting.frequency_hz),
             amplitude_v=float(row.setting.level_value if row.setting.level_mode == "voltage" else math.nan),
+            excitation_current_mA=float(row.setting.level_value * 1000.0 if row.setting.level_mode == "current" else math.nan),
             current_mA=float(row.current_point.current_a) * 1000.0,
             ls_h=ls_h,
             rs_ohm=rs_ohm,
@@ -2809,6 +2892,7 @@ class MainWindow(CurrentAnnealingWindow):
             model=setting.function,
             frequency_hz=float(setting.frequency_hz),
             amplitude_v=float(setting.level_value if setting.level_mode == "voltage" else math.nan),
+            excitation_current_mA=float(setting.level_value * 1000.0 if setting.level_mode == "current" else math.nan),
             current_mA=0.0,
             ls_h=ls_h,
             rs_ohm=rs_ohm,
@@ -2879,7 +2963,7 @@ class MainWindow(CurrentAnnealingWindow):
 
     def apply_default_lcr_presets(self, *, store: bool = True) -> None:
         self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(DEFAULT_FREQUENCY_PRESETS_HZ))
-        self.lineEdit_lcr_levels.setText(self._format_numeric_list(LCR_FRONT_PANEL_VOLTAGE_PRESETS_V))
+        self.lineEdit_lcr_levels.setText(self._default_lcr_level_text())
         if store:
             self._store_lcr_settings()
             self._update_ac_sweep_estimate()
@@ -2890,7 +2974,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._update_ac_sweep_estimate()
 
     def apply_all_lcr_levels(self) -> None:
-        self.lineEdit_lcr_levels.setText(self._format_numeric_list(LCR_FRONT_PANEL_VOLTAGE_PRESETS_V))
+        self.lineEdit_lcr_levels.setText(self._default_lcr_level_text())
         self._store_lcr_settings()
         self._update_ac_sweep_estimate()
 

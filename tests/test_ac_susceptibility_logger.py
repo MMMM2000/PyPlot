@@ -1413,6 +1413,67 @@ def test_lcr_preset_lists_match_simplified_ac_workflow() -> None:
         1.5,
         2.0,
     ]
+    assert ac_logger.LCR_FRONT_PANEL_CURRENT_PRESETS_MA == [
+        0.1,
+        0.5,
+        1.0,
+        5.0,
+        10.0,
+        20.0,
+    ]
+
+
+def test_ac_logger_defaults_to_lcr_current_excitation(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "current_excitation_default")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        assert window.comboBox_lcr_level_mode.currentData() == "current"
+        assert window.label_lcr_levels.text() == "LCR excitation current:"
+        assert window.lineEdit_lcr_levels.text() == "0.1, 0.5, 1, 5, 10, 20"
+        assert window.pushButton_lcr_all_levels.text() == "All currents"
+        assert "mA" in window.lineEdit_lcr_levels.placeholderText()
+        plan = window._prepare_lcr_plan()
+        assert {setting.level_mode for setting in plan} == {"current"}
+        assert [setting.level_value for setting in plan[:6]] == pytest.approx(
+            [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.02]
+        )
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_can_switch_lcr_excitation_between_current_and_voltage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "current_voltage_excitation_switch")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        window.lineEdit_lcr_frequencies.setText("1000")
+        window.lineEdit_lcr_levels.setText("1, 5 mA, 0.02 A")
+        current_plan = window._prepare_lcr_plan()
+        assert [setting.level_value for setting in current_plan] == pytest.approx([0.001, 0.005, 0.02])
+        assert all(setting.level_mode == "current" for setting in current_plan)
+
+        window._set_combo_data(window.comboBox_lcr_level_mode, "voltage")
+        window._handle_lcr_level_mode_changed()
+        assert window.label_lcr_levels.text() == "LCR excitation voltage:"
+        assert window.pushButton_lcr_all_levels.text() == "All voltages"
+        assert window.lineEdit_lcr_levels.text() == "0.01, 0.1, 0.3, 0.5, 1, 1.5, 2"
+        voltage_plan = window._prepare_lcr_plan()
+        assert all(setting.level_mode == "voltage" for setting in voltage_plan)
+    finally:
+        window.close()
+        app.processEvents()
 
 
 def test_ac_logger_uses_ac_specific_owon_supply_defaults_for_sweep_config() -> None:
@@ -1855,7 +1916,7 @@ def test_ac_logger_graph_defaults_are_ac_susceptibility_specific(
         assert window._plot_tiles[1].y_right_combo.currentData() == "ls_h"
         assert window._plot_tiles[1].y_extra_combo.currentData() == "wire_resistance_ohm"
         assert window._plot_tiles[2].x_combo.currentData() == "frequency_hz"
-        assert window._plot_tiles[3].x_combo.currentData() == "amplitude_v"
+        assert window._plot_tiles[3].x_combo.currentData() == "excitation_current_mA"
         assert ac_logger.pg is not None
         assert len(window._ac_pg_tiles) == 4
         assert window._ac_plot_render_state[0]["title"] == "Rs + Ls vs Elapsed time"
@@ -2195,7 +2256,7 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
     try:
         assert window.spinBox_ac_point_duration.value() == pytest.approx(10.0)
         assert window.lineEdit_lcr_frequencies.text() == window._format_numeric_list(ac_logger.PRACTICAL_FREQUENCY_PRESETS_HZ)
-        assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(ac_logger.LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
+        assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(ac_logger.LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
         assert window.progress_ac_run.format() == "AC progress: idle"
         sticky_frame = window.ui.pushButton_start_process.parentWidget()
         sticky_parent_layout = sticky_frame.parentWidget().layout()
@@ -2455,7 +2516,7 @@ def test_ac_logger_migrates_old_short_frequency_defaults(monkeypatch: pytest.Mon
     window = ac_logger.MainWindow()
     try:
         assert window.lineEdit_lcr_frequencies.text() == window._format_numeric_list(ac_logger.PRACTICAL_FREQUENCY_PRESETS_HZ)
-        assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(ac_logger.LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
+        assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(ac_logger.LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
     finally:
         window.close()
         app.processEvents()
@@ -2482,6 +2543,23 @@ def test_commands_for_settings_use_lcr6000_scpi_spellings() -> None:
         "LEV:VOLT 0.1\n",
         "APER FAST\n",
     ]
+
+
+def test_commands_for_settings_can_drive_lcr_current_level() -> None:
+    settings = lcr6000.Lcr6000Settings(
+        frequency_hz=1000.0,
+        level_value=0.005,
+        level_mode="current",
+        function="Ls-Rs",
+        monitor1="IAC",
+        monitor2="VAC",
+        aperture="SLOW",
+    )
+
+    commands = lcr6000.commands_for_settings(settings)
+
+    assert "LEV:CURR 0.005\n" in commands
+    assert "LEV:VOLT 0.005\n" not in commands
 
 
 def test_parse_fetch_impedance_keeps_raw_and_numeric_values() -> None:

@@ -6,7 +6,7 @@ current source:
 
 1. **Measure empty-coil baseline** with no microwire installed.
 2. **Run microwire current sweep** after inserting the wire, using the same LCR
-   frequency/amplitude settings while sweeping DC current up and back down.
+   frequency/excitation settings while sweeping DC current up and back down.
 
 The older current-annealing controls are hidden or replaced in this logger so
 the normal workflow only shows instrument setup, the AC experiment plan,
@@ -65,7 +65,7 @@ Quick probe after driver installation:
 ## Measurement Workflow
 
 Use **Measure empty-coil baseline** before mounting the microwire. Baseline
-runs the selected LCR model/frequency/amplitude matrix for the configured
+runs the selected LCR model/frequency/excitation matrix for the configured
 measurement time per point and writes a timestamped
 `ac_susc_empty_coil_baseline_YYYYMMDD_HHMMSS.tsv` file next to the selected log
 file. The filename intentionally does not include sample or microwire identity
@@ -93,14 +93,14 @@ Point acquisition controls are named for the AC experiment:
 - **Measure time/point** controls how long the logger keeps fetching LCR data
   at each setting. The default is `10 s`, and the same duration applies to
   empty-coil baseline settings and microwire
-  model/frequency/amplitude/current points. The actual number of rows depends
+  model/frequency/excitation/current points. The actual number of rows depends
   on how fast the LCR meter responds at that condition.
 - The run estimate shows separate empty-coil baseline and microwire sweep
   durations, plus the local clock time when each run would finish if started
   now. The estimate uses the selected settle time and a rough LCR-read
   allowance; real serial communication overhead can still add time.
 - During a run, the sticky task line reports the active LCR model, frequency,
-  amplitude, read number, and microwire current when applicable. The progress
+  excitation level, read number, and microwire current when applicable. The progress
   bar reports elapsed/total measurement time, estimated time remaining, and
   the expected finish clock time/date.
   Empty-coil baseline readings are also added to the live plots as 0 mA points
@@ -133,11 +133,14 @@ Ni50Fe27Ga23 microwire:
 
 - LCR model: `Ls-Rs`
 - Optional diagnostic model: `Lp-Rp`
-- Monitor 1: `Z`
+- LCR excitation: current mode, starting with all front-panel current presets,
+  `0.1, 0.5, 1, 5, 10, 20 mA`
+- Monitor 1/2 in current excitation mode: `IAC` and `VAC`, so the actual AC
+  coil drive can be recovered from the raw LCR monitor fields.
 - Frequencies: the full practical scan list, `10, 20, 50, 100, 200, 500, 1k,
   2k, 5k, 10k, 20k, 50k, 100k, 200k Hz`
-- Voltage levels: all front-panel voltage presets, `0.01, 0.1, 0.3, 0.5, 1.0,
-  1.5, 2.0 V`
+- Voltage excitation mode remains available for comparison or legacy runs, with
+  presets `0.01, 0.1, 0.3, 0.5, 1.0, 1.5, 2.0 V`.
 - Aperture: `FAST` for searching, `MED` or `SLOW` after the best region is known
 - Current loop: start conservatively, for example `20 mA -> 80 mA -> 20 mA`
 
@@ -163,11 +166,19 @@ The official LCR-6000 manual gives these ranges for the lab LCR-6200:
 
 The UI includes one-click preset selectors:
 
-- **Default full scan**: the full practical frequency scan and all voltage
-  presets.
+- **Default full scan**: the full practical frequency scan and all presets for
+  the selected excitation mode.
 - **All practical frequencies**: `10, 20, 50, 100, 200, 500, 1k, 2k, 5k, 10k,
   20k, 50k, 100k, 200k Hz`.
-- **All amplitudes**: `0.01, 0.1, 0.3, 0.5, 1.0, 1.5, 2.0 V`.
+- **All currents** in current excitation mode: `0.1, 0.5, 1, 5, 10, 20 mA`.
+- **All voltages** in voltage excitation mode: `0.01, 0.1, 0.3, 0.5, 1.0,
+  1.5, 2.0 V`.
+
+Current excitation is the default because the coil field is set by coil current,
+not by the LCR source voltage. Bare current values in the UI are interpreted as
+mA, so `1, 5, 20` means `1 mA, 5 mA, 20 mA`; explicit suffixes such as
+`500 uA`, `5 mA`, or `0.02 A` are also accepted. In voltage mode, bare values
+remain volts.
 
 Because the LCR-6200 frequency setting is continuous, "all frequencies" means
 the practical scan list above, not every possible value. The logger validates
@@ -178,7 +189,7 @@ entered values against the LCR-6200 range before configuring the meter.
 Each AC sweep row includes:
 
 ```text
-timestamp, elapsed_s, setting index/count, LCR model, frequency, level,
+timestamp, elapsed_s, setting index/count, LCR model, frequency, level mode/level,
 current_set_a, current_actual_a, voltage_actual_v, PSU resistance, PSU power,
 direction, repeat, LCR primary/secondary/monitors/status/raw,
 PSU backend/resource/status/error
@@ -275,7 +286,7 @@ By default it shows:
 - `Rs + Ls vs elapsed time`
 - `Rs + Ls + wire resistance vs measured current`
 - `Rs + Ls vs frequency`
-- `Rs + Ls vs amplitude`
+- `Rs + Ls vs LCR excitation current`
 
 Current plots distinguish `Current measured [mA]` from `Current set [mA]`.
 Measured current is the default X axis because it is the physical value returned
@@ -288,7 +299,7 @@ from the dashboard: the logger can keep writing every valid LCR/PSU read while
 the display shows a reduced, recent view for responsiveness.
 
 Additional selectable channels include elapsed time, measured current, set
-current, frequency, amplitude, `Rs`, `Ls`, wire resistance, and PSU power. The
+current, frequency, voltage amplitude, LCR excitation current, `Rs`, `Ls`, wire resistance, and PSU power. The
 plot renderer follows the Qt palette so dark mode labels, ticks, and titles
 remain readable.
 
@@ -297,7 +308,7 @@ dense parameter scans are easier to read without connecting lines. `Rs` and
 `Ls` are scatter-only by default and use separate Y scales. Wire resistance is
 drawn as line plus symbols when selected because it follows the DC current path
 through the microwire and contacts, but it is reduced to the median wire
-resistance for each model/frequency/amplitude/current setting so noisy PSU
+resistance for each model/frequency/excitation/current setting so noisy PSU
 readback does not dominate the dashboard.
 
 When frequency is selected as the X axis, the logger uses a logarithmic scale.
@@ -309,7 +320,7 @@ is deterministic and based on screen pixels rather than the numeric data range,
 so it improves readability without changing the logged values. Frequency and
 amplitude plots use display-only per-condition thinning once a condition
 contains many points, preserving representation from each
-model/frequency/amplitude/current group while leaving the TSV logging complete.
+model/frequency/excitation/current group while leaving the TSV logging complete.
 Combined plots use colored Y-axis labels/ticks instead of in-plot legends,
 keeping dense traces readable while still identifying left, right, and
 far-right axis data.
