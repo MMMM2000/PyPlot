@@ -8,61 +8,39 @@ script = ""
 [setup.darwin]
 script = '''
 set -e
-if [ -d .venv ] && ! .venv/bin/python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)"; then
-  echo "Existing .venv is not Python 3.14; recreating it for this worktree." >&2
-  rm -rf .venv
-fi
 
-if [ ! -d .venv ]; then
-  command -v python3.14 >/dev/null 2>&1 || {
-    echo "python3.14 is required for this project. Install it and retry." >&2
-    exit 1
-  }
-  python3.14 -m venv .venv
-fi
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-pip install -e ".[test]"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-artifacts/uv-cache}"
+export TMPDIR="${TMPDIR:-artifacts/tool-temp}"
+export TEMP="${TEMP:-$TMPDIR}"
+export TMP="${TMP:-$TMPDIR}"
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-artifacts/pip-cache}"
+mkdir -p "$UV_CACHE_DIR" "$TMPDIR" "$PIP_CACHE_DIR"
+
+command -v uv >/dev/null 2>&1 || {
+  echo "uv is required for this project. Install it and retry: https://docs.astral.sh/uv/getting-started/installation/" >&2
+  exit 1
+}
+
+uv sync --extra test
+uv run python --version
 '''
 
 [setup.win32]
 script = '''
 $ErrorActionPreference = "Stop"
 
-$venvPython = Join-Path $PWD ".venv\Scripts\python.exe"
+$env:UV_CACHE_DIR = if ($env:UV_CACHE_DIR) { $env:UV_CACHE_DIR } else { "artifacts\uv-cache" }
+$env:TEMP = if ($env:TEMP) { $env:TEMP } else { "artifacts\tool-temp" }
+$env:TMP = if ($env:TMP) { $env:TMP } else { $env:TEMP }
+$env:PIP_CACHE_DIR = if ($env:PIP_CACHE_DIR) { $env:PIP_CACHE_DIR } else { "artifacts\pip-cache" }
+New-Item -ItemType Directory -Force $env:UV_CACHE_DIR, $env:TEMP, $env:PIP_CACHE_DIR | Out-Null
 
-if (Test-Path $venvPython) {
-    & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)"
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Existing .venv is not Python 3.14; recreating it for this worktree."
-        Remove-Item -LiteralPath ".venv" -Recurse -Force
-    }
-} elseif (Test-Path ".venv") {
-    Write-Host "Existing .venv is incomplete; recreating it for this worktree."
-    Remove-Item -LiteralPath ".venv" -Recurse -Force
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    throw "uv is required for this project. Install it with: winget install --id=astral-sh.uv -e"
 }
 
-if (-not (Test-Path $venvPython)) {
-    if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
-        throw "The Windows Python launcher 'py' is required for setup. Install Python 3.14 and ensure py -0p lists it, then retry."
-    }
-    py -3.14 --version
-    if ($LASTEXITCODE -ne 0) {
-        throw "Python 3.14 is required for this project. Install it and ensure py -0p lists a 3.14 interpreter, then retry."
-    }
-    py -3.14 -m venv .venv
-    $venvPython = Join-Path $PWD ".venv\Scripts\python.exe"
-    & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Created .venv is not Python 3.14."
-    }
-}
-
-& $venvPython -m pip install --upgrade pip
-& $venvPython -m pip install -r requirements.txt
-& $venvPython -m pip install -r requirements-win.txt
-& $venvPython -m pip install -e ".[test]"
+uv sync --extra test
+uv run python --version
 '''
 
 [[actions]]
