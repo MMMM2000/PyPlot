@@ -157,10 +157,10 @@ def test_vsm_temperature_preview_keeps_dual_axis_legend_in_section_order() -> No
         assert legend is not None
         labels = [text.get_text() for text in legend.get_texts()]
         assert labels == [
-            "10000 Oe ↑",
-            "10000 Oe ↓",
-            "5 Oe ↑",
-            "5 Oe ↓",
+            "10000 Oe ↑ S1",
+            "10000 Oe ↓ S2",
+            "5 Oe ↑ S1",
+            "5 Oe ↓ S2",
         ]
     finally:
         builder_ui.plt.close(figure)

@@ -37,9 +37,13 @@ def pytest_configure() -> None:
         if tmp_root.name != "pyplot-tests":
             tmp_root = tmp_root / "pyplot-tests"
         tmp_root.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault("TMPDIR", str(tmp_root))
-        os.environ.setdefault("TEMP", str(tmp_root))
-        os.environ.setdefault("TMP", str(tmp_root))
+        os.environ["TMPDIR"] = str(tmp_root)
+        os.environ["TEMP"] = str(tmp_root)
+        os.environ["TMP"] = str(tmp_root)
+        os.environ.setdefault(
+            "MICROWIRE_BUILDER_STORAGE_ROOT",
+            str(tmp_root / "microwire-data-builder"),
+        )
         tempfile.tempdir = str(tmp_root)
     except Exception:
         pass

@@ -1230,12 +1230,16 @@ def _word_project_value_items(value: object) -> list[object]:
         return []
     if isinstance(value, float) and value != value:
         return []
-    if isinstance(value, list):
-        return [item for item in value if item not in (None, "", [], {})]
-    if isinstance(value, tuple):
-        return [item for item in value if item not in (None, "", [], {})]
-    if value in ("", [], {}):
-        return []
+    if isinstance(value, (list, tuple, set)):
+        items: list[object] = []
+        for item in value:
+            items.extend(_word_project_value_items(item))
+        return items
+    try:
+        if value in ("", [], {}):
+            return []
+    except Exception:
+        pass
     return [value]
 
 
@@ -1244,8 +1248,6 @@ def _word_project_merge_value(existing: object, incoming: object) -> object:
     if not incoming_items:
         return existing
     existing_items = _word_project_value_items(existing)
-    if not existing_items:
-        return incoming_items if len(incoming_items) > 1 else incoming_items[0]
     merged: list[object] = []
     seen: set[str] = set()
     for item in [*existing_items, *incoming_items]:

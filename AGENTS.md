@@ -1,21 +1,22 @@
 # AGENT GUIDELINES
 
 ## Environment
-- Use the project virtual environment for Python commands.
-- Match the interpreter to `pyproject.toml` before creating or reusing `.venv`. This repo currently requires Python 3.14 (`>=3.14,<3.15`); on Windows prefer `py -3.14 -m venv .venv` when recreating the environment, and do not fall back to Python 3.13.
+- Use `uv` for project Python commands and environment sync by default.
+- Match the interpreter to `pyproject.toml` before creating or reusing `.venv`. This repo currently requires Python 3.14 (`>=3.14,<3.15`); do not fall back to Python 3.13.
 - If `py -0p` does not list a Python 3.14 interpreter on Windows, stop environment setup and report that Python 3.14 must be installed/registered before installing the project.
-- Prefer the project `.venv`; on Windows use `.\.venv\Scripts\python.exe` explicitly and state which interpreter was used in the final summary.
-- If `.venv` is missing, broken, or tied to the wrong Python minor version for the project, recreate it before running project Python commands.
+- Prefer the project `.venv` created by `uv sync`; state the interpreter reported by `uv run python --version` in the final summary for dependency/setup work.
+- If `.venv` is missing, broken, or tied to the wrong Python minor version for the project, run `uv sync --extra test` before running project Python commands.
 - Treat `.venv` as disposable generated state. If the project now requires a newer Python version, replace the old `.venv` instead of asking the user to clean it up.
-- On Windows accounts with non-ASCII user paths, expect tool temp/cache issues. When running `pip`, `pip-compile`, or pytest, prefer workspace-scoped ignored paths such as `artifacts/tool-temp`, `artifacts/pip-cache`, and `artifacts/pip-tools-cache` for `TEMP`, `TMP`, `PIP_CACHE_DIR`, and pip-tools `--cache-dir`.
+- On Windows accounts with non-ASCII user paths, expect tool temp/cache issues. When running `uv`, `pip`, or pytest, prefer workspace-scoped ignored paths such as `artifacts/tool-temp`, `artifacts/uv-cache`, `artifacts/pip-cache`, and `artifacts/pip-tools-cache` for `TEMP`, `TMP`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`, and pip-tools `--cache-dir`.
+- If `uv` is unavailable, use the pip compatibility fallback: create `.venv` with Python 3.14, install `requirements.txt`, and on Windows install `requirements-win.txt` after the shared requirements file.
 
 ## Dependencies
-- Edit `pyproject.toml` first, then regenerate `requirements.txt` from it.
-- Keep `pyproject.toml`, `requirements.txt`, and generated lock headers aligned with the Python version used to compile them.
+- Edit `pyproject.toml` first, then regenerate `uv.lock` with `uv lock`.
+- Keep `pyproject.toml`, `uv.lock`, `requirements.txt`, and generated lock/export headers aligned with the Python version used to compile them.
+- Export pip compatibility requirements from the lock with `uv export --format requirements.txt --no-hashes --no-emit-project --output-file requirements.txt`.
 - If Windows-only dependencies change, also sync `requirements-win.txt`.
-- On Windows install `requirements.txt` first, then `requirements-win.txt`; otherwise install `requirements.txt`.
-- Install `.[test]` when tests or test-only tools are needed.
-- If a clean venv exposes a direct import that was previously only present by accident, add it to `pyproject.toml` and regenerate the lock file.
+- Use `uv sync --extra test` when tests or test-only tools are needed.
+- If a clean uv environment exposes a direct import that was previously only present by accident, add it to `pyproject.toml` and regenerate `uv.lock` plus compatibility exports.
 
 ## Git Sync
 - Before substantive work, run `git fetch --all --prune`.
@@ -36,9 +37,10 @@
 - After dependency changes, sanity-check imports for the relevant stack. At minimum for core runtime changes check PyQt6, matplotlib, numpy, pandas, scipy, and plotly; also check Origin/PDF packages or `cv2` when those dependencies are declared or touched.
 - Run the most relevant tests for the touched area. If the full suite is too slow or blocked by environment issues, run targeted suites and state what was not run.
 - For Qt tests in headless shells, set `QT_QPA_PLATFORM=offscreen`; for Matplotlib-heavy tests, set `MPLBACKEND=Agg`.
+- For Codex/macOS sandbox test runs, also set workspace-scoped caches such as `UV_CACHE_DIR=artifacts/uv-cache`, `MPLCONFIGDIR=artifacts/mpl-cache`, and `TMPDIR=artifacts/tool-temp`.
 - Prefer `pytest tests` or targeted test paths over bare `pytest` when repo-root transient folders might be collected.
 - If pytest cache/temp creation causes Windows access-denied errors, rerun with a fresh workspace temp directory and consider `-p no:cacheprovider`. Report any transient directories that Windows refuses to remove after best-effort cleanup.
-- Run `launcher.py --help` as the default smoke check for runtime/dependency changes. Run a fuller launcher or GUI smoke check when the touched behavior needs it, or state why it was skipped.
+- Run `uv run python launcher.py --help` as the default smoke check for runtime/dependency changes. Run a fuller launcher or GUI smoke check when the touched behavior needs it, or state why it was skipped.
 - Never run verification directly against the user's real `.pypj` or `.pydpj` project files. Always make a disposable copy first and test against the copy.
 - If tests need Microwire Data Builder storage, isolate app-data stores with a temporary storage root; do not write to the user's real `.microwire_data_builder` data.
 
