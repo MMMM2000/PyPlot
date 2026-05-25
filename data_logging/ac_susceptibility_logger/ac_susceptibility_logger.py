@@ -90,7 +90,6 @@ AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
 AC_PLOT_REFRESH_INTERVAL_S = 1.0
 AC_PLOT_RECENT_POINTS = 800
 AC_PLOT_RETAINED_POINTS = 1200
-AC_PLOT_MAX_POINTS_PER_CONDITION = 8
 AC_PLOT_JITTER_PX = 5.0
 AC_PLOT_SPREAD_PIXELS = {
     "off": 0.0,
@@ -1156,12 +1155,12 @@ class MainWindow(CurrentAnnealingWindow):
             runtime.extra_axis.setLabel("")
             runtime.extra_axis.hide()
         points = self._display_points_for_plot(str(x_channel.key))
-        left_pairs = self._plot_pairs(points, x_channel, y_left_channel)
+        left_pairs = self._plot_pairs_for_view(points, x_channel, y_left_channel)
         left_xy = self._pairs_with_plot_spread(plot_item, x_channel.key, left_pairs)
         self._set_pg_scatter(runtime.left_item, left_xy, y_left_channel.color, symbol="o")
         right_xy: list[tuple[float, float]] = []
         if y_right_channel is not None:
-            right_pairs = self._plot_pairs(points, x_channel, y_right_channel)
+            right_pairs = self._plot_pairs_for_view(points, x_channel, y_right_channel)
             right_xy = self._pairs_with_plot_spread(plot_item, x_channel.key, right_pairs)
             self._set_pg_scatter(runtime.right_item, right_xy, y_right_channel.color, symbol="s")
         else:
@@ -1170,9 +1169,9 @@ class MainWindow(CurrentAnnealingWindow):
         extra_type = ""
         if y_extra_channel is not None:
             extra_pairs = (
-                self._median_wire_resistance_pairs(points, x_channel)
+                self._plot_pairs_for_view(points, x_channel, y_extra_channel)
                 if y_extra_channel.key == "wire_resistance_ohm"
-                else self._plot_pairs(points, x_channel, y_extra_channel)
+                else self._plot_pairs_for_view(points, x_channel, y_extra_channel)
             )
             extra_xy = self._pairs_with_plot_spread(plot_item, x_channel.key, extra_pairs)
             if y_extra_channel.key == "wire_resistance_ohm":
@@ -1306,7 +1305,7 @@ class MainWindow(CurrentAnnealingWindow):
             axis.set_ylabel(y_left_channel.label, fontsize=8, labelpad=3)
             self._color_ac_y_axis(axis, y_left_channel.color)
             axis.set_title(self._plot_title(x_channel, y_left_channel, y_right_channel, y_extra_channel), fontsize=9, pad=8)
-            left_pairs = self._plot_pairs(points, x_channel, y_left_channel)
+            left_pairs = self._plot_pairs_for_view(points, x_channel, y_left_channel)
             if left_pairs:
                 x_values = self._jitter_plot_x_values(
                     axis,
@@ -1339,7 +1338,7 @@ class MainWindow(CurrentAnnealingWindow):
                     twin.set_xscale("log")
                 twin.set_ylabel(y_right_channel.label, fontsize=8, labelpad=3)
                 self._color_ac_y_axis(twin, y_right_channel.color)
-                right_pairs = self._plot_pairs(points, x_channel, y_right_channel)
+                right_pairs = self._plot_pairs_for_view(points, x_channel, y_right_channel)
                 if right_pairs:
                     x_values = self._jitter_plot_x_values(
                         twin,
@@ -1366,9 +1365,9 @@ class MainWindow(CurrentAnnealingWindow):
                 extra_axis.set_ylabel(y_extra_channel.label, fontsize=8, labelpad=12)
                 self._color_ac_y_axis(extra_axis, y_extra_channel.color)
                 if y_extra_channel.key == "wire_resistance_ohm":
-                    extra_pairs = self._median_wire_resistance_pairs(points, x_channel)
+                    extra_pairs = self._plot_pairs_for_view(points, x_channel, y_extra_channel)
                 else:
-                    extra_pairs = self._plot_pairs(points, x_channel, y_extra_channel)
+                    extra_pairs = self._plot_pairs_for_view(points, x_channel, y_extra_channel)
                 if extra_pairs:
                     x_values = [x_value for x_value, _ in extra_pairs]
                     y_values = [y_value for _, y_value in extra_pairs]
@@ -1421,15 +1420,26 @@ class MainWindow(CurrentAnnealingWindow):
             and math.isfinite(float(y_value))
         ]
 
-    def _median_wire_resistance_pairs(
+    def _plot_pairs_for_view(
         self,
         points: Sequence[AcPlotPoint],
         x_channel: AcPlotChannel,
+        y_channel: AcPlotChannel,
+    ) -> list[tuple[float, float]]:
+        if x_channel.key == "elapsed_s":
+            return self._plot_pairs(points, x_channel, y_channel)
+        return self._median_plot_pairs(points, x_channel, y_channel)
+
+    def _median_plot_pairs(
+        self,
+        points: Sequence[AcPlotPoint],
+        x_channel: AcPlotChannel,
+        y_channel: AcPlotChannel,
     ) -> list[tuple[float, float]]:
         grouped: dict[tuple[str, float | None, float | None, float | None, float | None], list[tuple[float, float]]] = {}
         for point in points:
             x_value = x_channel.getter(point)
-            y_value = point.wire_resistance_ohm
+            y_value = y_channel.getter(point)
             if (
                 x_value is None
                 or y_value is None
@@ -1542,37 +1552,7 @@ class MainWindow(CurrentAnnealingWindow):
         points = list(getattr(self, "_ac_plot_points", []))[-AC_PLOT_RECENT_POINTS:]
         if x_key == "current_mA":
             x_key = "current_actual_mA"
-        if x_key in {"elapsed_s", "current_actual_mA", "current_set_mA"}:
-            return points
-        if x_key not in {"frequency_hz", "amplitude_v", "excitation_current_mA"}:
-            return points
-        grouped: dict[tuple[str, float | None, float | None, float | None, float | None], list[AcPlotPoint]] = {}
-        for point in points:
-            key = (
-                point.model,
-                self._plot_key_value(point.frequency_hz),
-                self._plot_key_value(point.amplitude_v),
-                self._plot_key_value(point.excitation_current_mA),
-                self._plot_key_value(point.current_mA),
-            )
-            grouped.setdefault(key, []).append(point)
-        selected: list[AcPlotPoint] = []
-        for group in grouped.values():
-            selected.extend(self._thin_ac_plot_group(group, AC_PLOT_MAX_POINTS_PER_CONDITION))
-        selected.sort(key=lambda point: point.elapsed_s)
-        return selected
-
-    @staticmethod
-    def _thin_ac_plot_group(points: Sequence[AcPlotPoint], limit: int) -> list[AcPlotPoint]:
-        values = list(points)
-        limit = max(2, int(limit))
-        if len(values) <= limit:
-            return values
-        if limit == 2:
-            return [values[0], values[-1]]
-        step = (len(values) - 1) / float(limit - 1)
-        indices = sorted({int(round(i * step)) for i in range(limit)})
-        return [values[index] for index in indices]
+        return points
 
     def _start_ac_plot_refresh_timer(self) -> None:
         timer = QtCore.QTimer(self)

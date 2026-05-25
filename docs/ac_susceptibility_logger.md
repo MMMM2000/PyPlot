@@ -316,13 +316,13 @@ current, frequency, voltage amplitude, LCR excitation current, `Rs`, `Ls`, wire 
 plot renderer follows the Qt palette so dark mode labels, ticks, and titles
 remain readable.
 
-Plots are scatter-first with small translucent markers; dense time traces and
-dense parameter scans are easier to read without connecting lines. `Rs` and
+Elapsed-time plots are raw recent traces. All other plot X axes show one median
+point for each model/frequency/excitation/current setting, which keeps dense
+parameter scans readable without hiding the complete raw TSV data. `Rs` and
 `Ls` are scatter-only by default and use separate Y scales. Wire resistance is
 drawn as line plus symbols when selected because it follows the DC current path
-through the microwire and contacts, but it is reduced to the median wire
-resistance for each model/frequency/excitation/current setting so noisy PSU
-readback does not dominate the dashboard.
+through the microwire and contacts, using the same per-condition median
+reduction so noisy PSU readback does not dominate the dashboard.
 
 When frequency is selected as the X axis, the logger uses a logarithmic scale.
 Current, frequency, and amplitude scatter plots can use display-space
@@ -330,10 +330,8 @@ horizontal spread for repeated X values so dense repeated points do not collapse
 into a single vertical stripe. Configure the spread from **Configure plots**;
 the default is **Small**, and **Off** keeps exact stacked positions. The spread
 is deterministic and based on screen pixels rather than the numeric data range,
-so it improves readability without changing the logged values. Frequency and
-amplitude plots use display-only per-condition thinning once a condition
-contains many points, preserving representation from each
-model/frequency/excitation/current group while leaving the TSV logging complete.
+so it improves readability without changing the logged values. The median
+reduction is display-only; the TSV logging remains complete.
 Combined plots use colored Y-axis labels/ticks instead of in-plot legends,
 keeping dense traces readable while still identifying left, right, and
 far-right axis data.

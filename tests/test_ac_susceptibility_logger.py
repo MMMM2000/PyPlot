@@ -2182,7 +2182,7 @@ def test_ac_logger_elapsed_plot_defaults_to_small_scatter(
         app.processEvents()
 
 
-def test_ac_logger_frequency_plot_keeps_each_condition_when_display_thinning(
+def test_ac_logger_frequency_plot_shows_one_median_per_condition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -2190,7 +2190,6 @@ def test_ac_logger_frequency_plot_keeps_each_condition_when_display_thinning(
     monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
     monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
     monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
-    monkeypatch.setattr(ac_logger, "AC_PLOT_MAX_POINTS_PER_CONDITION", 8)
 
     window = ac_logger.MainWindow()
     try:
@@ -2208,12 +2207,8 @@ def test_ac_logger_frequency_plot_keeps_each_condition_when_display_thinning(
         window._refresh_ac_plots(force=True)
 
         state = window._ac_plot_render_state[0]
-        x_values = {float(point[0]) for point in state["left_xy"]}
-        assert len(x_values) > 2
-        assert min(x_values) < 100.0 < max(x_values)
-        assert any(90.0 <= value <= 110.0 for value in x_values)
-        assert any(180000.0 <= value <= 220000.0 for value in x_values)
-        assert len(state["left_xy"]) <= 16
+        assert [point[0] for point in state["left_xy"]] == pytest.approx([100.0, 200000.0])
+        assert [point[1] for point in state["left_xy"]] == pytest.approx([14.00495, 15.00495])
     finally:
         window.close()
         app.processEvents()
@@ -2224,7 +2219,6 @@ def test_ac_logger_display_points_caps_frequency_plots_to_recent_rows(
 ) -> None:
     window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
     monkeypatch.setattr(ac_logger, "AC_PLOT_RECENT_POINTS", 50)
-    monkeypatch.setattr(ac_logger, "AC_PLOT_MAX_POINTS_PER_CONDITION", 8)
     window._ac_plot_points = [
         ac_logger.AcPlotPoint(
             float(index),
@@ -2260,7 +2254,7 @@ def test_ac_logger_live_plot_buffer_keeps_only_recent_points(
     assert [point.elapsed_s for point in window._ac_plot_points] == [7.0, 8.0, 9.0, 10.0, 11.0]
 
 
-def test_ac_logger_repeated_frequency_points_are_spread_unless_disabled(
+def test_ac_logger_repeated_frequency_points_are_collapsed_to_median(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -2281,8 +2275,8 @@ def test_ac_logger_repeated_frequency_points_are_spread_unless_disabled(
 
         window._set_combo_data(window.comboBox_ac_plot_spread, "small")
         window._refresh_ac_plots(force=True)
-        spread_x = [float(point[0]) for point in window._ac_plot_render_state[0]["left_xy"]]
-        assert len({round(value, 6) for value in spread_x}) > 1
+        median_xy = window._ac_plot_render_state[0]["left_xy"]
+        assert median_xy == pytest.approx([(1000.0, 14.02)])
 
         window._set_combo_data(window.comboBox_ac_plot_spread, "off")
         window._refresh_ac_plots(force=True)
@@ -2327,6 +2321,10 @@ def test_ac_logger_current_plot_uses_measured_current_and_wire_resistance_line(
         assert state["extra_color"] == window._plot_channel("wire_resistance_ohm").color
         assert state["show_legend"] is False
         assert state["extra_item_type"] == "line"
+        assert [point[0] for point in state["left_xy"]] == pytest.approx([19.7, 39.3])
+        assert [point[1] for point in state["left_xy"]] == pytest.approx([14.45, 14.65])
+        assert [point[0] for point in state["right_xy"]] == pytest.approx([19.7, 39.3])
+        assert [point[1] for point in state["right_xy"]] == pytest.approx([2.05e-5, 2.25e-5])
         x_values = [point[0] for point in state["extra_xy"]]
         y_values = [point[1] for point in state["extra_xy"]]
         assert x_values == pytest.approx([19.7, 39.3])
