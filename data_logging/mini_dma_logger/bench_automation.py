@@ -32,12 +32,20 @@ class MiniDmaBenchRun:
 
 
 @dataclass(frozen=True)
+class MiniDmaBenchGuardrails:
+    max_stress_mpa: float | None = None
+    recovery_stress_mpa: float | None = None
+    wire_break_stops_plan: bool = True
+
+
+@dataclass(frozen=True)
 class MiniDmaBenchPlan:
     path: Path
     execute: bool
     log_dir: Path | None
     summary_path: Path | None
     max_total_duration_s: float | None
+    guardrails: MiniDmaBenchGuardrails
     runs: tuple[MiniDmaBenchRun, ...]
 
 
@@ -110,6 +118,20 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
     if payload.get("summary_path") is not None:
         summary_path = _resolve_plan_path(base, payload["summary_path"], field="summary_path", must_exist=False)
     max_total_duration_s = _optional_float(payload, "max_total_duration_s")
+    raw_guardrails = payload.get("guardrails", {})
+    if raw_guardrails is None:
+        raw_guardrails = {}
+    if not isinstance(raw_guardrails, Mapping):
+        raise MiniDmaBenchAutomationError("Mini DMA bench plan field 'guardrails' must be an object.")
+    max_stress_mpa = _optional_float(raw_guardrails, "max_stress_mpa")
+    recovery_stress_mpa = _optional_float(raw_guardrails, "recovery_stress_mpa")
+    if recovery_stress_mpa is not None and recovery_stress_mpa <= 0.0:
+        raise MiniDmaBenchAutomationError("Mini DMA bench plan guardrail recovery_stress_mpa must be positive.")
+    guardrails = MiniDmaBenchGuardrails(
+        max_stress_mpa=max_stress_mpa,
+        recovery_stress_mpa=recovery_stress_mpa,
+        wire_break_stops_plan=bool(raw_guardrails.get("wire_break_stops_plan", True)),
+    )
     default_max_run_duration_s = _as_float(
         payload.get("default_max_run_duration_s", DEFAULT_MAX_RUN_DURATION_S),
         field="default_max_run_duration_s",
@@ -185,6 +207,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         log_dir=log_dir,
         summary_path=summary_path,
         max_total_duration_s=max_total_duration_s,
+        guardrails=guardrails,
         runs=tuple(runs),
     )
 
@@ -236,11 +259,83 @@ def _metadata_path(window: Any) -> str | None:
     return None if path is None else str(path)
 
 
+def _latest_stress_mpa(window: Any) -> float | None:
+    method = getattr(window, "_bench_latest_stress_mpa", None)
+    if callable(method):
+        value = method()
+        return None if value is None else float(value)
+    for attr in ("_live_plot_points", "_session_points"):
+        points = getattr(window, attr, None)
+        if points:
+            for point in reversed(points):
+                value = getattr(point, "stress_mpa", None)
+                if value is not None:
+                    return float(value)
+    return None
+
+
+def _call_window_method(window: Any, name: str, *args: Any, **kwargs: Any) -> Any:
+    method = getattr(window, name, None)
+    if callable(method):
+        return method(*args, **kwargs)
+    return None
+
+
+def _check_guardrails(
+    window: Any,
+    guardrails: MiniDmaBenchGuardrails,
+) -> dict[str, Any] | None:
+    wire_break = getattr(window, "_wire_break_detected", None)
+    if callable(wire_break) and bool(wire_break()):
+        _call_window_method(window, "_disable_supply_output")
+        _call_window_method(
+            window,
+            "_stop_auto_ramp",
+            log_completion=False,
+            user_initiated=False,
+            offer_recovery=False,
+            stop_reason="wire_break_or_contact_loss",
+            stop_detail="Bench automation detected wire break or contact loss.",
+        )
+        _call_window_method(
+            window,
+            "_stop_session",
+            reason="wire_break_or_contact_loss",
+            detail="Bench automation detected wire break or contact loss.",
+        )
+        return {"type": "wire_break"}
+
+    if guardrails.max_stress_mpa is None:
+        return None
+    stress_mpa = _latest_stress_mpa(window)
+    if stress_mpa is None or stress_mpa <= guardrails.max_stress_mpa:
+        return None
+    _call_window_method(window, "_disable_supply_output")
+    recovered = False
+    if guardrails.recovery_stress_mpa is not None:
+        recovered = bool(
+            _call_window_method(
+                window,
+                "start_bench_stress_recovery",
+                guardrails.recovery_stress_mpa,
+                reason="bench high-stress guard",
+            )
+        )
+    return {
+        "type": "high_stress",
+        "stress_mpa": stress_mpa,
+        "max_stress_mpa": guardrails.max_stress_mpa,
+        "recovery_stress_mpa": guardrails.recovery_stress_mpa,
+        "recovery_started": recovered,
+    }
+
+
 def _execute_run(
     run: MiniDmaBenchRun,
     *,
     app: Any,
     window: Any,
+    guardrails: MiniDmaBenchGuardrails,
     sleep_fn: Callable[[float], None],
     total_deadline_s: float | None,
 ) -> dict[str, Any]:
@@ -264,8 +359,18 @@ def _execute_run(
         }
 
     status = "completed"
+    guard_events: list[dict[str, Any]] = []
     while _window_active(window):
         app.processEvents()
+        guard_event = _check_guardrails(window, guardrails)
+        if guard_event is not None:
+            guard_events.append(guard_event)
+            if guard_event["type"] == "wire_break":
+                status = "wire_break"
+                break
+            if guard_event["type"] == "high_stress":
+                status = "guard_recovered" if guard_event.get("recovery_started") else "guard_tripped"
+                break
         if time.monotonic() >= deadline_s:
             status = "timeout"
             stop = getattr(window, "_stop_auto_ramp", None)
@@ -293,6 +398,7 @@ def _execute_run(
         "status": status,
         "elapsed_s": max(0.0, time.monotonic() - start_s),
         "metadata_path": _metadata_path(window),
+        "guard_events": guard_events,
     }
 
 
@@ -318,6 +424,11 @@ def run_mini_dma_bench_plan(
                     "recipe_path": str(run.recipe_path),
                     "repeat_index": run.repeat_index,
                     "status": "validated",
+                    "guardrails": {
+                        "max_stress_mpa": plan.guardrails.max_stress_mpa,
+                        "recovery_stress_mpa": plan.guardrails.recovery_stress_mpa,
+                        "wire_break_stops_plan": plan.guardrails.wire_break_stops_plan,
+                    },
                 }
                 for run in plan.runs
             ],
@@ -336,7 +447,18 @@ def run_mini_dma_bench_plan(
     if plan.max_total_duration_s is not None:
         total_deadline_s = total_start_s + plan.max_total_duration_s
     try:
+        stop_after_wire_break = False
         for run in plan.runs:
+            if stop_after_wire_break:
+                run_summaries.append(
+                    {
+                        "name": run.name,
+                        "recipe_path": str(run.recipe_path),
+                        "repeat_index": run.repeat_index,
+                        "status": "skipped_after_wire_break",
+                    }
+                )
+                continue
             if total_deadline_s is not None and time.monotonic() >= total_deadline_s:
                 run_summaries.append(
                     {
@@ -354,10 +476,16 @@ def run_mini_dma_bench_plan(
                         run,
                         app=app,
                         window=window,
+                        guardrails=plan.guardrails,
                         sleep_fn=sleep_fn,
                         total_deadline_s=total_deadline_s,
                     )
                 )
+                if (
+                    run_summaries[-1].get("status") == "wire_break"
+                    and plan.guardrails.wire_break_stops_plan
+                ):
+                    stop_after_wire_break = True
             finally:
                 close = getattr(window, "close", None)
                 if callable(close):

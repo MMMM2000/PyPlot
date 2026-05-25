@@ -15335,6 +15335,64 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_recipe_progress()
         self._refresh_live_labels()
 
+    def _bench_latest_stress_mpa(self) -> float | None:
+        for points in (self._live_plot_points, self._session_points):
+            for point in reversed(points):
+                if point.stress_mpa is not None:
+                    return float(point.stress_mpa)
+        effective_load = self._current_effective_load_g()
+        return stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
+
+    def start_bench_stress_recovery(self, target_stress_mpa: float, *, reason: str) -> bool:
+        self._sync_manual_motion_base_from_current_position()
+        target = max(0.0, float(target_stress_mpa))
+        steps = [
+            AutomationStep(
+                "seek_target",
+                target_value=target,
+                basis=HSW_BASIS_STRESS_MPA,
+                note="bench_guard_recovery",
+            ),
+            AutomationStep(
+                "record",
+                target_value=target,
+                basis=HSW_BASIS_STRESS_MPA,
+                note="bench_guard_recovery",
+            ),
+        ]
+        if not self._preflight_recipe_hardware(steps):
+            return False
+        self._show_recovery_plot_dialog("Mini DMA Recovery: bench stress guard")
+        self._automation_steps = steps
+        self._automation_index = 0
+        self._automation_interval_ms = self._control_interval_ms()
+        _, tick_count = self._estimate_recipe_points_and_ticks(steps, self._automation_interval_ms)
+        self._automation_total_steps = tick_count
+        self._automation_completed_ticks = 0
+        self._automation_progress_started_s = time.monotonic()
+        self._automation_progress_last_format_update_s = 0.0
+        self._automation_active = True
+        self._automation_paused = False
+        self._active_control_config = self._freeze_control_config()
+        self._automation_name = RECOVERY_LOAD
+        self._set_automation_context(
+            phase="recover",
+            basis=HSW_BASIS_STRESS_MPA,
+            target_value=target,
+            plateau_index=0,
+        )
+        self._start_automation_control_loop(self._automation_interval_ms)
+        self._apply_ui_refresh_interval()
+        self._ui_refresh_timer.start()
+        self._log(
+            f"Bench high-stress guard triggered ({reason}); current output disabled and "
+            f"stress recovery toward {_format_compact_unit(target, 'MPa')} started."
+        )
+        self._update_recipe_buttons()
+        self._update_recipe_progress()
+        self._refresh_live_labels()
+        return True
+
     def _stop_auto_ramp(
         self,
         *,

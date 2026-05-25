@@ -244,3 +244,175 @@ def test_mini_dma_bench_plan_timeout_records_automation_timeout(tmp_path: Path, 
     stop_session = [payload for name, payload in events if name == "stop_session"][0]
     assert stop_auto["stop_reason"] == "automation_timeout"
     assert stop_session["reason"] == "automation_timeout"
+
+
+def test_mini_dma_bench_plan_high_stress_guard_disables_current_and_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_path = tmp_path / "iso-stress.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "guardrails": {
+                    "max_stress_mpa": 300.0,
+                    "recovery_stress_mpa": 50.0,
+                    "wire_break_stops_plan": True,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    clock = {"now": 100.0}
+    events: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(bench_automation.time, "monotonic", lambda: clock["now"])
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            events.append(("process", None))
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = True
+            self._session_active = True
+            self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            return
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            return
+
+        def _start_auto_ramp(self) -> None:
+            return
+
+        def _bench_latest_stress_mpa(self) -> float:
+            return 320.0
+
+        def _wire_break_detected(self) -> bool:
+            return False
+
+        def _disable_supply_output(self) -> None:
+            events.append(("disable_supply", None))
+
+        def start_bench_stress_recovery(self, target_stress_mpa: float, *, reason: str) -> bool:
+            events.append(("recover", (target_stress_mpa, reason)))
+            self._automation_active = False
+            self._session_active = False
+            return True
+
+        def close(self) -> None:
+            events.append(("close", None))
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        sleep_fn=lambda seconds: clock.__setitem__("now", clock["now"] + max(0.05, seconds)),
+    )
+
+    run = summary["runs"][0]
+    assert run["status"] == "guard_recovered"
+    assert run["guard_events"][0]["type"] == "high_stress"
+    assert run["guard_events"][0]["stress_mpa"] == pytest.approx(320.0)
+    assert ("disable_supply", None) in events
+    assert ("recover", (50.0, "bench high-stress guard")) in events
+
+
+def test_mini_dma_bench_plan_wire_break_stops_remaining_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_path = tmp_path / "iso-stress.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "guardrails": {
+                    "max_stress_mpa": 300.0,
+                    "recovery_stress_mpa": 50.0,
+                    "wire_break_stops_plan": True,
+                },
+                "runs": [
+                    {"name": "trial-a", "recipe_path": str(recipe_path)},
+                    {"name": "trial-b", "recipe_path": str(recipe_path)},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    clock = {"now": 100.0}
+
+    monkeypatch.setattr(bench_automation.time, "monotonic", lambda: clock["now"])
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            return
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = True
+            self._session_active = True
+            self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            return
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            return
+
+        def _start_auto_ramp(self) -> None:
+            return
+
+        def _wire_break_detected(self) -> bool:
+            return True
+
+        def _disable_supply_output(self) -> None:
+            self._automation_active = False
+            self._session_active = False
+
+        def close(self) -> None:
+            return
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        sleep_fn=lambda seconds: clock.__setitem__("now", clock["now"] + max(0.05, seconds)),
+    )
+
+    assert summary["runs"][0]["status"] == "wire_break"
+    assert summary["runs"][1]["status"] == "skipped_after_wire_break"

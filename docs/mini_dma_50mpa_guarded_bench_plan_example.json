@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "kind": "mini_dma_bench_sequence",
+  "summary_path": "artifacts/mini-dma-50mpa-guarded-summary.json",
+  "log_dir": "G:/My Drive/1 Projects/Praha/mini DMA/automated",
+  "default_max_run_duration_s": 2400,
+  "max_total_duration_s": 28800,
+  "length_setup": {
+    "starting_length_mm": 20.0,
+    "preload_length_mm": 20.4
+  },
+  "guardrails": {
+    "max_stress_mpa": 300.0,
+    "recovery_stress_mpa": 50.0,
+    "wire_break_stops_plan": true
+  },
+  "runs": [
+    {
+      "name": "iso-stress-50mpa-1-to-80-to-1ma",
+      "recipe_path": "recipes/iso-stress-50mpa-1-to-80-to-1ma.recipe.json",
+      "repeat": 12,
+      "max_run_duration_s": 1800
+    }
+  ]
+}

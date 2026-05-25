@@ -2870,6 +2870,27 @@ def test_current_task_summary_shows_current_sweep_phase(tmp_path: Path, qtbot) -
         _close_test_window(window)
 
 
+def test_bench_stress_recovery_starts_stress_seek_with_supply_off(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    loop_intervals: list[int] = []
+    window._preflight_recipe_hardware = lambda _steps: True  # type: ignore[method-assign]
+    window._show_recovery_plot_dialog = lambda _title: None  # type: ignore[method-assign]
+    window._start_automation_control_loop = lambda interval_ms: loop_intervals.append(interval_ms)  # type: ignore[method-assign]
+
+    try:
+        assert window.start_bench_stress_recovery(50.0, reason="test guard") is True
+
+        assert window._automation_active is True
+        assert window._automation_name == mini_dma_mod.RECOVERY_LOAD
+        assert window._automation_steps[0].action == "seek_target"
+        assert window._automation_steps[0].basis == mini_dma_mod.HSW_BASIS_STRESS_MPA
+        assert window._automation_steps[0].target_value == pytest.approx(50.0)
+        assert loop_intervals == [window._control_interval_ms()]
+        assert "Bench high-stress guard triggered" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_double_spin_boxes_trim_zero_only_decimals(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 

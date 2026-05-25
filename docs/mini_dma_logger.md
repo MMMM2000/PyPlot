@@ -181,6 +181,7 @@ Current intended hardware stack:
 - plot configuration moved into a popup dialog instead of taking permanent dashboard space
 - sample/project/output fields and dashboard plot selections are persisted as they change and when a session starts, so a crash or interrupted test window is less likely to wipe the operator's saved run identity
 - unattended bench sequences can be launched from `launcher.py --mini-dma-bench-plan plan.json`; the plan dry-runs by default, and execution requires `execute: true`, `armed: true`, `operator_confirmation: "MINI_DMA_BENCH_ARMED"`, existing recipe files, per-run timeouts, and automated setup `starting_length_mm` / `preload_length_mm` values unless interactive prompts are explicitly allowed
+- unattended Mini DMA bench plans can include `guardrails.max_stress_mpa`, `guardrails.recovery_stress_mpa`, and `guardrails.wire_break_stops_plan`; when live stress exceeds the guard, Mini DMA disables the current output, starts a stress recovery seek toward the configured recovery target, records the guard event in the summary, and continues the bench sequence, while a detected wire break/contact loss stops later runs
 
 ### Hsw Distribution Workflow
 
