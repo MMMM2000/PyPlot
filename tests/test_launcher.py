@@ -527,6 +527,44 @@ def test_microwire_word_report_project_exports_rvst_through_pyplot(
     assert frame.iloc[0]["R vs T residual graphs (Origin)"] == "rvst_residual.oggu"
 
 
+@pytest.mark.parametrize(
+    ("name", "module", "resource_tag"),
+    [
+        (
+            "Mini DMA Logger",
+            "data_logging.mini_dma_logger.mini_dma_logger",
+            "mini_dma",
+        ),
+        (
+            "Current Annealing Logger",
+            "data_logging.current_annealing_logger.current_annealing_logger",
+            "current_annealing",
+        ),
+    ],
+)
+def test_hardware_experiment_loggers_launch_in_child_process(
+    name: str,
+    module: str,
+    resource_tag: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[object] = []
+    monkeypatch.setattr(
+        launcher_module,
+        "launch_experiment_process",
+        lambda spec: launched.append(spec),
+    )
+
+    result = launcher_module.LOGGERS[name]()
+
+    assert result is None
+    assert launched
+    spec = launched[0]
+    assert getattr(spec, "display_name") == name
+    assert getattr(spec, "module") == module
+    assert getattr(spec, "resource_tag") == resource_tag
+
+
 def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

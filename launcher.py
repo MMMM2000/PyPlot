@@ -27,6 +27,11 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple, Sequence, cast, Pr
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PIL import Image
 
+from plotting.shared.experiment_processes import (
+    ExperimentProcessSpec,
+    launch_experiment_process,
+)
+
 
 LauncherFactory = Callable[..., QtWidgets.QWidget | None]
 
@@ -54,6 +59,24 @@ def _lazy(module: str, attr: str = "main") -> LauncherFactory:
             raise TypeError(f"{module}.{attr} is not callable")
         callable_target = cast(LauncherFactory, target)
         return callable_target(*args, **kwargs)
+
+    return factory
+
+
+def _experiment_process_launcher(
+    display_name: str,
+    module: str,
+    resource_tag: str,
+) -> LauncherFactory:
+    def factory(*_args: Any, **_kwargs: Any) -> QtWidgets.QWidget | None:
+        launch_experiment_process(
+            ExperimentProcessSpec(
+                display_name=display_name,
+                module=module,
+                resource_tag=resource_tag,
+            )
+        )
+        return None
 
     return factory
 
@@ -3347,11 +3370,15 @@ def _run_mini_dma_bench_plan(args: argparse.Namespace, qt_args: list[str]) -> in
 
 LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": _lazy("data_logging.data_logger", "main"),
-    "Current Annealing Logger": _lazy(
-        "data_logging.current_annealing_logger", "main"
+    "Current Annealing Logger": _experiment_process_launcher(
+        "Current Annealing Logger",
+        "data_logging.current_annealing_logger.current_annealing_logger",
+        "current_annealing",
     ),
-    "Mini DMA Logger": _lazy(
-        "data_logging.mini_dma_logger", "main"
+    "Mini DMA Logger": _experiment_process_launcher(
+        "Mini DMA Logger",
+        "data_logging.mini_dma_logger.mini_dma_logger",
+        "mini_dma",
     ),
     "Shared HMP PSU Setup": _lazy(
         "data_logging.shared_power_supply.setup_ui", "main"
