@@ -178,6 +178,7 @@ Current intended hardware stack:
 - recovery actions open a temporary dual-axis load/displacement vs time graph while returning load or displacement toward zero/start, update that graph from fresh scale replies, and the same actions are available from `Manual Actions`
 - plot configuration moved into a popup dialog instead of taking permanent dashboard space
 - sample/project/output fields and dashboard plot selections are persisted as they change and when a session starts, so a crash or interrupted test window is less likely to wipe the operator's saved run identity
+- unattended bench sequences can be launched from `launcher.py --mini-dma-bench-plan plan.json`; the plan dry-runs by default, and execution requires `execute: true`, `armed: true`, `operator_confirmation: "MINI_DMA_BENCH_ARMED"`, existing recipe files, per-run timeouts, and automated setup `starting_length_mm` / `preload_length_mm` values unless interactive prompts are explicitly allowed
 
 ### Hsw Distribution Workflow
 

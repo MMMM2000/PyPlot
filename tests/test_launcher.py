@@ -174,6 +174,17 @@ def test_launcher_detects_microwire_eda_cli_flags() -> None:
     assert args.microwire_eda_force_project_rebuild is False
 
 
+def test_launcher_detects_mini_dma_bench_plan_flag() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(
+        [
+            "--mini-dma-bench-plan",
+            "bench-plan.json",
+        ]
+    )
+    assert launcher_module._is_mini_dma_bench_requested(args) is True  # noqa: SLF001
+    assert args.mini_dma_bench_plan == "bench-plan.json"
+
+
 def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

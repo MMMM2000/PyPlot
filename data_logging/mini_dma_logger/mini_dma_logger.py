@@ -2725,6 +2725,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_points: list[MeasurementPoint] = []
         self._length_setup_progress_phase_key: tuple[object, ...] | None = None
         self._length_setup_progress_fraction_floor = 0.0
+        self._automated_setup_starting_length_mm: float | None = None
+        self._automated_setup_preload_length_mm: float | None = None
         self._motor_step_calibration_dialog: QtWidgets.QDialog | None = None
         self._motor_step_calibration_status_label: QtWidgets.QLabel | None = None
         self._motor_step_calibration_detail_label: QtWidgets.QLabel | None = None
@@ -14731,6 +14733,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._length_setup_status_label is not None:
             self._length_setup_status_label.setText(message)
 
+    def set_length_setup_automation_values(
+        self,
+        *,
+        starting_length_mm: float | None,
+        preload_length_mm: float | None,
+    ) -> None:
+        self._automated_setup_starting_length_mm = None if starting_length_mm is None else float(starting_length_mm)
+        self._automated_setup_preload_length_mm = None if preload_length_mm is None else float(preload_length_mm)
+
     def _close_length_setup_dialog(self) -> None:
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._close_length_setup_dialog)
@@ -16614,15 +16625,18 @@ class MainWindow(QtWidgets.QMainWindow):
         config = self._control_config()
         default_length_mm = max(0.001, config.initial_length_mm if config is not None else float(self.spin_initial_length.value()))
         self._update_length_setup_dialog("Enter the approximate mounted wire length before setup.")
-        starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
-            self,
-            APP_NAME,
-            "Approximate mounted wire length before preload (mm):",
-            default_length_mm,
-            0.001,
-            100000.0,
-            4,
-        )
+        if self._automated_setup_starting_length_mm is not None:
+            starting_length_mm, accepted = self._automated_setup_starting_length_mm, True
+        else:
+            starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
+                self,
+                APP_NAME,
+                "Approximate mounted wire length before preload (mm):",
+                default_length_mm,
+                0.001,
+                100000.0,
+                4,
+            )
         if not accepted:
             self._log("Recipe stopped because starting length entry was cancelled.")
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
@@ -16656,15 +16670,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_length_setup_dialog("Setup preload reached. Enter the measured wire length at preload.")
         config = self._control_config()
         default_length_mm = max(0.001, config.initial_length_mm if config is not None else float(self.spin_initial_length.value()))
-        measured_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
-            self,
-            APP_NAME,
-            "Measured wire length at preload (mm):",
-            default_length_mm,
-            0.001,
-            100000.0,
-            4,
-        )
+        if self._automated_setup_preload_length_mm is not None:
+            measured_length_mm, accepted = self._automated_setup_preload_length_mm, True
+        else:
+            measured_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
+                self,
+                APP_NAME,
+                "Measured wire length at preload (mm):",
+                default_length_mm,
+                0.001,
+                100000.0,
+                4,
+            )
         if not accepted:
             self._log("Recipe stopped because preload length entry was cancelled.")
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)

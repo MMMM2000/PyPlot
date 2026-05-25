@@ -5137,6 +5137,40 @@ def test_length_setup_progress_is_indeterminate_during_slack_takeup(
         _close_test_window(window)
 
 
+def test_length_setup_automation_values_answer_setup_prompts(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    prompt_calls: list[bool] = []
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: prompt_calls.append(True) or (0.0, False),
+    )
+
+    try:
+        window.set_length_setup_automation_values(
+            starting_length_mm=20.0,
+            preload_length_mm=20.4,
+        )
+
+        assert window._handle_starting_length_prompt_step() is True
+        assert window._setup_starting_length_mm == pytest.approx(20.0)
+        assert window.spin_initial_length.value() == pytest.approx(20.0)
+
+        window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+        window._current_position_mm = -1.25
+        window._handle_measure_length_prompt_step()
+
+        assert window._setup_preload_position_mm == pytest.approx(-1.25)
+        assert window._setup_measured_length_mm == pytest.approx(20.4)
+        assert prompt_calls == []
+    finally:
+        _close_test_window(window)
+
+
 def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
