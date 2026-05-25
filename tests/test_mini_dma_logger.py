@@ -4825,6 +4825,51 @@ def test_display_plot_points_keep_older_downsample_stable_as_new_samples_arrive(
         _close_test_window(window)
 
 
+def test_display_plot_points_bridge_cached_history_to_recent_tail(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _point(elapsed_s: float) -> mini_dma_mod.MeasurementPoint:
+        return mini_dma_mod.MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc="2026-05-11 00:00:00",
+            raw_position_mm=elapsed_s,
+            position_mm=elapsed_s,
+            raw_load_g=elapsed_s,
+            load_g=elapsed_s,
+            preload_state=mini_dma_mod.PRELOAD_DISABLED,
+            strain_pct=None,
+            stress_mpa=None,
+            current_set_mA=None,
+            current_measured_mA=None,
+            voltage_V=None,
+            resistance_ohm=None,
+            power_W=None,
+            automation_phase="current",
+            automation_basis=None,
+            automation_target_value=None,
+            plateau_index=None,
+            plateau_label=None,
+        )
+
+    try:
+        first_total = mini_dma_mod.DISPLAY_PLOT_MAX_POINTS + 5000
+        second_total = first_total + 80
+        window._session_points = [_point(float(index)) for index in range(first_total)]
+        window._display_plot_points()
+
+        window._session_points = [_point(float(index)) for index in range(second_total)]
+        display_points = window._display_plot_points()
+
+        recent_start_s = float(second_total - mini_dma_mod.DISPLAY_PLOT_RECENT_POINTS)
+        before_recent = [point.elapsed_s for point in display_points if point.elapsed_s < recent_start_s]
+
+        assert before_recent
+        assert recent_start_s - before_recent[-1] <= mini_dma_mod.DISPLAY_PLOT_BREAK_GAP_S
+        assert not display_points[-mini_dma_mod.DISPLAY_PLOT_RECENT_POINTS].plot_gap_before
+    finally:
+        _close_test_window(window)
+
+
 def test_display_plot_points_reuses_cached_old_history_for_repeated_refreshes(
     tmp_path: Path,
     qtbot,
@@ -4879,13 +4924,13 @@ def test_display_plot_points_reuses_cached_old_history_for_repeated_refreshes(
         window._session_points.append(_point(float(total_points)))
         third_display = window._display_plot_points()
 
-        assert len(calls) == 1
+        assert len(calls) == 2
         assert third_display[-1].elapsed_s == pytest.approx(float(total_points))
 
         window._session_points = [_point(float(index) + 0.25) for index in range(total_points)]
         replacement_display = window._display_plot_points()
 
-        assert len(calls) == 2
+        assert len(calls) == 3
         assert replacement_display[0].elapsed_s == pytest.approx(0.25)
     finally:
         _close_test_window(window)
@@ -4939,7 +4984,7 @@ def test_plot_xy_values_break_line_across_hidden_display_gap(tmp_path: Path, qtb
         _close_test_window(window)
 
 
-def test_display_plot_points_break_line_between_downsampled_history_and_recent_tail(
+def test_display_plot_points_connect_downsampled_history_to_recent_tail(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -4979,8 +5024,8 @@ def test_display_plot_points_break_line_between_downsampled_history_and_recent_t
 
         x_values, y_values = window._plot_xy_values(window._display_plot_points(), x_channel, y_channel)
 
-        assert any(math.isnan(value) for value in x_values)
-        assert any(math.isnan(value) for value in y_values)
+        assert not any(math.isnan(value) for value in x_values)
+        assert not any(math.isnan(value) for value in y_values)
     finally:
         _close_test_window(window)
 

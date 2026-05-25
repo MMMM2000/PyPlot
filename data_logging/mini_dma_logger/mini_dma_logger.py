@@ -191,6 +191,7 @@ DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 LIVE_PLOT_MAX_POINTS = 3000
 DISPLAY_PLOT_MAX_POINTS = 1500
 DISPLAY_PLOT_RECENT_POINTS = 600
+DISPLAY_PLOT_BRIDGE_POINTS = 200
 DISPLAY_PLOT_BASE_BUCKET_S = 1.0
 DISPLAY_PLOT_OLD_CACHE_GRANULARITY = 1000
 DISPLAY_PLOT_BREAK_GAP_S = 30.0
@@ -17533,9 +17534,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_plot_old_cache_key = None
             self._display_plot_old_cache = []
             return older_points + recent_points
-        sampled_older = self._cached_stable_downsample_older_plot_points(older_points, old_budget)
-        if sampled_older and recent_points:
-            recent_points = [replace(recent_points[0], plot_gap_before=True), *recent_points[1:]]
+        bridge_budget = min(DISPLAY_PLOT_BRIDGE_POINTS, max(0, old_budget // 3))
+        history_budget = max(1, old_budget - bridge_budget)
+        sampled_older = self._cached_stable_downsample_older_plot_points(older_points, history_budget)
+        if bridge_budget > 0 and sampled_older:
+            latest_sampled_elapsed_s = float(sampled_older[-1].elapsed_s)
+            bridge_source = [
+                point for point in older_points if float(point.elapsed_s) > latest_sampled_elapsed_s
+            ]
+            if bridge_source:
+                sampled_older.extend(self._stable_downsample_older_plot_points(bridge_source, bridge_budget))
+        if len(sampled_older) > old_budget:
+            sampled_older = sampled_older[:history_budget] + sampled_older[-bridge_budget:]
         return sampled_older + recent_points
 
     def _cached_stable_downsample_older_plot_points(
