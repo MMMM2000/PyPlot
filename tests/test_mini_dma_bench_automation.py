@@ -164,3 +164,83 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
     assert ("lengths", (20.0, 20.4)) in events
     assert ("recipe", "iso-strain.recipe.json") in events
     assert ("start", None) in events
+
+
+def test_mini_dma_bench_plan_timeout_records_automation_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "log_dir": str(tmp_path / "logs"),
+                "default_max_run_duration_s": 0.2,
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    clock = {"now": 100.0}
+    events: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(bench_automation.time, "monotonic", lambda: clock["now"])
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            events.append(("process", None))
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = True
+            self._session_active = True
+            self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            return
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            return
+
+        def _start_auto_ramp(self) -> None:
+            return
+
+        def _stop_auto_ramp(self, **kwargs: object) -> None:
+            events.append(("stop_auto", kwargs))
+            self._automation_active = False
+
+        def _stop_session(self, **kwargs: object) -> None:
+            events.append(("stop_session", kwargs))
+            self._session_active = False
+
+        def close(self) -> None:
+            events.append(("close", None))
+
+    def _sleep(seconds: float) -> None:
+        clock["now"] += max(0.05, seconds)
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        sleep_fn=_sleep,
+    )
+
+    assert summary["runs"][0]["status"] == "timeout"
+    stop_auto = [payload for name, payload in events if name == "stop_auto"][0]
+    stop_session = [payload for name, payload in events if name == "stop_session"][0]
+    assert stop_auto["stop_reason"] == "automation_timeout"
+    assert stop_session["reason"] == "automation_timeout"

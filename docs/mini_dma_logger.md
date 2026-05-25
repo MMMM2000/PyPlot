@@ -61,6 +61,7 @@ Current intended hardware stack:
 - log messages appear in the `Run log`; the duplicate status-bar echo is hidden, and a Developer-menu mirror can write the run log to a rotating text file for debugging
 - each run is written to its own output folder containing `measurement.txt`, `measurement.csv`, `metadata.json`, `scale_raw.csv`, `control_trace.csv`, `ui_telemetry.csv`, `setup.txt`, and `setup.csv`
 - `measurement.csv` remains the slower recipe/session log, `scale_raw.csv` preserves every acquired balance reply, `control_trace.csv` records closed-loop seek decisions, `ui_telemetry.csv` records Qt heartbeat/live-label/graph refresh timing, and `setup.csv` records pre-measurement setup separately from the recipe data
+- `metadata.json` includes a `stop` object with an explicit reason/category/label/detail so post-run review can distinguish normal recipe completion, manual stops, emergency stop, wire break/contact loss, app-close finalization, and bench automation timeouts without inferring from trace rows
 - saved or typed base filenames with repeated `_run02` / `_run03` suffix chains are cleaned back to the base sample name before choosing the next run folder, and the output-folder row includes an `Open` button next to `Browse`
 - recipe timing is split into a global control interval, global log interval, live label/telemetry interval, and dashboard graph refresh interval; individual recipes no longer own their own scheduler frequency
 - the global timing controls live under `Settings -> Timing...` instead of taking space in the normal Recipe panel

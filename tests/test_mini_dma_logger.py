@@ -11421,6 +11421,114 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         _close_test_window(window)
 
 
+def test_session_metadata_records_manual_recipe_stop_reason(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_manual_stop")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("record")]
+        window._automation_index = 0
+
+        window._stop_auto_ramp(user_initiated=True)
+
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "manual_recipe_stop"
+        assert payload["stop"]["category"] == "operator"
+        assert "Manual" in payload["stop"]["label"]
+        assert "Manual recipe stop" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_session_metadata_records_recipe_completed_stop_reason(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_recipe_complete")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._stop_session(reason="recipe_completed", detail="Recipe completed.")
+
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "recipe_completed"
+        assert payload["stop"]["category"] == "normal"
+        assert payload["stop"]["detail"] == "Recipe completed."
+    finally:
+        _close_test_window(window)
+
+
+def test_session_metadata_records_wire_break_stop_reason(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_wire_break")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    recovery_prompts: list[str] = []
+    window._ask_wire_break_recovery_after_stop = recovery_prompts.append  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._automation_active = True
+        window._supply_output_enabled = True
+        window._supply_last_setpoint_mA = 100.0
+        window._supply_snapshot = {
+            "current_mA": 0.0,
+            "voltage_V": float(window.spin_supply_voltage_limit.value()),
+            "resistance_ohm": None,
+            "power_W": None,
+        }
+
+        window._stop_for_wire_break()
+
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "wire_break_or_contact_loss"
+        assert payload["stop"]["category"] == "fault"
+        assert "Wire break" in payload["stop"]["label"]
+        assert recovery_prompts
+    finally:
+        _close_test_window(window)
+
+
+def test_session_metadata_records_emergency_stop_reason(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_emergency_stop")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._disable_motor_supply_output = lambda: True  # type: ignore[method-assign]
+    window._disable_supply_output = lambda: None  # type: ignore[method-assign]
+
+    class _Dispatcher:
+        def halt_and_hold(self) -> None:
+            return
+
+    window._build_tic_dispatcher = lambda: _Dispatcher()  # type: ignore[method-assign]
+    window._wait_for_tic_dispatcher = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("record")]
+        window._automation_index = 0
+
+        window._emergency_stop()
+
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "emergency_stop"
+        assert payload["stop"]["category"] == "operator"
+        assert "Emergency" in payload["stop"]["label"]
+    finally:
+        _close_test_window(window)
+
+
 def test_recipe_sample_header_tracks_sample_name(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 

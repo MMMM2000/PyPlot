@@ -268,9 +268,21 @@ def _execute_run(
         app.processEvents()
         if time.monotonic() >= deadline_s:
             status = "timeout"
-            stop = getattr(window, "_stop_recipe_from_button", None)
+            stop = getattr(window, "_stop_auto_ramp", None)
             if callable(stop):
-                stop()
+                stop(
+                    log_completion=False,
+                    user_initiated=False,
+                    offer_recovery=False,
+                    stop_reason="automation_timeout",
+                    stop_detail=f"Bench automation run exceeded {run.max_run_duration_s:.1f} s.",
+                )
+            stop_session = getattr(window, "_stop_session", None)
+            if callable(stop_session):
+                stop_session(
+                    reason="automation_timeout",
+                    detail=f"Bench automation run exceeded {run.max_run_duration_s:.1f} s.",
+                )
             break
         sleep_fn(0.05)
     app.processEvents()
