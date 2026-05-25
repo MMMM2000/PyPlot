@@ -2632,9 +2632,23 @@ def test_ac_logger_microwire_eta_uses_planned_sweep_position(
         assert "100%" not in text
         assert "ETA 0s" not in text
         assert "ETA" in text
+        assert "0.5 V excitation" in window.label_ac_current_task.text()
+        assert "0.5 V excitation" in window.label_lcr_status.text()
     finally:
         window.close()
         app.processEvents()
+
+
+def test_ac_logger_formats_current_excitation_in_sweep_status() -> None:
+    assert ac_logger.MainWindow._format_lcr_excitation(
+        lcr6000.Lcr6000Settings(10.0, 100e-6, level_mode="current")
+    ) == "100 uA excitation"
+    assert ac_logger.MainWindow._format_lcr_excitation(
+        lcr6000.Lcr6000Settings(10.0, 500e-6, level_mode="current")
+    ) == "0.5 mA excitation"
+    assert ac_logger.MainWindow._format_lcr_excitation(
+        lcr6000.Lcr6000Settings(10.0, 20e-3, level_mode="current")
+    ) == "20 mA excitation"
 
 
 def test_ac_logger_writes_optional_diagnostics(tmp_path: Path) -> None:

@@ -2839,20 +2839,32 @@ class MainWindow(CurrentAnnealingWindow):
             QtWidgets.QApplication.processEvents()
             return
         self._append_ac_plot_point(self._plot_point_from_sweep_row(row))
+        excitation_text = self._format_lcr_excitation(row.setting)
         self._set_ac_current_task(
             "Current task: microwire sweep - "
             f"{row.setting.function}, {row.setting.frequency_hz:g} Hz, "
-            f"{row.setting.level_value:g} {row.setting.level_mode}, "
+            f"{excitation_text}, "
             f"{row.current_point.current_a * 1000:g} mA {row.current_point.direction}, "
             f"read {row.repeat_index}"
         )
         self.label_lcr_status.setText(
             f"AC sweep {row.setting_index}/{row.total_settings}: "
             f"{row.setting.function}, {row.setting.frequency_hz:g} Hz, "
+            f"{excitation_text}, "
             f"{row.current_point.current_a * 1000:g} mA {row.current_point.direction}, "
             f"repeat {row.repeat_index}"
         )
         QtWidgets.QApplication.processEvents()
+
+    @staticmethod
+    def _format_lcr_excitation(setting: Lcr6000Settings) -> str:
+        value = float(setting.level_value)
+        if setting.level_mode == "current":
+            current_uA = value * 1_000_000.0
+            if abs(current_uA) <= 100.0:
+                return f"{current_uA:g} uA excitation"
+            return f"{value * 1000.0:g} mA excitation"
+        return f"{value:g} V excitation"
 
     def _planned_ac_sweep_elapsed(self, row: sweep.AcSweepRow) -> float | None:
         config = getattr(self, "_ac_active_sweep_config", None)
