@@ -14076,6 +14076,25 @@ class MainWindow(QtWidgets.QMainWindow):
             return "current"
         return f"{_format_compact_number(float(current_mA), decimals=3)} mA"
 
+    def _current_sweep_step_task_summary(self, step: AutomationStep) -> str:
+        target_text = self._automation_target_text(step.basis, step.target_value)
+        start_mA = step.current_start_mA
+        end_mA = step.current_end_mA
+        if start_mA is None or end_mA is None:
+            return f"Current sweep at {target_text}"
+        direction = "increasing" if float(end_mA) >= float(start_mA) else "decreasing"
+        target_current = self._automation_current_target_text(end_mA)
+        return f"At {target_text}: {direction} current to {target_current}"
+
+    def _previous_current_sweep_step_for_settle(self, step_index: int, step: AutomationStep) -> AutomationStep | None:
+        for previous in reversed(self._automation_steps[: max(0, step_index)]):
+            if previous.action == "sweep_current":
+                if previous.basis == step.basis and previous.target_value == step.target_value:
+                    return previous
+            if previous.action not in {"settle", "sweep_current"}:
+                break
+        return None
+
     def _current_task_summary(self) -> str:
         if not self._automation_active:
             return "Manual mode"
@@ -14098,6 +14117,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if step.action == "start_session":
             return "Starting measurement log"
 
+        if (
+            self._is_current_sweep_mode(self._automation_name)
+            and self._automation_phase in {"current", "current_hold", "current_limit_unwind"}
+        ):
+            context_target_text = self._automation_target_text(self._automation_basis, self._automation_target_value)
+            if self._automation_phase == "current_hold":
+                held = self._automation_current_target_text(self._active_current_sweep_last_setpoint_mA)
+                return f"At {context_target_text}: holding {held}, recovering target"
+            target_current = self._automation_current_target_text(self._active_current_sweep_display_target_mA)
+            direction_value = self._active_current_sweep_display_direction
+            if abs(direction_value) <= 1e-12 and self._active_current_sweep_display_target_mA is not None:
+                start_for_display = self._active_current_sweep_last_setpoint_mA
+                if start_for_display is not None:
+                    direction_value = float(self._active_current_sweep_display_target_mA) - float(start_for_display)
+            direction = "increasing" if direction_value >= 0.0 else "decreasing"
+            return f"At {context_target_text}: {direction} current to {target_current}"
+
         if step.action == "ramp_target":
             end_value = step.target_end_value if step.target_end_value is not None else step.target_value
             end_text = self._automation_target_text(step.basis, end_value)
@@ -14112,32 +14148,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return f"Ramp to {end_text}"
 
         if step.action == "sweep_current":
-            if self._automation_phase in {"current", "current_hold", "current_limit_unwind"}:
-                context_target_text = self._automation_target_text(self._automation_basis, self._automation_target_value)
-                if self._automation_phase == "current_hold":
-                    held = self._automation_current_target_text(self._active_current_sweep_last_setpoint_mA)
-                    return f"At {context_target_text}: holding {held}, recovering target"
-                target_current = self._automation_current_target_text(self._active_current_sweep_display_target_mA)
-                direction_value = self._active_current_sweep_display_direction
-                if abs(direction_value) <= 1e-12 and self._active_current_sweep_display_target_mA is not None:
-                    start_for_display = self._active_current_sweep_last_setpoint_mA
-                    if start_for_display is not None:
-                        direction_value = float(self._active_current_sweep_display_target_mA) - float(start_for_display)
-                direction = "increasing" if direction_value >= 0.0 else "decreasing"
-                return f"At {context_target_text}: {direction} current to {target_current}"
-            start_mA = step.current_start_mA
-            end_mA = step.current_end_mA
-            if start_mA is None or end_mA is None:
-                return f"Current sweep at {target_text}"
-            direction = "Increasing" if float(end_mA) >= float(start_mA) else "Decreasing"
-            target_current = self._automation_current_target_text(end_mA)
-            return f"At {target_text}: {direction.lower()} current to {target_current}"
+            return self._current_sweep_step_task_summary(step)
 
         if step.action == "mechanical_scan":
             current_text = self._automation_current_target_text(step.current_mA)
             return f"At {current_text}: fixed displacement steps toward {target_text}"
 
         if step.action == "settle":
+            if self._is_current_sweep_mode(self._automation_name):
+                previous_sweep = self._previous_current_sweep_step_for_settle(step_index, step)
+                if previous_sweep is not None:
+                    return self._current_sweep_step_task_summary(previous_sweep)
             return f"Settling at {target_text}"
         if step.action == "set_current":
             return f"Setting current to {self._automation_current_target_text(step.current_mA)}"
@@ -14967,6 +14988,7 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_item = widget.getPlotItem()
         plot_item.showGrid(x=True, y=True, alpha=0.28)
         plot_item.setClipToView(True)
+        plot_item.vb.setDefaultPadding(0.05)
         left_curve_kwargs: dict[str, Any] = {"pen": pg.mkPen(left_color, width=0.8)}
         if symbols:
             left_curve_kwargs.update(
@@ -14981,6 +15003,7 @@ class MainWindow(QtWidgets.QMainWindow):
         bundle = PyqtGraphPlotBundle(widget=widget, plot_item=plot_item, left_curve=left_curve)
         if right_label is not None:
             right_view = pg.ViewBox()
+            right_view.setDefaultPadding(0.05)
             right_curve_kwargs: dict[str, Any] = {"pen": pg.mkPen(right_color, width=0.75)}
             if symbols:
                 right_curve_kwargs.update(

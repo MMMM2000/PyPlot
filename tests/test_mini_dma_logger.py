@@ -1495,6 +1495,24 @@ def test_dashboard_plot_panel_keeps_right_edge_padding_and_compact_log(tmp_path:
         _close_test_window(window)
 
 
+def test_dashboard_plot_viewboxes_keep_data_edge_padding(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._plot_tiles[0].y_right_combo.setCurrentIndex(
+            window._plot_tiles[0].y_right_combo.findData("position_mm")
+        )
+        window._refresh_plots()
+
+        bundle = window._dashboard_plot_bundles[0]
+
+        assert bundle.plot_item.vb.state["defaultPadding"] >= 0.04
+        assert bundle.right_view is not None
+        assert bundle.right_view.state["defaultPadding"] >= 0.04
+    finally:
+        _close_test_window(window)
+
+
 def test_dashboard_pyqtgraph_axes_match_curve_colors_and_use_major_grid_only(
     tmp_path: Path,
     qtbot,
@@ -2802,6 +2820,14 @@ def test_current_task_summary_shows_current_sweep_phase(tmp_path: Path, qtbot) -
             note="1",
         ),
         mini_dma_mod.AutomationStep(
+            "settle",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_mA=1.0,
+            duration_s=0.5,
+            note="1",
+        ),
+        mini_dma_mod.AutomationStep(
             "ramp_target",
             target_value=100.0,
             target_start_value=50.0,
@@ -2828,12 +2854,16 @@ def test_current_task_summary_shows_current_sweep_phase(tmp_path: Path, qtbot) -
         window._automation_index = 1
         assert window._current_task_summary() == "At 50 MPa: decreasing current to 1 mA"
 
+        window._automation_phase = "settle"
+        window._automation_index = 2
+        assert window._current_task_summary() == "At 50 MPa: decreasing current to 1 mA"
+
         window._automation_phase = "current_hold"
         window._active_current_sweep_last_setpoint_mA = 42.4
         assert window._current_task_summary() == "At 50 MPa: holding 42.4 mA, recovering target"
 
         window._automation_phase = "target_ramp"
-        window._automation_index = 2
+        window._automation_index = 3
         assert window._current_task_summary() == "Ramp up to 100 MPa"
     finally:
         window._automation_active = False

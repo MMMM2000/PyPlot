@@ -18,6 +18,7 @@
 - Mini DMA mandatory length setup now refreshes the frozen control config after accepted starting length and computed `l0`, so strain logging and subsequent control use the measured setup length instead of a stale recipe-start value.
 - Mini DMA setup progress now tracks live preload target error instead of elapsed ramp time, and setup no longer performs a timed zero-load settle after the return-to-zero target is accepted.
 - Mini DMA dashboard plots now bridge cached downsampled history into the recent live tail instead of leaving an empty middle gap during long measurements.
+- Mini DMA dashboard plots now add view-box data-edge padding so right-edge points are not clipped, and the current-sweep task label stays on the active current/hold phase instead of flickering through short settle steps.
 - Mini DMA setup return-to-zero now applies a small strain-based speed floor for tiny residual loads, avoiding very slow one-step unloads near baseline.
 - Mini DMA length-setup plotting now snapshots setup samples before drawing, preventing live plot refresh crashes from concurrent sample updates.
 - Mini DMA paused-current recovery can now use a local hold-only response stiffness after several confirmed correction samples, allowing faster load/stress recovery during transformations while keeping the frozen current-sweep stiffness and displacement/strain safety rails intact.
