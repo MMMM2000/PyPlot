@@ -52,8 +52,8 @@ SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-22.3"
-CONTROL_LOGIC_PROFILE = "filtered-current-hold-transformation-gated"
+CONTROL_LOGIC_VERSION = "2026-05-25.1"
+CONTROL_LOGIC_PROFILE = "filtered-current-hold-recovery-band"
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
     "setup_slack_stress_cap",
@@ -62,6 +62,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_filtered_signal_change_gate",
     "current_hold_persistent_error_gate",
     "current_hold_transformation_entry_gate",
+    "current_hold_recovery_tolerance_band",
     "current_hold_noise_band_resume",
     "adaptive_current_hold_response_stiffness",
     "zero_load_reference_sidecar",
@@ -384,6 +385,7 @@ SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA = 3.0
 SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA = 8.0
+SERVO_CURRENT_SWEEP_HOLD_RECOVERY_MIN_STRESS_MPA = 8.0
 SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S = 1.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S = 1.0
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
@@ -12444,6 +12446,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_transformation_min_stress_mpa": (
                     SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA
                 ),
+                "current_hold_recovery_min_stress_mpa": (
+                    SERVO_CURRENT_SWEEP_HOLD_RECOVERY_MIN_STRESS_MPA
+                ),
                 "current_hold_entry_confirm_s": SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S,
                 "current_hold_min_away_slope_mpa_s": (
                     SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S
@@ -15813,6 +15818,12 @@ class MainWindow(QtWidgets.QMainWindow):
             SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA,
         )
 
+    def _current_sweep_hold_recovery_band_for_basis(self, basis: str) -> float:
+        return self._current_sweep_hold_min_band_for_basis(
+            basis,
+            SERVO_CURRENT_SWEEP_HOLD_RECOVERY_MIN_STRESS_MPA,
+        )
+
     def _reset_current_sweep_ramp_hold_candidate(self) -> None:
         self._current_sweep_ramp_hold_candidate_step_index = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
@@ -15956,6 +15967,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 step.basis,
                 self._current_sweep_hold_min_resume_stress_mpa(),
             ),
+            self._current_sweep_hold_recovery_band_for_basis(step.basis),
         )
         holding = self._current_sweep_ramp_hold_step_index == step_index
         pause_error = error_value
