@@ -2760,6 +2760,68 @@ def test_commands_for_settings_can_drive_lcr_current_level() -> None:
     assert "LEV:VOLT 0.005\n" not in commands
 
 
+def test_lcr_configure_waits_for_measurement_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSerialPort:
+        written: list[bytes]
+        responses: list[bytes]
+
+        def __init__(self, **_kwargs: object) -> None:
+            self.written = []
+            self.responses = [b"LIST\n", b"MEAS\n"]
+            self.is_open = True
+
+        def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+        def flush(self) -> None:
+            pass
+
+        def readline(self) -> bytes:
+            if self.responses:
+                return self.responses.pop(0)
+            return b""
+
+        def reset_input_buffer(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.is_open = False
+
+    fake_serial = FakeSerialPort()
+
+    class FakeSerialModule:
+        EIGHTBITS = 8
+        PARITY_NONE = "N"
+        STOPBITS_ONE = 1
+
+        @staticmethod
+        def Serial(**kwargs: object) -> FakeSerialPort:
+            return fake_serial
+
+    monkeypatch.setattr(lcr6000, "serial", FakeSerialModule)
+    monkeypatch.setattr(lcr6000.time, "sleep", lambda _seconds: None)
+
+    meter = lcr6000.Lcr6000Serial("COM9")
+    meter.configure(
+        lcr6000.Lcr6000Settings(
+            frequency_hz=10.0,
+            level_value=100e-6,
+            level_mode="current",
+            function="Ls-Rs",
+            monitor1="IAC",
+            monitor2="VAC",
+            aperture="MED",
+        )
+    )
+
+    assert fake_serial.written[:4] == [
+        b"DISP:PAGE MEAS\n",
+        b"DISP:PAGE?\n",
+        b"DISP:PAGE?\n",
+        b"FUNC Ls-Rs\n",
+    ]
+
+
 def test_parse_fetch_impedance_keeps_raw_and_numeric_values() -> None:
     reading = lcr6000.parse_fetch_impedance(
         "+2.61788e-11,+5.45442e-01,+3.88651e+05,+0.00000e+00,BIN1,AUX-OK,OK"

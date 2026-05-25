@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 import re
 import time
 from typing import Iterable, Sequence
@@ -396,10 +397,22 @@ class Lcr6000Serial:
     def identify(self) -> str:
         return self.query("*IDN?")
 
+    def _wait_for_measurement_page(self, *, timeout_s: float = 2.0, poll_s: float = 0.1) -> None:
+        attempts = max(1, int(math.ceil(timeout_s / poll_s)))
+        for attempt in range(attempts):
+            page = self.query("DISP:PAGE?", attempts=1).strip().upper()
+            if page.startswith("MEAS"):
+                return
+            if attempt + 1 < attempts:
+                time.sleep(poll_s)
+
     def configure(self, settings: Lcr6000Settings) -> None:
         for command in commands_for_settings(settings):
             self.write(command)
-            time.sleep(0.15)
+            if command.strip().upper() == "DISP:PAGE MEAS":
+                self._wait_for_measurement_page()
+            else:
+                time.sleep(0.15)
 
     def fetch_impedance(self) -> Lcr6000Reading:
         return parse_fetch_impedance(self.query("FETC:IMP?"))
