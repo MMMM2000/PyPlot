@@ -4118,9 +4118,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_setup_zero_stable_s.setValue(1.0)
         self.spin_setup_zero_stable_s.setSuffix(" s")
         self.spin_setup_zero_stable_s.setToolTip(
-            "Time to hold the returned zero-load baseline before applying the measured setup length."
+            "Legacy setting retained for old recipe files; setup now applies l0 as soon as the zero-load return is accepted."
         )
         strain_setup_form.addRow("Zero-load settle time", self.spin_setup_zero_stable_s)
+        self._hide_form_row(strain_setup_form, self.spin_setup_zero_stable_s)
         automation_form.addRow("", self.strain_setup_box)
 
         self.recipe_stack = CurrentPageStackedWidget(automation_box)
@@ -10057,9 +10058,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _setup_zero_stable_duration_s(self) -> float:
-        config = self._control_config()
-        stable_s = config.setup_zero_stable_s if config is not None else float(self.spin_setup_zero_stable_s.value())
-        return max(SETUP_ZERO_FALLBACK_MIN_TIME_S, float(stable_s))
+        return SETUP_ZERO_FALLBACK_MIN_TIME_S
 
     def _accept_pending_linear_zero_plateau_if_stable(self) -> bool:
         if self._setup_zero_fallback_reason != "linear_unload_slack":
@@ -12373,7 +12372,6 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_txt_handle.write(f"# Setup preload ramp rate MPa/s\t{self._setup_preload_ramp_rate_mpa_s():.6f}\n")
         setup_txt_handle.write(f"# Setup preload settle s\t{self.spin_setup_preload_stable_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup return duration s\t{self.spin_setup_return_duration_s.value():.6f}\n")
-        setup_txt_handle.write(f"# Setup zero-load settle s\t{self.spin_setup_zero_stable_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup slack speed pct/s\t{self.spin_setup_slack_speed_strain_pct_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup slack step cap MPa\t{self.spin_setup_slack_step_cap_stress_mpa.value():.6f}\n")
         setup_txt_handle.write(f"# Setup stage max speed mm/s\t{self._setup_motion_speed_cap_mm_s():.6f}\n")
@@ -14285,6 +14283,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 if (
                     not slack_takeup
                     and start_value is not None
+                    and target_value is not None
+                    and current_value is not None
+                    and abs(float(start_value) - float(target_value)) > 1e-12
+                ):
+                    total_error = abs(float(start_value) - float(target_value))
+                    remaining_error = abs(float(current_value) - float(target_value))
+                    phase_fraction = 1.0 - min(1.0, remaining_error / total_error)
+                    phase_key = (self._automation_index, current_step.action, current_step.note, "ramp")
+                if (
+                    not slack_takeup
+                    and phase_fraction is None
+                    and start_value is not None
                     and rate_value_s is not None
                     and target_value is not None
                     and abs(float(rate_value_s)) > 0.0
@@ -15446,7 +15456,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if preload_load_g is None:
             raise ValueError("Set a positive wire diameter before using preload length setup.")
         preload_stable_s = max(0.0, float(self.spin_setup_preload_stable_s.value()))
-        zero_stable_s = max(0.0, float(self.spin_setup_zero_stable_s.value()))
         steps: list[AutomationStep] = [
             AutomationStep("starting_length_prompt", note="setup_start_length"),
             AutomationStep(
@@ -15481,15 +15490,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "seek_target",
                 target_value=0.0,
                 basis=HSW_BASIS_LOAD_G,
-                note="setup_return_zero",
-            )
-        )
-        steps.append(
-            AutomationStep(
-                "settle",
-                target_value=0.0,
-                basis=HSW_BASIS_LOAD_G,
-                duration_s=zero_stable_s,
                 note="setup_return_zero",
             )
         )

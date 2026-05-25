@@ -714,9 +714,14 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
         assert preload_step.target_end_value == pytest.approx(10.0)
         assert preload_step.target_ramp_rate_value_s == pytest.approx(2.0)
         preload_settle = next(step for step in steps if step.action == "settle" and step.note == "setup_preload")
-        zero_settle = next(step for step in steps if step.action == "settle" and step.note == "setup_return_zero")
+        return_zero_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.action == "seek_target" and step.note == "setup_return_zero"
+        )
         assert preload_settle.duration_s == pytest.approx(2.0)
-        assert zero_settle.duration_s == pytest.approx(1.0)
+        assert not any(step.action == "settle" and step.note == "setup_return_zero" for step in steps)
+        assert steps[return_zero_index + 1].action == "apply_length_setup"
     finally:
         _close_test_window(window)
 
@@ -1249,6 +1254,19 @@ def test_pending_linear_unload_fallback_accepts_stable_near_zero_plateau(
         assert window._setup_zero_position_mm == pytest.approx(-1.94875)
         assert window._zero_load_scale_reference_g() == pytest.approx(21.1301, abs=0.001)
         assert "stable near-zero load plateau" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_return_zero_ignores_legacy_zero_stable_setting(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_setup_zero_stable_s.setValue(30.0)
+    window._active_control_config = window._freeze_control_config()
+
+    try:
+        assert window._setup_zero_stable_duration_s() == pytest.approx(
+            mini_dma_mod.SETUP_ZERO_FALLBACK_MIN_TIME_S
+        )
     finally:
         _close_test_window(window)
 
@@ -5072,6 +5090,45 @@ def test_length_setup_progress_tracks_active_ramp_phase_without_tick_counts(
         assert "50%" in text
         assert "20000" not in text
         assert "1234" not in text
+    finally:
+        _close_test_window(window)
+
+
+def test_length_setup_preload_progress_uses_live_target_error_not_elapsed_timeout(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 118.0)
+
+    try:
+        window._automation_active = True
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep(
+                "ramp_target",
+                target_value=20.0,
+                target_end_value=20.0,
+                basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                note="setup_preload",
+            )
+        ]
+        window._automation_index = 0
+        window._active_target_ramp_step_index = 0
+        window._active_target_ramp_started_s = 100.0
+        window._active_target_ramp_start_value = 140.0
+        window._active_target_ramp_rate_value_s = 24.0
+        window._setup_preload_engaged_seek_keys.add(
+            window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 20.0)
+        )
+        monkeypatch.setattr(window, "_current_distribution_value", lambda _basis: 29.0)
+        window._show_length_setup_dialog()
+
+        window._update_length_setup_progress()
+
+        assert window._length_setup_progress is not None
+        assert window._length_setup_progress.value() < 1000
+        assert "100%" not in window._length_setup_progress.format()
     finally:
         _close_test_window(window)
 
