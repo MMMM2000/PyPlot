@@ -52,8 +52,8 @@ SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-25.2"
-CONTROL_LOGIC_PROFILE = "filtered-current-hold-auto-recovery-band"
+CONTROL_LOGIC_VERSION = "2026-05-25.3"
+CONTROL_LOGIC_PROFILE = "filtered-current-hold-bounded-retry"
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
     "setup_slack_stress_cap",
@@ -63,6 +63,8 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_persistent_error_gate",
     "current_hold_transformation_entry_gate",
     "current_hold_recovery_tolerance_band",
+    "current_hold_retry_after_filter_window",
+    "current_hold_bounded_saved_cap",
     "current_hold_noise_band_resume",
     "adaptive_current_hold_response_stiffness",
     "zero_load_reference_sidecar",
@@ -361,7 +363,7 @@ SERVO_LIVE_STIFFNESS_ALPHA = 0.35
 SERVO_NOISE_SIGMA = 3.0
 SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S = 1.5
 SERVO_CURRENT_SWEEP_RATE_GAIN = 1.2
-SERVO_CURRENT_SWEEP_DEFAULTS_VERSION = 4
+SERVO_CURRENT_SWEEP_DEFAULTS_VERSION = 5
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S = 15.0
 SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S = 5.0
@@ -9415,7 +9417,14 @@ class MainWindow(QtWidgets.QMainWindow):
             abs(float(filtered_signal.noise)) * 0.25,
             1e-9,
         )
-        return change > required_change
+        if change > required_change:
+            return True
+        latest_s = self._latest_scale_sample_time_s()
+        clock_key = seek_key[0], seek_key[1]
+        last_s = self._seek_last_scale_timestamp_by_clock.get(clock_key)
+        if latest_s is None or last_s is None:
+            return False
+        return latest_s - float(last_s) >= self._current_sweep_hold_filter_window_s()
 
     def _current_hold_error_is_persistent(
         self,
@@ -10308,6 +10317,11 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._setup_zero_position_mm is not None
             and self._setup_zero_fallback_return_position_mm is None
         ):
+            if self._latest_scale_value_g is not None:
+                self._set_run_zero_load_scale_reference(
+                    float(self._latest_scale_value_g),
+                    reason="setup linear-unload baseline committed",
+                )
             self._clear_seek_state(seek_key)
             self._write_control_trace(
                 decision="accept",
@@ -18055,7 +18069,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if (
             current_sweep_servo_defaults_version < SERVO_CURRENT_SWEEP_DEFAULTS_VERSION
-            and math.isclose(saved_current_sweep_hold_cap, 20.0, rel_tol=1e-9, abs_tol=1e-9)
+            and (
+                math.isclose(saved_current_sweep_hold_cap, 20.0, rel_tol=1e-9, abs_tol=1e-9)
+                or saved_current_sweep_hold_cap > SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
+            )
         ):
             saved_current_sweep_hold_cap = SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
         self.spin_current_sweep_hold_correction_stress_mpa.setValue(

@@ -864,6 +864,7 @@ def test_setup_return_zero_accepts_after_linear_unload_baseline_is_committed(
             target_value=0.0,
             tolerance=0.005,
         ) is True
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.17)
     finally:
         _close_test_window(window)
 
@@ -9174,6 +9175,92 @@ def test_current_sweep_hold_waits_for_filtered_signal_to_change_before_repeating
         _close_test_window(window)
 
 
+def test_current_sweep_hold_retries_when_filtered_signal_stays_unchanged_for_full_window(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.time()
+
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
+        moves.append(float(target_mm))
+        command_s = time.time() - 0.4
+        window._last_motion_command_time_s = command_s
+        window._last_motion_expected_complete_time_s = command_s
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window.spin_current_sweep_hold_filter_window_s.setValue(1.8)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        500.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_out_of_band_sign_by_key[seek_key] = 1.0
+    window._seek_out_of_band_since_by_key[seek_key] = now_s - 2.0
+    load_g = mini_dma_mod.load_g_from_stress_mpa(35.0, window.spin_diameter.value())
+    assert load_g is not None
+    for index in range(5):
+        timestamp_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+        assert reached is False
+        assert len(moves) == 1
+
+        timestamp_s = now_s + 3.0
+        for index in range(8):
+            sample_s = timestamp_s - 1.75 + index * 0.25
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=sample_s,
+                raw_g=load_g,
+                applied_load_g=load_g,
+                raw_text=f"{load_g:.5f} g",
+            )
+            window._latest_scale_timestamp = sample_s
+            window._latest_scale_value_g = load_g
+
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert len(moves) == 2
+        assert "filtered control signal" not in window.log_output.toPlainText().lower()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_requires_persistent_out_of_band_error_before_correction(
     tmp_path: Path,
     qtbot,
@@ -10936,12 +11023,13 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
 
         assert first_logic["name"] == "mini_dma_control"
         assert first_logic["version"]
-        assert first_logic["profile"] == "filtered-current-hold-auto-recovery-band"
+        assert first_logic["profile"] == "filtered-current-hold-bounded-retry"
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
         assert "current_hold_transformation_entry_gate" in first_logic["features"]
         assert "current_hold_recovery_tolerance_band" in first_logic["features"]
+        assert "current_hold_retry_after_filter_window" in first_logic["features"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
         old_fingerprint = first_logic["fingerprint"]
@@ -11359,6 +11447,23 @@ def test_current_sweep_saved_20_mpa_hold_cap_migrates_to_30_mpa(tmp_path: Path, 
     settings.clear()
     settings.setValue("current_sweep_servo_defaults_version", 3)
     settings.setValue("current_sweep_hold_correction_stress_mpa", 20.0)
+    settings.sync()
+
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
+
+    try:
+        assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(30.0)
+    finally:
+        _close_test_window(window)
+        _restore_settings(snapshot)
+
+
+def test_current_sweep_saved_overlarge_hold_cap_migrates_to_30_mpa(tmp_path: Path, qtbot) -> None:
+    settings = _test_settings()
+    snapshot = _snapshot_settings()
+    settings.clear()
+    settings.setValue("current_sweep_servo_defaults_version", 4)
+    settings.setValue("current_sweep_hold_correction_stress_mpa", 100.0)
     settings.sync()
 
     window = _build_window(tmp_path, qtbot, preserve_settings=True)
