@@ -1828,6 +1828,29 @@ def test_stop_session_finalizes_partial_calibration_report(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_session_holds_sleep_guard_until_stopped(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = _build_window(tmp_path, qtbot)
+    calls: list[str] = []
+
+    class _FakeSleepGuard:
+        def acquire(self) -> None:
+            calls.append("acquire")
+
+        def release(self) -> None:
+            calls.append("release")
+
+    monkeypatch.setattr(mini_dma_mod, "create_experiment_sleep_guard", lambda _reason: _FakeSleepGuard())
+
+    try:
+        window._start_session(record_initial_point=False)
+        assert calls == ["acquire"]
+
+        window._stop_session()
+        assert calls == ["acquire", "release"]
+    finally:
+        _close_test_window(window)
+
+
 def test_nonpersistent_calibration_does_not_overwrite_saved_servo_settings(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()

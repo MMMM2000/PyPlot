@@ -137,6 +137,33 @@ def test_shared_broker_setpoint_and_stop_only_affect_leased_channel(qtbot) -> No
     assert window._shared_broker_lease_id is None
 
 
+def test_annealing_run_holds_sleep_guard_until_safe_end(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    calls: list[str] = []
+
+    class _FakeSleepGuard:
+        def acquire(self) -> None:
+            calls.append("acquire")
+
+        def release(self) -> None:
+            calls.append("release")
+
+    monkeypatch.setattr(logger_mod, "create_experiment_sleep_guard", lambda _reason: _FakeSleepGuard())
+    window._apply_supply_profile("shared_hmp_broker")
+    window._shared_broker_client = _FakeBrokerClient()
+    window.channel_select = 1
+    window.max_voltage = 30.0
+    window.current_current_set = 0.010
+    window.process_running = True
+
+    window.send_init_commands()
+    assert calls == ["acquire"]
+
+    window.send_safe_end_commands()
+    assert calls == ["acquire", "release"]
+
+
 def test_percent_from_hold_handles_zero() -> None:
     assert logger_mod.MainWindow._percent_from_hold(10.0, 0.0) is None
 

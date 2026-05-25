@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover - import guard
     pg = None  # type: ignore[assignment]
 
 from plotting.shared.logfiles import append_text_with_rotation
+from plotting.shared.power_guard import create_experiment_sleep_guard
 from plotting.shared.utils import ensure_app_theme, install_standard_menu
 from data_logging.shared_power_supply.broker import ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
 from data_logging.shared_power_supply.protocol import BrokerJsonClient
@@ -2802,6 +2803,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._display_plot_old_cache_key: tuple[object, ...] | None = None
         self._display_plot_old_cache: list[MeasurementPoint] = []
         self._session_active = False
+        self._sleep_guard: Any = None
         self._session_start_monotonic = 0.0
         self._session_created_utc: str | None = None
         self._session_txt_handle: Any = None
@@ -13216,6 +13218,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_count = 0
         self._session_ui_telemetry_count = 0
         self._ui_refresh_last_monotonic_s = None
+        self._acquire_experiment_sleep_guard()
         self._session_txt_handle = txt_handle
         self._session_csv_handle = csv_handle
         self._session_csv_writer = csv_writer
@@ -13342,9 +13345,32 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
         self._clear_run_zero_load_scale_reference()
+        self._release_experiment_sleep_guard()
         self._live_plot_points = []
         self._last_live_plot_scale_timestamp = None
         self._refresh_live_labels()
+
+    def _acquire_experiment_sleep_guard(self) -> None:
+        try:
+            if self._sleep_guard is not None:
+                return
+            self._sleep_guard = create_experiment_sleep_guard("Mini DMA experiment")
+            self._sleep_guard.acquire()
+            self._log("Sleep prevention active while the Mini DMA session is running.")
+        except Exception as exc:
+            self._sleep_guard = None
+            self._log(f"Could not enable sleep prevention: {exc}")
+
+    def _release_experiment_sleep_guard(self) -> None:
+        guard = self._sleep_guard
+        self._sleep_guard = None
+        if guard is None:
+            return
+        try:
+            guard.release()
+            self._log("Sleep prevention released.")
+        except Exception as exc:
+            self._log(f"Could not release sleep prevention: {exc}")
 
     def _write_control_trace(
         self,
@@ -18868,6 +18894,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_tic_dispatcher()
         self._disconnect_scale()
         self._stop_session(reason="app_closed", detail="Application window closed while session was active.")
+        self._release_experiment_sleep_guard()
         self._disconnect_supply()
         super().closeEvent(event)
 

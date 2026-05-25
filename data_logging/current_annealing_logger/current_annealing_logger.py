@@ -29,6 +29,7 @@ from data_logging.naming_history import LineEditHistory
 from data_logging.data_logger.file_name_builder import composition_warning_state
 from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING
 from data_logging.shared_power_supply.protocol import BrokerJsonClient
+from plotting.shared.power_guard import create_experiment_sleep_guard
 
 import numpy as np
 import matplotlib
@@ -291,6 +292,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shared_broker_client: Any = None
         self._shared_broker_lease_id: str | None = None
         self._shared_broker_owner = "current_annealing_logger"
+        self._sleep_guard: Any = None
         self._init_supply_profile()
         self.max_voltage_action: str = MAX_VOLTAGE_DEFAULT_ACTION
         self._init_max_voltage_action()
@@ -2963,14 +2965,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._using_shared_broker():
             self._shutdown_shared_broker_output()
             self.ui.label_last_command.setText("broker output off")
+            self._release_experiment_sleep_guard()
             return
         for i in range(0, len(self.commands_safe_end)):
             self.serial_command = self.commands_safe_end[i]
             self.send_serial_command()
             self.simple_delay(200)
+        self._release_experiment_sleep_guard()
             
 
     def send_init_commands(self):
+        if self.process_running:
+            self._acquire_experiment_sleep_guard()
         if self._using_shared_broker():
             if self.process_running:
                 self._initialize_shared_broker_output()
@@ -2992,6 +2998,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 # delay.  A brief 200 ms gap gives the supply time to process
                 # each command while keeping the UI responsive.
                 self.simple_delay(200)
+
+    def _acquire_experiment_sleep_guard(self) -> None:
+        try:
+            if self._sleep_guard is not None:
+                return
+            self._sleep_guard = create_experiment_sleep_guard("Current annealing experiment")
+            self._sleep_guard.acquire()
+            self._show_status_message("Sleep prevention active while annealing is running.", timeout_ms=5000)
+        except Exception as exc:
+            self._sleep_guard = None
+            self._show_status_message(f"Could not enable sleep prevention: {exc}", timeout_ms=10000)
+
+    def _release_experiment_sleep_guard(self) -> None:
+        guard = self._sleep_guard
+        self._sleep_guard = None
+        if guard is None:
+            return
+        try:
+            guard.release()
+            self._show_status_message("Sleep prevention released.", timeout_ms=5000)
+        except Exception as exc:
+            self._show_status_message(f"Could not release sleep prevention: {exc}", timeout_ms=10000)
             
     def simple_delay(self, delay_ms):
         self.wait = True
@@ -3555,6 +3583,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.port_name = self.ui.comboBox_port.currentData()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self._release_experiment_sleep_guard()
         if self.ser_mcu.isOpen():
             self.handle_connect_port_clicked()
             # self.ser_mcu.close()
