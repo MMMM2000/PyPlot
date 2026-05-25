@@ -5363,6 +5363,36 @@ def test_recipe_preflight_reports_scale_and_supply_together(
         _close_test_window(window)
 
 
+def test_recipe_preflight_restores_real_gram_zero_load_reference_before_setup(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.check_tension_load_positive.setChecked(True)
+        window.spin_zero_load_scale_g.setValue(0.0)
+        window._latest_scale_value_g = 17.325
+        window._latest_scale_timestamp = time.time()
+        window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+
+        ok = window._preflight_recipe_hardware(
+            [
+                mini_dma_mod.AutomationStep(
+                    "seek_target",
+                    target_value=20.0,
+                    basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                )
+            ]
+        )
+
+        assert ok is True
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert window._current_effective_load_g() == pytest.approx(3.875)
+    finally:
+        _close_test_window(window)
+
+
 def test_tic_status_warns_when_motor_power_vin_is_low(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -7648,6 +7678,38 @@ def test_zero_load_reference_maps_real_scale_weight_to_applied_load(tmp_path: Pa
 
         window._latest_scale_value_g = 21.25
         assert window._current_effective_load_g() == pytest.approx(0.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_real_gram_scale_reading_restores_default_zero_load_reference_when_saved_zero_is_tared(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.check_tension_load_positive.setChecked(True)
+        window.spin_zero_load_scale_g.setValue(0.0)
+        window._handle_scale_measurement(17.325, "17.32500 g", time.time())
+
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert window._current_effective_load_g() == pytest.approx(3.875)
+        assert "restored to 21.20000 g" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_physical_tared_scale_near_zero_keeps_zero_load_reference_at_zero(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.check_tension_load_positive.setChecked(True)
+        window.spin_zero_load_scale_g.setValue(0.0)
+        window._handle_scale_measurement(-0.250, "-0.25000 g", time.time())
+
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(0.0)
+        assert window._current_effective_load_g() == pytest.approx(0.250)
     finally:
         _close_test_window(window)
 

@@ -6877,6 +6877,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._latest_scale_value_g = value_g
             self._latest_scale_text = raw_text
             self._latest_scale_timestamp = timestamp_s
+            self._restore_default_zero_load_reference_if_real_grams(value_g)
             sample = self._scale_signal_buffer.add_sample(
                 timestamp_s=timestamp_s,
                 raw_g=value_g,
@@ -6970,6 +6971,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_zero_load_scale_g = None
         self._refresh_scale_reference_cache()
         self._refresh_live_labels()
+
+    def _restore_default_zero_load_reference_if_real_grams(self, raw_g: float) -> bool:
+        if not self._is_ui_thread():
+            return False
+        if not hasattr(self, "spin_zero_load_scale_g") or not hasattr(self, "check_tension_load_positive"):
+            return False
+        if not self.check_tension_load_positive.isChecked():
+            return False
+        if self._run_zero_load_scale_g is not None:
+            return False
+        current_reference_g = float(self.spin_zero_load_scale_g.value())
+        if abs(current_reference_g) > 0.01:
+            return False
+        if float(raw_g) < DEFAULT_ZERO_LOAD_SCALE_G * 0.5:
+            return False
+        self.spin_zero_load_scale_g.setValue(DEFAULT_ZERO_LOAD_SCALE_G)
+        self._load_offset_g = 0.0
+        self._refresh_scale_reference_cache()
+        self._log(
+            "Zero-load scale reference restored to "
+            f"{DEFAULT_ZERO_LOAD_SCALE_G:.5f} g because the balance is reporting real grams "
+            f"({float(raw_g):.5f} g) while the saved reference was 0 g."
+        )
+        return True
 
     def _capture_zero_load_scale_reference(self) -> bool:
         if not self._has_fresh_scale_reading():
@@ -13696,6 +13721,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Scale is not connected. Use Auto-detect scale, then verify the zero-load reference, "
                 "and fix the serial link if it still fails."
             )
+        if not issues and self._recipe_requires_scale(steps):
+            with self._scale_state_lock:
+                latest_raw_g = self._latest_scale_value_g
+            self._restore_default_zero_load_reference_if_real_grams(float(latest_raw_g))
         if not issues:
             return True
         message = "Recipe preflight failed:\n\n" + "\n".join(f"- {issue}" for issue in issues)
