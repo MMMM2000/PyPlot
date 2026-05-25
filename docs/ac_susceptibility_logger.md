@@ -287,6 +287,9 @@ not create or command a power-supply backend.
 The right-side graph area follows the Mini DMA dashboard pattern: use
 **Configure plots** to choose which plot tiles are visible and what each tile
 uses for bottom X, left Y, optional right Y, and optional far-right Y.
+Live plots intentionally show only a recent, thinned preview of the run so
+overnight sweeps do not spend minutes redrawing old points. The TSV file still
+contains every acquired LCR and PSU readback row.
 
 By default it shows:
 

@@ -88,8 +88,9 @@ AC_DEFAULT_LOG_DIR = Path.home() / "Downloads" / "ac_susceptibility"
 AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
 AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
 AC_PLOT_REFRESH_INTERVAL_S = 1.0
-AC_PLOT_RECENT_POINTS = 3000
-AC_PLOT_MAX_POINTS_PER_CONDITION = 160
+AC_PLOT_RECENT_POINTS = 800
+AC_PLOT_RETAINED_POINTS = 1200
+AC_PLOT_MAX_POINTS_PER_CONDITION = 8
 AC_PLOT_JITTER_PX = 5.0
 AC_PLOT_SPREAD_PIXELS = {
     "off": 0.0,
@@ -1537,13 +1538,13 @@ class MainWindow(CurrentAnnealingWindow):
         return float(x_value) + (float(offset_px) / bbox_width) * span
 
     def _display_points_for_plot(self, x_key: str) -> list[AcPlotPoint]:
-        points = list(getattr(self, "_ac_plot_points", []))
+        points = list(getattr(self, "_ac_plot_points", []))[-AC_PLOT_RECENT_POINTS:]
         if x_key == "current_mA":
             x_key = "current_actual_mA"
         if x_key in {"elapsed_s", "current_actual_mA", "current_set_mA"}:
-            return points[-AC_PLOT_RECENT_POINTS:]
+            return points
         if x_key not in {"frequency_hz", "amplitude_v", "excitation_current_mA"}:
-            return points[-AC_PLOT_RECENT_POINTS:]
+            return points
         grouped: dict[tuple[str, float | None, float | None, float | None, float | None], list[AcPlotPoint]] = {}
         for point in points:
             key = (
@@ -2930,8 +2931,9 @@ class MainWindow(CurrentAnnealingWindow):
         except (AttributeError, RuntimeError):
             return
         points.append(point)
-        if len(points) > 5000:
-            del points[:-5000]
+        retained = max(1, int(AC_PLOT_RETAINED_POINTS))
+        if len(points) > retained:
+            del points[:-retained]
         self._ac_plot_dirty = True
 
     def _reset_ac_live_plots(self, reason: str) -> None:

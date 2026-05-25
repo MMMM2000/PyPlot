@@ -2219,6 +2219,47 @@ def test_ac_logger_frequency_plot_keeps_each_condition_when_display_thinning(
         app.processEvents()
 
 
+def test_ac_logger_display_points_caps_frequency_plots_to_recent_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    monkeypatch.setattr(ac_logger, "AC_PLOT_RECENT_POINTS", 50)
+    monkeypatch.setattr(ac_logger, "AC_PLOT_MAX_POINTS_PER_CONDITION", 8)
+    window._ac_plot_points = [
+        ac_logger.AcPlotPoint(
+            float(index),
+            "Ls-Rs",
+            10.0 + float(index),
+            0.001 * float(index + 1),
+            float(index),
+            1e-5,
+            14.0,
+        )
+        for index in range(200)
+    ]
+
+    points = window._display_points_for_plot("frequency_hz")
+
+    assert len(points) <= 50
+    assert min(point.elapsed_s for point in points) >= 150.0
+
+
+def test_ac_logger_live_plot_buffer_keeps_only_recent_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    monkeypatch.setattr(ac_logger, "AC_PLOT_RETAINED_POINTS", 5, raising=False)
+    window._ac_plot_points = []
+    window._refresh_ac_plots = lambda **_kwargs: None  # type: ignore[method-assign]
+
+    for index in range(12):
+        window._append_ac_plot_point(
+            ac_logger.AcPlotPoint(float(index), "Ls-Rs", 1000.0, 0.1, 0.0, 1e-5, 14.0)
+        )
+
+    assert [point.elapsed_s for point in window._ac_plot_points] == [7.0, 8.0, 9.0, 10.0, 11.0]
+
+
 def test_ac_logger_repeated_frequency_points_are_spread_unless_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
