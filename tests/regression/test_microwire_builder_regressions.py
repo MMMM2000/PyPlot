@@ -791,6 +791,113 @@ def test_suspend_disk_writes_flushes_latest_state_to_disk(
         builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
 
 
+def test_project_payload_embeds_graph_records_independent_of_global_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial_root = tmp_path / "initial"
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: initial_root)
+    builder_storage.MiniDatabaseStore._memory_data = {}
+    builder_storage.MiniDatabaseStore._memory_payloads = {}
+    builder_storage.MiniDatabaseStore._pending_sections = set()
+    builder_storage.MiniDatabaseStore._pending_payloads = set()
+    builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        record = builder_ui.VsmTemperatureScanRecord(
+            path=tmp_path / "scan.txt",
+            sample="Sample",
+            data=pd.DataFrame(
+                {
+                    "temperature": [10.0, 20.0],
+                    "field": [10000.0, 10000.0],
+                    "signal": [1.0, 1.1],
+                    "section_index": [0, 0],
+                }
+            ),
+        )
+        table = pd.DataFrame(
+            [
+                {
+                    "Sample": "Sample",
+                    builder_ui.VSM_TEMPERATURE_SCAN_COLUMN: "scan.txt",
+                }
+            ]
+        )
+        section.data = builder_storage.MiniDatabaseData(
+            sources=[str(tmp_path)],
+            processed={str(record.path): 1.0},
+            table=table,
+            extra={"payloads": {"vsm_temperature_scan_records": "vsm_temperature_scan_records"}},
+        )
+        section.store.save(section.data)
+        section.store.save_payload("vsm_temperature_scan_records", [record])
+
+        project_payload = section.export_project_payload()
+
+        fresh_root = tmp_path / "fresh"
+        monkeypatch.setattr(builder_storage, "_storage_root", lambda: fresh_root)
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        restored = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_args: None)
+        try:
+            restored.import_project_payload(project_payload)
+            payload = restored.store.load_payload("vsm_temperature_scan_records")
+            assert isinstance(payload, list)
+            assert len(payload) == 1
+            assert payload[0].sample == "Sample"
+            assert payload[0].data["signal"].tolist() == [1.0, 1.1]
+        finally:
+            restored.close()
+    finally:
+        section.close()
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        builder_storage.MiniDatabaseStore._pending_sections = set()
+        builder_storage.MiniDatabaseStore._pending_payloads = set()
+        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+
+
+def test_section_startup_does_not_begin_recursive_pending_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: tmp_path)
+    builder_storage.MiniDatabaseStore._memory_data = {}
+    builder_storage.MiniDatabaseStore._memory_payloads = {}
+    builder_storage.MiniDatabaseStore._pending_sections = set()
+    builder_storage.MiniDatabaseStore._pending_payloads = set()
+    builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    source_dir = tmp_path / "vsm"
+    source_dir.mkdir()
+    (source_dir / "scan.txt").write_text("placeholder", encoding="utf-8")
+    store = builder_storage.MiniDatabaseStore("vsm_temperature_scan")
+    store.save(
+        builder_storage.MiniDatabaseData(
+            sources=[str(source_dir)],
+            processed={},
+            table=pd.DataFrame(),
+            extra={},
+        )
+    )
+    section = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        assert section._pending_scan_in_progress is False
+        assert section._pending_scan_thread is None
+        assert "press Refresh" in section.status_label.text()
+    finally:
+        section.close()
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        builder_storage.MiniDatabaseStore._pending_sections = set()
+        builder_storage.MiniDatabaseStore._pending_payloads = set()
+        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+
+
 def test_video_cumulative_length_uses_raw_fabrication_pieces_not_just_visible_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

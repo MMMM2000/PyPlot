@@ -157,10 +157,10 @@ def test_vsm_temperature_preview_keeps_dual_axis_legend_in_section_order() -> No
         assert legend is not None
         labels = [text.get_text() for text in legend.get_texts()]
         assert labels == [
-            "10000 Oe ↑",
-            "10000 Oe ↓",
-            "5 Oe ↑",
-            "5 Oe ↓",
+            "10000 Oe \u2191 S1",
+            "10000 Oe \u2193 S2",
+            "5 Oe \u2191 S1",
+            "5 Oe \u2193 S2",
         ]
     finally:
         builder_ui.plt.close(figure)
@@ -549,6 +549,32 @@ def test_render_measurement_pixmap_uses_readable_default_preview_size() -> None:
     assert not pixmap.isNull()
     assert pixmap.width() >= builder_ui.ANNEALING_GRAPH_WIDTH
     assert pixmap.height() >= builder_ui.ANNEALING_GRAPH_HEIGHT
+
+
+def test_annealing_display_keeps_pyplot_title_and_axis_labels() -> None:
+    display = builder_ui._AnnealingPlotDisplay.__new__(builder_ui._AnnealingPlotDisplay)
+    record = SimpleNamespace(
+        dataframe=pd.DataFrame(
+            {
+                "I_mA": [0.0, 50.0, 100.0, 50.0],
+                "R_ohm": [120.0, 150.0, 180.0, 160.0],
+            }
+        ),
+        path=Path("Ni50Fe27Ga23 1_1 1000 mA.csv"),
+        metadata=None,
+    )
+
+    figure = display._build_figure(record)
+    try:
+        axes = figure.axes[0]
+        assert axes.get_title()
+        assert "1/1" in axes.get_title()
+        assert "1000 mA" in axes.get_title()
+        assert axes.get_xlabel() == "Current [mA]"
+        assert axes.get_ylabel()
+        assert axes.get_legend() is not None
+    finally:
+        builder_ui.plt.close(figure)
 
 
 def test_shape_memory_preview_uses_dual_axis_overlay() -> None:

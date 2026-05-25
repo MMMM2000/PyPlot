@@ -43,6 +43,8 @@ def test_make_figures_create_one_line_per_target() -> None:
         resistance_ax = resistance_fig.axes[0]
         assert len(strain_ax.lines) == 9
         assert len(resistance_ax.lines) == 9
+        assert all(line.get_marker() == "o" for line in strain_ax.lines)
+        assert all(line.get_marker() == "o" for line in resistance_ax.lines)
         assert strain_ax.get_xlabel() == "Measured current [mA]"
         assert strain_ax.get_ylabel() == "Strain [%]"
         assert resistance_ax.get_ylabel() == "Resistance [Ohm]"

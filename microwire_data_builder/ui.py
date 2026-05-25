@@ -599,6 +599,32 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _encode_project_payload(value: Any) -> Optional[Dict[str, str]]:
+    try:
+        raw = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        return None
+    return {
+        "encoding": "pickle-base64",
+        "value": base64.b64encode(raw).decode("ascii"),
+    }
+
+
+def _decode_project_payload(payload: Any) -> Any:
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("encoding") != "pickle-base64":
+        return None
+    value = payload.get("value")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        raw = base64.b64decode(value.encode("ascii"), validate=True)
+        return pickle.loads(raw)
+    except Exception:
+        return None
+
+
 def _normalise_import_header(text: str) -> str:
     cleaned = str(text or "").strip().lower()
     if not cleaned:
@@ -4908,26 +4934,11 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             axes = None
         if axes is not None:
             try:
-                axes.set_title("")
-                axes.set_xlabel("")
-                axes.set_ylabel("")
-            except Exception:
-                pass
-            try:
-                legend = axes.get_legend()
-            except Exception:
-                legend = None
-            if legend is not None:
-                try:
-                    legend.remove()
-                except Exception:
-                    pass
-            try:
                 axes.tick_params(labelsize=8)
             except Exception:
                 pass
         try:
-            figure.subplots_adjust(left=0.08, right=0.98, top=0.98, bottom=0.12)
+            figure.subplots_adjust(left=0.08, right=0.98, top=0.88, bottom=0.14)
         except Exception:
             pass
         return figure
@@ -7042,6 +7053,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._pending_count_cache: int | None = None
         self._pending_scan_in_progress = False
         self._pending_scan_generation = 0
+        self._suppress_pending_scan_once = True
         self._pending_scan_thread: QtCore.QThread | None = None
         self._pending_scan_worker: Optional[_PendingScanWorker] = None
         self._progress_dialog: QtWidgets.QProgressDialog | None = None
@@ -7962,8 +7974,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         else:
             self.refresh_button.setEnabled(True)
             if pending_count is None:
-                message = "Scanning for new or updated files…"
-                if not self._pending_scan_in_progress:
+                if getattr(self, "_suppress_pending_scan_once", False):
+                    self._suppress_pending_scan_once = False
+                    message = "Connected folder(s); press Refresh to scan for new files."
+                else:
+                    message = "Scanning for new or updated files..."
+                if not self._pending_scan_in_progress and message.startswith("Scanning"):
                     self._request_pending_scan()
             elif pending_count:
                 message = f"⚠️ {pending_count} new or updated file(s) pending processing."
@@ -8043,6 +8059,26 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         extra_payload = _json_safe(self.data.extra)
         if not isinstance(extra_payload, (dict, list, tuple, str, int, float, bool)) and extra_payload is not None:
             extra_payload = str(extra_payload)
+        project_payloads: Dict[str, Dict[str, str]] = {}
+        payload_refs = {}
+        if isinstance(self.data.extra, Mapping):
+            payloads_extra = self.data.extra.get("payloads")
+            if isinstance(payloads_extra, Mapping):
+                payload_refs = {
+                    str(key): str(value)
+                    for key, value in payloads_extra.items()
+                    if isinstance(key, str) and isinstance(value, str) and value.strip()
+                }
+        for name in sorted(set(payload_refs.values())):
+            try:
+                stored_payload = self.store.load_payload(name)
+            except Exception:
+                stored_payload = None
+            if stored_payload is None:
+                continue
+            encoded_payload = _encode_project_payload(stored_payload)
+            if encoded_payload is not None:
+                project_payloads[name] = encoded_payload
         return {
             "section": self.section_key,
             "title": self.section_title,
@@ -8052,6 +8088,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             "extra": extra_payload,
             "sources": list(self.data.sources),
             "processed": dict(self.data.processed),
+            "payloads": project_payloads,
         }
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:
@@ -8106,6 +8143,22 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.model.set_frame(frame)
         self._pending_count_cache = 0
         self.store.save(self.data)
+        project_payloads = payload.get("payloads")
+        if isinstance(project_payloads, Mapping):
+            for name, encoded in project_payloads.items():
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                decoded = _decode_project_payload(encoded)
+                if decoded is None:
+                    continue
+                try:
+                    self.store.save_payload(name.strip(), decoded)
+                except Exception:
+                    self.logger.exception(
+                        "Failed to restore project payload %s for section %s",
+                        name,
+                        self.section_key,
+                    )
         self._populate_sources_list()
         if self._project_load_batch_mode:
             self._reset_progress_ui()

@@ -614,7 +614,7 @@ def test_launcher_pyplot_automation_generates_summary_and_artifacts(tmp_path: Pa
     [
         (None, "file not found"),
         ("{not-json", "not valid JSON"),
-        ({"kind": "builder", "version": 1}, "reserved"),
+        ({"kind": "builder", "version": 1}, "project"),
         ({"kind": "pyplot", "version": 99}, "Only version 1 is supported"),
         ({"kind": "pyplot", "version": 1, "plugin": "Nope"}, "Unknown PyPlot plugin"),
     ],
@@ -636,6 +636,91 @@ def test_automation_recipe_validation_errors(
 
     assert exit_code == 2
     assert message_fragment in capsys.readouterr().out
+
+
+def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    scan_path = tmp_path / "202602010101-TSCN-a000-example.txt"
+    scan_path.write_text(
+        "\n".join(
+            [
+                "@Samplename: Ni50Fe27Ga23 5-4",
+                "@@End of Header.",
+                "Time_since_start Applied_Field Signal_X_direction Sample_Temperature_For_Plot_",
+                "New Section: Section 0:",
+                "0 10000 0.00051 25.0",
+                "1 10000 0.00050 26.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    bad_scan_path = tmp_path / "bad-scan.txt"
+    bad_scan_path.write_text("not a VSM temperature scan", encoding="utf-8")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "vsm_temperature_scan",
+                        "paths": [str(scan_path), str(bad_scan_path)],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    second_exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+    assert second_exit_code == 0
+    assert project_path.read_text(encoding="utf-8") != output_project.read_text(encoding="utf-8")
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["vsm_temperature_scan"]
+    assert section_payload["rows"]
+    assert section_payload["payloads"]["vsm_temperature_scan_records"]["encoding"] == "pickle-base64"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "ok"
+    assert manifest["copied_project"] == str(output_project.resolve())
+    assert manifest["commands"][0]["record_count"] == 1
+    assert manifest["commands"][0]["updated_count"] == 1
+    assert manifest["commands"][0]["skipped_count"] == 1
+    assert manifest["commands"][0]["skipped_sources"] == [str(bad_scan_path)]
+    assert '"kind": "builder"' in capsys.readouterr().out
 
 
 def test_automation_recipe_rejects_origin_when_unavailable(

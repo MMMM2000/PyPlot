@@ -355,16 +355,271 @@ def _validate_pyplot_project_file(path: Path) -> None:
         )
 
 
+def _validate_builder_project_payload(payload: dict[str, Any], *, path: Path) -> None:
+    if payload.get("kind") != "MicrowireDataBuilder":
+        raise _AutomationRecipeError(
+            f"Project '{path}' is not a Microwire Data Builder project."
+        )
+    if payload.get("version") != 1:
+        raise _AutomationRecipeError(
+            f"Project '{path}' uses unsupported Microwire Data Builder project version {payload.get('version')!r}."
+        )
+
+
+def _collect_builder_paths(
+    paths: Sequence[Path],
+    *,
+    supported_suffixes: Sequence[str],
+) -> list[Path]:
+    suffixes = {suffix.lower() for suffix in supported_suffixes}
+    collected: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            for candidate in sorted(path.rglob("*")):
+                if not candidate.is_file():
+                    continue
+                if suffixes and candidate.suffix.lower() not in suffixes:
+                    continue
+                collected.append(candidate)
+        elif path.is_file():
+            if suffixes and path.suffix.lower() not in suffixes:
+                continue
+            collected.append(path)
+    return list(dict.fromkeys(collected))
+
+
+def _record_path_key(record: object) -> str:
+    raw_path = getattr(record, "path", "")
+    try:
+        return str(Path(raw_path).resolve())
+    except Exception:
+        return str(raw_path)
+
+
+def _run_builder_automation_recipe(recipe_path: Path) -> int:
+    try:
+        recipe = _load_json_object(recipe_path, label="Automation recipe")
+        base_dir = recipe_path.parent
+        if recipe.get("kind") != "builder":
+            raise _AutomationRecipeError("Builder automation recipe kind must be 'builder'.")
+        if recipe.get("version") != 1:
+            raise _AutomationRecipeError(
+                f"Unsupported builder automation recipe version {recipe.get('version')!r}. Only version 1 is supported."
+            )
+
+        project_path = _resolve_recipe_path_value(
+            recipe.get("project"),
+            base_dir=base_dir,
+            field_name="project",
+        )
+        if project_path is None or not project_path.exists():
+            raise _AutomationRecipeError("Builder automation field 'project' must point to an existing .pydpj file.")
+
+        source_payload = _load_json_object(project_path, label="Microwire Data Builder project")
+        _validate_builder_project_payload(source_payload, path=project_path)
+
+        working_copy_dir = _resolve_recipe_path_value(
+            recipe.get("working_copy_dir"),
+            base_dir=base_dir,
+            field_name="working_copy_dir",
+        )
+        if working_copy_dir is None:
+            working_copy_dir = (base_dir / "builder_automation").resolve()
+        working_copy_dir.mkdir(parents=True, exist_ok=True)
+
+        output_project = _resolve_recipe_path_value(
+            recipe.get("output_project"),
+            base_dir=base_dir,
+            field_name="output_project",
+        )
+        if output_project is None:
+            output_project = working_copy_dir / f"{project_path.stem}.updated{project_path.suffix}"
+        output_project = output_project.with_suffix(".pydpj")
+        try:
+            same_project = project_path.resolve() == output_project.resolve()
+        except Exception:
+            same_project = str(project_path) == str(output_project)
+        if same_project and not bool(recipe.get("overwrite_source", False)):
+            raise _AutomationRecipeError(
+                "Builder automation refuses to overwrite the source .pydpj without overwrite_source=true."
+            )
+        output_project.parent.mkdir(parents=True, exist_ok=True)
+        if not same_project:
+            shutil.copy2(project_path, output_project)
+
+        project_payload = _load_json_object(output_project, label="Microwire Data Builder project copy")
+        _validate_builder_project_payload(project_payload, path=output_project)
+        sections = project_payload.get("sections")
+        if not isinstance(sections, dict):
+            sections = {}
+            project_payload["sections"] = sections
+
+        commands = recipe.get("commands")
+        if not isinstance(commands, list) or not commands:
+            raise _AutomationRecipeError("Builder automation field 'commands' must be a non-empty array.")
+
+        manifest_path = _resolve_recipe_path_value(
+            recipe.get("manifest_path"),
+            base_dir=base_dir,
+            field_name="manifest_path",
+        )
+        if manifest_path is None:
+            manifest_path = output_project.with_suffix(".manifest.json")
+
+        os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        from microwire_data_builder import storage as builder_storage
+        from microwire_data_builder import ui as builder_ui
+
+        original_storage_root = builder_storage._storage_root
+        automation_store = working_copy_dir / "_builder_store"
+        builder_storage._storage_root = lambda: automation_store  # type: ignore[assignment]
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        builder_storage.MiniDatabaseStore._pending_sections = set()
+        builder_storage.MiniDatabaseStore._pending_payloads = set()
+        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+
+        command_results: list[dict[str, Any]] = []
+        try:
+            for index, command in enumerate(commands):
+                if not isinstance(command, dict):
+                    raise _AutomationRecipeError(f"Builder command {index} must be an object.")
+                action = str(command.get("action") or "").strip()
+                section_name = str(command.get("section") or "").strip()
+                if action == "rebuild_assemble":
+                    command_results.append(
+                        {
+                            "action": action,
+                            "status": "skipped",
+                            "reason": "Assemble rebuild is not implemented in builder automation v1.",
+                        }
+                    )
+                    continue
+                if action != "update_section" or section_name != "vsm_temperature_scan":
+                    raise _AutomationRecipeError(
+                        f"Unsupported builder command {index}: action={action!r}, section={section_name!r}."
+                    )
+                raw_paths = command.get("paths")
+                if not isinstance(raw_paths, list) or not raw_paths:
+                    raise _AutomationRecipeError("VSM temperature scan update requires a non-empty 'paths' array.")
+                input_paths: list[Path] = []
+                for path_index, raw_path in enumerate(raw_paths):
+                    path = _resolve_recipe_path_value(
+                        raw_path,
+                        base_dir=base_dir,
+                        field_name=f"commands[{index}].paths[{path_index}]",
+                    )
+                    if path is None or not path.exists():
+                        raise _AutomationRecipeError(f"Builder input path does not exist: {path}")
+                    input_paths.append(path)
+                candidates = _collect_builder_paths(
+                    input_paths,
+                    supported_suffixes=builder_ui.VsmTemperatureScanSection.supported_suffixes,
+                )
+                section = builder_ui.VsmTemperatureScanSection(LOGGER, lambda *_args: None)
+                try:
+                    section.import_project_payload(sections.get("vsm_temperature_scan", {}))
+                    existing_payload = section.store.load_payload("vsm_temperature_scan_records")
+                    existing_records = list(existing_payload) if isinstance(existing_payload, list) else []
+                    source_strings = [str(path) for path in input_paths]
+                    section.data.sources = list(dict.fromkeys([*section.data.sources, *source_strings]))
+                    result = section.process(candidates)
+                    processed_keys = set()
+                    for processed_path in result.processed:
+                        try:
+                            processed_keys.add(str(Path(processed_path).resolve()))
+                        except Exception:
+                            processed_keys.add(str(processed_path))
+                    skipped_sources: list[str] = []
+                    for candidate in candidates:
+                        try:
+                            candidate_key = str(candidate.resolve())
+                        except Exception:
+                            candidate_key = str(candidate)
+                        if candidate_key not in processed_keys:
+                            skipped_sources.append(str(candidate))
+                    merged: dict[str, object] = {}
+                    for record in existing_records:
+                        key = _record_path_key(record)
+                        if key:
+                            merged[key] = record
+                    for record in result.payloads.get("vsm_temperature_scan_records", []):
+                        key = _record_path_key(record)
+                        if key:
+                            merged[key] = record
+                    merged_records = list(merged.values())
+                    section.data.table = builder_ui._graph_records_to_frame(
+                        merged_records,
+                        builder_ui.VSM_TEMPERATURE_SCAN_COLUMN,
+                        sample_column="_sample",
+                    )
+                    section.data.processed = {**section.data.processed, **result.processed}
+                    section.data.extra["payloads"] = {
+                        "vsm_temperature_scan_records": "vsm_temperature_scan_records"
+                    }
+                    section.store.save_payload("vsm_temperature_scan_records", merged_records)
+                    section.store.save(section.data)
+                    sections["vsm_temperature_scan"] = section.export_project_payload()
+                    command_results.append(
+                        {
+                            "action": action,
+                            "section": section_name,
+                            "status": "ok",
+                            "input_count": len(input_paths),
+                            "candidate_count": len(candidates),
+                            "updated_count": len(processed_keys),
+                            "skipped_count": len(skipped_sources),
+                            "skipped_sources": skipped_sources,
+                            "record_count": len(merged_records),
+                            "row_count": int(len(section.data.table.index)),
+                            "sources": source_strings,
+                        }
+                    )
+                finally:
+                    section.close()
+        finally:
+            builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
+            builder_storage.MiniDatabaseStore._memory_data = {}
+            builder_storage.MiniDatabaseStore._memory_payloads = {}
+            builder_storage.MiniDatabaseStore._pending_sections = set()
+            builder_storage.MiniDatabaseStore._pending_payloads = set()
+            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+
+        project_payload["saved_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        output_project.write_text(
+            json.dumps(project_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        manifest = {
+            "kind": "builder",
+            "version": 1,
+            "status": "ok",
+            "source_project": str(project_path.resolve()),
+            "copied_project": str(output_project.resolve()),
+            "manifest_path": str(manifest_path.resolve()),
+            "commands": command_results,
+        }
+        _write_json(manifest_path, manifest)
+        print(json.dumps(manifest, ensure_ascii=False))
+        return 0
+    except _AutomationRecipeError as exc:
+        print(f"[automation-recipe] {exc}")
+        return 2
+    except Exception as exc:
+        print(f"[automation-recipe] {type(exc).__name__}: {exc}")
+        return 1
+
+
 def _load_automation_recipe_request(recipe_path: Path) -> _PyPlotAutomationRequest:
     recipe = _load_json_object(recipe_path, label="Automation recipe")
     base_dir = recipe_path.parent
 
     kind = recipe.get("kind")
     if kind != "pyplot":
-        if kind == "builder":
-            raise _AutomationRecipeError(
-                "Automation recipe kind 'builder' is reserved for future work and is not implemented yet."
-            )
         raise _AutomationRecipeError(
             f"Unsupported automation recipe kind {kind!r}. Only 'pyplot' is supported in v1."
         )
@@ -3154,6 +3409,9 @@ def _run_automation_recipe(args: argparse.Namespace, qt_args: list[str]) -> int:
         return 2
     try:
         recipe_path = Path(recipe_value).expanduser()
+        recipe = _load_json_object(recipe_path, label="Automation recipe")
+        if recipe.get("kind") == "builder":
+            return _run_builder_automation_recipe(recipe_path)
         request = _load_automation_recipe_request(recipe_path)
     except _AutomationRecipeError as exc:
         print(f"[automation-recipe] {exc}")

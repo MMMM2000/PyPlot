@@ -182,6 +182,8 @@ def _make_current_figure(
             y_values,
             label=_format_target_label(target),
             linewidth=1.4,
+            marker="o",
+            markersize=3.5,
         )
     ax.set_title(f"{run.sample_name} - {title_suffix}")
     ax.set_xlabel("Measured current [mA]")
