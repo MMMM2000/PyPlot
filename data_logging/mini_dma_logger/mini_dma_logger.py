@@ -28,6 +28,8 @@ except Exception:  # pragma: no cover - import guard
 
 from plotting.shared.logfiles import append_text_with_rotation
 from plotting.shared.utils import ensure_app_theme, install_standard_menu
+from data_logging.shared_power_supply.broker import ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
+from data_logging.shared_power_supply.protocol import BrokerJsonClient
 
 try:
     import serial
@@ -263,6 +265,20 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": False,
         "voltage_first": True,
         "current_resolution_mA": 1.0,
+    },
+    "shared_hmp_broker": {
+        "label": "Shared HMP broker",
+        "start_current_mA": 1.0,
+        "min_start_current_mA": 1.0,
+        "max_voltage": 32.05,
+        "channel_select": 0,
+        "motor_supply_channel": 0,
+        "channel_count": 4,
+        "baudrate": 0,
+        "reset_on_start": False,
+        "voltage_first": False,
+        "current_resolution_mA": 0.2,
+        "shared_broker": True,
     },
 }
 HEATING_MODE_OFF = "off"
@@ -2530,6 +2546,191 @@ class PowerSupplyController:
         }
 
 
+class SharedBrokerSupplyController:
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        max_voltage_v: float,
+        current_channel: int | None,
+        motor_channel: int | None = None,
+        owner: str = "mini_dma_logger",
+    ) -> None:
+        self.host = str(host or "127.0.0.1").strip() or "127.0.0.1"
+        self.port = int(port)
+        self.port_name = f"{self.host}:{self.port}"
+        self.baudrate = 0
+        self.profile_id = "shared_hmp_broker"
+        self.profile = dict(SUPPLY_PROFILES[self.profile_id])
+        self.max_voltage_v = float(max_voltage_v)
+        self.current_channel = None if current_channel is None else int(current_channel)
+        self.motor_channel = None if motor_channel is None else int(motor_channel)
+        self.owner = owner
+        self._client: Any = None
+        self._leases: dict[int, str] = {}
+        self._connected = False
+        self._io_lock = RLock()
+
+    def connect(self) -> None:
+        if self._client is None:
+            self._client = BrokerJsonClient(host=self.host, port=self.port)
+        self._connected = True
+
+    def disconnect(self) -> None:
+        with self._io_lock:
+            client = self._client
+            channels = list(self._leases)
+            if self.current_channel in channels:
+                channels.remove(self.current_channel)
+                channels.insert(0, self.current_channel)
+            for channel in channels:
+                lease_id = self._leases[channel]
+                try:
+                    client.release(channel=channel, lease_id=lease_id)
+                except Exception:
+                    pass
+            self._leases.clear()
+            self._client = None
+            self._connected = False
+
+    def is_connected(self) -> bool:
+        return self._connected and self._client is not None
+
+    def _require_client(self) -> Any:
+        if not self.is_connected():
+            raise RuntimeError("Shared HMP broker is not connected.")
+        return self._client
+
+    def selected_channel(self) -> int:
+        return int(self.current_channel or 0)
+
+    def select_channel(self, channel: int | None = None) -> None:
+        return None
+
+    def _role_for_channel(self, channel: int) -> str:
+        if self.motor_channel is not None and int(channel) == self.motor_channel:
+            return ROLE_MINI_DMA_MOTOR
+        return ROLE_MINI_DMA_CURRENT
+
+    def _lease_channel(self, channel: int) -> str:
+        channel = int(channel)
+        lease_id = self._leases.get(channel)
+        if lease_id:
+            return lease_id
+        lease = self._require_client().lease(
+            channel=channel,
+            owner=self.owner,
+            role=self._role_for_channel(channel),
+        )
+        lease_id = str(lease.get("lease_id") or "")
+        if not lease_id:
+            raise RuntimeError("Shared HMP broker did not return a lease id.")
+        self._leases[channel] = lease_id
+        return lease_id
+
+    def current_resolution_mA(self) -> float:
+        return max(0.001, float(self.profile.get("current_resolution_mA", 1.0)))
+
+    def quantize_current_mA(self, current_mA: float) -> float:
+        resolution_mA = self.current_resolution_mA()
+        return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
+
+    def configure_channel(
+        self,
+        *,
+        channel: int,
+        voltage_v: float,
+        current_a: float,
+        output_on: bool,
+    ) -> None:
+        with self._io_lock:
+            lease_id = self._lease_channel(channel)
+            self._require_client().configure_channel(
+                channel=int(channel),
+                lease_id=lease_id,
+                voltage_v=max(0.0, float(voltage_v)),
+                current_a=max(0.0, float(current_a)),
+                output_on=bool(output_on),
+            )
+
+    def initialize_output(
+        self,
+        *,
+        current_mA: float,
+        reset_on_start: bool,
+        force_voltage_first: bool | None = None,
+    ) -> None:
+        channel = self.selected_channel()
+        if channel <= 0:
+            raise RuntimeError("Select a shared HMP broker current-sweep channel first.")
+        self.configure_channel(
+            channel=channel,
+            voltage_v=max(0.0, float(self.max_voltage_v)),
+            current_a=self.quantize_current_mA(current_mA) / 1000.0,
+            output_on=True,
+        )
+
+    def set_current_mA(self, current_mA: float) -> None:
+        channel = self.selected_channel()
+        if channel <= 0:
+            raise RuntimeError("Select a shared HMP broker current-sweep channel first.")
+        with self._io_lock:
+            self._require_client().set_current(
+                channel=channel,
+                lease_id=self._lease_channel(channel),
+                current_mA=self.quantize_current_mA(current_mA),
+            )
+
+    def output_on(self) -> None:
+        channel = self.selected_channel()
+        if channel <= 0:
+            raise RuntimeError("Select a shared HMP broker current-sweep channel first.")
+        with self._io_lock:
+            self._require_client().set_output(
+                channel=channel,
+                lease_id=self._lease_channel(channel),
+                output_on=True,
+            )
+
+    def output_off(self) -> None:
+        channel = self.selected_channel()
+        if channel <= 0:
+            return
+        lease_id = self._leases.get(channel)
+        if not lease_id:
+            return
+        with self._io_lock:
+            self._require_client().set_output(channel=channel, lease_id=lease_id, output_on=False)
+
+    def shutdown_output(self, *, reset_voltage_v: float = 1.0, reset_current_mA: float = 1.0) -> None:
+        channel = self.selected_channel()
+        if channel <= 0:
+            return
+        with self._io_lock:
+            lease_id = self._lease_channel(channel)
+            client = self._require_client()
+            client.set_output(channel=channel, lease_id=lease_id, output_on=False)
+            client.configure_channel(
+                channel=channel,
+                lease_id=lease_id,
+                voltage_v=max(0.0, float(reset_voltage_v)),
+                current_a=max(0.0, float(reset_current_mA)) / 1000.0,
+                output_on=False,
+            )
+
+    def measure(self) -> dict[str, float | None]:
+        channel = self.selected_channel()
+        if channel <= 0:
+            return {
+                "voltage_V": None,
+                "current_mA": None,
+                "resistance_ohm": None,
+                "power_W": None,
+            }
+        return dict(self._require_client().measure_channel(channel=channel))
+
+
 class MainWindow(QtWidgets.QMainWindow):
     _control_ui_event = QtCore.pyqtSignal(object)
 
@@ -3691,6 +3892,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_supply_baud.addItem(baud)
         self.combo_supply_baud.setCurrentText("9600")
         supply_form.addRow("Baud", self.combo_supply_baud)
+
+        broker_row = QtWidgets.QHBoxLayout()
+        self.edit_shared_broker_host = QtWidgets.QLineEdit("127.0.0.1", supply_box)
+        self.edit_shared_broker_host.setMaximumWidth(120)
+        self.edit_shared_broker_host.setToolTip("Shared HMP broker host.")
+        broker_row.addWidget(self.edit_shared_broker_host)
+        self.spin_shared_broker_port = QtWidgets.QSpinBox(supply_box)
+        self.spin_shared_broker_port.setRange(1, 65535)
+        self.spin_shared_broker_port.setValue(8765)
+        self.spin_shared_broker_port.setMaximumWidth(90)
+        self.spin_shared_broker_port.setToolTip("Shared HMP broker port.")
+        broker_row.addWidget(self.spin_shared_broker_port)
+        supply_form.addRow("Broker", broker_row)
 
         self.combo_supply_profile = QtWidgets.QComboBox(supply_box)
         for profile_id, profile in SUPPLY_PROFILES.items():
@@ -6065,17 +6279,33 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _build_supply_controller(self) -> PowerSupplyController:
+        profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
+        if self._using_shared_broker_supply():
+            return SharedBrokerSupplyController(  # type: ignore[return-value]
+                host=self.edit_shared_broker_host.text().strip(),
+                port=int(self.spin_shared_broker_port.value()),
+                max_voltage_v=float(self.spin_supply_voltage_limit.value()),
+                current_channel=self._current_sweep_supply_channel(),
+                motor_channel=self._motor_supply_channel(),
+            )
         return PowerSupplyController(
             port_name=str(self.combo_supply_port.currentData() or "").strip(),
             baudrate=int(self.combo_supply_baud.currentText()),
-            profile_id=str(self.combo_supply_profile.currentData() or "hmp4030"),
+            profile_id=profile_id,
             max_voltage_v=float(self.spin_supply_voltage_limit.value()),
             channel_select=self._current_sweep_supply_channel(),
         )
 
+    def _using_shared_broker_supply(self) -> bool:
+        profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
+        return bool(SUPPLY_PROFILES.get(profile_id, {}).get("shared_broker", False))
+
     def _apply_supply_profile_defaults(self) -> None:
         profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         profile = SUPPLY_PROFILES.get(profile_id, SUPPLY_PROFILES["hmp4030"])
+        baudrate = int(profile.get("baudrate", 0) or 0)
+        if baudrate > 0:
+            self.combo_supply_baud.setCurrentText(str(baudrate))
         self.spin_supply_voltage_limit.setValue(float(profile.get("max_voltage", 32.05)))
         self.spin_supply_manual_current.setValue(float(profile.get("start_current_mA", 1.0)))
         current_channel = int(profile.get("channel_select", 0) or 0)
@@ -6099,9 +6329,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log(f"Failed to connect power supply: {exc}")
             return False
         self._supply_controller = controller
-        self.label_supply_status.setText(
-            f"Supply connected on {controller.port_name} at {controller.baudrate} baud ({controller.profile['label']})."
-        )
+        if isinstance(controller, SharedBrokerSupplyController):
+            self.label_supply_status.setText(
+                f"Supply connected through shared HMP broker at {controller.port_name}."
+            )
+        else:
+            self.label_supply_status.setText(
+                f"Supply connected on {controller.port_name} at {controller.baudrate} baud ({controller.profile['label']})."
+            )
         self._log(self.label_supply_status.text())
         self._refresh_supply_snapshot(force=True)
         return True
@@ -13684,9 +13919,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._supply_controller is not None and self._supply_controller.is_connected():
             return True
         self._log("Preflight: power supply is not connected, trying auto-detect/connect.")
-        if not str(self.combo_supply_port.currentData() or "").strip():
+        if not self._using_shared_broker_supply() and not str(self.combo_supply_port.currentData() or "").strip():
             self._refresh_supply_ports()
-        self._auto_detect_supply_port()
+        if not self._using_shared_broker_supply():
+            self._auto_detect_supply_port()
         return self._connect_supply(show_errors=False)
 
     def _ensure_tic_ready_for_recipe(self) -> bool:
@@ -17726,6 +17962,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("supply_port", self.combo_supply_port.currentData() or "")
         self.settings.setValue("supply_baud", self.combo_supply_baud.currentText())
         self.settings.setValue("supply_profile", self.combo_supply_profile.currentData() or "hmp4030")
+        self.settings.setValue("shared_broker_host", self.edit_shared_broker_host.text().strip())
+        self.settings.setValue("shared_broker_port", self.spin_shared_broker_port.value())
         self.settings.setValue("current_sweep_supply_channel", self.combo_current_sweep_supply_channel.currentData() or 0)
         self.settings.setValue("supply_voltage_limit_v", self.spin_supply_voltage_limit.value())
         self.settings.setValue("supply_manual_current_mA", self.spin_supply_manual_current.value())
@@ -17973,6 +18211,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if self.combo_supply_baud.findText(supply_baud) >= 0:
             self.combo_supply_baud.setCurrentText(supply_baud)
+        self.edit_shared_broker_host.setText(
+            self.settings.value("shared_broker_host", "127.0.0.1", type=str)
+        )
+        self.spin_shared_broker_port.setValue(
+            int(self.settings.value("shared_broker_port", 8765, type=int))
+        )
         current_sweep_channel = int(
             self.settings.value(
                 "current_sweep_supply_channel",
