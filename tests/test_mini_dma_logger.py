@@ -5671,7 +5671,7 @@ def test_current_sweep_hold_has_no_timeout_stop(
         _close_test_window(window)
 
 
-def test_current_sweep_hold_resumes_inside_recovery_band(
+def test_current_sweep_hold_resumes_inside_calculated_noise_recovery_band(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -5680,7 +5680,7 @@ def test_current_sweep_hold_resumes_inside_recovery_band(
     window._current_sweep_ramp_hold_step_index = 4
     window._current_sweep_ramp_hold_started_s = 100.0
     window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
-        lambda *_args, **_kwargs: (6.0, 6.0, 0.25, 0.0)
+        lambda *_args, **_kwargs: (6.0, 6.0, 0.25, 2.5)
     )
     step = mini_dma_mod.AutomationStep(
         "sweep_current",
@@ -5715,6 +5715,39 @@ def test_current_sweep_hold_stays_paused_outside_recovery_band(
     window._current_sweep_ramp_hold_started_s = 100.0
     window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
         lambda *_args, **_kwargs: (12.0, 12.0, 0.25, 0.0)
+    )
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=5.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.0,
+    )
+
+    try:
+        holding, stopped = window._update_current_sweep_ramp_hold(step, 4, now_s=102.0)
+
+        assert holding is True
+        assert stopped is False
+        assert window._current_sweep_ramp_hold_step_index == 4
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_recovery_band_uses_physical_tolerance_without_fixed_floor(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._current_sweep_ramp_hold_step_index = 4
+    window._current_sweep_ramp_hold_started_s = 100.0
+    window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (7.0, 7.0, 6.0, 0.0)
     )
     step = mini_dma_mod.AutomationStep(
         "sweep_current",
@@ -10903,7 +10936,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
 
         assert first_logic["name"] == "mini_dma_control"
         assert first_logic["version"]
-        assert first_logic["profile"] == "filtered-current-hold-recovery-band"
+        assert first_logic["profile"] == "filtered-current-hold-auto-recovery-band"
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
