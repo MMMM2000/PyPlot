@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import json
@@ -221,6 +223,28 @@ class _SlowBaselineCadenceError(RuntimeError):
         super().__init__(f"{rate_hz:.3g} Hz from {reads} reads")
         self.rate_hz = rate_hz
         self.reads = reads
+
+
+@contextmanager
+def _prevent_windows_sleep_during_run() -> Any:
+    if sys.platform != "win32":
+        yield
+        return
+    es_continuous = 0x80000000
+    es_system_required = 0x00000001
+    kernel32 = ctypes.windll.kernel32
+    try:
+        kernel32.SetThreadExecutionState(es_continuous | es_system_required)
+    except Exception:
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            kernel32.SetThreadExecutionState(es_continuous)
+        except Exception:
+            pass
 
 
 def _plot_point_from_lcr_reading(
@@ -477,15 +501,16 @@ class AcSweepWorker(QtCore.QObject):
     @QtCore.pyqtSlot()
     def run(self) -> None:
         try:
-            sweep.run_ac_sweep(
-                config=self.config,
-                lcr=self.lcr,
-                psu=self.psu,
-                output_path=self.output_path,
-                progress=self.row_ready.emit,
-                stop_requested=lambda: self._stop_requested,
-                sleep=self._sleep_with_stop,
-            )
+            with _prevent_windows_sleep_during_run():
+                sweep.run_ac_sweep(
+                    config=self.config,
+                    lcr=self.lcr,
+                    psu=self.psu,
+                    output_path=self.output_path,
+                    progress=self.row_ready.emit,
+                    stop_requested=lambda: self._stop_requested,
+                    sleep=self._sleep_with_stop,
+                )
             self.finished.emit(str(self.output_path), False)
         except Exception as exc:
             if self._stop_requested:

@@ -275,8 +275,12 @@ current has already been accepted, is logged as `WARN` and the run continues.
 If the supply never returns actual-current readback before the point starts, the
 run aborts because the logger cannot know whether output is active. On normal
 completion, user stop, or error, the shutdown sequence sets current and voltage
-to zero before turning output off. Baseline measurement does not create or
-command a power-supply backend.
+to zero before turning output off. If the existing serial handle fails during
+shutdown, the logger closes and reopens the selected PSU port once and repeats
+the zero-current, zero-voltage, output-off sequence. During active microwire
+current sweeps on Windows, the worker also requests that the system stay awake
+so USB serial connections are not suspended mid-run. Baseline measurement does
+not create or command a power-supply backend.
 
 ## Live Plots
 

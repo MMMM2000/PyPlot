@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -401,6 +402,61 @@ def test_serial_scpi_current_source_shutdown_zeroes_current_and_voltage(monkeypa
 
     assert psu._serial is not None
     assert psu._serial.written[-3:] == [b"CURR 0.0000\n", b"VOLT 0.000\n", b"OUTP OFF\n"]
+
+
+def test_serial_scpi_current_source_shutdown_reopens_stale_serial_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSerialPort:
+        instances: list["FakeSerialPort"] = []
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.written: list[bytes] = []
+            self.closed = False
+            self.is_open = True
+            self.fail_writes = False
+            self.instances.append(self)
+
+        def reset_input_buffer(self) -> None:
+            return None
+
+        def write(self, payload: bytes) -> None:
+            if self.fail_writes:
+                raise OSError("WriteFile failed")
+            self.written.append(payload)
+
+        def flush(self) -> None:
+            return None
+
+        def readline(self) -> bytes:
+            return b"OWON,SPE6102,123456,V1.0\n"
+
+        def close(self) -> None:
+            self.closed = True
+            self.is_open = False
+
+    fake_serial_module = type("SerialModule", (), {"Serial": FakeSerialPort})
+    monkeypatch.setattr(sweep, "serial", fake_serial_module)
+    monkeypatch.setattr(sweep.time, "sleep", lambda _seconds: None)
+
+    psu = sweep.SerialScpiCurrentSource(
+        backend_id="owon_spe6102",
+        resource="COM7",
+        baudrate=115200,
+        voltage_limit_v=61.0,
+    )
+    psu.connect()
+    FakeSerialPort.instances[0].fail_writes = True
+
+    psu.output_off()
+
+    assert len(FakeSerialPort.instances) == 2
+    assert FakeSerialPort.instances[0].closed
+    assert FakeSerialPort.instances[1].written[-3:] == [
+        b"CURR 0.0000\n",
+        b"VOLT 0.000\n",
+        b"OUTP OFF\n",
+    ]
 
 
 def test_detect_power_supply_candidates_queries_ports_without_selecting_lcr() -> None:
@@ -3153,7 +3209,6 @@ def test_ac_logger_baseline_collection_honors_stop_request() -> None:
 
 
 def test_ac_logger_settle_sleep_processes_stop_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
     window._ac_sweep_stop_requested = False
     calls = {"events": 0, "sleeps": 0}
@@ -3171,7 +3226,46 @@ def test_ac_logger_settle_sleep_processes_stop_request(monkeypatch: pytest.Monke
     assert window._sleep_with_stop_processing(2.0, quantum_s=0.25) is False
     assert calls["events"] == 1
     assert calls["sleeps"] == 0
-    app.processEvents()
+
+
+def test_ac_sweep_worker_holds_windows_awake_while_running(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    @contextmanager
+    def fake_awake_guard() -> object:
+        events.append("awake_enter")
+        try:
+            yield
+        finally:
+            events.append("awake_exit")
+
+    def fake_run_ac_sweep(**_kwargs: object) -> None:
+        events.append("run")
+
+    monkeypatch.setattr(ac_logger, "_prevent_windows_sleep_during_run", fake_awake_guard)
+    monkeypatch.setattr(sweep, "run_ac_sweep", fake_run_ac_sweep)
+
+    worker = ac_logger.AcSweepWorker(
+        config=sweep.AcSweepConfig(
+            lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+            current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+            point_duration_s=0.0,
+            dwell_s=0.0,
+            psu_backend="owon_spe6102",
+            psu_resource="COM7",
+            voltage_limit_v=61.0,
+        ),
+        lcr=object(),
+        psu=object(),
+        output_path=tmp_path / "sweep.tsv",
+    )
+
+    worker.run()
+
+    assert events == ["awake_enter", "run", "awake_exit"]
 
 
 def test_ac_logger_baseline_retries_empty_lcr_response() -> None:

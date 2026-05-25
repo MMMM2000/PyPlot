@@ -1175,11 +1175,16 @@ class SerialScpiCurrentSource:
             raise RuntimeError("select a power-supply serial port")
         if self._serial is not None and getattr(self._serial, "is_open", False):
             return
+        self._open_serial_port()
+        time.sleep(0.08)
+        self._verify_identity()
+
+    def _open_serial_port(self) -> None:
+        if serial is None:
+            raise RuntimeError("pyserial is not available")
         self._serial = serial.Serial(self.resource, baudrate=self.baudrate, timeout=0.7, write_timeout=0.7)
         self._serial.rts = False
         self._serial.dtr = False
-        time.sleep(0.08)
-        self._verify_identity()
 
     def _verify_identity(self) -> None:
         idn = self.identify()
@@ -1237,6 +1242,20 @@ class SerialScpiCurrentSource:
         return PowerSupplyMeasurement(current_actual_a=current, voltage_actual_v=voltage, status="OK")
 
     def output_off(self) -> None:
+        try:
+            self._send_output_off_commands()
+        except Exception as first_error:
+            self.close()
+            try:
+                self._open_serial_port()
+                time.sleep(0.08)
+                self._send_output_off_commands()
+            except Exception as second_error:
+                raise RuntimeError(
+                    f"failed to turn power-supply output off after reconnect: {second_error}"
+                ) from first_error
+
+    def _send_output_off_commands(self) -> None:
         try:
             self.select_channel()
         except Exception:
