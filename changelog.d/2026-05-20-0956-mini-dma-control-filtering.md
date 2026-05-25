@@ -8,6 +8,7 @@
 - Mini DMA current-hold recovery now retries after a full fresh filter window even when the median signal is unchanged, avoiding indefinite waits during held-current transformations.
 - Mini DMA migrates overlarge saved current-hold correction caps back to the safer default and records the setup linear-unload baseline as the run zero-load scale reference.
 - Mini DMA current-hold recovery now resumes the current ramp when the recovery seek accepts the target, waits instead of moving when filtered stress is already returning quickly toward target, and only learns hold-response stiffness from motor moves whose measured load/stress changes in the commanded direction.
+- Mini DMA setup now separates preload-target settle time from zero-load settle time, keeps length-setup progress monotonic within each phase, lets the dashboard plot grid shrink to the available window, and breaks plotted lines across hidden/downsampled history gaps instead of drawing diagonal bridges.
 - Mini DMA setup slack take-up now exposes a configurable stiffness-prior step cap and defaults it to `50 MPa`, making pre-contact slack removal much faster while keeping feedback-gated moves bounded.
 - Mini DMA mandatory length setup now refreshes the frozen control config after accepted starting length and computed `l0`, so strain logging and subsequent control use the measured setup length instead of a stale recipe-start value.
 - Mini DMA setup return-to-zero now applies a small strain-based speed floor for tiny residual loads, avoiding very slow one-step unloads near baseline.

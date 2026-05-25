@@ -684,6 +684,7 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
     window.combo_recipe_mode.setCurrentIndex(mode_index)
     window.spin_setup_preload_stress_mpa.setValue(10.0)
     window.spin_setup_preload_duration_s.setValue(5.0)
+    window.spin_setup_preload_stable_s.setValue(2.0)
     window.spin_setup_zero_stable_s.setValue(1.0)
     window.spin_current_sweep_target_start.setValue(0.0)
     window.spin_current_sweep_target_end.setValue(10.0)
@@ -712,6 +713,10 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
         assert preload_step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA
         assert preload_step.target_end_value == pytest.approx(10.0)
         assert preload_step.target_ramp_rate_value_s == pytest.approx(2.0)
+        preload_settle = next(step for step in steps if step.action == "settle" and step.note == "setup_preload")
+        zero_settle = next(step for step in steps if step.action == "settle" and step.note == "setup_return_zero")
+        assert preload_settle.duration_s == pytest.approx(2.0)
+        assert zero_settle.duration_s == pytest.approx(1.0)
     finally:
         _close_test_window(window)
 
@@ -1461,10 +1466,12 @@ def test_dashboard_plot_panel_keeps_right_edge_padding_and_compact_log(tmp_path:
         assert window.log_output.maximumHeight() <= 96
         assert window._dashboard_plot_splitter.childrenCollapsible() is False
         assert all(
-            widget.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Policy.Expanding
+            widget.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Policy.Ignored
             for widget in window._dashboard_plot_widgets
         )
         assert window._dashboard_plot_widgets
+        assert all(widget.minimumWidth() == 0 for widget in window._dashboard_plot_widgets)
+        assert all(widget.minimumHeight() == 0 for widget in window._dashboard_plot_widgets)
         assert all(widget.maximumHeight() > 10000 for widget in window._dashboard_plot_widgets)
     finally:
         _close_test_window(window)
@@ -4866,6 +4873,54 @@ def test_display_plot_points_reuses_cached_old_history_for_repeated_refreshes(
         _close_test_window(window)
 
 
+def test_plot_xy_values_break_line_across_hidden_display_gap(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _point(elapsed_s: float, load_g: float) -> mini_dma_mod.MeasurementPoint:
+        return mini_dma_mod.MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc="2026-05-11 00:00:00",
+            raw_position_mm=load_g,
+            position_mm=load_g,
+            raw_load_g=load_g,
+            load_g=load_g,
+            preload_state=mini_dma_mod.PRELOAD_DISABLED,
+            strain_pct=None,
+            stress_mpa=None,
+            current_set_mA=None,
+            current_measured_mA=None,
+            voltage_V=None,
+            resistance_ohm=None,
+            power_W=None,
+            automation_phase="current",
+            automation_basis=None,
+            automation_target_value=None,
+            plateau_index=None,
+            plateau_label=None,
+        )
+
+    try:
+        x_channel = window._plot_channel("elapsed_s")
+        y_channel = window._plot_channel("load_g")
+        assert x_channel is not None
+        assert y_channel is not None
+
+        x_values, y_values = window._plot_xy_values(
+            [_point(10.0, 1.0), _point(12.0, 1.2), _point(180.0, 3.0)],
+            x_channel,
+            y_channel,
+        )
+
+        assert x_values[0:2] == pytest.approx([10.0, 12.0])
+        assert y_values[0:2] == pytest.approx([1.0, 1.2])
+        assert math.isnan(x_values[2])
+        assert math.isnan(y_values[2])
+        assert x_values[3] == pytest.approx(180.0)
+        assert y_values[3] == pytest.approx(3.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_length_setup_dialog_has_local_pause_stop_and_progress(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -4971,6 +5026,67 @@ def test_length_setup_progress_tracks_active_ramp_phase_without_tick_counts(
         assert "50%" in text
         assert "20000" not in text
         assert "1234" not in text
+    finally:
+        _close_test_window(window)
+
+
+def test_length_setup_progress_does_not_move_backward_when_ramp_estimate_resets(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [108.0]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+
+    try:
+        window._automation_active = True
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep(
+                "ramp_target",
+                target_value=20.0,
+                target_end_value=20.0,
+                basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                note="setup_preload",
+            ),
+        ]
+        window._automation_index = 0
+        window._active_target_ramp_step_index = 0
+        window._active_target_ramp_started_s = 100.0
+        window._active_target_ramp_start_value = 0.0
+        window._active_target_ramp_rate_value_s = 2.0
+        window._setup_preload_engaged_seek_keys.add(
+            window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 20.0)
+        )
+        window._show_length_setup_dialog()
+        window._update_length_setup_progress()
+        first_value = window._length_setup_progress.value()
+
+        window._active_target_ramp_started_s = 107.0
+        window._active_target_ramp_start_value = 18.0
+        window._active_target_ramp_rate_value_s = 2.0
+        window._update_length_setup_progress()
+
+        assert window._length_setup_progress.value() >= first_value
+    finally:
+        _close_test_window(window)
+
+
+def test_length_setup_progress_does_not_start_timed_settle_state(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("settle", duration_s=3.0, note="setup_preload")]
+        window._automation_index = 0
+        window._active_timed_step_index = None
+        window._show_length_setup_dialog()
+
+        window._update_length_setup_progress()
+
+        assert window._active_timed_step_index is None
+        assert window._length_setup_progress is not None
+        assert window._length_setup_progress.value() == 0
     finally:
         _close_test_window(window)
 
@@ -10353,6 +10469,7 @@ def test_recipe_completion_stops_session_logging(tmp_path: Path, qtbot) -> None:
     window.edit_log_name.setText("recipe_completion")
     window._latest_scale_timestamp = time.time()
     window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = lambda _steps: True  # type: ignore[method-assign]
 
     try:
         window._start_session()
@@ -10618,6 +10735,8 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window.combo_recipe_mode.setCurrentIndex(index)
         window.spin_setup_preload_stress_mpa.setValue(20.0)
         window.spin_setup_preload_duration_s.setValue(10.0)
+        window.spin_setup_preload_stable_s.setValue(2.5)
+        window.spin_setup_zero_stable_s.setValue(4.0)
         window.spin_setup_slack_step_cap_stress_mpa.setValue(75.0)
         window.spin_current_sweep_target_start.setValue(50.0)
         window.spin_current_sweep_target_end.setValue(500.0)
@@ -10636,8 +10755,12 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert payload["schema_version"] == 1
         assert payload["recipe"]["mode"] == mini_dma_mod.CURRENT_SWEEP_STRESS
         assert payload["recipe"]["setup"]["slack_step_cap_stress_mpa"] == pytest.approx(75.0)
+        assert payload["recipe"]["setup"]["preload_stable_s"] == pytest.approx(2.5)
+        assert payload["recipe"]["setup"]["zero_stable_s"] == pytest.approx(4.0)
 
         window.spin_setup_preload_stress_mpa.setValue(5.0)
+        window.spin_setup_preload_stable_s.setValue(0.0)
+        window.spin_setup_zero_stable_s.setValue(0.0)
         window.spin_setup_slack_step_cap_stress_mpa.setValue(10.0)
         window.spin_current_sweep_target_end.setValue(25.0)
         window.spin_current_sweep_end_mA.setValue(5.0)
@@ -10648,6 +10771,8 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
 
         assert window.combo_recipe_mode.currentData() == mini_dma_mod.CURRENT_SWEEP_STRESS
         assert window.spin_setup_preload_stress_mpa.value() == pytest.approx(20.0)
+        assert window.spin_setup_preload_stable_s.value() == pytest.approx(2.5)
+        assert window.spin_setup_zero_stable_s.value() == pytest.approx(4.0)
         assert window.spin_setup_slack_step_cap_stress_mpa.value() == pytest.approx(75.0)
         assert window.spin_current_sweep_target_end.value() == pytest.approx(500.0)
         assert window.spin_current_sweep_end_mA.value() == pytest.approx(80.0)
@@ -11194,7 +11319,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
 
         assert first_logic["name"] == "mini_dma_control"
         assert first_logic["version"]
-        assert first_logic["profile"] == "filtered-current-hold-bounded-retry"
+        assert first_logic["profile"] == "filtered-current-hold-setup-ui"
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]

@@ -52,8 +52,8 @@ SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-25.4"
-CONTROL_LOGIC_PROFILE = "filtered-current-hold-bounded-retry"
+CONTROL_LOGIC_VERSION = "2026-05-25.5"
+CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
     "setup_slack_stress_cap",
@@ -69,6 +69,9 @@ CONTROL_LOGIC_FEATURES = [
     "adaptive_current_hold_response_stiffness",
     "current_hold_waits_for_natural_target_return",
     "current_hold_response_requires_directional_motor_response",
+    "separate_setup_preload_and_zero_settle",
+    "stable_setup_phase_progress",
+    "dashboard_plot_gap_breaks",
     "zero_load_reference_sidecar",
 ]
 CONTROL_TRACE_FIELDNAMES = [
@@ -190,6 +193,7 @@ DISPLAY_PLOT_MAX_POINTS = 1500
 DISPLAY_PLOT_RECENT_POINTS = 600
 DISPLAY_PLOT_BASE_BUCKET_S = 1.0
 DISPLAY_PLOT_OLD_CACHE_GRANULARITY = 1000
+DISPLAY_PLOT_BREAK_GAP_S = 30.0
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 SETUP_ZERO_FALLBACK_MIN_POINTS = 4
 SETUP_ZERO_FALLBACK_MIN_TIME_S = 0.8
@@ -1792,6 +1796,7 @@ class MiniDmaControlConfig:
     setup_slack_speed_strain_pct_s: float
     setup_slack_step_cap_stress_mpa: float
     setup_preload_tolerance_mpa: float
+    setup_preload_stable_s: float
     setup_zero_stable_s: float
     current_sweep_target_ramp_rate_value_s: float
     current_sweep_target_speed_mm_s: float
@@ -2718,6 +2723,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_last_record_scale_timestamp: float | None = None
         self._last_length_setup_plot_refresh_s: float | None = None
         self._length_setup_points: list[MeasurementPoint] = []
+        self._length_setup_progress_phase_key: tuple[object, ...] | None = None
+        self._length_setup_progress_fraction_floor = 0.0
         self._motor_step_calibration_dialog: QtWidgets.QDialog | None = None
         self._motor_step_calibration_status_label: QtWidgets.QLabel | None = None
         self._motor_step_calibration_detail_label: QtWidgets.QLabel | None = None
@@ -2957,6 +2964,7 @@ class MainWindow(QtWidgets.QMainWindow):
             setup_slack_speed_strain_pct_s=float(self.spin_setup_slack_speed_strain_pct_s.value()),
             setup_slack_step_cap_stress_mpa=float(self.spin_setup_slack_step_cap_stress_mpa.value()),
             setup_preload_tolerance_mpa=float(self.spin_setup_preload_tolerance_mpa.value()),
+            setup_preload_stable_s=float(self.spin_setup_preload_stable_s.value()),
             setup_zero_stable_s=float(self.spin_setup_zero_stable_s.value()),
             current_sweep_target_ramp_rate_value_s=float(self.spin_current_sweep_target_ramp_rate.value()),
             current_sweep_target_speed_mm_s=float(self.spin_current_sweep_target_speed_mm_s.value()),
@@ -4089,12 +4097,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._hide_form_row(strain_setup_form, setup_zero_tolerance_row)
         self.spin_setup_zero_tolerance_g.hide()
         self.label_setup_zero_tolerance_equiv.hide()
+        self.spin_setup_preload_stable_s = CompactDoubleSpinBox(self.strain_setup_box)
+        self.spin_setup_preload_stable_s.setDecimals(2)
+        self.spin_setup_preload_stable_s.setRange(0.0, 60.0)
+        self.spin_setup_preload_stable_s.setValue(1.0)
+        self.spin_setup_preload_stable_s.setSuffix(" s")
+        self.spin_setup_preload_stable_s.setToolTip(
+            "Time to hold the setup preload target before asking for the measured loaded length."
+        )
+        strain_setup_form.addRow("Preload settle time", self.spin_setup_preload_stable_s)
         self.spin_setup_zero_stable_s = CompactDoubleSpinBox(self.strain_setup_box)
         self.spin_setup_zero_stable_s.setDecimals(2)
         self.spin_setup_zero_stable_s.setRange(0.0, 60.0)
         self.spin_setup_zero_stable_s.setValue(1.0)
         self.spin_setup_zero_stable_s.setSuffix(" s")
-        strain_setup_form.addRow("Setup stable time", self.spin_setup_zero_stable_s)
+        self.spin_setup_zero_stable_s.setToolTip(
+            "Time to hold the returned zero-load baseline before applying the measured setup length."
+        )
+        strain_setup_form.addRow("Zero-load settle time", self.spin_setup_zero_stable_s)
         automation_form.addRow("", self.strain_setup_box)
 
         self.recipe_stack = CurrentPageStackedWidget(automation_box)
@@ -5218,6 +5238,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_setup_slack_step_cap_stress_mpa,
             self.spin_setup_preload_tolerance_mpa,
             self.spin_setup_zero_tolerance_g,
+            self.spin_setup_preload_stable_s,
             self.spin_setup_zero_stable_s,
             self.spin_current_sweep_target_start,
             self.spin_current_sweep_target_end,
@@ -12306,7 +12327,9 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_txt_handle.write(f"# Setup preload stress MPa\t{self.spin_setup_preload_stress_mpa.value():.6f}\n")
         setup_txt_handle.write(f"# Setup preload duration s\t{self.spin_setup_preload_duration_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup preload ramp rate MPa/s\t{self._setup_preload_ramp_rate_mpa_s():.6f}\n")
+        setup_txt_handle.write(f"# Setup preload settle s\t{self.spin_setup_preload_stable_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup return duration s\t{self.spin_setup_return_duration_s.value():.6f}\n")
+        setup_txt_handle.write(f"# Setup zero-load settle s\t{self.spin_setup_zero_stable_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup slack speed pct/s\t{self.spin_setup_slack_speed_strain_pct_s.value():.6f}\n")
         setup_txt_handle.write(f"# Setup slack step cap MPa\t{self.spin_setup_slack_step_cap_stress_mpa.value():.6f}\n")
         setup_txt_handle.write(f"# Setup stage max speed mm/s\t{self._setup_motion_speed_cap_mm_s():.6f}\n")
@@ -12500,6 +12523,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_slack_speed_strain_pct_s": float(self.spin_setup_slack_speed_strain_pct_s.value()),
                 "setup_slack_step_cap_stress_mpa": float(self.spin_setup_slack_step_cap_stress_mpa.value()),
                 "setup_zero_tolerance_g": float(self._auto_requested_tolerance_for_basis(HSW_BASIS_LOAD_G)),
+                "setup_preload_stable_s": float(self.spin_setup_preload_stable_s.value()),
                 "setup_zero_stable_s": float(self.spin_setup_zero_stable_s.value()),
                 "target_ramp_rate_value_s": float(self.spin_current_sweep_target_ramp_rate.value()),
                 "target_ramp_stage_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
@@ -12692,6 +12716,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_preload_tolerance_mode": "automatic",
                 "setup_zero_tolerance_g": float(self._auto_requested_tolerance_for_basis(HSW_BASIS_LOAD_G)),
                 "setup_zero_tolerance_mode": "automatic",
+                "setup_preload_stable_s": float(self.spin_setup_preload_stable_s.value()),
                 "setup_zero_stable_s": float(self.spin_setup_zero_stable_s.value()),
                 "setup_starting_length_mm": self._setup_starting_length_mm,
                 "setup_measured_length_mm": self._setup_measured_length_mm,
@@ -13748,6 +13773,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     "slack_step_cap_stress_mpa": float(self.spin_setup_slack_step_cap_stress_mpa.value()),
                     "preload_tolerance_mpa": float(self.spin_setup_preload_tolerance_mpa.value()),
                     "zero_tolerance_g": float(self.spin_setup_zero_tolerance_g.value()),
+                    "preload_stable_s": float(self.spin_setup_preload_stable_s.value()),
+                    "zero_stable_s": float(self.spin_setup_zero_stable_s.value()),
                 },
                 "timing": {
                     "control_interval_ms": int(self._control_interval_ms()),
@@ -13823,6 +13850,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_setup_slack_step_cap_stress_mpa.setValue(float(setup.get("slack_step_cap_stress_mpa", self.spin_setup_slack_step_cap_stress_mpa.value())))
             self.spin_setup_preload_tolerance_mpa.setValue(float(setup.get("preload_tolerance_mpa", self.spin_setup_preload_tolerance_mpa.value())))
             self.spin_setup_zero_tolerance_g.setValue(float(setup.get("zero_tolerance_g", self.spin_setup_zero_tolerance_g.value())))
+            self.spin_setup_preload_stable_s.setValue(float(setup.get("preload_stable_s", self.spin_setup_preload_stable_s.value())))
+            self.spin_setup_zero_stable_s.setValue(float(setup.get("zero_stable_s", self.spin_setup_zero_stable_s.value())))
         timing = recipe.get("timing")
         if isinstance(timing, Mapping):
             self.spin_control_interval.setValue(int(timing.get("control_interval_ms", self.spin_control_interval.value())))
@@ -14066,6 +14095,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_current_task_display()
         self._update_length_setup_progress(value=value, total=total, complete=complete, percent=percent)
 
+    def _timed_step_elapsed_for_progress_s(self, step_index: int) -> float:
+        if self._active_timed_step_index != step_index:
+            return 0.0
+        return max(0.0, time.monotonic() - float(self._active_timed_step_started_s))
+
+    def _monotonic_length_setup_phase_fraction(
+        self,
+        phase_key: tuple[object, ...],
+        phase_fraction: float,
+    ) -> float:
+        clamped = max(0.0, min(1.0, float(phase_fraction)))
+        if self._length_setup_progress_phase_key != phase_key:
+            self._length_setup_progress_phase_key = phase_key
+            self._length_setup_progress_fraction_floor = clamped
+            return clamped
+        self._length_setup_progress_fraction_floor = max(
+            self._length_setup_progress_fraction_floor,
+            clamped,
+        )
+        return self._length_setup_progress_fraction_floor
+
     def _update_length_setup_progress(
         self,
         *,
@@ -14083,6 +14133,8 @@ class MainWindow(QtWidgets.QMainWindow):
             else None
         )
         if complete:
+            self._length_setup_progress_phase_key = None
+            self._length_setup_progress_fraction_floor = 0.0
             self._length_setup_progress.setRange(0, 1000)
             self._length_setup_progress.setValue(1000)
             self._length_setup_progress.setFormat(f"Setup progress: complete ({sample_count} samples)")
@@ -14090,8 +14142,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_active and current_step is not None:
             phase_text = ""
             phase_fraction: float | None = None
+            phase_key: tuple[object, ...] | None = None
             if current_step.action == "ramp_target" and current_step.note == "setup_preload":
                 phase_text = "Slack take-up"
+                phase_key = (self._automation_index, current_step.action, current_step.note, "slack")
                 slack_takeup = False
                 target_value = (
                     current_step.target_end_value
@@ -14130,30 +14184,39 @@ class MainWindow(QtWidgets.QMainWindow):
                     duration_s = abs(float(start_value) - float(target_value)) / abs(float(rate_value_s))
                     if duration_s > 0.0:
                         phase_fraction = (time.monotonic() - self._active_target_ramp_started_s) / duration_s
+                        phase_key = (self._automation_index, current_step.action, current_step.note, "ramp")
             elif current_step.action == "settle" and current_step.note == "setup_preload":
                 phase_text = "Preload settle"
+                phase_key = (self._automation_index, current_step.action, current_step.note)
                 duration_s = max(0.001, float(current_step.duration_s or 0.0))
-                phase_fraction = self._timed_step_elapsed_s(self._automation_index) / duration_s
+                phase_fraction = self._timed_step_elapsed_for_progress_s(self._automation_index) / duration_s
             elif current_step.action == "measure_length_prompt":
                 phase_text = "Waiting for length"
+                phase_key = (self._automation_index, current_step.action, current_step.note)
                 phase_fraction = 0.0
             elif current_step.action == "seek_target" and current_step.note == "setup_return_zero":
                 phase_text = "Return load to zero"
                 phase_fraction = None
             elif current_step.action == "settle" and current_step.note == "setup_return_zero":
                 phase_text = "Zero-load settle"
+                phase_key = (self._automation_index, current_step.action, current_step.note)
                 duration_s = max(0.001, float(current_step.duration_s or 0.0))
-                phase_fraction = self._timed_step_elapsed_s(self._automation_index) / duration_s
+                phase_fraction = self._timed_step_elapsed_for_progress_s(self._automation_index) / duration_s
             elif current_step.action == "apply_length_setup":
                 phase_text = "Apply length"
+                phase_key = (self._automation_index, current_step.action, current_step.note)
                 phase_fraction = 0.0
             if phase_text:
                 if phase_fraction is None:
+                    self._length_setup_progress_phase_key = None
+                    self._length_setup_progress_fraction_floor = 0.0
                     self._length_setup_progress.setRange(0, 0)
                     self._length_setup_progress.setFormat(
                         f"Setup progress: {phase_text} ({sample_count} samples)"
                     )
                 else:
+                    if phase_key is not None:
+                        phase_fraction = self._monotonic_length_setup_phase_fraction(phase_key, phase_fraction)
                     phase_percent = int(round(max(0.0, min(1.0, phase_fraction)) * 100.0))
                     self._length_setup_progress.setRange(0, 1000)
                     self._length_setup_progress.setValue(max(0, min(1000, phase_percent * 10)))
@@ -14691,6 +14754,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._length_setup_stress_curve = None
         self._length_setup_load_curve = None
         self._length_setup_displacement_curve = None
+        self._length_setup_progress_phase_key = None
+        self._length_setup_progress_fraction_floor = 0.0
         self._restore_main_window_focus_soon()
 
     def _close_recovery_plot_dialog(self) -> None:
@@ -14766,9 +14831,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if pg is None:  # pragma: no cover - guarded by caller in normal app use
             raise RuntimeError("pyqtgraph is not available")
         widget = pg.PlotWidget(parent=parent)
+        widget.setMinimumWidth(0)
         widget.setMinimumHeight(0)
         widget.setMaximumHeight(16777215)
-        widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
+        widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Ignored)
         widget.setMouseEnabled(x=True, y=True)
         plot_item = widget.getPlotItem()
         plot_item.showGrid(x=True, y=True, alpha=0.28)
@@ -14896,7 +14962,7 @@ class MainWindow(QtWidgets.QMainWindow):
         y_values: Sequence[float],
     ) -> None:
         if curve is not None:
-            curve.setData(list(x_values), list(y_values))
+            curve.setData(list(x_values), list(y_values), connect="finite")
 
     def _disable_pyqtgraph_axis_scaling(self, axis: Any) -> None:
         try:
@@ -14939,13 +15005,22 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> tuple[list[float], list[float]]:
         x_values: list[float] = []
         y_values: list[float] = []
+        previous_elapsed_s: float | None = None
         for point in points:
             x_value = x_channel.getter(point)
             y_value = y_channel.getter(point)
             if x_value is None or y_value is None:
                 continue
+            elapsed_s = float(point.elapsed_s)
+            if (
+                previous_elapsed_s is not None
+                and elapsed_s - previous_elapsed_s > DISPLAY_PLOT_BREAK_GAP_S
+            ):
+                x_values.append(float("nan"))
+                y_values.append(float("nan"))
             x_values.append(float(x_value))
             y_values.append(float(y_value))
+            previous_elapsed_s = elapsed_s
         return x_values, y_values
 
     def _refresh_length_setup_plot(self) -> None:
@@ -15237,7 +15312,8 @@ class MainWindow(QtWidgets.QMainWindow):
         preload_load_g = load_g_from_stress_mpa(preload_stress_mpa, float(self.spin_diameter.value()))
         if preload_load_g is None:
             raise ValueError("Set a positive wire diameter before using preload length setup.")
-        stable_s = max(0.0, float(self.spin_setup_zero_stable_s.value()))
+        preload_stable_s = max(0.0, float(self.spin_setup_preload_stable_s.value()))
+        zero_stable_s = max(0.0, float(self.spin_setup_zero_stable_s.value()))
         steps: list[AutomationStep] = [
             AutomationStep("starting_length_prompt", note="setup_start_length"),
             AutomationStep(
@@ -15255,7 +15331,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "settle",
                 target_value=preload_stress_mpa,
                 basis=HSW_BASIS_STRESS_MPA,
-                duration_s=stable_s,
+                duration_s=preload_stable_s,
                 note="setup_preload",
             )
         )
@@ -15280,7 +15356,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "settle",
                 target_value=0.0,
                 basis=HSW_BASIS_LOAD_G,
-                duration_s=stable_s,
+                duration_s=zero_stable_s,
                 note="setup_return_zero",
             )
         )
@@ -17541,6 +17617,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.settings.setValue("setup_preload_tolerance_mpa", self.spin_setup_preload_tolerance_mpa.value())
         self.settings.setValue("setup_zero_tolerance_g", SERVO_AUTO_TOLERANCE_LOAD_G)
+        self.settings.setValue("setup_preload_stable_s", self.spin_setup_preload_stable_s.value())
         self.settings.setValue("setup_zero_stable_s", self.spin_setup_zero_stable_s.value())
         self.settings.setValue("current_sweep_target_start", self.spin_current_sweep_target_start.value())
         self.settings.setValue("current_sweep_target_end", self.spin_current_sweep_target_end.value())
@@ -18058,8 +18135,12 @@ class MainWindow(QtWidgets.QMainWindow):
             max(0.0001, float(self.settings.value("setup_preload_tolerance_mpa", 0.25)))
         )
         self.spin_setup_zero_tolerance_g.setValue(SERVO_AUTO_TOLERANCE_LOAD_G)
+        saved_setup_zero_stable_s = max(0.0, float(self.settings.value("setup_zero_stable_s", 1.0)))
+        self.spin_setup_preload_stable_s.setValue(
+            max(0.0, float(self.settings.value("setup_preload_stable_s", saved_setup_zero_stable_s)))
+        )
         self.spin_setup_zero_stable_s.setValue(
-            max(0.0, float(self.settings.value("setup_zero_stable_s", 1.0)))
+            saved_setup_zero_stable_s
         )
         self._apply_current_sweep_target_values(recipe_mode, allow_legacy_settings=True)
         self._last_recipe_mode = recipe_mode
