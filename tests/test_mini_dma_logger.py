@@ -4921,6 +4921,52 @@ def test_plot_xy_values_break_line_across_hidden_display_gap(tmp_path: Path, qtb
         _close_test_window(window)
 
 
+def test_display_plot_points_break_line_between_downsampled_history_and_recent_tail(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _point(elapsed_s: float, load_g: float) -> mini_dma_mod.MeasurementPoint:
+        return mini_dma_mod.MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc="2026-05-11 00:00:00",
+            raw_position_mm=0.0,
+            position_mm=0.0,
+            raw_load_g=load_g,
+            load_g=load_g,
+            preload_state=mini_dma_mod.PRELOAD_DISABLED,
+            strain_pct=None,
+            stress_mpa=None,
+            current_set_mA=None,
+            current_measured_mA=None,
+            voltage_V=None,
+            resistance_ohm=None,
+            power_W=None,
+            automation_phase="current",
+            automation_basis=None,
+            automation_target_value=None,
+            plateau_index=None,
+            plateau_label=None,
+        )
+
+    try:
+        total_points = mini_dma_mod.DISPLAY_PLOT_MAX_POINTS + 800
+        window._session_points = [_point(index * 0.2, float(index % 13)) for index in range(total_points)]
+
+        x_channel = window._plot_channel("elapsed_s")
+        y_channel = window._plot_channel("load_g")
+        assert x_channel is not None
+        assert y_channel is not None
+
+        x_values, y_values = window._plot_xy_values(window._display_plot_points(), x_channel, y_channel)
+
+        assert any(math.isnan(value) for value in x_values)
+        assert any(math.isnan(value) for value in y_values)
+    finally:
+        _close_test_window(window)
+
+
 def test_length_setup_dialog_has_local_pause_stop_and_progress(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 

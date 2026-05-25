@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Condition, Event, RLock, Thread, current_thread, get_ident
@@ -992,6 +992,7 @@ class MeasurementPoint:
     current_l0_mm: float | None = None
     current_relative_position_mm: float | None = None
     current_relative_strain_pct: float | None = None
+    plot_gap_before: bool = False
 
 
 @dataclass
@@ -15024,6 +15025,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             elapsed_s = float(point.elapsed_s)
             if (
+                point.plot_gap_before
+                or
                 previous_elapsed_s is not None
                 and elapsed_s - previous_elapsed_s > DISPLAY_PLOT_BREAK_GAP_S
             ):
@@ -17412,6 +17415,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_plot_old_cache = []
             return older_points + recent_points
         sampled_older = self._cached_stable_downsample_older_plot_points(older_points, old_budget)
+        if sampled_older and recent_points:
+            recent_points = [replace(recent_points[0], plot_gap_before=True), *recent_points[1:]]
         return sampled_older + recent_points
 
     def _cached_stable_downsample_older_plot_points(
