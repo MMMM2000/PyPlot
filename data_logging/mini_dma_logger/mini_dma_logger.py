@@ -52,7 +52,7 @@ SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-25.3"
+CONTROL_LOGIC_VERSION = "2026-05-25.4"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-bounded-retry"
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
@@ -67,6 +67,8 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_bounded_saved_cap",
     "current_hold_noise_band_resume",
     "adaptive_current_hold_response_stiffness",
+    "current_hold_waits_for_natural_target_return",
+    "current_hold_response_requires_directional_motor_response",
     "zero_load_reference_sidecar",
 ]
 CONTROL_TRACE_FIELDNAMES = [
@@ -9201,11 +9203,15 @@ class MainWindow(QtWidgets.QMainWindow):
         previous_position = self._seek_last_effective_position_by_key.get(seek_key)
         if previous_value is None or previous_position is None:
             return
-        delta_position = abs(current_position - previous_position)
+        signed_delta_position = float(current_position) - float(previous_position)
+        delta_position = abs(signed_delta_position)
         if delta_position < self._motor_step_mm() * 0.5:
             return
-        delta_value = abs(float(current_value) - float(previous_value))
+        signed_delta_value = float(current_value) - float(previous_value)
+        delta_value = abs(signed_delta_value)
         if delta_value <= 0.0 or not math.isfinite(delta_value):
+            return
+        if signed_delta_position * signed_delta_value <= 0.0:
             return
         load_stiffness = self._load_stiffness_from_basis_sensitivity(basis, delta_value / delta_position)
         if load_stiffness is None:
@@ -9237,11 +9243,15 @@ class MainWindow(QtWidgets.QMainWindow):
         previous_position = self._seek_last_effective_position_by_key.get(seek_key)
         if previous_value is None or previous_position is None:
             return
-        delta_position = abs(current_position - previous_position)
+        signed_delta_position = float(current_position) - float(previous_position)
+        delta_position = abs(signed_delta_position)
         if delta_position < self._motor_step_mm() * 0.5:
             return
-        delta_value = abs(float(current_value) - float(previous_value))
+        signed_delta_value = float(current_value) - float(previous_value)
+        delta_value = abs(signed_delta_value)
         if delta_value <= 0.0 or not math.isfinite(delta_value):
+            return
+        if signed_delta_position * signed_delta_value <= 0.0:
             return
         load_stiffness = self._load_stiffness_from_basis_sensitivity(basis, delta_value / delta_position)
         if load_stiffness is None:
@@ -9450,6 +9460,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self._seek_out_of_band_since_by_key.pop(seek_key, None)
             self._seek_out_of_band_sign_by_key.pop(seek_key, None)
             return True
+        slope = float(filtered_signal.slope_per_s)
+        recovery_band = max(
+            abs(float(effective_tolerance)),
+            self._current_sweep_hold_min_band_for_basis(
+                basis,
+                self._current_sweep_hold_min_resume_stress_mpa(),
+            ),
+            abs(float(filtered_signal.noise)) * self._current_sweep_hold_noise_sigma(),
+        )
+        remaining_error = abs(float(error_value)) - recovery_band
+        moving_toward_target = float(error_value) * slope > 0.0
+        if moving_toward_target and remaining_error > 0.0:
+            min_slope = max(
+                self._current_sweep_hold_min_slope_for_basis(basis),
+                remaining_error / max(self._current_sweep_hold_filter_window_s() * 2.0, 1e-9),
+            )
+            if abs(slope) >= min_slope:
+                return False
         sign = math.copysign(1.0, float(error_value))
         previous_sign = self._seek_out_of_band_sign_by_key.get(seek_key)
         timestamp_s = float(filtered_signal.timestamp_s)
@@ -15780,6 +15808,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s = None
 
+    def _resume_current_sweep_ramp_from_hold(self, *, now_s: float, reason: str) -> None:
+        held_s = max(0.0, float(now_s) - self._current_sweep_ramp_hold_started_s)
+        self._active_current_sweep_started_s += held_s
+        self._clear_current_sweep_ramp_hold()
+        self._log(f"Resumed current ramp after holding for {held_s:.2f} s; {reason}.")
+
     def _current_sweep_hold_setting(
         self,
         step_value: float | None,
@@ -15827,6 +15861,19 @@ class MainWindow(QtWidgets.QMainWindow):
             basis,
             SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA,
         )
+
+    def _current_sweep_hold_min_slope_for_basis(self, basis: str) -> float:
+        if basis == HSW_BASIS_STRESS_MPA:
+            return SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S
+        if basis == HSW_BASIS_LOAD_G:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            load_slope = load_g_from_stress_mpa(
+                SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S,
+                diameter_mm,
+            )
+            return 0.0 if load_slope is None else abs(float(load_slope))
+        return 0.0
 
     def _reset_current_sweep_ramp_hold_candidate(self) -> None:
         self._current_sweep_ramp_hold_candidate_step_index = None
@@ -16022,12 +16069,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 ),
             )
             if now_s - self._current_sweep_ramp_hold_in_band_since_s >= stable_s:
-                self._active_current_sweep_started_s += held_s
-                self._clear_current_sweep_ramp_hold()
-                self._log(
-                    "Resumed current ramp after holding for "
-                    f"{held_s:.2f} s; filtered target error {_format_compact_number(resume_error)} "
-                    f"is inside resume band {_format_compact_number(resume_band)}."
+                self._resume_current_sweep_ramp_from_hold(
+                    now_s=now_s,
+                    reason=(
+                        f"filtered target error {_format_compact_number(resume_error)} "
+                        f"is inside resume band {_format_compact_number(resume_band)}"
+                    ),
                 )
                 return False, False
         else:
@@ -16296,11 +16343,16 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             point_count_before_seek = len(self._session_points)
             try:
-                self._seek_distribution_target(step.basis, step.target_value, tolerance)
+                target_recovered = self._seek_distribution_target(step.basis, step.target_value, tolerance)
             except Exception as exc:
                 self._log(f"Recipe stopped: {exc}")
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return True
+            if target_recovered:
+                self._resume_current_sweep_ramp_from_hold(
+                    now_s=time.monotonic(),
+                    reason="held-current recovery seek accepted the target",
+                )
             if len(self._session_points) == point_count_before_seek:
                 self._maybe_record_scheduled_point(
                     quiet=True,
