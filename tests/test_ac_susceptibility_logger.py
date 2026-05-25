@@ -2720,6 +2720,38 @@ def test_ac_logger_migrates_old_short_frequency_defaults(monkeypatch: pytest.Mon
         app.processEvents()
 
 
+def test_ac_logger_migrates_old_short_current_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    original = QtCore.QSettings
+    store = original(
+        original.Format.IniFormat,
+        original.Scope.UserScope,
+        "microwire_tests",
+        "old_short_current_defaults",
+    )
+    store.clear()
+    store.setValue("level_mode", "current")
+    store.setValue("levels", "1, 5, 10, 20")
+
+    def factory(_organization: str, _application: str) -> QtCore.QSettings:
+        return store
+
+    monkeypatch.setattr(ac_logger.QtCore, "QSettings", factory)
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    window = ac_logger.MainWindow()
+    try:
+        assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(ac_logger.LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
+        plan = window._prepare_lcr_plan()
+        assert [setting.level_value for setting in plan[:6]] == pytest.approx(
+            [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.02]
+        )
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_commands_for_settings_use_lcr6000_scpi_spellings() -> None:
     settings = lcr6000.Lcr6000Settings(
         frequency_hz=1000.0,
@@ -2734,11 +2766,16 @@ def test_commands_for_settings_use_lcr6000_scpi_spellings() -> None:
     assert lcr6000.commands_for_settings(settings) == [
         "DISP:PAGE MEAS\n",
         "FUNC Ls-Q\n",
+        "FUNC:IMP:AUTO OFF\n",
         "FUNC:RANG:AUTO AUTO\n",
         "FUNC:MON1 Z\n",
         "FUNC:MON2 IAC\n",
         "FREQ 1000\n",
+        "LEV:SRES 30\n",
         "LEV:VOLT 0.1\n",
+        "LEV:ALC ON\n",
+        "BIAS OFF\n",
+        "COMP:STAT OFF\n",
         "APER FAST\n",
     ]
 
@@ -2758,6 +2795,10 @@ def test_commands_for_settings_can_drive_lcr_current_level() -> None:
 
     assert "LEV:CURR 0.005\n" in commands
     assert "LEV:VOLT 0.005\n" not in commands
+    assert "LEV:SRES 30\n" in commands
+    assert "LEV:ALC ON\n" in commands
+    assert "FUNC:IMP:AUTO OFF\n" in commands
+    assert "COMP:STAT OFF\n" in commands
 
 
 def test_lcr_configure_waits_for_measurement_page(monkeypatch: pytest.MonkeyPatch) -> None:

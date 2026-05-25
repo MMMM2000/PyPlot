@@ -112,6 +112,7 @@ LEGACY_DEFAULT_FREQUENCY_TEXTS = {
     "100, 1000, 10000, 100000",
 }
 LEGACY_DEFAULT_LEVEL_TEXTS = {"0.1, 0.3, 1.0", "0.1, 0.3, 1"}
+LEGACY_CURRENT_LEVEL_TEXTS = {"1, 5, 10, 20", "1, 5, 20", "1, 5, 10, 20.0"}
 DEFAULT_CURRENT_LEVEL_TEXT = ", ".join(f"{value:g}" for value in LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
 DEFAULT_VOLTAGE_LEVEL_TEXT = ", ".join(f"{value:g}" for value in LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
 
@@ -2102,7 +2103,12 @@ class MainWindow(CurrentAnnealingWindow):
             if stored_frequencies in LEGACY_DEFAULT_FREQUENCY_TEXTS:
                 self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(PRACTICAL_FREQUENCY_PRESETS_HZ))
             stored_levels = self.lineEdit_lcr_levels.text().strip()
-            if not stored_levels or stored_levels in LEGACY_DEFAULT_LEVEL_TEXTS:
+            level_mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
+            if (
+                not stored_levels
+                or stored_levels in LEGACY_DEFAULT_LEVEL_TEXTS
+                or (level_mode == "current" and stored_levels in LEGACY_CURRENT_LEVEL_TEXTS)
+            ):
                 self.lineEdit_lcr_levels.setText(self._default_lcr_level_text())
             plan_loops = self.ac_settings.value("plan_loops", 1)
             self.checkBox_ac_plan_loops.setChecked(str(plan_loops).lower() not in {"0", "false", "no"})

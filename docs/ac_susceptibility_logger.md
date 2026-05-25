@@ -137,6 +137,9 @@ Ni50Fe27Ga23 microwire:
   `0.1, 0.5, 1, 5, 10, 20 mA`
 - Monitor 1/2 in current excitation mode: `IAC` and `VAC`, so the actual AC
   coil drive can be recovered from the raw LCR monitor fields.
+- LCR setup state: auto range on, auto LCZ off, source resistance `30 ohm`,
+  ALC on, DC bias off, and comparator off. The logger applies these explicitly
+  at each LCR setting instead of inheriting the front-panel state.
 - Frequencies: the full practical scan list, `10, 20, 50, 100, 200, 500, 1k,
   2k, 5k, 10k, 20k, 50k, 100k, 200k Hz`
 - Voltage excitation mode remains available for comparison or legacy runs, with

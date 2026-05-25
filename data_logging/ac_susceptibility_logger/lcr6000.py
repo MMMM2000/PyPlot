@@ -108,6 +108,10 @@ class Lcr6000Settings:
     monitor1: str = "Z"
     monitor2: str = "IAC"
     aperture: str = "FAST"
+    source_resistance_ohm: int = 30
+    auto_lcz_enabled: bool = False
+    alc_enabled: bool = True
+    comparator_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -266,6 +270,8 @@ def validate_settings(settings: Lcr6000Settings, *, model: str = "LCR-6200") -> 
             raise ValueError("LCR current level must be in the manual range 100 uA to 20 mA")
     else:
         raise ValueError("level_mode must be 'voltage' or 'current'")
+    if int(settings.source_resistance_ohm) not in {30, 50, 100}:
+        raise ValueError("LCR source resistance must be 30, 50, or 100 ohms")
 
 
 def normalize_function(value: str) -> str:
@@ -289,6 +295,10 @@ def normalize_aperture(value: str) -> str:
     if token not in {"FAST", "MED", "SLOW"}:
         raise ValueError(f"unsupported aperture: {value!r}")
     return token
+
+
+def _scpi_on_off(enabled: bool) -> str:
+    return "ON" if enabled else "OFF"
 
 
 def _parse_float_token(token: str) -> float | None:
@@ -328,15 +338,20 @@ def commands_for_settings(settings: Lcr6000Settings) -> list[str]:
     commands = [
         "DISP:PAGE MEAS\n",
         f"FUNC {settings.function}\n",
+        f"FUNC:IMP:AUTO {_scpi_on_off(settings.auto_lcz_enabled)}\n",
         "FUNC:RANG:AUTO AUTO\n",
         f"FUNC:MON1 {settings.monitor1}\n",
         f"FUNC:MON2 {settings.monitor2}\n",
         f"FREQ {settings.frequency_hz:.12g}\n",
+        f"LEV:SRES {int(settings.source_resistance_ohm)}\n",
     ]
     if settings.level_mode == "current":
         commands.append(f"LEV:CURR {settings.level_value:.12g}\n")
     else:
         commands.append(f"LEV:VOLT {settings.level_value:.12g}\n")
+    commands.append(f"LEV:ALC {_scpi_on_off(settings.alc_enabled)}\n")
+    commands.append("BIAS OFF\n")
+    commands.append(f"COMP:STAT {_scpi_on_off(settings.comparator_enabled)}\n")
     commands.append(f"APER {settings.aperture}\n")
     return commands
 
