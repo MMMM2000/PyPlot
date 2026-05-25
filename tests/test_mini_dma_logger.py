@@ -11651,6 +11651,24 @@ def test_stale_output_base_filename_syncs_to_current_sample(tmp_path: Path, qtbo
         _close_test_window(window)
 
 
+def test_stale_output_base_filename_syncs_when_only_condition_changed(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    window.combo_recipe_mode.setCurrentIndex(index)
+    window.edit_name_composition.setText("Ni50Fe27Ga23")
+    window.edit_name_wire.setText("12/2")
+    window.edit_name_condition.setText("cer cap")
+    window.edit_sample_name.setText("Ni50Fe27Ga23 12/2 cer cap")
+    window.edit_log_name.setText("Ni50Fe27Ga23 12_2 with glass iso-stress")
+
+    try:
+        window._sync_stale_log_name_from_sample()
+
+        assert window.edit_log_name.text() == "Ni50Fe27Ga23 12_2 cer cap iso-stress"
+    finally:
+        _close_test_window(window)
+
+
 def test_auto_output_base_filename_includes_current_sweep_recipe_type(
     tmp_path: Path,
     qtbot,

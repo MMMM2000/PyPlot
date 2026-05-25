@@ -7148,10 +7148,11 @@ class MainWindow(QtWidgets.QMainWindow):
             _clean_session_basename(self.edit_name_composition.text()),
             _clean_session_basename(MicrowireLineEdit.to_filename_token(self.edit_name_wire.text())),
             _clean_session_basename(self.edit_name_specimen.text()),
+            _clean_session_basename(" ".join(self.edit_name_condition.text().split())),
         ]
         meaningful_tokens = [token for token in sample_tokens if len(token) >= 2]
         matched_tokens = [token for token in meaningful_tokens if token and token in current]
-        required_matches = min(2, len(meaningful_tokens))
+        required_matches = len(meaningful_tokens)
         if meaningful_tokens and len(matched_tokens) < required_matches:
             self.edit_log_name.setText(desired)
             self._last_auto_log_name = desired

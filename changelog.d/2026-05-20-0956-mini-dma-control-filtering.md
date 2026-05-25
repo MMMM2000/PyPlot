@@ -12,6 +12,7 @@
 - Mini DMA dashboard plots now also break the line between downsampled history and the recent live tail, avoiding misleading diagonal connectors while long measurements are still running.
 - Mini DMA now has an explicitly armed `--mini-dma-bench-plan` automation path for unattended recipe sequences, with dry-run validation, setup-length automation, per-run timeouts, summary JSON, and modal-warning suppression so failed preflights do not block overnight control.
 - Mini DMA session metadata, status text, and run log now record explicit stop outcomes such as normal recipe completion, manual recipe/session stop, emergency stop, wire break/contact loss, app close, or bench automation timeout.
+- Mini DMA now treats changed specimen/condition text as part of the auto-generated output filename identity, so a stale base filename is refreshed before existing-output checks prompt to save as the next run.
 - Mini DMA setup slack take-up now exposes a configurable stiffness-prior step cap and defaults it to `50 MPa`, making pre-contact slack removal much faster while keeping feedback-gated moves bounded.
 - Mini DMA mandatory length setup now refreshes the frozen control config after accepted starting length and computed `l0`, so strain logging and subsequent control use the measured setup length instead of a stale recipe-start value.
 - Mini DMA setup return-to-zero now applies a small strain-based speed floor for tiny residual loads, avoiding very slow one-step unloads near baseline.
