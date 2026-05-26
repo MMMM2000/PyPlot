@@ -2729,7 +2729,23 @@ class SharedBrokerSupplyController:
                 "resistance_ohm": None,
                 "power_W": None,
             }
-        return dict(self._require_client().measure_channel(channel=channel))
+        readback = dict(self._require_client().measure_channel(channel=channel))
+        voltage_v = readback.get("voltage_V")
+        current_mA = readback.get("current_mA")
+        current_a = None if current_mA is None else float(current_mA) / 1000.0
+        resistance_ohm = readback.get("resistance_ohm")
+        power_w = readback.get("power_W")
+        if resistance_ohm is None and voltage_v is not None and current_a is not None:
+            if abs(current_a) >= MIN_RESISTANCE_CURRENT_MA / 1000.0:
+                resistance_ohm = float(voltage_v) / current_a
+        if power_w is None and voltage_v is not None and current_a is not None:
+            power_w = float(voltage_v) * current_a
+        return {
+            "voltage_V": None if voltage_v is None else float(voltage_v),
+            "current_mA": None if current_mA is None else float(current_mA),
+            "resistance_ohm": None if resistance_ohm is None else float(resistance_ohm),
+            "power_W": None if power_w is None else float(power_w),
+        }
 
 
 class MainWindow(QtWidgets.QMainWindow):

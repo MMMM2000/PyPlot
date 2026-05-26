@@ -7346,8 +7346,6 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
             return {
                 "voltage_V": 0.5,
                 "current_mA": 10.0,
-                "resistance_ohm": 50.0,
-                "power_W": 0.005,
             }
 
     clients: list[_FakeBrokerClient] = []
@@ -7370,7 +7368,10 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
     controller.configure_channel(channel=3, voltage_v=12.0, current_a=0.5, output_on=True)
     controller.initialize_output(current_mA=10.0, reset_on_start=True)
     controller.set_current_mA(10.4)
-    assert controller.measure()["current_mA"] == pytest.approx(10.0)
+    readback = controller.measure()
+    assert readback["current_mA"] == pytest.approx(10.0)
+    assert readback["resistance_ohm"] == pytest.approx(50.0)
+    assert readback["power_W"] == pytest.approx(0.005)
     controller.shutdown_output(reset_voltage_v=1.0, reset_current_mA=1.0)
     controller.disconnect()
 
