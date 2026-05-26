@@ -1,0 +1,8 @@
+# Optional report-generation and PDF-inspection helpers for Codex/manual analysis.
+#
+# These packages are not required to launch or run the PyPlot application.
+# Install them only in environments that need to create, inspect, or post-process
+# PDF/DOCX-style analysis reports.
+pdfplumber==0.11.8
+pypdf==6.10.2
+reportlab==4.4.10

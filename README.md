@@ -34,6 +34,10 @@ compatibility files for machines or packaging scripts that still use pip. For th
 fallback path, create `.venv` with Python 3.14, activate it, upgrade pip, install
 `requirements.txt`, and on Windows install `requirements-win.txt` afterwards.
 
+Optional report-generation helpers are kept separate in
+`requirements-reporting.txt`; see `docs/reporting_tooling.md` for Python report
+helpers and system tools such as Poppler.
+
 OriginPro users should also install `originpro`, `numpy`, `pandas`,
 `python-dateutil`, `pytz`, `six`, and `tzdata` inside Origin's embedded Python
 before choosing the Origin backend.
