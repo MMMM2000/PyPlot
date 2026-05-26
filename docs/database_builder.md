@@ -85,7 +85,9 @@ For the dedicated manual fabrication-video workflow, see [Universal Video Builde
 
 ## Agent Automation
 
-- Builder automation recipes can update a copied `.pydpj` project without opening the Builder UI. Use `kind: "builder"` / `action: "update_section"` with a supported graph-backed section such as `vsm_temperature_scan`, `vsm_hysteresis`, `dma_iso_stress`, `mini_dma`, `shape_memory_stress_strain`, or `fmr`. The recipe scans the provided files or folders, merges parsed records with existing section records, saves the updated copied project, and writes a JSON manifest.
+- Builder automation recipes can update a copied `.pydpj` project without opening the Builder UI. Use `kind: "builder"` / `action: "update_section"` with a supported graph-backed section such as `annealing`, `vsm_temperature_scan`, `vsm_hysteresis`, `dma_iso_stress`, `mini_dma`, `shape_memory_stress_strain`, or `fmr`. The recipe scans the provided files or folders, merges parsed records with existing section records, saves the updated copied project, and writes a JSON manifest.
+- Section update commands can set `exclude_dir_names`, for example `["archive", "automated_control_tests"]`, to avoid recursively importing old or diagnostic runs from a measurement folder.
+- Builder automation recipes can also maintain a timestamped database folder by setting `database_dir`. The root keeps `microwire_database_latest.pydpj` and `update_manifest_latest.json`; each successful run first moves the previous latest files into `archive/` with the run timestamp, then promotes the newly generated project and manifest. If `project` is omitted, the recipe uses the current latest project from that database folder.
 - Builder project saves now embed graph-section payloads alongside the section rows so copied projects can restore VSM temperature scan records without relying on global AppData cache files.
 - HTML export must not require the Videos section to be processed, and includes a compare view (Ctrl/Cmd-click rows to compare).
 - Matplotlib/Origin outputs should use the same rows and columns as the Assemble preview.

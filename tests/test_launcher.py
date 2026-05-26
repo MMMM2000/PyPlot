@@ -807,6 +807,142 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
     assert str(bad_run / "measurement.csv") in command["skipped_sources"]
 
 
+def test_builder_automation_recipe_promotes_database_latest_and_archives_previous(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    database_dir = tmp_path / "microwire_database"
+    database_dir.mkdir()
+    latest_project = database_dir / "microwire_database_latest.pydpj"
+    latest_project.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    latest_manifest = database_dir / "update_manifest_latest.json"
+    latest_manifest.write_text(
+        json.dumps({"kind": "builder", "status": "old"}),
+        encoding="utf-8",
+    )
+    scan_path = tmp_path / "202602010101-TSCN-a000-example.txt"
+    scan_path.write_text(
+        "\n".join(
+            [
+                "@Samplename: Ni50Fe27Ga23 5-4",
+                "@@End of Header.",
+                "Time_since_start Applied_Field Signal_X_direction Sample_Temperature_For_Plot_",
+                "New Section: Section 0:",
+                "0 10000 0.00051 25.0",
+                "1 10000 0.00050 26.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "database_dir": str(database_dir),
+                "timestamp": "2026-05-26_1512",
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "vsm_temperature_scan",
+                        "paths": [str(scan_path)],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    assert latest_project.exists()
+    assert (database_dir / "update_manifest_latest.json").exists()
+    archived_project = database_dir / "archive" / "microwire_database_2026-05-26_1512.pydpj"
+    archived_manifest = database_dir / "archive" / "update_manifest_2026-05-26_1512.json"
+    assert archived_project.exists()
+    assert archived_manifest.exists()
+    latest_payload = json.loads(latest_project.read_text(encoding="utf-8"))
+    assert latest_payload["sections"]["vsm_temperature_scan"]["rows"]
+    latest_manifest_payload = json.loads(
+        (database_dir / "update_manifest_latest.json").read_text(encoding="utf-8")
+    )
+    assert latest_manifest_payload["database"]["latest_project"] == str(latest_project.resolve())
+    assert latest_manifest_payload["database"]["archived_project"] == str(archived_project.resolve())
+
+
+def test_builder_automation_recipe_can_exclude_named_subdirectories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    data_root = tmp_path / "mini_dma"
+    good_run = _write_mini_dma_run(data_root / "good_run")
+    archived_run = _write_mini_dma_run(data_root / "archive" / "old_run", sample_name="Ni50Fe27Ga23 12_3")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "output_project": str(output_project),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "mini_dma",
+                        "paths": [str(data_root)],
+                        "exclude_dir_names": ["archive"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    payload = json.loads(output_project.read_text(encoding="utf-8"))
+    rows = payload["sections"]["mini_dma"]["rows"]
+    assert len(rows) == 1
+    assert str(good_run) in rows[0]["_sources"]
+    assert str(archived_run) not in rows[0]["_sources"]
+
+
 def test_automation_recipe_rejects_origin_when_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

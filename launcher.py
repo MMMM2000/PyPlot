@@ -370,13 +370,27 @@ def _collect_builder_paths(
     paths: Sequence[Path],
     *,
     supported_suffixes: Sequence[str],
+    exclude_dir_names: Sequence[str] = (),
 ) -> list[Path]:
     suffixes = {suffix.lower() for suffix in supported_suffixes}
+    excluded_names = {str(name).strip().lower() for name in exclude_dir_names if str(name).strip()}
+
+    def _is_excluded(candidate: Path, root: Path) -> bool:
+        if not excluded_names:
+            return False
+        try:
+            relative_parts = candidate.relative_to(root).parts
+        except ValueError:
+            relative_parts = candidate.parts
+        return any(part.lower() in excluded_names for part in relative_parts[:-1])
+
     collected: list[Path] = []
     for path in paths:
         if path.is_dir():
             for candidate in sorted(path.rglob("*")):
                 if not candidate.is_file():
+                    continue
+                if _is_excluded(candidate, path):
                     continue
                 if suffixes and candidate.suffix.lower() not in suffixes:
                     continue
@@ -398,6 +412,11 @@ def _record_path_key(record: object) -> str:
 
 def _builder_section_specs(builder_ui: Any) -> dict[str, dict[str, Any]]:
     return {
+        "annealing": {
+            "class": builder_ui.AnnealingSection,
+            "payload": "annealing_records",
+            "table_builder": lambda records: builder_ui._annealing_records_to_frame(records, LOGGER),
+        },
         "vsm_hysteresis": {
             "class": builder_ui.VsmHysteresisSection,
             "payload": "vsm_hysteresis_records",
@@ -463,7 +482,8 @@ def _run_builder_update_section_command(
 
     section_class = spec["class"]
     payload_name = str(spec["payload"])
-    graph_column = str(spec["graph_column"])
+    graph_column = spec.get("graph_column")
+    table_builder = spec.get("table_builder")
     raw_paths = command.get("paths")
     if not isinstance(raw_paths, list) or not raw_paths:
         raise _AutomationRecipeError(
@@ -481,9 +501,17 @@ def _run_builder_update_section_command(
         input_paths.append(path)
 
     supported_suffixes = getattr(section_class, "supported_suffixes", ())
+    raw_exclude_dir_names = command.get("exclude_dir_names", [])
+    if raw_exclude_dir_names in (None, ""):
+        raw_exclude_dir_names = []
+    if not isinstance(raw_exclude_dir_names, list):
+        raise _AutomationRecipeError(
+            f"{section_name} update field 'exclude_dir_names' must be an array when provided."
+        )
     candidates = _collect_builder_paths(
         input_paths,
         supported_suffixes=supported_suffixes,
+        exclude_dir_names=[str(name) for name in raw_exclude_dir_names],
     )
     section = section_class(LOGGER, lambda *_args: None)
     try:
@@ -512,12 +540,17 @@ def _run_builder_update_section_command(
         new_payload = result.payloads.get(payload_name, [])
         new_records = list(new_payload) if isinstance(new_payload, list) else []
         merged_records = _merge_builder_records(existing_records, new_records)
-        section.data.table = builder_ui._graph_records_to_frame(
-            merged_records,
-            graph_column,
-            sample_column="_sample",
-        )
+        if callable(table_builder):
+            section.data.table = table_builder(merged_records)
+        else:
+            section.data.table = builder_ui._graph_records_to_frame(
+                merged_records,
+                str(graph_column),
+                sample_column="_sample",
+            )
         section.data.processed = {**section.data.processed, **result.processed}
+        if isinstance(result.extra, dict):
+            section.data.extra.update(result.extra)
         section.data.extra["payloads"] = {payload_name: payload_name}
         section.store.save_payload(payload_name, merged_records)
         section.store.save(section.data)
@@ -539,6 +572,79 @@ def _run_builder_update_section_command(
         section.close()
 
 
+def _timestamp_for_builder_database(recipe: Mapping[str, Any]) -> str:
+    raw = recipe.get("timestamp")
+    if raw is not None:
+        text = str(raw).strip()
+        if text:
+            return re.sub(r"[^0-9A-Za-z_-]+", "_", text)
+    return datetime.now().strftime("%Y-%m-%d_%H%M")
+
+
+def _builder_database_paths(
+    recipe: Mapping[str, Any],
+    *,
+    base_dir: Path,
+) -> dict[str, Path | str] | None:
+    raw_database_dir = recipe.get("database_dir")
+    if raw_database_dir in (None, ""):
+        return None
+    database_dir = _resolve_recipe_path_value(
+        raw_database_dir,
+        base_dir=base_dir,
+        field_name="database_dir",
+    )
+    if database_dir is None:
+        raise _AutomationRecipeError("Builder database field 'database_dir' must be a path.")
+    database_name = str(recipe.get("database_name") or "microwire_database").strip()
+    if not database_name:
+        database_name = "microwire_database"
+    database_name = re.sub(r"[^0-9A-Za-z_.-]+", "_", database_name)
+    timestamp = _timestamp_for_builder_database(recipe)
+    archive_dir = database_dir / "archive"
+    return {
+        "database_dir": database_dir,
+        "database_name": database_name,
+        "timestamp": timestamp,
+        "latest_project": database_dir / f"{database_name}_latest.pydpj",
+        "latest_manifest": database_dir / "update_manifest_latest.json",
+        "archive_dir": archive_dir,
+        "archive_project": archive_dir / f"{database_name}_{timestamp}.pydpj",
+        "archive_manifest": archive_dir / f"update_manifest_{timestamp}.json",
+    }
+
+
+def _archive_existing_builder_database_latest(database_paths: Mapping[str, Path | str]) -> dict[str, str | None]:
+    latest_project = cast(Path, database_paths["latest_project"])
+    latest_manifest = cast(Path, database_paths["latest_manifest"])
+    archive_project = cast(Path, database_paths["archive_project"])
+    archive_manifest = cast(Path, database_paths["archive_manifest"])
+    archive_dir = cast(Path, database_paths["archive_dir"])
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archived_project: str | None = None
+    archived_manifest: str | None = None
+    if latest_project.exists():
+        target = archive_project
+        counter = 1
+        while target.exists():
+            target = archive_project.with_name(f"{archive_project.stem}_{counter}{archive_project.suffix}")
+            counter += 1
+        shutil.move(str(latest_project), str(target))
+        archived_project = str(target.resolve())
+    if latest_manifest.exists():
+        target = archive_manifest
+        counter = 1
+        while target.exists():
+            target = archive_manifest.with_name(f"{archive_manifest.stem}_{counter}{archive_manifest.suffix}")
+            counter += 1
+        shutil.move(str(latest_manifest), str(target))
+        archived_manifest = str(target.resolve())
+    return {
+        "archived_project": archived_project,
+        "archived_manifest": archived_manifest,
+    }
+
+
 def _run_builder_automation_recipe(recipe_path: Path) -> int:
     try:
         recipe = _load_json_object(recipe_path, label="Automation recipe")
@@ -550,8 +656,13 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                 f"Unsupported builder automation recipe version {recipe.get('version')!r}. Only version 1 is supported."
             )
 
+        database_paths = _builder_database_paths(recipe, base_dir=base_dir)
+        raw_project_value = recipe.get("project")
+        if raw_project_value in (None, "") and database_paths is not None:
+            latest_project = cast(Path, database_paths["latest_project"])
+            raw_project_value = str(latest_project) if latest_project.exists() else None
         project_path = _resolve_recipe_path_value(
-            recipe.get("project"),
+            raw_project_value,
             base_dir=base_dir,
             field_name="project",
         )
@@ -567,7 +678,10 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             field_name="working_copy_dir",
         )
         if working_copy_dir is None:
-            working_copy_dir = (base_dir / "builder_automation").resolve()
+            if database_paths is not None:
+                working_copy_dir = cast(Path, database_paths["database_dir"]) / "_working"
+            else:
+                working_copy_dir = (base_dir / "builder_automation").resolve()
         working_copy_dir.mkdir(parents=True, exist_ok=True)
 
         output_project = _resolve_recipe_path_value(
@@ -576,7 +690,13 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             field_name="output_project",
         )
         if output_project is None:
-            output_project = working_copy_dir / f"{project_path.stem}.updated{project_path.suffix}"
+            if database_paths is not None:
+                output_project = (
+                    working_copy_dir
+                    / f"{database_paths['database_name']}_{database_paths['timestamp']}.pydpj"
+                )
+            else:
+                output_project = working_copy_dir / f"{project_path.stem}.updated{project_path.suffix}"
         output_project = output_project.with_suffix(".pydpj")
         try:
             same_project = project_path.resolve() == output_project.resolve()
@@ -607,7 +727,13 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             field_name="manifest_path",
         )
         if manifest_path is None:
-            manifest_path = output_project.with_suffix(".manifest.json")
+            if database_paths is not None:
+                manifest_path = (
+                    working_copy_dir
+                    / f"update_manifest_{database_paths['timestamp']}.json"
+                )
+            else:
+                manifest_path = output_project.with_suffix(".manifest.json")
 
         os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
         app = QtWidgets.QApplication.instance()
@@ -619,6 +745,8 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
 
         original_storage_root = builder_storage._storage_root
         automation_store = working_copy_dir / "_builder_store"
+        if automation_store.exists():
+            shutil.rmtree(automation_store)
         builder_storage._storage_root = lambda: automation_store  # type: ignore[assignment]
         builder_storage.MiniDatabaseStore._memory_data = {}
         builder_storage.MiniDatabaseStore._memory_payloads = {}
@@ -678,7 +806,25 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             "manifest_path": str(manifest_path.resolve()),
             "commands": command_results,
         }
+        if database_paths is not None:
+            database_dir = cast(Path, database_paths["database_dir"])
+            latest_project = cast(Path, database_paths["latest_project"])
+            latest_manifest = cast(Path, database_paths["latest_manifest"])
+            database_dir.mkdir(parents=True, exist_ok=True)
+            archive_result = _archive_existing_builder_database_latest(database_paths)
+            shutil.copy2(output_project, latest_project)
+            manifest["database"] = {
+                "database_dir": str(database_dir.resolve()),
+                "database_name": str(database_paths["database_name"]),
+                "timestamp": str(database_paths["timestamp"]),
+                "latest_project": str(latest_project.resolve()),
+                "latest_manifest": str(latest_manifest.resolve()),
+                **archive_result,
+            }
         _write_json(manifest_path, manifest)
+        if database_paths is not None:
+            latest_manifest = cast(Path, database_paths["latest_manifest"])
+            _write_json(latest_manifest, manifest)
         print(json.dumps(manifest, ensure_ascii=False))
         return 0
     except _AutomationRecipeError as exc:

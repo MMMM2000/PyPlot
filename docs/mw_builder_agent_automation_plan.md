@@ -70,6 +70,29 @@ The exact encoding can change, but the invariant should not: loading a `.pydpj` 
 }
 ```
 
+For the Praha rolling database workflow, use `database_dir` instead of fixed
+`output_project` and `manifest_path` fields:
+
+```json
+{
+  "kind": "builder",
+  "version": 1,
+  "project": "G:/My Drive/1 Projects/Praha/microwire_project.pydpj",
+  "database_dir": "G:/My Drive/1 Projects/Praha/microwire_database",
+  "commands": [
+    {
+      "action": "update_section",
+      "section": "mini_dma",
+      "paths": ["G:/My Drive/1 Projects/Praha/mini DMA"]
+    }
+  ]
+}
+```
+
+The database folder keeps `microwire_database_latest.pydpj` and
+`update_manifest_latest.json` at the root, and moves the previous latest files
+to timestamped copies in `archive/` before promoting a successful new run.
+
 ## Safety Rules
 
 - Default to a copied project.
@@ -82,6 +105,8 @@ The exact encoding can change, but the invariant should not: loading a `.pydpj` 
 
 - Loading a project copy with VSM Temperature Scan records works after clearing `MiniDatabaseStore` memory and pointing AppData storage at an empty temp folder.
 - A builder automation recipe updates only the copied `.pydpj`, remains idempotent for repeated inputs, and reports skipped malformed VSM files in the manifest.
+- Current annealing is supported by the same `update_section` command using `section: "annealing"`.
+- A builder automation recipe with `database_dir` promotes a new latest project/manifest and archives the previous latest files with a timestamp.
 
 ## Tests Still To Add
 
