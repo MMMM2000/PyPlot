@@ -723,6 +723,90 @@ def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
     assert '"kind": "builder"' in capsys.readouterr().out
 
 
+def _write_mini_dma_run(path: Path, *, sample_name: str = "Ni50Fe27Ga23 12_2") -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "metadata.json").write_text(
+        json.dumps({"sample_name": sample_name, "initial_length_mm": 10.0}),
+        encoding="utf-8",
+    )
+    rows = [
+        "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,stress_mpa,resistance_ohm,current_set_mA,current_measured_mA,position_mm",
+        "0,current,50,1,0.00,50,100,1,1,0.000",
+        "1,current,50,1,0.05,50,101,10,10,0.005",
+        "2,current,50,1,0.10,50,102,20,20,0.010",
+        "3,current,100,2,0.15,100,110,1,1,0.015",
+        "4,current,100,2,0.25,100,112,10,10,0.025",
+        "5,current,100,2,0.35,100,114,20,20,0.035",
+    ]
+    (path / "measurement.csv").write_text("\n".join(rows), encoding="utf-8")
+    return path
+
+
+def test_builder_automation_recipe_updates_mini_dma_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_path = _write_mini_dma_run(tmp_path / "Ni50Fe27Ga23 12_2 test_run01")
+    bad_run = tmp_path / "bad-run"
+    bad_run.mkdir()
+    (bad_run / "measurement.csv").write_text("not,a,mini,dma\n", encoding="utf-8")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "mini_dma",
+                        "paths": [str(run_path), str(bad_run)],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["mini_dma"]
+    assert section_payload["rows"]
+    assert section_payload["payloads"]["mini_dma_records"]["encoding"] == "pickle-base64"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    command = manifest["commands"][0]
+    assert command["section"] == "mini_dma"
+    assert command["record_count"] == 1
+    assert command["updated_count"] == 1
+    assert command["skipped_count"] == 1
+    assert str(bad_run / "measurement.csv") in command["skipped_sources"]
+
+
 def test_automation_recipe_rejects_origin_when_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

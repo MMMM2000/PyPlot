@@ -172,6 +172,64 @@ def test_video_missing_sources_highlight_whole_row_red() -> None:
     assert foreground is not None and foreground.color().name() == "#ffd6d6"
 
 
+def test_auto_fit_columns_does_not_render_graph_decorations(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = builder_ui.MiniDatabaseSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame({"Graph": ["a", "b"], "Value": [1, 2]})
+        section.model.set_frame(frame)
+        calls: list[str] = []
+
+        def decoration_provider(row: pd.Series, column: str) -> None:
+            calls.append(f"{row.name}:{column}")
+            return None
+
+        section.model.set_decoration_provider(decoration_provider)
+
+        def resize_columns(table: QtWidgets.QTableView) -> None:
+            model = table.model()
+            assert model is not None
+            for row in range(model.rowCount()):
+                for column in range(model.columnCount()):
+                    model.data(
+                        model.index(row, column),
+                        QtCore.Qt.ItemDataRole.DecorationRole,
+                    )
+
+        monkeypatch.setattr(QtWidgets.QTableView, "resizeColumnsToContents", resize_columns)
+
+        section._auto_fit_columns()
+
+        assert calls == []
+    finally:
+        section.close()
+
+
+def test_auto_fit_columns_skips_during_project_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = builder_ui.MiniDatabaseSection(logging.getLogger("test"), lambda *_args: None)
+    resize_calls: list[str] = []
+    try:
+        section.model.set_frame(pd.DataFrame({"Graph": ["a"]}))
+        monkeypatch.setattr(
+            QtWidgets.QTableView,
+            "resizeColumnsToContents",
+            lambda *_args: resize_calls.append("resize"),
+        )
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = True
+
+        section._auto_fit_columns()
+
+        assert resize_calls == []
+    finally:
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = False
+        section.close()
+
+
 def test_video_section_open_button_enables_and_opens_selected_sources(tmp_path: Path) -> None:
     app = QtWidgets.QApplication.instance()
     if app is None:

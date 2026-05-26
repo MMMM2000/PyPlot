@@ -396,6 +396,149 @@ def _record_path_key(record: object) -> str:
         return str(raw_path)
 
 
+def _builder_section_specs(builder_ui: Any) -> dict[str, dict[str, Any]]:
+    return {
+        "vsm_hysteresis": {
+            "class": builder_ui.VsmHysteresisSection,
+            "payload": "vsm_hysteresis_records",
+            "graph_column": builder_ui.VSM_HYSTERESIS_COLUMN,
+        },
+        "vsm_temperature_scan": {
+            "class": builder_ui.VsmTemperatureScanSection,
+            "payload": "vsm_temperature_scan_records",
+            "graph_column": builder_ui.VSM_TEMPERATURE_SCAN_COLUMN,
+        },
+        "dma_iso_stress": {
+            "class": builder_ui.DmaIsoStressSection,
+            "payload": "dma_iso_stress_records",
+            "graph_column": builder_ui.DMA_ISOSTRESS_COLUMN,
+        },
+        "mini_dma": {
+            "class": builder_ui.MiniDmaSection,
+            "payload": "mini_dma_records",
+            "graph_column": builder_ui.MINI_DMA_COLUMN,
+        },
+        "shape_memory_stress_strain": {
+            "class": builder_ui.ShapeMemoryStressStrainSection,
+            "payload": "shape_memory_stress_strain_records",
+            "graph_column": builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+        },
+        "fmr": {
+            "class": builder_ui.FmrSection,
+            "payload": "fmr_records",
+            "graph_column": builder_ui.FMR_COLUMN,
+        },
+    }
+
+
+def _merge_builder_records(existing_records: Sequence[object], new_records: Sequence[object]) -> list[object]:
+    merged: dict[str, object] = {}
+    fallback_index = 0
+    for record in [*existing_records, *new_records]:
+        key = _record_path_key(record)
+        if not key:
+            fallback_index += 1
+            key = f"record-{fallback_index}"
+        merged[key] = record
+    return list(merged.values())
+
+
+def _run_builder_update_section_command(
+    *,
+    builder_ui: Any,
+    command: dict[str, Any],
+    command_index: int,
+    section_name: str,
+    sections: dict[str, Any],
+    base_dir: Path,
+) -> dict[str, Any]:
+    section_specs = _builder_section_specs(builder_ui)
+    spec = section_specs.get(section_name)
+    if spec is None:
+        supported = ", ".join(sorted(section_specs))
+        raise _AutomationRecipeError(
+            f"Unsupported builder update_section command {command_index}: section={section_name!r}. "
+            f"Supported sections: {supported}."
+        )
+
+    section_class = spec["class"]
+    payload_name = str(spec["payload"])
+    graph_column = str(spec["graph_column"])
+    raw_paths = command.get("paths")
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise _AutomationRecipeError(
+            f"{section_name} update requires a non-empty 'paths' array."
+        )
+    input_paths: list[Path] = []
+    for path_index, raw_path in enumerate(raw_paths):
+        path = _resolve_recipe_path_value(
+            raw_path,
+            base_dir=base_dir,
+            field_name=f"commands[{command_index}].paths[{path_index}]",
+        )
+        if path is None or not path.exists():
+            raise _AutomationRecipeError(f"Builder input path does not exist: {path}")
+        input_paths.append(path)
+
+    supported_suffixes = getattr(section_class, "supported_suffixes", ())
+    candidates = _collect_builder_paths(
+        input_paths,
+        supported_suffixes=supported_suffixes,
+    )
+    section = section_class(LOGGER, lambda *_args: None)
+    try:
+        section.import_project_payload(sections.get(section_name, {}))
+        existing_payload = section.store.load_payload(payload_name)
+        existing_records = list(existing_payload) if isinstance(existing_payload, list) else []
+        source_strings = [str(path) for path in input_paths]
+        section.data.sources = list(dict.fromkeys([*section.data.sources, *source_strings]))
+        result = section.process(candidates)
+
+        processed_keys = set()
+        for processed_path in result.processed:
+            try:
+                processed_keys.add(str(Path(processed_path).resolve()))
+            except Exception:
+                processed_keys.add(str(processed_path))
+        skipped_sources: list[str] = []
+        for candidate in candidates:
+            try:
+                candidate_key = str(candidate.resolve())
+            except Exception:
+                candidate_key = str(candidate)
+            if candidate_key not in processed_keys:
+                skipped_sources.append(str(candidate))
+
+        new_payload = result.payloads.get(payload_name, [])
+        new_records = list(new_payload) if isinstance(new_payload, list) else []
+        merged_records = _merge_builder_records(existing_records, new_records)
+        section.data.table = builder_ui._graph_records_to_frame(
+            merged_records,
+            graph_column,
+            sample_column="_sample",
+        )
+        section.data.processed = {**section.data.processed, **result.processed}
+        section.data.extra["payloads"] = {payload_name: payload_name}
+        section.store.save_payload(payload_name, merged_records)
+        section.store.save(section.data)
+        sections[section_name] = section.export_project_payload()
+        return {
+            "action": "update_section",
+            "section": section_name,
+            "status": "ok",
+            "input_count": len(input_paths),
+            "candidate_count": len(candidates),
+            "updated_count": len(processed_keys),
+            "skipped_count": len(skipped_sources),
+            "skipped_sources": skipped_sources,
+            "record_count": len(merged_records),
+            "row_count": int(len(section.data.table.index)),
+            "sources": source_strings,
+        }
+    finally:
+        section.close()
+
+
 def _run_builder_automation_recipe(recipe_path: Path) -> int:
     try:
         recipe = _load_json_object(recipe_path, label="Automation recipe")
@@ -499,88 +642,20 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                         }
                     )
                     continue
-                if action != "update_section" or section_name != "vsm_temperature_scan":
+                if action != "update_section":
                     raise _AutomationRecipeError(
                         f"Unsupported builder command {index}: action={action!r}, section={section_name!r}."
                     )
-                raw_paths = command.get("paths")
-                if not isinstance(raw_paths, list) or not raw_paths:
-                    raise _AutomationRecipeError("VSM temperature scan update requires a non-empty 'paths' array.")
-                input_paths: list[Path] = []
-                for path_index, raw_path in enumerate(raw_paths):
-                    path = _resolve_recipe_path_value(
-                        raw_path,
+                command_results.append(
+                    _run_builder_update_section_command(
+                        builder_ui=builder_ui,
+                        command=command,
+                        command_index=index,
+                        section_name=section_name,
+                        sections=sections,
                         base_dir=base_dir,
-                        field_name=f"commands[{index}].paths[{path_index}]",
                     )
-                    if path is None or not path.exists():
-                        raise _AutomationRecipeError(f"Builder input path does not exist: {path}")
-                    input_paths.append(path)
-                candidates = _collect_builder_paths(
-                    input_paths,
-                    supported_suffixes=builder_ui.VsmTemperatureScanSection.supported_suffixes,
                 )
-                section = builder_ui.VsmTemperatureScanSection(LOGGER, lambda *_args: None)
-                try:
-                    section.import_project_payload(sections.get("vsm_temperature_scan", {}))
-                    existing_payload = section.store.load_payload("vsm_temperature_scan_records")
-                    existing_records = list(existing_payload) if isinstance(existing_payload, list) else []
-                    source_strings = [str(path) for path in input_paths]
-                    section.data.sources = list(dict.fromkeys([*section.data.sources, *source_strings]))
-                    result = section.process(candidates)
-                    processed_keys = set()
-                    for processed_path in result.processed:
-                        try:
-                            processed_keys.add(str(Path(processed_path).resolve()))
-                        except Exception:
-                            processed_keys.add(str(processed_path))
-                    skipped_sources: list[str] = []
-                    for candidate in candidates:
-                        try:
-                            candidate_key = str(candidate.resolve())
-                        except Exception:
-                            candidate_key = str(candidate)
-                        if candidate_key not in processed_keys:
-                            skipped_sources.append(str(candidate))
-                    merged: dict[str, object] = {}
-                    for record in existing_records:
-                        key = _record_path_key(record)
-                        if key:
-                            merged[key] = record
-                    for record in result.payloads.get("vsm_temperature_scan_records", []):
-                        key = _record_path_key(record)
-                        if key:
-                            merged[key] = record
-                    merged_records = list(merged.values())
-                    section.data.table = builder_ui._graph_records_to_frame(
-                        merged_records,
-                        builder_ui.VSM_TEMPERATURE_SCAN_COLUMN,
-                        sample_column="_sample",
-                    )
-                    section.data.processed = {**section.data.processed, **result.processed}
-                    section.data.extra["payloads"] = {
-                        "vsm_temperature_scan_records": "vsm_temperature_scan_records"
-                    }
-                    section.store.save_payload("vsm_temperature_scan_records", merged_records)
-                    section.store.save(section.data)
-                    sections["vsm_temperature_scan"] = section.export_project_payload()
-                    command_results.append(
-                        {
-                            "action": action,
-                            "section": section_name,
-                            "status": "ok",
-                            "input_count": len(input_paths),
-                            "candidate_count": len(candidates),
-                            "updated_count": len(processed_keys),
-                            "skipped_count": len(skipped_sources),
-                            "skipped_sources": skipped_sources,
-                            "record_count": len(merged_records),
-                            "row_count": int(len(section.data.table.index)),
-                            "sources": source_strings,
-                        }
-                    )
-                finally:
-                    section.close()
         finally:
             builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
             builder_storage.MiniDatabaseStore._memory_data = {}

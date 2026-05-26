@@ -2855,6 +2855,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self._recent_old_values: Dict[Tuple[int, int], Any] = {}
         self._row_series_cache: Dict[int, pd.Series] = {}
         self._column_label_cache: Tuple[str, ...] = tuple(str(column) for column in self._frame.columns)
+        self._decoration_suppressed = 0
 
     @staticmethod
     def _coerce_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
@@ -2920,6 +2921,12 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         provider: Optional[Callable[[pd.Series, str], Optional[QtGui.QBrush]]],
     ) -> None:
         self._background_provider = provider
+
+    def suppress_decorations(self, suppressed: bool) -> None:
+        if suppressed:
+            self._decoration_suppressed += 1
+            return
+        self._decoration_suppressed = max(0, self._decoration_suppressed - 1)
 
     def set_foreground_provider(
         self,
@@ -3017,6 +3024,8 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         except Exception:
             return None
         if role == QtCore.Qt.ItemDataRole.DecorationRole:
+            if self._decoration_suppressed:
+                return None
             provider = getattr(self, "_decoration_provider", None)
             if provider is not None:
                 column_label = self._column_label(index.column())
@@ -7214,30 +7223,39 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             pass
 
     def _auto_fit_columns(self) -> None:
+        if self._project_load_batch_mode:
+            return
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
             return
+        model = getattr(table, "model", lambda: None)()
+        source_model = None
+        if hasattr(model, "sourceModel"):
+            try:
+                source_model = model.sourceModel()
+            except Exception:
+                source_model = None
+        decoration_model = source_model if isinstance(source_model, DataFrameModel) else model
+        if isinstance(decoration_model, DataFrameModel):
+            decoration_model.suppress_decorations(True)
         try:
             table.resizeColumnsToContents()
         except Exception:
             return
-        model = getattr(table, "model", lambda: None)()
+        finally:
+            if isinstance(decoration_model, DataFrameModel):
+                decoration_model.suppress_decorations(False)
         frame: Optional[pd.DataFrame] = None
         if hasattr(model, "frame"):
             try:
                 frame = model.frame()
             except Exception:
                 frame = None
-        if frame is None and hasattr(model, "sourceModel"):
+        if frame is None and source_model is not None and hasattr(source_model, "frame"):
             try:
-                source_model = model.sourceModel()
+                frame = source_model.frame()
             except Exception:
-                source_model = None
-            if source_model is not None and hasattr(source_model, "frame"):
-                try:
-                    frame = source_model.frame()
-                except Exception:
-                    frame = None
+                frame = None
         if frame is None or getattr(frame, "empty", False):
             return
         try:
@@ -10982,6 +11000,8 @@ class MicroscopeSection(MiniDatabaseSection):
         QtCore.QTimer.singleShot(0, self._ensure_table_autosized)
 
     def _ensure_table_autosized(self) -> None:
+        if self._project_load_batch_mode:
+            return
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
             return
@@ -15099,6 +15119,8 @@ class VideoSection(MiniDatabaseSection):
         QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
     def _autosize_video_table(self) -> None:
+        if self._project_load_batch_mode:
+            return
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return
         try:
@@ -22542,6 +22564,8 @@ class CompareSection(MiniDatabaseSection):
         return 1
 
     def _update_matrix_column_widths(self) -> None:
+        if MiniDatabaseSection._project_load_batch_mode:
+            return
         if not isinstance(getattr(self, "matrix_view", None), QtWidgets.QTableView):
             return
         frame = self.matrix_model.frame()
@@ -29820,7 +29844,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
                             importer(assembly_payload or {})
                         except Exception as exc:
                             self.logger.error("Failed to load section assemble: %s", exc)
-            MiniDatabaseSection._project_load_batch_mode = False
             self._update_imported_data_item()
             if isinstance(assembly, AssemblySection):
                 show_imported = getattr(assembly, "_show_imported", True)
@@ -29848,6 +29871,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._dirty = False
             self.logger.info("Project loaded from %s", target)
             _pump_events(total_steps, "Finishing…")
+            MiniDatabaseSection._project_load_batch_mode = False
             if not _builder_dialogs_suppressed():
                 QtWidgets.QMessageBox.information(
                     self,

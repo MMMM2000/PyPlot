@@ -85,7 +85,7 @@ For the dedicated manual fabrication-video workflow, see [Universal Video Builde
 
 ## Agent Automation
 
-- Builder automation recipes can update a copied `.pydpj` project without opening the Builder UI. The first supported recipe operation is `kind: "builder"` / `action: "update_section"` for `section: "vsm_temperature_scan"`, which scans the provided files or folders, merges the parsed records with existing VSM temperature scan records, saves the updated copied project, and writes a JSON manifest.
+- Builder automation recipes can update a copied `.pydpj` project without opening the Builder UI. Use `kind: "builder"` / `action: "update_section"` with a supported graph-backed section such as `vsm_temperature_scan`, `vsm_hysteresis`, `dma_iso_stress`, `mini_dma`, `shape_memory_stress_strain`, or `fmr`. The recipe scans the provided files or folders, merges parsed records with existing section records, saves the updated copied project, and writes a JSON manifest.
 - Builder project saves now embed graph-section payloads alongside the section rows so copied projects can restore VSM temperature scan records without relying on global AppData cache files.
 - HTML export must not require the Videos section to be processed, and includes a compare view (Ctrl/Cmd-click rows to compare).
 - Matplotlib/Origin outputs should use the same rows and columns as the Assemble preview.
