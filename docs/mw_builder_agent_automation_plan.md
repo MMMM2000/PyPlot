@@ -89,6 +89,6 @@ The exact encoding can change, but the invariant should not: loading a `.pydpj` 
 
 ## Later Phases
 
-- Add commands for Mini DMA, current annealing, VSM hysteresis, DMA Iso-Stress, Shape Memory Stress/Strain, and FMR.
+- Add commands for Mini DMA, current annealing, VSM hysteresis, DMA Iso-Stress, Manual Stress/Strain, and FMR.
 - Add a live Builder session bridge only if project-level commands are insufficient.
 - Lazy-load heavy PyPlot and Origin dependencies during Builder startup so opening the UI does not import every plotting backend.

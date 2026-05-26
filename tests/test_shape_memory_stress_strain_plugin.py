@@ -28,7 +28,7 @@ def _ensure_app() -> QtWidgets.QApplication:
 
 def test_shape_memory_defaults_to_dual_axis_layout() -> None:
     app = _ensure_app()
-    window = PyPlotWorkbench(initial_plotter="Shape Memory Stress/Strain")
+    window = PyPlotWorkbench(initial_plotter="Manual Stress/Strain")
     try:
         plugin = window._current_plugin  # noqa: SLF001 - test hook
         assert isinstance(plugin, PyPlotPlugin)
@@ -48,7 +48,7 @@ def test_shape_memory_defaults_to_dual_axis_layout() -> None:
 
 def test_shape_memory_open_origin_keeps_dual_axis_mode(monkeypatch) -> None:
     app = _ensure_app()
-    window = PyPlotWorkbench(initial_plotter="Shape Memory Stress/Strain")
+    window = PyPlotWorkbench(initial_plotter="Manual Stress/Strain")
     try:
         plugin = window._current_plugin  # noqa: SLF001 - test hook
         assert isinstance(plugin, PyPlotPlugin)
@@ -78,7 +78,7 @@ def test_shape_memory_open_origin_keeps_dual_axis_mode(monkeypatch) -> None:
 
 def test_shape_memory_origin_export_uses_current_plot_tabs(monkeypatch) -> None:
     app = _ensure_app()
-    window = PyPlotWorkbench(initial_plotter="Shape Memory Stress/Strain")
+    window = PyPlotWorkbench(initial_plotter="Manual Stress/Strain")
     try:
         plugin = window._current_plugin  # noqa: SLF001 - test hook
         assert isinstance(plugin, PyPlotPlugin)

@@ -5162,7 +5162,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        self.header_label = QtWidgets.QLabel("Select a row to preview shape-memory graphs.")
+        self.header_label = QtWidgets.QLabel("Select a row to preview manual stress/strain graphs.")
         self.header_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
@@ -5170,7 +5170,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
 
         self._stack = QtWidgets.QStackedLayout()
         self._placeholder = QtWidgets.QLabel(
-            "Select a row to preview shape-memory graphs."
+            "Select a row to preview manual stress/strain graphs."
         )
         self._placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setWordWrap(True)
@@ -5232,7 +5232,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
             for idx, record in enumerate(records)
         )
         current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
-        self.header_label.setText(title or "Shape memory stress/strain")
+        self.header_label.setText(title or "Manual stress/strain")
         if records and signature == self._record_signature and self._tab_widget.count() == len(signature):
             self._stack.setCurrentWidget(self._tab_widget)
             return
@@ -5244,7 +5244,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
             self._saved_fracture_selection = None
             self._update_picked_labels(None)
             if not records:
-                self._placeholder.setText("No shape-memory graphs available for this microwire.")
+                self._placeholder.setText("No manual stress/strain graphs available for this microwire.")
                 self._stack.setCurrentWidget(self._placeholder)
                 return
             for record in records:
@@ -5277,10 +5277,10 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
                 page_layout = QtWidgets.QVBoxLayout(page)
                 page_layout.setContentsMargins(0, 0, 0, 0)
                 page_layout.addWidget(canvas, 1)
-                label = _record_label_for_display(record) or record.sample or "Shape memory"
+                label = _record_label_for_display(record) or record.sample or "Manual stress/strain"
                 self._tab_widget.addTab(page, label)
             if self._tab_widget.count() == 0:
-                self._placeholder.setText("No shape-memory graphs available for this microwire.")
+                self._placeholder.setText("No manual stress/strain graphs available for this microwire.")
                 self._stack.setCurrentWidget(self._placeholder)
             else:
                 self._record_signature = signature
@@ -5307,7 +5307,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         self._refresh_saved_picked_labels()
 
     def clear(self, message: str) -> None:
-        self.header_label.setText("Shape memory stress/strain")
+        self.header_label.setText("Manual stress/strain")
         self._clear_tabs()
         self._record_signature = ()
         self._update_hover_label(None)
@@ -5781,24 +5781,24 @@ def _shape_memory_stress_strain_preview_items(
                 partial(
                     _open_pyplot_for_paths,
                     paths,
-                    "Shape Memory Stress/Strain",
+                    "Manual Stress/Strain",
                     logger,
                     auto_plot=True,
                     open_origin=False,
                 ),
-                tooltip="Open this shape-memory file in the PyPlot Shape Memory Stress/Strain plugin.",
+                tooltip="Open this manual stress/strain file in PyPlot.",
             ),
             _GraphPreviewAction(
                 "Open in Origin",
                 partial(
                     _open_pyplot_for_paths,
                     paths,
-                    "Shape Memory Stress/Strain",
+                    "Manual Stress/Strain",
                     logger,
                     auto_plot=True,
                     open_origin=True,
                 ),
-                tooltip="Send this shape-memory file to Origin via PyPlot.",
+                tooltip="Send this manual stress/strain file to Origin via PyPlot.",
             ),
         )
         items.append(_GraphPreviewItem(title, pixmap, actions=actions))
@@ -17923,7 +17923,7 @@ class MiniDmaSection(MiniDatabaseSection):
 
 class ShapeMemoryStressStrainSection(MiniDatabaseSection):
     section_key = "shape_memory_stress_strain"
-    section_title = "Shape memory stress/strain"
+    section_title = "Manual stress/strain"
     supported_suffixes = (".txt",)
     HIDDEN_SECTION_COLUMNS = (
         "Sample",
@@ -17981,25 +17981,25 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self.controls_layout.addWidget(self.open_graphs_button)
         self.open_pyplot_button = QtWidgets.QPushButton("Open in PyPlot")
         self.open_pyplot_button.setToolTip(
-            "Open the selected shape-memory files in PyPlot."
+            "Open the selected manual stress/strain files in PyPlot."
         )
         self.open_pyplot_button.clicked.connect(self._open_selected_in_pyplot)
         self.controls_layout.addWidget(self.open_pyplot_button)
         self.open_origin_button = QtWidgets.QPushButton("Open in Origin")
         self.open_origin_button.setToolTip(
-            "Send the selected shape-memory files to Origin via PyPlot."
+            "Send the selected manual stress/strain files to Origin via PyPlot."
         )
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
         self.clear_values_button = QtWidgets.QPushButton("Clear selected values")
         self.clear_values_button.setToolTip(
-            "Clear saved standard/fracture values for the selected shape-memory rows."
+            "Clear saved standard/fracture values for the selected manual stress/strain rows."
         )
         self.clear_values_button.clicked.connect(self._clear_selected_values)
         self.controls_layout.addWidget(self.clear_values_button)
         self.visibility_button = QtWidgets.QPushButton("Visibility...")
         self.visibility_button.setToolTip(
-            "Show or hide specific shape-memory graphs."
+            "Show or hide specific manual stress/strain graphs."
         )
         self.visibility_button.clicked.connect(self._open_visibility_dialog)
         self.controls_layout.addWidget(self.visibility_button)
@@ -18229,7 +18229,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             self.logger.exception(
-                "Failed to persist shape-memory visibility settings"
+                "Failed to persist manual stress/strain visibility settings"
             )
 
     def _visible_records(
@@ -18249,7 +18249,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             QtWidgets.QMessageBox.information(
                 self,
                 self.section_title,
-                "No shape-memory graphs are available yet.",
+                "No manual stress/strain graphs are available yet.",
             )
             return
         groups = _visibility_groups_from_records(self._all_records)
@@ -18819,7 +18819,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             return
         records = self._selected_preview_records()
         if not records:
-            panel.clear("Select a row to preview shape-memory graphs.")
+            panel.clear("Select a row to preview manual stress/strain graphs.")
             return
         first = records[0]
         title = getattr(first, "sample", None) or self.section_title
@@ -19085,7 +19085,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         try:
             self.store.save(self.data)
         except Exception:
-            self.logger.exception("Failed to persist cleared shape-memory values")
+            self.logger.exception("Failed to persist cleared manual stress/strain values")
         try:
             self.data_updated.emit()
         except Exception:
@@ -19429,10 +19429,10 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             )
             return
         dialog = _GraphGalleryDialog(
-            "Shape memory stress/strain graphs",
+            "Manual stress/strain graphs",
             items,
             parent=self,
-            empty_message="No shape-memory graphs available.",
+            empty_message="No manual stress/strain graphs available.",
         )
         dialog.exec()
 
@@ -19456,7 +19456,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             return
         _open_pyplot_for_paths(
             paths,
-            "Shape Memory Stress/Strain",
+            "Manual Stress/Strain",
             self.logger,
             auto_plot=True,
             open_origin=False,
@@ -19482,7 +19482,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             return
         _open_pyplot_for_paths(
             paths,
-            "Shape Memory Stress/Strain",
+            "Manual Stress/Strain",
             self.logger,
             auto_plot=True,
             open_origin=True,
@@ -22056,7 +22056,7 @@ class CompareSection(MiniDatabaseSection):
         self.open_dma_button.clicked.connect(lambda: self._open_preview_graph("dma_iso_stress"))
         self.open_dma_button.setEnabled(False)
         graph_row.addWidget(self.open_dma_button)
-        self.open_shape_memory_button = QtWidgets.QPushButton("Open shape-memory graphs")
+        self.open_shape_memory_button = QtWidgets.QPushButton("Open manual stress/strain graphs")
         self.open_shape_memory_button.clicked.connect(
             lambda: self._open_preview_graph("shape_memory_stress_strain")
         )
@@ -22137,10 +22137,10 @@ class CompareSection(MiniDatabaseSection):
         )
         self.graph_preview_tabs.addTab(self.dma_iso_gallery, "DMA iso-stress")
         self.shape_memory_gallery = _GraphGalleryWidget(
-            "Select a row to preview shape-memory graphs.",
+            "Select a row to preview manual stress/strain graphs.",
             self.graph_preview_panel,
         )
-        self.graph_preview_tabs.addTab(self.shape_memory_gallery, "Shape memory")
+        self.graph_preview_tabs.addTab(self.shape_memory_gallery, "Manual stress/strain")
         self.fmr_gallery = _GraphGalleryWidget(
             "Select a row to preview FMR graphs.",
             self.graph_preview_panel,
@@ -23019,7 +23019,7 @@ class CompareSection(MiniDatabaseSection):
                     "Select a row to preview DMA iso-stress graphs."
                 )
                 self.shape_memory_gallery.clear(
-                    "Select a row to preview shape-memory graphs."
+                    "Select a row to preview manual stress/strain graphs."
                 )
                 self.fmr_gallery.clear("Select a row to preview FMR graphs.")
                 return
@@ -23102,7 +23102,7 @@ class CompareSection(MiniDatabaseSection):
             )
             self.shape_memory_gallery.set_items(
                 shape_memory_items,
-                "No shape-memory graphs available for this microwire.",
+                "No manual stress/strain graphs available for this microwire.",
             )
 
             fmr_records = self._ensure_fmr_groups().get(key, [])
@@ -23193,14 +23193,14 @@ class CompareSection(MiniDatabaseSection):
             empty_message = "No DMA iso-stress graphs available."
         elif kind == "shape_memory_stress_strain":
             records = self._ensure_shape_memory_stress_strain_groups().get(key, [])
-            title = "Shape memory stress/strain graphs"
+            title = "Manual stress/strain graphs"
             items = _shape_memory_stress_strain_preview_items(
                 records,
                 self.logger,
                 width_px=GRAPH_PREVIEW_WIDTH,
                 height_px=GRAPH_PREVIEW_HEIGHT,
             )
-            empty_message = "No shape-memory graphs available."
+            empty_message = "No manual stress/strain graphs available."
         else:
             records = self._ensure_fmr_groups().get(key, [])
             title = "FMR graphs"
@@ -23488,7 +23488,7 @@ class AssemblySection(QtWidgets.QWidget):
             ("transition_temps", "Transition temps"),
             ("dma_iso_stress", "DMA iso-stress"),
             ("mini_dma", "Mini DMA"),
-            ("shape_memory_stress_strain", "Shape memory stress/strain"),
+            ("shape_memory_stress_strain", "Manual stress/strain"),
             ("fmr", "FMR"),
             ("strain", "Strain"),
         ]
@@ -23547,7 +23547,7 @@ class AssemblySection(QtWidgets.QWidget):
         self.open_dma_button.clicked.connect(lambda: self._open_preview_graph("dma_iso_stress"))
         self.open_dma_button.setEnabled(False)
         graph_row.addWidget(self.open_dma_button)
-        self.open_shape_memory_button = QtWidgets.QPushButton("Open shape-memory graphs")
+        self.open_shape_memory_button = QtWidgets.QPushButton("Open manual stress/strain graphs")
         self.open_shape_memory_button.clicked.connect(
             lambda: self._open_preview_graph("shape_memory_stress_strain")
         )
@@ -23676,10 +23676,10 @@ class AssemblySection(QtWidgets.QWidget):
         )
         self.graph_preview_tabs.addTab(self.dma_iso_gallery, "DMA iso-stress")
         self.shape_memory_gallery = _GraphGalleryWidget(
-            "Select a row to preview shape-memory graphs.",
+            "Select a row to preview manual stress/strain graphs.",
             self.graph_preview_panel,
         )
-        self.graph_preview_tabs.addTab(self.shape_memory_gallery, "Shape memory")
+        self.graph_preview_tabs.addTab(self.shape_memory_gallery, "Manual stress/strain")
         self.fmr_gallery = _GraphGalleryWidget(
             "Select a row to preview FMR graphs.",
             self.graph_preview_panel,
@@ -24628,7 +24628,7 @@ class AssemblySection(QtWidgets.QWidget):
                     self._filter_hidden_records(payload, "shape_memory_stress_strain")
                 )
             else:
-                _mark_missing("Shape memory stress/strain")
+                _mark_missing("Manual stress/strain")
         self._cached_shape_memory_stress_strain_records = list(
             shape_memory_stress_strain_records
         )
@@ -26318,7 +26318,7 @@ class AssemblySection(QtWidgets.QWidget):
                 self.vsm_hysteresis_gallery.clear("Select a row to preview VSM hysteresis graphs.")
                 self.vsm_temperature_gallery.clear("Select a row to preview VSM temperature scans.")
                 self.dma_iso_gallery.clear("Select a row to preview DMA iso-stress graphs.")
-                self.shape_memory_gallery.clear("Select a row to preview shape-memory graphs.")
+                self.shape_memory_gallery.clear("Select a row to preview manual stress/strain graphs.")
                 self.fmr_gallery.clear("Select a row to preview FMR graphs.")
                 return
             key = _row_to_microwire_key(row)
@@ -26399,7 +26399,7 @@ class AssemblySection(QtWidgets.QWidget):
             )
             self.shape_memory_gallery.set_items(
                 shape_memory_items,
-                "No shape-memory graphs available for this microwire.",
+                "No manual stress/strain graphs available for this microwire.",
             )
 
             fmr_records = self._ensure_fmr_groups().get(key, [])
@@ -26560,7 +26560,7 @@ class AssemblySection(QtWidgets.QWidget):
         add_group("DMA iso-stress", section_map.get("dma_iso_stress", []))
         add_group("Mini DMA", section_map.get("mini_dma", []))
         add_group(
-            "Shape memory stress/strain",
+            "Manual stress/strain",
             section_map.get("shape_memory_stress_strain", []),
         )
         add_group("FMR", section_map.get("fmr", []))
@@ -26781,14 +26781,14 @@ class AssemblySection(QtWidgets.QWidget):
             empty_message = "No DMA iso-stress graphs available."
         elif kind == "shape_memory_stress_strain":
             records = self._ensure_shape_memory_stress_strain_groups().get(key, [])
-            title = "Shape memory stress/strain graphs"
+            title = "Manual stress/strain graphs"
             items = _shape_memory_stress_strain_preview_items(
                 records,
                 self.logger,
                 width_px=GRAPH_PREVIEW_WIDTH,
                 height_px=GRAPH_PREVIEW_HEIGHT,
             )
-            empty_message = "No shape-memory graphs available."
+            empty_message = "No manual stress/strain graphs available."
         else:
             records = self._ensure_fmr_groups().get(key, [])
             title = "FMR graphs"
@@ -27358,9 +27358,9 @@ class AssemblySection(QtWidgets.QWidget):
         if has_shape_memory:
             shape_memory_section = """
             <div class="preview-section">
-              <div class="preview-title">Shape memory stress/strain</div>
+              <div class="preview-title">Manual stress/strain</div>
               <div id="preview-shape-memory" class="preview-stack"></div>
-              <div id="preview-shape-memory-empty" class="preview-empty">No shape-memory graphs</div>
+              <div id="preview-shape-memory-empty" class="preview-empty">No manual stress/strain graphs</div>
             </div>
             """
         fmr_section = ""
@@ -28544,7 +28544,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         )
         self.tab_widget.addTab(
             self.shape_memory_stress_strain_section,
-            "Shape memory stress/strain",
+            "Manual stress/strain",
         )
         self.sections["shape_memory_stress_strain"] = (
             self.shape_memory_stress_strain_section

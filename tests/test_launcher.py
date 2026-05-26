@@ -57,7 +57,7 @@ def test_microwire_word_graph_sections_require_origin_graph_descriptors() -> Non
 
     assert launcher_module._microwire_word_graph_sections_for_row(source_only) == {}
     assert launcher_module._microwire_word_graph_sections_for_row(with_origin) == {
-        "Shape memory stress/strain": {
+        "Manual stress/strain": {
             "sources": [],
             "graphs": ["shape_memory.oggu"],
             "references": ["30mA", "shape_memory.oggu"],

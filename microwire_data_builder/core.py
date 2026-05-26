@@ -4700,7 +4700,7 @@ _WORD_REPORT_LABELS: Dict[str, str] = {
     VSM_HYSTERESIS_ORIGIN_COLUMN: "VSM hysteresis graphs (Origin)",
     DMA_ISOSTRESS_ORIGIN_COLUMN: "DMA iso-stress graphs (Origin)",
     MINI_DMA_ORIGIN_COLUMN: "Mini DMA graphs (Origin)",
-    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN: "Shape memory stress/strain graphs (Origin)",
+    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN: "Manual stress/strain graphs (Origin)",
     FMR_ORIGIN_COLUMN: "FMR graphs (Origin)",
     RVT_POINT_COUNT_COLUMN: "R vs T points",
     RVT_TEMPERATURE_RANGE_COLUMN: "R vs T temperature range (deg C)",
@@ -4799,7 +4799,7 @@ _WORD_GRAPH_SECTIONS: Tuple[
     ("DMA iso-stress", (DMA_ISOSTRESS_ORIGIN_COLUMN,), (DMA_ISOSTRESS_COLUMN,)),
     ("Mini DMA", (MINI_DMA_ORIGIN_COLUMN,), (MINI_DMA_COLUMN,)),
     (
-        "Shape memory stress/strain",
+        "Manual stress/strain",
         (SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,),
         (SHAPE_MEMORY_STRESS_STRAIN_COLUMN,),
     ),
@@ -7477,8 +7477,8 @@ def build_database(
                 row,
                 records=shape_memory_records,
                 origin_column=SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
-                plugin_name="Shape Memory Stress/Strain",
-                display_prefix="Shape memory stress/strain Origin graph",
+                plugin_name="Manual Stress/Strain",
+                display_prefix="Manual stress/strain Origin graph",
                 section_token="shape_memory_stress_strain",
             )
         shape_memory_entry = shape_memory_entry_map.get(key_str, {})

@@ -985,8 +985,8 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
     )
     parser.add_argument(
         "--visual-plugin",
-        default="shape-memory",
-        help="Plugin visual-check target. Currently supported: shape-memory.",
+        default="manual-stress-strain",
+        help="Plugin visual-check target. Currently supported: manual-stress-strain.",
     )
     parser.add_argument(
         "--visual-input",
@@ -998,7 +998,7 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         "--visual-layout",
         choices=("dual", "separate"),
         default="dual",
-        help="Shape-memory graph layout for visual-check mode.",
+        help="Manual stress/strain graph layout for visual-check mode.",
     )
     parser.add_argument(
         "--visual-output-dir",
@@ -1662,8 +1662,8 @@ _WORD_PROJECT_GRAPH_SOURCE_SPECS: dict[str, tuple[str, str, str, str, str]] = {
         "_word_shape_memory_stress_strain_sources",
         "Shape memory stress/strain graphs",
         "Shape memory stress/strain graphs (Origin)",
-        "Shape Memory Stress/Strain",
-        "Shape memory stress/strain Origin graph",
+        "Manual Stress/Strain",
+        "Manual stress/strain Origin graph",
     ),
     "fmr": (
         "_word_fmr_sources",
@@ -1707,7 +1707,7 @@ _WORD_REPORT_GRAPH_MANIFEST_SECTIONS: tuple[tuple[str, tuple[str, ...], tuple[st
         ("Mini DMA graphs", "Mini DMA graphs (Origin)"),
     ),
     (
-        "Shape memory stress/strain",
+        "Manual stress/strain",
         ("_word_shape_memory_stress_strain_sources",),
         ("Shape memory stress/strain graphs", "Shape memory stress/strain graphs (Origin)"),
     ),
@@ -2607,8 +2607,12 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
 
 
 def _run_visual_check(args: argparse.Namespace) -> int:
-    plugin_token = str(getattr(args, "visual_plugin", "shape-memory")).strip().lower()
+    plugin_token = str(getattr(args, "visual_plugin", "manual-stress-strain")).strip().lower()
     supported_tokens = {
+        "manual",
+        "manual-stress-strain",
+        "manual_stress_strain",
+        "manual stress/strain",
         "shape-memory",
         "shape_memory",
         "shape-memory-stress-strain",
@@ -2618,7 +2622,7 @@ def _run_visual_check(args: argparse.Namespace) -> int:
     if plugin_token not in supported_tokens:
         print(
             f"Unsupported --visual-plugin '{plugin_token}'. "
-            "Only shape-memory visual-check is currently implemented."
+            "Only manual stress/strain visual-check is currently implemented."
         )
         return 2
 
