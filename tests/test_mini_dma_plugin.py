@@ -4,15 +4,27 @@ from pathlib import Path
 
 import matplotlib
 import pytest
+from PyQt6 import QtWidgets
 
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt  # noqa: E402
 
 from plotting.plugins import builtin_plugin_registry
 from plotting.plugins.mini_dma import core
+from plotting.plugins.mini_dma.mini_dma_plugin import MiniDmaPlugin
 
 
 SAMPLE_RUN = Path("sample_data/mini dma/Ni50Fe27Ga23 12_2 test_run32")
+_APP_REF: QtWidgets.QApplication | None = None
+
+
+def _ensure_qapp() -> QtWidgets.QApplication:
+    global _APP_REF
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    _APP_REF = app
+    return app
 
 
 def test_load_run_accepts_folder_and_metadata_sample_name() -> None:
@@ -104,6 +116,23 @@ def test_strain_current_figure_can_use_each_trace_minimum_as_l0() -> None:
         plt.close(fig)
 
 
+def test_strain_current_figure_can_use_global_minimum_as_shared_l0() -> None:
+    run = core.load_run(SAMPLE_RUN)
+
+    fig = core.make_strain_current_figure(
+        run,
+        strain_baseline_mode=core.STRAIN_BASELINE_GLOBAL_MINIMUM,
+    )
+    try:
+        ax = fig.axes[0]
+        assert ax.get_ylabel() == "Strain from global minimum length [%]"
+        minima = [min(line.get_ydata()) for line in ax.lines]
+        assert min(minima) == pytest.approx(0.0)
+        assert any(value > 0.0 for value in minima)
+    finally:
+        plt.close(fig)
+
+
 def test_build_plot_frame_pairs_current_with_requested_y_column() -> None:
     run = core.load_run(SAMPLE_RUN)
     frame = core.build_plot_frame(run, y_column="strain_pct")
@@ -129,3 +158,18 @@ def test_plugin_is_registered() -> None:
     registry = builtin_plugin_registry()
 
     assert "Mini DMA" in registry
+
+
+def test_plugin_defaults_to_global_strain_baseline_and_power_axis() -> None:
+    app = _ensure_qapp()
+    host = QtWidgets.QWidget()
+    plugin = MiniDmaPlugin(host, "Mini DMA")
+    try:
+        plugin.settings_widget()
+        assert plugin._strain_baseline_mode() == core.STRAIN_BASELINE_GLOBAL_MINIMUM
+        assert plugin._show_power_top_axis_enabled() is True
+        plugin._set_strain_baseline_mode(core.STRAIN_BASELINE_PER_TARGET_MINIMUM)
+        assert plugin._strain_baseline_mode() == core.STRAIN_BASELINE_PER_TARGET_MINIMUM
+    finally:
+        host.close()
+        app.processEvents()

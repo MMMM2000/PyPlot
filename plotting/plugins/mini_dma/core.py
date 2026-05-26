@@ -22,6 +22,14 @@ REQUIRED_COLUMNS = {
 }
 CURRENT_COLUMNS = ("current_measured_mA", "current_set_mA")
 MIN_POINTS_PER_TARGET = 2
+STRAIN_BASELINE_RAW = "raw"
+STRAIN_BASELINE_GLOBAL_MINIMUM = "global_minimum"
+STRAIN_BASELINE_PER_TARGET_MINIMUM = "per_target_minimum"
+STRAIN_BASELINE_MODES = {
+    STRAIN_BASELINE_RAW,
+    STRAIN_BASELINE_GLOBAL_MINIMUM,
+    STRAIN_BASELINE_PER_TARGET_MINIMUM,
+}
 
 
 @dataclass(frozen=True)
@@ -117,18 +125,19 @@ def make_strain_current_figure(
     run: MiniDmaRun,
     *,
     zero_minimum_strain: bool = False,
+    strain_baseline_mode: str | None = None,
     show_power_top_axis: bool = False,
 ) -> Figure:
+    baseline_mode = _normalise_strain_baseline_mode(
+        strain_baseline_mode,
+        zero_minimum_strain=zero_minimum_strain,
+    )
     return _make_current_figure(
         run,
         y_column="strain_pct",
-        y_label=(
-            "Strain from trace-minimum length [%]"
-            if zero_minimum_strain
-            else "Strain [%]"
-        ),
+        y_label=_strain_axis_label(baseline_mode),
         title_suffix="Strain vs Current",
-        zero_minimum_y=zero_minimum_strain,
+        strain_baseline_mode=baseline_mode,
         show_power_top_axis=show_power_top_axis,
     )
 
@@ -155,7 +164,7 @@ def _make_current_figure(
     y_label: str,
     title_suffix: str,
     filter_resistance_outliers: bool = False,
-    zero_minimum_y: bool = False,
+    strain_baseline_mode: str = STRAIN_BASELINE_RAW,
     show_power_top_axis: bool = False,
 ) -> Figure:
     groups = current_sweep_groups(run.frame)
@@ -166,6 +175,16 @@ def _make_current_figure(
     ax = fig.add_subplot(111)
     power_currents: list[float] = []
     power_resistances: list[float] = []
+    global_l0_mm = (
+        _global_minimum_length_mm(run, [group for _target, group in groups])
+        if y_column == "strain_pct" and strain_baseline_mode == STRAIN_BASELINE_GLOBAL_MINIMUM
+        else None
+    )
+    global_strain_min = (
+        _global_minimum_strain_pct(run, [group for _target, group in groups])
+        if y_column == "strain_pct" and strain_baseline_mode == STRAIN_BASELINE_GLOBAL_MINIMUM
+        else None
+    )
     for target, group in groups:
         if filter_resistance_outliers:
             group = _drop_resistance_outliers(group)
@@ -175,8 +194,16 @@ def _make_current_figure(
             power_currents.extend(group["current_mA"].to_numpy(dtype=float).tolist())
             power_resistances.extend(group["resistance_ohm"].to_numpy(dtype=float).tolist())
         y_values = group[y_column].to_numpy(dtype=float)
-        if zero_minimum_y and len(y_values):
-            y_values = _strain_from_trace_minimum_length(run, group)
+        if y_column == "strain_pct" and len(y_values):
+            if strain_baseline_mode == STRAIN_BASELINE_PER_TARGET_MINIMUM:
+                y_values = _strain_from_trace_minimum_length(run, group)
+            elif strain_baseline_mode == STRAIN_BASELINE_GLOBAL_MINIMUM:
+                y_values = _strain_from_global_minimum_length(
+                    run,
+                    group,
+                    global_l0_mm,
+                    global_strain_min,
+                )
         ax.plot(
             group["current_mA"].to_numpy(dtype=float),
             y_values,
@@ -232,6 +259,22 @@ def strain_from_trace_minimum_length(run: MiniDmaRun, group: pd.DataFrame) -> pd
     return pd.Series(_strain_from_trace_minimum_length(run, group), index=group.index)
 
 
+def strain_from_global_minimum_length(
+    run: MiniDmaRun,
+    groups: Iterable[pd.DataFrame],
+) -> list[pd.Series]:
+    group_list = list(groups)
+    l0_mm = _global_minimum_length_mm(run, group_list)
+    global_strain_min = _global_minimum_strain_pct(run, group_list)
+    return [
+        pd.Series(
+            _strain_from_global_minimum_length(run, group, l0_mm, global_strain_min),
+            index=group.index,
+        )
+        for group in group_list
+    ]
+
+
 def _drop_resistance_outliers(group: pd.DataFrame) -> pd.DataFrame:
     if "resistance_ohm" not in group or len(group) < 6:
         return group
@@ -252,22 +295,90 @@ def _drop_resistance_outliers(group: pd.DataFrame) -> pd.DataFrame:
 
 def _strain_from_trace_minimum_length(run: MiniDmaRun, group: pd.DataFrame) -> pd.Series:
     """Recalculate strain with each curve's shortest measured length as l0."""
-    if "position_mm" in group.columns and run.initial_length_mm is not None:
-        position = pd.to_numeric(group["position_mm"], errors="coerce")
-        if position.notna().any():
-            length_mm = run.initial_length_mm + position
-            l0_mm = float(length_mm.min(skipna=True))
-            if pd.notna(l0_mm) and l0_mm > 0.0:
-                return (length_mm - l0_mm) / l0_mm * 100.0
-
-    strain_pct = pd.to_numeric(group["strain_pct"], errors="coerce")
-    if run.initial_length_mm is not None and strain_pct.notna().any():
-        length_mm = run.initial_length_mm * (1.0 + strain_pct / 100.0)
+    length_mm = _length_trace_mm(run, group)
+    if length_mm is not None and length_mm.notna().any():
         l0_mm = float(length_mm.min(skipna=True))
         if pd.notna(l0_mm) and l0_mm > 0.0:
             return (length_mm - l0_mm) / l0_mm * 100.0
 
+    strain_pct = pd.to_numeric(group["strain_pct"], errors="coerce")
     return strain_pct - strain_pct.min(skipna=True)
+
+
+def _strain_from_global_minimum_length(
+    run: MiniDmaRun,
+    group: pd.DataFrame,
+    global_l0_mm: float | None,
+    global_strain_min: float | None,
+) -> pd.Series:
+    length_mm = _length_trace_mm(run, group)
+    if length_mm is not None and length_mm.notna().any():
+        if global_l0_mm is not None and pd.notna(global_l0_mm) and global_l0_mm > 0.0:
+            return (length_mm - global_l0_mm) / global_l0_mm * 100.0
+
+    strain_pct = pd.to_numeric(group["strain_pct"], errors="coerce")
+    if global_strain_min is None:
+        global_strain_min = float(strain_pct.min(skipna=True))
+    return strain_pct - global_strain_min
+
+
+def _length_trace_mm(run: MiniDmaRun, group: pd.DataFrame) -> pd.Series | None:
+    if "position_mm" in group.columns and run.initial_length_mm is not None:
+        position = pd.to_numeric(group["position_mm"], errors="coerce")
+        if position.notna().any():
+            return run.initial_length_mm + position
+
+    strain_pct = pd.to_numeric(group["strain_pct"], errors="coerce")
+    if run.initial_length_mm is not None and strain_pct.notna().any():
+        return run.initial_length_mm * (1.0 + strain_pct / 100.0)
+    return None
+
+
+def _global_minimum_length_mm(run: MiniDmaRun, groups: Iterable[pd.DataFrame]) -> float | None:
+    minima: list[float] = []
+    for group in groups:
+        length_mm = _length_trace_mm(run, group)
+        if length_mm is None or not length_mm.notna().any():
+            continue
+        value = float(length_mm.min(skipna=True))
+        if pd.notna(value) and value > 0.0:
+            minima.append(value)
+    if not minima:
+        return None
+    return min(minima)
+
+
+def _global_minimum_strain_pct(run: MiniDmaRun, groups: Iterable[pd.DataFrame]) -> float | None:
+    minima: list[float] = []
+    for group in groups:
+        strain_pct = pd.to_numeric(group["strain_pct"], errors="coerce")
+        if strain_pct.notna().any():
+            value = float(strain_pct.min(skipna=True))
+            if pd.notna(value):
+                minima.append(value)
+    if not minima:
+        return None
+    return min(minima)
+
+
+def _normalise_strain_baseline_mode(
+    mode: str | None,
+    *,
+    zero_minimum_strain: bool = False,
+) -> str:
+    if isinstance(mode, str) and mode in STRAIN_BASELINE_MODES:
+        return mode
+    if zero_minimum_strain:
+        return STRAIN_BASELINE_PER_TARGET_MINIMUM
+    return STRAIN_BASELINE_RAW
+
+
+def _strain_axis_label(mode: str) -> str:
+    if mode == STRAIN_BASELINE_GLOBAL_MINIMUM:
+        return "Strain from global minimum length [%]"
+    if mode == STRAIN_BASELINE_PER_TARGET_MINIMUM:
+        return "Strain from trace-minimum length [%]"
+    return "Strain [%]"
 
 
 def _choose_current_column(frame: pd.DataFrame) -> str | None:

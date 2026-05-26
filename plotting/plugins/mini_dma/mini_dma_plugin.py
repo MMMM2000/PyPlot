@@ -28,7 +28,7 @@ class MiniDmaPlugin(PyPlotPlugin):
         self._runs: list[core.MiniDmaRun] = []
         self._plot_tabs: list[QtWidgets.QWidget] = []
         self._summary_label: QtWidgets.QLabel | None = None
-        self._zero_minimum_strain_checkbox: QtWidgets.QCheckBox | None = None
+        self._strain_baseline_combo: QtWidgets.QComboBox | None = None
         self._show_power_top_axis_checkbox: QtWidgets.QCheckBox | None = None
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
@@ -64,17 +64,30 @@ class MiniDmaPlugin(PyPlotPlugin):
         )
         note.setWordWrap(True)
         section_layout.addWidget(note)
-        zero_minimum = QtWidgets.QCheckBox("Use each trace minimum as strain l0")
-        zero_minimum.setToolTip(
-            "Recalculate each strain-current curve using the shortest measured length in that trace "
-            "as l0, so its lowest point is physically treated as 0 strain."
+        baseline_label = QtWidgets.QLabel("Strain baseline:")
+        section_layout.addWidget(baseline_label)
+        baseline_combo = QtWidgets.QComboBox()
+        baseline_combo.setToolTip(
+            "Choose how Mini DMA recalculates the strain-current Y axis. "
+            "Global minimum uses one shared l0 from all target-stress curves; "
+            "each target minimum gives every stress plateau its own zero."
         )
-        section_layout.addWidget(zero_minimum)
-        self._zero_minimum_strain_checkbox = zero_minimum
+        baseline_combo.addItem(
+            "Global minimum length",
+            core.STRAIN_BASELINE_GLOBAL_MINIMUM,
+        )
+        baseline_combo.addItem(
+            "Each target minimum",
+            core.STRAIN_BASELINE_PER_TARGET_MINIMUM,
+        )
+        baseline_combo.addItem("Measured strain", core.STRAIN_BASELINE_RAW)
+        section_layout.addWidget(baseline_combo)
+        self._strain_baseline_combo = baseline_combo
         show_power = QtWidgets.QCheckBox("Show power top axis")
         show_power.setToolTip(
             "Add a top X axis with P = I^2R labels calculated from the current-sweep curves."
         )
+        show_power.setChecked(True)
         section_layout.addWidget(show_power)
         self._show_power_top_axis_checkbox = show_power
         layout.addWidget(section)
@@ -137,17 +150,14 @@ class MiniDmaPlugin(PyPlotPlugin):
 
         self.clear_plot_tabs(self._plot_tabs)
         plots_created = 0
-        zero_minimum_strain = bool(
-            self._zero_minimum_strain_checkbox is not None
-            and self._zero_minimum_strain_checkbox.isChecked()
-        )
+        strain_baseline_mode = self._strain_baseline_mode()
         for run in self._runs:
             plot_specs = (
                 (
                     "strain_current",
                     lambda current_run: core.make_strain_current_figure(
                         current_run,
-                        zero_minimum_strain=zero_minimum_strain,
+                        strain_baseline_mode=strain_baseline_mode,
                         show_power_top_axis=self._show_power_top_axis_enabled(),
                     ),
                 ),
@@ -264,12 +274,14 @@ class MiniDmaPlugin(PyPlotPlugin):
                 "plot_kind": plot_kind,
                 "sample_name": run.sample_name,
                 "zero_minimum_strain": (
-                    bool(
-                        self._zero_minimum_strain_checkbox is not None
-                        and self._zero_minimum_strain_checkbox.isChecked()
-                    )
+                    self._strain_baseline_mode() != core.STRAIN_BASELINE_RAW
                     if plot_kind == "strain_current"
                     else False
+                ),
+                "strain_baseline_mode": (
+                    self._strain_baseline_mode()
+                    if plot_kind == "strain_current"
+                    else core.STRAIN_BASELINE_RAW
                 ),
                 "show_power_top_axis": (
                     self._show_power_top_axis_enabled()
@@ -296,6 +308,17 @@ class MiniDmaPlugin(PyPlotPlugin):
         checkbox = self._show_power_top_axis_checkbox
         return bool(checkbox is not None and checkbox.isChecked())
 
+    def _strain_baseline_mode(self) -> str:
+        combo = self._strain_baseline_combo
+        if combo is None:
+            self.settings_widget()
+            combo = self._strain_baseline_combo
+        if combo is not None:
+            value = combo.currentData()
+            if isinstance(value, str) and value in core.STRAIN_BASELINE_MODES:
+                return value
+        return core.STRAIN_BASELINE_GLOBAL_MINIMUM
+
     def _set_show_power_top_axis(self, enabled: bool) -> None:
         if self._show_power_top_axis_checkbox is None:
             self.settings_widget()
@@ -303,7 +326,18 @@ class MiniDmaPlugin(PyPlotPlugin):
             self._show_power_top_axis_checkbox.setChecked(bool(enabled))
 
     def _set_zero_minimum_strain(self, enabled: bool) -> None:
-        if self._zero_minimum_strain_checkbox is None:
+        self._set_strain_baseline_mode(
+            core.STRAIN_BASELINE_PER_TARGET_MINIMUM
+            if enabled
+            else core.STRAIN_BASELINE_RAW
+        )
+
+    def _set_strain_baseline_mode(self, mode: str) -> None:
+        if self._strain_baseline_combo is None:
             self.settings_widget()
-        if self._zero_minimum_strain_checkbox is not None:
-            self._zero_minimum_strain_checkbox.setChecked(bool(enabled))
+        combo = self._strain_baseline_combo
+        if combo is None:
+            return
+        index = combo.findData(mode)
+        if index >= 0:
+            combo.setCurrentIndex(index)
