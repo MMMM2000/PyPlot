@@ -89,7 +89,8 @@ AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
 AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
 AC_PLOT_REFRESH_INTERVAL_S = 1.0
 AC_PLOT_RECENT_POINTS = 800
-AC_PLOT_RETAINED_POINTS = 1200
+AC_PLOT_MEDIAN_HISTORY_POINTS = 10000
+AC_PLOT_RETAINED_POINTS = 10000
 AC_PLOT_JITTER_PX = 5.0
 AC_PLOT_SPREAD_PIXELS = {
     "off": 0.0,
@@ -724,7 +725,7 @@ class MainWindow(CurrentAnnealingWindow):
             plot_widget.setMinimumSize(320, 230)
             plot_widget.setBackground(self._qt_color_to_tuple(self.palette().color(QtGui.QPalette.ColorRole.Base)))
             plot_item = plot_widget.getPlotItem()
-            plot_item.showGrid(x=True, y=True, alpha=0.22)
+            plot_item.showGrid(x=False, y=False)
             plot_item.showAxis("right")
             plot_item.getAxis("top").setStyle(showValues=False)
             plot_item.getAxis("right").setStyle(showValues=True)
@@ -1211,7 +1212,7 @@ class MainWindow(CurrentAnnealingWindow):
             "extra_item_type": extra_type,
             "extra_xy": extra_xy,
             "show_legend": False,
-            "grid": "left-only",
+            "grid": "off",
         }
 
     def _style_pg_axis(self, axis: Any, color: str | QtGui.QColor) -> None:
@@ -1549,10 +1550,12 @@ class MainWindow(CurrentAnnealingWindow):
         return float(x_value) + (float(offset_px) / bbox_width) * span
 
     def _display_points_for_plot(self, x_key: str) -> list[AcPlotPoint]:
-        points = list(getattr(self, "_ac_plot_points", []))[-AC_PLOT_RECENT_POINTS:]
         if x_key == "current_mA":
             x_key = "current_actual_mA"
-        return points
+        points = list(getattr(self, "_ac_plot_points", []))
+        if x_key == "elapsed_s":
+            return points[-AC_PLOT_RECENT_POINTS:]
+        return points[-AC_PLOT_MEDIAN_HISTORY_POINTS:]
 
     def _start_ac_plot_refresh_timer(self) -> None:
         timer = QtCore.QTimer(self)
@@ -1572,7 +1575,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._refresh_ac_plots(force=True)
 
     @staticmethod
-    def _style_ac_axis(axis: Any, theme: dict[str, Any], *, grid: bool = True) -> None:
+    def _style_ac_axis(axis: Any, theme: dict[str, Any], *, grid: bool = False) -> None:
         axis.set_facecolor(theme["axes_rgb"])
         for spine in axis.spines.values():
             spine.set_color(theme["text_rgb"])

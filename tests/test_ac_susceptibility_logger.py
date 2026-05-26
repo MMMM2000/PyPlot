@@ -2118,7 +2118,7 @@ def test_ac_logger_frequency_plot_uses_log_scatter_and_colored_axes_without_lege
         assert state["left_color"] == window._plot_channel("rs_ohm").color
         assert state["right_color"] == window._plot_channel("ls_h").color
         assert state["show_legend"] is False
-        assert state["grid"] == "left-only"
+        assert state["grid"] == "off"
     finally:
         window.close()
         app.processEvents()
@@ -2214,11 +2214,12 @@ def test_ac_logger_frequency_plot_shows_one_median_per_condition(
         app.processEvents()
 
 
-def test_ac_logger_display_points_caps_frequency_plots_to_recent_rows(
+def test_ac_logger_display_points_keeps_deeper_history_for_median_plots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
     monkeypatch.setattr(ac_logger, "AC_PLOT_RECENT_POINTS", 50)
+    monkeypatch.setattr(ac_logger, "AC_PLOT_MEDIAN_HISTORY_POINTS", 120)
     window._ac_plot_points = [
         ac_logger.AcPlotPoint(
             float(index),
@@ -2232,10 +2233,13 @@ def test_ac_logger_display_points_caps_frequency_plots_to_recent_rows(
         for index in range(200)
     ]
 
-    points = window._display_points_for_plot("frequency_hz")
+    frequency_points = window._display_points_for_plot("frequency_hz")
+    elapsed_points = window._display_points_for_plot("elapsed_s")
 
-    assert len(points) <= 50
-    assert min(point.elapsed_s for point in points) >= 150.0
+    assert len(frequency_points) == 120
+    assert min(point.elapsed_s for point in frequency_points) >= 80.0
+    assert len(elapsed_points) == 50
+    assert min(point.elapsed_s for point in elapsed_points) >= 150.0
 
 
 def test_ac_logger_live_plot_buffer_keeps_only_recent_points(

@@ -290,9 +290,9 @@ not create or command a power-supply backend.
 The right-side graph area follows the Mini DMA dashboard pattern: use
 **Configure plots** to choose which plot tiles are visible and what each tile
 uses for bottom X, left Y, optional right Y, and optional far-right Y.
-Live plots intentionally show only a recent, thinned preview of the run so
-overnight sweeps do not spend minutes redrawing old points. The TSV file still
-contains every acquired LCR and PSU readback row.
+Live plots intentionally separate the raw time trace from parameter summaries
+so overnight sweeps do not spend minutes redrawing old points. The TSV file
+still contains every acquired LCR and PSU readback row.
 
 By default it shows:
 
@@ -309,20 +309,22 @@ measured current when old settings are loaded.
 The live dashboard uses PyQtGraph so it can update persistent plot objects
 instead of rebuilding a Matplotlib figure. The raw TSV logging path is separate
 from the dashboard: the logger can keep writing every valid LCR/PSU read while
-the display shows a reduced, recent view for responsiveness.
+the display shows reduced views for responsiveness.
 
 Additional selectable channels include elapsed time, measured current, set
 current, frequency, voltage amplitude, LCR excitation current, `Rs`, `Ls`, wire resistance, and PSU power. The
 plot renderer follows the Qt palette so dark mode labels, ticks, and titles
 remain readable.
 
-Elapsed-time plots are raw recent traces. All other plot X axes show one median
-point for each model/frequency/excitation/current setting, which keeps dense
-parameter scans readable without hiding the complete raw TSV data. `Rs` and
-`Ls` are scatter-only by default and use separate Y scales. Wire resistance is
-drawn as line plus symbols when selected because it follows the DC current path
-through the microwire and contacts, using the same per-condition median
-reduction so noisy PSU readback does not dominate the dashboard.
+Elapsed-time plots are raw recent traces. All other plot X axes use a deeper
+history window and show one median point for each
+model/frequency/excitation/current setting, which keeps dense parameter scans
+readable without hiding the complete raw TSV data. Plot gridlines are hidden to
+keep dense multi-axis views cleaner. `Rs` and `Ls` are scatter-only by default
+and use separate Y scales. Wire resistance is drawn as line plus symbols when
+selected because it follows the DC current path through the microwire and
+contacts, using the same per-condition median reduction so noisy PSU readback
+does not dominate the dashboard.
 
 When frequency is selected as the X axis, the logger uses a logarithmic scale.
 Current, frequency, and amplitude scatter plots can use display-space
