@@ -168,6 +168,7 @@ GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
+MANUAL_JOG_TIC_STATUS_FRESH_S = 2.0
 TIC_USB_VENDOR_ID = 0x1FFB
 TIC_USB_TRANSPORT_NATIVE = "native-usb"
 TIC_USB_TRANSPORT_ALIASES = {TIC_USB_TRANSPORT_NATIVE, "usb", "pyusb"}
@@ -1844,20 +1845,49 @@ class MiniDmaControlConfig:
     return_to_origin: bool
 
 
+def _find_libusb_wheel_library(candidate: str) -> str | None:
+    try:
+        import libusb._platform as libusb_platform  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    dll_path = Path(str(libusb_platform.DLL_PATH))
+    if not dll_path.exists():
+        return None
+    stem = dll_path.name.lower()
+    normalized_candidate = candidate.lower().replace(".dll", "")
+    if normalized_candidate in stem:
+        return str(dll_path)
+    return None
+
+
 def _load_pyusb_backend() -> tuple[Any, Any, Any | None]:
     try:
         import usb.core as usb_core  # type: ignore[import-not-found]
         import usb.util as usb_util  # type: ignore[import-not-found]
         import usb.backend.libusb1 as usb_libusb1  # type: ignore[import-not-found]
     except Exception as exc:  # pragma: no cover - optional dependency guard
-        raise RuntimeError("PyUSB is not installed; install pyusb and libusb-package.") from exc
-    backend = None
+        raise RuntimeError("PyUSB is not installed; install pyusb and libusb.") from exc
+
+    backend_errors: list[str] = []
+    backend = usb_libusb1.get_backend(find_library=_find_libusb_wheel_library)
+    if backend is not None:
+        return usb_core, usb_util, backend
+
     try:
         import libusb_package  # type: ignore[import-not-found]
 
         backend = usb_libusb1.get_backend(find_library=libusb_package.find_library)
-    except Exception:
+    except Exception as exc:
+        backend_errors.append(str(exc))
         backend = usb_libusb1.get_backend()
+    if backend is None:
+        reason = "; ".join(message for message in backend_errors if message)
+        suffix = f" ({reason})" if reason else ""
+        raise RuntimeError(
+            "No libusb backend is available for PyUSB. Install the 64-bit libusb wheel "
+            "or make a matching libusb-1.0.dll available."
+            f"{suffix}"
+        )
     return usb_core, usb_util, backend
 
 
@@ -1893,7 +1923,7 @@ class NativeTicUsbController:
 
     def _find_device(self) -> Any:
         try:
-            devices = list(
+            raw_devices = list(
                 self._usb_core.find(
                     find_all=True,
                     idVendor=TIC_USB_VENDOR_ID,
@@ -1903,16 +1933,24 @@ class NativeTicUsbController:
             )
         except Exception as exc:
             raise RuntimeError(f"Native Tic USB scan failed: {exc}") from exc
-        for device in devices:
+        tic_devices: list[tuple[Any, str, str]] = []
+        serial_unreadable_devices: list[Any] = []
+        for device in raw_devices:
             product = self._device_string(device, getattr(device, "iProduct", None))
             serial = self._device_string(device, getattr(device, "iSerialNumber", None))
             if product and "tic" not in product.lower():
                 continue
+            tic_devices.append((device, product, serial))
+            if self.device_serial and not serial:
+                serial_unreadable_devices.append(device)
+        for device, _product, serial in tic_devices:
             if self.device_serial and serial and serial != self.device_serial:
                 continue
             if self.device_serial and not serial:
                 continue
             return device
+        if self.device_serial and len(tic_devices) == 1 and len(serial_unreadable_devices) == 1:
+            return serial_unreadable_devices[0]
         serial_text = f" with serial {self.device_serial}" if self.device_serial else ""
         raise RuntimeError(f"No Pololu Tic USB device{serial_text} was found.")
 
@@ -2094,46 +2132,62 @@ class TicController:
     def get_status(self) -> str:
         native = self._native_controller()
         if native is not None:
-            native_status = native.get_status()
-            if self._native_only():
-                return native_status
             try:
-                return self.run("--status", "--full")
-            except Exception:
-                return native_status
+                return native.get_status()
+            except Exception as exc:
+                self._native_error = exc
+                if self._native_only():
+                    raise
         last_error: Exception | None = None
         for args in (("--status", "--full"), ("--status",), ("--full",)):
             try:
-                return self.run(*args)
+                status_text = self.run(*args)
+                if _extract_status_float(status_text, "VIN voltage") is not None:
+                    return status_text
+                last_error = RuntimeError(
+                    "ticcmd status output did not include VIN voltage; motor power cannot be verified."
+                )
             except Exception as exc:
                 last_error = exc
                 continue
-        try:
-            return self.run("--list")
-        except Exception:
-            if last_error is not None:
-                raise last_error
-            raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("ticcmd status did not return motor status.")
 
     def halt_and_hold(self) -> None:
         native = self._native_controller()
         if native is not None:
-            native.halt_and_hold()
-            return
+            try:
+                native.halt_and_hold()
+                return
+            except Exception as exc:
+                self._native_error = exc
+                if self._native_only():
+                    raise
         self.run("--halt-and-hold")
 
     def reset_command_timeout(self) -> None:
         native = self._native_controller()
         if native is not None:
-            native.reset_command_timeout()
-            return
+            try:
+                native.reset_command_timeout()
+                return
+            except Exception as exc:
+                self._native_error = exc
+                if self._native_only():
+                    raise
         self.run("--reset-command-timeout", timeout_s=2.0)
 
     def set_current_position(self, position_steps: int) -> None:
         native = self._native_controller()
         if native is not None:
-            native.set_current_position(position_steps)
-            return
+            try:
+                native.set_current_position(position_steps)
+                return
+            except Exception as exc:
+                self._native_error = exc
+                if self._native_only():
+                    raise
         self.run("--halt-and-set-position", str(int(position_steps)))
 
     def set_step_mode(self, step_mode: str) -> None:
@@ -2145,14 +2199,24 @@ class TicController:
     def set_current_limit_mA(self, target_mA: float) -> int:
         native = self._native_controller()
         if native is not None:
-            return native.set_current_limit_mA(target_mA)
+            try:
+                return native.set_current_limit_mA(target_mA)
+            except Exception as exc:
+                self._native_error = exc
+                if self._native_only():
+                    raise
         return apply_tic_current_limit_mA(self, target_mA)
 
     def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
         native = self._native_controller()
         if native is not None:
-            native.set_target_velocity(velocity_steps_per_10k_s)
-            return
+            try:
+                native.set_target_velocity(velocity_steps_per_10k_s)
+                return
+            except Exception as exc:
+                self._native_error = exc
+                if self._native_only():
+                    raise
         self.run(
             "--energize",
             "--reset-command-timeout",
@@ -2164,8 +2228,13 @@ class TicController:
     def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
         native = self._native_controller()
         if native is not None:
-            native.set_target_position(position_steps, max_speed=max_speed)
-            return
+            try:
+                native.set_target_position(position_steps, max_speed=max_speed)
+                return
+            except Exception as exc:
+                self._native_error = exc
+                if self._native_only():
+                    raise
         args = [
             "--energize",
             "--reset-command-timeout",
@@ -12047,10 +12116,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _prepare_manual_jog_press(self) -> None:
         previous_motor_power_ok = self._tic_motor_power_ok
-        try:
-            refreshed = self._refresh_tic_status()
-        except Exception:
-            refreshed = False
+        refreshed = False
+        recent_ok_status = (
+            self._tic_motor_power_ok is True
+            and self._last_tic_status_time_s is not None
+            and time.time() - self._last_tic_status_time_s <= MANUAL_JOG_TIC_STATUS_FRESH_S
+        )
+        if recent_ok_status:
+            refreshed = True
+        else:
+            try:
+                refreshed = self._refresh_tic_status()
+            except Exception:
+                refreshed = False
         if not refreshed and previous_motor_power_ok is None:
             self._tic_motor_power_ok = None
         if self._has_unconfirmed_motion_command():

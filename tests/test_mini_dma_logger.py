@@ -2321,6 +2321,52 @@ def test_manual_jog_press_resyncs_stale_previous_target(
         _close_test_window(window)
 
 
+def test_manual_jog_press_uses_recent_good_tic_status_without_blocking_refresh(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    refresh_calls: list[bool] = []
+
+    window._refresh_tic_status = lambda: refresh_calls.append(True) or True  # type: ignore[method-assign]
+    window._tic_motor_power_ok = True
+    window._last_tic_vin_v = 12.0
+    window._last_tic_status_time_s = time.time()
+    window._last_motion_command_time_s = None
+    window._current_position_mm = 1.25
+    window._effective_position_mm = 9.0
+    window._last_effective_move_target_mm = 9.0
+    window._last_move_target_mm = 9.0
+    window._manual_jog_uses_last_target = True
+
+    try:
+        window._prepare_manual_jog_press()
+
+        assert refresh_calls == []
+        assert window._effective_position_mm == pytest.approx(1.25)
+        assert window._last_effective_move_target_mm == pytest.approx(1.25)
+        assert window._last_move_target_mm == pytest.approx(1.25)
+        assert window._manual_jog_uses_last_target is False
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_jog_press_refreshes_stale_tic_status(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    refresh_calls: list[bool] = []
+
+    window._refresh_tic_status = lambda: refresh_calls.append(True) or True  # type: ignore[method-assign]
+    window._tic_motor_power_ok = True
+    window._last_tic_status_time_s = time.time() - (mini_dma_mod.MANUAL_JOG_TIC_STATUS_FRESH_S + 1.0)
+
+    try:
+        window._prepare_manual_jog_press()
+
+        assert refresh_calls == [True]
+    finally:
+        _close_test_window(window)
+
+
 def test_held_manual_jog_advances_by_configured_linear_speed(
     tmp_path: Path,
     qtbot,
@@ -7920,6 +7966,34 @@ def test_tic_status_falls_back_when_full_status_times_out(monkeypatch: pytest.Mo
     ]
 
 
+def test_tic_status_raises_instead_of_returning_device_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = "00501366, Tic T500\n"
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    controller = mini_dma_mod.TicController(command_path="ticcmd", device_serial="00501366")
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    with pytest.raises(RuntimeError, match="VIN voltage"):
+        controller.get_status()
+
+    assert calls == [
+        ["ticcmd.exe", "-d", "00501366", "--status", "--full"],
+        ["ticcmd.exe", "-d", "00501366", "--status"],
+        ["ticcmd.exe", "-d", "00501366", "--full"],
+    ]
+
+
 def test_tic_units_per_mm_follow_microstep_factor() -> None:
     assert mini_dma_mod.tic_units_per_mm(100.0, "full") == pytest.approx(100.0)
     assert mini_dma_mod.tic_units_per_mm(100.0, "1/2 step") == pytest.approx(200.0)
@@ -8041,6 +8115,95 @@ def test_native_tic_usb_controller_formats_status(monkeypatch: pytest.MonkeyPatc
     assert "Errors currently stopping the motor: None" in status
 
 
+def test_native_tic_usb_controller_accepts_single_device_when_serial_string_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeDevice:
+        idVendor = mini_dma_mod.TIC_USB_VENDOR_ID
+        iProduct = 2
+        iSerialNumber = 3
+
+        def ctrl_transfer(
+            self,
+            request_type: int,
+            request: int,
+            value: int = 0,
+            index: int = 0,
+            data_or_wLength: object = None,
+            *,
+            timeout: int | None = None,
+        ) -> bytes:
+            data = bytearray(0x35)
+            data[0x00] = 10
+            data[0x33:0x35] = (12000).to_bytes(2, "little")
+            return bytes(data)
+
+    device = _FakeDevice()
+
+    class _FakeCore:
+        @staticmethod
+        def find(*, find_all: bool, idVendor: int, backend: object | None = None) -> list[_FakeDevice]:
+            return [device]
+
+    class _FakeUtil:
+        @staticmethod
+        def get_string(_device: _FakeDevice, index: int) -> str:
+            raise ValueError("The device has no langid")
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "_load_pyusb_backend",
+        lambda: (_FakeCore, _FakeUtil, object()),
+    )
+
+    status = mini_dma_mod.NativeTicUsbController(device_serial="00501366").get_status()
+
+    assert "VIN voltage: 12.00 V" in status
+
+
+def test_native_tic_usb_controller_rejects_ambiguous_unreadable_serials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeDevice:
+        idVendor = mini_dma_mod.TIC_USB_VENDOR_ID
+        iProduct = 2
+        iSerialNumber = 3
+
+    class _FakeCore:
+        @staticmethod
+        def find(*, find_all: bool, idVendor: int, backend: object | None = None) -> list[_FakeDevice]:
+            return [_FakeDevice(), _FakeDevice()]
+
+    class _FakeUtil:
+        @staticmethod
+        def get_string(_device: _FakeDevice, index: int) -> str:
+            raise ValueError("The device has no langid")
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "_load_pyusb_backend",
+        lambda: (_FakeCore, _FakeUtil, object()),
+    )
+
+    with pytest.raises(RuntimeError, match="No Pololu Tic USB device"):
+        mini_dma_mod.NativeTicUsbController(device_serial="00501366")
+
+
+def test_libusb_wheel_library_finder_accepts_bundled_dll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import libusb._platform as libusb_platform
+
+    dll_path = tmp_path / "libusb-1.0.dll"
+    dll_path.write_bytes(b"fake dll")
+    monkeypatch.setattr(libusb_platform, "DLL_PATH", dll_path)
+
+    assert mini_dma_mod._find_libusb_wheel_library("usb-1.0") == str(dll_path)
+    assert mini_dma_mod._find_libusb_wheel_library("libusb-1.0") == str(dll_path)
+    assert mini_dma_mod._find_libusb_wheel_library("other") is None
+
+
 def test_tic_controller_prefers_native_usb_when_requested(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeNative:
         def __init__(self, *, device_serial: str = "") -> None:
@@ -8054,6 +8217,9 @@ def test_tic_controller_prefers_native_usb_when_requested(monkeypatch: pytest.Mo
         def set_current_limit_mA(self, target_mA: float) -> int:
             self.current_limits.append(target_mA)
             return 343
+
+        def get_status(self) -> str:
+            return "VIN voltage: 12.00 V\nTransport: native USB\n"
 
     created: list[_FakeNative] = []
 
@@ -8071,12 +8237,14 @@ def test_tic_controller_prefers_native_usb_when_requested(monkeypatch: pytest.Mo
     )
     controller.set_target_position(42, max_speed=123)
     applied_current_limit = controller.set_current_limit_mA(343)
+    status = controller.get_status()
 
     assert len(created) == 1
     assert created[0].device_serial == "00501366"
     assert created[0].targets == [(42, 123)]
     assert created[0].current_limits == [343]
     assert applied_current_limit == 343
+    assert "Transport: native USB" in status
 
 
 def test_tic_controller_auto_falls_back_to_ticcmd_when_native_usb_unavailable(
@@ -8108,6 +8276,90 @@ def test_tic_controller_auto_falls_back_to_ticcmd_when_native_usb_unavailable(
     controller.reset_command_timeout()
 
     assert calls == [["ticcmd.exe", "-d", "00501366", "--reset-command-timeout"]]
+
+
+def test_tic_controller_falls_back_to_ticcmd_when_native_status_call_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _FakeNative:
+        def __init__(self, *, device_serial: str = "") -> None:
+            self.device_serial = device_serial
+
+        def get_status(self) -> str:
+            raise RuntimeError("native access denied")
+
+    class _Completed:
+        returncode = 0
+        stdout = "VIN voltage: 12.00 V\nOperation state: Normal\n"
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    controller = mini_dma_mod.TicController(
+        command_path="ticcmd",
+        device_serial="00501366",
+        prefer_native_usb=True,
+    )
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _FakeNative)
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    status = controller.get_status()
+
+    assert "VIN voltage: 12.00 V" in status
+    assert calls == [["ticcmd.exe", "-d", "00501366", "--status", "--full"]]
+
+
+def test_tic_controller_falls_back_to_ticcmd_when_native_move_call_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _FakeNative:
+        def __init__(self, *, device_serial: str = "") -> None:
+            self.device_serial = device_serial
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            raise RuntimeError("native access denied")
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    controller = mini_dma_mod.TicController(
+        command_path="ticcmd",
+        device_serial="00501366",
+        prefer_native_usb=True,
+    )
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _FakeNative)
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    controller.set_target_position(-42, max_speed=123)
+
+    assert calls == [
+        [
+            "ticcmd.exe",
+            "-d",
+            "00501366",
+            "--energize",
+            "--reset-command-timeout",
+            "--exit-safe-start",
+            "--max-speed",
+            "123",
+            "--position",
+            "-42",
+        ]
+    ]
 
 
 def test_tic_controller_is_reused_until_connection_settings_change(

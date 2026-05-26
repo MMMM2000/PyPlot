@@ -69,4 +69,8 @@ Shared-broker Mini DMA connect performs a broker `snapshot` request before repor
 
 Mini DMA manual hardware auto-connect powers the selected HMP motor-supply channel before checking Tic VIN. That keeps the hardware-card result aligned with benches where the Tic motor rail is supplied by the same HMP channel that auto-connect is responsible for enabling.
 
+Mini DMA prefers native USB for Pololu Tic commands when **Prefer native USB commands when available** is checked. The Python runtime includes the `libusb` wheel so PyUSB can load a matching 64-bit `libusb-1.0.dll`; `ticcmd` remains the fallback path if the native USB backend, device scan, or individual native USB command is unavailable. If Windows/libusb cannot read the Tic string descriptors but exactly one Tic is visible, Mini DMA accepts that device for native control. Tic status checks must return a parseable `VIN voltage` before Mini DMA treats motor power as verified; device-list output is not accepted as motor status.
+
+For quick regression checks during shared-HMP/Mini-DMA work, run `scripts/run_mini_dma_shared_hmp_checks.ps1`. It uses a workspace temp root and covers the explicit-channel guardrails, broker controller path, motor-supply-before-Tic ordering, native USB backend, manual jog status freshness, and the Current Annealing shared-broker smoke tests without running the full Mini DMA test file.
+
 For end-to-end bench checks, use `docs/shared_hmp_bench_validation.md`. It captures the current CH1/CH3/CH4 wiring, low-current/no-wire test limits, motor-supply checks, small-motion smoke, connected-current smoke, and final HMP safety readback.
