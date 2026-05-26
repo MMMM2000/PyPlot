@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "kind": "mini_dma_bench_sequence",
+  "summary_path": "artifacts/mini-dma-bench-summary.json",
+  "log_dir": "G:/My Drive/1 Projects/Praha/mini DMA/automated",
+  "default_max_run_duration_s": 3600,
+  "max_total_duration_s": 28800,
+  "length_setup": {
+    "starting_length_mm": 20.0,
+    "preload_length_mm": 20.4
+  },
+  "runs": [
+    {
+      "name": "iso-strain-control-a",
+      "recipe_path": "recipes/iso-strain-control-a.recipe.json",
+      "repeat": 3,
+      "max_run_duration_s": 1800
+    },
+    {
+      "name": "iso-strain-control-b",
+      "recipe_path": "recipes/iso-strain-control-b.recipe.json",
+      "repeat": 3
+    }
+  ]
+}

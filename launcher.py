@@ -547,6 +547,11 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         help="Run a machine-facing automation recipe JSON file.",
     )
     parser.add_argument(
+        "--mini-dma-bench-plan",
+        default=None,
+        help="Run or dry-run an explicitly armed Mini DMA bench automation plan JSON file.",
+    )
+    parser.add_argument(
         "--pyplot-list-plugins",
         action="store_true",
         help="List available PyPlot plugin names and exit.",
@@ -820,6 +825,10 @@ def _is_pyplot_automation_requested(args: argparse.Namespace) -> bool:
         or getattr(args, "pyplot_plot_image", None)
         or getattr(args, "pyplot_summary_json", None)
     )
+
+
+def _is_mini_dma_bench_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "mini_dma_bench_plan", None))
 
 
 def _is_pyplot_session_requested(args: argparse.Namespace) -> bool:
@@ -3317,6 +3326,25 @@ def _run_pyplot_automation(args: argparse.Namespace, qt_args: list[str]) -> int:
     request = _pyplot_request_from_legacy_args(args)
     return _run_pyplot_automation_request(request, qt_args)
 
+
+def _run_mini_dma_bench_plan(args: argparse.Namespace, qt_args: list[str]) -> int:
+    from data_logging.mini_dma_logger.bench_automation import (
+        MiniDmaBenchAutomationError,
+        run_mini_dma_bench_plan,
+    )
+
+    try:
+        summary = run_mini_dma_bench_plan(str(getattr(args, "mini_dma_bench_plan")), qt_args=qt_args)
+    except MiniDmaBenchAutomationError as exc:
+        print(f"[mini-dma-bench] {exc}")
+        return 2
+    except Exception as exc:
+        print(f"[mini-dma-bench] {type(exc).__name__}: {exc}")
+        return 1
+    print(json.dumps(summary, ensure_ascii=False))
+    return 0
+
+
 LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": _lazy("data_logging.data_logger", "main"),
     "Current Annealing Logger": _lazy(
@@ -3984,6 +4012,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_run_visual_check(args))
     if getattr(args, "automation_recipe", None):
         raise SystemExit(_run_automation_recipe(args, qt_args))
+    if _is_mini_dma_bench_requested(args):
+        raise SystemExit(_run_mini_dma_bench_plan(args, qt_args))
     if _is_microwire_word_report_requested(args):
         raise SystemExit(_run_microwire_word_report_cli(args))
     if _is_microwire_eda_requested(args):

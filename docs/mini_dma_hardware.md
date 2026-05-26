@@ -10,6 +10,19 @@ This document is the canonical hardware reference for the current Mini DMA bench
 | Linear actuator | StepperOnline 8C15S0504AC5-038RS NEMA 8 captive Acme linear stepper | https://www.omc-stepperonline.com/nema-8-captive-acme-linear-stepper-motor-0-5a-38-2mm-stack-screw-lead-2mm-0-07874-travel-38-1mm-8c15s0504ac5-038rs | 2 mm lead, 0.01 mm full-step travel, 38.1 mm stroke, 0.5 A/phase. |
 | Stepper controller | Pololu Tic T500 USB Multi-Interface Stepper Motor Controller, item 3134 | https://www.pololu.com/product/3134 | 4.5-35 V, about 1.5 A/phase without extra cooling, full to 1/8 microstepping, open-loop position/speed control. |
 
+## Bench Provisioning Defaults
+
+Mini DMA includes a bench-provisioning action for copying the setup to a second bench. The operator still has to connect the hardware correctly and choose/confirm ambiguous ports or channels, but the app should configure the normal Košice-style defaults from there:
+
+- HMP4040 current-sweep channel on the current bench: `CH4`.
+- HMP4040 motor-supply channel on the current bench: `CH3`, `12 V`, `0.5 A` rail-current limit.
+- HMP4040 serial link on the current bench: `COM3` at `115200` baud.
+- HMP current-sweep voltage limit: `32.05 V`, matching the observed maximum rather than the older rounded `30 V` value.
+- Tic motor current limit: default `343 mA`, matching the bench setting that has enough torque for current experiments while keeping motor heating lower. Treat `500 mA/phase` as the motor-rating ceiling, not the deployment default.
+- Tic step mode: `1/8 step`, with `100 full steps/mm` and `800 Tic units/mm`.
+
+Keep the two current limits separate in UI, docs, and troubleshooting. The HMP motor-supply current limit protects the 12 V supply rail feeding the Tic; the current bench mostly ran at `0.4 A`, but one long sweep showed Tic VIN sag while CH2 was configured that way, so the copied-bench default is `0.5 A`. The Tic current limit controls the motor winding current and is the value that most directly affects motor heating and torque.
+
 ## Balance Details
 
 Known specifications:
