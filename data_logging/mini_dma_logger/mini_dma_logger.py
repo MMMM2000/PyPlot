@@ -3490,7 +3490,8 @@ class MainWindow(QtWidgets.QMainWindow):
         scale_zero_row.addWidget(self.button_scale_tare)
         self.button_scale_hardware_tare = QtWidgets.QPushButton("Tare scale", scale_box)
         self.button_scale_hardware_tare.setToolTip(
-            "Occasional use. Sends the physical tare command to the balance and resets Mini DMA's zero-load reference to 0 g."
+            "Occasional use. Sends the physical tare command to the balance. "
+            "Use Capture zero-load to change Mini DMA's zero-load reference."
         )
         self.button_scale_hardware_tare.clicked.connect(self._tare_scale_hardware)
         scale_zero_row.addWidget(self.button_scale_hardware_tare)
@@ -3631,7 +3632,7 @@ class MainWindow(QtWidgets.QMainWindow):
         probe_button.clicked.connect(self._probe_scale_port)
         remote_tare_button = QtWidgets.QPushButton("Diagnostic remote tare scale", scale_advanced_box)
         remote_tare_button.setToolTip(
-            "Advanced only. Sends the physical scale tare command and resets the zero-load reference to 0 g."
+            "Advanced only. Sends the physical scale tare command without changing Mini DMA's zero-load reference."
         )
         remote_tare_button.clicked.connect(self._tare_scale_hardware)
         self.button_advanced_software_tare = QtWidgets.QPushButton(
@@ -7297,14 +7298,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if was_connected:
                 self._connect_scale()
         self._load_offset_g = 0.0
-        self.spin_zero_load_scale_g.setValue(0.0)
         if value_g is not None:
             self._latest_scale_value_g = value_g
         self._latest_scale_text = raw_text or "tare command sent"
         self._latest_scale_timestamp = time.time()
         self._refresh_live_labels()
         self._log(
-            "Diagnostic hardware tare command sent to the scale; zero-load reference reset to 0 g."
+            "Diagnostic hardware tare command sent to the scale; zero-load reference was left unchanged."
             + (f" Current raw reading: {raw_text}." if raw_text else "")
         )
         return True

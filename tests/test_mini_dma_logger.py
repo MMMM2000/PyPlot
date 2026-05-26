@@ -12514,6 +12514,7 @@ def test_apply_name_fields_uses_display_wire_and_file_safe_wire_token(tmp_path: 
 def test_hardware_tare_sends_escape_t_and_clears_software_offset(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
     window = _build_window(tmp_path, qtbot)
     window._load_offset_g = 1.234
+    window.spin_zero_load_scale_g.setValue(21.2)
     window.combo_scale_port.clear()
     window.combo_scale_port.addItem("COM6", "COM6")
     window.combo_scale_port.setCurrentIndex(0)
@@ -12554,6 +12555,7 @@ def test_hardware_tare_sends_escape_t_and_clears_software_offset(tmp_path: Path,
         assert window._tare_scale_hardware() is True
         assert written and written[0] == b"\x1bt"
         assert window._load_offset_g == 0.0
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
     finally:
         _close_test_window(window)
 
