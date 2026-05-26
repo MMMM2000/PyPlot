@@ -7270,6 +7270,190 @@ def test_supply_shutdown_turns_output_off_and_resets_current_channel() -> None:
     ]
 
 
+def test_shared_broker_supply_controller_leases_current_and_motor_channels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
+            return {"lease_id": f"lease-{channel}"}
+
+        def release(self, *, channel: int, lease_id: str) -> None:
+            self.calls.append(("release", {"channel": channel, "lease_id": lease_id}))
+
+        def configure_channel(
+            self,
+            *,
+            channel: int,
+            lease_id: str,
+            voltage_v: float,
+            current_a: float,
+            output_on: bool,
+        ) -> None:
+            self.calls.append(
+                (
+                    "configure_channel",
+                    {
+                        "channel": channel,
+                        "lease_id": lease_id,
+                        "voltage_v": voltage_v,
+                        "current_a": current_a,
+                        "output_on": output_on,
+                    },
+                )
+            )
+
+        def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+            self.calls.append(
+                ("set_current", {"channel": channel, "lease_id": lease_id, "current_mA": current_mA})
+            )
+
+        def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:
+            self.calls.append(
+                ("set_output", {"channel": channel, "lease_id": lease_id, "output_on": output_on})
+            )
+
+        def measure_channel(self, *, channel: int) -> dict[str, float | None]:
+            self.calls.append(("measure_channel", {"channel": channel}))
+            return {
+                "voltage_V": 0.5,
+                "current_mA": 10.0,
+                "resistance_ohm": 50.0,
+                "power_W": 0.005,
+            }
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=1.0,
+        current_channel=4,
+        motor_channel=3,
+    )
+
+    controller.connect()
+    controller.configure_channel(channel=3, voltage_v=12.0, current_a=0.5, output_on=True)
+    controller.initialize_output(current_mA=10.0, reset_on_start=True)
+    controller.set_current_mA(10.4)
+    assert controller.measure()["current_mA"] == pytest.approx(10.0)
+    controller.shutdown_output(reset_voltage_v=1.0, reset_current_mA=1.0)
+    controller.disconnect()
+
+    assert clients[0].host == "127.0.0.1"
+    assert clients[0].port == 8765
+    assert clients[0].calls == [
+        (
+            "lease",
+            {
+                "channel": 3,
+                "owner": "mini_dma_logger",
+                "role": mini_dma_mod.ROLE_MINI_DMA_MOTOR,
+            },
+        ),
+        (
+            "configure_channel",
+            {
+                "channel": 3,
+                "lease_id": "lease-3",
+                "voltage_v": 12.0,
+                "current_a": 0.5,
+                "output_on": True,
+            },
+        ),
+        (
+            "lease",
+            {
+                "channel": 4,
+                "owner": "mini_dma_logger",
+                "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+            },
+        ),
+        (
+            "configure_channel",
+            {
+                "channel": 4,
+                "lease_id": "lease-4",
+                "voltage_v": 1.0,
+                "current_a": 0.01,
+                "output_on": True,
+            },
+        ),
+        ("set_current", {"channel": 4, "lease_id": "lease-4", "current_mA": 10.4}),
+        ("measure_channel", {"channel": 4}),
+        ("set_output", {"channel": 4, "lease_id": "lease-4", "output_on": False}),
+        (
+            "configure_channel",
+            {
+                "channel": 4,
+                "lease_id": "lease-4",
+                "voltage_v": 1.0,
+                "current_a": 0.001,
+                "output_on": False,
+            },
+        ),
+        ("release", {"channel": 4, "lease_id": "lease-4"}),
+        ("release", {"channel": 3, "lease_id": "lease-3"}),
+    ]
+
+
+def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.edit_shared_broker_host.setText("localhost")
+        window.spin_shared_broker_port.setValue(9999)
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+
+        controller = window._build_supply_controller()
+
+        assert isinstance(controller, mini_dma_mod.SharedBrokerSupplyController)
+        assert controller.host == "localhost"
+        assert controller.port == 9999
+        assert controller.selected_channel() == 4
+        assert controller.motor_channel == 3
+    finally:
+        _close_test_window(window)
+
+
+def test_shared_broker_preflight_connects_without_serial_auto_detect(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    calls: list[str] = []
+
+    try:
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window._auto_detect_supply_port = lambda: calls.append("auto-detect") or True  # type: ignore[method-assign]
+
+        assert window._ensure_supply_ready_for_recipe() is True
+
+        assert calls == []
+        assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
+    finally:
+        _close_test_window(window)
+
+
 def test_supply_reads_are_throttled_during_fast_recipe_logging(
     tmp_path: Path,
     qtbot,
