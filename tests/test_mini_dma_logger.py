@@ -3040,6 +3040,24 @@ def test_current_sweep_recipe_commands_at_least_one_milliamp(tmp_path: Path, qtb
         _close_test_window(window)
 
 
+def test_current_sweep_recipe_has_no_post_sweep_settle_step(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(50.0)
+        window.spin_current_sweep_target_step.setValue(25.0)
+
+        steps, _summary, _interval_ms = window._build_automation_recipe()
+
+        assert any(step.action == "sweep_current" for step in steps)
+        assert not any(step.action == "settle" and step.note == "1" for step in steps)
+        assert not hasattr(window, "spin_current_sweep_settle_s")
+    finally:
+        _close_test_window(window)
+
+
 def test_dashboard_plot_choices_are_recipe_mode_specific(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -11884,6 +11902,63 @@ def test_session_metadata_records_recipe_completed_stop_reason(tmp_path: Path, q
         assert payload["stop"]["reason"] == "recipe_completed"
         assert payload["stop"]["category"] == "normal"
         assert payload["stop"]["detail"] == "Recipe completed."
+    finally:
+        _close_test_window(window)
+
+
+def test_session_stop_recovers_metadata_when_output_folder_was_moved(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_moved_folder")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    recovery_root = tmp_path / "recovered"
+    monkeypatch.setattr(window, "_session_recovery_root", lambda: recovery_root, raising=False)
+
+    try:
+        window._start_session()
+        assert window._session_json_path is not None
+        window._session_points.append(
+            mini_dma_mod.MeasurementPoint(
+                elapsed_s=1.25,
+                timestamp_utc="2026-05-26 09:00:00",
+                raw_position_mm=0.0,
+                position_mm=0.1,
+                raw_load_g=21.5,
+                load_g=0.3,
+                preload_state=mini_dma_mod.PRELOAD_DISABLED,
+                strain_pct=0.2,
+                stress_mpa=12.3,
+                current_set_mA=10.0,
+                current_measured_mA=9.8,
+                voltage_V=1.2,
+                resistance_ohm=122.0,
+                power_W=0.0118,
+                automation_phase="current",
+                automation_basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                automation_target_value=50.0,
+                plateau_index=1,
+                plateau_label="Stress 50 MPa",
+            )
+        )
+        window._session_json_path = tmp_path / "missing_output" / "metadata.json"
+
+        window._stop_session(reason="recipe_control_stop", detail="metadata write failed")
+
+        recovery_dirs = list(recovery_root.glob("MiniDMA_recovered_*"))
+        assert len(recovery_dirs) == 1
+        recovered_metadata = json.loads((recovery_dirs[0] / "metadata.json").read_text(encoding="utf-8"))
+        with (recovery_dirs[0] / "measurement.csv").open("r", encoding="utf-8", newline="") as handle:
+            recovered_rows = list(csv.DictReader(handle))
+        assert recovered_metadata["session_state"] == "finished"
+        assert recovered_metadata["point_count"] == 1
+        assert recovered_metadata["stop"]["reason"] == "recipe_control_stop"
+        assert recovered_metadata["recovery"]["reason"] == "metadata_write_failed"
+        assert len(recovered_rows) == 1
+        assert recovered_rows[0]["stress_mpa"] == "12.300000"
+        assert "Emergency session recovery saved" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 

@@ -1836,7 +1836,6 @@ class MiniDmaControlConfig:
     current_sweep_nudge_mm: float
     current_sweep_balance_speed_mm_s: float
     current_sweep_max_seek_mm: float
-    current_sweep_settle_s: float
     supply_profile_id: str
     supply_current_resolution_mA: float
     motor_supply_enabled: bool
@@ -2842,6 +2841,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_ui_telemetry_path: Path | None = None
         self._session_setup_txt_path: Path | None = None
         self._session_setup_csv_path: Path | None = None
+        self._session_recovery_path: Path | None = None
         self._session_start_wall_s = 0.0
         self._session_raw_scale_start_wall_s = 0.0
         self._last_session_log_timestamp_s: float | None = None
@@ -3211,7 +3211,6 @@ class MainWindow(QtWidgets.QMainWindow):
             current_sweep_nudge_mm=float(self.spin_current_sweep_nudge_mm.value()),
             current_sweep_balance_speed_mm_s=float(self.spin_current_sweep_balance_speed_mm_s.value()),
             current_sweep_max_seek_mm=float(self.spin_current_sweep_max_seek_mm.value()),
-            current_sweep_settle_s=float(self.spin_current_sweep_settle_s.value()),
             supply_profile_id=str(self.combo_supply_profile.currentData() or "hmp4030"),
             supply_current_resolution_mA=supply_resolution,
             motor_supply_enabled=self.check_motor_supply_power.isChecked(),
@@ -4990,12 +4989,6 @@ class MainWindow(QtWidgets.QMainWindow):
         current_max_seek_label = current_sweep_form.labelForField(self.spin_current_sweep_max_seek_mm)
         if current_max_seek_label is not None:
             current_max_seek_label.setVisible(False)
-        self.spin_current_sweep_settle_s = CompactDoubleSpinBox(automation_box)
-        self.spin_current_sweep_settle_s.setDecimals(2)
-        self.spin_current_sweep_settle_s.setRange(0.0, 3600.0)
-        self.spin_current_sweep_settle_s.setValue(0.5)
-        self.spin_current_sweep_settle_s.setSuffix(" s")
-        current_sweep_form.addRow("Settle after current", self.spin_current_sweep_settle_s)
         self.spin_current_sweep_interval = QtWidgets.QSpinBox(automation_box)
         self.spin_current_sweep_interval.setRange(50, 60000)
         self.spin_current_sweep_interval.setValue(250)
@@ -5505,7 +5498,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_nudge_mm,
             self.spin_current_sweep_balance_speed_mm_s,
             self.spin_current_sweep_max_seek_mm,
-            self.spin_current_sweep_settle_s,
             self.spin_current_sweep_interval,
             self.spin_current_sweep_log_interval,
             self.spin_constant_current_start_target,
@@ -11307,10 +11299,7 @@ class MainWindow(QtWidgets.QMainWindow):
             summary += " Current returns at each plateau."
             if self.check_current_sweep_return_target.isChecked():
                 summary += " Target returns to start."
-            summary += (
-                f" Automatic hold tolerance {self._auto_tolerance_summary_text(basis)}, "
-                f"settle {_format_compact_unit(self.spin_current_sweep_settle_s.value(), 's', decimals=2)}."
-            )
+            summary += f" Automatic hold tolerance {self._auto_tolerance_summary_text(basis)}."
             if basis == HSW_BASIS_LOAD_G:
                 banner = "Iso-load current sweep"
             elif basis == HSW_BASIS_STRESS_MPA:
@@ -13089,7 +13078,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "legacy_balancing_nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
                 "legacy_balancing_speed_mm_s": float(self.spin_current_sweep_balance_speed_mm_s.value()),
                 "max_correction_travel_mm": float(self.spin_current_sweep_max_seek_mm.value()),
-                "settle_s": float(self.spin_current_sweep_settle_s.value()),
                 "legacy_interval_ms": int(self.spin_current_sweep_interval.value()),
                 "control_interval_ms": self._control_interval_ms(),
                 "log_interval_ms": self._log_interval_ms(),
@@ -13109,7 +13097,72 @@ class MainWindow(QtWidgets.QMainWindow):
             payload["session_state"] = "finished"
         if finished_utc:
             payload["finished_utc"] = finished_utc
-        self._session_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        try:
+            self._session_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError as exc:
+            self._write_emergency_session_snapshot(
+                payload,
+                reason="metadata_write_failed",
+                error=exc,
+            )
+
+    def _session_recovery_root(self) -> Path:
+        return Path(_default_download_dir()) / "MiniDMA_recovered_sessions"
+
+    def _write_emergency_session_snapshot(
+        self,
+        payload: dict[str, Any],
+        *,
+        reason: str,
+        error: BaseException,
+    ) -> None:
+        try:
+            if self._session_recovery_path is None:
+                base_name = "session"
+                if self._session_base_path is not None:
+                    base_name = self._session_base_path.parent.name or self._session_base_path.stem
+                safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", base_name).strip("._") or "session"
+                self._session_recovery_path = (
+                    self._session_recovery_root()
+                    / f"MiniDMA_recovered_{safe_name}_{_utc_filename_timestamp()}"
+                )
+            self._session_recovery_path.mkdir(parents=True, exist_ok=True)
+            recovery_payload = dict(payload)
+            recovery_payload["recovery"] = {
+                "reason": reason,
+                "error": str(error),
+                "original_metadata_path": None
+                if self._session_json_path is None
+                else str(self._session_json_path),
+                "saved_utc": _utc_timestamp(),
+            }
+            metadata_path = self._session_recovery_path / SESSION_METADATA_JSON
+            metadata_path.write_text(json.dumps(recovery_payload, indent=2), encoding="utf-8")
+
+            txt_path = self._session_recovery_path / SESSION_MEASUREMENT_TX
+            csv_path = self._session_recovery_path / SESSION_MEASUREMENT_CSV
+            with (
+                txt_path.open("w", encoding="utf-8", newline="") as txt_handle,
+                csv_path.open("w", encoding="utf-8", newline="") as csv_handle,
+            ):
+                txt_handle.write("\t".join(LONG_NAMES) + "\n")
+                txt_handle.write("\t".join(UNITS) + "\n")
+                txt_handle.write("# Emergency recovery copy\n")
+                writer = csv.DictWriter(csv_handle, fieldnames=MEASUREMENT_CSV_FIELDNAMES)
+                writer.writeheader()
+                for point in self._session_points:
+                    self._write_point_to_handles(
+                        point,
+                        txt_handle=txt_handle,
+                        csv_writer=writer,
+                        csv_handle=None,
+                    )
+            self._log(f"Emergency session recovery saved to {self._session_recovery_path}.")
+        except Exception as recovery_exc:
+            self._log(
+                "Emergency session recovery failed after metadata write error: "
+                f"{recovery_exc}; original error: {error}"
+            )
 
     def _set_automation_context(
         self,
@@ -13231,6 +13284,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_reason = None
         self._session_stop_detail = None
         self._session_stop_recorded_utc = None
+        self._session_recovery_path = None
         self._session_raw_scale_count = 0
         self._session_ui_telemetry_count = 0
         self._ui_refresh_last_monotonic_s = None
@@ -14199,7 +14253,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
                 "balance_speed_mm_s": float(self.spin_current_sweep_balance_speed_mm_s.value()),
                 "max_seek_mm": float(self.spin_current_sweep_max_seek_mm.value()),
-                "settle_s": float(self.spin_current_sweep_settle_s.value()),
             }
         if self._is_constant_current_strain_sweep_mode(mode):
             payload["recipe"]["constant_current_stress_strain"] = {
@@ -14277,7 +14330,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_nudge_mm.setValue(float(current_sweep.get("nudge_mm", self.spin_current_sweep_nudge_mm.value())))
             self.spin_current_sweep_balance_speed_mm_s.setValue(float(current_sweep.get("balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())))
             self.spin_current_sweep_max_seek_mm.setValue(float(current_sweep.get("max_seek_mm", self.spin_current_sweep_max_seek_mm.value())))
-            self.spin_current_sweep_settle_s.setValue(float(current_sweep.get("settle_s", self.spin_current_sweep_settle_s.value())))
         constant_current = recipe.get("constant_current_stress_strain")
         if isinstance(constant_current, Mapping):
             basis = str(constant_current.get("start_basis", self._constant_current_start_basis()))
@@ -16217,7 +16269,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 float(self.spin_current_sweep_hold_resume_factor.value()),
             )
             current_hold_resume_stable_s = float(self.spin_current_sweep_hold_resume_stable_s.value())
-            settle_s = float(self.spin_current_sweep_settle_s.value())
             if target_ramp_rate <= 0.0:
                 raise ValueError("Set a non-zero target ramp rate.")
             targets = self._build_numeric_targets(target_start, target_end, target_step)
@@ -16277,17 +16328,6 @@ class MainWindow(QtWidgets.QMainWindow):
                                 note=str(plateau_index),
                             )
                         )
-                if settle_s > 0.0:
-                    steps.append(
-                        AutomationStep(
-                            "settle",
-                            target_value=target,
-                            basis=basis,
-                            current_mA=current_start,
-                            duration_s=settle_s,
-                            note=str(plateau_index),
-                        )
-                    )
             if self.check_current_sweep_return_target.isChecked() and targets:
                 steps.append(
                     AutomationStep(
@@ -18205,7 +18245,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("current_sweep_nudge_mm", self.spin_current_sweep_nudge_mm.value())
         self.settings.setValue("current_sweep_balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())
         self.settings.setValue("current_sweep_max_seek_mm", self.spin_current_sweep_max_seek_mm.value())
-        self.settings.setValue("current_sweep_settle_s", self.spin_current_sweep_settle_s.value())
         self.settings.setValue("current_sweep_interval_ms", self._control_interval_ms())
         self.settings.setValue("current_sweep_log_interval_ms", self._log_interval_ms())
         self.settings.setValue("constant_current_start_basis", self._constant_current_start_basis())
@@ -18859,7 +18898,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_max_seek_mm.setValue(
             max(0.01, float(self.settings.value("current_sweep_max_seek_mm", 3.0)))
         )
-        self.spin_current_sweep_settle_s.setValue(float(self.settings.value("current_sweep_settle_s", 0.5)))
         self.spin_current_sweep_interval.setValue(int(self.settings.value("current_sweep_interval_ms", 250)))
         self.spin_current_sweep_log_interval.setValue(int(self.settings.value("current_sweep_log_interval_ms", 500)))
         self._update_current_sweep_basis_ui()
