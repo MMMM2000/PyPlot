@@ -46,6 +46,7 @@ Current intended hardware stack:
 
 - one combined Mini DMA session for motion, load, and recipe-owned current control
 - session naming helpers and run notes
+- on Windows, active sessions request OS sleep/display prevention so long measurements are not interrupted by automatic PC sleep
 - settings-panel spin boxes and drop-downs ignore mouse-wheel value changes so scrolling the panel cannot silently alter recipe or hardware options
 - the settings panel disables horizontal scrolling, and note/log text wraps to the available width
 - hardware driver details such as baud rates, serial request commands, `ticcmd`, device serials, mechanical full steps/mm, Tic step mode, and derived Tic units/mm are hidden by default under `Advanced hardware settings`
