@@ -45,6 +45,7 @@ Current intended hardware stack:
 ### Core Session Model
 
 - one combined Mini DMA session for motion, load, and recipe-owned current control
+- when launched from the PyPlot Launcher, the Mini DMA window starts as its own Python GUI process so other experiment windows can keep running independently
 - session naming helpers and run notes
 - on Windows, active sessions request OS sleep/display prevention so long measurements are not interrupted by automatic PC sleep
 - settings-panel spin boxes and drop-downs ignore mouse-wheel value changes so scrolling the panel cannot silently alter recipe or hardware options
