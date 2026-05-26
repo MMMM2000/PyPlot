@@ -2833,6 +2833,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # Signal that a new sample arrived so command sequencing can continue
             skip_sample = bool(self._skip_current_sample)
             if not skip_sample:
+                initial_sample = self.first_sample
+                self._write_sample_to_file(initial_sample=initial_sample)
                 if self.first_sample:
                     self.first_sample = False
                 self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
@@ -2892,6 +2894,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # Signal that a new sample arrived so command sequencing can continue
             skip_sample = bool(self._skip_current_sample)
             if not skip_sample:
+                initial_sample = self.first_sample
+                self._write_sample_to_file(initial_sample=initial_sample)
                 if self.first_sample:
                     self.first_sample = False
                 self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))

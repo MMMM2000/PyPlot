@@ -137,6 +137,33 @@ def test_shared_broker_setpoint_and_stop_only_affect_leased_channel(qtbot) -> No
     assert window._shared_broker_lease_id is None
 
 
+def test_shared_broker_run_writes_measurements_to_log(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeBrokerClient()
+    fake.readbacks = [
+        {"voltage_V": 0.5, "current_mA": 2.0},
+        {"voltage_V": 0.6, "current_mA": 3.0},
+    ]
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.operation_mode = 2
+    window.process_running = True
+    window.first_sample = True
+    window.current_increment = 0.0
+    window.current_current_set = 0.002
+    window.f_name = str(tmp_path / "annealing.tsv")
+    window._reset_sample_buffers()
+
+    window.handle_send_new_command()
+    window.handle_send_new_command()
+
+    lines = (tmp_path / "annealing.tsv").read_text(encoding="utf-8").splitlines()
+    assert lines == ["3\t0.6\t200"]
+
+
 def test_annealing_run_holds_sleep_guard_until_safe_end(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
