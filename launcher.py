@@ -7,13 +7,22 @@ import time
 import logging
 import traceback
 import json
+import csv
+import math
+import re
+import shutil
+import secrets
+import socket
+import socketserver
 import tempfile
+import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple, cast, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple, Sequence, cast, Protocol
 
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PIL import Image
@@ -215,6 +224,10 @@ def _create_launcher_icon() -> QtGui.QIcon:
 
 class _AutomationRecipeError(Exception):
     """Raised when an automation recipe is invalid or unsupported."""
+
+
+SESSION_PROTOCOL_VERSION = 1
+DEFAULT_SESSION_COMMAND_TIMEOUT_S = 120.0
 
 
 @dataclass
@@ -596,6 +609,51 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         help="Wait this many milliseconds after actions before capturing artifacts.",
     )
     parser.add_argument(
+        "--pyplot-session-start",
+        action="store_true",
+        help="Launch a persistent PyPlot automation session and keep it running.",
+    )
+    parser.add_argument(
+        "--pyplot-session-list",
+        action="store_true",
+        help="List currently registered live PyPlot automation sessions and exit.",
+    )
+    parser.add_argument(
+        "--pyplot-session-send",
+        action="store_true",
+        help="Send a JSON automation command to a live PyPlot session and exit.",
+    )
+    parser.add_argument(
+        "--pyplot-session-state",
+        action="store_true",
+        help="Fetch the current state from a live PyPlot session and exit.",
+    )
+    parser.add_argument(
+        "--pyplot-session-close",
+        action="store_true",
+        help="Request that a live PyPlot session close and exit.",
+    )
+    parser.add_argument(
+        "--pyplot-session-id",
+        default=None,
+        help="Live PyPlot session id for session-state/send/close commands.",
+    )
+    parser.add_argument(
+        "--pyplot-session-command-json",
+        default=None,
+        help="Inline JSON command payload for --pyplot-session-send.",
+    )
+    parser.add_argument(
+        "--pyplot-session-command-file",
+        default=None,
+        help="Path to a JSON command payload for --pyplot-session-send.",
+    )
+    parser.add_argument(
+        "--pyplot-session-info-file",
+        default=None,
+        help="When starting a live PyPlot session, also write the session metadata JSON to this path.",
+    )
+    parser.add_argument(
         "--visual-check",
         action="store_true",
         help="Run automated visual verification flow instead of opening the launcher UI.",
@@ -645,6 +703,41 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         help="Generate a Microwire EDA report from a .pydpj project or assembled spreadsheet and exit.",
     )
     parser.add_argument(
+        "--microwire-word-report",
+        default=None,
+        help=(
+            "Generate Word sample reports from a Builder .pydpj, assembled spreadsheet, "
+            "or direct R vs T CSV without opening the Builder UI."
+        ),
+    )
+    parser.add_argument(
+        "--microwire-word-sample",
+        default=None,
+        help='Limit the Word export to one sample, e.g. "Ni50Fe27Ga23 12/2".',
+    )
+    parser.add_argument(
+        "--microwire-word-force-project-rebuild",
+        action="store_true",
+        help="For .pydpj Word exports, rebuild Assemble rows transiently before writing reports.",
+    )
+    parser.add_argument(
+        "--microwire-word-origin",
+        dest="microwire_word_origin",
+        action="store_true",
+        help="Generate available Origin objects for Word reports (default).",
+    )
+    parser.add_argument(
+        "--no-microwire-word-origin",
+        dest="microwire_word_origin",
+        action="store_false",
+        help="Skip Origin object generation for Word report CLI runs.",
+    )
+    parser.add_argument(
+        "--microwire-word-graphs-only",
+        action="store_true",
+        help="Only write Word reports for microwires with at least one generated Origin graph descriptor.",
+    )
+    parser.add_argument(
         "--rows",
         choices=(("all", "filtered", "selected")),
         default="all",
@@ -653,7 +746,7 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
     parser.add_argument(
         "--out",
         default=None,
-        help="Output directory for Microwire EDA CLI runs.",
+        help="Output directory for Microwire EDA and Microwire Word CLI runs.",
     )
     parser.add_argument(
         "--microwire-eda-title",
@@ -714,6 +807,7 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         microwire_eda_composition_splits=True,
         microwire_eda_findings=True,
         microwire_eda_force_project_rebuild=False,
+        microwire_word_origin=True,
     )
     args, qt_args = parser.parse_known_args(argv)
     return args, qt_args
@@ -737,8 +831,22 @@ def _is_mini_dma_bench_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "mini_dma_bench_plan", None))
 
 
+def _is_pyplot_session_requested(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "pyplot_session_start", False)
+        or getattr(args, "pyplot_session_list", False)
+        or getattr(args, "pyplot_session_send", False)
+        or getattr(args, "pyplot_session_state", False)
+        or getattr(args, "pyplot_session_close", False)
+    )
+
+
 def _is_microwire_eda_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_eda", None))
+
+
+def _is_microwire_word_report_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "microwire_word_report", None))
 
 
 def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
@@ -784,6 +892,1399 @@ def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
         for finding in result.findings[:3]:
             print(f"[microwire-eda] finding={finding.get('headline', 'Finding')}")
     return 0
+
+
+_RVST_CSV_HEADER = ("iso_time", "t_elapsed_s", "sp_c", "pv_c", "resistance_ohm")
+_MINI_DMA_REQUIRED_COLUMNS = {
+    "elapsed_s",
+    "automation_phase",
+    "automation_target_value",
+    "plateau_index",
+    "strain_pct",
+    "resistance_ohm",
+}
+
+
+def _parse_microwire_word_sample(sample: object) -> tuple[str | None, str | None]:
+    text = str(sample or "").strip()
+    if not text:
+        return None, None
+    match = re.search(
+        r"^(?P<composition>\S+)\s+(?P<draw>\d+)\s*[/_\-]\s*(?P<piece>\d+[A-Za-z0-9]*)",
+        text,
+    )
+    if match:
+        return (
+            match.group("composition"),
+            f"{match.group('draw')}/{match.group('piece')}",
+        )
+    return text, None
+
+
+def _normalise_microwire_word_part(value: object) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip()).casefold()
+
+
+def _normalise_microwire_word_key(value: object) -> str:
+    text = _normalise_microwire_word_part(value)
+    return text.replace("\\", "/").replace("-", "/").replace("_", "/")
+
+
+def _looks_like_rvst_csv(path: Path) -> bool:
+    if path.suffix.lower() != ".csv":
+        return False
+    try:
+        header = path.read_text(encoding="utf-8-sig", errors="ignore").splitlines()[0]
+    except (OSError, IndexError):
+        return False
+    columns = tuple(column.strip().casefold() for column in header.split(";"))
+    return columns[: len(_RVST_CSV_HEADER)] == _RVST_CSV_HEADER
+
+
+def _looks_like_mini_dma_measurement(path: Path) -> bool:
+    if path.name.casefold() != "measurement.csv":
+        return False
+    try:
+        header = path.read_text(encoding="utf-8-sig", errors="ignore").splitlines()[0]
+    except (OSError, IndexError):
+        return False
+    columns = {column.strip().casefold() for column in header.split(",")}
+    return _MINI_DMA_REQUIRED_COLUMNS.issubset(columns)
+
+
+def _infer_rvst_word_sample(path: Path, sample_override: object) -> tuple[str, str]:
+    composition, microwire = _parse_microwire_word_sample(sample_override)
+    if composition and microwire:
+        return composition, microwire
+
+    tokens = [token for token in re.split(r"[_\s]+", path.stem.strip()) if token]
+    if len(tokens) >= 3 and tokens[1].isdigit():
+        piece_match = re.match(r"(?P<piece>\d+[A-Za-z0-9]*)", tokens[2])
+        if piece_match:
+            return tokens[0], f"{tokens[1]}/{piece_match.group('piece')}"
+    if composition:
+        return composition, microwire or ""
+    return path.stem, ""
+
+
+def _infer_mini_dma_word_sample(path: Path) -> tuple[str, str]:
+    container = path.parent if path.name.casefold() == "measurement.csv" else path
+    text = container.name.strip()
+    tokens = [token for token in re.split(r"[_\s]+", text) if token]
+    if len(tokens) >= 3 and tokens[1].isdigit():
+        piece_match = re.match(r"(?P<piece>\d+[A-Za-z0-9]*)", tokens[2])
+        if piece_match:
+            return tokens[0], f"{tokens[1]}/{piece_match.group('piece')}"
+    composition, microwire = _parse_microwire_word_sample(text.replace("_", "/"))
+    return composition or text, microwire or ""
+
+
+def _format_numeric_range(values: object) -> str:
+    import pandas as pd
+
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric.empty:
+        return ""
+    return f"{float(numeric.min()):.6g} to {float(numeric.max()):.6g}"
+
+
+def _set_origin_plot_color(plot_obj: object, color: str) -> None:
+    for attr, value in (
+        ("color", color),
+        ("symbol_edge_color", color),
+        ("symbol_fill_color", color),
+        ("line_width", 1.5),
+        ("symbol_kind", 0),
+    ):
+        if not hasattr(plot_obj, attr):
+            continue
+        try:
+            setattr(plot_obj, attr, value)
+        except Exception:
+            continue
+
+
+def _export_rvst_origin_artifact(
+    rvst_frame: object,
+    *,
+    title: str,
+    source_path: Path,
+    output_dir: Path,
+):
+    import pandas as pd
+
+    from microwire_data_builder.core import export_origin_graph_artifact, _safe_plot_stem
+    from plotting.plugins.r_vs_t import core as rvst_core
+    from plotting.shared.origin import (
+        _ensure_origin_sdk_on_path,
+        hide_origin_workbook,
+        origin_safe_token,
+        set_origin_axis_title,
+        set_origin_graph_title,
+    )
+
+    segments = rvst_core.split_heating_cooling(pd.DataFrame(rvst_frame))
+    if not segments:
+        return None
+
+    data: dict[str, pd.Series] = {}
+    for segment in segments:
+        data[f"{segment.label} temperature"] = pd.Series(segment.x)
+        data[f"{segment.label} resistance"] = pd.Series(segment.y)
+    workbook_frame = pd.DataFrame(data)
+    origin_dir = output_dir / "_origin_objects"
+    origin_dir.mkdir(parents=True, exist_ok=True)
+    descriptor_stem = f"{_safe_plot_stem(source_path.stem)}_rvst"
+
+    _ensure_origin_sdk_on_path()
+    import originpro as origin_any  # type: ignore
+
+    try:
+        origin_any.set_show()
+    except Exception:
+        pass
+
+    try:
+        lt_int = getattr(origin_any, "lt_int", None)
+        if callable(lt_int):
+            lt_int("@V")
+    except Exception:
+        pass
+    book_name = origin_safe_token(f"{source_path.stem}_rvst", fallback="RvsT", max_len=32)
+    workbook = origin_any.new_book("w", lname=book_name)
+    worksheet = workbook[0]
+    try:
+        worksheet.name = origin_safe_token("RvsT", fallback="RvsT", max_len=13)
+    except Exception:
+        pass
+    worksheet.from_df(workbook_frame)
+    try:
+        worksheet.cols_axis("".join("XY" for _segment in segments))
+    except Exception:
+        pass
+
+    graph = None
+    for template in ("line", "ORIGIN"):
+        try:
+            graph = origin_any.new_graph(template=template)
+        except Exception:
+            graph = None
+        if graph is not None:
+            break
+    if graph is None:
+        graph = origin_any.new_graph()
+    layer = graph[0]
+    for index, segment in enumerate(segments):
+        try:
+            plot_obj = layer.add_plot(worksheet, coly=(index * 2) + 1, colx=index * 2, type="y")
+        except TypeError:
+            plot_obj = layer.add_plot(worksheet, coly=(index * 2) + 1, colx=index * 2)
+        try:
+            plot_obj.lname = segment.label
+        except Exception:
+            pass
+        palette = rvst_core.HEATING_COLORS if segment.kind == "heating" else rvst_core.COOLING_COLORS
+        color = palette[index % len(palette)] if palette else ""
+        if color:
+            _set_origin_plot_color(plot_obj, color)
+    try:
+        layer.rescale()
+    except Exception:
+        pass
+    set_origin_axis_title(layer, "x", "Temperature (deg C)")
+    set_origin_axis_title(layer, "y", "Resistance (Ohm)")
+    set_origin_graph_title(origin_any, graph, layer, title)
+    hide_origin_workbook(origin_any, workbook, graph)
+
+    artifact = export_origin_graph_artifact(
+        handles={
+            "origin": origin_any,
+            "graph": graph,
+            "workbook": workbook,
+            "worksheet": worksheet,
+            "legend_label": title,
+        },
+        descriptor_stem=descriptor_stem,
+        origin_dir=origin_dir,
+        display_text=f"R vs T Origin graph: {title}",
+        log=LOGGER,
+    )
+
+    if artifact is None or (artifact.object_path is None and not getattr(artifact, "clipboard_fallback", False)):
+        return None
+    return artifact
+
+
+def _load_rvst_word_report_frame(source_path: Path, sample_override: object, output_dir: Path, *, include_origin: bool):
+    import pandas as pd
+
+    from microwire_data_builder.core import (
+        RVT_FILE_COLUMN,
+        RVT_GRAPH_COLUMN,
+        RVT_ORIGIN_COLUMN,
+        RVT_RESIDUAL_ORIGIN_COLUMN,
+        RVT_POINT_COUNT_COLUMN,
+        RVT_RESISTANCE_RANGE_COLUMN,
+        RVT_TEMPERATURE_RANGE_COLUMN,
+        _safe_plot_stem,
+    )
+    from plotting.plugins.r_vs_t.core import load_file
+
+    frame = load_file(source_path)
+    composition, microwire = _infer_rvst_word_sample(source_path, sample_override)
+    first_timestamp = ""
+    if "iso_time" in frame.columns and not frame.empty:
+        try:
+            parsed_timestamp = pd.to_datetime(frame["iso_time"].iloc[0], errors="coerce")
+        except Exception:
+            parsed_timestamp = pd.NaT
+        if pd.notna(parsed_timestamp):
+            first_timestamp = parsed_timestamp.isoformat(sep=" ", timespec="seconds")
+        else:
+            first_timestamp = str(frame["iso_time"].iloc[0]).strip()
+    title = " ".join(part for part in (composition, microwire) if part).strip() or source_path.stem
+    origin_artifacts = {}
+    row = {
+        "Composition": composition,
+        "Microwire": microwire,
+        "Production datetime": first_timestamp,
+        "Data source": "R vs T CSV",
+        RVT_FILE_COLUMN: str(source_path),
+        RVT_POINT_COUNT_COLUMN: int(len(frame)),
+        RVT_TEMPERATURE_RANGE_COLUMN: _format_numeric_range(frame["pv_c"]),
+        RVT_RESISTANCE_RANGE_COLUMN: _format_numeric_range(frame["resistance_ohm"]),
+    }
+    if include_origin:
+        try:
+            artifacts = _export_pyplot_origin_artifacts_for_paths(
+                paths=[source_path],
+                plugin_name="R vs T",
+                output_dir=output_dir,
+                descriptor_prefix=_safe_plot_stem(f"{source_path.stem}_rvst"),
+                display_prefix=f"R vs T Origin graph: {title}",
+            )
+        except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
+            LOGGER.warning("R vs T Origin object generation skipped for %s: %s", source_path, exc)
+            artifacts = []
+        if artifacts:
+            artifact = artifacts[0]
+            row[RVT_GRAPH_COLUMN] = artifact.display_text or artifact.descriptor
+            row[RVT_ORIGIN_COLUMN] = artifact.descriptor
+            origin_artifacts[artifact.descriptor] = artifact
+    return pd.DataFrame([row]), origin_artifacts
+
+
+def _export_pyplot_origin_artifacts_for_paths(
+    *,
+    paths: list[Path],
+    plugin_name: str,
+    output_dir: Path,
+    descriptor_prefix: str,
+    display_prefix: str,
+    plot_mode: str | None = None,
+) -> list[object]:
+    from microwire_data_builder.core import export_pyplot_origin_artifacts_for_paths
+
+    return list(
+        export_pyplot_origin_artifacts_for_paths(
+            paths=paths,
+            plugin_name=plugin_name,
+            origin_dir=output_dir / "_origin_objects",
+            descriptor_prefix=descriptor_prefix,
+            display_prefix=display_prefix,
+            log=LOGGER,
+            plot_mode=plot_mode,
+        )
+    )
+
+
+def _project_section_rows(section: object) -> list[dict[str, Any]]:
+    if not isinstance(section, dict):
+        return []
+    rows = section.get("rows")
+    columns = section.get("columns")
+    if not isinstance(rows, list):
+        return []
+    if rows and isinstance(rows[0], dict):
+        return [dict(row) for row in rows if isinstance(row, dict)]
+    if isinstance(columns, list):
+        column_names = [str(column) for column in columns]
+        converted: list[dict[str, Any]] = []
+        for row in rows:
+            if isinstance(row, list):
+                converted.append(dict(zip(column_names, row)))
+        return converted
+    return []
+
+
+def _word_project_row_sample(row: dict[str, Any]) -> tuple[str, str]:
+    composition = str(row.get("Composition") or "").strip()
+    microwire = str(row.get("Microwire") or "").strip()
+    if not microwire:
+        draw = row.get("Draw")
+        piece = row.get("Piece")
+        try:
+            draw_text = str(int(float(draw)))
+            piece_text = str(int(float(piece)))
+        except (TypeError, ValueError):
+            draw_text = str(draw or "").strip()
+            piece_text = str(piece or "").strip()
+        if draw_text and piece_text:
+            microwire = f"{draw_text}/{piece_text}"
+    return composition, microwire
+
+
+def _word_project_value_items(value: object) -> list[object]:
+    if value is None:
+        return []
+    if isinstance(value, float) and value != value:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        items: list[object] = []
+        for item in value:
+            items.extend(_word_project_value_items(item))
+        return items
+    try:
+        if value in ("", [], {}):
+            return []
+    except Exception:
+        pass
+    return [value]
+
+
+def _word_project_merge_value(existing: object, incoming: object) -> object:
+    incoming_items = _word_project_value_items(incoming)
+    if not incoming_items:
+        return existing
+    existing_items = _word_project_value_items(existing)
+    merged: list[object] = []
+    seen: set[str] = set()
+    for item in [*existing_items, *incoming_items]:
+        try:
+            marker = f"{float(item):.12g}"
+        except (TypeError, ValueError):
+            marker = str(item)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        merged.append(item)
+    return merged if len(merged) > 1 else merged[0]
+
+
+def _word_project_public_source_name(source: object) -> str:
+    text = str(source or "").strip()
+    if not text:
+        return ""
+    return Path(text).name
+
+
+def _word_project_add_current_annealing_sources(target: dict[str, Any], sources: object) -> None:
+    from microwire_data_builder.core import FIGURE_COLUMNS
+
+    high_sources: list[str] = []
+    other_sources: list[str] = []
+    for item in _word_project_value_items(sources):
+        text = str(item)
+        filename = Path(text).name
+        if "1000ma" in filename.replace(" ", "").casefold():
+            high_sources.append(text)
+        else:
+            other_sources.append(text)
+    if high_sources:
+        target["_word_annealing_1000_sources"] = _word_project_merge_value(
+            target.get("_word_annealing_1000_sources"),
+            high_sources,
+        )
+        target[FIGURE_COLUMNS[0]] = _word_project_merge_value(
+            target.get(FIGURE_COLUMNS[0]),
+            [_word_project_public_source_name(source) for source in high_sources],
+        )
+    if other_sources:
+        target["_word_annealing_other_sources"] = _word_project_merge_value(
+            target.get("_word_annealing_other_sources"),
+            other_sources,
+        )
+        target[FIGURE_COLUMNS[1]] = _word_project_merge_value(
+            target.get(FIGURE_COLUMNS[1]),
+            [_word_project_public_source_name(source) for source in other_sources],
+        )
+
+
+_WORD_PROJECT_GRAPH_SOURCE_SPECS: dict[str, tuple[str, str, str, str, str]] = {
+    "vsm_temperature_scan": (
+        "_word_vsm_temperature_scan_sources",
+        "VSM temperature scan graphs",
+        "VSM temperature scan graphs (Origin)",
+        "VSM Temperature Scan",
+        "VSM temperature scan Origin graph",
+    ),
+    "vsm_hysteresis": (
+        "_word_vsm_hysteresis_sources",
+        "VSM hysteresis graphs",
+        "VSM hysteresis graphs (Origin)",
+        "VSM Hysteresis Loops",
+        "VSM hysteresis Origin graph",
+    ),
+    "dma_iso_stress": (
+        "_word_dma_iso_stress_sources",
+        "DMA iso-stress graphs",
+        "DMA iso-stress graphs (Origin)",
+        "DMA Iso-Stress",
+        "DMA iso-stress Origin graph",
+    ),
+    "mini_dma": (
+        "_word_mini_dma_sources",
+        "Mini DMA graphs",
+        "Mini DMA graphs (Origin)",
+        "Mini DMA",
+        "Mini DMA Origin graph",
+    ),
+    "shape_memory_stress_strain": (
+        "_word_shape_memory_stress_strain_sources",
+        "Shape memory stress/strain graphs",
+        "Shape memory stress/strain graphs (Origin)",
+        "Shape Memory Stress/Strain",
+        "Shape memory stress/strain Origin graph",
+    ),
+    "fmr": (
+        "_word_fmr_sources",
+        "FMR graphs",
+        "FMR graphs (Origin)",
+        "FMR",
+        "FMR Origin graph",
+    ),
+}
+
+
+_WORD_REPORT_GRAPH_MANIFEST_SECTIONS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        "Current annealing",
+        ("_word_annealing_1000_sources", "_word_annealing_other_sources"),
+        ("Figure — 1000 mA", "Figure — other annealing", "Figure — 1000 mA (Origin)", "Figure — other annealing (Origin)"),
+    ),
+    (
+        "R vs T",
+        ("R vs T files",),
+        ("R vs T graphs", "R vs T graphs (Origin)", "R vs T residual graphs (Origin)"),
+    ),
+    (
+        "VSM temperature scan",
+        ("_word_vsm_temperature_scan_sources",),
+        ("VSM temperature scan graphs", "VSM temperature scan graphs (Origin)"),
+    ),
+    (
+        "VSM hysteresis loops",
+        ("_word_vsm_hysteresis_sources",),
+        ("VSM hysteresis graphs", "VSM hysteresis graphs (Origin)"),
+    ),
+    (
+        "DMA iso-stress",
+        ("_word_dma_iso_stress_sources",),
+        ("DMA iso-stress graphs", "DMA iso-stress graphs (Origin)"),
+    ),
+    (
+        "Mini DMA",
+        ("_word_mini_dma_sources",),
+        ("Mini DMA graphs", "Mini DMA graphs (Origin)"),
+    ),
+    (
+        "Shape memory stress/strain",
+        ("_word_shape_memory_stress_strain_sources",),
+        ("Shape memory stress/strain graphs", "Shape memory stress/strain graphs (Origin)"),
+    ),
+    (
+        "FMR",
+        ("_word_fmr_sources",),
+        ("FMR graphs", "FMR graphs (Origin)"),
+    ),
+)
+
+
+def _word_project_add_graph_sources(
+    target: dict[str, Any],
+    section_name: str,
+    sources: object,
+) -> None:
+    spec = _WORD_PROJECT_GRAPH_SOURCE_SPECS.get(section_name)
+    if spec is None:
+        return
+    source_column, graph_column, _origin_column, _plugin_name, _display_prefix = spec
+    source_values = [str(item) for item in _word_project_value_items(sources) if str(item or "").strip()]
+    if not source_values:
+        return
+    target[source_column] = _word_project_merge_value(target.get(source_column), source_values)
+    target[graph_column] = _word_project_merge_value(
+        target.get(graph_column),
+        [_word_project_public_source_name(source) for source in source_values],
+    )
+
+
+def _word_project_shape_memory_current(path: Path) -> float | None:
+    match = re.search(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*mA\b", path.stem, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _word_project_current_density(current_mA: float | None, diameter_um: object) -> float | None:
+    if current_mA is None:
+        return None
+    try:
+        diameter = float(diameter_um)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(diameter) or diameter <= 0:
+        return None
+    area_mm2 = math.pi * (diameter / 2000.0) ** 2
+    if area_mm2 <= 0:
+        return None
+    return current_mA / area_mm2
+
+
+def _word_project_shape_memory_summary(path: Path) -> dict[str, Any]:
+    try:
+        from plotting.plugins.shape_memory_stress_strain.core import load_manual_stress_strain_file
+        import pandas as pd
+    except Exception:
+        return {}
+    try:
+        frame = load_manual_stress_strain_file(path)
+    except Exception:
+        return {}
+    if frame.empty:
+        return {}
+
+    def _max(column: str) -> float | None:
+        if column not in frame.columns:
+            return None
+        values = pd.to_numeric(frame[column], errors="coerce").dropna()
+        if values.empty:
+            return None
+        return float(values.max())
+
+    summary: dict[str, Any] = {}
+    is_fracture = "fracture" in path.stem.casefold()
+    current = _word_project_shape_memory_current(path)
+    if is_fracture:
+        summary["Fracture load (g)"] = _max("load_g")
+        summary["Fracture strain (%)"] = _max("strain_pct")
+        summary["Fracture stress (MPa)"] = _max("stress_mpa")
+        if current is not None:
+            summary["Fracture stress/strain current (mA)"] = current
+    else:
+        summary["Load (g)"] = _max("load_g")
+        summary["Strain (%)"] = _max("strain_pct")
+        summary["Stress (MPa)"] = _max("stress_mpa")
+        if current is not None:
+            summary["Stress/strain current (mA)"] = current
+    return {key: value for key, value in summary.items() if value not in (None, "")}
+
+
+def _word_project_enrich_shape_memory_row(source_row: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(source_row)
+    for source in _word_project_value_items(source_row.get("_sources")):
+        path = Path(str(source))
+        if not path.exists():
+            continue
+        for column, value in _word_project_shape_memory_summary(path).items():
+            if enriched.get(column) in (None, ""):
+                enriched[column] = value
+    return enriched
+
+
+def _load_project_word_report_frame(
+    source_path: Path,
+    sample: object,
+    output_dir: Path,
+    *,
+    include_origin: bool,
+    extra_search_roots: Sequence[Path] | None = None,
+):
+    import pandas as pd
+
+    from microwire_data_builder.core import (
+        FIGURE_COLUMNS,
+        DIAMETER_COLUMN,
+        DIAMETER_RATIO_COLUMN,
+        GLASS_DIAMETER_COLUMN,
+        MICROSCOPE_IMAGE_COLUMNS,
+        DMA_ISOSTRESS_ORIGIN_COLUMN,
+        FMR_ORIGIN_COLUMN,
+        MINI_DMA_COLUMN,
+        MINI_DMA_ORIGIN_COLUMN,
+        RVT_FILE_COLUMN,
+        RVT_GRAPH_COLUMN,
+        RVT_ORIGIN_COLUMN,
+        RVT_RESIDUAL_ORIGIN_COLUMN,
+        RVT_POINT_COUNT_COLUMN,
+        RVT_RESISTANCE_RANGE_COLUMN,
+        RVT_TEMPERATURE_RANGE_COLUMN,
+        SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+        VSM_HYSTERESIS_ORIGIN_COLUMN,
+        VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
+        WORD_MICROWIRE_DATA_COLUMNS,
+        _load_annealing,
+        _plot_measurement_origin,
+        _safe_plot_stem,
+    )
+    from plotting.plugins.r_vs_t.core import load_file
+
+    payload = json.loads(source_path.read_text(encoding="utf-8"))
+    sections = payload.get("sections") if isinstance(payload, dict) else {}
+    if not isinstance(sections, dict):
+        raise ValueError("Project file does not contain Builder sections.")
+
+    rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    assemble_rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    microscope_dimension_columns = {DIAMETER_COLUMN, GLASS_DIAMETER_COLUMN, DIAMETER_RATIO_COLUMN}
+    rvt_search_roots: list[Path] = [source_path.parent]
+    for root in extra_search_roots or ():
+        if root not in rvt_search_roots:
+            rvt_search_roots.append(root)
+
+    def _remember_rvt_search_root(value: object) -> None:
+        for item in _word_project_value_items(value):
+            text = str(item or "").strip()
+            if not text:
+                continue
+            path = Path(text)
+            try:
+                if not path.exists():
+                    continue
+            except OSError:
+                continue
+            for parent in path.parents:
+                try:
+                    rvt_root = parent / "RvsT"
+                    if rvt_root.exists() and parent not in rvt_search_roots:
+                        rvt_search_roots.append(parent)
+                except OSError:
+                    continue
+
+    for section_name, section in sections.items():
+        if section_name in {"compare"}:
+            continue
+        for source_row in _project_section_rows(section):
+            if section_name == "shape_memory_stress_strain":
+                source_row = _word_project_enrich_shape_memory_row(source_row)
+            composition, microwire = _word_project_row_sample(source_row)
+            if not composition or not microwire:
+                continue
+            key = (
+                _normalise_microwire_word_part(composition),
+                _normalise_microwire_word_key(microwire),
+            )
+            if section_name == "assemble":
+                assemble_rows_by_key[key] = dict(source_row)
+            target = rows_by_key.setdefault(
+                key,
+                {
+                    "Composition": composition,
+                    "Microwire": microwire,
+                },
+            )
+            for column, value in source_row.items():
+                if column in {"_key", "_group_key", "_shape_memory_group_key", "_shape_memory_group_order"}:
+                    continue
+                if column == "Graph — 1000 mA":
+                    column = FIGURE_COLUMNS[0]
+                elif column == "Graph — other annealing":
+                    column = FIGURE_COLUMNS[1]
+                elif column == "_core_image":
+                    column = MICROSCOPE_IMAGE_COLUMNS[0]
+                elif column == "_glass_image":
+                    column = MICROSCOPE_IMAGE_COLUMNS[1]
+                elif column == "_sources" and section_name == "annealing":
+                    _remember_rvt_search_root(value)
+                    _word_project_add_current_annealing_sources(target, value)
+                    continue
+                elif column == "_sources" and section_name in _WORD_PROJECT_GRAPH_SOURCE_SPECS:
+                    _remember_rvt_search_root(value)
+                    _word_project_add_graph_sources(target, section_name, value)
+                    continue
+                elif column.startswith("_"):
+                    continue
+                if column in microscope_dimension_columns and section_name != "microscope":
+                    continue
+                if section_name == "assemble":
+                    if _word_project_value_items(value) or not _word_project_value_items(
+                        target.get(column)
+                    ):
+                        target[column] = value
+                else:
+                    target[column] = _word_project_merge_value(target.get(column), value)
+
+    for key, assemble_row in assemble_rows_by_key.items():
+        target = rows_by_key.get(key)
+        if target is None:
+            continue
+        for column in WORD_MICROWIRE_DATA_COLUMNS:
+            if column in assemble_row:
+                target[column] = assemble_row.get(column)
+
+    frame = pd.DataFrame(list(rows_by_key.values()))
+    for index, row in frame.iterrows():
+        diameter = row.get(DIAMETER_COLUMN)
+        for current_column, density_column in (
+            ("Stress/strain current (mA)", "Stress/strain current density (A/mm^2)"),
+            (
+                "Fracture stress/strain current (mA)",
+                "Fracture stress/strain current density (A/mm^2)",
+            ),
+        ):
+            if density_column not in frame.columns:
+                frame[density_column] = pd.Series([None] * len(frame), dtype=object)
+            else:
+                frame[density_column] = frame[density_column].astype(object)
+            if _word_project_value_items(row.get(density_column)):
+                continue
+            densities = []
+            for value in _word_project_value_items(row.get(current_column)):
+                try:
+                    current_value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                density = _word_project_current_density(current_value, diameter)
+                if density is not None:
+                    densities.append(density)
+            densities = [value for value in densities if value is not None]
+            if densities:
+                frame.at[index, density_column] = densities if len(densities) > 1 else densities[0]
+    frame = _filter_microwire_word_report_frame(frame, sample)
+    origin_artifacts: dict[str, Any] = {}
+    for column in (
+        f"{FIGURE_COLUMNS[0]} (Origin)",
+        f"{FIGURE_COLUMNS[1]} (Origin)",
+        RVT_FILE_COLUMN,
+        RVT_GRAPH_COLUMN,
+        RVT_ORIGIN_COLUMN,
+        RVT_RESIDUAL_ORIGIN_COLUMN,
+        RVT_POINT_COUNT_COLUMN,
+        RVT_TEMPERATURE_RANGE_COLUMN,
+        RVT_RESISTANCE_RANGE_COLUMN,
+        VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,
+        VSM_HYSTERESIS_ORIGIN_COLUMN,
+        DMA_ISOSTRESS_ORIGIN_COLUMN,
+        MINI_DMA_ORIGIN_COLUMN,
+        SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+        FMR_ORIGIN_COLUMN,
+    ):
+        if column not in frame.columns:
+            frame[column] = pd.Series([None] * len(frame), dtype=object)
+        else:
+            frame[column] = frame[column].astype(object)
+
+    mini_dma_paths: list[Path] = []
+    seen_mini_dma_paths: set[Path] = set()
+    for root in rvt_search_roots:
+        for mini_root_name in ("mini DMA", "Mini DMA", "mini_dma"):
+            mini_root = root / mini_root_name
+            if not mini_root.exists():
+                continue
+            for path in mini_root.rglob("measurement.csv"):
+                try:
+                    resolved = path.resolve()
+                except OSError:
+                    resolved = path
+                if resolved in seen_mini_dma_paths or not path.is_file():
+                    continue
+                if not _looks_like_mini_dma_measurement(path):
+                    continue
+                seen_mini_dma_paths.add(resolved)
+                mini_dma_paths.append(path)
+
+    if mini_dma_paths:
+        source_column = "_word_mini_dma_sources"
+        if source_column not in frame.columns:
+            frame[source_column] = pd.Series([None] * len(frame), dtype=object)
+        if MINI_DMA_COLUMN not in frame.columns:
+            frame[MINI_DMA_COLUMN] = pd.Series([None] * len(frame), dtype=object)
+        for index, row in frame.iterrows():
+            composition = row.get("Composition")
+            microwire = row.get("Microwire")
+            matching_mini_dma = []
+            for path in mini_dma_paths:
+                inferred_composition, inferred_microwire = _infer_mini_dma_word_sample(path)
+                if (
+                    _normalise_microwire_word_part(inferred_composition)
+                    == _normalise_microwire_word_part(composition)
+                    and _normalise_microwire_word_key(inferred_microwire)
+                    == _normalise_microwire_word_key(microwire)
+                ):
+                    matching_mini_dma.append(path.parent)
+            if matching_mini_dma:
+                values = [str(path) for path in dict.fromkeys(matching_mini_dma)]
+                frame.at[index, source_column] = _word_project_merge_value(
+                    row.get(source_column),
+                    values,
+                )
+                frame.at[index, MINI_DMA_COLUMN] = _word_project_merge_value(
+                    row.get(MINI_DMA_COLUMN),
+                    [path.name for path in dict.fromkeys(matching_mini_dma)],
+                )
+
+    if include_origin:
+        origin_dir = output_dir / "_origin_objects"
+        for index, row in frame.iterrows():
+            for source_column, origin_column in (
+                ("_word_annealing_1000_sources", f"{FIGURE_COLUMNS[0]} (Origin)"),
+                ("_word_annealing_other_sources", f"{FIGURE_COLUMNS[1]} (Origin)"),
+            ):
+                descriptors: list[str] = []
+                for source in _word_project_value_items(row.get(source_column)):
+                    path = Path(str(source))
+                    if not path.exists():
+                        continue
+                    try:
+                        annealing_frame = _load_annealing(path)
+                        artifact = _plot_measurement_origin(
+                            annealing_frame,
+                            path,
+                            origin_dir,
+                            LOGGER,
+                        )
+                    except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
+                        LOGGER.warning("Current annealing Origin object generation skipped for %s: %s", path, exc)
+                        artifact = None
+                    if artifact is None:
+                        continue
+                    descriptors.append(artifact.descriptor)
+                    origin_artifacts[artifact.descriptor] = artifact
+                if descriptors:
+                    frame.at[index, origin_column] = descriptors if len(descriptors) > 1 else descriptors[0]
+
+            for section_name, spec in _WORD_PROJECT_GRAPH_SOURCE_SPECS.items():
+                source_column, _graph_column, origin_column, plugin_name, display_prefix = spec
+                descriptors = []
+                source_paths = [
+                    Path(str(source))
+                    for source in _word_project_value_items(row.get(source_column))
+                    if str(source or "").strip()
+                ]
+                source_paths = [path for path in dict.fromkeys(source_paths) if path.exists()]
+                if not source_paths:
+                    continue
+                sample_title = " ".join(
+                    part
+                    for part in (
+                        str(row.get("Composition") or "").strip(),
+                        str(row.get("Microwire") or "").strip(),
+                    )
+                    if part
+                ).strip()
+                prefix = _safe_plot_stem(
+                    "_".join(
+                        part
+                        for part in (
+                            sample_title or f"sample_{index + 1}",
+                            section_name,
+                        )
+                        if part
+                    )
+                )
+                try:
+                    artifacts = _export_pyplot_origin_artifacts_for_paths(
+                        paths=source_paths,
+                        plugin_name=plugin_name,
+                        output_dir=output_dir,
+                        descriptor_prefix=prefix,
+                        display_prefix=display_prefix,
+                    )
+                    if section_name == "rvt":
+                        artifacts.extend(
+                            _export_pyplot_origin_artifacts_for_paths(
+                                paths=source_paths,
+                                plugin_name=plugin_name,
+                                output_dir=output_dir,
+                                descriptor_prefix=f"{prefix}_residual",
+                                display_prefix=f"{display_prefix} residual",
+                                plot_mode="residual",
+                            )
+                        )
+                except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
+                    LOGGER.warning("%s Origin object generation skipped for %s: %s", display_prefix, sample_title, exc)
+                    artifacts = []
+                for artifact in artifacts:
+                    descriptor = getattr(artifact, "descriptor", None)
+                    if not descriptor:
+                        continue
+                    descriptors.append(str(descriptor))
+                    origin_artifacts[str(descriptor)] = artifact
+                if descriptors:
+                    if section_name == "rvt":
+                        raw_descriptors = [
+                            descriptor
+                            for descriptor in descriptors
+                            if "residual" not in descriptor.casefold()
+                        ]
+                        residual_descriptors = [
+                            descriptor
+                            for descriptor in descriptors
+                            if "residual" in descriptor.casefold()
+                        ]
+                        if raw_descriptors:
+                            frame.at[index, origin_column] = raw_descriptors if len(raw_descriptors) > 1 else raw_descriptors[0]
+                        if residual_descriptors:
+                            frame.at[index, RVT_RESIDUAL_ORIGIN_COLUMN] = residual_descriptors if len(residual_descriptors) > 1 else residual_descriptors[0]
+                    else:
+                        frame.at[index, origin_column] = descriptors if len(descriptors) > 1 else descriptors[0]
+
+    rvt_paths = []
+    seen_rvt_paths: set[Path] = set()
+    for root in rvt_search_roots:
+        rvt_root = root / "RvsT"
+        if not rvt_root.exists():
+            continue
+        for path in rvt_root.rglob("*.csv"):
+            try:
+                resolved = path.resolve()
+            except OSError:
+                resolved = path
+            if resolved in seen_rvt_paths or not path.is_file() or not _looks_like_rvst_csv(path):
+                continue
+            seen_rvt_paths.add(resolved)
+            rvt_paths.append(path)
+
+    for index, row in frame.iterrows():
+        composition = row.get("Composition")
+        microwire = row.get("Microwire")
+        matching_rvt = []
+        for path in rvt_paths:
+            inferred_composition, inferred_microwire = _infer_rvst_word_sample(path, None)
+            if (
+                _normalise_microwire_word_part(inferred_composition)
+                == _normalise_microwire_word_part(composition)
+                and _normalise_microwire_word_key(inferred_microwire)
+                == _normalise_microwire_word_key(microwire)
+            ):
+                matching_rvt.append(path)
+        if matching_rvt:
+            frame.at[index, RVT_FILE_COLUMN] = [str(path) for path in matching_rvt]
+            frame.at[index, RVT_GRAPH_COLUMN] = [path.name for path in matching_rvt]
+
+        rvt_origin_descriptors: list[str] = []
+        for path in matching_rvt:
+            rvt_frame = load_file(path)
+            frame.at[index, RVT_POINT_COUNT_COLUMN] = int(len(rvt_frame))
+            frame.at[index, RVT_TEMPERATURE_RANGE_COLUMN] = _format_numeric_range(rvt_frame["pv_c"])
+            frame.at[index, RVT_RESISTANCE_RANGE_COLUMN] = _format_numeric_range(rvt_frame["resistance_ohm"])
+            if include_origin:
+                title = " ".join(part for part in (str(composition or ""), str(microwire or "")) if part).strip()
+                try:
+                    artifacts = _export_pyplot_origin_artifacts_for_paths(
+                        paths=[path],
+                        plugin_name="R vs T",
+                        output_dir=output_dir,
+                        descriptor_prefix=_safe_plot_stem(
+                            "_".join(
+                                part
+                                for part in (
+                                    title or path.stem,
+                                    "r_vs_t",
+                                    path.stem,
+                                )
+                                if part
+                            )
+                        ),
+                        display_prefix=f"R vs T Origin graph: {title or path.stem}",
+                    )
+                except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
+                    LOGGER.warning("R vs T Origin object generation skipped for %s: %s", path, exc)
+                    artifacts = []
+                for artifact in artifacts:
+                    rvt_origin_descriptors.append(artifact.descriptor)
+                    origin_artifacts[artifact.descriptor] = artifact
+                    frame.at[index, RVT_GRAPH_COLUMN] = artifact.display_text or artifact.descriptor
+        rvt_residual_origin_descriptors: list[str] = []
+        if include_origin:
+            for path in matching_rvt:
+                title = " ".join(part for part in (str(composition or ""), str(microwire or "")) if part).strip()
+                try:
+                    residual_artifacts = _export_pyplot_origin_artifacts_for_paths(
+                        paths=[path],
+                        plugin_name="R vs T",
+                        output_dir=output_dir,
+                        descriptor_prefix=_safe_plot_stem(
+                            "_".join(
+                                part
+                                for part in (
+                                    title or path.stem,
+                                    "r_vs_t_residual",
+                                    path.stem,
+                                )
+                                if part
+                            )
+                        ),
+                        display_prefix=f"R vs T residual Origin graph: {title or path.stem}",
+                        plot_mode="residual",
+                    )
+                except Exception as exc:  # pragma: no cover - depends on local Origin/COM setup
+                    LOGGER.warning("R vs T residual Origin object generation skipped for %s: %s", path, exc)
+                    residual_artifacts = []
+                for artifact in residual_artifacts:
+                    rvt_residual_origin_descriptors.append(artifact.descriptor)
+                    origin_artifacts[artifact.descriptor] = artifact
+        if rvt_origin_descriptors:
+            frame.at[index, RVT_ORIGIN_COLUMN] = (
+                rvt_origin_descriptors if len(rvt_origin_descriptors) > 1 else rvt_origin_descriptors[0]
+            )
+        if rvt_residual_origin_descriptors:
+            frame.at[index, RVT_RESIDUAL_ORIGIN_COLUMN] = (
+                rvt_residual_origin_descriptors
+                if len(rvt_residual_origin_descriptors) > 1
+                else rvt_residual_origin_descriptors[0]
+            )
+
+    return frame.reset_index(drop=True), origin_artifacts
+
+
+def _filter_microwire_word_report_frame(frame, sample: object):
+    import pandas as pd
+
+    if not sample:
+        return frame.reset_index(drop=True)
+    composition, microwire = _parse_microwire_word_sample(sample)
+    if not composition and not microwire:
+        return frame.reset_index(drop=True)
+    if "Composition" not in frame.columns:
+        raise ValueError("Cannot filter Word reports by sample because the input has no Composition column.")
+
+    mask = frame["Composition"].map(_normalise_microwire_word_part) == _normalise_microwire_word_part(composition)
+    if microwire:
+        if "Microwire" not in frame.columns:
+            raise ValueError("Cannot filter Word reports by sample because the input has no Microwire column.")
+        mask = mask & (
+            frame["Microwire"].map(_normalise_microwire_word_key)
+            == _normalise_microwire_word_key(microwire)
+        )
+    filtered = frame.loc[mask].copy()
+    if filtered.empty:
+        raise ValueError(f"No rows matched sample {sample!r}.")
+    return filtered.reset_index(drop=True)
+
+
+def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespace, output_dir: Path):
+    if _looks_like_rvst_csv(source_path):
+        return _load_rvst_word_report_frame(
+            source_path,
+            getattr(args, "microwire_word_sample", None),
+            output_dir,
+            include_origin=bool(getattr(args, "microwire_word_origin", True)),
+        )
+    if source_path.suffix.lower() == ".pydpj":
+        copy_dir = output_dir / "_project_copy"
+        copy_dir.mkdir(parents=True, exist_ok=True)
+        copied_source = copy_dir / f"{source_path.stem}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}{source_path.suffix}"
+        shutil.copy2(source_path, copied_source)
+        setattr(args, "_microwire_word_copied_project", str(copied_source))
+        print(f"[microwire-word] copied_project={copied_source}")
+        return _load_project_word_report_frame(
+            copied_source,
+            getattr(args, "microwire_word_sample", None),
+            output_dir,
+            include_origin=bool(getattr(args, "microwire_word_origin", True)),
+            extra_search_roots=[source_path.parent],
+        )
+
+    from microwire_eda import MicrowireEdaConfig
+    from microwire_eda.core import load_analysis_frame
+
+    config = MicrowireEdaConfig(
+        input_path=source_path,
+        copy_project=True,
+        force_project_rebuild=bool(getattr(args, "microwire_word_force_project_rebuild", False)),
+    )
+    frame, _kind, _working_path, _copied_project_path, _used_project_rebuild = load_analysis_frame(config)
+    return (
+        _filter_microwire_word_report_frame(
+            frame,
+            getattr(args, "microwire_word_sample", None),
+        ),
+        {},
+    )
+
+
+def _microwire_word_graph_sections_for_row(row: Any) -> dict[str, dict[str, list[str]]]:
+    sections: dict[str, dict[str, list[str]]] = {}
+    for section_name, source_columns, graph_columns in _WORD_REPORT_GRAPH_MANIFEST_SECTIONS:
+        source_values: list[str] = []
+        graph_values: list[str] = []
+        origin_values: list[str] = []
+        for column in source_columns:
+            source_values.extend(
+                str(item)
+                for item in _word_project_value_items(row.get(column))
+                if str(item or "").strip()
+            )
+        for column in graph_columns:
+            values = [
+                str(item)
+                for item in _word_project_value_items(row.get(column))
+                if str(item or "").strip()
+            ]
+            graph_values.extend(values)
+            if str(column).endswith("(Origin)"):
+                origin_values.extend(values)
+        source_values = list(dict.fromkeys(source_values))
+        graph_values = list(dict.fromkeys(graph_values))
+        origin_values = list(dict.fromkeys(origin_values))
+        if origin_values:
+            sections[section_name] = {
+                "sources": source_values,
+                "graphs": origin_values,
+                "references": graph_values,
+            }
+    return sections
+
+
+def _filter_microwire_word_graph_rows(frame: Any):
+    if frame.empty:
+        return frame
+    keep_indices = [
+        index
+        for index, row in frame.iterrows()
+        if _microwire_word_graph_sections_for_row(row)
+    ]
+    return frame.loc[keep_indices].reset_index(drop=True)
+
+
+def _word_report_output_filenames(frame: Any) -> list[str]:
+    from microwire_data_builder.core import _word_report_filename
+
+    used_names: set[str] = set()
+    filenames: list[str] = []
+    for index, (_, row) in enumerate(frame.reset_index(drop=True).iterrows()):
+        filename = _word_report_filename(row, index)
+        stem = Path(filename).stem
+        suffix = Path(filename).suffix or ".docx"
+        candidate = filename
+        duplicate_index = 2
+        while candidate.lower() in used_names:
+            candidate = f"{stem}_{duplicate_index}{suffix}"
+            duplicate_index += 1
+        used_names.add(candidate.lower())
+        filenames.append(candidate)
+    return filenames
+
+
+def _word_manifest_stat_target(path: Path) -> Path:
+    if path.is_dir():
+        for child_name in ("measurement.csv", "metadata.json"):
+            child = path / child_name
+            if child.exists():
+                return child
+    return path
+
+
+def _word_manifest_source_entry(source: str) -> dict[str, Any]:
+    path = Path(source)
+    stat_path = _word_manifest_stat_target(path)
+    entry: dict[str, Any] = {
+        "path": str(path),
+        "stat_path": str(stat_path),
+        "exists": False,
+        "is_dir": False,
+        "mtime": None,
+        "size": None,
+    }
+    try:
+        entry["exists"] = path.exists()
+        entry["is_dir"] = path.is_dir()
+        if stat_path.exists():
+            stat = stat_path.stat()
+            entry["mtime"] = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+            entry["size"] = int(stat.st_size)
+    except OSError:
+        pass
+    return entry
+
+
+def _write_microwire_word_manifest(
+    frame: Any,
+    reports: Sequence[Path],
+    output_dir: Path,
+    *,
+    source_path: Path,
+    copied_project: str | None,
+    include_origin: bool,
+) -> tuple[Path, Path]:
+    exported_at = datetime.now(timezone.utc).isoformat()
+    rows: list[dict[str, Any]] = []
+    for index, (_, row) in enumerate(frame.reset_index(drop=True).iterrows()):
+        report_path = Path(reports[index]) if index < len(reports) else output_dir / _word_report_output_filenames(frame)[index]
+        sections = _microwire_word_graph_sections_for_row(row)
+        source_entries = {
+            section_name: [
+                _word_manifest_source_entry(source)
+                for source in section_data.get("sources", [])
+            ]
+            for section_name, section_data in sections.items()
+        }
+        rows.append(
+            {
+                "composition": str(row.get("Composition") or "").strip(),
+                "microwire": str(row.get("Microwire") or "").strip(),
+                "docx": str(report_path),
+                "docx_name": report_path.name,
+                "graph_sections": sorted(sections.keys()),
+                "sections": sections,
+                "source_files": source_entries,
+            }
+        )
+
+    manifest = {
+        "format": "microwire-docx-export-manifest-v1",
+        "exported_at": exported_at,
+        "source_project": str(source_path),
+        "copied_project": copied_project,
+        "output_dir": str(output_dir),
+        "origin_embeddings": bool(include_origin),
+        "report_count": len(rows),
+        "reports": rows,
+    }
+    json_path = output_dir / "docx_export_manifest.json"
+    csv_path = output_dir / "docx_export_manifest.csv"
+    json_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "composition",
+                "microwire",
+                "docx_name",
+                "graph_sections",
+                "source_count",
+                "sources",
+            ],
+        )
+        writer.writeheader()
+        for item in rows:
+            sources = []
+            for section_data in item["source_files"].values():
+                for source_entry in section_data:
+                    sources.append(str(source_entry.get("path") or ""))
+            writer.writerow(
+                {
+                    "composition": item["composition"],
+                    "microwire": item["microwire"],
+                    "docx_name": item["docx_name"],
+                    "graph_sections": "; ".join(item["graph_sections"]),
+                    "source_count": len(sources),
+                    "sources": "; ".join(sources),
+                }
+            )
+    return json_path, csv_path
+
+
+def _archive_existing_microwire_word_reports(frame: Any, output_dir: Path) -> list[Path]:
+    archive_dir = output_dir / "archive"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    archived: list[Path] = []
+    for filename in _word_report_output_filenames(frame):
+        path = output_dir / filename
+        if not path.exists():
+            continue
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target = archive_dir / f"{path.stem}_before_batch_{timestamp}{path.suffix}"
+        counter = 2
+        while target.exists():
+            target = archive_dir / f"{path.stem}_before_batch_{timestamp}_{counter}{path.suffix}"
+            counter += 1
+        shutil.move(str(path), str(target))
+        archived.append(target)
+    return archived
+
+
+def _disable_originpro_exit_detach() -> None:
+    try:
+        import plotting.shared.origin as shared_origin
+
+        setattr(shared_origin, "_ORIGIN_RELEASED", True)
+    except Exception:
+        pass
+    try:
+        import atexit
+        import originpro.config as origin_config  # type: ignore
+    except Exception:
+        return
+    handler = getattr(origin_config, "_exit_handler", None)
+    if callable(handler):
+        try:
+            atexit.unregister(handler)
+        except Exception:
+            pass
+    obj_count = getattr(origin_config, "_OBJS_COUNT", None)
+    if isinstance(obj_count, list) and obj_count:
+        try:
+            obj_count[0] = max(int(obj_count[0]), 1)
+        except Exception:
+            obj_count[0] = 1
+
+
+def _attach_origin_for_word_report() -> None:
+    from plotting.shared.origin import _ensure_origin_sdk_on_path
+
+    _ensure_origin_sdk_on_path()
+    import originpro as op  # type: ignore
+
+    attach = getattr(op, "attach", None)
+    if callable(attach):
+        attach()
+    try:
+        op.set_show()
+    except Exception:
+        pass
+
+
+def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
+    from microwire_data_builder.core import export_word_reports
+
+    try:
+        source_path = Path(str(getattr(args, "microwire_word_report", "")).strip()).expanduser()
+        if not source_path.exists():
+            raise FileNotFoundError(source_path)
+        output_dir_value = getattr(args, "out", None)
+        output_dir = (
+            Path(str(output_dir_value)).expanduser()
+            if output_dir_value
+            else source_path.with_suffix("").parent / f"{source_path.stem}_word_reports"
+        )
+        if bool(getattr(args, "microwire_word_origin", True)):
+            try:
+                _attach_origin_for_word_report()
+            except Exception as exc:
+                LOGGER.warning("Origin object generation skipped for Word report: %s", exc)
+                setattr(args, "microwire_word_origin", False)
+        frame, origin_artifacts = _load_microwire_word_report_frame(source_path, args, output_dir)
+        if bool(getattr(args, "microwire_word_graphs_only", False)):
+            before_count = len(frame)
+            frame = _filter_microwire_word_graph_rows(frame)
+            print(f"[microwire-word] graph_rows={len(frame)}")
+            print(f"[microwire-word] skipped_graphless_rows={before_count - len(frame)}")
+        archived_reports = _archive_existing_microwire_word_reports(frame, output_dir)
+        for archived in archived_reports:
+            print(f"[microwire-word] archived={archived}")
+        reports = export_word_reports(frame, output_dir, origin_artifacts=origin_artifacts, logger=LOGGER)
+        manifest_json, manifest_csv = _write_microwire_word_manifest(
+            frame,
+            reports,
+            output_dir,
+            source_path=source_path,
+            copied_project=getattr(args, "_microwire_word_copied_project", None),
+            include_origin=bool(getattr(args, "microwire_word_origin", True)),
+        )
+        print(f"[microwire-word] output_dir={output_dir}")
+        print(f"[microwire-word] reports={len(reports)}")
+        print(f"[microwire-word] manifest={manifest_json}")
+        print(f"[microwire-word] manifest_csv={manifest_csv}")
+        for report in reports:
+            print(f"[microwire-word] report={report}")
+        return 0
+    finally:
+        _disable_originpro_exit_detach()
 
 
 def _run_visual_check(args: argparse.Namespace) -> int:
@@ -855,55 +2356,12 @@ def _path_payload(paths: list[Path]) -> list[str]:
 
 
 def _pyplot_summary(window: "PyPlotWorkbench", plugin_name: str | None) -> dict[str, Any]:
-    current_tab = window.tab_widget.currentWidget()
-    axes = None
-    try:
-        axes = window._current_axes()
-    except Exception:
-        axes = None
-    current_title = ""
-    current_x = ""
-    current_y = ""
-    if axes is not None:
-        try:
-            current_title = str(axes.get_title() or "")
-        except Exception:
-            current_title = ""
-        try:
-            current_x = str(axes.get_xlabel() or "")
-        except Exception:
-            current_x = ""
-        try:
-            current_y = str(axes.get_ylabel() or "")
-        except Exception:
-            current_y = ""
-    visible_plot_tabs: list[str] = []
-    for index in range(window.tab_widget.count()):
-        try:
-            visible_plot_tabs.append(window.tab_widget.tabText(index))
-        except Exception:
-            continue
-    return {
-        "plugin": plugin_name,
-        "selected_paths": _path_payload(window._selected_paths()),  # type: ignore[attr-defined]
-        "worksheet_count": len(getattr(window, "_worksheets", {})),
-        "workbook_count": len(getattr(window, "_workbooks", {})),
-        "tab_count": int(window.tab_widget.count()),
-        "tab_labels": visible_plot_tabs,
-        "current_tab_label": window.tab_widget.tabText(window.tab_widget.currentIndex())
-        if window.tab_widget.currentIndex() >= 0
-        else "",
-        "current_title": current_title,
-        "current_x_label": current_x,
-        "current_y_label": current_y,
-        "graph_format_visible": bool(
-            isinstance(getattr(window, "_graph_format_dialog", None), QtWidgets.QDialog)
-            and window._graph_format_dialog.isVisible()  # type: ignore[attr-defined]
-        ),
-        "current_tab_has_axes": axes is not None,
-        "object_tree_top_level_count": int(getattr(window, "object_tree", QtWidgets.QTreeWidget()).topLevelItemCount()),
-        "current_widget_has_descriptor": current_tab in getattr(window, "_tab_descriptors", {}),
-    }
+    state_getter = getattr(window, "automation_get_state", None)
+    if callable(state_getter):
+        state = state_getter()
+        if isinstance(state, dict):
+            return state
+    return {"plugin": plugin_name}
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -912,22 +2370,258 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _select_pyplot_plugin(window: "PyPlotWorkbench", plugin_name: str) -> None:
-    current = getattr(window, "_current_plotter_name", None)
-    if current == plugin_name and getattr(window, "_current_plugin", None) is not None:
+    selector = getattr(window, "automation_select_plugin", None)
+    if callable(selector):
+        selector(plugin_name)
         return
-    combo = getattr(window, "_plotter_combo", None)
-    if isinstance(combo, QtWidgets.QComboBox):
-        index = combo.findData(plugin_name)
-        if index < 0:
-            raise RuntimeError(f"PyPlot plugin '{plugin_name}' is not available in this session.")
-        combo.setCurrentIndex(index)
-    if getattr(window, "_current_plotter_name", None) == plugin_name:
-        return
-    apply_selected = getattr(window, "_apply_selected_plotter", None)
-    if callable(apply_selected):
-        apply_selected()
-    if getattr(window, "_current_plotter_name", None) != plugin_name:
-        raise RuntimeError(f"Failed to activate PyPlot plugin '{plugin_name}'.")
+    raise RuntimeError("PyPlot plugin selection automation is unavailable.")
+
+
+def _session_registry_dir() -> Path:
+    return Path(tempfile.gettempdir()) / "pyplot_automation_sessions"
+
+
+def _session_record_path(session_id: str) -> Path:
+    return _session_registry_dir() / f"{session_id}.json"
+
+
+def _write_session_record(payload: dict[str, Any]) -> Path:
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        raise RuntimeError("Session record payload is missing session_id.")
+    path = _session_record_path(session_id)
+    _write_json(path, payload)
+    return path
+
+
+def _remove_session_record(session_id: str) -> None:
+    path = _session_record_path(session_id)
+    if path.exists():
+        try:
+            path.unlink()
+        except Exception:
+            pass
+
+
+def _is_process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _load_session_record(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _list_session_records() -> list[dict[str, Any]]:
+    registry = _session_registry_dir()
+    if not registry.exists():
+        return []
+    payloads: list[dict[str, Any]] = []
+    for path in sorted(registry.glob("*.json")):
+        payload = _load_session_record(path)
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _get_session_record(session_id: str) -> dict[str, Any]:
+    token = str(session_id or "").strip()
+    if not token:
+        raise _AutomationRecipeError("PyPlot session id is required.")
+    record_path = _session_record_path(token)
+    payload = _load_session_record(record_path)
+    if not isinstance(payload, dict):
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            time.sleep(0.1)
+            payload = _load_session_record(record_path)
+            if isinstance(payload, dict):
+                break
+    if not isinstance(payload, dict):
+        raise _AutomationRecipeError(f"PyPlot session '{token}' is not available.")
+    return payload
+
+
+def _coerce_session_timeout(value: object) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        timeout = DEFAULT_SESSION_COMMAND_TIMEOUT_S
+    return max(5.0, timeout)
+
+
+class _PyPlotSessionBridge(QtCore.QObject):
+    _command_signal = QtCore.pyqtSignal(object, object)
+
+    def __init__(
+        self,
+        *,
+        window: "PyPlotWorkbench",
+        session_id: str,
+        token: str,
+        port: int,
+        record_path: Path,
+    ) -> None:
+        super().__init__(window)
+        self.window = window
+        self.session_id = session_id
+        self.token = token
+        self.port = port
+        self.record_path = record_path
+        self._command_signal.connect(self._execute_queued_command)
+
+    def session_payload(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "token": self.token,
+            "port": self.port,
+            "pid": os.getpid(),
+            "cwd": str(Path.cwd()),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "plugin": getattr(self.window, "_current_plotter_name", None),
+            "protocol_version": SESSION_PROTOCOL_VERSION,
+        }
+
+    def dispatch_remote_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("token") != self.token:
+            raise RuntimeError("PyPlot session token is invalid.")
+        command = payload.get("command")
+        if not isinstance(command, dict):
+            raise RuntimeError("PyPlot session request must include an object 'command'.")
+        return self._dispatch_on_gui_thread(
+            command,
+            timeout_s=_coerce_session_timeout(payload.get("timeout_s")),
+        )
+
+    def _dispatch_on_gui_thread(
+        self,
+        command: dict[str, Any],
+        *,
+        timeout_s: float = DEFAULT_SESSION_COMMAND_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        if QtCore.QThread.currentThread() is self.thread():
+            return self.window.automation_execute_command(command)
+        holder: dict[str, Any] = {}
+        event = threading.Event()
+        self._command_signal.emit(command, (holder, event))
+        if not event.wait(timeout=timeout_s):
+            raise TimeoutError("Timed out waiting for PyPlot session command to finish.")
+        error = holder.get("error")
+        if isinstance(error, BaseException):
+            raise error
+        result = holder.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("PyPlot session returned an invalid response payload.")
+        return result
+
+    @QtCore.pyqtSlot(object, object)
+    def _execute_queued_command(self, command: object, transport: object) -> None:
+        holder, event = cast(tuple[dict[str, Any], threading.Event], transport)
+        try:
+            if not isinstance(command, dict):
+                raise RuntimeError("PyPlot session command payload is invalid.")
+            holder["result"] = self.window.automation_execute_command(command)
+        except Exception as exc:
+            holder["error"] = exc
+        finally:
+            event.set()
+
+
+class _PyPlotSessionTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, server_address: tuple[str, int]) -> None:
+        self.bridge: _PyPlotSessionBridge | None = None
+        super().__init__(server_address, _PyPlotSessionRequestHandler)
+
+
+class _PyPlotSessionRequestHandler(socketserver.StreamRequestHandler):
+    def handle(self) -> None:
+        raw = self.rfile.readline(1_000_000)
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            response: dict[str, Any] = {
+                "status": "error",
+                "error": f"Invalid PyPlot session JSON payload: {exc}",
+            }
+        else:
+            if not isinstance(payload, dict):
+                response = {
+                    "status": "error",
+                    "error": "PyPlot session request must be a JSON object.",
+                }
+            else:
+                try:
+                    bridge = getattr(self.server, "bridge", None)  # type: ignore[attr-defined]
+                    if bridge is None:
+                        raise RuntimeError("PyPlot session bridge is not ready.")
+                    response = bridge.dispatch_remote_command(payload)
+                except Exception as exc:
+                    response = {
+                        "status": "error",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+        self.wfile.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+
+
+def _send_pyplot_session_command(
+    session_id: str,
+    command: dict[str, Any],
+    *,
+    timeout_s: float = DEFAULT_SESSION_COMMAND_TIMEOUT_S,
+) -> dict[str, Any]:
+    record = _get_session_record(session_id)
+    host = str(record.get("host") or "127.0.0.1")
+    port = record.get("port")
+    token = record.get("token")
+    if not isinstance(port, int) or port <= 0:
+        raise _AutomationRecipeError(f"PyPlot session '{session_id}' has an invalid port.")
+    if not isinstance(token, str) or not token:
+        raise _AutomationRecipeError(f"PyPlot session '{session_id}' is missing its auth token.")
+    payload = {
+        "token": token,
+        "command": command,
+        "timeout_s": _coerce_session_timeout(timeout_s),
+    }
+    try:
+        with socket.create_connection((host, port), timeout=max(5.0, float(timeout_s))) as sock:
+            sock.settimeout(max(5.0, float(timeout_s)))
+            raw = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+            sock.sendall(raw)
+            buffer = b""
+            while not buffer.endswith(b"\n"):
+                chunk = sock.recv(65_536)
+                if not chunk:
+                    break
+                buffer += chunk
+    except OSError as exc:
+        raise _AutomationRecipeError(
+            f"Failed to contact PyPlot session '{session_id}' on {host}:{port}: {exc}"
+        ) from exc
+    try:
+        response = json.loads(buffer.decode("utf-8"))
+    except Exception as exc:
+        raise _AutomationRecipeError(
+            f"PyPlot session '{session_id}' returned invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(response, dict):
+        raise _AutomationRecipeError(f"PyPlot session '{session_id}' returned an invalid response.")
+    return response
 
 
 def _export_visible_plot_images(
@@ -1248,52 +2942,58 @@ def _execute_pyplot_automation_request(
         _pump_qt_events(app, rounds=4)
 
         if isinstance(request.load_project_path, Path):
-            window._load_project_from_path(request.load_project_path)  # type: ignore[attr-defined]
-            _pump_qt_events(app, rounds=8)
-            if getattr(window, "_project_path", None) != request.load_project_path:
-                raise RuntimeError(f"Failed to load PyPlot project {request.load_project_path}")
+            loader = getattr(window, "automation_load_project", None)
+            if callable(loader):
+                loader(request.load_project_path)
+            else:
+                raise RuntimeError("PyPlot project-load automation is unavailable.")
 
         if request.plugin_name:
             _select_pyplot_plugin(window, request.plugin_name)
             _pump_qt_events(app, rounds=4)
 
         if request.import_entries:
-            window._import_paths(request.import_entries)  # type: ignore[attr-defined]
-            _pump_qt_events(app, rounds=6)
+            importer = getattr(window, "automation_import_paths", None)
+            if callable(importer):
+                importer(request.import_entries)
+            else:
+                raise RuntimeError("PyPlot import automation is unavailable.")
             imported_paths = list(request.import_entries)
 
-        plugin = getattr(window, "_current_plugin", None)
         if request.generate:
-            if plugin is None:
-                raise RuntimeError("No active PyPlot plugin selected for generate.")
-            plugin.generate()
-            _pump_qt_events(app, rounds=8)
+            generator = getattr(window, "automation_generate", None)
+            if callable(generator):
+                generator()
+            else:
+                raise RuntimeError("PyPlot generate automation is unavailable.")
 
         for graph_payload in request.build_graphs:
-            creator = getattr(window, "_automation_create_graph", None)
-            if not callable(creator):
+            creator = getattr(window, "automation_build_graph", None)
+            if callable(creator):
+                creator(graph_payload)
+            else:
                 raise RuntimeError("PyPlot graph builder automation is unavailable.")
-            creator(graph_payload)
-            _pump_qt_events(app, rounds=6)
 
         for figure_payload in request.create_figures:
-            creator = getattr(window, "_automation_create_figure", None)
-            if not callable(creator):
+            creator = getattr(window, "automation_create_figure", None)
+            if callable(creator):
+                creator(figure_payload)
+            else:
                 raise RuntimeError("PyPlot figure layout automation is unavailable.")
-            creator(figure_payload)
-            _pump_qt_events(app, rounds=6)
 
         if request.open_graph_format:
-            opener = getattr(window, "_open_graph_format_dialog", None)
+            opener = getattr(window, "automation_open_graph_format", None)
             if callable(opener):
                 opener()
-            _pump_qt_events(app, rounds=4)
+            else:
+                raise RuntimeError("PyPlot graph-format automation is unavailable.")
 
         if request.open_origin:
-            if plugin is None:
-                raise RuntimeError("No active PyPlot plugin selected for Origin export.")
-            plugin.open_origin()
-            _pump_qt_events(app, rounds=6)
+            opener = getattr(window, "automation_open_origin", None)
+            if callable(opener):
+                opener()
+            else:
+                raise RuntimeError("PyPlot Origin automation is unavailable.")
 
         wait_ms = max(0, int(request.wait_ms or 0))
         if wait_ms > 0:
@@ -1303,33 +3003,37 @@ def _execute_pyplot_automation_request(
                 time.sleep(min(0.02, max(0.0, deadline - time.time())))
 
         if isinstance(request.window_image_path, Path):
-            target = request.window_image_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _pump_qt_events(app, rounds=4)
-            if not window.grab().save(str(target)):
-                raise RuntimeError(f"Failed to save PyPlot screenshot to {target}")
+            capturer = getattr(window, "automation_capture_window", None)
+            if callable(capturer):
+                capturer(request.window_image_path)
+            else:
+                raise RuntimeError("PyPlot window-capture automation is unavailable.")
 
         if isinstance(request.current_plot_image_path, Path):
-            axes = window._current_axes()  # type: ignore[attr-defined]
-            if axes is None or getattr(axes, "figure", None) is None:
-                raise RuntimeError("No active plot is available for current_plot_image export.")
-            target = request.current_plot_image_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            axes.figure.savefig(target, dpi=160)
+            capturer = getattr(window, "automation_capture_current_plot", None)
+            if callable(capturer):
+                capturer(request.current_plot_image_path)
+            else:
+                raise RuntimeError("PyPlot plot-capture automation is unavailable.")
 
         if isinstance(request.plot_images_dir, Path):
             exported_plot_paths = _export_visible_plot_images(window, app, request.plot_images_dir)
 
         if isinstance(request.export_all_figures_dir, Path) and isinstance(request.export_all_figures_format, str):
-            exporter = getattr(window, "_automation_export_all_figures", None)
+            exporter = getattr(window, "automation_export_all_figures", None)
             if not callable(exporter):
                 raise RuntimeError("PyPlot batch figure export automation is unavailable.")
-            exported_all_figure_paths = exporter(
+            export_result = exporter(
                 output_dir=request.export_all_figures_dir,
                 fmt=request.export_all_figures_format,
                 dpi=request.export_all_figures_dpi,
                 transparent=bool(request.export_all_figures_transparent),
             )
+            exported_all_figure_paths = [
+                Path(item)
+                for item in cast(dict[str, Any], export_result).get("paths", [])
+                if isinstance(item, str)
+            ]
 
         if isinstance(request.review_output_dir, Path):
             theme = theme_manager()
@@ -1351,13 +3055,13 @@ def _execute_pyplot_automation_request(
                     _pump_qt_events(app, rounds=4)
 
         if isinstance(request.save_project_path, Path):
-            target = _normalise_project_path(request.save_project_path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            window._write_project_file(target)  # type: ignore[attr-defined]
-            _pump_qt_events(app, rounds=4)
-            if getattr(window, "_project_path", None) != target or not target.exists():
-                raise RuntimeError(f"Failed to save PyPlot project to {target}")
-            saved_project_path = target
+            saver = getattr(window, "automation_save_project", None)
+            if not callable(saver):
+                raise RuntimeError("PyPlot project-save automation is unavailable.")
+            save_result = saver(request.save_project_path)
+            saved = cast(dict[str, Any], save_result).get("saved_project")
+            if isinstance(saved, str) and saved.strip():
+                saved_project_path = Path(saved)
 
         active_plugin_name = getattr(window, "_current_plotter_name", None) or request.plugin_name
         summary = _pyplot_summary(window, active_plugin_name)
@@ -1466,6 +3170,151 @@ def _run_automation_recipe(args: argparse.Namespace, qt_args: list[str]) -> int:
         print(f"[automation-recipe] {exc}")
         return 2
     return _run_pyplot_automation_request(request, qt_args)
+
+
+def _load_session_command_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    command_file = getattr(args, "pyplot_session_command_file", None)
+    if isinstance(command_file, str) and command_file.strip():
+        path = Path(command_file).expanduser()
+        payload = _load_json_object(path, label="PyPlot session command")
+        return payload
+    command_json = getattr(args, "pyplot_session_command_json", None)
+    if not isinstance(command_json, str) or not command_json.strip():
+        raise _AutomationRecipeError(
+            "PyPlot session send requires either --pyplot-session-command-json or --pyplot-session-command-file."
+        )
+    try:
+        payload = json.loads(command_json)
+    except json.JSONDecodeError as exc:
+        raise _AutomationRecipeError(
+            f"PyPlot session command JSON is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise _AutomationRecipeError("PyPlot session command must be a JSON object.")
+    return payload
+
+
+def _run_pyplot_session_client(args: argparse.Namespace) -> int:
+    try:
+        if getattr(args, "pyplot_session_list", False):
+            response = {
+                "status": "ok",
+                "sessions": _list_session_records(),
+            }
+        elif getattr(args, "pyplot_session_state", False):
+            session_id = str(getattr(args, "pyplot_session_id", None) or "")
+            response = _send_pyplot_session_command(session_id, {"action": "state"})
+        elif getattr(args, "pyplot_session_close", False):
+            session_id = str(getattr(args, "pyplot_session_id", None) or "")
+            response = _send_pyplot_session_command(session_id, {"action": "close"})
+        elif getattr(args, "pyplot_session_send", False):
+            session_id = str(getattr(args, "pyplot_session_id", None) or "")
+            command = _load_session_command_from_args(args)
+            response = _send_pyplot_session_command(session_id, command)
+        else:
+            raise _AutomationRecipeError("No PyPlot session action was requested.")
+    except _AutomationRecipeError as exc:
+        print(f"[pyplot-session] {exc}")
+        return 2
+
+    print(json.dumps(response, ensure_ascii=False))
+    return 0 if response.get("status") == "ok" else 1
+
+
+def _run_pyplot_session_start(args: argparse.Namespace, qt_args: list[str]) -> int:
+    from plotting.pyplot.app import PyPlotWorkbench
+
+    show_window = bool(getattr(args, "pyplot_show_window", False))
+    created_app = False
+    app = QtWidgets.QApplication.instance()
+    if not isinstance(app, QtWidgets.QApplication):
+        if not show_window:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication([sys.argv[0], *qt_args])
+        created_app = True
+        _schedule_theme_application(app)
+    try:
+        app.setQuitOnLastWindowClosed(True)
+    except Exception:
+        pass
+
+    request = _pyplot_request_from_legacy_args(args)
+    window = PyPlotWorkbench(initial_plotter=request.plugin_name)
+    if show_window:
+        window.show()
+    _pump_qt_events(app, rounds=4)
+
+    if request.plugin_name:
+        _select_pyplot_plugin(window, request.plugin_name)
+    if request.import_entries:
+        importer = getattr(window, "automation_import_paths", None)
+        if callable(importer):
+            importer(request.import_entries)
+    if request.generate:
+        generator = getattr(window, "automation_generate", None)
+        if callable(generator):
+            generator()
+    if request.open_graph_format:
+        opener = getattr(window, "automation_open_graph_format", None)
+        if callable(opener):
+            opener()
+    if request.open_origin:
+        opener = getattr(window, "automation_open_origin", None)
+        if callable(opener):
+            opener()
+
+    session_id = uuid.uuid4().hex
+    token = secrets.token_urlsafe(24)
+    server = _PyPlotSessionTcpServer(("127.0.0.1", 0))
+    port = int(server.server_address[1])
+    bridge = _PyPlotSessionBridge(
+        window=window,
+        session_id=session_id,
+        token=token,
+        port=port,
+        record_path=_session_record_path(session_id),
+    )
+    server.bridge = bridge
+    server_thread = threading.Thread(
+        target=server.serve_forever,
+        name=f"PyPlotSessionServer-{session_id}",
+        daemon=True,
+    )
+    server_thread.start()
+
+    session_payload = bridge.session_payload()
+    session_payload["host"] = "127.0.0.1"
+    record_path = _write_session_record(session_payload)
+
+    info_path_value = getattr(args, "pyplot_session_info_file", None)
+    if isinstance(info_path_value, str) and info_path_value.strip():
+        _write_json(Path(info_path_value).expanduser(), session_payload)
+
+    def _cleanup() -> None:
+        _remove_session_record(session_id)
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        try:
+            server.server_close()
+        except Exception:
+            pass
+
+    app.aboutToQuit.connect(_cleanup)
+    window.destroyed.connect(lambda *_args: _cleanup())
+
+    print(json.dumps(session_payload, ensure_ascii=False))
+    try:
+        app.exec()
+    finally:
+        _cleanup()
+        if created_app:
+            try:
+                app.quit()
+            except Exception:
+                pass
+    return 0
 
 
 def _run_pyplot_automation(args: argparse.Namespace, qt_args: list[str]) -> int:
@@ -2155,12 +4004,18 @@ class MasterLauncher(QtWidgets.QWidget):
 def main(argv: list[str] | None = None) -> None:
     argv_list = list(sys.argv if argv is None else argv)
     args, qt_args = _parse_launcher_args(argv_list[1:])
+    if _is_pyplot_session_requested(args):
+        if getattr(args, "pyplot_session_start", False):
+            raise SystemExit(_run_pyplot_session_start(args, qt_args))
+        raise SystemExit(_run_pyplot_session_client(args))
     if args.visual_check:
         raise SystemExit(_run_visual_check(args))
     if getattr(args, "automation_recipe", None):
         raise SystemExit(_run_automation_recipe(args, qt_args))
     if _is_mini_dma_bench_requested(args):
         raise SystemExit(_run_mini_dma_bench_plan(args, qt_args))
+    if _is_microwire_word_report_requested(args):
+        raise SystemExit(_run_microwire_word_report_cli(args))
     if _is_microwire_eda_requested(args):
         raise SystemExit(_run_microwire_eda_cli(args))
     if _is_pyplot_automation_requested(args):

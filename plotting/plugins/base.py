@@ -120,6 +120,11 @@ class PyPlotPlugin:
             "Origin export is not available for this plotting script yet.",
         )
 
+    def origin_export_tabs(self) -> Iterable[QtWidgets.QWidget] | None:
+        """Return graph tabs that should be included in shared Origin export."""
+
+        return None
+
     def export_origin_workbooks(self) -> None:
         exporter = getattr(self.host, "_export_workbooks_to_origin", None)
         if callable(exporter):

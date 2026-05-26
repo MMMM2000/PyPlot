@@ -104,13 +104,19 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "body": dedent(
             """
             ### Live MLX90640 view
-            1. Keep the Nucleo running the MLX90640 fast-stream firmware for the default binary
-               mode, or the older frame-dump firmware for text mode.
-            2. Select the Nucleo serial port, normally `COM10`, use **Binary fast** at `921600`
-               baud for live viewing, and press **Connect**. Use **Text frame dump** at `115200`
-               baud only for the older diagnostic firmware.
-            3. The viewer reconstructs the 32 x 24 thermal frame, scales it into a heatmap, and
-               updates the min, mean, max, ambient, and frame-rate readouts.
+            1. Keep the Nucleo running the STM32Cube MLX90640 raw-stream firmware for the
+               fastest live diagnostic view, or the older Arduino firmware for calibrated
+               binary/text modes.
+            2. Select the Nucleo serial port, normally `COM10`, use **Cube raw** at
+               `2000000` baud for the STM32Cube firmware, choose the requested refresh
+               rate, and press **Connect**. The current 400 kHz I2C firmware is clean at
+               16 Hz and 32 Hz; 64 Hz remains experimental and may overrun. Use
+               **Arduino binary** at `921600` baud or **Text frame dump** at `115200` baud only
+               with the older Arduino firmware.
+            3. The viewer reconstructs the 32 x 24 frame, scales it into a heatmap, and updates
+               the min, mean, max, ambient, and frame-rate readouts. Cube raw mode loads the
+               camera EEPROM when available and attempts host-side Celsius conversion; if the
+               calibration sanity checks fail, it falls back to raw sensor counts.
             4. Use **Auto scale** while aligning the camera. Switch to fixed min/max scaling when
                comparing before/after current frames so colour changes are easier to judge.
             5. Press **Export frame** to save the current PNG heatmap and raw text frame to

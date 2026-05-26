@@ -47,6 +47,27 @@ def test_load_file_handles_decimal_commas(tmp_path: Path) -> None:
     assert df["R_Ohm"].tolist() == pytest.approx([1000.5, 1001.5])
 
 
+def test_load_file_keeps_milliamp_input_without_multiplying_by_1000(tmp_path: Path) -> None:
+    path = tmp_path / "already_ma_80mA.txt"
+    path.write_text("2 0.1 100\n4 0.2 110\n6 0.3 120\n")
+    df = anneal_core.load_file(path)
+    assert df["I_mA"].tolist() == pytest.approx([2.0, 4.0, 6.0])
+
+
+def test_load_file_uses_filename_target_to_keep_amp_input_in_physical_range(tmp_path: Path) -> None:
+    path = tmp_path / "amp_input_80mA.txt"
+    path.write_text("0.02 0.1 100\n0.04 0.2 110\n0.08 0.3 120\n")
+    df = anneal_core.load_file(path)
+    assert df["I_mA"].tolist() == pytest.approx([20.0, 40.0, 80.0])
+
+
+def test_load_file_rejects_currents_above_expected_annealing_ceiling(tmp_path: Path) -> None:
+    path = tmp_path / "too_high_1500mA.txt"
+    path.write_text("1200 0.1 100\n1500 0.2 110\n")
+    with pytest.raises(ValueError, match="1000 mA ceiling"):
+        anneal_core.load_file(path)
+
+
 def test_plot_one_bridges_increasing_to_decreasing_segment() -> None:
     df = pd.DataFrame(
         {
@@ -92,6 +113,24 @@ def test_plot_one_uses_shared_default_label_style_and_size() -> None:
     plt.close(fig)
 
 
+def test_plot_one_can_show_power_top_axis() -> None:
+    df = pd.DataFrame(
+        {
+            "I_mA": [0.0, 10.0, 20.0, 30.0],
+            "R_Ohm": [100.0, 110.0, 120.0, 130.0],
+        }
+    )
+    fig, _ = anneal_core.plot_one(df, "Anneal", show_power_top_axis=True)
+    try:
+        assert len(fig.axes) == 2
+        top_ax = fig.axes[1]
+        assert top_ax.get_xlabel() == "Power [mW]"
+        assert top_ax.get_xlim() == pytest.approx(fig.axes[0].get_xlim())
+        assert any(label.get_text() for label in top_ax.get_xticklabels())
+    finally:
+        plt.close(fig)
+
+
 def test_plot_one_legend_text_color_follows_line_color() -> None:
     df = pd.DataFrame(
         {
@@ -111,6 +150,26 @@ def test_plot_one_legend_text_color_follows_line_color() -> None:
         text_colors = [mcolors.to_hex(text.get_color()) for text in legend.get_texts()]
         assert text_colors
         assert text_colors == handle_colors[: len(text_colors)]
+    finally:
+        plt.close(fig)
+
+
+def test_plot_one_uses_distinct_cycle_colors_and_labels() -> None:
+    df = pd.DataFrame(
+        {
+            "I_mA": [0.0, 10.0, 20.0, 10.0, 0.0, 10.0, 20.0, 10.0, 0.0],
+            "R_Ohm": [100.0, 120.0, 140.0, 130.0, 110.0, 125.0, 145.0, 135.0, 115.0],
+        }
+    )
+    fig, _ = anneal_core.plot_one(df, "Anneal")
+    try:
+        ax = fig.axes[0]
+        legend = ax.get_legend()
+        assert legend is not None
+        labels = [text.get_text() for text in legend.get_texts()]
+        assert labels == ["Increasing 1", "Decreasing 1", "Increasing 2", "Decreasing 2"]
+        colors = [mcolors.to_hex(line.get_color()).lower() for line in ax.lines]
+        assert colors[:4] == ["#dc2626", "#2563eb", "#f97316", "#0ea5e9"]
     finally:
         plt.close(fig)
 
@@ -258,15 +317,53 @@ def test_origin_directional_legend_does_not_embed_sample_title() -> None:
     )
 
     legend_text = layer.label("Legend").text
-    assert "Increasing current" in legend_text
-    assert "Decreasing current" in legend_text
+    assert "Increasing 1" in legend_text
+    assert "Decreasing 1" in legend_text
     assert "Ni50Fe27Ga23" not in legend_text
+
+
+def test_origin_directional_export_keeps_cycle_specific_series_colors() -> None:
+    layer = _DummyLayer()
+    graph = _DummyGraph()
+    worksheet = _DummyWorksheet()
+    currents = anneal_core.np.array(
+        [0.0, 20.0, 40.0, 20.0, 0.0, 20.0, 40.0, 20.0, 0.0],
+        dtype=float,
+    )
+    resistances = anneal_core.np.array(
+        [100.0, 120.0, 150.0, 140.0, 130.0, 125.0, 155.0, 145.0, 135.0],
+        dtype=float,
+    )
+
+    anneal_core._plot_origin_experimental(  # noqa: SLF001
+        origin_any=None,
+        workbook=None,
+        worksheet=worksheet,
+        graph=graph,
+        layer=layer,
+        currents=currents,
+        resistances=resistances,
+        legend_label="Ni50Fe27Ga23 1_1",
+    )
+
+    assert len(layer._plots) == 4  # noqa: SLF001 - test helper state
+    assert [plot.color for plot in layer._plots] == [  # noqa: SLF001 - test helper state
+        "#dc2626",
+        "#2563eb",
+        "#f97316",
+        "#0ea5e9",
+    ]
 
 
 def test_current_annealing_plugin_uses_shared_origin_export() -> None:
     assert (
         anneal_plugin_mod.CurrentAnnealingPlugin.uses_shared_plot_workbooks is True
     )
+
+
+def test_current_annealing_plugin_exposes_no_redundant_settings_widget() -> None:
+    plugin = anneal_plugin_mod.CurrentAnnealingPlugin(object(), "Current Annealing")
+    assert plugin.settings_widget() is None
 
 
 def test_current_annealing_open_origin_delegates_to_shared_host_export() -> None:

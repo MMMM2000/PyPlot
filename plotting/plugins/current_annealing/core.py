@@ -19,8 +19,10 @@ from plotting.shared.utils import save_figure, show_plots, schedule_origin_relea
 from plotting.shared.origin import (
     origin_session,
     hide_origin_workbook,
+    set_origin_axis_title as shared_set_origin_axis_title,
     set_origin_graph_title as shared_set_origin_graph_title,
 )
+from plotting.shared.power_axis import add_power_top_axis
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.toolkit import format_annealing_title
 
@@ -43,6 +45,8 @@ TITLE_SIZE = 16
 SHOW_TICK_LABELS = True
 SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
+INCREASING_COLORS = ["#dc2626", "#f97316", "#ea580c", "#ef4444"]
+DECREASING_COLORS = ["#2563eb", "#0ea5e9", "#1d4ed8", "#06b6d4"]
 
 # Relax figure count warning for batch plotting inside PyPlot tabs
 plt.rcParams["figure.max_open_warning"] = 0
@@ -53,6 +57,7 @@ ORIGIN_MODE: str = ORIGIN_MODES[0]
 
 
 _SUBSCRIPT_PATTERN = re.compile(r"([A-Z][a-z])(\d+)")
+_CURRENT_TARGET_PATTERN = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*mA\b", re.IGNORECASE)
 
 
 def _format_origin_annotation(text: str) -> str:
@@ -69,6 +74,41 @@ def _format_origin_annotation(text: str) -> str:
 
 def _escape_ltalk_text(text: str) -> str:
     return str(text).replace('"', '""')
+
+
+def _expected_current_limit_mA() -> float:
+    return 1000.0
+
+
+def _target_current_from_path(path: str) -> float | None:
+    match = _CURRENT_TARGET_PATTERN.search(Path(path).name)
+    if not match:
+        return None
+    try:
+        return float(match.group("value"))
+    except Exception:
+        return None
+
+
+def _infer_current_scale_to_mA(path: str, raw_currents: pd.Series) -> float:
+    finite = pd.to_numeric(raw_currents, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if finite.empty:
+        return 1.0
+    abs_values = finite.abs()
+    raw_max = float(abs_values.max())
+    if not math.isfinite(raw_max) or raw_max <= 0.0:
+        return 1.0
+
+    target_mA = _target_current_from_path(path)
+    if target_mA is not None and math.isfinite(target_mA) and target_mA > 0.0:
+        candidates = (
+            (1.0, raw_max),
+            (1000.0, raw_max * 1000.0),
+        )
+        best_scale = min(candidates, key=lambda item: abs(item[1] - target_mA))[0]
+        return float(best_scale)
+
+    return 1000.0 if raw_max <= 1.2 else 1.0
 
 
 def load_file(path: str) -> pd.DataFrame:
@@ -115,14 +155,17 @@ def load_file(path: str) -> pd.DataFrame:
         df = df.iloc[1:].reset_index(drop=True)
     if df.empty:
         raise ValueError(f"{path}: no valid samples after parsing")
-    median_abs = float(df["I_A"].abs().median()) if not df["I_A"].empty else 0.0
-    if np.isnan(median_abs):
-        median_abs = 0.0
-    if median_abs > 20.0:
-        df["I_mA"] = df["I_A"]
-        df["I_A"] = df["I_A"] / 1e3
-    else:
+    scale_to_mA = _infer_current_scale_to_mA(path, df["I_A"])
+    if scale_to_mA == 1000.0:
         df["I_mA"] = df["I_A"] * 1e3
+    else:
+        df["I_mA"] = df["I_A"]
+    df["I_A"] = df["I_mA"] / 1e3
+    max_current_mA = float(df["I_mA"].abs().max()) if not df["I_mA"].empty else 0.0
+    if math.isfinite(max_current_mA) and max_current_mA > (_expected_current_limit_mA() + 1e-6):
+        raise ValueError(
+            f"{path}: current exceeds expected {_expected_current_limit_mA():.0f} mA ceiling after unit detection"
+        )
     mask = (
         np.isfinite(df["I_mA"]) &
         np.isfinite(df["R_Ohm"]) &
@@ -212,6 +255,16 @@ def _normalise_origin_mode(mode: str | None) -> str:
     return ORIGIN_MODES[0]
 
 
+def _segment_label(direction: float, cycle_index: int) -> str:
+    prefix = "Increasing" if direction >= 0 else "Decreasing"
+    return f"{prefix} {cycle_index}"
+
+
+def _segment_color(direction: float, cycle_index: int) -> str:
+    palette = INCREASING_COLORS if direction >= 0 else DECREASING_COLORS
+    return palette[(max(cycle_index, 1) - 1) % len(palette)]
+
+
 def _clear_layer(layer: Any) -> None:
     remover = getattr(layer, "remove_plot", None)
     if callable(remover):
@@ -299,6 +352,48 @@ def _set_graph_title(
     _ = applied
 
 
+def _place_current_annealing_title(layer: Any, text: str) -> None:
+    label_method = getattr(layer, "label", None)
+    title_label = None
+    if callable(label_method):
+        try:
+            title_label = label_method("Title")
+        except Exception:
+            title_label = None
+    if title_label is None:
+        return
+    try:
+        title_label.text = text
+    except Exception:
+        pass
+    _set_visibility(title_label, True)
+    _set_text_size(title_label, max(11, min(TITLE_SIZE, 12)))
+    get_float = getattr(layer, "get_float", None)
+    set_float = getattr(title_label, "set_float", None)
+    if not callable(get_float) or not callable(set_float):
+        return
+    try:
+        x_from = float(get_float("x.from"))
+        x_to = float(get_float("x.to"))
+        y_from = float(get_float("y.from"))
+        y_to = float(get_float("y.to"))
+    except Exception:
+        return
+    if not all(math.isfinite(value) for value in (x_from, x_to, y_from, y_to)):
+        return
+    y_span = y_to - y_from
+    if y_span <= 0:
+        return
+    for key, value in (
+        ("x", (x_from + x_to) / 2.0),
+        ("y", y_to + (y_span * 0.34)),
+    ):
+        try:
+            set_float(key, float(value))
+        except Exception:
+            pass
+
+
 def _assign_long_name(target: Any | None, name: str) -> None:
     if target is None:
         return
@@ -381,6 +476,80 @@ def _apply_axis_labels(layer: Any, x_label: str, y_label: str) -> None:
                 sub = getattr(axis_obj, attr, None)
                 if sub is not None:
                     _set_visibility(sub, False)
+
+
+def _apply_origin_power_top_axis(
+    layer: Any,
+    workbook: Any | None,
+    worksheet: Any | None,
+    currents: np.ndarray,
+    resistances: np.ndarray,
+) -> None:
+    finite_current = np.asarray(currents, dtype=float)
+    finite_current = finite_current[np.isfinite(finite_current)]
+    if finite_current.size < 2:
+        return
+    current_min = float(np.nanmin(finite_current))
+    current_max = float(np.nanmax(finite_current))
+    if not math.isfinite(current_min) or not math.isfinite(current_max):
+        return
+    if math.isclose(current_min, current_max, abs_tol=1e-12):
+        return
+    finite_mask = np.isfinite(np.asarray(currents, dtype=float)) & np.isfinite(
+        np.asarray(resistances, dtype=float)
+    )
+    if not finite_mask.any():
+        return
+    power_values = (np.asarray(currents, dtype=float)[finite_mask] ** 2) * np.asarray(
+        resistances, dtype=float
+    )[finite_mask] / 1000.0
+    current_values = np.asarray(currents, dtype=float)[finite_mask]
+    grouped = pd.DataFrame({"current": current_values, "power": power_values}).groupby(
+        "current", sort=True, as_index=False
+    )["power"].median()
+    if len(grouped) < 2:
+        return
+    try:
+        x_values = grouped["current"].to_numpy(dtype=float)
+        p_values = grouped["power"].to_numpy(dtype=float)
+        denominator = float(np.sum(x_values**4))
+        if math.isclose(denominator, 0.0, abs_tol=1e-12):
+            return
+        quad = float(np.sum((x_values**2) * p_values) / denominator)
+    except Exception:
+        return
+    formula = f"({quad:.12g})*x^2"
+    lt_exec = getattr(layer, "lt_exec", None)
+    if not callable(lt_exec):
+        return
+    commands = [
+        "axis -ps X A 3;",
+        "axis -ps X L 3;",
+        "layer.x.showAxes=3;",
+        "layer.x.showlabel=1;",
+        "layer.x.showLabels=3;",
+        "layer.x2.showlabel=1;",
+        "layer.x2.showLabels=3;",
+        "layer.x2.label.type=1;",
+        "layer.x2.labelType=1;",
+        f'layer.x2.label.formula$="{formula}";',
+        "layer.x2.label.decPlaces=1;",
+        "layer.x.ticks=10;",
+        "layer.x2.ticks=10;",
+        "layer.x2.label.fsize=10;",
+    ]
+    for command in commands:
+        try:
+            lt_exec(command)
+        except Exception:
+            continue
+    try:
+        shared_set_origin_axis_title(layer, "x2", "Power [mW]")
+    except Exception:
+        try:
+            lt_exec('label -s -xt "Power [mW]";')
+        except Exception:
+            pass
 
 
 def _apply_tick_settings(layer: Any, axis_name: str, axis_obj: Any | None) -> None:
@@ -549,6 +718,104 @@ def _apply_origin_readability(layer: Any, graph: Any | None) -> None:
             pass
 
 
+def _style_origin_report_layout(layer: Any, *, outside_legend: bool = False) -> None:
+    """Reserve page space for native Origin labels and place the legend predictably."""
+    if layer is None:
+        return
+    lt_exec = getattr(layer, "lt_exec", None)
+    if not callable(lt_exec):
+        return
+    layer_box = (
+        "layer -u 1; layer 50 46 26 30; "
+        "layer.top=30; layer.left=26; layer.width=50; layer.height=46;"
+        if outside_legend
+        else "layer -u 1; layer 58 46 23 30; "
+        "layer.top=30; layer.left=23; layer.width=58; layer.height=46;"
+    )
+    commands = [
+        layer_box,
+        "layer.x.ticks=10;",
+        "layer.x2.ticks=10;",
+        "layer.x.label.fsize=10;",
+        "layer.x2.label.fsize=10;",
+        "layer.y.label.fsize=10;",
+        "layer.x.title.fsize=12;",
+        "layer.x2.title.fsize=12;",
+        "layer.y.title.fsize=12;",
+        "legend.fsize=10;",
+    ]
+    if outside_legend:
+        commands.extend(
+            [
+                "legend.x=layer.x.to + legend.dx / 2 + abs(layer.x.to - layer.x.from) * 0.04;",
+                "legend.y=layer.y.to - legend.dy / 2;",
+            ]
+        )
+    else:
+        commands.extend(
+            [
+                "legend.x=layer.x.from + legend.dx / 2;",
+                "legend.y=layer.y.to - legend.dy / 2;",
+            ]
+        )
+    for command in commands:
+        try:
+            lt_exec(command)
+        except Exception:
+            continue
+
+
+def _apply_origin_curve_color(plot_any: Any, color: str) -> None:
+    set_cmd = getattr(plot_any, "set_cmd", None)
+    if callable(set_cmd):
+        try:
+            red = int(color[1:3], 16)
+            green = int(color[3:5], 16)
+            blue = int(color[5:7], 16)
+            origin_color = f"color({red},{green},{blue})"
+            origin_html_color = f'color("{color}")'
+            for command in (
+                f"-c {origin_color}",
+                f"-cse {origin_html_color}",
+                f"-csf {origin_html_color}",
+                f"-cr {origin_color}",
+                f"-cser {origin_color}",
+                f"-csfr {origin_color}",
+                f"-cf {origin_color}",
+                "-kf 0",
+            ):
+                try:
+                    set_cmd(command)
+                except TypeError:
+                    set_cmd(command, "")
+        except Exception:
+            pass
+    for attr, value in (
+        ("color", color),
+        ("line_color", color),
+        ("symbol_color", color),
+        ("symbol_edge_color", color),
+        ("symbol_fill_color", color),
+        ("symbol_interior", 1),
+    ):
+        try:
+            setattr(plot_any, attr, value)
+        except Exception:
+            pass
+    symbol = getattr(plot_any, "symbol", None)
+    if symbol is not None:
+        for attr, value in (
+            ("color", color),
+            ("edge_color", color),
+            ("fill_color", color),
+            ("symbol_color", color),
+        ):
+            try:
+                setattr(symbol, attr, value)
+            except Exception:
+                pass
+
+
 def _plot_origin_simple(
     workbook: Any | None,
     worksheet: Any | None,
@@ -565,12 +832,10 @@ def _plot_origin_simple(
     plot_any = cast(Any, plot_obj)
     color = '#000000'
     try:
-        plot_any.color = color
+        _apply_origin_curve_color(plot_any, color)
         plot_any.line_width = 1.5
         plot_any.symbol_shape = 2
         plot_any.symbol_size = 4
-        plot_any.symbol_edge_color = color
-        plot_any.symbol_fill_color = color
         plot_any.legend = line_label
     except Exception:
         try:
@@ -630,28 +895,7 @@ def _plot_origin_experimental(
         )
         return
 
-    inc_x: List[float] = []
-    inc_y: List[float] = []
-    dec_x: List[float] = []
-    dec_y: List[float] = []
-
     previous_direction: float | None = None
-    for start, end, direction in segments:
-        if end <= start:
-            previous_direction = direction
-            continue
-        xs = currents[start:end].tolist()
-        ys = resistances[start:end].tolist()
-        target_x, target_y = (inc_x, inc_y) if direction >= 0 else (dec_x, dec_y)
-        if direction < 0 and previous_direction is not None and previous_direction >= 0 and start > 0:
-            xs.insert(0, float(currents[start - 1]))
-            ys.insert(0, float(resistances[start - 1]))
-        if target_x and xs:
-            target_x.append(float('nan'))
-            target_y.append(float('nan'))
-        target_x.extend(xs)
-        target_y.extend(ys)
-        previous_direction = direction
 
     legend_entries: List[Tuple[int, str]] = []
 
@@ -720,6 +964,7 @@ def _plot_origin_experimental(
         if not isinstance(dataset_index, int):
             dataset_index = len(legend_entries) + 1
         legend_entries.append((dataset_index, label))
+        _apply_origin_curve_color(plot_any, color)
 
     try:
         worksheet.header_rows("LUC")
@@ -727,11 +972,29 @@ def _plot_origin_experimental(
         pass
 
     col_index = 0
-    if _write_series(col_index, inc_x, inc_y, "Increasing current"):
-        _add_direction_plot(col_index, "Increasing current", '#d32f2f')
-        col_index += 2
-    if _write_series(col_index, dec_x, dec_y, "Decreasing current"):
-        _add_direction_plot(col_index, "Decreasing current", '#1976d2')
+    inc_count = 0
+    dec_count = 0
+    for start, end, direction in segments:
+        if end <= start:
+            previous_direction = direction
+            continue
+        segment_x = currents[start:end].tolist()
+        segment_y = resistances[start:end].tolist()
+        if direction < 0 and previous_direction is not None and previous_direction >= 0 and start > 0:
+            segment_x.insert(0, float(currents[start - 1]))
+            segment_y.insert(0, float(resistances[start - 1]))
+        if direction >= 0:
+            inc_count += 1
+            cycle_index = inc_count
+        else:
+            dec_count += 1
+            cycle_index = dec_count
+        label = _segment_label(direction, cycle_index)
+        color = _segment_color(direction, cycle_index)
+        if _write_series(col_index, segment_x, segment_y, label):
+            _add_direction_plot(col_index, label, color)
+            col_index += 2
+        previous_direction = direction
 
     if not legend_entries:
         _plot_origin_simple(
@@ -767,6 +1030,7 @@ def plot_one(
     *,
     figsize: Tuple[float, float] | None = None,
     target_px: Tuple[int, int] | None = None,
+    show_power_top_axis: bool = False,
 ) -> Tuple[Figure, str]:
     if target_px is not None:
         target_width, target_height = target_px
@@ -786,11 +1050,7 @@ def plot_one(
     _, segments = _direction_profile(currents)
     marker_size = 3.0
     line_width = 1.2
-    heating_color = "#dc2626"  # red
-    cooling_color = "#2563eb"  # blue
-
     legend_handles: list[Line2D] = []
-    legend_kinds: set[str] = set()
     if currents.size == 0:
         pass
     elif currents.size == 1:
@@ -808,7 +1068,6 @@ def plot_one(
         inc_count = 0
         dec_count = 0
         for start, end, direction in segments:
-            color = heating_color if direction >= 0 else cooling_color
             if end <= start:
                 previous_direction = direction
                 continue
@@ -828,12 +1087,12 @@ def plot_one(
                 )
             if direction >= 0:
                 inc_count += 1
-                label = f"Increasing {inc_count}"
-                legend_key = "increasing"
+                cycle_index = inc_count
             else:
                 dec_count += 1
-                label = f"Decreasing {dec_count}"
-                legend_key = "decreasing"
+                cycle_index = dec_count
+            label = _segment_label(direction, cycle_index)
+            color = _segment_color(direction, cycle_index)
             line = ax.plot(
                 segment_currents,
                 segment_resistances,
@@ -846,28 +1105,33 @@ def plot_one(
                 linewidth=line_width,
                 label=label,
             )[0]
-            if legend_key not in legend_kinds:
-                legend_handles.append(
-                    Line2D(
-                        [],
-                        [],
-                        color=color,
-                        marker="o",
-                        linestyle="-",
-                        markersize=marker_size,
-                        linewidth=line_width,
-                        label="Increasing current"
-                        if legend_key == "increasing"
-                        else "Decreasing current",
-                    )
+            legend_handles.append(
+                Line2D(
+                    [],
+                    [],
+                    color=color,
+                    marker="o",
+                    linestyle="-",
+                    markersize=marker_size,
+                    linewidth=line_width,
+                    label=label,
                 )
-                legend_kinds.add(legend_key)
+            )
             previous_direction = direction
 
     ax.set_xlabel("Current [mA]", fontsize=AXIS_LABEL_SIZE)
     ax.set_ylabel("Resistance [Ω]", fontsize=AXIS_LABEL_SIZE)
     ax.set_title(title, fontsize=TITLE_SIZE, pad=10)
     ax.grid(True, ls="--", alpha=0.3)
+    if show_power_top_axis:
+        add_power_top_axis(
+            ax,
+            currents,
+            resistances,
+            label="Power [mW]",
+            label_size=AXIS_LABEL_SIZE,
+            tick_size=TICK_SIZE,
+        )
     if legend_handles:
         legend = ax.legend(
             handles=legend_handles,
@@ -928,6 +1192,7 @@ def plot_one_origin(
     source_name: str,
     mode: str | None = None,
     *,
+    show_power_top_axis: bool = False,
     return_handles: bool = False,
 ) -> dict[str, object] | None:
     currents = df["I_mA"].to_numpy(dtype=float)
@@ -969,6 +1234,11 @@ def plot_one_origin(
     hide_origin_workbook(origin_any, workbook, graph)
 
     _apply_origin_readability(layer, graph)
+    if show_power_top_axis:
+        _apply_origin_power_top_axis(layer, workbook, worksheet, currents, resistances)
+    _style_origin_report_layout(layer)
+    _set_graph_title(layer, display_label, graph=graph, origin_any=origin_any)
+    _place_current_annealing_title(layer, display_label)
 
     if return_handles:
         handles["graph"] = graph

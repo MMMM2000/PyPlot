@@ -791,7 +791,15 @@ def test_suspend_disk_writes_flushes_latest_state_to_disk(
         builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
 
 
-def test_video_cumulative_length_uses_raw_fabrication_pieces_not_just_visible_rows() -> None:
+def test_video_cumulative_length_uses_raw_fabrication_pieces_not_just_visible_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: tmp_path)
+    builder_storage.MiniDatabaseStore._memory_data = {}
+    builder_storage.MiniDatabaseStore._memory_payloads = {}
+    builder_storage.MiniDatabaseStore._pending_sections = set()
+    builder_storage.MiniDatabaseStore._pending_payloads = set()
+    builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication([])
@@ -840,6 +848,11 @@ def test_video_cumulative_length_uses_raw_fabrication_pieces_not_just_visible_ro
             fabrication_store.save_payload("fabrication_index_raw", original_raw)
         else:
             fabrication_store.clear_payload("fabrication_index_raw")
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        builder_storage.MiniDatabaseStore._pending_sections = set()
+        builder_storage.MiniDatabaseStore._pending_payloads = set()
+        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
         section.close()
 
 

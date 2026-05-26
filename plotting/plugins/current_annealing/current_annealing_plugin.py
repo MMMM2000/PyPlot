@@ -37,6 +37,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         self._plot_tabs: list[QtWidgets.QWidget] = []
         self._workbook_keys: dict[str, str] = {}
         self._panel_widget: QtWidgets.QWidget | None = None
+        self._show_power_top_axis_checkbox: QtWidgets.QCheckBox | None = None
 
     def activate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(False)
@@ -59,46 +60,20 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         summary = QtWidgets.QLabel("Load current annealing files to plot traces or export to Origin.")
         summary.setWordWrap(True)
         overview_layout.addWidget(summary)
+        show_power = QtWidgets.QCheckBox("Show power top axis")
+        show_power.setToolTip(
+            "Add a top X axis with P = I^2R labels calculated from the plotted current/resistance data."
+        )
+        overview_layout.addWidget(show_power)
+        self._show_power_top_axis_checkbox = show_power
         overview_layout.addStretch(1)
         layout.addWidget(overview_section)
         layout.addStretch(1)
         self._panel_widget = container
         return container
 
-    def settings_widget(self) -> QtWidgets.QWidget:  # type: ignore[override]
-        if self._settings_widget is not None:
-            return self._settings_widget
-        container = QtWidgets.QWidget(self.host)
-        layout = QtWidgets.QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-
-        window_module = window_api()
-        def _form_layout(parent: QtWidgets.QWidget) -> QtWidgets.QFormLayout:
-            form = QtWidgets.QFormLayout(parent)
-            form.setContentsMargins(0, 0, 0, 0)
-            form.setHorizontalSpacing(8)
-            form.setVerticalSpacing(4)
-            form.setFieldGrowthPolicy(
-                QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-            )
-            return form
-
-        origin_section, origin_layout = window_module.create_toolbar_section(
-            "Origin export",
-            parent=container,
-            layout_factory=_form_layout,
-        )
-        origin_note = QtWidgets.QLabel(
-            "Uses shared PyPlot Origin export (direction-separated traces, shared title placement).",
-            origin_section,
-        )
-        origin_note.setWordWrap(True)
-        origin_layout.addRow(origin_note)
-        layout.addWidget(origin_section)
-        layout.addStretch(1)
-        self._settings_widget = container
-        return container
+    def settings_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
+        return None
 
     def _apply_settings_to_core(self) -> None:
         anneal_core.SHOW_PLOTS = False
@@ -208,7 +183,11 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         window_module = window_api()
         title = format_annealing_title(Path(path_str).stem)
         try:
-            fig, _ = anneal_core.plot_one(df, title)
+            fig, _ = anneal_core.plot_one(
+                df,
+                title,
+                show_power_top_axis=self._show_power_top_axis_enabled(),
+            )
         except Exception as exc:
             self._log(f"Failed to plot {Path(path_str).name}: {exc}", level="error")
             return None
@@ -248,6 +227,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             metadata={
                 "source_file": path_str,
                 "saved_path": "",
+                "show_power_top_axis": self._show_power_top_axis_enabled(),
             },
         )
         self.host.tab_widget.addTab(tab, Path(path_str).name)
@@ -381,6 +361,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             "open_plot_sources": plots,
             "current_plot_source": current_source,
             "had_plots": bool(self._plot_tabs),
+            "show_power_top_axis": self._show_power_top_axis_enabled(),
         }
 
     def restore_project_state(self, state: dict[str, Any], *, project_dir: Path) -> None:  # type: ignore[override]
@@ -407,6 +388,9 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                     pass
 
         loaded = False
+        show_power = state.get("show_power_top_axis")
+        if isinstance(show_power, bool):
+            self._set_show_power_top_axis(show_power)
         if resolved_paths:
             loaded = self._load_data_from_paths(resolved_paths, show_errors=False)
         else:
@@ -450,6 +434,17 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                                 self.host.tab_widget.setCurrentIndex(index)
                             break
         self.update_ui()
+
+    def _show_power_top_axis_enabled(self) -> bool:
+        checkbox = self._show_power_top_axis_checkbox
+        return bool(checkbox is not None and checkbox.isChecked())
+
+    def _set_show_power_top_axis(self, enabled: bool) -> None:
+        if self._show_power_top_axis_checkbox is None:
+            self.panel_widget()
+        checkbox = self._show_power_top_axis_checkbox
+        if checkbox is not None:
+            checkbox.setChecked(bool(enabled))
 
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._plot_tabs and self._data_by_file:
@@ -504,6 +499,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             worksheet_objects: list[WorksheetData] = []
             for sheet_name, frame in self._split_by_direction(df):
                 worksheet = host._create_worksheet_from_frame(workbook, sheet_name, frame)
+                worksheet.metadata["show_power_top_axis"] = self._show_power_top_axis_enabled()
                 columns = worksheet.columns
                 current_meta = columns.get("Current (mA)")
                 if isinstance(current_meta, window_module.WorksheetColumnMeta):
