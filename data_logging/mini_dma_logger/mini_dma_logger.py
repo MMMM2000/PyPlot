@@ -55,7 +55,7 @@ SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-25.5"
+CONTROL_LOGIC_VERSION = "2026-05-26.1"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
@@ -76,6 +76,9 @@ CONTROL_LOGIC_FEATURES = [
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
     "zero_load_reference_sidecar",
+    "voltage_limit_unwind_uses_measured_current_fallback",
+    "voltage_limit_defers_to_current_hold",
+    "wire_break_recovery_prompt_ui_thread",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -6721,6 +6724,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         if self._automation_active and self._is_current_sweep_mode(self._automation_name):
+            if (
+                self._active_current_sweep_step_index is not None
+                and self._current_sweep_ramp_hold_step_index == self._active_current_sweep_step_index
+            ):
+                if not self._supply_voltage_limit_logged:
+                    self._log(
+                        f"Supply voltage reached the configured limit ({measured_v:.3f} V / {limit_v:.3f} V) "
+                        "while the current ramp is held for target recovery; keeping the held current."
+                    )
+                    self._supply_voltage_limit_logged = True
+                return
             self._mark_current_sweep_voltage_limit(
                 measured_v=measured_v,
                 limit_v=limit_v,
@@ -6798,9 +6812,20 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _stop_for_wire_break(self) -> None:
-        if self._wire_break_stop_in_progress:
+        if not self._is_ui_thread():
+            if self._wire_break_stop_in_progress:
+                return
+            self._wire_break_stop_in_progress = True
+            self._run_on_ui_thread(self._finish_wire_break_stop_on_ui_thread)
             return
-        self._wire_break_stop_in_progress = True
+        self._finish_wire_break_stop_on_ui_thread()
+
+    def _finish_wire_break_stop_on_ui_thread(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._finish_wire_break_stop_on_ui_thread)
+            return
+        if not self._wire_break_stop_in_progress:
+            self._wire_break_stop_in_progress = True
         try:
             message = self._wire_break_stop_message()
             self._log(message)
@@ -6819,6 +6844,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._wire_break_stop_in_progress = False
 
     def _ask_wire_break_recovery_after_stop(self, message: str) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(lambda message=message: self._ask_wire_break_recovery_after_stop(message))
+            return
         if self._tic_motor_power_ok is False:
             QtWidgets.QMessageBox.warning(self, APP_NAME, message)
             return
@@ -6851,6 +6879,14 @@ class MainWindow(QtWidgets.QMainWindow):
         start_mA = self._active_current_sweep_last_setpoint_mA
         if start_mA is None:
             start_mA = self._supply_last_setpoint_mA
+        measured_current_mA = self._supply_snapshot.get("current_mA")
+        if (
+            start_mA is None
+            and measured_current_mA is not None
+            and math.isfinite(float(measured_current_mA))
+            and float(measured_current_mA) > 0.0
+        ):
+            start_mA = float(measured_current_mA)
         self._current_sweep_voltage_limit_step_index = step_index
         self._current_sweep_voltage_limit_started_s = started_s if started_s is not None else time.monotonic()
         self._current_sweep_voltage_limit_start_mA = self._quantize_supply_current_mA(start_mA or 0.0)

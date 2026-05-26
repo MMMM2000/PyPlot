@@ -7074,6 +7074,125 @@ def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_
         _close_test_window(window)
 
 
+def test_current_sweep_voltage_limit_uses_measured_current_when_setpoint_state_is_missing(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def measure(self) -> dict[str, float | None]:
+            return {
+                "current_mA": 49.7,
+                "voltage_V": 32.002,
+                "resistance_ohm": 644.0,
+                "power_W": 1.59,
+            }
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = None
+    window._active_current_sweep_step_index = 4
+    window._active_current_sweep_started_s = 90.0
+    window._active_current_sweep_last_setpoint_mA = None
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window.spin_supply_voltage_limit.setValue(32.05)
+    window._seek_distribution_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    ticks = iter([100.0, 100.0, 100.2, 100.4])
+
+    def _fake_monotonic() -> float:
+        try:
+            return next(ticks)
+        except StopIteration:
+            return 100.6
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=50.0,
+        current_ramp_rate_mA_s=1.0,
+    )
+
+    try:
+        window._refresh_supply_snapshot(force=True)
+
+        assert window._current_sweep_voltage_limit_step_index == 4
+        assert window._current_sweep_voltage_limit_start_mA == pytest.approx(49.6)
+        assert window._handle_current_sweep_step(step, 4) is False
+        assert supply.commands == [49.6]
+        assert window._handle_current_sweep_step(step, 4) is False
+        assert supply.commands == pytest.approx([49.6, 49.4])
+        assert window._active_current_sweep_step_index == 4
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_voltage_limit_keeps_current_hold_active(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def measure(self) -> dict[str, float | None]:
+            return {
+                "current_mA": 49.7,
+                "voltage_V": 32.002,
+                "resistance_ohm": 644.0,
+                "power_W": 1.59,
+            }
+
+        def disconnect(self) -> None:
+            return None
+
+    window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 49.8
+    window._active_current_sweep_step_index = 4
+    window._active_current_sweep_last_setpoint_mA = 49.8
+    window._current_sweep_ramp_hold_step_index = 4
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window.spin_supply_voltage_limit.setValue(32.05)
+
+    try:
+        window._refresh_supply_snapshot(force=True)
+
+        assert window._current_sweep_voltage_limit_step_index is None
+        assert window._current_sweep_ramp_hold_step_index == 4
+        assert "keeping the held current" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_open_circuit_zero_current_stops_recipe_and_offers_recovery(
     tmp_path: Path,
     qtbot,
@@ -7140,6 +7259,40 @@ def test_current_sweep_open_circuit_zero_current_stops_recipe_and_offers_recover
         assert "Wire break detected" in log_text
         assert "reversing recipe current" not in log_text
     finally:
+        window._automation_active = False
+        window._session_active = False
+        _close_test_window(window)
+
+
+def test_wire_break_stop_from_worker_defers_recovery_prompt_to_ui_thread(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    scheduled_callbacks: list[object] = []
+    recovery_prompts: list[str] = []
+    ui_thread_id = window._ui_thread_id
+    run_on_ui_thread = window._run_on_ui_thread
+    window._ask_wire_break_recovery_after_stop = recovery_prompts.append  # type: ignore[method-assign]
+    window._run_on_ui_thread = scheduled_callbacks.append  # type: ignore[method-assign]
+    window._ui_thread_id = -1
+    window._automation_active = True
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 55.0
+    window._supply_snapshot = {
+        "current_mA": 0.0,
+        "voltage_V": 30.0,
+        "resistance_ohm": None,
+        "power_W": 0.0,
+    }
+
+    try:
+        window._stop_for_wire_break()
+
+        assert recovery_prompts == []
+        assert scheduled_callbacks
+        assert window._wire_break_stop_in_progress is True
+    finally:
+        window._ui_thread_id = ui_thread_id
+        window._run_on_ui_thread = run_on_ui_thread  # type: ignore[method-assign]
+        window._wire_break_stop_in_progress = False
         window._automation_active = False
         window._session_active = False
         _close_test_window(window)
