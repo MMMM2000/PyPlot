@@ -4805,13 +4805,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_start_mA.setRange(0.0, 5000.0)
         self.spin_current_sweep_start_mA.setValue(1.0)
         self.spin_current_sweep_start_mA.setSuffix(" mA")
-        current_sweep_form.addRow("Current start", self.spin_current_sweep_start_mA)
+        current_start_mA_row, self.label_current_start_density = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_current_sweep_start_mA,
+        )
+        current_sweep_form.addRow("Current start", current_start_mA_row)
         self.spin_current_sweep_end_mA = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_end_mA.setDecimals(2)
         self.spin_current_sweep_end_mA.setRange(0.0, 5000.0)
         self.spin_current_sweep_end_mA.setValue(3.0)
         self.spin_current_sweep_end_mA.setSuffix(" mA")
-        current_sweep_form.addRow("Current end", self.spin_current_sweep_end_mA)
+        current_end_mA_row, self.label_current_end_density = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_current_sweep_end_mA,
+        )
+        current_sweep_form.addRow("Current end", current_end_mA_row)
         self.spin_current_sweep_step_mA = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_step_mA.setDecimals(2)
         self.spin_current_sweep_step_mA.setRange(0.01, 5000.0)
@@ -7458,6 +7466,17 @@ class MainWindow(QtWidgets.QMainWindow):
         unit = "MPa/s" if per_second else "MPa"
         return _format_compact_unit(stress_mpa, unit, decimals=4)
 
+    def _current_density_text(self, current_mA: float, *, per_second: bool = False) -> str:
+        diameter_mm = float(self.spin_diameter.value())
+        if diameter_mm <= 0.0:
+            return "-"
+        area_mm2 = math.pi * (diameter_mm / 2.0) ** 2
+        if area_mm2 <= 0.0:
+            return "-"
+        current_density_a_mm2 = (float(current_mA) / 1000.0) / area_mm2
+        unit = "A/mm^2/s" if per_second else "A/mm^2"
+        return _format_compact_unit(current_density_a_mm2, unit, decimals=4)
+
     def _target_equivalent_text(self, basis: str, value: float, *, per_second: bool = False) -> str:
         if basis == HSW_BASIS_STRESS_MPA:
             return self._load_equivalent_text(value, per_second=per_second)
@@ -7577,6 +7596,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 float(self.spin_current_sweep_target_ramp_rate.value()),
                 per_second=True,
             )
+        )
+        self.label_current_start_density.setText(
+            self._current_density_text(float(self.spin_current_sweep_start_mA.value()))
+        )
+        self.label_current_end_density.setText(
+            self._current_density_text(float(self.spin_current_sweep_end_mA.value()))
         )
         constant_basis = self._constant_current_start_basis()
         self.label_constant_current_start_equiv.setText(

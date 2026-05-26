@@ -3575,6 +3575,7 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
         window.combo_recipe_mode.setCurrentIndex(mode_index)
         window.spin_current_sweep_target_start.setValue(10.0)
         window.spin_current_sweep_target_ramp_rate.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(50.0)
         window._update_recipe_mode_ui()
 
         assert "Sample: Ni50Fe27Ga23 12/2" in window.label_recipe_sample.text()
@@ -3584,6 +3585,7 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
         assert window.spin_setup_zero_tolerance_g.isHidden() is True
         assert "0.7208 g" in window.label_current_target_start_equiv.text()
         assert "0.07208 g/s" in window.label_current_target_ramp_equiv.text()
+        assert "70.7355 A/mm^2" in window.label_current_end_density.text()
         assert "palette(mid)" not in window.label_current_target_start_equiv.styleSheet()
 
         mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
