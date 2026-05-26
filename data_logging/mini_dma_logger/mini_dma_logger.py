@@ -52,7 +52,7 @@ SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-25.5"
+CONTROL_LOGIC_VERSION = "2026-05-25.7"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
@@ -62,11 +62,13 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_filtered_signal_change_gate",
     "current_hold_persistent_error_gate",
     "current_hold_transformation_entry_gate",
+    "current_hold_extreme_latest_sample_entry",
     "current_hold_recovery_tolerance_band",
     "current_hold_retry_after_filter_window",
     "current_hold_bounded_saved_cap",
     "current_hold_noise_band_resume",
     "adaptive_current_hold_response_stiffness",
+    "current_hold_predicts_with_adaptive_response_stiffness",
     "current_hold_waits_for_natural_target_return",
     "current_hold_response_requires_directional_motor_response",
     "separate_setup_preload_and_zero_settle",
@@ -2671,6 +2673,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_recipe_summary = ""
         self._paused_current_setpoint_mA: float | None = None
         self._recipe_origin_mm = 0.0
+        self._recipe_pre_measurement_setup_override: bool | None = None
         self._recipe_estimated_points = 0
         self._automation_estimated_total_s = 0.0
         self._current_sweep_duration_overheads_s: list[float] = []
@@ -8672,6 +8675,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _pre_measurement_setup_enabled(self, mode: str | None = None) -> bool:
         _ = mode
+        if self._recipe_pre_measurement_setup_override is not None:
+            return self._recipe_pre_measurement_setup_override
         return True
 
     def _distribution_units(self, basis: str | None = None) -> tuple[str, int]:
@@ -9344,6 +9349,16 @@ class MainWindow(QtWidgets.QMainWindow):
         seek_key: tuple[str, int, float],
     ) -> float:
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        adaptive_sensitivity = self._current_sweep_hold_response_sensitivity_per_mm(
+            basis,
+            seek_key=seek_key,
+        )
+        if (
+            adaptive_sensitivity is not None
+            and math.isfinite(float(adaptive_sensitivity))
+            and float(adaptive_sensitivity) > 0.0
+        ):
+            sensitivity = float(adaptive_sensitivity)
         if sensitivity is None or sensitivity <= 0.0:
             if self._is_current_sweep_mode(self._automation_name):
                 return self._seek_speed_limited_step_mm(
@@ -10462,18 +10477,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return True
         if filtered_signal is not None:
-            noise_band = max(
-                effective_tolerance,
-                filtered_signal.noise * self._current_sweep_hold_noise_sigma(),
-                self._current_sweep_hold_min_band_for_basis(
+            if self._is_current_sweep_mode(self._automation_name) and self._automation_phase in {
+                "current",
+                "current_hold",
+                "settle",
+            }:
+                noise_band = self._current_sweep_trim_acceptance_band_for_basis(
                     basis,
-                    self._current_sweep_hold_min_resume_stress_mpa(),
-                ),
-            )
-            if self._automation_phase == "current_hold":
+                    effective_tolerance,
+                )
+            else:
                 noise_band = max(
-                    noise_band,
-                    self._current_sweep_hold_transformation_band_for_basis(basis),
+                    effective_tolerance,
+                    filtered_signal.noise * self._current_sweep_hold_noise_sigma(),
+                    self._current_sweep_hold_min_band_for_basis(
+                        basis,
+                        self._current_sweep_hold_min_resume_stress_mpa(),
+                    ),
                 )
             if abs(delta_value) <= noise_band:
                 self._clear_seek_state(seek_key)
@@ -13949,7 +13969,10 @@ class MainWindow(QtWidgets.QMainWindow):
             raise ValueError(f"Unsupported recipe mode: {mode or '<missing>'}")
         self.combo_recipe_mode.setCurrentIndex(mode_index)
         setup = recipe.get("setup")
+        self._recipe_pre_measurement_setup_override = None
         if isinstance(setup, Mapping):
+            if "enabled" in setup:
+                self._recipe_pre_measurement_setup_override = bool(setup.get("enabled"))
             self.spin_setup_preload_stress_mpa.setValue(float(setup.get("preload_stress_mpa", self.spin_setup_preload_stress_mpa.value())))
             self.spin_setup_preload_duration_s.setValue(float(setup.get("preload_duration_s", self.spin_setup_preload_duration_s.value())))
             self.spin_setup_return_duration_s.setValue(float(setup.get("return_duration_s", self.spin_setup_return_duration_s.value())))
@@ -13993,7 +14016,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_mid_correction_stress_mpa.setValue(float(current_sweep.get("mid_correction_stress_mpa", self.spin_current_sweep_mid_correction_stress_mpa.value())))
             self.spin_current_sweep_near_correction_stress_mpa.setValue(float(current_sweep.get("near_correction_stress_mpa", self.spin_current_sweep_near_correction_stress_mpa.value())))
             self.check_current_sweep_return_target.setChecked(bool(current_sweep.get("return_target", self.check_current_sweep_return_target.isChecked())))
-            self.check_current_sweep_first_overheating.setChecked(bool(current_sweep.get("first_overheating", self.check_current_sweep_first_overheating.isChecked())))
+            first_overheating = current_sweep.get(
+                "first_overheating",
+                current_sweep.get("first_overheating_repeat", self.check_current_sweep_first_overheating.isChecked()),
+            )
+            self.check_current_sweep_first_overheating.setChecked(bool(first_overheating))
             self.check_current_sweep_reverse_current.setChecked(bool(current_sweep.get("reverse_current", self.check_current_sweep_reverse_current.isChecked())))
             self.spin_current_sweep_tolerance.setValue(float(current_sweep.get("tolerance", self.spin_current_sweep_tolerance.value())))
             self.spin_current_sweep_nudge_mm.setValue(float(current_sweep.get("nudge_mm", self.spin_current_sweep_nudge_mm.value())))
@@ -15728,7 +15755,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise ValueError("Set at least one calibration step per direction.")
             preload_targets = self._build_numeric_targets(start_load_g, end_load_g, load_step_g)
             baseline_count = max(1, int(math.ceil(baseline_s / max(record_spacing_s, 1e-9))))
-            steps = self._build_pre_measurement_setup_steps()
+            steps = (
+                self._build_pre_measurement_setup_steps()
+                if self._pre_measurement_setup_enabled(mode)
+                else [AutomationStep("start_session", note="recipe_start")]
+            )
             steps.extend(
                 AutomationStep(
                     "calibration_record",
@@ -15815,10 +15846,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 float(self.spin_diameter.value()),
             )
             load_text = "-" if setup_load_g is None else f" (~{setup_load_g:.4f} g)"
-            summary += (
-                " Includes mandatory length setup: "
-                f"{self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
-            )
+            if self._pre_measurement_setup_enabled(mode):
+                summary += (
+                    " Includes mandatory length setup: "
+                    f"{self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
+                )
             return steps, summary, control_interval_ms
 
         if self._is_constant_current_strain_sweep_mode(mode):
@@ -15841,7 +15873,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 clamped_target = self._recipe_current_setpoint_mA(current_target)
                 if not current_targets or abs(clamped_target - current_targets[-1]) > 1e-12:
                     current_targets.append(clamped_target)
-            steps = self._build_pre_measurement_setup_steps()
+            steps = (
+                self._build_pre_measurement_setup_steps()
+                if self._pre_measurement_setup_enabled(mode)
+                else [AutomationStep("start_session", note="recipe_start")]
+            )
             for current_index, current_mA in enumerate(current_targets, start=1):
                 note_prefix = f"{current_index}"
                 steps.append(
@@ -15916,10 +15952,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 float(self.spin_diameter.value()),
             )
             load_text = "-" if setup_load_g is None else f" (~{setup_load_g:.4f} g)"
-            summary += (
-                " Includes mandatory length setup: "
-                f"{self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
-            )
+            if self._pre_measurement_setup_enabled(mode):
+                summary += (
+                    " Includes mandatory length setup: "
+                    f"{self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
+                )
             return steps, summary, control_interval_ms
 
         if self._is_current_sweep_mode(mode):
@@ -15943,7 +15980,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if target_ramp_rate <= 0.0:
                 raise ValueError("Set a non-zero target ramp rate.")
             targets = self._build_numeric_targets(target_start, target_end, target_step)
-            steps = self._build_pre_measurement_setup_steps()
+            steps = (
+                self._build_pre_measurement_setup_steps()
+                if self._pre_measurement_setup_enabled(mode)
+                else [AutomationStep("start_session", note="recipe_start")]
+            )
             previous_target: float | None = 0.0
             for plateau_index, target in enumerate(targets, start=1):
                 steps.append(
@@ -16059,10 +16100,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 float(self.spin_diameter.value()),
             )
             load_text = "-" if setup_load_g is None else f" (~{setup_load_g:.4f} g)"
-            summary += (
-                " Includes mandatory length setup: "
-                f"{self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
-            )
+            if self._pre_measurement_setup_enabled(mode):
+                summary += (
+                    " Includes mandatory length setup: "
+                    f"{self.spin_setup_preload_stress_mpa.value():.4f} MPa{load_text} -> 0 g."
+                )
             return steps, summary, control_interval_ms
 
         total_distance_mm = float(self.spin_ramp_distance.value())
@@ -16146,6 +16188,15 @@ class MainWindow(QtWidgets.QMainWindow):
             load_g = load_g_from_stress_mpa(abs(float(stress_mpa)), diameter_mm)
             return 0.0 if load_g is None else abs(float(load_g))
         return 0.0
+
+    def _current_sweep_trim_acceptance_band_for_basis(self, basis: str, effective_tolerance: float) -> float:
+        return max(
+            abs(float(effective_tolerance)),
+            self._current_sweep_hold_min_band_for_basis(
+                basis,
+                self._current_sweep_near_correction_stress_mpa(),
+            ),
+        )
 
     def _current_sweep_hold_transformation_band_for_basis(self, basis: str) -> float:
         return self._current_sweep_hold_min_band_for_basis(
@@ -16233,6 +16284,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if abs(float(signed_error)) <= transformation_band:
             self._reset_current_sweep_ramp_hold_candidate()
             return False
+        if abs(float(signed_error)) > transformation_band * 2.5:
+            return True
         slope = float(filtered_signal.slope_per_s)
         if step.basis == HSW_BASIS_LOAD_G:
             config = self._control_config()
@@ -16340,6 +16393,31 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{_format_compact_number(pause_band)}."
             )
             return True, False
+
+        if (
+            not holding
+            and filtered_signal is not None
+            and step.target_value is not None
+            and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+        ):
+            latest_signed_error = float(filtered_signal.latest_value) - float(step.target_value)
+            latest_band = max(
+                abs(float(pause_band)),
+                self._current_sweep_hold_transformation_band_for_basis(step.basis),
+            )
+            if abs(latest_signed_error) > latest_band * 2.5:
+                self._current_sweep_ramp_hold_step_index = step_index
+                self._current_sweep_ramp_hold_started_s = now_s
+                self._current_sweep_ramp_hold_in_band_since_s = None
+                self._reset_current_sweep_ramp_hold_candidate()
+                setpoint = self._active_current_sweep_last_setpoint_mA
+                self._log(
+                    "Holding current ramp"
+                    f"{'' if setpoint is None else f' at {setpoint:.3f} mA'}; "
+                    f"latest filtered-window target error {_format_compact_number(abs(latest_signed_error))} "
+                    f"exceeds transformation band {_format_compact_number(latest_band)}."
+                )
+                return True, False
 
         if not holding:
             self._reset_current_sweep_ramp_hold_candidate()

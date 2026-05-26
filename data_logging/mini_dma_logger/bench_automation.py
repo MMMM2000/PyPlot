@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,6 +221,56 @@ def _write_summary(path: Path | None, summary: Mapping[str, Any]) -> None:
     path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _bench_plan_lock_path(path: str | Path) -> Path:
+    plan_path = Path(path).expanduser().resolve()
+    return plan_path.with_suffix(plan_path.suffix + ".lock")
+
+
+@contextlib.contextmanager
+def _bench_plan_lock(path: str | Path) -> Any:
+    lock_path = Path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise MiniDmaBenchAutomationError(
+                    f"Mini DMA bench automation is already running for this plan: {lock_path}"
+                ) from exc
+            locked = True
+            try:
+                yield
+            finally:
+                if locked:
+                    try:
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise MiniDmaBenchAutomationError(
+                    f"Mini DMA bench automation is already running for this plan: {lock_path}"
+                ) from exc
+            try:
+                yield
+            finally:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+    finally:
+        handle.close()
+
+
 def _ensure_qapplication(qt_args: Sequence[str] | None) -> QtWidgets.QApplication:
     app = QtWidgets.QApplication.instance()
     if not isinstance(app, QtWidgets.QApplication):
@@ -248,6 +300,22 @@ def _apply_length_setup_automation(window: Any, run: MiniDmaBenchRun) -> None:
             starting_length_mm=run.starting_length_mm,
             preload_length_mm=run.preload_length_mm,
         )
+
+
+def _apply_run_identity(window: Any, run: MiniDmaBenchRun) -> None:
+    sample = getattr(window, "edit_sample_name", None)
+    if sample is not None and hasattr(sample, "setText"):
+        sample.setText(str(run.name))
+    log_name = getattr(window, "edit_log_name", None)
+    if log_name is not None and hasattr(log_name, "setText"):
+        log_name.setText(str(run.name))
+
+
+def _apply_noninteractive_overrides(window: Any) -> None:
+    # Bench plans must not block overnight on operator dialogs.
+    setattr(window, "_ask_existing_output_action", lambda _paths: "next")
+    setattr(window, "_ask_recovery_after_stop", lambda: None)
+    setattr(window, "_ask_resume_stopped_recipe", lambda: "start")
 
 
 def _window_active(window: Any) -> bool:
@@ -345,6 +413,10 @@ def _execute_run(
         deadline_s = min(deadline_s, total_deadline_s)
 
     window._load_recipe_from_path(run.recipe_path)
+    _apply_run_identity(window, run)
+    app.processEvents()
+    _apply_run_identity(window, run)
+    _apply_noninteractive_overrides(window)
     _apply_length_setup_automation(window, run)
     window._start_auto_ramp()
     app.processEvents()
@@ -360,9 +432,15 @@ def _execute_run(
 
     status = "completed"
     guard_events: list[dict[str, Any]] = []
+    recovering_from_guard = False
     while _window_active(window):
         app.processEvents()
-        guard_event = _check_guardrails(window, guardrails)
+        active_guardrails = (
+            MiniDmaBenchGuardrails(wire_break_stops_plan=guardrails.wire_break_stops_plan)
+            if recovering_from_guard
+            else guardrails
+        )
+        guard_event = _check_guardrails(window, active_guardrails)
         if guard_event is not None:
             guard_events.append(guard_event)
             if guard_event["type"] == "wire_break":
@@ -370,7 +448,10 @@ def _execute_run(
                 break
             if guard_event["type"] == "high_stress":
                 status = "guard_recovered" if guard_event.get("recovery_started") else "guard_tripped"
-                break
+                if guard_event.get("recovery_started"):
+                    recovering_from_guard = True
+                else:
+                    break
         if time.monotonic() >= deadline_s:
             status = "timeout"
             stop = getattr(window, "_stop_auto_ramp", None)
@@ -403,6 +484,24 @@ def _execute_run(
 
 
 def run_mini_dma_bench_plan(
+    path: str | Path,
+    *,
+    qt_args: Sequence[str] | None = None,
+    app_factory: Callable[[Sequence[str] | None], Any] | None = None,
+    window_factory: Callable[..., Any] | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    with _bench_plan_lock(_bench_plan_lock_path(path)):
+        return _run_mini_dma_bench_plan_unlocked(
+            path,
+            qt_args=qt_args,
+            app_factory=app_factory,
+            window_factory=window_factory,
+            sleep_fn=sleep_fn,
+        )
+
+
+def _run_mini_dma_bench_plan_unlocked(
     path: str | Path,
     *,
     qt_args: Sequence[str] | None = None,

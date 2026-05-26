@@ -32,6 +32,14 @@ def _write_recipe(path: Path) -> None:
     )
 
 
+class _FakeLineEdit:
+    def __init__(self, events: list[tuple[str, object]]) -> None:
+        self._events = events
+
+    def setText(self, value: str) -> None:
+        self._events.append(("line_edit", value))
+
+
 def test_mini_dma_bench_plan_rejects_unarmed_execution(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)
@@ -75,6 +83,32 @@ def test_mini_dma_bench_plan_dry_run_validates_recipe_paths(tmp_path: Path) -> N
     assert summary["run_count"] == 2
     assert summary["runs"][0]["status"] == "validated"
     assert summary_path.exists()
+
+
+def test_mini_dma_bench_plan_refuses_second_active_runner(tmp_path: Path) -> None:
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(tmp_path / "recipe.json")}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    lock_path = bench_automation._bench_plan_lock_path(plan_path)  # type: ignore[attr-defined]
+    with bench_automation._bench_plan_lock(lock_path):  # type: ignore[attr-defined]
+        with pytest.raises(bench_automation.MiniDmaBenchAutomationError, match="already running"):
+            with bench_automation._bench_plan_lock(lock_path):  # type: ignore[attr-defined]
+                pass
 
 
 def test_mini_dma_bench_plan_requires_automated_lengths_for_execution(tmp_path: Path) -> None:
@@ -134,6 +168,8 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
             self._automation_active = False
             self._session_active = False
             self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
+            self.edit_sample_name = _FakeLineEdit(events)
+            self.edit_log_name = _FakeLineEdit(events)
 
         def set_length_setup_automation_values(
             self,
@@ -147,7 +183,12 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
             events.append(("recipe", path.name))
 
         def _start_auto_ramp(self) -> None:
+            events.append(("collision", self._ask_existing_output_action([])))
+            self._ask_recovery_after_stop()
             events.append(("start", None))
+
+        def _ask_recovery_after_stop(self) -> None:
+            events.append(("recovery_prompt", None))
 
         def close(self) -> None:
             events.append(("close", None))
@@ -163,6 +204,9 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
     assert summary["runs"][0]["status"] == "completed"
     assert ("lengths", (20.0, 20.4)) in events
     assert ("recipe", "iso-strain.recipe.json") in events
+    assert ("line_edit", "trial") in events
+    assert ("collision", "next") in events
+    assert ("recovery_prompt", None) not in events
     assert ("start", None) in events
 
 
@@ -277,6 +321,8 @@ def test_mini_dma_bench_plan_high_stress_guard_disables_current_and_recovers(
     )
     clock = {"now": 100.0}
     events: list[tuple[str, object]] = []
+    stress_values = [320.0, 48.0]
+    windows: list[object] = []
 
     monkeypatch.setattr(bench_automation.time, "monotonic", lambda: clock["now"])
 
@@ -289,6 +335,7 @@ def test_mini_dma_bench_plan_high_stress_guard_disables_current_and_recovers(
             self._automation_active = True
             self._session_active = True
             self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
+            windows.append(self)
 
         def set_length_setup_automation_values(
             self,
@@ -305,7 +352,7 @@ def test_mini_dma_bench_plan_high_stress_guard_disables_current_and_recovers(
             return
 
         def _bench_latest_stress_mpa(self) -> float:
-            return 320.0
+            return stress_values[0]
 
         def _wire_break_detected(self) -> bool:
             return False
@@ -315,8 +362,6 @@ def test_mini_dma_bench_plan_high_stress_guard_disables_current_and_recovers(
 
         def start_bench_stress_recovery(self, target_stress_mpa: float, *, reason: str) -> bool:
             events.append(("recover", (target_stress_mpa, reason)))
-            self._automation_active = False
-            self._session_active = False
             return True
 
         def close(self) -> None:
@@ -326,13 +371,19 @@ def test_mini_dma_bench_plan_high_stress_guard_disables_current_and_recovers(
         plan_path,
         app_factory=lambda _qt_args: _FakeApp(),
         window_factory=_FakeWindow,
-        sleep_fn=lambda seconds: clock.__setitem__("now", clock["now"] + max(0.05, seconds)),
+        sleep_fn=lambda seconds: (
+            clock.__setitem__("now", clock["now"] + max(0.05, seconds)),
+            stress_values.pop(0) if len(stress_values) > 1 and ("recover", (50.0, "bench high-stress guard")) in events else None,
+            setattr(windows[-1], "_automation_active", False) if windows and len(stress_values) == 1 else None,
+            setattr(windows[-1], "_session_active", False) if windows and len(stress_values) == 1 else None,
+        ),
     )
 
     run = summary["runs"][0]
     assert run["status"] == "guard_recovered"
     assert run["guard_events"][0]["type"] == "high_stress"
     assert run["guard_events"][0]["stress_mpa"] == pytest.approx(320.0)
+    assert run["elapsed_s"] > 0.04
     assert ("disable_supply", None) in events
     assert ("recover", (50.0, "bench high-stress guard")) in events
 
