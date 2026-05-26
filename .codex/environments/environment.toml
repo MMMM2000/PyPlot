@@ -35,11 +35,36 @@ $env:TMP = if ($env:TMP) { $env:TMP } else { $env:TEMP }
 $env:PIP_CACHE_DIR = if ($env:PIP_CACHE_DIR) { $env:PIP_CACHE_DIR } else { "artifacts\pip-cache" }
 New-Item -ItemType Directory -Force $env:UV_CACHE_DIR, $env:TEMP, $env:PIP_CACHE_DIR | Out-Null
 
+$localUvBin = Join-Path $env:USERPROFILE ".local\bin"
+if ((-not (Get-Command uv -ErrorAction SilentlyContinue)) -and (Test-Path (Join-Path $localUvBin "uv.exe"))) {
+    $env:Path = "$localUvBin;$env:Path"
+}
+
+$python314 = $null
+if (Get-Command py -ErrorAction SilentlyContinue) {
+    py -3.14 --version
+    if ($LASTEXITCODE -eq 0) {
+        $python314 = "3.14"
+    }
+}
+if (-not $python314) {
+    $standardPython314 = Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"
+    if (Test-Path $standardPython314) {
+        & $standardPython314 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 14) else 1)"
+        if ($LASTEXITCODE -eq 0) {
+            $python314 = $standardPython314
+        }
+    }
+}
+if (-not $python314) {
+    throw "Python 3.14 is required for this project. Install it and ensure py -0p lists a 3.14 interpreter, or install it at $env:LOCALAPPDATA\Programs\Python\Python314, then retry."
+}
+
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     throw "uv is required for this project. Install it with: winget install --id=astral-sh.uv -e"
 }
 
-uv sync --extra test
+uv sync --extra test --python $python314
 uv run python --version
 '''
 

@@ -7435,6 +7435,7 @@ def test_recipe_completion_stops_session_logging(tmp_path: Path, qtbot) -> None:
     window.edit_log_name.setText("recipe_completion")
     window._latest_scale_timestamp = time.time()
     window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = lambda _steps: True  # type: ignore[method-assign]
 
     try:
         window._start_session()

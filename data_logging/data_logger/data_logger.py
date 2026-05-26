@@ -1408,7 +1408,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 folder = re.sub(r'[<>:"/\\|?*]', "_", folder)
                 target_dir = os.path.join(self.root_log_dir, folder)
         os.makedirs(target_dir, exist_ok=True)
-        full_path = os.path.join(target_dir, f"{file_base}.txt")
+        disk_file_base = re.sub(r'[<>:"/\\|?*]', "_", file_base)
+        full_path = os.path.join(target_dir, f"{disk_file_base}.txt")
 
         self.log_dir = target_dir
         self.ui.lineEdit_log_dir.setText(self.log_dir)

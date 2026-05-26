@@ -45,12 +45,36 @@ The full suite result was:
 
 The remaining important validation is Windows, because that is where PyPlot has the more fragile setup story: Python launcher, non-ASCII paths, PyQt, Origin packages, and Codex worktree setup.
 
+On this Windows laptop, `uv` and Python 3.14 were not initially available to the sandboxed shell. Python 3.14.4 is now installed at `%LOCALAPPDATA%\Programs\Python\Python314\python.exe`, and uv is installed at `%USERPROFILE%\.local\bin\uv.exe`.
+
+The Codex Windows setup guard now checks both `py -3.14` and the standard python.org per-user Python 3.14 path before running `uv sync`, so this setup can proceed even when the Python launcher has not registered 3.14 yet.
+
+Windows validation now passes with the session PATH including those install locations:
+
+```powershell
+$env:Path = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Programs\Python\Python314;$env:LOCALAPPDATA\Programs\Python\Python314\Scripts;$env:Path"
+$env:UV_CACHE_DIR = "artifacts\uv-cache"
+$env:TEMP = "C:\tmp\pyplot-tests"
+$env:TMP = "C:\tmp\pyplot-tests"
+$env:MPLBACKEND = "Agg"
+$env:QT_QPA_PLATFORM = "offscreen"
+$env:MICROWIRE_BUILDER_STORAGE_ROOT = "C:\tmp\pyplot-tests\microwire-data-builder"
+uv sync --extra test --python "$env:LOCALAPPDATA\Programs\Python\Python314\python.exe"
+uv run pytest tests
+```
+
+Result:
+
+```text
+879 passed, 21 skipped, 273 warnings
+```
+
 Run these from the PyPlot repo root on the Windows laptop:
 
 ```powershell
 uv --version
 py -0p
-uv sync --extra test
+uv sync --extra test --python 3.14
 uv run python --version
 uv run python launcher.py --help
 uv run pytest tests
@@ -59,7 +83,7 @@ uv run pytest tests
 Confirm that:
 
 - `uv` is installed and available in PowerShell.
-- `py -0p` lists Python 3.14.
+- `py -0p` lists Python 3.14, or `%LOCALAPPDATA%\Programs\Python\Python314\python.exe --version` reports Python 3.14.x.
 - `uv run python --version` reports Python 3.14.x.
 - `uv sync --extra test` creates/updates `.venv` without falling back to Python 3.13.
 - `launcher.py --help` works.
@@ -92,7 +116,7 @@ py -0p
 Then retry:
 
 ```powershell
-uv sync --extra test
+uv sync --extra test --python 3.14
 ```
 
 ## Useful Cache/Temp Pattern For Windows

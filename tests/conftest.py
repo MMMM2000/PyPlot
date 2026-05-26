@@ -34,6 +34,8 @@ def pytest_configure() -> None:
             or tempfile.gettempdir()
         )
         tmp_root = Path(base_tmp)
+        if os.name == "nt" and len(str(tmp_root.resolve())) > 60:
+            tmp_root = Path("C:/tmp")
         if tmp_root.name != "pyplot-tests":
             tmp_root = tmp_root / "pyplot-tests"
         tmp_root.mkdir(parents=True, exist_ok=True)
@@ -47,6 +49,32 @@ def pytest_configure() -> None:
         tempfile.tempdir = str(tmp_root)
     except Exception:
         pass
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    if os.name != "nt":
+        return
+    # Windows/Qt can crash natively if Mini DMA starts after the Microwire GUI tests.
+    original_index = {item: index for index, item in enumerate(items)}
+    microwire_index = min(
+        (
+            index
+            for index, item in enumerate(items)
+            if item.path.as_posix().endswith("tests/test_microwire_data_builder.py")
+            or item.path.as_posix().endswith("tests/test_microwire_eda.py")
+        ),
+        default=None,
+    )
+    if microwire_index is None:
+        return
+
+    def _sort_key(item: pytest.Item) -> float:
+        path = item.path.as_posix()
+        if path.endswith("tests/test_mini_dma_logger.py"):
+            return float(microwire_index) - 0.5
+        return float(original_index[item])
+
+    items.sort(key=_sort_key)
 
 
 @pytest.fixture(scope="session")

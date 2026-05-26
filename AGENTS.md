@@ -3,9 +3,9 @@
 ## Environment
 - Use `uv` for project Python commands and environment sync by default.
 - Match the interpreter to `pyproject.toml` before creating or reusing `.venv`. This repo currently requires Python 3.14 (`>=3.14,<3.15`); do not fall back to Python 3.13.
-- If `py -0p` does not list a Python 3.14 interpreter on Windows, stop environment setup and report that Python 3.14 must be installed/registered before installing the project.
+- If `py -0p` does not list a Python 3.14 interpreter on Windows, check the standard python.org per-user path `%LOCALAPPDATA%\Programs\Python\Python314\python.exe`; if neither is available, stop environment setup and report that Python 3.14 must be installed or registered before installing the project.
 - Prefer the project `.venv` created by `uv sync`; state the interpreter reported by `uv run python --version` in the final summary for dependency/setup work.
-- If `.venv` is missing, broken, or tied to the wrong Python minor version for the project, run `uv sync --extra test` before running project Python commands.
+- If `.venv` is missing, broken, or tied to the wrong Python minor version for the project, run `uv sync --extra test` before running project Python commands; on Windows prefer `uv sync --extra test --python 3.14` when the launcher lists Python 3.14, or pass the full `%LOCALAPPDATA%\Programs\Python\Python314\python.exe` path when it does not.
 - Treat `.venv` as disposable generated state. If the project now requires a newer Python version, replace the old `.venv` instead of asking the user to clean it up.
 - On Windows accounts with non-ASCII user paths, expect tool temp/cache issues. When running `uv`, `pip`, or pytest, prefer workspace-scoped ignored paths such as `artifacts/tool-temp`, `artifacts/uv-cache`, `artifacts/pip-cache`, and `artifacts/pip-tools-cache` for `TEMP`, `TMP`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`, and pip-tools `--cache-dir`.
 - If `uv` is unavailable, use the pip compatibility fallback: create `.venv` with Python 3.14, install `requirements.txt`, and on Windows install `requirements-win.txt` after the shared requirements file.
@@ -15,7 +15,7 @@
 - Keep `pyproject.toml`, `uv.lock`, `requirements.txt`, and generated lock/export headers aligned with the Python version used to compile them.
 - Export pip compatibility requirements from the lock with `uv export --format requirements.txt --no-hashes --no-emit-project --output-file requirements.txt`.
 - If Windows-only dependencies change, also sync `requirements-win.txt`.
-- Use `uv sync --extra test` when tests or test-only tools are needed.
+- Use `uv sync --extra test` when tests or test-only tools are needed; on Windows use `uv sync --extra test --python 3.14` to avoid selecting the wrong interpreter.
 - If a clean uv environment exposes a direct import that was previously only present by accident, add it to `pyproject.toml` and regenerate `uv.lock` plus compatibility exports.
 
 ## Git Sync

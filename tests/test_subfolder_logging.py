@@ -47,5 +47,5 @@ def test_subfolder_name_sanitized(tmp_path, monkeypatch):
     window.ui.lineEdit_log_file.setText("bad<>sub s2-1a 74mA 2,5a")
     window.start_logging()
     assert window.log_dir == str(tmp_path / "bad__sub s2-1a 74mA")
-    assert (tmp_path / "bad__sub s2-1a 74mA" / "bad<>sub s2-1a 74mA 2,5a.txt").exists()
+    assert (tmp_path / "bad__sub s2-1a 74mA" / "bad__sub s2-1a 74mA 2,5a.txt").exists()
     window.cancel_logging()
