@@ -55,7 +55,7 @@ SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-26.1"
+CONTROL_LOGIC_VERSION = "2026-05-26.2"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
@@ -79,6 +79,7 @@ CONTROL_LOGIC_FEATURES = [
     "voltage_limit_unwind_uses_measured_current_fallback",
     "voltage_limit_defers_to_current_hold",
     "wire_break_recovery_prompt_ui_thread",
+    "single_prompt_length_setup",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -2923,6 +2924,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_measured_length_mm: float | None = None
         self._setup_starting_length_mm: float | None = None
         self._setup_preload_position_mm: float | None = None
+        self._setup_preload_ramp_skipped = False
         self._setup_zero_position_mm: float | None = None
         self._setup_return_zero_start_point_index = 0
         self._setup_return_zero_speed_mm_s_value: float | None = None
@@ -8329,7 +8331,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         self._log(
             f"Computed l0 = {_format_compact_unit(l0_mm, 'mm', decimals=4)} from "
-            f"measured preload length {_format_compact_unit(measured_length_mm, 'mm', decimals=4)} "
+            f"measured mounted length {_format_compact_unit(measured_length_mm, 'mm', decimals=4)} "
             f"and stage return {_format_compact_unit(preload_extension_mm, 'mm', decimals=4)}."
         )
         return l0_mm
@@ -12668,7 +12670,7 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_txt_handle.write(f"# Created UTC\t{created_utc}\n")
         setup_txt_handle.write(f"# Sample\t{self.edit_sample_name.text().strip()}\n")
         setup_txt_handle.write(f"# Notes\t{self.edit_run_notes.toPlainText().strip()}\n")
-        setup_txt_handle.write(f"# Starting length prior mm\t{self.spin_initial_length.value():.6f}\n")
+        setup_txt_handle.write(f"# Initial length setting before setup mm\t{self.spin_initial_length.value():.6f}\n")
         setup_txt_handle.write(f"# Wire diameter mm\t{self.spin_diameter.value():.6f}\n")
         setup_txt_handle.write(f"# Zero-load scale reading g\t{self._zero_load_scale_reference_g():.6f}\n")
         setup_txt_handle.write(f"# Setup preload stress MPa\t{self.spin_setup_preload_stress_mpa.value():.6f}\n")
@@ -13104,6 +13106,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_starting_length_mm": self._setup_starting_length_mm,
                 "setup_measured_length_mm": self._setup_measured_length_mm,
                 "setup_preload_position_mm": self._setup_preload_position_mm,
+                "setup_length_reference_position_mm": self._setup_preload_position_mm,
+                "setup_preload_ramp_skipped": self._setup_preload_ramp_skipped,
                 "target_start": float(self.spin_current_sweep_target_start.value()),
                 "target_end": float(self.spin_current_sweep_target_end.value()),
                 "target_step": float(self.spin_current_sweep_target_step.value()),
@@ -14721,6 +14725,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 phase_key = (self._automation_index, current_step.action, current_step.note)
                 duration_s = max(0.001, float(current_step.duration_s or 0.0))
                 phase_fraction = self._timed_step_elapsed_for_progress_s(self._automation_index) / duration_s
+            elif current_step.action == "mark_setup_return_zero":
+                phase_text = "Length reference"
+                phase_key = (self._automation_index, current_step.action, current_step.note)
+                phase_fraction = 0.0
             elif current_step.action == "measure_length_prompt":
                 phase_text = "Waiting for length"
                 phase_key = (self._automation_index, current_step.action, current_step.note)
@@ -14979,6 +14987,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_measured_length_mm = None
         self._setup_starting_length_mm = None
         self._setup_preload_position_mm = None
+        self._setup_preload_ramp_skipped = False
         self._setup_zero_position_mm = None
         self._setup_return_zero_start_point_index = 0
         self._setup_return_zero_speed_mm_s_value = None
@@ -15247,7 +15256,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_zero_fallback_raw_g = None
         self._setup_zero_fallback_reason = ""
         self._length_setup_start_monotonic = time.monotonic()
-        self._update_length_setup_dialog("Enter the approximate mounted wire length before setup.")
+        self._update_length_setup_dialog("Enter the measured mounted wire length before setup.")
         self._update_length_setup_progress()
         self._update_length_setup_controls()
         self._refresh_length_setup_plot()
@@ -15269,6 +15278,8 @@ class MainWindow(QtWidgets.QMainWindow):
         preload_length_mm: float | None,
     ) -> None:
         self._automated_setup_starting_length_mm = None if starting_length_mm is None else float(starting_length_mm)
+        # Kept for older bench-plan JSON and old resume code. New setup recipes use only
+        # the starting length prompt, which is now the measured mounted wire length.
         self._automated_setup_preload_length_mm = None if preload_length_mm is None else float(preload_length_mm)
 
     def _close_length_setup_dialog(self) -> None:
@@ -15837,6 +15848,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
         self._setup_preload_engaged_seek_keys.clear()
+        self._setup_preload_ramp_skipped = False
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_wall_started_s = 0.0
@@ -15952,10 +15964,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         steps.append(
             AutomationStep(
-                "measure_length_prompt",
+                "mark_setup_return_zero",
                 target_value=preload_stress_mpa,
                 basis=HSW_BASIS_STRESS_MPA,
-                note="setup_length",
+                note="setup_return_zero_start",
             )
         )
         steps.append(
@@ -17096,6 +17108,27 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
         )
         ramp_rate = configured_ramp_rate
+        if (
+            step.note == "setup_preload"
+            and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and self._active_target_ramp_step_index != step_index
+        ):
+            current_value = self._current_distribution_value(step.basis)
+            if current_value is not None and float(current_value) >= end_value:
+                self._setup_preload_ramp_skipped = True
+                self._set_automation_context(
+                    phase="target_ramp",
+                    basis=step.basis,
+                    target_value=end_value,
+                    note=step.note,
+                )
+                self._record_length_setup_point()
+                self._log(
+                    "Mounted wire is already above setup preload; "
+                    "skipping preload ramp and returning load to 0."
+                )
+                return True
+            self._setup_preload_ramp_skipped = False
         if self._active_target_ramp_step_index != step_index:
             self._active_target_ramp_step_index = step_index
             self._active_target_ramp_started_s = time.monotonic()
@@ -17207,14 +17240,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return bool(self._call_on_ui_thread_sync(self._handle_starting_length_prompt_step))
         config = self._control_config()
         default_length_mm = max(0.001, config.initial_length_mm if config is not None else float(self.spin_initial_length.value()))
-        self._update_length_setup_dialog("Enter the approximate mounted wire length before setup.")
+        self._update_length_setup_dialog("Enter the measured mounted wire length before setup.")
         if self._automated_setup_starting_length_mm is not None:
             starting_length_mm, accepted = self._automated_setup_starting_length_mm, True
         else:
             starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
                 self,
                 APP_NAME,
-                "Approximate mounted wire length before preload (mm):",
+                "Measured mounted wire length now (mm):",
                 default_length_mm,
                 0.001,
                 100000.0,
@@ -17225,19 +17258,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
         self._setup_starting_length_mm = float(starting_length_mm)
+        self._setup_measured_length_mm = float(starting_length_mm)
+        self._setup_preload_position_mm = float(self._current_position_mm)
         self.spin_initial_length.setValue(float(starting_length_mm))
         self._active_control_config = self._freeze_control_config()
         if self._session_setup_txt_handle is not None:
             self._session_setup_txt_handle.write(
-                f"# Accepted starting length prior mm\t{self._setup_starting_length_mm:.6f}\n"
+                f"# Measured mounted length mm\t{self._setup_measured_length_mm:.6f}\n"
+                f"# Length measurement position mm\t{self._setup_preload_position_mm:.6f}\n"
             )
             self._session_setup_txt_handle.flush()
         self._refresh_equivalent_labels()
         self._update_length_setup_dialog("Moving to setup preload.")
         self._log(
-            "Starting length prior accepted: "
-            f"{_format_compact_unit(self._setup_starting_length_mm, 'mm', decimals=4)}. "
-            "The stiffness prior was rescaled before preload."
+            "Mounted length accepted: "
+            f"{_format_compact_unit(self._setup_measured_length_mm, 'mm', decimals=4)} "
+            f"at stage position {_format_compact_unit(self._setup_preload_position_mm, 'mm', decimals=4)}. "
+            "The stiffness prior was rescaled before setup."
         )
         return True
 
@@ -17288,11 +17325,25 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return True
 
+    def _handle_mark_setup_return_zero_step(self) -> bool:
+        if not self._is_ui_thread():
+            return bool(self._call_on_ui_thread_sync(self._handle_mark_setup_return_zero_step))
+        self._record_length_setup_point()
+        self._setup_return_zero_start_point_index = len(self._length_setup_points)
+        self._setup_return_zero_speed_mm_s_value = None
+        self._setup_zero_position_mm = None
+        self._setup_zero_fallback_return_position_mm = None
+        self._setup_zero_fallback_raw_g = None
+        self._setup_zero_fallback_reason = ""
+        self._update_length_setup_dialog("Returning load to 0 g to compute l0.")
+        self._log("Length reference already captured; returning load to 0 g to compute l0.")
+        return True
+
     def _handle_apply_length_setup_step(self) -> bool:
         if not self._is_ui_thread():
             return bool(self._call_on_ui_thread_sync(self._handle_apply_length_setup_step))
         if self._setup_measured_length_mm is None or self._setup_preload_position_mm is None:
-            self._log("Recipe stopped because preload length setup is missing the measured length or preload position.")
+            self._log("Recipe stopped because length setup is missing the measured length or reference position.")
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
         try:
@@ -17306,6 +17357,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._setup_zero_position_mm = zero_position_mm
                 else:
                     zero_position_mm = float(self._current_position_mm)
+                    self._setup_zero_position_mm = zero_position_mm
             l0_mm = self._apply_preload_length_result(
                 measured_length_mm=self._setup_measured_length_mm,
                 preload_position_mm=self._setup_preload_position_mm,
@@ -17572,6 +17624,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 note=step.note,
             )
             self._handle_measure_length_prompt_step()
+        elif step.action == "mark_setup_return_zero":
+            self._set_automation_context(
+                phase="return_zero_start",
+                basis=step.basis,
+                target_value=step.target_value,
+                note=step.note,
+            )
+            self._handle_mark_setup_return_zero_step()
         elif step.action == "apply_length_setup":
             self._set_automation_context(phase="apply_l0", note=step.note)
             self._handle_apply_length_setup_step()
@@ -17587,6 +17647,24 @@ class MainWindow(QtWidgets.QMainWindow):
             if not finished and self._automation_active:
                 self._automation_index -= 1
         elif step.action == "settle":
+            if step.note == "setup_preload" and self._setup_preload_ramp_skipped:
+                self._set_automation_context(
+                    phase="settle",
+                    basis=step.basis,
+                    target_value=step.target_value,
+                    plateau_index=int(step.note) if step.note.isdigit() else None,
+                    note=step.note,
+                )
+                self._record_length_setup_point()
+                self._log("Skipping setup preload settle because the run started above preload.")
+                if self._automation_active:
+                    self._automation_completed_ticks = min(
+                        max(1, self._automation_total_steps or len(self._automation_steps)),
+                        self._automation_completed_ticks + 1,
+                    )
+                self._update_recipe_progress()
+                self._refresh_live_labels()
+                return
             self._timed_step_elapsed_s(step_index)
             plateau_index = int(step.note) if step.note.isdigit() else None
             setup_settle_phase = step.note in {"setup_preload", "setup_return_zero"}

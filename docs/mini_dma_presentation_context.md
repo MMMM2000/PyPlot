@@ -119,9 +119,9 @@ How to explain it:
 
 Every recipe now starts with mandatory length setup before the main recipe log begins:
 
-1. Operator enters approximate mounted wire length.
-2. Mini DMA ramps to a configured setup preload stress.
-3. Operator enters the measured wire length under preload.
+1. Operator enters the measured mounted wire length.
+2. Mini DMA ramps to the configured setup preload stress if the wire is below it.
+3. If the wire is already above setup preload, Mini DMA skips the preload ramp.
 4. Mini DMA returns toward 0 g applied load.
 5. The app computes unloaded gauge length `l0`.
 6. The main recipe starts with strain zero and stress conversion tied to that setup.
@@ -334,7 +334,7 @@ Recent debugging lessons:
 3. Hardware Overview: balance, linear actuator, Tic controller, power supply
 4. Software Overview: one PyQt app, recipe engine, hardware workers, logging
 5. Data Flow Diagram: scale + motor + supply into session files and live control
-6. Mandatory Length Setup: preload, measured length, return-to-zero, computed `l0`
+6. Mandatory Length Setup: measured mounted length, optional preload, return-to-zero, computed `l0`
 7. Recipe Types: displacement, Hsw scan, calibration, iso-load/stress/strain sweeps
 8. Closed-Loop Control: target error, stiffness, tolerance, correction distance
 9. Current Sweep Behavior: current ramp plus mechanical servo
