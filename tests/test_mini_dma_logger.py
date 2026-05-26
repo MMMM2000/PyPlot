@@ -9,6 +9,7 @@ import importlib
 import json
 import math
 import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ pytest.importorskip(
 )
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from data_logging.shared_power_supply.profiles import HMP4040_PROFILE
 
 TEST_QSETTINGS_ROOT = Path(
     os.environ.get("PYTEST_QSETTINGS_ROOT", "artifacts/test-qsettings")
@@ -2452,8 +2454,8 @@ def test_manual_auto_connect_button_runs_manual_preflight(tmp_path: Path, qtbot)
 
         button.clicked.emit()
 
-        qtbot.waitUntil(lambda: called == ["tic", "scale", "supply", "current"], timeout=1000)
-        assert called == ["tic", "scale", "supply", "current"]
+        qtbot.waitUntil(lambda: called == ["scale", "supply", "current", "tic"], timeout=1000)
+        assert called == ["scale", "supply", "current", "tic"]
         assert button.isEnabled()
         assert button.text() == "Auto-connect hardware"
     finally:
@@ -2478,6 +2480,25 @@ def test_manual_auto_connect_button_disables_while_queued(tmp_path: Path, qtbot)
         assert not button.isEnabled()
         assert button.text() == "Auto-connecting..."
         qtbot.waitUntil(lambda: button.isEnabled(), timeout=1000)
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_auto_connect_enables_motor_supply_before_tic_status(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._enable_motor_supply_output = lambda: called.append("motor") or True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+    window.check_motor_supply_power.setChecked(True)
+
+    try:
+        window._run_manual_auto_connect_hardware()
+
+        assert called == ["scale", "supply", "current", "supply", "motor", "tic"]
+        assert "Manual hardware auto-connect completed." in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -4496,7 +4517,7 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
         _close_test_window(window)
 
 
-def test_hmp4040_profile_defaults_to_ch4_current_and_ch3_motor(tmp_path: Path, qtbot) -> None:
+def test_hmp4040_profile_change_requires_manual_channel_selection(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
@@ -4505,14 +4526,14 @@ def test_hmp4040_profile_defaults_to_ch4_current_and_ch3_motor(tmp_path: Path, q
 
         window.combo_supply_profile.setCurrentIndex(profile_index)
 
-        assert window.combo_current_sweep_supply_channel.currentData() == 4
-        assert window.combo_motor_supply_channel.currentData() == 3
-        assert window._build_supply_controller().selected_channel() == 4
+        assert window.combo_current_sweep_supply_channel.currentData() == 0
+        assert window.combo_motor_supply_channel.currentData() == 0
+        assert window._build_supply_controller().selected_channel() == 0
     finally:
         _close_test_window(window)
 
 
-def test_hmp4040_restored_profile_uses_profile_channel_defaults(tmp_path: Path, qtbot) -> None:
+def test_hmp4040_restored_profile_keeps_channels_unselected_without_saved_channels(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
     settings = _test_settings()
@@ -4526,8 +4547,8 @@ def test_hmp4040_restored_profile_uses_profile_channel_defaults(tmp_path: Path, 
     try:
         assert window.combo_supply_profile.currentData() == "hmp4040"
         assert window.combo_supply_baud.currentText() == "115200"
-        assert window.combo_current_sweep_supply_channel.currentData() == 4
-        assert window.combo_motor_supply_channel.currentData() == 3
+        assert window.combo_current_sweep_supply_channel.currentData() == 0
+        assert window.combo_motor_supply_channel.currentData() == 0
         assert window.spin_supply_voltage_limit.value() == pytest.approx(32.05)
     finally:
         _close_test_window(window)
@@ -4561,8 +4582,8 @@ def test_auto_detect_supply_port_identifies_hmp4040(tmp_path: Path, qtbot, monke
         assert window.combo_supply_port.currentData() == "COM7"
         assert window.combo_supply_baud.currentText() == "115200"
         assert window.combo_supply_profile.currentData() == "hmp4040"
-        assert window.combo_current_sweep_supply_channel.currentData() == 4
-        assert window.combo_motor_supply_channel.currentData() == 3
+        assert window.combo_current_sweep_supply_channel.currentData() == 0
+        assert window.combo_motor_supply_channel.currentData() == 0
     finally:
         _close_test_window(window)
 
@@ -7302,6 +7323,10 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
             self.port = port
             self.calls: list[tuple[str, dict[str, object]]] = []
 
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
         def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
             self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
             return {"lease_id": f"lease-{channel}"}
@@ -7378,6 +7403,7 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
     assert clients[0].host == "127.0.0.1"
     assert clients[0].port == 8765
     assert clients[0].calls == [
+        ("snapshot", {}),
         (
             "lease",
             {
@@ -7457,11 +7483,295 @@ def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, q
         _close_test_window(window)
 
 
-def test_shared_broker_preflight_connects_without_serial_auto_detect(tmp_path: Path, qtbot) -> None:
+def test_supply_channels_default_to_unselected_and_have_no_profile_default_label(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        current_labels = [
+            window.combo_current_sweep_supply_channel.itemText(index)
+            for index in range(window.combo_current_sweep_supply_channel.count())
+        ]
+
+        assert "Profile default" not in current_labels
+        assert window.combo_current_sweep_supply_channel.currentData() == 0
+        assert window.combo_motor_supply_channel.currentData() == 0
+        assert window._current_sweep_supply_channel() is None
+        assert window._motor_supply_channel() is None
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_channel_setup_requires_explicit_channel(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    configured: list[object] = []
+
+    class _FakeSupply:
+        def is_connected(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            return None
+
+        def configure_channel(self, **kwargs: object) -> None:
+            configured.append(kwargs)
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+
+        assert window._prepare_current_sweep_supply_channel() is False
+
+        assert configured == []
+        assert "Select a current-sweep supply channel before preparing the output." in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_motor_supply_enable_requires_explicit_channel(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    warnings: list[str] = []
+    configured: list[object] = []
+
+    class _FakeSupply:
+        def is_connected(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            return None
+
+        def configure_channel(self, **kwargs: object) -> None:
+            configured.append(kwargs)
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        original_warning = QtWidgets.QMessageBox.warning
+        QtWidgets.QMessageBox.warning = (  # type: ignore[method-assign]
+            lambda _parent, _title, message: warnings.append(str(message))
+        )
+        try:
+            assert window._enable_motor_supply_output() is False
+        finally:
+            QtWidgets.QMessageBox.warning = original_warning  # type: ignore[method-assign]
+
+        assert configured == []
+        assert warnings == [
+            "Failed to enable motor supply channel: Select a motor supply channel before enabling motor power."
+        ]
+    finally:
+        _close_test_window(window)
+
+
+def test_motor_supply_enable_fails_when_output_readback_stays_off(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    warnings: list[str] = []
+
+    class _FakeSupply:
+        def is_connected(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            return None
+
+        def configure_channel(self, **_kwargs: object) -> None:
+            return None
+
+        def select_channel(self, channel: int | None = None) -> None:
+            return None
+
+        def output_state(self, channel: int | None = None) -> bool:
+            return False
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+        monkeypatch_warning = QtWidgets.QMessageBox.warning
+        QtWidgets.QMessageBox.warning = (  # type: ignore[method-assign]
+            lambda _parent, _title, message: warnings.append(str(message))
+        )
+        try:
+            assert window._enable_motor_supply_output() is False
+        finally:
+            QtWidgets.QMessageBox.warning = monkeypatch_warning  # type: ignore[method-assign]
+
+        assert "CH3 output did not report ON" in warnings[0]
+        assert "Motor supply CH3 enabled" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_shared_broker_supply_connect_validates_broker_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, payload))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=1.0,
+        current_channel=4,
+        motor_channel=3,
+    )
+
+    controller.connect()
+
+    assert controller.is_connected() is True
+    assert clients[0].calls == [("snapshot", {})]
+
+
+def test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    broker_started = False
+
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            if not broker_started:
+                raise TimeoutError("timed out")
+            if action == "snapshot":
+                return {"ok": True, "snapshot": {"model": "hmp4040"}}
+            if action == "measure_channel":
+                return {
+                    "ok": True,
+                    "readback": {
+                        "voltage_V": 0.0,
+                        "current_mA": 0.0,
+                        "resistance_ohm": None,
+                        "power_W": 0.0,
+                    },
+                }
+            return {"ok": True}
+
+    class _FakeDriver:
+        def __init__(self, *, port_name: str, baudrate: int, timeout_s: float) -> None:
+            self.port_name = port_name
+            self.baudrate = baudrate
+            self.timeout_s = timeout_s
+            self.profile = HMP4040_PROFILE
+            self.closed = False
+
+        def connect(self) -> None:
+            return None
+
+        def identify(self) -> str:
+            return "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62"
+
+        def close(self) -> None:
+            self.closed = True
+
+        def configure_channel(self, **_kwargs: object) -> None:
+            return None
+
+        def set_current_mA(self, **_kwargs: object) -> None:
+            return None
+
+        def set_output(self, **_kwargs: object) -> None:
+            return None
+
+        def measure(self, **_kwargs: object) -> dict[str, float | None]:
+            return {"voltage_V": 0.0, "current_mA": 0.0}
+
+    class _FakeServer:
+        def __init__(self) -> None:
+            self.shutdown_called = False
+            self.close_called = False
+
+        def shutdown(self) -> None:
+            self.shutdown_called = True
+
+        def server_close(self) -> None:
+            self.close_called = True
+
+    class _FakeThread:
+        def __init__(self) -> None:
+            self.joined = False
+
+        def join(self, timeout: float | None = None) -> None:
+            self.joined = True
+
+    started: dict[str, object] = {}
+
+    def _fake_start_broker_server(broker: object, *, host: str, port: int) -> tuple[_FakeServer, _FakeThread]:
+        nonlocal broker_started
+        broker_started = True
+        server = _FakeServer()
+        thread = _FakeThread()
+        started.update({"broker": broker, "host": host, "port": port, "server": server, "thread": thread})
+        return server, thread
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
+        monkeypatch.setattr(mini_dma_mod, "HmpSerialDriver", _FakeDriver)
+        monkeypatch.setattr(mini_dma_mod, "start_broker_server", _fake_start_broker_server)
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.combo_supply_port.addItem("COM3", "COM3")
+        window.combo_supply_port.setCurrentIndex(window.combo_supply_port.findData("COM3"))
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.check_motor_supply_power.setChecked(True)
+        window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+        window.spin_supply_voltage_limit.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(40.0)
+        window.spin_motor_supply_voltage.setValue(12.0)
+        window.spin_motor_supply_current_limit.setValue(0.4)
+
+        assert window._connect_supply(show_errors=False) is True
+
+        assert broker_started is True
+        assert started["host"] == "127.0.0.1"
+        assert started["port"] == 8765
+        assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
+        assert "Started shared HMP broker" in window.log_output.toPlainText()
+        assert "Supply connected through shared HMP broker" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_shared_broker_preflight_connects_without_serial_auto_detect(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     window = _build_window(tmp_path, qtbot)
     calls: list[str] = []
 
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
     try:
+        monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
         profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
         assert profile_index >= 0
         window.combo_supply_profile.setCurrentIndex(profile_index)
@@ -7581,6 +7891,33 @@ def test_tic_controller_sets_step_mode_with_ticcmd(monkeypatch: pytest.MonkeyPat
     controller.set_step_mode("4")
 
     assert calls == [["ticcmd.exe", "-d", "00501366", "--step-mode", "4"]]
+
+
+def test_tic_status_falls_back_when_full_status_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = "VIN voltage: 12.00 V\nOperation state: Normal\n"
+        stderr = ""
+
+    def _fake_run(args: list[str], **kwargs: object) -> _Completed:
+        calls.append(args)
+        if "--full" in args and "--status" in args:
+            raise subprocess.TimeoutExpired(args, timeout=float(kwargs.get("timeout", 5.0)))
+        return _Completed()
+
+    controller = mini_dma_mod.TicController(command_path="ticcmd", device_serial="00501366")
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    status = controller.get_status()
+
+    assert "VIN voltage: 12.00 V" in status
+    assert calls == [
+        ["ticcmd.exe", "-d", "00501366", "--status", "--full"],
+        ["ticcmd.exe", "-d", "00501366", "--status"],
+    ]
 
 
 def test_tic_units_per_mm_follow_microstep_factor() -> None:
@@ -8490,6 +8827,7 @@ def test_emergency_stop_turns_off_current_halts_tic_and_stops_session(tmp_path: 
     window._supply_output_enabled = True
     window._supply_last_setpoint_mA = 12.5
     window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+    window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(2))
 
     try:
         window._start_session()
@@ -11161,20 +11499,23 @@ def test_motor_supply_channel_is_enabled_before_recipe_tic_preflight(tmp_path: P
 
         assert ok is True
         assert supply.configured == [(2, 12.0, 1.5, True)]
-        assert supply.selected_anneal == 1
+        assert supply.selected_anneal == 0
     finally:
         _close_test_window(window)
 
 
-def test_hmp4030_defaults_use_real_voltage_limit_and_kosice_channels(tmp_path: Path, qtbot) -> None:
+def test_hmp4030_defaults_keep_safe_voltage_and_require_manual_channel_selection(
+    tmp_path: Path,
+    qtbot,
+) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
         assert mini_dma_mod.SUPPLY_PROFILES["hmp4030"]["max_voltage"] == pytest.approx(32.05)
         assert mini_dma_mod.SUPPLY_PROFILES["hmp4030"]["channel_select"] == 3
         assert window.spin_supply_voltage_limit.value() == pytest.approx(32.05)
-        assert window.combo_current_sweep_supply_channel.currentData() == 3
-        assert window.combo_motor_supply_channel.currentData() == 2
+        assert window.combo_current_sweep_supply_channel.currentData() == 0
+        assert window.combo_motor_supply_channel.currentData() == 0
         assert window.spin_motor_supply_voltage.value() == pytest.approx(12.0)
         assert window.spin_motor_supply_current_limit.value() == pytest.approx(0.5)
         assert window.spin_tic_current_limit_mA.value() == 343
@@ -11337,6 +11678,10 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window.combo_current_sweep_supply_channel.setCurrentIndex(
+        window.combo_current_sweep_supply_channel.findData(3)
+    )
+    window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(2))
 
     try:
         ok = window._provision_bench_hardware()

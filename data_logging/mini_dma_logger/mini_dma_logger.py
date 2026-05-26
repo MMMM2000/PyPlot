@@ -29,8 +29,9 @@ except Exception:  # pragma: no cover - import guard
 from plotting.shared.logfiles import append_text_with_rotation
 from plotting.shared.power_guard import create_experiment_sleep_guard
 from plotting.shared.utils import ensure_app_theme, install_standard_menu
-from data_logging.shared_power_supply.broker import ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
-from data_logging.shared_power_supply.protocol import BrokerJsonClient
+from data_logging.shared_power_supply.broker import SharedPowerSupplyBroker, ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
+from data_logging.shared_power_supply.driver import HmpSerialDriver
+from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
 
 try:
     import serial
@@ -2100,12 +2101,19 @@ class TicController:
                 return self.run("--status", "--full")
             except Exception:
                 return native_status
+        last_error: Exception | None = None
         for args in (("--status", "--full"), ("--status",), ("--full",)):
             try:
                 return self.run(*args)
-            except RuntimeError:
+            except Exception as exc:
+                last_error = exc
                 continue
-        return self.run("--list")
+        try:
+            return self.run("--list")
+        except Exception:
+            if last_error is not None:
+                raise last_error
+            raise
 
     def halt_and_hold(self) -> None:
         native = self._native_controller()
@@ -2458,8 +2466,9 @@ class PowerSupplyController:
 
     def select_channel(self, channel: int | None = None) -> None:
         target_channel = self.selected_channel() if channel is None else int(channel)
-        if target_channel > 0:
-            self.command(f"INST:NSEL {target_channel}")
+        if target_channel <= 0:
+            raise RuntimeError("Select a power-supply channel before controlling the output.")
+        self.command(f"INST:NSEL {target_channel}")
 
     def current_resolution_mA(self) -> float:
         return max(0.001, float(self.profile.get("current_resolution_mA", 1.0)))
@@ -2519,6 +2528,13 @@ class PowerSupplyController:
             self.select_channel()
             self.command("OUTP OFF")
 
+    def output_state(self, channel: int | None = None) -> bool | None:
+        target_channel = self.selected_channel() if channel is None else int(channel)
+        with self._io_lock:
+            self.select_channel(target_channel)
+            state = self.query_float("OUTP?", settle_s=0.03, timeout_s=0.4)
+        return None if state is None else bool(int(round(float(state))))
+
     def shutdown_output(self, *, reset_voltage_v: float = 1.0, reset_current_mA: float = 1.0) -> None:
         with self._io_lock:
             self.select_channel()
@@ -2576,6 +2592,7 @@ class SharedBrokerSupplyController:
     def connect(self) -> None:
         if self._client is None:
             self._client = BrokerJsonClient(host=self.host, port=self.port)
+        self._client.request("snapshot")
         self._connected = True
 
     def disconnect(self) -> None:
@@ -2703,6 +2720,12 @@ class SharedBrokerSupplyController:
             return
         with self._io_lock:
             self._require_client().set_output(channel=channel, lease_id=lease_id, output_on=False)
+
+    def output_state(self, channel: int | None = None) -> bool | None:
+        target_channel = self.selected_channel() if channel is None else int(channel)
+        if target_channel <= 0:
+            return None
+        return self._require_client().output_state(channel=target_channel)
 
     def shutdown_output(self, *, reset_voltage_v: float = 1.0, reset_current_mA: float = 1.0) -> None:
         channel = self.selected_channel()
@@ -2964,6 +2987,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._calibrated_load_noise_g: float | None = None
         self._run_log_mirror_enabled = False
         self._run_log_mirror_path = DEFAULT_RUN_LOG_MIRROR_PATH
+        self._owned_shared_broker_server: Any | None = None
+        self._owned_shared_broker_thread: Thread | None = None
+        self._owned_shared_broker_driver: HmpSerialDriver | None = None
         self._diameter_imported = False
         self._builder_import_in_progress = False
         self._plot_tiles: list[PlotTileWidgets] = []
@@ -3931,12 +3957,9 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form.addRow("Profile", self.combo_supply_profile)
 
         self.combo_current_sweep_supply_channel = QtWidgets.QComboBox(supply_box)
-        self.combo_current_sweep_supply_channel.addItem("Profile default", 0)
+        self.combo_current_sweep_supply_channel.addItem("Select channel...", 0)
         for channel in range(1, 5):
             self.combo_current_sweep_supply_channel.addItem(f"CH{channel}", channel)
-        self.combo_current_sweep_supply_channel.setCurrentIndex(
-            self.combo_current_sweep_supply_channel.findData(SUPPLY_PROFILES["hmp4030"]["channel_select"])
-        )
         supply_form.addRow("Current-sweep channel", self.combo_current_sweep_supply_channel)
 
         self.spin_supply_voltage_limit = CompactDoubleSpinBox(supply_box)
@@ -4018,9 +4041,9 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form.addRow("", self.check_motor_supply_power)
         motor_supply_row = QtWidgets.QHBoxLayout()
         self.combo_motor_supply_channel = QtWidgets.QComboBox(supply_box)
+        self.combo_motor_supply_channel.addItem("Select channel...", 0)
         for channel in range(1, 5):
             self.combo_motor_supply_channel.addItem(f"CH{channel}", channel)
-        self.combo_motor_supply_channel.setCurrentIndex(self.combo_motor_supply_channel.findData(2))
         self.spin_motor_supply_voltage = CompactDoubleSpinBox(supply_box)
         self.spin_motor_supply_voltage.setDecimals(2)
         self.spin_motor_supply_voltage.setRange(0.0, 32.05)
@@ -6311,7 +6334,7 @@ class MainWindow(QtWidgets.QMainWindow):
             baudrate=int(self.combo_supply_baud.currentText()),
             profile_id=profile_id,
             max_voltage_v=float(self.spin_supply_voltage_limit.value()),
-            channel_select=self._current_sweep_supply_channel(),
+            channel_select=self._current_sweep_supply_channel() or 0,
         )
 
     def _using_shared_broker_supply(self) -> bool:
@@ -6326,14 +6349,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_supply_baud.setCurrentText(str(baudrate))
         self.spin_supply_voltage_limit.setValue(float(profile.get("max_voltage", 32.05)))
         self.spin_supply_manual_current.setValue(float(profile.get("start_current_mA", 1.0)))
-        current_channel = int(profile.get("channel_select", 0) or 0)
-        current_channel_index = self.combo_current_sweep_supply_channel.findData(current_channel)
-        if current_channel_index >= 0:
-            self.combo_current_sweep_supply_channel.setCurrentIndex(current_channel_index)
-        motor_channel = int(profile.get("motor_supply_channel", 0) or 0)
-        motor_channel_index = self.combo_motor_supply_channel.findData(motor_channel)
-        if motor_channel_index >= 0:
-            self.combo_motor_supply_channel.setCurrentIndex(motor_channel_index)
+        if not getattr(self, "_settings_restore_in_progress", False):
+            current_channel_index = self.combo_current_sweep_supply_channel.findData(0)
+            if current_channel_index >= 0:
+                self.combo_current_sweep_supply_channel.setCurrentIndex(current_channel_index)
+            motor_channel_index = self.combo_motor_supply_channel.findData(0)
+            if motor_channel_index >= 0:
+                self.combo_motor_supply_channel.setCurrentIndex(motor_channel_index)
 
     def _connect_supply(self, checked: bool = False, *, show_errors: bool = True) -> bool:
         self._disconnect_supply()
@@ -6341,11 +6363,23 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             controller.connect()
         except Exception as exc:
-            if show_errors:
-                QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to connect power supply: {exc}")
+            if self._using_shared_broker_supply():
+                try:
+                    self._start_owned_shared_broker()
+                    controller = self._build_supply_controller()
+                    controller.connect()
+                except Exception as broker_exc:
+                    if show_errors:
+                        QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to connect power supply: {broker_exc}")
+                    else:
+                        self._log(f"Failed to connect power supply: {broker_exc}")
+                    return False
             else:
-                self._log(f"Failed to connect power supply: {exc}")
-            return False
+                if show_errors:
+                    QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to connect power supply: {exc}")
+                else:
+                    self._log(f"Failed to connect power supply: {exc}")
+                return False
         self._supply_controller = controller
         if isinstance(controller, SharedBrokerSupplyController):
             self.label_supply_status.setText(
@@ -6358,6 +6392,94 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(self.label_supply_status.text())
         self._refresh_supply_snapshot(force=True)
         return True
+
+    def _start_owned_shared_broker(self) -> None:
+        if self._owned_shared_broker_server is not None:
+            return
+        port_name = str(self.combo_supply_port.currentData() or "").strip()
+        if not port_name:
+            raise RuntimeError("Select the HMP COM port before starting the shared HMP broker.")
+        current_channel = self._current_sweep_supply_channel()
+        if current_channel is None:
+            raise RuntimeError("Select a current-sweep supply channel before starting the shared HMP broker.")
+        motor_channel = self._motor_supply_channel() if self._motor_supply_enabled() else None
+        if self._motor_supply_enabled() and motor_channel is None:
+            raise RuntimeError("Select a motor supply channel before starting the shared HMP broker.")
+
+        driver = HmpSerialDriver(
+            port_name=port_name,
+            baudrate=int(self.combo_supply_baud.currentText()),
+            timeout_s=0.7,
+        )
+        try:
+            driver.connect()
+            idn_text = driver.identify()
+            if driver.profile is None:
+                raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
+            broker = SharedPowerSupplyBroker(driver, driver.profile)
+            current_limit_mA = max(
+                float(self.spin_supply_manual_current.value()),
+                float(self.spin_current_sweep_start_mA.value()),
+                float(self.spin_current_sweep_end_mA.value()),
+                float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
+                1.0,
+            )
+            broker.assign_role(
+                channel=current_channel,
+                role=ROLE_MINI_DMA_CURRENT,
+                confirmed=True,
+                voltage_limit_v=float(self.spin_supply_voltage_limit.value()),
+                current_limit_a=current_limit_mA / 1000.0,
+            )
+            if motor_channel is not None:
+                broker.assign_role(
+                    channel=motor_channel,
+                    role=ROLE_MINI_DMA_MOTOR,
+                    confirmed=True,
+                    voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
+                    current_limit_a=float(self.spin_motor_supply_current_limit.value()),
+                )
+            broker.confirm_profile(name="Mini DMA auto-started shared HMP broker")
+            server, thread = start_broker_server(
+                broker,
+                host=self.edit_shared_broker_host.text().strip() or "127.0.0.1",
+                port=int(self.spin_shared_broker_port.value()),
+            )
+        except Exception:
+            driver.close()
+            raise
+
+        self._owned_shared_broker_server = server
+        self._owned_shared_broker_thread = thread
+        self._owned_shared_broker_driver = driver
+        self._log(f"Started shared HMP broker on {self.edit_shared_broker_host.text().strip() or '127.0.0.1'}:{self.spin_shared_broker_port.value()} for {port_name}.")
+
+    def _stop_owned_shared_broker(self) -> None:
+        server = self._owned_shared_broker_server
+        thread = self._owned_shared_broker_thread
+        driver = self._owned_shared_broker_driver
+        self._owned_shared_broker_server = None
+        self._owned_shared_broker_thread = None
+        self._owned_shared_broker_driver = None
+        if server is not None:
+            try:
+                server.shutdown()
+            except Exception:
+                pass
+            try:
+                server.server_close()
+            except Exception:
+                pass
+        if thread is not None:
+            try:
+                thread.join(timeout=2.0)
+            except Exception:
+                pass
+        if driver is not None:
+            try:
+                driver.close()
+            except Exception:
+                pass
 
     def _disconnect_supply(self) -> None:
         if self._supply_controller is not None:
@@ -6387,16 +6509,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return config.motor_supply_enabled
         return self.check_motor_supply_power.isChecked()
 
-    def _motor_supply_channel(self) -> int:
-        return int(self.combo_motor_supply_channel.currentData() or 1)
+    def _motor_supply_channel(self) -> int | None:
+        configured = int(self.combo_motor_supply_channel.currentData() or 0)
+        return configured if configured > 0 else None
 
     def _current_sweep_supply_channel(self) -> int | None:
         configured = int(self.combo_current_sweep_supply_channel.currentData() or 0)
         if configured > 0:
             return configured
-        profile = SUPPLY_PROFILES.get(str(self.combo_supply_profile.currentData() or "hmp4030"), {})
-        channel = int(profile.get("channel_select", 0) or 0)
-        return channel if channel > 0 else None
+        return None
 
     def _enable_motor_supply_output(self) -> bool:
         if self._supply_controller is None or not self._supply_controller.is_connected():
@@ -6404,13 +6525,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         try:
             channel = self._motor_supply_channel()
+            if channel is None:
+                raise RuntimeError("Select a motor supply channel before enabling motor power.")
             self._supply_controller.configure_channel(
                 channel=channel,
                 voltage_v=float(self.spin_motor_supply_voltage.value()),
                 current_a=float(self.spin_motor_supply_current_limit.value()),
                 output_on=True,
             )
-            self._supply_controller.select_channel()
+            current_channel = self._current_sweep_supply_channel()
+            if current_channel is not None:
+                self._supply_controller.select_channel(current_channel)
+            output_state = self._supply_channel_output_state(channel)
+            if output_state is False:
+                raise RuntimeError(f"CH{channel} output did not report ON after motor power enable.")
         except Exception as exc:
             self._log(f"Motor supply enable failed: {exc}")
             QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to enable motor supply channel: {exc}")
@@ -6422,18 +6550,35 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return True
 
+    def _supply_channel_output_state(self, channel: int) -> bool | None:
+        if self._supply_controller is None:
+            return None
+        method = getattr(self._supply_controller, "output_state", None)
+        if not callable(method):
+            return None
+        try:
+            return method(channel)
+        except Exception as exc:
+            self._log(f"Supply CH{channel} output-state readback failed: {exc}")
+            return None
+
     def _disable_motor_supply_output(self) -> bool:
         if self._supply_controller is None or not self._supply_controller.is_connected():
             return False
         try:
             channel = self._motor_supply_channel()
+            if channel is None:
+                self._log("Select a motor supply channel before disabling motor power.")
+                return False
             self._supply_controller.configure_channel(
                 channel=channel,
                 voltage_v=float(self.spin_motor_supply_voltage.value()),
                 current_a=float(self.spin_motor_supply_current_limit.value()),
                 output_on=False,
             )
-            self._supply_controller.select_channel()
+            current_channel = self._current_sweep_supply_channel()
+            if current_channel is not None:
+                self._supply_controller.select_channel(current_channel)
         except Exception as exc:
             self._log(f"Motor supply disable failed: {exc}")
             return False
@@ -6445,7 +6590,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         channel = self._current_sweep_supply_channel()
         if channel is None:
-            return True
+            self._log("Select a current-sweep supply channel before preparing the output.")
+            return False
         current_mA = float(self.spin_supply_manual_current.value())
         try:
             self._supply_controller.configure_channel(
@@ -12023,10 +12169,6 @@ class MainWindow(QtWidgets.QMainWindow):
         steps = 3 + (1 if self._motor_supply_enabled() else 0)
         completed_steps = 0
         try:
-            self._set_manual_auto_connect_progress("Connecting motor controller...", completed_steps, steps)
-            if not self._ensure_tic_ready_for_recipe():
-                connected = False
-            completed_steps += 1
             self._set_manual_auto_connect_progress("Connecting scale...", completed_steps, steps)
             if self._scale_thread is None:
                 connected = self._ensure_scale_ready_for_recipe() and connected
@@ -12044,6 +12186,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 elif not self._enable_motor_supply_output():
                     connected = False
                 completed_steps += 1
+            self._set_manual_auto_connect_progress("Connecting motor controller...", completed_steps, steps)
+            if not self._ensure_tic_ready_for_recipe():
+                connected = False
+            completed_steps += 1
             if connected:
                 self._set_manual_auto_connect_progress("Hardware auto-connect completed.", steps, steps)
                 self._log("Manual hardware auto-connect completed.")
@@ -14044,6 +14190,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self._supply_controller is None:
                     raise RuntimeError("supply controller is missing after connect")
                 channel = self._motor_supply_channel()
+                if channel is None:
+                    raise RuntimeError("select a motor supply channel first")
                 voltage = float(self.spin_motor_supply_voltage.value())
                 current_limit = float(self.spin_motor_supply_current_limit.value())
                 self._supply_controller.configure_channel(
@@ -14052,7 +14200,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     current_a=current_limit,
                     output_on=True,
                 )
-                self._supply_controller.select_channel()
+                current_channel = self._current_sweep_supply_channel()
+                if current_channel is not None:
+                    self._supply_controller.select_channel(current_channel)
                 statuses.append(
                     f"PASS: Motor supply CH{channel} set to "
                     f"{_format_compact_number(voltage, decimals=2)} V / "
@@ -14063,7 +14213,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 ok = False
             channel = self._current_sweep_supply_channel()
             if channel is None:
-                statuses.append("PASS: Current-sweep supply uses the profile's direct output channel.")
+                statuses.append("FAIL: Select a current-sweep supply channel.")
+                ok = False
             else:
                 statuses.append(f"PASS: Current-sweep supply channel CH{channel} selected.")
 
@@ -18012,7 +18163,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("continuity_monitor_enabled", self.check_continuity_monitor.isChecked())
         self.settings.setValue("continuity_current_mA", self.spin_continuity_current_mA.value())
         self.settings.setValue("motor_supply_enabled", self.check_motor_supply_power.isChecked())
-        self.settings.setValue("motor_supply_channel", self.combo_motor_supply_channel.currentData() or 1)
+        self.settings.setValue("motor_supply_channel", self.combo_motor_supply_channel.currentData() or 0)
         self.settings.setValue("motor_supply_voltage_v", self.spin_motor_supply_voltage.value())
         self.settings.setValue("motor_supply_current_limit_a", self.spin_motor_supply_current_limit.value())
         self.settings.setValue("ticcmd_path", self.edit_ticcmd_path.text())
@@ -18262,7 +18413,7 @@ class MainWindow(QtWidgets.QMainWindow):
         current_sweep_channel = int(
             self.settings.value(
                 "current_sweep_supply_channel",
-                int(supply_profile_defaults.get("channel_select", SUPPLY_PROFILES["hmp4030"]["channel_select"]) or 0),
+                0,
             )
         )
         current_sweep_channel_index = self.combo_current_sweep_supply_channel.findData(current_sweep_channel)
@@ -18284,7 +18435,7 @@ class MainWindow(QtWidgets.QMainWindow):
         motor_channel = int(
             self.settings.value(
                 "motor_supply_channel",
-                int(supply_profile_defaults.get("motor_supply_channel", 2) or 2),
+                0,
             )
         )
         motor_channel_index = self.combo_motor_supply_channel.findData(motor_channel)
@@ -18912,6 +19063,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_session(reason="app_closed", detail="Application window closed while session was active.")
         self._release_experiment_sleep_guard()
         self._disconnect_supply()
+        self._stop_owned_shared_broker()
         super().closeEvent(event)
 
 

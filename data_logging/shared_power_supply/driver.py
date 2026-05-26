@@ -156,6 +156,15 @@ class HmpSerialDriver:
             self.select_channel(channel)
             self._write_command("OUTP ON" if output_on else "OUTP OFF")
 
+    def output_state(self, *, channel: int) -> bool | None:
+        with self._io_lock:
+            self.select_channel(channel)
+            self._write_command("OUTP?")
+            response = self._read_line().strip()
+        if not response:
+            return None
+        return response[:1] == "1" or response.upper().startswith("ON")
+
     def measure(self, *, channel: int) -> dict[str, float | None]:
         with self._io_lock:
             self.select_channel(channel)

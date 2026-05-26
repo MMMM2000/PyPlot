@@ -83,6 +83,8 @@ class BrokerTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 output_on=bool(request["output_on"]),
             )
             return {"ok": True}
+        if action == "output_state":
+            return {"ok": True, "output_on": broker.output_state(channel=int(request["channel"]))}
         if action == "measure_channel":
             return {"ok": True, "readback": broker.measure_channel(channel=int(request["channel"]))}
         if action == "snapshot":
@@ -155,6 +157,10 @@ class BrokerJsonClient:
 
     def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:
         self.request("set_output", channel=channel, lease_id=lease_id, output_on=output_on)
+
+    def output_state(self, *, channel: int) -> bool | None:
+        value = self.request("output_state", channel=channel).get("output_on")
+        return None if value is None else bool(value)
 
     def measure_channel(self, *, channel: int) -> dict[str, float | None]:
         return dict(self.request("measure_channel", channel=channel)["readback"])
