@@ -1548,21 +1548,22 @@ def test_dashboard_plot_updates_pyqtgraph_left_and_right_curves(tmp_path: Path, 
         _close_test_window(window)
 
 
-def test_dashboard_plot_panel_keeps_right_edge_padding_and_compact_log(tmp_path: Path, qtbot) -> None:
+def test_dashboard_plot_panel_keeps_axis_padding_and_compact_log(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
         margins = window._dashboard_plot_canvas_layout.contentsMargins()
-        assert margins.right() >= 24
+        assert margins.left() >= 10
+        assert margins.top() >= 10
+        assert margins.right() >= 10
+        assert margins.bottom() >= 14
+        assert window._dashboard_plot_grid.horizontalSpacing() >= 18
+        assert window._dashboard_plot_grid.verticalSpacing() >= 18
         assert window.log_output.maximumHeight() <= 96
         assert window._dashboard_plot_splitter.childrenCollapsible() is False
-        assert all(
-            widget.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Policy.Ignored
-            for widget in window._dashboard_plot_widgets
-        )
         assert window._dashboard_plot_widgets
-        assert all(widget.minimumWidth() == 0 for widget in window._dashboard_plot_widgets)
-        assert all(widget.minimumHeight() == 0 for widget in window._dashboard_plot_widgets)
+        assert all(widget.minimumWidth() >= 320 for widget in window._dashboard_plot_widgets)
+        assert all(widget.minimumHeight() >= 230 for widget in window._dashboard_plot_widgets)
         assert all(widget.maximumHeight() > 10000 for widget in window._dashboard_plot_widgets)
     finally:
         _close_test_window(window)
