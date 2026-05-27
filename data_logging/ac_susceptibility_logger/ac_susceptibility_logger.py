@@ -9,8 +9,10 @@ from datetime import datetime, timedelta
 import json
 import math
 import os
+import subprocess
 import re
 import sys
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -521,6 +523,106 @@ class AcSweepWorker(QtCore.QObject):
             self.failed.emit(str(exc))
 
 
+class AcPsuWatchdogGuard:
+    """Keep a detached PSU-off watchdog armed while a hardware AC sweep runs."""
+
+    def __init__(
+        self,
+        *,
+        config: sweep.AcSweepConfig,
+        output_path: Path,
+        baudrate: int,
+        heartbeat_interval_s: float = 1.0,
+        stale_timeout_s: float = 8.0,
+    ) -> None:
+        self.config = config
+        self.output_path = Path(output_path)
+        self.baudrate = int(baudrate)
+        self.heartbeat_interval_s = max(0.2, float(heartbeat_interval_s))
+        self.stale_timeout_s = max(2.0, float(stale_timeout_s))
+        suffix = f"{os.getpid()}_{int(time.time())}"
+        self.heartbeat_path = self.output_path.with_name(f"{self.output_path.stem}_psu_watchdog_{suffix}.heartbeat")
+        self.disarm_path = self.output_path.with_name(f"{self.output_path.stem}_psu_watchdog_{suffix}.disarm")
+        self.log_path = self.output_path.with_name(f"{self.output_path.stem}_psu_watchdog_{suffix}.jsonl")
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._process: subprocess.Popen[bytes] | None = None
+
+    def start(self) -> None:
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        for path in (self.disarm_path, self.heartbeat_path):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        self._write_heartbeat()
+        self._thread = threading.Thread(target=self._heartbeat_loop, name="ac-psu-watchdog-heartbeat", daemon=True)
+        self._thread.start()
+        cmd = [
+            sys.executable,
+            "-m",
+            "data_logging.ac_susceptibility_logger.psu_watchdog",
+            "--parent-pid",
+            str(os.getpid()),
+            "--heartbeat",
+            str(self.heartbeat_path),
+            "--disarm",
+            str(self.disarm_path),
+            "--backend",
+            self.config.psu_backend,
+            "--resource",
+            self.config.psu_resource,
+            "--baudrate",
+            str(self.baudrate),
+            "--timeout-s",
+            str(self.stale_timeout_s),
+            "--poll-s",
+            "1.0",
+            "--log",
+            str(self.log_path),
+        ]
+        flags = 0
+        if os.name == "nt":
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+        self._process = subprocess.Popen(
+            cmd,
+            cwd=str(Path(__file__).resolve().parents[2]),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+
+    def stop(self) -> None:
+        try:
+            self.disarm_path.write_text("disarmed\n", encoding="ascii")
+        except Exception:
+            pass
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=2.0)
+        process = self._process
+        if process is not None:
+            try:
+                process.wait(timeout=3.0)
+            except Exception:
+                pass
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop_event.wait(self.heartbeat_interval_s):
+            self._write_heartbeat()
+
+    def _write_heartbeat(self) -> None:
+        payload = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "pid": os.getpid(),
+            "backend": self.config.psu_backend,
+            "resource": self.config.psu_resource,
+        }
+        self.heartbeat_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="ascii")
+
+
 class MainWindow(CurrentAnnealingWindow):
     """Current annealing logger extended with LCR-6200 measurements."""
 
@@ -564,6 +666,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_active_sweep_config: sweep.AcSweepConfig | None = None
         self._ac_worker_thread: QtCore.QThread | None = None
         self._ac_worker: QtCore.QObject | None = None
+        self._ac_psu_watchdog: AcPsuWatchdogGuard | None = None
         super().__init__()
         self.setWindowTitle("AC Susceptibility Logger")
         self._restore_ac_developer_settings()
@@ -2389,6 +2492,23 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
         self._ac_active_sweep_config = config
+        watchdog = AcPsuWatchdogGuard(
+            config=config,
+            output_path=output_path,
+            baudrate=self._selected_ac_psu_baudrate(),
+        )
+        try:
+            watchdog.start()
+        except Exception as exc:
+            self._ac_sweep_running = False
+            self._ac_active_sweep_config = None
+            QtWidgets.QMessageBox.warning(
+                self,
+                "AC sweep watchdog failed",
+                f"Could not arm the PSU watchdog, so the sweep was not started:\n{exc}",
+            )
+            return
+        self._ac_psu_watchdog = watchdog
         self._reset_ac_progress("Microwire sweep", self._sweep_total_reads(config), units="time")
         self._set_ac_current_task("Current task: preparing microwire current sweep")
         self.pushButton_run_ac_sweep.setEnabled(False)
@@ -2418,6 +2538,8 @@ class MainWindow(CurrentAnnealingWindow):
             thread.start()
             return
         except Exception as exc:
+            watchdog.stop()
+            self._ac_psu_watchdog = None
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"AC sweep failed: {exc}")
             QtWidgets.QMessageBox.warning(self, "AC sweep failed", str(exc))
@@ -2522,6 +2644,10 @@ class MainWindow(CurrentAnnealingWindow):
         return max(1, int(round(estimate.estimated_seconds * 1000.0)))
 
     def _finish_ac_worker_state(self) -> None:
+        watchdog = getattr(self, "_ac_psu_watchdog", None)
+        self._ac_psu_watchdog = None
+        if watchdog is not None:
+            watchdog.stop()
         self._ac_sweep_running = False
         self._ac_sweep_stop_requested = False
         self._ac_active_sweep_config = None
@@ -3714,6 +3840,12 @@ class MainWindow(CurrentAnnealingWindow):
         return self._format_optional_sample_value(value)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if self._ac_sweep_running:
+            self.handle_stop_ac_sweep_clicked()
+            event.ignore()
+            self.label_lcr_status.setText("Stopping AC sweep before closing so the PSU can be turned off...")
+            self._set_ac_current_task("Current task: stopping before close")
+            return
         meter = self.lcr_meter
         if meter is not None:
             try:

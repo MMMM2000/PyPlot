@@ -11,6 +11,7 @@ import pytest
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from data_logging.ac_susceptibility_logger import lcr6000
+from data_logging.ac_susceptibility_logger import psu_watchdog
 from data_logging.ac_susceptibility_logger import sweep
 
 ac_logger = pytest.importorskip(
@@ -457,6 +458,60 @@ def test_serial_scpi_current_source_shutdown_reopens_stale_serial_port(
         b"VOLT 0.000\n",
         b"OUTP OFF\n",
     ]
+
+
+def test_psu_watchdog_turns_output_off_when_parent_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePsu:
+        instances: list["FakePsu"] = []
+
+        def __init__(self, *, backend_id: str, resource: str, baudrate: int, voltage_limit_v: float | None = None) -> None:
+            self.backend_id = backend_id
+            self.resource = resource
+            self.baudrate = baudrate
+            self.off_calls = 0
+            self.closed = False
+            self.instances.append(self)
+
+        def output_off(self) -> None:
+            self.off_calls += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    heartbeat = tmp_path / "sweep.heartbeat"
+    heartbeat.write_text("alive\n", encoding="ascii")
+    disarm = tmp_path / "sweep.disarm"
+    log_path = tmp_path / "watchdog.jsonl"
+    monkeypatch.setattr(psu_watchdog, "_parent_process_alive", lambda _pid: False)
+    monkeypatch.setattr(psu_watchdog.sweep, "SerialScpiCurrentSource", FakePsu)
+
+    exit_code = psu_watchdog.main(
+        [
+            "--parent-pid",
+            "12345",
+            "--heartbeat",
+            str(heartbeat),
+            "--disarm",
+            str(disarm),
+            "--backend",
+            "owon_spe6102",
+            "--resource",
+            "COM11",
+            "--baudrate",
+            "115200",
+            "--log",
+            str(log_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert len(FakePsu.instances) == 1
+    assert FakePsu.instances[0].off_calls == 1
+    assert FakePsu.instances[0].closed
+    assert "output_off_sent" in log_path.read_text(encoding="utf-8")
 
 
 def test_detect_power_supply_candidates_queries_ports_without_selecting_lcr() -> None:

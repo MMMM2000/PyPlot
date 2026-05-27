@@ -281,9 +281,14 @@ completion, user stop, or error, the shutdown sequence sets current and voltage
 to zero before turning output off. If the existing serial handle fails during
 shutdown, the logger closes and reopens the selected PSU port once and repeats
 the zero-current, zero-voltage, output-off sequence. During active microwire
-current sweeps on Windows, the worker also requests that the system stay awake
-so USB serial connections are not suspended mid-run. Baseline measurement does
-not create or command a power-supply backend.
+current sweeps, the app refuses ordinary window close requests until the worker
+has stopped cleanly. It also starts a detached PSU watchdog that watches the GUI
+process and a heartbeat file; if the parent process disappears or the heartbeat
+stops updating, the watchdog reopens the selected PSU port and sends the same
+zero-current, zero-voltage, output-off sequence. During active microwire current
+sweeps on Windows, the worker also requests that the system stay awake so USB
+serial connections are not suspended mid-run. Baseline measurement does not
+create or command a power-supply backend.
 
 ## Live Plots
 
