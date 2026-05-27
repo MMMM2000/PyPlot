@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 import math
@@ -152,6 +152,14 @@ class AcSweepConfig:
     psu_current_feedback_resistance_ohm: float = 390.0
     psu_measure_attempts: int = 3
     psu_missing_readback_warn: bool = True
+
+
+@dataclass(frozen=True)
+class AcResumePlan:
+    config: AcSweepConfig
+    completed_setting_indices: list[int]
+    partial_setting_indices: list[int]
+    summary: str
 
 
 @dataclass(frozen=True)
@@ -311,6 +319,132 @@ def estimate_sweep(
             + total_points * max(0.0, float(point_duration_s))
         ),
     )
+
+
+def build_resume_plan(config: AcSweepConfig, completed_paths: Sequence[str | Path]) -> AcResumePlan:
+    """Return a config that skips settings already completed in previous TSVs.
+
+    Resume is intentionally setting-granular: a partial setting is measured
+    again from its first current point so each setting remains internally
+    complete in one output file.
+    """
+    planned_settings = list(config.lcr_settings)
+    planned_current_points = list(config.current_points)
+    required_points = {_current_point_key(point) for point in planned_current_points}
+    if not required_points:
+        raise ValueError("resume requires at least one planned current point")
+    planned_keys = {_lcr_setting_key(setting) for setting in planned_settings}
+    observed_by_setting: dict[tuple[Any, ...], set[tuple[float, str]]] = {}
+    for path in completed_paths:
+        snapshot_settings, observed = _read_completed_sweep_observations(Path(path))
+        for setting_index, points in observed.items():
+            if setting_index < 1 or setting_index > len(snapshot_settings):
+                continue
+            setting_key = _lcr_setting_key(snapshot_settings[setting_index - 1])
+            if setting_key not in planned_keys:
+                continue
+            observed_by_setting.setdefault(setting_key, set()).update(points)
+
+    completed_indices: list[int] = []
+    partial_indices: list[int] = []
+    remaining_settings: list[Lcr6000Settings] = []
+    for index, setting in enumerate(planned_settings, start=1):
+        setting_key = _lcr_setting_key(setting)
+        seen_points = observed_by_setting.get(setting_key, set())
+        if required_points.issubset(seen_points):
+            completed_indices.append(index)
+            continue
+        if seen_points:
+            partial_indices.append(index)
+        remaining_settings.append(setting)
+
+    summary = (
+        f"{len(completed_indices)} complete setting(s) skipped; "
+        f"{len(partial_indices)} partial setting(s) will be redone; "
+        f"{len(remaining_settings)} setting(s) remain."
+    )
+    return AcResumePlan(
+        config=replace(config, lcr_settings=remaining_settings),
+        completed_setting_indices=completed_indices,
+        partial_setting_indices=partial_indices,
+        summary=summary,
+    )
+
+
+def _read_completed_sweep_observations(path: Path) -> tuple[list[Lcr6000Settings], dict[int, set[tuple[float, str]]]]:
+    config_settings: list[Lcr6000Settings] | None = None
+    header: list[str] | None = None
+    observed: dict[int, set[tuple[float, str]]] = {}
+    with path.open("r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.rstrip("\n")
+            if line.startswith("# config_json="):
+                payload = json.loads(line.split("=", 1)[1])
+                config_settings = [
+                    _lcr_setting_from_snapshot(item)
+                    for item in payload.get("lcr_settings", [])
+                    if isinstance(item, dict)
+                ]
+                continue
+            if line.startswith("# Timestamp UTC\t"):
+                header = line[2:].split("\t")
+                continue
+            if not line or line.startswith("#") or header is None:
+                continue
+            cells = line.split("\t")
+            row = _row_mapping(header, cells)
+            try:
+                setting_index = int(row["AC setting index"])
+                current_a = float(row["Current set (A)"])
+                direction = row["Sweep direction"].strip().lower()
+                int(row["Repeat index"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if direction:
+                observed.setdefault(setting_index, set()).add((round(current_a, 9), direction))
+    if config_settings is None:
+        raise ValueError(f"{path} does not contain AC sweep metadata")
+    return config_settings, observed
+
+
+def _row_mapping(header: Sequence[str], cells: Sequence[str]) -> dict[str, str]:
+    return {name: cells[index] if index < len(cells) else "" for index, name in enumerate(header)}
+
+
+def _lcr_setting_from_snapshot(item: dict[str, Any]) -> Lcr6000Settings:
+    return Lcr6000Settings(
+        frequency_hz=float(item.get("frequency_hz", 0.0)),
+        level_value=float(item.get("level_value", 0.0)),
+        level_mode=str(item.get("level_mode", "voltage")),
+        function=str(item.get("function", "Ls-Rs")),
+        monitor1=str(item.get("monitor1", "Z")),
+        monitor2=str(item.get("monitor2", "IAC")),
+        aperture=str(item.get("aperture", "FAST")),
+        source_resistance_ohm=int(item.get("source_resistance_ohm", 30)),
+        auto_lcz_enabled=bool(item.get("auto_lcz_enabled", False)),
+        alc_enabled=bool(item.get("alc_enabled", True)),
+        comparator_enabled=bool(item.get("comparator_enabled", False)),
+    )
+
+
+def _lcr_setting_key(setting: Lcr6000Settings) -> tuple[Any, ...]:
+    return (
+        str(setting.function),
+        round(float(setting.frequency_hz), 9),
+        str(setting.level_mode),
+        round(float(setting.level_value), 12),
+        str(setting.monitor1),
+        str(setting.monitor2),
+        str(setting.aperture),
+        int(setting.source_resistance_ohm),
+        bool(setting.auto_lcz_enabled),
+        bool(setting.alc_enabled),
+        bool(setting.comparator_enabled),
+    )
+
+
+def _current_point_key(point: CurrentLoopPoint) -> tuple[float, str]:
+    return (round(float(point.current_a), 9), str(point.direction).strip().lower())
 
 
 class AcSweepTsvWriter:

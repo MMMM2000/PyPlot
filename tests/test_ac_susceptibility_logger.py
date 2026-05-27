@@ -638,6 +638,81 @@ def test_write_sweep_metadata_and_row_flushes_incrementally(tmp_path: Path) -> N
     ]
 
 
+def test_resume_plan_skips_complete_settings_and_redoes_partial_settings(tmp_path: Path) -> None:
+    current_points = [
+        sweep.CurrentLoopPoint(0.02, "up"),
+        sweep.CurrentLoopPoint(0.04, "up"),
+    ]
+    settings = [
+        lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs"),
+        lcr6000.Lcr6000Settings(2000.0, 0.1, function="Ls-Rs"),
+        lcr6000.Lcr6000Settings(5000.0, 0.1, function="Ls-Rs"),
+    ]
+    config = sweep.AcSweepConfig(
+        lcr_settings=settings,
+        current_points=current_points,
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+    )
+    reading = lcr6000.Lcr6000Reading(
+        timestamp_utc="2026-05-27T10:00:00.000+00:00",
+        raw="+1.0,+2.0,+0.0,+0.0,OK",
+        primary=1.0,
+        secondary=2.0,
+        monitor1=0.0,
+        monitor2=0.0,
+        comparator="OK",
+    )
+    path = tmp_path / "partial.tsv"
+    writer = sweep.AcSweepTsvWriter(path, config)
+    writer.write_metadata()
+    for current_point in current_points:
+        writer.write_row(
+            sweep.AcSweepRow(
+                timestamp_utc="2026-05-27T10:00:01.000+00:00",
+                elapsed_s=1.0,
+                setting_index=1,
+                total_settings=3,
+                setting=settings[0],
+                current_point=current_point,
+                repeat_index=1,
+                lcr_reading=reading,
+                psu_measurement=sweep.PowerSupplyMeasurement(current_actual_a=current_point.current_a, voltage_actual_v=1.0, status="OK"),
+                psu_backend="owon_spe6102",
+                psu_resource="COM7",
+            )
+        )
+    writer.write_row(
+        sweep.AcSweepRow(
+            timestamp_utc="2026-05-27T10:00:03.000+00:00",
+            elapsed_s=3.0,
+            setting_index=2,
+            total_settings=3,
+            setting=settings[1],
+            current_point=current_points[0],
+            repeat_index=1,
+            lcr_reading=reading,
+            psu_measurement=sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.0, status="OK"),
+            psu_backend="owon_spe6102",
+            psu_resource="COM7",
+        )
+    )
+    writer.close()
+
+    plan = sweep.build_resume_plan(config, [path])
+
+    assert plan.completed_setting_indices == [1]
+    assert plan.partial_setting_indices == [2]
+    assert [setting.frequency_hz for setting in plan.config.lcr_settings] == [2000.0, 5000.0]
+    assert plan.config.current_points == current_points
+    assert "1 complete" in plan.summary
+    assert "1 partial" in plan.summary
+
+
 def test_run_ac_sweep_uses_owon_backend_and_safe_shutdown_on_lcr_failure(tmp_path: Path) -> None:
     class FakeLcr:
         def __init__(self) -> None:
@@ -3381,6 +3456,60 @@ def test_ac_logger_reset_live_plots_clears_previous_run_points() -> None:
     assert window._ac_plot_dirty is False
     assert diagnostics == [("plot_reset", {"reason": "microwire_sweep_start"})]
     assert redraws["count"] == 1
+
+
+def test_ac_logger_builds_resumed_sweep_config_from_completed_files(tmp_path: Path) -> None:
+    settings = [
+        lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs"),
+        lcr6000.Lcr6000Settings(2000.0, 0.1, function="Ls-Rs"),
+    ]
+    current_points = [sweep.CurrentLoopPoint(0.02, "up")]
+    config = sweep.AcSweepConfig(
+        lcr_settings=settings,
+        current_points=current_points,
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+    )
+    reading = lcr6000.Lcr6000Reading(
+        timestamp_utc="2026-05-27T10:00:00.000+00:00",
+        raw="+1.0,+2.0,+0.0,+0.0,OK",
+        primary=1.0,
+        secondary=2.0,
+        monitor1=0.0,
+        monitor2=0.0,
+        comparator="OK",
+    )
+    path = tmp_path / "completed.tsv"
+    writer = sweep.AcSweepTsvWriter(path, config)
+    writer.write_metadata()
+    writer.write_row(
+        sweep.AcSweepRow(
+            timestamp_utc="2026-05-27T10:00:01.000+00:00",
+            elapsed_s=1.0,
+            setting_index=1,
+            total_settings=2,
+            setting=settings[0],
+            current_point=current_points[0],
+            repeat_index=1,
+            lcr_reading=reading,
+            psu_measurement=sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.0, status="OK"),
+            psu_backend="owon_spe6102",
+            psu_resource="COM7",
+        )
+    )
+    writer.close()
+
+    window = type("Window", (), {"_build_ac_sweep_config": lambda self: config})()
+
+    plan = ac_logger.MainWindow._build_resumed_ac_sweep_config(window, [str(path)])
+
+    assert plan.completed_setting_indices == [1]
+    assert plan.partial_setting_indices == []
+    assert list(plan.config.lcr_settings) == [settings[1]]
 
 
 def test_ac_logger_baseline_collection_honors_stop_request() -> None:

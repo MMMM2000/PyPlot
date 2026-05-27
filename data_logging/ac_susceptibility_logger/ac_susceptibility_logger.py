@@ -1986,6 +1986,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.label_ac_sweep_estimate = QtWidgets.QLabel("", group)
         self.label_ac_sweep_estimate.setWordWrap(True)
         self.pushButton_run_ac_sweep = QtWidgets.QPushButton("Run microwire current sweep", group)
+        self.pushButton_continue_ac_sweep = QtWidgets.QPushButton("Continue from previous sweep...", group)
         self.pushButton_stop_ac_sweep = QtWidgets.QPushButton("Stop", group)
         self.pushButton_stop_ac_sweep.setEnabled(False)
 
@@ -2051,6 +2052,7 @@ class MainWindow(CurrentAnnealingWindow):
         action_row = QtWidgets.QHBoxLayout()
         action_row.addWidget(self.pushButton_measure_lcr_baseline)
         action_row.addWidget(self.pushButton_run_ac_sweep)
+        action_row.addWidget(self.pushButton_continue_ac_sweep)
         action_row.addWidget(self.pushButton_stop_ac_sweep)
         self.frame_ac_plan_actions = QtWidgets.QFrame(plan_group)
         self.frame_ac_plan_actions.setLayout(action_row)
@@ -2074,6 +2076,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_apply_lcr_setting.clicked.connect(self.handle_apply_lcr_setting_clicked)
         self.pushButton_measure_lcr_baseline.clicked.connect(self.handle_measure_lcr_baseline_clicked)
         self.pushButton_run_ac_sweep.clicked.connect(self.handle_run_ac_sweep_clicked)
+        self.pushButton_continue_ac_sweep.clicked.connect(self.handle_continue_ac_sweep_clicked)
         self.pushButton_stop_ac_sweep.clicked.connect(self.handle_stop_ac_sweep_clicked)
         self.pushButton_lcr_default_presets.clicked.connect(self.apply_default_lcr_presets)
         self.pushButton_lcr_all_frequencies.clicked.connect(self.apply_all_lcr_frequencies)
@@ -2471,16 +2474,79 @@ class MainWindow(CurrentAnnealingWindow):
         if self._ac_sweep_running:
             self.handle_stop_ac_sweep_clicked()
             return
+        try:
+            config = self._build_ac_sweep_config()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Invalid AC sweep", str(exc))
+            return
+        self._start_ac_sweep(config, reset_reason="microwire_sweep_start")
+
+    def handle_continue_ac_sweep_clicked(self) -> None:
+        if self._ac_sweep_running:
+            self.handle_stop_ac_sweep_clicked()
+            return
         meter = self.lcr_meter
         if meter is None or not meter.is_open:
             QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
             return
-        try:
-            config = self._build_ac_sweep_config()
-            self._release_inherited_psu_port_for_ac(config.psu_resource)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Invalid AC sweep", str(exc))
+        filenames, _selected_filter = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "Select completed AC sweep TSV files",
+            self.ui.lineEdit_log_dir.text(),
+            "TSV files (*.tsv);;All files (*)",
+        )
+        if not filenames:
             return
+        try:
+            resume_plan = self._build_resumed_ac_sweep_config(filenames)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Cannot continue AC sweep", str(exc))
+            return
+        if not resume_plan.config.lcr_settings:
+            QtWidgets.QMessageBox.information(
+                self,
+                "AC sweep already complete",
+                f"The selected file(s) already contain every setting in the current plan.\n\n{resume_plan.summary}",
+            )
+            return
+        if resume_plan.partial_setting_indices:
+            partial_text = ", ".join(str(index) for index in resume_plan.partial_setting_indices[:12])
+            if len(resume_plan.partial_setting_indices) > 12:
+                partial_text += ", ..."
+            message = (
+                f"{resume_plan.summary}\n\n"
+                f"Partial setting(s) will be measured again from the first current point: {partial_text}."
+            )
+        else:
+            message = resume_plan.summary
+        response = QtWidgets.QMessageBox.question(
+            self,
+            "Continue AC sweep",
+            f"{message}\n\nStart continuation now?",
+        )
+        if response != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._start_ac_sweep(
+            resume_plan.config,
+            reset_reason="microwire_sweep_resume",
+            status_prefix=f"Continuing AC sweep: {resume_plan.summary}",
+        )
+
+    def _build_resumed_ac_sweep_config(self, completed_paths: Sequence[str | Path]) -> sweep.AcResumePlan:
+        return sweep.build_resume_plan(self._build_ac_sweep_config(), completed_paths)
+
+    def _start_ac_sweep(
+        self,
+        config: sweep.AcSweepConfig,
+        *,
+        reset_reason: str,
+        status_prefix: str | None = None,
+    ) -> None:
+        meter = self.lcr_meter
+        if meter is None or not meter.is_open:
+            QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
+            return
+        self._release_inherited_psu_port_for_ac(config.psu_resource)
         psu = sweep.SerialScpiCurrentSource(
             backend_id=config.psu_backend,
             resource=config.psu_resource,
@@ -2488,7 +2554,7 @@ class MainWindow(CurrentAnnealingWindow):
             voltage_limit_v=config.voltage_limit_v,
         )
         output_path = self._sweep_output_path()
-        self._reset_ac_live_plots("microwire_sweep_start")
+        self._reset_ac_live_plots(reset_reason)
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
         self._ac_active_sweep_config = config
@@ -2512,9 +2578,13 @@ class MainWindow(CurrentAnnealingWindow):
         self._reset_ac_progress("Microwire sweep", self._sweep_total_reads(config), units="time")
         self._set_ac_current_task("Current task: preparing microwire current sweep")
         self.pushButton_run_ac_sweep.setEnabled(False)
+        self.pushButton_continue_ac_sweep.setEnabled(False)
         self.pushButton_stop_ac_sweep.setEnabled(True)
         self._set_sticky_action_state(running=True)
-        self.label_lcr_status.setText(f"Running AC sweep: {output_path}")
+        if status_prefix:
+            self.label_lcr_status.setText(f"{status_prefix}: {output_path}")
+        else:
+            self.label_lcr_status.setText(f"Running AC sweep: {output_path}")
         try:
             worker = AcSweepWorker(
                 config=config,
@@ -2653,6 +2723,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_active_sweep_config = None
         self.pushButton_measure_lcr_baseline.setEnabled(True)
         self.pushButton_run_ac_sweep.setEnabled(True)
+        self.pushButton_continue_ac_sweep.setEnabled(True)
         self.pushButton_stop_ac_sweep.setEnabled(False)
         self._set_sticky_action_state(running=False)
         self._refresh_dirty_ac_plots()

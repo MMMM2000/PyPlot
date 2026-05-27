@@ -83,6 +83,14 @@ minimum. Sweep files use an AC-specific base such as
 `ac_susc_current_sweep_YYYYMMDD_HHMMSS.tsv` and are flushed after every LCR read
 for overnight recovery.
 
+Use **Continue from previous sweep...** to restart after an interrupted
+microwire sweep. Select one or more previous sweep TSV files, keep the current
+UI plan set to the intended full sweep, and the logger compares the selected
+files against that plan. AC settings whose full current loop was already
+recorded are skipped. Any partially recorded AC setting is measured again from
+its first current point, then the missing settings continue into a new
+timestamped TSV file.
+
 The AC Susceptibility Logger keeps its output directory and sweep-base setting
 separate from the Current Annealing Logger. By default, AC files go under
 `Downloads/ac_susceptibility` with the sweep base `ac_susc_current_sweep`.
