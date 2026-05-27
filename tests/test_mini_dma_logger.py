@@ -37,6 +37,16 @@ mini_dma_mod = importlib.import_module(
 )
 
 
+@pytest.fixture(autouse=True)
+def _block_real_tic_usb_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests must not claim the bench Tic USB device."""
+
+    def _blocked_backend() -> object:
+        raise RuntimeError("real Tic USB access is disabled in tests")
+
+    monkeypatch.setattr(mini_dma_mod, "_load_pyusb_backend", _blocked_backend)
+
+
 def _test_settings() -> QtCore.QSettings:
     return QtCore.QSettings(
         str(TEST_QSETTINGS_ROOT / "mini_dma_logger.ini"),
@@ -5839,6 +5849,37 @@ def test_recipe_preflight_blocks_when_tic_motor_power_is_low(
         assert len(warnings) == 1
         assert "Motor controller" in warnings[0]
         assert "VIN 0.10 V" in warnings[0]
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_preflight_reports_tic_status_read_failure(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    warnings: list[str] = []
+
+    class _FakeController:
+        def get_status(self) -> str:
+            raise RuntimeError("Access denied")
+
+    window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message),
+    )
+
+    try:
+        ok = window._preflight_recipe_hardware([mini_dma_mod.AutomationStep("move", target_mm=1.0)])
+
+        assert ok is False
+        assert len(warnings) == 1
+        assert "Motor controller status could not be read" in warnings[0]
+        assert "Access denied" in warnings[0]
+        assert "other Mini DMA/test processes" in warnings[0]
     finally:
         _close_test_window(window)
 

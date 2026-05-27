@@ -3007,6 +3007,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_effective_move_target_mm = 0.0
         self._last_commanded_position_steps: int | None = 0
         self._last_tic_vin_v: float | None = None
+        self._last_tic_status_error: str | None = None
         self._tic_motor_power_ok: bool | None = None
         self._tic_motor_power_warning_active = False
         self._tic_keepalive_warning_active = False
@@ -12267,6 +12268,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             status_text = controller.get_status()
         except Exception as exc:
+            self._last_tic_status_error = str(exc)
             self._log(f"Tic status failed: {exc}")
             self.label_tic_summary.setText(str(exc))
             self.label_card_motion.setText("Tic unavailable")
@@ -12274,6 +12276,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._last_tic_vin_v = None
             self._tic_motor_power_ok = False
             return False
+        self._last_tic_status_error = None
         self._tic_status_text = status_text
         step_mode_text = _extract_status_value(status_text, "Step mode")
         if step_mode_text is not None and self._set_tic_step_mode_combo(step_mode_text):
@@ -14548,11 +14551,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_manual_auto_connect_progress("Checking motor controller...", 2, preflight_steps)
             if self._recipe_requires_tic(steps) and not self._ensure_tic_ready_for_recipe():
                 vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
-                issues.append(
-                    "Motor controller is reachable, but motor power is not ready "
-                    f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V). "
-                    "Turn on the motor supply, or enable the HMP motor-supply channel option and run Check motor again."
-                )
+                if self._last_tic_status_error:
+                    issues.append(
+                        "Motor controller status could not be read "
+                        f"({self._last_tic_status_error}). "
+                        "Close other Mini DMA/test processes that may be using the Tic USB device, "
+                        "then run Check motor again."
+                    )
+                else:
+                    issues.append(
+                        "Motor controller is reachable, but motor power is not ready "
+                        f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V). "
+                        "Turn on the motor supply, or enable the HMP motor-supply channel option and run Check motor again."
+                    )
             if not issues and self._recipe_requires_tic(steps):
                 tic_limit_ok, tic_limit_message = self._apply_tic_current_limit()
                 self._log(f"Recipe preflight: {tic_limit_message}")
