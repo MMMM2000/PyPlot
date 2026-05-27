@@ -5703,6 +5703,66 @@ def test_builder_database_latest_resolver_leaves_normal_projects(tmp_path: Path)
     assert builder_ui._resolve_latest_database_project(project_path) == project_path
 
 
+def test_builder_auto_open_prefers_configured_latest_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    database_dir = tmp_path / "microwire_database"
+    database_dir.mkdir()
+    latest = database_dir / "microwire_database_latest.pydpj"
+    latest.write_text("{}", encoding="utf-8")
+    old_project = tmp_path / "microwire_project.pydpj"
+    old_project.write_text("{}", encoding="utf-8")
+    window = BuilderWindow()
+    try:
+        window._auto_open_latest_database = True
+        window._auto_open_last = True
+        window._database_project_dir = database_dir
+        window.settings.setValue(window._project_settings_key("last_path"), str(old_project))
+        opened: list[Path] = []
+        monkeypatch.setattr(window, "_load_project_from_path", lambda path: opened.append(path))
+
+        window._maybe_auto_open_last_project()
+
+        assert opened == [latest]
+    finally:
+        window._auto_open_latest_database = False
+        window._auto_open_last = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_builder_settings_menu_names_latest_database_option(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    window = BuilderWindow()
+    window._auto_open_last = False
+    try:
+        settings_menu = next(
+            menu
+            for menu in window.menuBar().findChildren(QtWidgets.QMenu)
+            if menu.title() == "Settings"
+        )
+        action_texts = [action.text() for action in settings_menu.actions()]
+
+        assert "Open last/recent project on startup" in action_texts
+        assert "Open latest database project on startup" in action_texts
+    finally:
+        window._auto_open_latest_database = False
+        window._auto_open_last = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_split_sample_variant_parses_suffix() -> None:
     from microwire_data_builder.ui import _split_sample_variant
 

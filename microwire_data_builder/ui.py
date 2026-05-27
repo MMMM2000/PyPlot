@@ -489,6 +489,22 @@ def _open_microwire_eda_window(config: object, parent: QtWidgets.QWidget | None 
     launch_eda_window(config=config if isinstance(config, object) else None, parent=parent)
 
 
+def _settings_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
 def _looks_like_test_path(value: object) -> bool:
     if not isinstance(value, (str, Path)):
         return False
@@ -570,6 +586,36 @@ def _resolve_latest_database_project(path: Path) -> Path:
         if len(latest_candidates) == 1:
             return latest_candidates[0]
     return candidate
+
+
+def _latest_database_project_in_dir(database_dir: Path) -> Path | None:
+    root = Path(database_dir).expanduser()
+    try:
+        if not root.exists() or not root.is_dir():
+            return None
+    except Exception:
+        return None
+    preferred = root / "microwire_database_latest.pydpj"
+    try:
+        if preferred.exists() and preferred.is_file():
+            return preferred
+    except Exception:
+        pass
+    try:
+        latest_candidates = [
+            candidate
+            for candidate in root.glob("*_latest.pydpj")
+            if candidate.exists() and candidate.is_file()
+        ]
+    except Exception:
+        return None
+    if not latest_candidates:
+        return None
+    try:
+        latest_candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    except Exception:
+        latest_candidates.sort(key=lambda path: path.name)
+    return latest_candidates[0]
 
 
 def _dialog_start_directory(preferred: Path | str | None = None) -> Path:
@@ -28465,8 +28511,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._recent_projects_menu: QtWidgets.QMenu | None = None
         self._load_recent_projects_setting()
         raw_auto = self.settings.value(self._project_settings_key("auto_open_last"), False)
-        self._auto_open_last: bool = bool(raw_auto)
+        self._auto_open_last: bool = _settings_bool(raw_auto, False)
+        raw_auto_latest = self.settings.value(
+            self._project_settings_key("auto_open_latest_database"), False
+        )
+        self._auto_open_latest_database: bool = _settings_bool(raw_auto_latest, False)
+        self._database_project_dir: Optional[Path] = None
+        stored_database_dir = _sanitise_existing_directory(
+            self.settings.value(self._project_settings_key("database_dir"), "")
+        )
+        if stored_database_dir:
+            self._database_project_dir = Path(stored_database_dir)
         self._auto_open_last_action: QtGui.QAction | None = None
+        self._auto_open_latest_database_action: QtGui.QAction | None = None
+        self._database_project_dir_action: QtGui.QAction | None = None
         self._data_menu: QtWidgets.QMenu | None = None
         self._show_imported_action: QtGui.QAction | None = None
         self._separate_imported_action: QtGui.QAction | None = None
@@ -29347,14 +29405,43 @@ class BuilderWindow(QtWidgets.QMainWindow):
             title = f"{self._base_title} - {self._project_path.name}"
         self.setWindowTitle(title)
 
+    def _database_project_dir_label(self) -> str:
+        if isinstance(self._database_project_dir, Path):
+            return f"Database folder: {self._database_project_dir}"
+        return "Set database folder..."
+
+    def _update_database_settings_actions(self) -> None:
+        if self._database_project_dir_action is not None:
+            self._database_project_dir_action.setText(self._database_project_dir_label())
+        if self._auto_open_latest_database_action is not None:
+            self._auto_open_latest_database_action.setChecked(
+                self._auto_open_latest_database
+            )
+            self._auto_open_latest_database_action.setEnabled(
+                isinstance(self._database_project_dir, Path)
+            )
+
     def _setup_settings_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
         settings_menu = menu_bar.addMenu("Settings")
-        auto_open_action = QtGui.QAction("Open last project on startup", self)
+        auto_open_action = QtGui.QAction("Open last/recent project on startup", self)
         auto_open_action.setCheckable(True)
         auto_open_action.setChecked(self._auto_open_last)
         auto_open_action.toggled.connect(self._toggle_auto_open_last)
         settings_menu.addAction(auto_open_action)
         self._auto_open_last_action = auto_open_action
+
+        latest_database_action = QtGui.QAction("Open latest database project on startup", self)
+        latest_database_action.setCheckable(True)
+        latest_database_action.setChecked(self._auto_open_latest_database)
+        latest_database_action.toggled.connect(self._toggle_auto_open_latest_database)
+        settings_menu.addAction(latest_database_action)
+        self._auto_open_latest_database_action = latest_database_action
+
+        database_dir_action = QtGui.QAction(self._database_project_dir_label(), self)
+        database_dir_action.triggered.connect(self._choose_database_project_dir)
+        settings_menu.addAction(database_dir_action)
+        self._database_project_dir_action = database_dir_action
+        self._update_database_settings_actions()
 
     def _setup_data_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
         data_menu = menu_bar.addMenu("Data")
@@ -29677,29 +29764,92 @@ class BuilderWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-    def _maybe_auto_open_last_project(self) -> None:
-        if not self._auto_open_last:
-            return
-        last_path = _sanitise_existing_file(
-            self.settings.value(self._project_settings_key("last_path"), "")
+    def _toggle_auto_open_latest_database(self, enabled: bool) -> None:
+        self._auto_open_latest_database = bool(enabled)
+        try:
+            self.settings.setValue(
+                self._project_settings_key("auto_open_latest_database"),
+                int(bool(enabled)),
+            )
+        except Exception:
+            pass
+        self._update_database_settings_actions()
+
+    def _choose_database_project_dir(self) -> None:
+        start_dir = self._database_project_dir
+        if start_dir is None:
+            start_dir = self._project_dialog_start_directory()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Microwire Database Folder",
+            str(start_dir),
         )
+        if not selected:
+            return
+        database_dir = Path(selected)
+        latest = _latest_database_project_in_dir(database_dir)
+        if latest is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Database Folder",
+                "No *_latest.pydpj file was found in the selected folder.",
+            )
+            return
+        self._database_project_dir = database_dir
+        try:
+            self.settings.setValue(
+                self._project_settings_key("database_dir"),
+                str(database_dir),
+            )
+        except Exception:
+            pass
+        self._auto_open_latest_database = True
+        try:
+            self.settings.setValue(
+                self._project_settings_key("auto_open_latest_database"),
+                1,
+            )
+        except Exception:
+            pass
+        self._update_database_settings_actions()
+        self.logger.info("Microwire database folder set to %s", database_dir)
+
+    def _maybe_auto_open_last_project(self) -> None:
         candidate: Optional[Path] = None
-        if last_path:
-            path_obj = Path(last_path)
-            if path_obj.exists():
-                candidate = _resolve_latest_database_project(path_obj)
-        else:
-            try:
-                self.settings.remove(self._project_settings_key("last_path"))
-            except Exception:
-                pass
-        if candidate is None and self._recent_projects:
-            fallback = Path(self._recent_projects[0])
-            if fallback.exists():
-                candidate = _resolve_latest_database_project(fallback)
+        if self._auto_open_latest_database and isinstance(self._database_project_dir, Path):
+            candidate = _latest_database_project_in_dir(self._database_project_dir)
+            if candidate is None:
+                self.logger.warning(
+                    "No latest Microwire database project found in %s",
+                    self._database_project_dir,
+                )
+        if candidate is None and self._auto_open_last:
+            last_path = _sanitise_existing_file(
+                self.settings.value(self._project_settings_key("last_path"), "")
+            )
+            if last_path:
+                path_obj = Path(last_path)
+                if path_obj.exists():
+                    candidate = _resolve_latest_database_project(path_obj)
+            else:
+                try:
+                    self.settings.remove(self._project_settings_key("last_path"))
+                except Exception:
+                    pass
+            if candidate is None and self._recent_projects:
+                fallback = Path(self._recent_projects[0])
+                if fallback.exists():
+                    candidate = _resolve_latest_database_project(fallback)
         if candidate is None:
             return
         try:
+            if (
+                self._auto_open_latest_database
+                and isinstance(self._database_project_dir, Path)
+                and candidate.parent == self._database_project_dir
+                and candidate.name.endswith("_latest.pydpj")
+            ):
+                self.logger.info("Opening latest Microwire database project: %s", candidate)
             self._load_project_from_path(candidate)
         except Exception:
             self.logger.exception("Failed to auto-open last project %s", candidate)
