@@ -522,6 +522,56 @@ def _sanitise_existing_file(value: object) -> Optional[str]:
     return None
 
 
+def _database_name_from_project_stem(stem: str) -> str | None:
+    if stem.endswith("_latest"):
+        return stem[: -len("_latest")] or None
+    match = re.match(r"^(?P<name>.+)_\d{4}-\d{2}-\d{2}_\d{4}(?:_\d+)?$", stem)
+    if match:
+        return match.group("name") or None
+    return None
+
+
+def _resolve_latest_database_project(path: Path) -> Path:
+    """Return the rolling database latest project for a remembered DB copy."""
+
+    candidate = Path(path).expanduser()
+    try:
+        if not candidate.exists() or not candidate.is_file():
+            return candidate
+    except Exception:
+        return candidate
+    if candidate.name.endswith("_latest.pydpj"):
+        return candidate
+
+    database_name = _database_name_from_project_stem(candidate.stem)
+    parent = candidate.parent
+    roots: list[Path] = []
+    if parent.name.lower() in {"archive", "_working"}:
+        roots.append(parent.parent)
+    roots.append(parent)
+
+    for root in dict.fromkeys(roots):
+        try:
+            if not root.exists() or not root.is_dir():
+                continue
+        except Exception:
+            continue
+        if database_name:
+            named_latest = root / f"{database_name}_latest.pydpj"
+            try:
+                if named_latest.exists() and named_latest.is_file():
+                    return named_latest
+            except Exception:
+                pass
+        try:
+            latest_candidates = sorted(root.glob("*_latest.pydpj"))
+        except Exception:
+            latest_candidates = []
+        if len(latest_candidates) == 1:
+            return latest_candidates[0]
+    return candidate
+
+
 def _dialog_start_directory(preferred: Path | str | None = None) -> Path:
     candidates: List[Path] = []
     if preferred:
@@ -29637,7 +29687,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if last_path:
             path_obj = Path(last_path)
             if path_obj.exists():
-                candidate = path_obj
+                candidate = _resolve_latest_database_project(path_obj)
         else:
             try:
                 self.settings.remove(self._project_settings_key("last_path"))
@@ -29646,7 +29696,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if candidate is None and self._recent_projects:
             fallback = Path(self._recent_projects[0])
             if fallback.exists():
-                candidate = fallback
+                candidate = _resolve_latest_database_project(fallback)
         if candidate is None:
             return
         try:
@@ -29746,7 +29796,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._save_recent_projects_setting()
             self._update_recent_projects_menu()
             return
-        self._load_project_from_path(candidate)
+        self._load_project_from_path(_resolve_latest_database_project(candidate))
 
     def _open_project(self) -> None:
         start_dir = self._project_dialog_start_directory()

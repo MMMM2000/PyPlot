@@ -5679,6 +5679,30 @@ def test_builder_close_stops_pending_scan_threads(tmp_path: Path) -> None:
             window.close()
 
 
+def test_builder_database_latest_resolver_prefers_root_latest(tmp_path: Path) -> None:
+    database_dir = tmp_path / "microwire_database"
+    archive_dir = database_dir / "archive"
+    working_dir = database_dir / "_working"
+    archive_dir.mkdir(parents=True)
+    working_dir.mkdir()
+    latest = database_dir / "microwire_database_latest.pydpj"
+    archived = archive_dir / "microwire_database_2026-05-26_1732_1.pydpj"
+    working = working_dir / "microwire_database_2026-05-27_0930.pydpj"
+    for path in (latest, archived, working):
+        path.write_text("{}", encoding="utf-8")
+
+    assert builder_ui._resolve_latest_database_project(archived) == latest
+    assert builder_ui._resolve_latest_database_project(working) == latest
+    assert builder_ui._resolve_latest_database_project(latest) == latest
+
+
+def test_builder_database_latest_resolver_leaves_normal_projects(tmp_path: Path) -> None:
+    project_path = tmp_path / "ordinary_project.pydpj"
+    project_path.write_text("{}", encoding="utf-8")
+
+    assert builder_ui._resolve_latest_database_project(project_path) == project_path
+
+
 def test_split_sample_variant_parses_suffix() -> None:
     from microwire_data_builder.ui import _split_sample_variant
 
