@@ -30,6 +30,7 @@ from data_logging.current_annealing_logger.current_annealing_logger import (
     SUPPLY_PROFILES,
     _apply_app_font_to_matplotlib,
 )
+from plotting.shared.experiment_processes import gui_python_executable, hidden_process_creationflags
 from plotting.shared.utils import ensure_app_theme
 
 from .lcr6000 import (
@@ -559,7 +560,7 @@ class AcPsuWatchdogGuard:
         self._thread = threading.Thread(target=self._heartbeat_loop, name="ac-psu-watchdog-heartbeat", daemon=True)
         self._thread.start()
         cmd = [
-            sys.executable,
+            str(gui_python_executable(Path(sys.executable))),
             "-m",
             "data_logging.ac_susceptibility_logger.psu_watchdog",
             "--parent-pid",
@@ -581,9 +582,7 @@ class AcPsuWatchdogGuard:
             "--log",
             str(self.log_path),
         ]
-        flags = 0
-        if os.name == "nt":
-            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+        flags = hidden_process_creationflags() if os.name == "nt" else 0
         self._process = subprocess.Popen(
             cmd,
             cwd=str(Path(__file__).resolve().parents[2]),

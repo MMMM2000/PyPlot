@@ -23,6 +23,11 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple, cast, Protocol
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PIL import Image
 
+from plotting.shared.experiment_processes import (
+    ExperimentProcessSpec,
+    launch_experiment_process,
+)
+
 
 LauncherFactory = Callable[..., QtWidgets.QWidget | None]
 
@@ -50,6 +55,24 @@ def _lazy(module: str, attr: str = "main") -> LauncherFactory:
             raise TypeError(f"{module}.{attr} is not callable")
         callable_target = cast(LauncherFactory, target)
         return callable_target(*args, **kwargs)
+
+    return factory
+
+
+def _experiment_process_launcher(
+    display_name: str,
+    module: str,
+    resource_tag: str,
+) -> LauncherFactory:
+    def factory(*_args: Any, **_kwargs: Any) -> QtWidgets.QWidget | None:
+        launch_experiment_process(
+            ExperimentProcessSpec(
+                display_name=display_name,
+                module=module,
+                resource_tag=resource_tag,
+            )
+        )
+        return None
 
     return factory
 
@@ -1882,14 +1905,20 @@ def _run_pyplot_automation(args: argparse.Namespace, qt_args: list[str]) -> int:
 
 LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": _lazy("data_logging.data_logger", "main"),
-    "Current Annealing Logger": _lazy(
-        "data_logging.current_annealing_logger", "main"
+    "Current Annealing Logger": _experiment_process_launcher(
+        "Current Annealing Logger",
+        "data_logging.current_annealing_logger.current_annealing_logger",
+        "current_annealing",
     ),
-    "AC Susceptibility Logger": _lazy(
-        "data_logging.ac_susceptibility_logger", "main"
+    "AC Susceptibility Logger": _experiment_process_launcher(
+        "AC Susceptibility Logger",
+        "data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
+        "ac_susceptibility",
     ),
-    "Mini DMA Logger": _lazy(
-        "data_logging.mini_dma_logger", "main"
+    "Mini DMA Logger": _experiment_process_launcher(
+        "Mini DMA Logger",
+        "data_logging.mini_dma_logger.mini_dma_logger",
+        "mini_dma",
     ),
     "Manual Stress/Strain Logger": _lazy(
         "data_logging.manual_stress_strain_logger", "main"

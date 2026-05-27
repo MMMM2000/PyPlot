@@ -3621,6 +3621,53 @@ def test_ac_sweep_worker_holds_windows_awake_while_running(
     assert events == ["awake_enter", "run", "awake_exit"]
 
 
+def test_ac_psu_watchdog_launch_is_windowless_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeProcess:
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def fake_popen(args: list[str], **kwargs: object) -> FakeProcess:
+        calls.append({"args": args, **kwargs})
+        return FakeProcess()
+
+    python = tmp_path / "python.exe"
+    pythonw = tmp_path / "pythonw.exe"
+    python.write_text("", encoding="ascii")
+    pythonw.write_text("", encoding="ascii")
+    monkeypatch.setattr(ac_logger.sys, "executable", str(python))
+    monkeypatch.setattr(ac_logger.os, "name", "nt")
+    monkeypatch.setattr(ac_logger.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ac_logger.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(ac_logger.subprocess, "DETACHED_PROCESS", 0x8, raising=False)
+    monkeypatch.setattr(ac_logger.subprocess, "CREATE_NO_WINDOW", 0x8000000, raising=False)
+
+    guard = ac_logger.AcPsuWatchdogGuard(
+        config=sweep.AcSweepConfig(
+            lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1)],
+            current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+            dwell_s=0.0,
+            psu_backend="owon_spe6102",
+            psu_resource="COM7",
+            voltage_limit_v=61.0,
+        ),
+        output_path=tmp_path / "sweep.tsv",
+        baudrate=115200,
+    )
+
+    guard.start()
+    guard.stop()
+
+    assert calls
+    assert calls[0]["args"][0] == str(pythonw)
+    creationflags = int(calls[0]["creationflags"])
+    assert creationflags & 0x8000000
+
+
 def test_ac_logger_baseline_retries_empty_lcr_response() -> None:
     class SlowMeter:
         is_open = True
