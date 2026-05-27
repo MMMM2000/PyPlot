@@ -152,7 +152,7 @@ def test_recipe_start_freezes_control_config_before_worker_ticks(tmp_path: Path,
     window = _build_window(tmp_path, qtbot)
 
     try:
-        window._preflight_recipe_hardware = lambda _steps: True  # type: ignore[method-assign]
+        window._preflight_recipe_hardware = lambda _steps, **_kwargs: True  # type: ignore[method-assign]
         window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
         window._start_session = lambda **_kwargs: setattr(window, "_session_active", True)  # type: ignore[method-assign]
         window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
@@ -2005,7 +2005,7 @@ def test_calibration_recipe_builds_automatic_sequence(tmp_path: Path, qtbot) -> 
         _close_test_window(window)
 
 
-def test_calibration_recipe_includes_mandatory_length_setup(tmp_path: Path, qtbot) -> None:
+def test_calibration_recipe_includes_length_setup_by_default(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CALIBRATION)
     assert mode_index >= 0
@@ -2023,7 +2023,7 @@ def test_calibration_recipe_includes_mandatory_length_setup(tmp_path: Path, qtbo
         steps, summary, interval_ms = window._build_automation_recipe()
 
         assert interval_ms == 250
-        assert "mandatory length setup" in summary
+        assert "Includes length setup" in summary
         actions = [step.action for step in steps]
         assert steps[0].action == "starting_length_prompt"
         assert steps[0].note == "setup_start_length"
@@ -2931,7 +2931,7 @@ def test_recipe_start_keeps_timed_progress_estimate(tmp_path: Path, qtbot) -> No
         _, expected_ticks = window._estimate_recipe_points_and_ticks(steps, interval_ms)
         assert expected_ticks > len(steps)
 
-        window._preflight_recipe_hardware = lambda _steps: True  # type: ignore[method-assign]
+        window._preflight_recipe_hardware = lambda _steps, **_kwargs: True  # type: ignore[method-assign]
         window._start_session = lambda **_kwargs: setattr(window, "_session_active", True)  # type: ignore[method-assign]
 
         window._start_auto_ramp()
@@ -3797,12 +3797,13 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
 
         assert "Sample: Ni50Fe27Ga23 12/2" in window.label_recipe_sample.text()
         assert "diameter 0.03 mm" in window.label_recipe_sample.text()
-        assert "0.7208 g" in window.label_setup_preload_stress_equiv.text()
-        assert "0.07208 g/s" in window.label_setup_preload_ramp_equiv.text()
+        assert "0.721 g" in window.label_setup_preload_stress_equiv.text()
+        assert "0.072 g/s" in window.label_setup_preload_ramp_equiv.text()
         assert window.spin_setup_zero_tolerance_g.isHidden() is True
-        assert "0.7208 g" in window.label_current_target_start_equiv.text()
-        assert "0.07208 g/s" in window.label_current_target_ramp_equiv.text()
-        assert "70.7355 A/mm^2" in window.label_current_end_density.text()
+        assert "0.721 g" in window.label_current_target_start_equiv.text()
+        assert "0.072 g/s" in window.label_current_target_ramp_equiv.text()
+        assert "70.736 A/mm<sup>2</sup>" in window.label_current_end_density.text()
+        assert window.label_current_end_density.textFormat() == QtCore.Qt.TextFormat.RichText
         assert "palette(mid)" not in window.label_current_target_start_equiv.styleSheet()
 
         mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
@@ -3815,6 +3816,59 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
 
         assert window.label_current_target_start_equiv.text().endswith("MPa")
         assert float(window.label_current_target_start_equiv.text().split()[0]) == pytest.approx(10.0, rel=2e-4)
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_setup_panel_is_collapsible_and_can_disable_setup(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_setup_preload_stress_mpa.setValue(20.0)
+        window.spin_setup_preload_duration_s.setValue(5.0)
+        window._update_recipe_mode_ui()
+
+        assert window.check_pre_measurement_setup_enabled.isChecked()
+        assert window.setup_details_panel.isVisible() is False
+        assert "20 MPa" in window.label_setup_summary.text()
+        assert "5 s" in window.label_setup_summary.text()
+
+        steps = window._build_automation_recipe()[0]
+        assert steps[0].action == "starting_length_prompt"
+
+        window.check_pre_measurement_setup_enabled.setChecked(False)
+        window._update_recipe_mode_ui()
+
+        assert window._pre_measurement_setup_enabled() is False
+        assert "Off" in window.label_setup_summary.text()
+        steps = window._build_automation_recipe()[0]
+        assert steps[0].action != "starting_length_prompt"
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_file_status_tracks_saved_and_unsaved_changes(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    recipe_path = tmp_path / "recipe.recipe.json"
+
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+
+        assert "Unsaved" in window.label_recipe_file_status.text()
+
+        window._save_recipe_to_path(recipe_path)
+
+        assert recipe_path.name in window.label_recipe_file_status.text()
+        assert "Saved" in window.label_recipe_file_status.text()
+        assert "#16a34a" in window.label_recipe_file_status.styleSheet()
+
+        window.spin_current_sweep_end_mA.setValue(window.spin_current_sweep_end_mA.value() + 1.0)
+        window._update_recipe_mode_ui()
+
+        assert "Unsaved changes" in window.label_recipe_file_status.text()
+        assert "#dc2626" in window.label_recipe_file_status.styleSheet()
     finally:
         _close_test_window(window)
 
@@ -5837,6 +5891,8 @@ def test_recipe_preflight_blocks_when_tic_motor_power_is_low(
             )
 
     window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._enable_motor_supply_output = lambda: True  # type: ignore[method-assign]
     monkeypatch.setattr(
         mini_dma_mod.QtWidgets.QMessageBox,
         "warning",
@@ -5867,6 +5923,8 @@ def test_recipe_preflight_reports_tic_status_read_failure(
             raise RuntimeError("Access denied")
 
     window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._enable_motor_supply_output = lambda: True  # type: ignore[method-assign]
     monkeypatch.setattr(
         mini_dma_mod.QtWidgets.QMessageBox,
         "warning",
