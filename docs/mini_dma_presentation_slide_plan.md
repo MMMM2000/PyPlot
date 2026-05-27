@@ -839,7 +839,7 @@ Time: 1:00
 
 Visible slide text:
 
-- `preload -> measure length -> return toward zero load -> compute l0`
+- `measure length -> optional preload -> return toward zero load -> compute l0`
 - `strain zero is measured, not guessed`
 
 Image / visual:
@@ -849,7 +849,7 @@ Image / visual:
 Talk out loud:
 
 - "For such thin wires, the initial mounted state may include slack or misalignment."
-- "Before the main measurement, the system applies preload, lets us define the wire length, and computes the unloaded gauge length."
+- "Before the main measurement, we enter the mounted wire length once, optionally apply preload if the wire is below it, and compute the unloaded gauge length."
 - "This makes strain meaningful."
 
 ### Slide 10 - Closed-Loop Stress Control
@@ -1109,7 +1109,7 @@ Talk out loud:
 Visible slide text:
 
 - `Before every run: define the mechanical zero`
-- `preload -> measure length -> return toward zero load -> compute l0`
+- `measure length -> optional preload -> return toward zero load -> compute l0`
 
 Image / visual:
 
@@ -1120,7 +1120,7 @@ Talk out loud:
 
 - "For microwires, the initial mounted position is not a reliable strain zero."
 - "The wire can be slack, bent, or slightly misaligned."
-- "The setup step applies a small preload, lets us measure the length, and then estimates the unloaded gauge length."
+- "The setup step records the mounted length, optionally applies a small preload, and then estimates the unloaded gauge length."
 - "This makes strain calculation more meaningful than simply using the starting motor position."
 
 ### Slide 10 - Control Logic

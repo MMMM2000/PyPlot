@@ -701,15 +701,16 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
         assert steps[0].action == "starting_length_prompt"
         actions = [step.action for step in steps]
         assert "starting_length_prompt" in actions
-        assert "measure_length_prompt" in actions
+        assert "measure_length_prompt" not in actions
+        assert "mark_setup_return_zero" in actions
         assert "apply_length_setup" in actions
         assert "start_session" in actions
         start_length_index = actions.index("starting_length_prompt")
-        prompt_index = actions.index("measure_length_prompt")
+        mark_index = actions.index("mark_setup_return_zero")
         apply_index = actions.index("apply_length_setup")
         session_index = actions.index("start_session")
         first_recipe_index = actions.index("set_current")
-        assert start_length_index < prompt_index < apply_index < session_index < first_recipe_index
+        assert start_length_index < mark_index < apply_index < session_index < first_recipe_index
         preload_step = next(step for step in steps if step.note == "setup_preload")
         assert preload_step.action == "ramp_target"
         assert preload_step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA
@@ -723,6 +724,7 @@ def test_length_setup_steps_precede_current_sweep_recipe(tmp_path: Path, qtbot) 
         )
         assert preload_settle.duration_s == pytest.approx(2.0)
         assert not any(step.action == "settle" and step.note == "setup_return_zero" for step in steps)
+        assert steps[return_zero_index - 1].action == "mark_setup_return_zero"
         assert steps[return_zero_index + 1].action == "apply_length_setup"
     finally:
         _close_test_window(window)
@@ -936,7 +938,66 @@ def test_starting_length_prompt_updates_stiffness_prior_length(
 
         assert window.spin_initial_length.value() == pytest.approx(42.5)
         assert window._setup_starting_length_mm == pytest.approx(42.5)
-        assert "Starting length prior accepted" in window.log_output.toPlainText()
+        assert window._setup_measured_length_mm == pytest.approx(42.5)
+        assert window._setup_preload_position_mm == pytest.approx(window._current_position_mm)
+        assert "Mounted length accepted" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_single_length_setup_applies_l0_from_starting_reference(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window._current_position_mm = -1.5
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: (30.5, True),
+    )
+
+    try:
+        assert window._handle_starting_length_prompt_step() is True
+        assert window._handle_mark_setup_return_zero_step() is True
+        window._current_position_mm = -1.0
+        window._effective_position_mm = -1.0
+        window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+
+        assert window._handle_apply_length_setup_step() is True
+
+        assert window.spin_initial_length.value() == pytest.approx(30.0)
+        assert window._setup_zero_position_mm == pytest.approx(-1.0)
+        assert "Length reference already captured" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_preload_ramp_skips_when_starting_above_preload(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._current_distribution_value = lambda *_args, **_kwargs: 24.0  # type: ignore[method-assign]
+
+    def _unexpected_seek(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("setup preload should not seek when already above preload")
+
+    window._seek_distribution_target = _unexpected_seek  # type: ignore[method-assign]
+    step = mini_dma_mod.AutomationStep(
+        "ramp_target",
+        target_value=20.0,
+        target_end_value=20.0,
+        target_ramp_rate_value_s=4.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        note="setup_preload",
+    )
+
+    try:
+        assert window._handle_target_ramp_step(step, 1) is True
+        assert window._setup_preload_ramp_skipped is True
+        assert "already above setup preload" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -1956,11 +2017,12 @@ def test_calibration_recipe_includes_mandatory_length_setup(tmp_path: Path, qtbo
         assert steps[0].action == "starting_length_prompt"
         assert steps[0].note == "setup_start_length"
         assert "starting_length_prompt" in actions
-        assert "measure_length_prompt" in actions
+        assert "measure_length_prompt" not in actions
+        assert "mark_setup_return_zero" in actions
         assert "apply_length_setup" in actions
         assert "start_session" in actions
-        assert actions.index("starting_length_prompt") < actions.index("measure_length_prompt")
-        assert actions.index("measure_length_prompt") < actions.index("apply_length_setup")
+        assert actions.index("starting_length_prompt") < actions.index("mark_setup_return_zero")
+        assert actions.index("mark_setup_return_zero") < actions.index("apply_length_setup")
         assert actions.index("apply_length_setup") < actions.index("start_session") < actions.index("calibration_record")
     finally:
         _close_test_window(window)
@@ -4402,13 +4464,11 @@ def test_setup_preload_target_ramp_uses_elapsed_mpa_rate(
         _close_test_window(window)
 
 
-def test_setup_preload_target_ramp_above_target_ramps_down_from_live_value(
+def test_setup_preload_target_ramp_above_target_skips_preload_from_live_value(
     tmp_path: Path,
     qtbot,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    now_s = [100.0]
     captured_targets: list[float] = []
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
@@ -4419,8 +4479,6 @@ def test_setup_preload_target_ramp_above_target_ramps_down_from_live_value(
     assert overload_g is not None
     window._latest_scale_value_g = 21.17 - overload_g
     window._latest_scale_timestamp = time.time()
-
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
 
     def _capture_seek(_basis: str, target_value: float, _tolerance: float) -> bool:
         captured_targets.append(target_value)
@@ -4438,27 +4496,21 @@ def test_setup_preload_target_ramp_above_target_ramps_down_from_live_value(
     )
 
     try:
-        assert window._handle_target_ramp_step(step, 4) is False
+        assert window._handle_target_ramp_step(step, 4) is True
 
-        now_s[0] = 102.5
-
-        assert window._handle_target_ramp_step(step, 4) is False
-        assert captured_targets == [pytest.approx(80.0), pytest.approx(65.0)]
-        assert window._active_target_ramp_rate_value_s == pytest.approx(6.0)
+        assert captured_targets == []
+        assert window._setup_preload_ramp_skipped is True
+        assert "already above setup preload" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
 
-def test_setup_preload_live_start_duration_controls_high_preload_relaxation(
+def test_setup_preload_live_start_above_target_skips_preload_relaxation(
     tmp_path: Path,
     qtbot,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    now_s = [100.0]
     captured_targets: list[float] = []
-
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
 
     try:
         window.spin_setup_preload_duration_s.setValue(5.0)
@@ -4482,12 +4534,10 @@ def test_setup_preload_live_start_duration_controls_high_preload_relaxation(
             note="setup_preload",
         )
 
-        assert window._handle_target_ramp_step(step, 4) is False
-        now_s[0] = 102.5
-        assert window._handle_target_ramp_step(step, 4) is False
+        assert window._handle_target_ramp_step(step, 4) is True
 
-        assert captured_targets == [pytest.approx(320.0), pytest.approx(170.0)]
-        assert window._active_target_ramp_rate_value_s == pytest.approx(60.0)
+        assert captured_targets == []
+        assert window._setup_preload_ramp_skipped is True
     finally:
         window._active_control_config = None
         _close_test_window(window)
@@ -5345,7 +5395,7 @@ def test_length_setup_progress_tracks_active_ramp_phase_without_tick_counts(
                 note="setup_preload",
             ),
             mini_dma_mod.AutomationStep("settle", duration_s=3.0, note="setup_preload"),
-            mini_dma_mod.AutomationStep("measure_length_prompt", note="setup_length"),
+            mini_dma_mod.AutomationStep("mark_setup_return_zero", note="setup_return_zero_start"),
             mini_dma_mod.AutomationStep("seek_target", note="setup_return_zero"),
             mini_dma_mod.AutomationStep("settle", duration_s=3.0, note="setup_return_zero"),
             mini_dma_mod.AutomationStep("apply_length_setup", note="setup_apply_l0"),
@@ -5544,14 +5594,10 @@ def test_length_setup_automation_values_answer_setup_prompts(
 
         assert window._handle_starting_length_prompt_step() is True
         assert window._setup_starting_length_mm == pytest.approx(20.0)
+        assert window._setup_measured_length_mm == pytest.approx(20.0)
+        assert window._setup_preload_position_mm == pytest.approx(window._current_position_mm)
         assert window.spin_initial_length.value() == pytest.approx(20.0)
 
-        window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
-        window._current_position_mm = -1.25
-        window._handle_measure_length_prompt_step()
-
-        assert window._setup_preload_position_mm == pytest.approx(-1.25)
-        assert window._setup_measured_length_mm == pytest.approx(20.4)
         assert prompt_calls == []
     finally:
         _close_test_window(window)
