@@ -9,4 +9,8 @@
 - Let Mini DMA native Tic USB accept a single visible Tic when Windows/libusb cannot read USB string descriptors, while still rejecting ambiguous multi-Tic scans.
 - Made preferred-native Tic control fall back to `ticcmd` if an individual native USB status or move command is denied.
 - Tightened Mini DMA Tic status handling so device-list output can no longer be treated as motor status; status must include parseable VIN before motor power is verified.
+- Logged Tic transport use so native USB activation and every `ticcmd` fallback reason are visible in Mini DMA run logs.
+- Serialized native Tic USB status and motion/keepalive commands so status refreshes cannot race motion commands and incorrectly mark motor VIN as unavailable.
+- Hid Windows console windows for rare `ticcmd` fallback commands.
+- Showed the hardware auto-connect progress dialog during Start recipe preflight when required hardware is not already ready.
 - Added `scripts/run_mini_dma_shared_hmp_checks.ps1` for a fast shared-HMP/Mini-DMA/Tic regression slice.

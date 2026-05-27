@@ -2061,13 +2061,18 @@ class TicController:
         device_serial: str = "",
         *,
         prefer_native_usb: bool = False,
+        transport_logger: Callable[[str], None] | None = None,
     ) -> None:
         self.command_path = command_path.strip() or "ticcmd"
         self.device_serial = device_serial.strip()
         self.prefer_native_usb = bool(prefer_native_usb)
+        self.transport_logger = transport_logger
         self._native_backend: NativeTicUsbController | None = None
         self._native_attempted = False
         self._native_error: Exception | None = None
+        self._native_success_logged = False
+        self._ticcmd_fallback_messages: set[str] = set()
+        self._transport_lock = RLock()
 
     def _native_only(self) -> bool:
         return self.command_path.strip().lower() in TIC_USB_TRANSPORT_ALIASES
@@ -2087,8 +2092,40 @@ class TicController:
             self._native_error = exc
             if self._native_only():
                 raise RuntimeError(f"Native Tic USB transport is unavailable: {exc}") from exc
+            self._log_ticcmd_fallback(f"native USB setup failed: {exc}")
             self._native_backend = None
         return self._native_backend
+
+    def _log_native_success_once(self) -> None:
+        if self._native_success_logged:
+            return
+        self._native_success_logged = True
+        if self.transport_logger is not None:
+            self.transport_logger("Tic transport: native USB active.")
+
+    def _log_ticcmd_fallback(self, reason: str) -> None:
+        message = f"Tic transport fallback: using ticcmd because {reason}"
+        if message in self._ticcmd_fallback_messages:
+            return
+        self._ticcmd_fallback_messages.add(message)
+        if self.transport_logger is not None:
+            self.transport_logger(message)
+
+    def _reopen_native_controller(self) -> NativeTicUsbController | None:
+        if not self._native_allowed():
+            return None
+        self._native_backend = None
+        self._native_attempted = True
+        try:
+            self._native_backend = NativeTicUsbController(device_serial=self.device_serial)
+        except Exception as exc:
+            self._native_error = exc
+            self._native_backend = None
+        return self._native_backend
+
+    def _native_retry_after_failure(self, initial_error: Exception) -> NativeTicUsbController | None:
+        self._native_error = initial_error
+        return self._reopen_native_controller()
 
     def executable(self) -> str | None:
         if self._native_only():
@@ -2109,86 +2146,141 @@ class TicController:
         return args
 
     def run(self, *extra_args: str, timeout_s: float = 5.0) -> str:
-        if self._native_only():
-            native = self._native_controller()
-            if native is not None:
-                raise RuntimeError("Raw ticcmd arguments are unavailable for the native USB transport.")
-        args = self._base_args()
-        args.extend(extra_args)
-        completed = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-        stdout = completed.stdout.strip()
-        stderr = completed.stderr.strip()
-        if completed.returncode != 0:
-            detail = stderr or stdout or f"ticcmd exited with code {completed.returncode}"
-            raise RuntimeError(detail)
-        return stdout
+        with self._transport_lock:
+            if self._native_only():
+                native = self._native_controller()
+                if native is not None:
+                    raise RuntimeError("Raw ticcmd arguments are unavailable for the native USB transport.")
+            args = self._base_args()
+            args.extend(extra_args)
+            startupinfo = None
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+            completed = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                check=False,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+            )
+            stdout = completed.stdout.strip()
+            stderr = completed.stderr.strip()
+            if completed.returncode != 0:
+                detail = stderr or stdout or f"ticcmd exited with code {completed.returncode}"
+                raise RuntimeError(detail)
+            return stdout
 
     def get_status(self) -> str:
-        native = self._native_controller()
-        if native is not None:
-            try:
-                return native.get_status()
-            except Exception as exc:
-                self._native_error = exc
-                if self._native_only():
-                    raise
-        last_error: Exception | None = None
-        for args in (("--status", "--full"), ("--status",), ("--full",)):
-            try:
-                status_text = self.run(*args)
-                if _extract_status_float(status_text, "VIN voltage") is not None:
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    status_text = native.get_status()
+                    self._log_native_success_once()
                     return status_text
-                last_error = RuntimeError(
-                    "ticcmd status output did not include VIN voltage; motor power cannot be verified."
-                )
-            except Exception as exc:
-                last_error = exc
-                continue
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("ticcmd status did not return motor status.")
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            status_text = retry_native.get_status()
+                            self._log_native_success_once()
+                            return status_text
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native status failed: {exc}")
+            last_error: Exception | None = None
+            for args in (("--status", "--full"), ("--status",), ("--full",)):
+                try:
+                    status_text = self.run(*args)
+                    if _extract_status_float(status_text, "VIN voltage") is not None:
+                        return status_text
+                    last_error = RuntimeError(
+                        "ticcmd status output did not include VIN voltage; motor power cannot be verified."
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    continue
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("ticcmd status did not return motor status.")
 
     def halt_and_hold(self) -> None:
-        native = self._native_controller()
-        if native is not None:
-            try:
-                native.halt_and_hold()
-                return
-            except Exception as exc:
-                self._native_error = exc
-                if self._native_only():
-                    raise
-        self.run("--halt-and-hold")
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.halt_and_hold()
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.halt_and_hold()
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native halt failed: {exc}")
+            self.run("--halt-and-hold")
 
     def reset_command_timeout(self) -> None:
-        native = self._native_controller()
-        if native is not None:
-            try:
-                native.reset_command_timeout()
-                return
-            except Exception as exc:
-                self._native_error = exc
-                if self._native_only():
-                    raise
-        self.run("--reset-command-timeout", timeout_s=2.0)
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.reset_command_timeout()
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.reset_command_timeout()
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native keepalive failed: {exc}")
+            self.run("--reset-command-timeout", timeout_s=2.0)
 
     def set_current_position(self, position_steps: int) -> None:
-        native = self._native_controller()
-        if native is not None:
-            try:
-                native.set_current_position(position_steps)
-                return
-            except Exception as exc:
-                self._native_error = exc
-                if self._native_only():
-                    raise
-        self.run("--halt-and-set-position", str(int(position_steps)))
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.set_current_position(position_steps)
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.set_current_position(position_steps)
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native zero-position failed: {exc}")
+            self.run("--halt-and-set-position", str(int(position_steps)))
 
     def set_step_mode(self, step_mode: str) -> None:
         normalized = normalize_tic_step_mode(step_mode)
@@ -2197,55 +2289,89 @@ class TicController:
         self.run("--step-mode", normalized)
 
     def set_current_limit_mA(self, target_mA: float) -> int:
-        native = self._native_controller()
-        if native is not None:
-            try:
-                return native.set_current_limit_mA(target_mA)
-            except Exception as exc:
-                self._native_error = exc
-                if self._native_only():
-                    raise
-        return apply_tic_current_limit_mA(self, target_mA)
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    applied = native.set_current_limit_mA(target_mA)
+                    self._log_native_success_once()
+                    return applied
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            applied = retry_native.set_current_limit_mA(target_mA)
+                            self._log_native_success_once()
+                            return applied
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native current-limit command failed: {exc}")
+            return apply_tic_current_limit_mA(self, target_mA)
 
     def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
-        native = self._native_controller()
-        if native is not None:
-            try:
-                native.set_target_velocity(velocity_steps_per_10k_s)
-                return
-            except Exception as exc:
-                self._native_error = exc
-                if self._native_only():
-                    raise
-        self.run(
-            "--energize",
-            "--reset-command-timeout",
-            "--exit-safe-start",
-            "--velocity",
-            str(int(velocity_steps_per_10k_s)),
-        )
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.set_target_velocity(velocity_steps_per_10k_s)
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.set_target_velocity(velocity_steps_per_10k_s)
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native velocity command failed: {exc}")
+            self.run(
+                "--energize",
+                "--reset-command-timeout",
+                "--exit-safe-start",
+                "--velocity",
+                str(int(velocity_steps_per_10k_s)),
+            )
 
     def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
-        native = self._native_controller()
-        if native is not None:
-            try:
-                native.set_target_position(position_steps, max_speed=max_speed)
-                return
-            except Exception as exc:
-                self._native_error = exc
-                if self._native_only():
-                    raise
-        args = [
-            "--energize",
-            "--reset-command-timeout",
-            "--exit-safe-start",
-        ]
-        if max_speed is not None and max_speed > 0:
-            args.extend(["--max-speed", str(int(max_speed))])
-        args.extend(["--position", str(int(position_steps))])
-        self.run(
-            *args,
-        )
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.set_target_position(position_steps, max_speed=max_speed)
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.set_target_position(position_steps, max_speed=max_speed)
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native position command failed: {exc}")
+            args = [
+                "--energize",
+                "--reset-command-timeout",
+                "--exit-safe-start",
+            ]
+            if max_speed is not None and max_speed > 0:
+                args.extend(["--max-speed", str(int(max_speed))])
+            args.extend(["--position", str(int(position_steps))])
+            self.run(
+                *args,
+            )
 
 
 def benchmark_tic_transport_latency(
@@ -6344,6 +6470,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 command_path=key[0],
                 device_serial=key[1],
                 prefer_native_usb=key[2],
+                transport_logger=self._log,
             )
             self._tic_controller_key = key
         return self._tic_controller
@@ -9933,6 +10060,47 @@ class MainWindow(QtWidgets.QMainWindow):
             seek_key=seek_key,
         )
 
+    def _current_sweep_protective_step_needed(
+        self,
+        previous_error: float | None,
+        error_value: float,
+        tolerance: float,
+    ) -> bool:
+        if previous_error is None or not self._current_sweep_freezes_live_stiffness():
+            return False
+        previous_abs = abs(float(previous_error))
+        current_abs = abs(float(error_value))
+        growth_margin = max(abs(float(tolerance)) * 0.2, 1e-9)
+        if float(previous_error) * float(error_value) >= 0.0:
+            return current_abs > previous_abs + growth_margin
+        violent_reversal_margin = max(abs(float(tolerance)) * 3.0, previous_abs * 0.5)
+        return current_abs > previous_abs + violent_reversal_margin
+
+    def _current_sweep_travel_limit_exceeded(
+        self,
+        seek_key: tuple[str, int, float],
+        next_travel_mm: float,
+    ) -> bool:
+        if not self._current_sweep_freezes_live_stiffness():
+            return False
+        limit_mm = self._seek_max_travel_mm()
+        current_travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
+        return current_travel_mm + abs(float(next_travel_mm)) > limit_mm
+
+    def _stop_for_current_sweep_travel_limit(
+        self,
+        seek_key: tuple[str, int, float],
+        next_travel_mm: float,
+    ) -> None:
+        limit_mm = self._seek_max_travel_mm()
+        current_travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
+        self._log(
+            "Recipe stopped because closed-loop load/stress correction exceeded the "
+            f"correction travel limit ({_format_compact_unit(current_travel_mm + abs(float(next_travel_mm)), 'mm')} "
+            f"> {_format_compact_unit(limit_mm, 'mm')})."
+        )
+        self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+
     def _clear_seek_state(self, seek_key: tuple[str, int, float]) -> None:
         self._seek_last_error_by_key.pop(seek_key, None)
         self._seek_last_value_by_key.pop(seek_key, None)
@@ -10930,9 +11098,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return True
         if filtered_signal is not None:
+            noise_component = filtered_signal.noise * self._current_sweep_hold_noise_sigma()
+            if self._is_current_sweep_mode(self._automation_name):
+                noise_component = self._current_sweep_bounded_noise_band(
+                    basis,
+                    filtered_signal.noise,
+                )
             noise_band = max(
                 effective_tolerance,
-                filtered_signal.noise * self._current_sweep_hold_noise_sigma(),
+                noise_component,
                 self._current_sweep_hold_min_band_for_basis(
                     basis,
                     self._current_sweep_hold_min_resume_stress_mpa(),
@@ -11147,6 +11321,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             return False
         overshot_target = previous_error is not None and previous_error * delta_value < 0.0
+        protective_single_step = self._current_sweep_protective_step_needed(
+            previous_error,
+            delta_value,
+            effective_tolerance,
+        )
         if overshot_target:
             if (
                 filtered_signal is not None
@@ -11253,6 +11432,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self._seek_no_response_count_by_key[seek_key] = 0
+        if protective_single_step:
+            nudge_mm = min(nudge_mm, self._motor_step_mm())
+            self._log(
+                "Closed-loop response worsened after the previous correction; "
+                "using a protective single-step correction."
+            )
         seek_direction = delta_value
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             seek_direction *= self._tension_motion_sign()
@@ -11266,6 +11451,22 @@ class MainWindow(QtWidgets.QMainWindow):
             and nudge_mm <= self._motor_step_mm() + 1e-12
         ):
             backlash_takeup_mm = 0.0
+        if self._current_sweep_travel_limit_exceeded(seek_key, nudge_mm + backlash_takeup_mm):
+            self._stop_for_current_sweep_travel_limit(seek_key, nudge_mm + backlash_takeup_mm)
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=effective_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                correction_mm=nudge_mm,
+                backlash_mm=backlash_takeup_mm,
+                result="stopped",
+                reason="correction_travel_limit",
+            )
+            return False
         if not zero_return_needs_more_motion and not self._reverse_correction_is_worthwhile(
             basis,
             delta_value,
@@ -14199,39 +14400,65 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return self._tic_motor_power_ok is not False
 
-    def _preflight_recipe_hardware(self, steps: Sequence[AutomationStep]) -> bool:
+    def _recipe_preflight_needs_progress(self, steps: Sequence[AutomationStep]) -> bool:
+        if self._manual_auto_connect_progress is not None:
+            return False
+        supply_ready = self._supply_controller is not None and self._supply_controller.is_connected()
+        return (
+            (self._recipe_requires_supply(steps) and not supply_ready)
+            or (self._recipe_requires_scale(steps) and self._scale_thread is None)
+            or (self._recipe_requires_tic(steps) and self._tic_motor_power_ok is not True)
+        )
+
+    def _preflight_recipe_hardware(self, steps: Sequence[AutomationStep], *, show_progress: bool = False) -> bool:
+        started_progress = False
+        preflight_steps = 4
+        if show_progress and self._recipe_preflight_needs_progress(steps):
+            started_progress = True
+            self._show_manual_auto_connect_progress()
+            self._set_manual_auto_connect_progress("Checking recipe hardware...", 0, preflight_steps)
+            self._log("Recipe hardware auto-connect started.")
         issues: list[str] = []
-        if self._recipe_requires_supply(steps) and not self._ensure_supply_ready_for_recipe():
-            issues.append("Power supply is not connected. Use Auto-detect/connect supply and check the supply is powered on.")
-        if not issues and self._motor_supply_enabled() and not self._enable_motor_supply_output():
-            issues.append("Motor supply channel could not be enabled. Check the HMP channel wiring/settings.")
-        if self._recipe_requires_tic(steps) and not self._ensure_tic_ready_for_recipe():
-            vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
-            issues.append(
-                "Motor controller is reachable, but motor power is not ready "
-                f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V). "
-                "Turn on the motor supply, or enable the HMP motor-supply channel option and run Check motor again."
-            )
-        if not issues and self._recipe_requires_tic(steps):
-            tic_limit_ok, tic_limit_message = self._apply_tic_current_limit()
-            self._log(f"Recipe preflight: {tic_limit_message}")
-            if not tic_limit_ok:
-                issues.append(tic_limit_message.replace("FAIL: ", "", 1))
-        if self._recipe_requires_scale(steps) and not self._ensure_scale_ready_for_recipe():
-            issues.append(
-                "Scale is not connected. Use Auto-detect scale, then verify the zero-load reference, "
-                "and fix the serial link if it still fails."
-            )
-        if not issues and self._recipe_requires_scale(steps):
-            with self._scale_state_lock:
-                latest_raw_g = self._latest_scale_value_g
-            self._restore_default_zero_load_reference_if_real_grams(float(latest_raw_g))
-        if not issues:
-            return True
-        message = "Recipe preflight failed:\n\n" + "\n".join(f"- {issue}" for issue in issues)
-        self._log(message.replace("\n", " "))
-        QtWidgets.QMessageBox.warning(self, APP_NAME, message)
-        return False
+        try:
+            self._set_manual_auto_connect_progress("Checking power supply...", 0, preflight_steps)
+            if self._recipe_requires_supply(steps) and not self._ensure_supply_ready_for_recipe():
+                issues.append("Power supply is not connected. Use Auto-detect/connect supply and check the supply is powered on.")
+            self._set_manual_auto_connect_progress("Checking motor supply...", 1, preflight_steps)
+            if not issues and self._motor_supply_enabled() and not self._enable_motor_supply_output():
+                issues.append("Motor supply channel could not be enabled. Check the HMP channel wiring/settings.")
+            self._set_manual_auto_connect_progress("Checking motor controller...", 2, preflight_steps)
+            if self._recipe_requires_tic(steps) and not self._ensure_tic_ready_for_recipe():
+                vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
+                issues.append(
+                    "Motor controller is reachable, but motor power is not ready "
+                    f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V). "
+                    "Turn on the motor supply, or enable the HMP motor-supply channel option and run Check motor again."
+                )
+            if not issues and self._recipe_requires_tic(steps):
+                tic_limit_ok, tic_limit_message = self._apply_tic_current_limit()
+                self._log(f"Recipe preflight: {tic_limit_message}")
+                if not tic_limit_ok:
+                    issues.append(tic_limit_message.replace("FAIL: ", "", 1))
+            self._set_manual_auto_connect_progress("Checking scale...", 3, preflight_steps)
+            if self._recipe_requires_scale(steps) and not self._ensure_scale_ready_for_recipe():
+                issues.append(
+                    "Scale is not connected. Use Auto-detect scale, then verify the zero-load reference, "
+                    "and fix the serial link if it still fails."
+                )
+            if not issues and self._recipe_requires_scale(steps):
+                with self._scale_state_lock:
+                    latest_raw_g = self._latest_scale_value_g
+                self._restore_default_zero_load_reference_if_real_grams(float(latest_raw_g))
+            if not issues:
+                self._set_manual_auto_connect_progress("Recipe hardware ready.", preflight_steps, preflight_steps)
+                return True
+            message = "Recipe preflight failed:\n\n" + "\n".join(f"- {issue}" for issue in issues)
+            self._log(message.replace("\n", " "))
+            QtWidgets.QMessageBox.warning(self, APP_NAME, message)
+            return False
+        finally:
+            if started_progress:
+                self._close_manual_auto_connect_progress()
 
     def _apply_tic_current_limit(self) -> tuple[bool, str]:
         target_mA = float(self.spin_tic_current_limit_mA.value())
@@ -15062,7 +15289,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
             return
         self._sync_stale_log_name_from_sample()
-        if not self._preflight_recipe_hardware(steps):
+        if not self._preflight_recipe_hardware(steps, show_progress=True):
             return
         if not self._prepare_continuity_current_for_recipe(steps):
             return
@@ -16660,6 +16887,12 @@ class MainWindow(QtWidgets.QMainWindow):
             SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA,
         )
 
+    def _current_sweep_bounded_noise_band(self, basis: str, noise_value: float) -> float:
+        noise_band = max(0.0, float(noise_value)) * self._current_sweep_hold_noise_sigma()
+        if not self._is_current_sweep_mode(self._automation_name):
+            return noise_band
+        return min(noise_band, self._current_sweep_hold_transformation_band_for_basis(basis))
+
     def _current_sweep_hold_min_slope_for_basis(self, basis: str) -> float:
         if basis == HSW_BASIS_STRESS_MPA:
             return SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S
@@ -16737,6 +16970,9 @@ class MainWindow(QtWidgets.QMainWindow):
             abs(float(pause_band)),
             self._current_sweep_hold_transformation_band_for_basis(step.basis),
         )
+        if abs(float(signed_error)) > transformation_band * 2.5:
+            self._reset_current_sweep_ramp_hold_candidate()
+            return True
         if abs(float(signed_error)) <= transformation_band:
             self._reset_current_sweep_ramp_hold_candidate()
             return False
@@ -16804,7 +17040,7 @@ class MainWindow(QtWidgets.QMainWindow):
         resume_factor = self._current_sweep_hold_resume_factor(step)
         pause_band = max(
             tolerance * pause_factor,
-            noise_value * self._current_sweep_hold_noise_sigma(),
+            self._current_sweep_bounded_noise_band(step.basis, noise_value),
             self._current_sweep_hold_min_band_for_basis(
                 step.basis,
                 self._current_sweep_hold_min_pause_stress_mpa(),
@@ -16813,7 +17049,7 @@ class MainWindow(QtWidgets.QMainWindow):
         resume_band = max(
             tolerance * resume_factor,
             min(
-                noise_value * self._current_sweep_hold_noise_sigma(),
+                self._current_sweep_bounded_noise_band(step.basis, noise_value),
                 self._current_sweep_hold_transformation_band_for_basis(step.basis),
             ),
             self._current_sweep_hold_min_band_for_basis(

@@ -2576,6 +2576,83 @@ def test_manual_auto_connect_shows_progress_dialog_while_queued(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_recipe_preflight_shows_auto_connect_progress_when_requested(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    warnings: list[str] = []
+    progress_seen: list[bool] = []
+
+    def _fail_scale() -> bool:
+        progress = window._manual_auto_connect_progress
+        progress_seen.append(progress is not None and progress.isVisible())
+        return False
+
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message),
+    )
+    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+    window._ensure_scale_ready_for_recipe = _fail_scale  # type: ignore[method-assign]
+    window._tic_motor_power_ok = None
+    window._scale_thread = None
+
+    try:
+        ok = window._preflight_recipe_hardware(
+            [
+                mini_dma_mod.AutomationStep(
+                    "seek_target",
+                    target_value=0.0,
+                    basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+                ),
+                mini_dma_mod.AutomationStep("record", basis=mini_dma_mod.HSW_BASIS_LOAD_G),
+            ],
+            show_progress=True,
+        )
+
+        assert ok is False
+        assert progress_seen == [True]
+        assert window._manual_auto_connect_progress is None
+        assert warnings
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_preflight_does_not_show_auto_connect_progress_by_default(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    shown: list[bool] = []
+    window._show_manual_auto_connect_progress = lambda: shown.append(True)  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+    window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+
+    try:
+        ok = window._preflight_recipe_hardware(
+            [
+                mini_dma_mod.AutomationStep(
+                    "seek_target",
+                    target_value=0.0,
+                    basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+                ),
+                mini_dma_mod.AutomationStep("record", basis=mini_dma_mod.HSW_BASIS_LOAD_G),
+            ]
+        )
+
+        assert ok is True
+        assert shown == []
+    finally:
+        _close_test_window(window)
+
+
 def test_manual_auto_connect_prepares_current_sweep_channel_without_enabling_output(
     tmp_path: Path,
     qtbot,
@@ -6105,6 +6182,44 @@ def test_current_sweep_hold_uses_absolute_stress_error_on_current_up_ramp(
         _close_test_window(window)
 
 
+def test_current_sweep_hold_pauses_despite_large_transient_noise(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (24.0, 24.0, 0.5, 12.0)
+    )
+    signal = mini_dma_mod.ScaleControlSignal(
+        value=74.0,
+        latest_value=74.0,
+        noise=12.0,
+        slope_per_s=10.0,
+        sample_count=8,
+        timestamp_s=time.time(),
+    )
+    window._scale_control_signal_for_basis = lambda *_args, **_kwargs: signal  # type: ignore[method-assign]
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=20.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+    )
+
+    try:
+        holding, stopped = window._update_current_sweep_ramp_hold(step, 4, now_s=100.0)
+
+        assert holding is True
+        assert stopped is False
+        assert window._current_sweep_ramp_hold_step_index == 4
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_has_no_timeout_stop(
     tmp_path: Path,
     qtbot,
@@ -7939,6 +8054,40 @@ def test_tic_controller_sets_step_mode_with_ticcmd(monkeypatch: pytest.MonkeyPat
     assert calls == [["ticcmd.exe", "-d", "00501366", "--step-mode", "4"]]
 
 
+def test_tic_controller_run_hides_ticcmd_console_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _StartupInfo:
+        def __init__(self) -> None:
+            self.dwFlags = 0
+            self.wShowWindow = None
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args: list[str], **kwargs: object) -> _Completed:
+        captured["args"] = args
+        captured.update(kwargs)
+        return _Completed()
+
+    monkeypatch.setattr(mini_dma_mod.os, "name", "nt")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(mini_dma_mod.subprocess, "STARTF_USESHOWWINDOW", 0x00000001, raising=False)
+    monkeypatch.setattr(mini_dma_mod.subprocess, "STARTUPINFO", _StartupInfo, raising=False)
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+    controller = mini_dma_mod.TicController(command_path="ticcmd", device_serial="00501366")
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+
+    controller.run("--status")
+
+    startupinfo = captured["startupinfo"]
+    assert captured["creationflags"] == 0x08000000
+    assert startupinfo.dwFlags & 0x00000001
+    assert startupinfo.wShowWindow == 0
+
+
 def test_tic_status_falls_back_when_full_status_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
@@ -8230,10 +8379,12 @@ def test_tic_controller_prefers_native_usb_when_requested(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _make_native)
 
+    logs: list[str] = []
     controller = mini_dma_mod.TicController(
         command_path="ticcmd",
         device_serial="00501366",
         prefer_native_usb=True,
+        transport_logger=logs.append,
     )
     controller.set_target_position(42, max_speed=123)
     applied_current_limit = controller.set_current_limit_mA(343)
@@ -8245,6 +8396,66 @@ def test_tic_controller_prefers_native_usb_when_requested(monkeypatch: pytest.Mo
     assert created[0].current_limits == [343]
     assert applied_current_limit == 343
     assert "Transport: native USB" in status
+    assert logs == ["Tic transport: native USB active."]
+
+
+def test_tic_controller_serializes_native_usb_status_and_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeNative:
+        def __init__(self, *, device_serial: str = "") -> None:
+            self.device_serial = device_serial
+            self.active = False
+            self.calls: list[str] = []
+
+        def _enter(self, name: str) -> None:
+            if self.active:
+                raise RuntimeError(f"concurrent native USB access during {name}")
+            self.active = True
+            self.calls.append(name)
+            time.sleep(0.03)
+            self.active = False
+
+        def get_status(self) -> str:
+            self._enter("status")
+            return "VIN voltage: 12.00 V\nTransport: native USB\n"
+
+        def reset_command_timeout(self) -> None:
+            self._enter("keepalive")
+
+    created: list[_FakeNative] = []
+
+    def _make_native(*, device_serial: str = "") -> _FakeNative:
+        native = _FakeNative(device_serial=device_serial)
+        created.append(native)
+        return native
+
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _make_native)
+    controller = mini_dma_mod.TicController(
+        command_path="ticcmd",
+        device_serial="00501366",
+        prefer_native_usb=True,
+    )
+    errors: list[BaseException] = []
+
+    def _call(method: str) -> None:
+        try:
+            getattr(controller, method)()
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_call, args=("get_status",)),
+        threading.Thread(target=_call, args=("reset_command_timeout",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1.0)
+
+    assert errors == []
+    assert len(created) == 1
+    assert sorted(created[0].calls) == ["keepalive", "status"]
 
 
 def test_tic_controller_auto_falls_back_to_ticcmd_when_native_usb_unavailable(
@@ -8264,10 +8475,12 @@ def test_tic_controller_auto_falls_back_to_ticcmd_when_native_usb_unavailable(
     def _fail_native(*, device_serial: str = "") -> object:
         raise RuntimeError("no native USB access")
 
+    logs: list[str] = []
     controller = mini_dma_mod.TicController(
         command_path="ticcmd",
         device_serial="00501366",
         prefer_native_usb=True,
+        transport_logger=logs.append,
     )
     monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _fail_native)
     monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
@@ -8276,6 +8489,7 @@ def test_tic_controller_auto_falls_back_to_ticcmd_when_native_usb_unavailable(
     controller.reset_command_timeout()
 
     assert calls == [["ticcmd.exe", "-d", "00501366", "--reset-command-timeout"]]
+    assert logs == ["Tic transport fallback: using ticcmd because native USB setup failed: no native USB access"]
 
 
 def test_tic_controller_falls_back_to_ticcmd_when_native_status_call_fails(
@@ -8299,10 +8513,12 @@ def test_tic_controller_falls_back_to_ticcmd_when_native_status_call_fails(
         calls.append(args)
         return _Completed()
 
+    logs: list[str] = []
     controller = mini_dma_mod.TicController(
         command_path="ticcmd",
         device_serial="00501366",
         prefer_native_usb=True,
+        transport_logger=logs.append,
     )
     monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _FakeNative)
     monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
@@ -8312,6 +8528,7 @@ def test_tic_controller_falls_back_to_ticcmd_when_native_status_call_fails(
 
     assert "VIN voltage: 12.00 V" in status
     assert calls == [["ticcmd.exe", "-d", "00501366", "--status", "--full"]]
+    assert logs == ["Tic transport fallback: using ticcmd because native status failed: native access denied"]
 
 
 def test_tic_controller_falls_back_to_ticcmd_when_native_move_call_fails(
@@ -8335,10 +8552,12 @@ def test_tic_controller_falls_back_to_ticcmd_when_native_move_call_fails(
         calls.append(args)
         return _Completed()
 
+    logs: list[str] = []
     controller = mini_dma_mod.TicController(
         command_path="ticcmd",
         device_serial="00501366",
         prefer_native_usb=True,
+        transport_logger=logs.append,
     )
     monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _FakeNative)
     monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
@@ -8360,6 +8579,57 @@ def test_tic_controller_falls_back_to_ticcmd_when_native_move_call_fails(
             "-42",
         ]
     ]
+    assert logs == ["Tic transport fallback: using ticcmd because native position command failed: native access denied"]
+
+
+def test_tic_controller_reopens_native_usb_once_before_ticcmd_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _FakeNative:
+        def __init__(self, *, device_serial: str = "") -> None:
+            self.device_serial = device_serial
+            self.targets: list[tuple[int, int | None]] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            if len(created) == 1:
+                raise OSError(2, "Entity not found")
+            self.targets.append((position_steps, max_speed))
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    created: list[_FakeNative] = []
+
+    def _make_native(*, device_serial: str = "") -> _FakeNative:
+        native = _FakeNative(device_serial=device_serial)
+        created.append(native)
+        return native
+
+    logs: list[str] = []
+    controller = mini_dma_mod.TicController(
+        command_path="ticcmd",
+        device_serial="00501366",
+        prefer_native_usb=True,
+        transport_logger=logs.append,
+    )
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _make_native)
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    controller.set_target_position(-42, max_speed=123)
+
+    assert len(created) == 2
+    assert created[1].targets == [(-42, 123)]
+    assert calls == []
+    assert logs == ["Tic transport: native USB active."]
 
 
 def test_tic_controller_is_reused_until_connection_settings_change(
@@ -8377,6 +8647,7 @@ def test_tic_controller_is_reused_until_connection_settings_change(
             device_serial: str,
             *,
             prefer_native_usb: bool = False,
+            transport_logger: object | None = None,
         ) -> None:
             created.append((command_path, device_serial))
 
@@ -10161,6 +10432,135 @@ def test_current_sweep_overshoot_shrinks_correction_to_target_space_step(
         _close_test_window(window)
 
 
+def test_current_sweep_large_overshoot_falls_back_to_single_motor_step(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        window._last_move_target_mm = target_mm
+        window._last_motion_command_time_s = time.time()
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0125)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(46.944)
+    window.spin_backlash_mm.setValue(0.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        197.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = 14.0
+    window._seek_last_value_by_key[seek_key] = 36.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.3
+    window._seek_last_effective_position_by_key[seek_key] = 6.7275
+    window._current_position_mm = 6.7275
+    window._effective_position_mm = 6.7275
+    window._last_move_target_mm = 6.7275
+    window._last_effective_move_target_mm = 6.7275
+    window._latest_scale_timestamp = time.time()
+    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(
+        90.0,
+        window.spin_diameter.value(),
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
+
+        assert reached is False
+        assert moves
+        _target_mm, effective_mm = moves[-1]
+        assert effective_mm is not None
+        assert abs(effective_mm - 6.7275) == pytest.approx(window._motor_step_mm())
+        assert "protective single-step correction" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_stops_when_correction_travel_exceeds_limit(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _fail_move(*_args: object, **_kwargs: object) -> bool:
+        pytest.fail("travel-limit stop should happen before sending a move")
+
+    window._move_to_position_mm = _fail_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0125)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(46.944)
+    window.spin_current_sweep_max_seek_mm.setValue(0.10)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        197.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = -20.0
+    window._seek_last_value_by_key[seek_key] = 70.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.3
+    window._seek_last_effective_position_by_key[seek_key] = 6.7275
+    window._seek_travel_by_key[seek_key] = 0.101
+    window._current_position_mm = 6.7275
+    window._effective_position_mm = 6.7275
+    window._latest_scale_timestamp = time.time()
+    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(
+        90.0,
+        window.spin_diameter.value(),
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
+
+        assert reached is False
+        assert window._automation_active is False
+        assert "exceeded the correction travel limit" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_reversal_uses_correction_step_without_predictive_backlash(
     tmp_path: Path,
     qtbot,
@@ -10744,6 +11144,63 @@ def test_current_sweep_hold_accepts_small_filtered_fluctuation_without_correctio
 
         assert reached is True
         assert moves == []
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_does_not_accept_large_error_as_noise_band(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.time()
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0125)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        690.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    for index in range(8):
+        stress = 78.0 + (0.5 if index % 2 else 0.0)
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_out_of_band_sign_by_key[seek_key] = -1.0
+    window._seek_out_of_band_since_by_key[seek_key] = now_s - 2.0
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
+
+        assert reached is False
+        assert moves
     finally:
         _close_test_window(window)
 
