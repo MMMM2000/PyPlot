@@ -572,6 +572,193 @@ def _run_builder_update_section_command(
         section.close()
 
 
+def _builder_section_has_payload(payload: object) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    for key in ("rows", "payloads", "sources", "imported_rows"):
+        value = payload.get(key)
+        if isinstance(value, Mapping) and value:
+            return True
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and value:
+            return True
+    return False
+
+
+def _builder_rebuild_sections_from_command(
+    command: Mapping[str, Any],
+    *,
+    sections: Mapping[str, Any],
+    command_index: int,
+) -> set[str]:
+    raw_sections = command.get("sections")
+    if raw_sections in (None, ""):
+        return {
+            str(key)
+            for key, payload in sections.items()
+            if key not in {"assemble", "compare"} and _builder_section_has_payload(payload)
+        }
+    if not isinstance(raw_sections, list):
+        raise _AutomationRecipeError(
+            f"Builder rebuild_assemble command {command_index} field 'sections' must be an array when provided."
+        )
+    selected = {str(value).strip() for value in raw_sections if str(value).strip()}
+    if not selected:
+        raise _AutomationRecipeError(
+            f"Builder rebuild_assemble command {command_index} field 'sections' must not be empty."
+        )
+    return selected
+
+
+def _run_builder_rebuild_assemble_command(
+    *,
+    builder_ui: Any,
+    command: dict[str, Any],
+    command_index: int,
+    sections: dict[str, Any],
+    output_project: Path,
+) -> dict[str, Any]:
+    selected = _builder_rebuild_sections_from_command(
+        command,
+        sections=sections,
+        command_index=command_index,
+    )
+    if not selected:
+        raise _AutomationRecipeError(
+            f"Builder rebuild_assemble command {command_index} has no section payloads to assemble."
+        )
+
+    window = builder_ui.BuilderWindow()
+    try:
+        window._auto_open_last = False  # noqa: SLF001 - keep automation project-scoped
+        with builder_ui.MiniDatabaseStore.suspend_disk_writes():
+            for key, section in window.sections.items():
+                importer = getattr(section, "import_project_payload", None)
+                if not callable(importer):
+                    continue
+                try:
+                    section.reset_to_blank()
+                except Exception:
+                    pass
+                importer(sections.get(key, {}))
+            assembly = getattr(window, "assembly_section", None)
+            if assembly is not None:
+                importer = getattr(assembly, "import_project_payload", None)
+                if callable(importer):
+                    importer(sections.get("assemble", {}))
+        try:
+            window._refresh_sections_after_project_load()  # noqa: SLF001
+        except Exception:
+            LOGGER.debug("Builder automation assemble refresh failed", exc_info=True)
+
+        assembly = getattr(window, "assembly_section", None)
+        if assembly is None:
+            raise _AutomationRecipeError("Builder automation could not create the Assemble section.")
+        inputs = assembly._prepare_builder_inputs(selected, require_payloads=False)  # noqa: SLF001
+        if inputs is None:
+            raise _AutomationRecipeError(
+                f"Builder rebuild_assemble command {command_index} could not prepare inputs."
+            )
+        (
+            fabrication_index,
+            annealing_records,
+            vsm_hysteresis_records,
+            vsm_temperature_records,
+            dma_isostress_records,
+            mini_dma_records,
+            shape_memory_stress_strain_records,
+            shape_memory_entries,
+            fmr_records,
+            microscope_index,
+            video_index,
+            strain_records,
+            strain_entries,
+            current_density_entries,
+            overrides,
+            phase_points,
+            transition_points,
+            video_overrides,
+        ) = inputs
+
+        if "microscope" in selected and overrides:
+            microscope_index = builder_ui._apply_microscope_overrides(
+                microscope_index,
+                overrides,
+            )
+        elif "microscope" not in selected:
+            microscope_index = {}
+
+        output_dir = output_project.parent
+        output_name = output_project.stem
+        config = builder_ui.BuilderConfig(
+            annealing_files=[],
+            fabrication_files=[],
+            output_dir=output_dir,
+            microscope_files=[],
+            video_files=[],
+            strain_files=[],
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+            output_name=output_name,
+            include_microscope_crops=False,
+        )
+        result = builder_ui.build_database(
+            config,
+            logger=LOGGER,
+            fabrication_index=fabrication_index,
+            measurement_records=annealing_records,
+            vsm_hysteresis_records=(
+                vsm_hysteresis_records if "vsm_hysteresis" in selected else []
+            ),
+            vsm_temperature_scan_records=(
+                vsm_temperature_records if "vsm_temperature_scan" in selected else []
+            ),
+            dma_iso_stress_records=(
+                dma_isostress_records if "dma_iso_stress" in selected else []
+            ),
+            mini_dma_records=mini_dma_records if "mini_dma" in selected else [],
+            shape_memory_stress_strain_records=(
+                shape_memory_stress_strain_records
+                if "shape_memory_stress_strain" in selected
+                else []
+            ),
+            shape_memory_entries=(
+                shape_memory_entries if "shape_memory_stress_strain" in selected else {}
+            ),
+            fmr_records=fmr_records if "fmr" in selected else [],
+            microscope_index=microscope_index if "microscope" in selected else {},
+            video_index=video_index,
+            video_overrides=video_overrides,
+            strain_records=strain_records if "strain" in selected else {},
+            strain_entries=strain_entries if "strain" in selected else {},
+            current_density_entries=(
+                current_density_entries if "current_density" in selected else {}
+            ),
+            phase_points=phase_points,
+            transition_temps=transition_points,
+            skip_exports=True,
+            include_fabrication_draw_siblings=True,
+        )
+        dataframe = result.dataframe if hasattr(result, "dataframe") else pd.DataFrame()
+        if not isinstance(dataframe, pd.DataFrame):
+            dataframe = pd.DataFrame()
+        merged = assembly._merge_imported_rows(dataframe)  # noqa: SLF001
+        assembly._update_preview(merged)  # noqa: SLF001
+        sections["assemble"] = assembly.export_project_payload()
+        return {
+            "action": "rebuild_assemble",
+            "status": "ok",
+            "sections": sorted(selected),
+            "row_count": int(len(merged.index)),
+            "column_count": int(len(merged.columns)),
+        }
+    finally:
+        try:
+            window.close()
+        except Exception:
+            pass
+
+
 def _timestamp_for_builder_database(recipe: Mapping[str, Any]) -> str:
     raw = recipe.get("timestamp")
     if raw is not None:
