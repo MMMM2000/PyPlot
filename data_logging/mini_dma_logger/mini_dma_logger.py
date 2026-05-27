@@ -580,6 +580,18 @@ def _find_ticcmd() -> str:
     return "ticcmd"
 
 
+def _hidden_subprocess_kwargs() -> dict[str, object]:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
+
+
 def _decode_escape_text(text: str) -> bytes:
     if not text:
         return b""
@@ -2064,11 +2076,13 @@ class TicController:
         device_serial: str = "",
         *,
         prefer_native_usb: bool = False,
+        allow_ticcmd_fallback: bool = True,
         transport_logger: Callable[[str], None] | None = None,
     ) -> None:
         self.command_path = command_path.strip() or "ticcmd"
         self.device_serial = device_serial.strip()
         self.prefer_native_usb = bool(prefer_native_usb)
+        self.allow_ticcmd_fallback = bool(allow_ticcmd_fallback)
         self.transport_logger = transport_logger
         self._native_backend: NativeTicUsbController | None = None
         self._native_attempted = False
@@ -2083,6 +2097,9 @@ class TicController:
     def _native_allowed(self) -> bool:
         return self.prefer_native_usb or self._native_only() or self.command_path.strip().lower() == "auto"
 
+    def _fallback_allowed(self) -> bool:
+        return self.allow_ticcmd_fallback and not self._native_only()
+
     def _native_controller(self) -> NativeTicUsbController | None:
         if not self._native_allowed():
             return None
@@ -2093,7 +2110,7 @@ class TicController:
             self._native_backend = NativeTicUsbController(device_serial=self.device_serial)
         except Exception as exc:
             self._native_error = exc
-            if self._native_only():
+            if self._native_only() or not self._fallback_allowed():
                 raise RuntimeError(f"Native Tic USB transport is unavailable: {exc}") from exc
             self._log_ticcmd_fallback(f"native USB setup failed: {exc}")
             self._native_backend = None
@@ -2156,21 +2173,13 @@ class TicController:
                     raise RuntimeError("Raw ticcmd arguments are unavailable for the native USB transport.")
             args = self._base_args()
             args.extend(extra_args)
-            startupinfo = None
-            creationflags = 0
-            if os.name == "nt":
-                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = 0
             completed = subprocess.run(
                 args,
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,
                 check=False,
-                startupinfo=startupinfo,
-                creationflags=creationflags,
+                **_hidden_subprocess_kwargs(),
             )
             stdout = completed.stdout.strip()
             stderr = completed.stderr.strip()
@@ -2197,7 +2206,7 @@ class TicController:
                         except Exception as retry_exc:
                             self._native_error = retry_exc
                             exc = retry_exc
-                    if self._native_only():
+                    if self._native_only() or not self._fallback_allowed():
                         raise
                     self._log_ticcmd_fallback(f"native status failed: {exc}")
             last_error: Exception | None = None
@@ -2234,7 +2243,7 @@ class TicController:
                         except Exception as retry_exc:
                             self._native_error = retry_exc
                             exc = retry_exc
-                    if self._native_only():
+                    if self._native_only() or not self._fallback_allowed():
                         raise
                     self._log_ticcmd_fallback(f"native halt failed: {exc}")
             self.run("--halt-and-hold")
@@ -2257,7 +2266,7 @@ class TicController:
                         except Exception as retry_exc:
                             self._native_error = retry_exc
                             exc = retry_exc
-                    if self._native_only():
+                    if self._native_only() or not self._fallback_allowed():
                         raise
                     self._log_ticcmd_fallback(f"native keepalive failed: {exc}")
             self.run("--reset-command-timeout", timeout_s=2.0)
@@ -2280,7 +2289,7 @@ class TicController:
                         except Exception as retry_exc:
                             self._native_error = retry_exc
                             exc = retry_exc
-                    if self._native_only():
+                    if self._native_only() or not self._fallback_allowed():
                         raise
                     self._log_ticcmd_fallback(f"native zero-position failed: {exc}")
             self.run("--halt-and-set-position", str(int(position_steps)))
@@ -2309,7 +2318,7 @@ class TicController:
                         except Exception as retry_exc:
                             self._native_error = retry_exc
                             exc = retry_exc
-                    if self._native_only():
+                    if self._native_only() or not self._fallback_allowed():
                         raise
                     self._log_ticcmd_fallback(f"native current-limit command failed: {exc}")
             return apply_tic_current_limit_mA(self, target_mA)
@@ -2332,7 +2341,7 @@ class TicController:
                         except Exception as retry_exc:
                             self._native_error = retry_exc
                             exc = retry_exc
-                    if self._native_only():
+                    if self._native_only() or not self._fallback_allowed():
                         raise
                     self._log_ticcmd_fallback(f"native velocity command failed: {exc}")
             self.run(
@@ -2361,7 +2370,7 @@ class TicController:
                         except Exception as retry_exc:
                             self._native_error = retry_exc
                             exc = retry_exc
-                    if self._native_only():
+                    if self._native_only() or not self._fallback_allowed():
                         raise
                     self._log_ticcmd_fallback(f"native position command failed: {exc}")
             args = [
@@ -6477,6 +6486,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 command_path=key[0],
                 device_serial=key[1],
                 prefer_native_usb=key[2],
+                allow_ticcmd_fallback=not key[2],
                 transport_logger=self._log,
             )
             self._tic_controller_key = key
@@ -13238,6 +13248,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     text=True,
                     timeout=1.5,
                     check=False,
+                    **_hidden_subprocess_kwargs(),
                 )
             except Exception:
                 return None
@@ -14549,7 +14560,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if not issues and self._motor_supply_enabled() and not self._enable_motor_supply_output():
                 issues.append("Motor supply channel could not be enabled. Check the HMP channel wiring/settings.")
             self._set_manual_auto_connect_progress("Checking motor controller...", 2, preflight_steps)
-            if self._recipe_requires_tic(steps) and not self._ensure_tic_ready_for_recipe():
+            if self._recipe_requires_tic(steps) and not self.check_tic_native_usb.isChecked():
+                issues.append(
+                    "Mini DMA recipes require native USB Tic control. "
+                    "Enable 'Prefer native USB commands when available' and run Check motor again. "
+                    "ticcmd remains available for diagnostics only."
+                )
+            if not issues and self._recipe_requires_tic(steps) and not self._ensure_tic_ready_for_recipe():
                 vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
                 if self._last_tic_status_error:
                     issues.append(

@@ -5884,6 +5884,37 @@ def test_recipe_preflight_reports_tic_status_read_failure(
         _close_test_window(window)
 
 
+def test_recipe_preflight_requires_native_usb_for_tic_recipes(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    warnings: list[str] = []
+    tic_checked: list[bool] = []
+
+    window.check_tic_native_usb.setChecked(False)
+    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: tic_checked.append(True) or True  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message),
+    )
+
+    try:
+        ok = window._preflight_recipe_hardware([mini_dma_mod.AutomationStep("move", target_mm=1.0)])
+
+        assert ok is False
+        assert len(warnings) == 1
+        assert "native USB Tic control" in warnings[0]
+        assert "ticcmd remains available for diagnostics only" in warnings[0]
+        assert tic_checked == []
+    finally:
+        _close_test_window(window)
+
+
 def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -8791,6 +8822,38 @@ def test_tic_controller_falls_back_to_ticcmd_when_native_status_call_fails(
     assert logs == ["Tic transport fallback: using ticcmd because native status failed: native access denied"]
 
 
+def test_tic_controller_can_disable_ticcmd_status_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _FakeNative:
+        def __init__(self, *, device_serial: str = "") -> None:
+            self.device_serial = device_serial
+
+        def get_status(self) -> str:
+            raise RuntimeError("native access denied")
+
+    controller = mini_dma_mod.TicController(
+        command_path="ticcmd",
+        device_serial="00501366",
+        prefer_native_usb=True,
+        allow_ticcmd_fallback=False,
+    )
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _FakeNative)
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(
+        mini_dma_mod.subprocess,
+        "run",
+        lambda args, **_kwargs: calls.append(list(args)) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    with pytest.raises(RuntimeError, match="native access denied"):
+        controller.get_status()
+
+    assert calls == []
+
+
 def test_tic_controller_falls_back_to_ticcmd_when_native_move_call_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8907,6 +8970,7 @@ def test_tic_controller_is_reused_until_connection_settings_change(
             device_serial: str,
             *,
             prefer_native_usb: bool = False,
+            allow_ticcmd_fallback: bool = True,
             transport_logger: object | None = None,
         ) -> None:
             created.append((command_path, device_serial))
@@ -8924,6 +8988,22 @@ def test_tic_controller_is_reused_until_connection_settings_change(
         assert first is second
         assert third is not first
         assert created == [("ticcmd-a", "serial-a"), ("ticcmd-a", "serial-b")]
+    finally:
+        _close_test_window(window)
+
+
+def test_main_window_disables_ticcmd_fallback_when_native_usb_is_preferred(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.check_tic_native_usb.setChecked(True)
+        controller = window._build_tic_controller()
+
+        assert controller.prefer_native_usb is True
+        assert controller.allow_ticcmd_fallback is False
     finally:
         _close_test_window(window)
 
@@ -12462,6 +12542,8 @@ def test_motor_supply_channel_is_enabled_before_recipe_tic_preflight(tmp_path: P
     window.spin_motor_supply_current_limit.setValue(1.5)
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
 
     try:
         ok = window._preflight_recipe_hardware([mini_dma_mod.AutomationStep("move", target_mm=0.0)])
