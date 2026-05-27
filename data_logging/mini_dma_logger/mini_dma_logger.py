@@ -5587,12 +5587,12 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_canvas_container.setMinimumHeight(0)
         plot_canvas_layout = QtWidgets.QVBoxLayout(plot_canvas_container)
         self._dashboard_plot_canvas_layout = plot_canvas_layout
-        plot_canvas_layout.setContentsMargins(4, 0, 28, 0)
-        plot_canvas_layout.setSpacing(6)
+        plot_canvas_layout.setContentsMargins(10, 10, 10, 16)
+        plot_canvas_layout.setSpacing(10)
         self._dashboard_plot_grid = QtWidgets.QGridLayout()
         self._dashboard_plot_grid.setContentsMargins(0, 0, 0, 0)
-        self._dashboard_plot_grid.setHorizontalSpacing(8)
-        self._dashboard_plot_grid.setVerticalSpacing(8)
+        self._dashboard_plot_grid.setHorizontalSpacing(18)
+        self._dashboard_plot_grid.setVerticalSpacing(18)
         plot_canvas_layout.addLayout(self._dashboard_plot_grid, stretch=1)
         self._dashboard_plot_bundles = []
         self._dashboard_plot_widgets = []
@@ -5607,6 +5607,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     left_label="Applied tensile load (g)",
                     right_label="Right Y",
                 )
+                bundle.widget.setMinimumSize(320, 230)
                 row, column = divmod(plot_index, 2)
                 self._dashboard_plot_grid.addWidget(bundle.widget, row, column)
                 self._dashboard_plot_grid.setRowStretch(row, 1)
