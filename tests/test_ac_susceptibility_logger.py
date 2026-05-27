@@ -2029,12 +2029,21 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         sticky_texts = {
             window.ui.pushButton_start_process.text(),
             window.ui.pushButton_show_history.text(),
+            window.pushButton_continue_ac_sweep_sticky.text(),
             window.ui.pushButton_reverse_now.text(),
         }
-        assert sticky_texts == {"Measure empty-coil baseline", "Run microwire current sweep", "Stop"}
+        assert sticky_texts == {
+            "Measure empty-coil baseline",
+            "Run microwire current sweep",
+            "Continue from previous sweep...",
+            "Stop",
+        }
         assert all("anneal" not in text.lower() for text in sticky_texts)
         assert all("history" not in text.lower() for text in sticky_texts)
         assert all("reverse" not in text.lower() for text in sticky_texts)
+        settings_action = window._find_menu_action("&Settings")
+        assert settings_action is not None
+        assert settings_action.isVisible() is False
         assert window.pushButton_auto_setup.text() == "Auto-connect hardware"
         assert window.groupBox_ac_hardware.title() == "Hardware"
         assert window.ui.groupBox_serial_settings.isHidden()

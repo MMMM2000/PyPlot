@@ -2124,6 +2124,9 @@ class MainWindow(CurrentAnnealingWindow):
         self._install_ac_wheel_guard(group)
 
     def _simplify_inherited_ac_workflow(self) -> None:
+        settings_menu_action = self._find_menu_action("&Settings")
+        if settings_menu_action is not None:
+            settings_menu_action.setVisible(False)
         process_frame = getattr(self.ui, "frame_process_settings", None)
         if isinstance(process_frame, QtWidgets.QWidget):
             process_frame.hide()
@@ -2146,6 +2149,27 @@ class MainWindow(CurrentAnnealingWindow):
             except TypeError:
                 pass
             button.clicked.connect(slot)
+        sticky_run = getattr(self.ui, "pushButton_show_history", None)
+        sticky_stop = getattr(self.ui, "pushButton_reverse_now", None)
+        if isinstance(sticky_run, QtWidgets.QPushButton) and isinstance(sticky_stop, QtWidgets.QPushButton):
+            button_frame = sticky_run.parentWidget()
+            layout = button_frame.layout() if isinstance(button_frame, QtWidgets.QWidget) else None
+            if isinstance(layout, QtWidgets.QBoxLayout):
+                self.pushButton_continue_ac_sweep_sticky = QtWidgets.QPushButton(
+                    "Continue from previous sweep...",
+                    button_frame,
+                )
+                self.pushButton_continue_ac_sweep_sticky.clicked.connect(self.handle_continue_ac_sweep_clicked)
+                stop_index = layout.indexOf(sticky_stop)
+                layout.insertWidget(max(0, stop_index), self.pushButton_continue_ac_sweep_sticky)
+
+    def _find_menu_action(self, text: str) -> QtGui.QAction | None:
+        menu_bar = self.menuBar()
+        wanted = text.replace("&", "").strip().lower()
+        for action in menu_bar.actions():
+            if action.text().replace("&", "").strip().lower() == wanted:
+                return action
+        return None
 
     def _install_ac_sticky_progress(self) -> None:
         start_button = getattr(self.ui, "pushButton_start_process", None)
@@ -2724,6 +2748,9 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_measure_lcr_baseline.setEnabled(True)
         self.pushButton_run_ac_sweep.setEnabled(True)
         self.pushButton_continue_ac_sweep.setEnabled(True)
+        sticky_continue = getattr(self, "pushButton_continue_ac_sweep_sticky", None)
+        if isinstance(sticky_continue, QtWidgets.QPushButton):
+            sticky_continue.setEnabled(True)
         self.pushButton_stop_ac_sweep.setEnabled(False)
         self._set_sticky_action_state(running=False)
         self._refresh_dirty_ac_plots()
@@ -2934,6 +2961,9 @@ class MainWindow(CurrentAnnealingWindow):
             start.setEnabled(not running)
         if isinstance(sweep_button, QtWidgets.QPushButton):
             sweep_button.setEnabled(not running)
+        sticky_continue = getattr(self, "pushButton_continue_ac_sweep_sticky", None)
+        if isinstance(sticky_continue, QtWidgets.QPushButton):
+            sticky_continue.setEnabled(not running)
         if isinstance(stop, QtWidgets.QPushButton):
             stop.setEnabled(running)
 
