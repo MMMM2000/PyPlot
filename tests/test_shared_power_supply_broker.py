@@ -42,6 +42,9 @@ class FakeHmpSerial:
             self.channels[self.selected_channel]["output"] = True
         elif upper == "OUTP OFF":
             self.channels[self.selected_channel]["output"] = False
+        elif upper == "OUTP?":
+            value = "1" if self.channels[self.selected_channel]["output"] else "0"
+            self._responses.append(f"{value}\n".encode("ascii"))
         elif upper == "MEAS:VOLT?":
             self._responses.append(f"{self.channels[self.selected_channel]['voltage']}\n".encode("ascii"))
         elif upper == "MEAS:CURR?":
@@ -140,6 +143,17 @@ def test_broker_serializes_channel_selection_and_commands() -> None:
         "MEAS:VOLT?",
         "MEAS:CURR?",
     ]
+
+
+def test_broker_reports_channel_output_state() -> None:
+    broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
+    broker.assign_role(channel=3, role=ROLE_MINI_DMA_CURRENT, confirmed=True)
+    broker.confirm_profile()
+    lease = broker.lease(channel=3, owner="mini-dma", role=ROLE_MINI_DMA_CURRENT)
+
+    broker.configure_channel(channel=3, lease_id=lease.lease_id, voltage_v=12.0, current_a=0.4, output_on=True)
+
+    assert broker.output_state(channel=3) is True
 
 
 def test_broker_blocks_raw_and_global_reset_style_commands() -> None:

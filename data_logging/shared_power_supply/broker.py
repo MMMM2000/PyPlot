@@ -244,6 +244,13 @@ class SharedPowerSupplyBroker:
         self._require_lease(channel=channel, lease_id=lease_id)
         self.driver.set_output(channel=channel, output_on=output_on)
 
+    def output_state(self, *, channel: int) -> bool | None:
+        channel = self.validate_channel(channel)
+        config = self.bench_profile.channels.get(channel, BenchChannel())
+        if config.role == ROLE_UNUSED or not config.confirmed:
+            raise PermissionError(f"CH{channel} must be confirmed before output-state readback.")
+        return self.driver.output_state(channel=channel)
+
     def measure_channel(self, *, channel: int) -> dict[str, float | None]:
         channel = self.validate_channel(channel)
         config = self.bench_profile.channels.get(channel, BenchChannel())

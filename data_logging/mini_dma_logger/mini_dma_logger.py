@@ -29,8 +29,9 @@ except Exception:  # pragma: no cover - import guard
 from plotting.shared.logfiles import append_text_with_rotation
 from plotting.shared.power_guard import create_experiment_sleep_guard
 from plotting.shared.utils import ensure_app_theme, install_standard_menu
-from data_logging.shared_power_supply.broker import ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
-from data_logging.shared_power_supply.protocol import BrokerJsonClient
+from data_logging.shared_power_supply.broker import SharedPowerSupplyBroker, ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
+from data_logging.shared_power_supply.driver import HmpSerialDriver
+from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
 
 try:
     import serial
@@ -170,6 +171,7 @@ GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
+MANUAL_JOG_TIC_STATUS_FRESH_S = 2.0
 TIC_USB_VENDOR_ID = 0x1FFB
 TIC_USB_TRANSPORT_NATIVE = "native-usb"
 TIC_USB_TRANSPORT_ALIASES = {TIC_USB_TRANSPORT_NATIVE, "usb", "pyusb"}
@@ -1845,20 +1847,49 @@ class MiniDmaControlConfig:
     return_to_origin: bool
 
 
+def _find_libusb_wheel_library(candidate: str) -> str | None:
+    try:
+        import libusb._platform as libusb_platform  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    dll_path = Path(str(libusb_platform.DLL_PATH))
+    if not dll_path.exists():
+        return None
+    stem = dll_path.name.lower()
+    normalized_candidate = candidate.lower().replace(".dll", "")
+    if normalized_candidate in stem:
+        return str(dll_path)
+    return None
+
+
 def _load_pyusb_backend() -> tuple[Any, Any, Any | None]:
     try:
         import usb.core as usb_core  # type: ignore[import-not-found]
         import usb.util as usb_util  # type: ignore[import-not-found]
         import usb.backend.libusb1 as usb_libusb1  # type: ignore[import-not-found]
     except Exception as exc:  # pragma: no cover - optional dependency guard
-        raise RuntimeError("PyUSB is not installed; install pyusb and libusb-package.") from exc
-    backend = None
+        raise RuntimeError("PyUSB is not installed; install pyusb and libusb.") from exc
+
+    backend_errors: list[str] = []
+    backend = usb_libusb1.get_backend(find_library=_find_libusb_wheel_library)
+    if backend is not None:
+        return usb_core, usb_util, backend
+
     try:
         import libusb_package  # type: ignore[import-not-found]
 
         backend = usb_libusb1.get_backend(find_library=libusb_package.find_library)
-    except Exception:
+    except Exception as exc:
+        backend_errors.append(str(exc))
         backend = usb_libusb1.get_backend()
+    if backend is None:
+        reason = "; ".join(message for message in backend_errors if message)
+        suffix = f" ({reason})" if reason else ""
+        raise RuntimeError(
+            "No libusb backend is available for PyUSB. Install the 64-bit libusb wheel "
+            "or make a matching libusb-1.0.dll available."
+            f"{suffix}"
+        )
     return usb_core, usb_util, backend
 
 
@@ -1894,7 +1925,7 @@ class NativeTicUsbController:
 
     def _find_device(self) -> Any:
         try:
-            devices = list(
+            raw_devices = list(
                 self._usb_core.find(
                     find_all=True,
                     idVendor=TIC_USB_VENDOR_ID,
@@ -1904,16 +1935,24 @@ class NativeTicUsbController:
             )
         except Exception as exc:
             raise RuntimeError(f"Native Tic USB scan failed: {exc}") from exc
-        for device in devices:
+        tic_devices: list[tuple[Any, str, str]] = []
+        serial_unreadable_devices: list[Any] = []
+        for device in raw_devices:
             product = self._device_string(device, getattr(device, "iProduct", None))
             serial = self._device_string(device, getattr(device, "iSerialNumber", None))
             if product and "tic" not in product.lower():
                 continue
+            tic_devices.append((device, product, serial))
+            if self.device_serial and not serial:
+                serial_unreadable_devices.append(device)
+        for device, _product, serial in tic_devices:
             if self.device_serial and serial and serial != self.device_serial:
                 continue
             if self.device_serial and not serial:
                 continue
             return device
+        if self.device_serial and len(tic_devices) == 1 and len(serial_unreadable_devices) == 1:
+            return serial_unreadable_devices[0]
         serial_text = f" with serial {self.device_serial}" if self.device_serial else ""
         raise RuntimeError(f"No Pololu Tic USB device{serial_text} was found.")
 
@@ -2024,13 +2063,18 @@ class TicController:
         device_serial: str = "",
         *,
         prefer_native_usb: bool = False,
+        transport_logger: Callable[[str], None] | None = None,
     ) -> None:
         self.command_path = command_path.strip() or "ticcmd"
         self.device_serial = device_serial.strip()
         self.prefer_native_usb = bool(prefer_native_usb)
+        self.transport_logger = transport_logger
         self._native_backend: NativeTicUsbController | None = None
         self._native_attempted = False
         self._native_error: Exception | None = None
+        self._native_success_logged = False
+        self._ticcmd_fallback_messages: set[str] = set()
+        self._transport_lock = RLock()
 
     def _native_only(self) -> bool:
         return self.command_path.strip().lower() in TIC_USB_TRANSPORT_ALIASES
@@ -2050,8 +2094,40 @@ class TicController:
             self._native_error = exc
             if self._native_only():
                 raise RuntimeError(f"Native Tic USB transport is unavailable: {exc}") from exc
+            self._log_ticcmd_fallback(f"native USB setup failed: {exc}")
             self._native_backend = None
         return self._native_backend
+
+    def _log_native_success_once(self) -> None:
+        if self._native_success_logged:
+            return
+        self._native_success_logged = True
+        if self.transport_logger is not None:
+            self.transport_logger("Tic transport: native USB active.")
+
+    def _log_ticcmd_fallback(self, reason: str) -> None:
+        message = f"Tic transport fallback: using ticcmd because {reason}"
+        if message in self._ticcmd_fallback_messages:
+            return
+        self._ticcmd_fallback_messages.add(message)
+        if self.transport_logger is not None:
+            self.transport_logger(message)
+
+    def _reopen_native_controller(self) -> NativeTicUsbController | None:
+        if not self._native_allowed():
+            return None
+        self._native_backend = None
+        self._native_attempted = True
+        try:
+            self._native_backend = NativeTicUsbController(device_serial=self.device_serial)
+        except Exception as exc:
+            self._native_error = exc
+            self._native_backend = None
+        return self._native_backend
+
+    def _native_retry_after_failure(self, initial_error: Exception) -> NativeTicUsbController | None:
+        self._native_error = initial_error
+        return self._reopen_native_controller()
 
     def executable(self) -> str | None:
         if self._native_only():
@@ -2072,63 +2148,141 @@ class TicController:
         return args
 
     def run(self, *extra_args: str, timeout_s: float = 5.0) -> str:
-        if self._native_only():
-            native = self._native_controller()
-            if native is not None:
-                raise RuntimeError("Raw ticcmd arguments are unavailable for the native USB transport.")
-        args = self._base_args()
-        args.extend(extra_args)
-        completed = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-        stdout = completed.stdout.strip()
-        stderr = completed.stderr.strip()
-        if completed.returncode != 0:
-            detail = stderr or stdout or f"ticcmd exited with code {completed.returncode}"
-            raise RuntimeError(detail)
-        return stdout
+        with self._transport_lock:
+            if self._native_only():
+                native = self._native_controller()
+                if native is not None:
+                    raise RuntimeError("Raw ticcmd arguments are unavailable for the native USB transport.")
+            args = self._base_args()
+            args.extend(extra_args)
+            startupinfo = None
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+            completed = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                check=False,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+            )
+            stdout = completed.stdout.strip()
+            stderr = completed.stderr.strip()
+            if completed.returncode != 0:
+                detail = stderr or stdout or f"ticcmd exited with code {completed.returncode}"
+                raise RuntimeError(detail)
+            return stdout
 
     def get_status(self) -> str:
-        native = self._native_controller()
-        if native is not None:
-            native_status = native.get_status()
-            if self._native_only():
-                return native_status
-            try:
-                return self.run("--status", "--full")
-            except Exception:
-                return native_status
-        for args in (("--status", "--full"), ("--status",), ("--full",)):
-            try:
-                return self.run(*args)
-            except RuntimeError:
-                continue
-        return self.run("--list")
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    status_text = native.get_status()
+                    self._log_native_success_once()
+                    return status_text
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            status_text = retry_native.get_status()
+                            self._log_native_success_once()
+                            return status_text
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native status failed: {exc}")
+            last_error: Exception | None = None
+            for args in (("--status", "--full"), ("--status",), ("--full",)):
+                try:
+                    status_text = self.run(*args)
+                    if _extract_status_float(status_text, "VIN voltage") is not None:
+                        return status_text
+                    last_error = RuntimeError(
+                        "ticcmd status output did not include VIN voltage; motor power cannot be verified."
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    continue
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("ticcmd status did not return motor status.")
 
     def halt_and_hold(self) -> None:
-        native = self._native_controller()
-        if native is not None:
-            native.halt_and_hold()
-            return
-        self.run("--halt-and-hold")
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.halt_and_hold()
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.halt_and_hold()
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native halt failed: {exc}")
+            self.run("--halt-and-hold")
 
     def reset_command_timeout(self) -> None:
-        native = self._native_controller()
-        if native is not None:
-            native.reset_command_timeout()
-            return
-        self.run("--reset-command-timeout", timeout_s=2.0)
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.reset_command_timeout()
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.reset_command_timeout()
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native keepalive failed: {exc}")
+            self.run("--reset-command-timeout", timeout_s=2.0)
 
     def set_current_position(self, position_steps: int) -> None:
-        native = self._native_controller()
-        if native is not None:
-            native.set_current_position(position_steps)
-            return
-        self.run("--halt-and-set-position", str(int(position_steps)))
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.set_current_position(position_steps)
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.set_current_position(position_steps)
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native zero-position failed: {exc}")
+            self.run("--halt-and-set-position", str(int(position_steps)))
 
     def set_step_mode(self, step_mode: str) -> None:
         normalized = normalize_tic_step_mode(step_mode)
@@ -2137,40 +2291,89 @@ class TicController:
         self.run("--step-mode", normalized)
 
     def set_current_limit_mA(self, target_mA: float) -> int:
-        native = self._native_controller()
-        if native is not None:
-            return native.set_current_limit_mA(target_mA)
-        return apply_tic_current_limit_mA(self, target_mA)
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    applied = native.set_current_limit_mA(target_mA)
+                    self._log_native_success_once()
+                    return applied
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            applied = retry_native.set_current_limit_mA(target_mA)
+                            self._log_native_success_once()
+                            return applied
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native current-limit command failed: {exc}")
+            return apply_tic_current_limit_mA(self, target_mA)
 
     def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
-        native = self._native_controller()
-        if native is not None:
-            native.set_target_velocity(velocity_steps_per_10k_s)
-            return
-        self.run(
-            "--energize",
-            "--reset-command-timeout",
-            "--exit-safe-start",
-            "--velocity",
-            str(int(velocity_steps_per_10k_s)),
-        )
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.set_target_velocity(velocity_steps_per_10k_s)
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.set_target_velocity(velocity_steps_per_10k_s)
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native velocity command failed: {exc}")
+            self.run(
+                "--energize",
+                "--reset-command-timeout",
+                "--exit-safe-start",
+                "--velocity",
+                str(int(velocity_steps_per_10k_s)),
+            )
 
     def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
-        native = self._native_controller()
-        if native is not None:
-            native.set_target_position(position_steps, max_speed=max_speed)
-            return
-        args = [
-            "--energize",
-            "--reset-command-timeout",
-            "--exit-safe-start",
-        ]
-        if max_speed is not None and max_speed > 0:
-            args.extend(["--max-speed", str(int(max_speed))])
-        args.extend(["--position", str(int(position_steps))])
-        self.run(
-            *args,
-        )
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.set_target_position(position_steps, max_speed=max_speed)
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.set_target_position(position_steps, max_speed=max_speed)
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only():
+                        raise
+                    self._log_ticcmd_fallback(f"native position command failed: {exc}")
+            args = [
+                "--energize",
+                "--reset-command-timeout",
+                "--exit-safe-start",
+            ]
+            if max_speed is not None and max_speed > 0:
+                args.extend(["--max-speed", str(int(max_speed))])
+            args.extend(["--position", str(int(position_steps))])
+            self.run(
+                *args,
+            )
 
 
 def benchmark_tic_transport_latency(
@@ -2460,8 +2663,9 @@ class PowerSupplyController:
 
     def select_channel(self, channel: int | None = None) -> None:
         target_channel = self.selected_channel() if channel is None else int(channel)
-        if target_channel > 0:
-            self.command(f"INST:NSEL {target_channel}")
+        if target_channel <= 0:
+            raise RuntimeError("Select a power-supply channel before controlling the output.")
+        self.command(f"INST:NSEL {target_channel}")
 
     def current_resolution_mA(self) -> float:
         return max(0.001, float(self.profile.get("current_resolution_mA", 1.0)))
@@ -2521,6 +2725,13 @@ class PowerSupplyController:
             self.select_channel()
             self.command("OUTP OFF")
 
+    def output_state(self, channel: int | None = None) -> bool | None:
+        target_channel = self.selected_channel() if channel is None else int(channel)
+        with self._io_lock:
+            self.select_channel(target_channel)
+            state = self.query_float("OUTP?", settle_s=0.03, timeout_s=0.4)
+        return None if state is None else bool(int(round(float(state))))
+
     def shutdown_output(self, *, reset_voltage_v: float = 1.0, reset_current_mA: float = 1.0) -> None:
         with self._io_lock:
             self.select_channel()
@@ -2578,6 +2789,7 @@ class SharedBrokerSupplyController:
     def connect(self) -> None:
         if self._client is None:
             self._client = BrokerJsonClient(host=self.host, port=self.port)
+        self._client.request("snapshot")
         self._connected = True
 
     def disconnect(self) -> None:
@@ -2705,6 +2917,12 @@ class SharedBrokerSupplyController:
             return
         with self._io_lock:
             self._require_client().set_output(channel=channel, lease_id=lease_id, output_on=False)
+
+    def output_state(self, channel: int | None = None) -> bool | None:
+        target_channel = self.selected_channel() if channel is None else int(channel)
+        if target_channel <= 0:
+            return None
+        return self._require_client().output_state(channel=target_channel)
 
     def shutdown_output(self, *, reset_voltage_v: float = 1.0, reset_current_mA: float = 1.0) -> None:
         channel = self.selected_channel()
@@ -2967,6 +3185,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._calibrated_load_noise_g: float | None = None
         self._run_log_mirror_enabled = False
         self._run_log_mirror_path = DEFAULT_RUN_LOG_MIRROR_PATH
+        self._owned_shared_broker_server: Any | None = None
+        self._owned_shared_broker_thread: Thread | None = None
+        self._owned_shared_broker_driver: HmpSerialDriver | None = None
         self._diameter_imported = False
         self._builder_import_in_progress = False
         self._plot_tiles: list[PlotTileWidgets] = []
@@ -3934,12 +4155,9 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form.addRow("Profile", self.combo_supply_profile)
 
         self.combo_current_sweep_supply_channel = QtWidgets.QComboBox(supply_box)
-        self.combo_current_sweep_supply_channel.addItem("Profile default", 0)
+        self.combo_current_sweep_supply_channel.addItem("Select channel...", 0)
         for channel in range(1, 5):
             self.combo_current_sweep_supply_channel.addItem(f"CH{channel}", channel)
-        self.combo_current_sweep_supply_channel.setCurrentIndex(
-            self.combo_current_sweep_supply_channel.findData(SUPPLY_PROFILES["hmp4030"]["channel_select"])
-        )
         supply_form.addRow("Current-sweep channel", self.combo_current_sweep_supply_channel)
 
         self.spin_supply_voltage_limit = CompactDoubleSpinBox(supply_box)
@@ -4021,9 +4239,9 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form.addRow("", self.check_motor_supply_power)
         motor_supply_row = QtWidgets.QHBoxLayout()
         self.combo_motor_supply_channel = QtWidgets.QComboBox(supply_box)
+        self.combo_motor_supply_channel.addItem("Select channel...", 0)
         for channel in range(1, 5):
             self.combo_motor_supply_channel.addItem(f"CH{channel}", channel)
-        self.combo_motor_supply_channel.setCurrentIndex(self.combo_motor_supply_channel.findData(2))
         self.spin_motor_supply_voltage = CompactDoubleSpinBox(supply_box)
         self.spin_motor_supply_voltage.setDecimals(2)
         self.spin_motor_supply_voltage.setRange(0.0, 32.05)
@@ -6256,6 +6474,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 command_path=key[0],
                 device_serial=key[1],
                 prefer_native_usb=key[2],
+                transport_logger=self._log,
             )
             self._tic_controller_key = key
         return self._tic_controller
@@ -6315,7 +6534,7 @@ class MainWindow(QtWidgets.QMainWindow):
             baudrate=int(self.combo_supply_baud.currentText()),
             profile_id=profile_id,
             max_voltage_v=float(self.spin_supply_voltage_limit.value()),
-            channel_select=self._current_sweep_supply_channel(),
+            channel_select=self._current_sweep_supply_channel() or 0,
         )
 
     def _using_shared_broker_supply(self) -> bool:
@@ -6330,14 +6549,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_supply_baud.setCurrentText(str(baudrate))
         self.spin_supply_voltage_limit.setValue(float(profile.get("max_voltage", 32.05)))
         self.spin_supply_manual_current.setValue(float(profile.get("start_current_mA", 1.0)))
-        current_channel = int(profile.get("channel_select", 0) or 0)
-        current_channel_index = self.combo_current_sweep_supply_channel.findData(current_channel)
-        if current_channel_index >= 0:
-            self.combo_current_sweep_supply_channel.setCurrentIndex(current_channel_index)
-        motor_channel = int(profile.get("motor_supply_channel", 0) or 0)
-        motor_channel_index = self.combo_motor_supply_channel.findData(motor_channel)
-        if motor_channel_index >= 0:
-            self.combo_motor_supply_channel.setCurrentIndex(motor_channel_index)
+        if not getattr(self, "_settings_restore_in_progress", False):
+            current_channel_index = self.combo_current_sweep_supply_channel.findData(0)
+            if current_channel_index >= 0:
+                self.combo_current_sweep_supply_channel.setCurrentIndex(current_channel_index)
+            motor_channel_index = self.combo_motor_supply_channel.findData(0)
+            if motor_channel_index >= 0:
+                self.combo_motor_supply_channel.setCurrentIndex(motor_channel_index)
 
     def _connect_supply(self, checked: bool = False, *, show_errors: bool = True) -> bool:
         self._disconnect_supply()
@@ -6345,11 +6563,23 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             controller.connect()
         except Exception as exc:
-            if show_errors:
-                QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to connect power supply: {exc}")
+            if self._using_shared_broker_supply():
+                try:
+                    self._start_owned_shared_broker()
+                    controller = self._build_supply_controller()
+                    controller.connect()
+                except Exception as broker_exc:
+                    if show_errors:
+                        QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to connect power supply: {broker_exc}")
+                    else:
+                        self._log(f"Failed to connect power supply: {broker_exc}")
+                    return False
             else:
-                self._log(f"Failed to connect power supply: {exc}")
-            return False
+                if show_errors:
+                    QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to connect power supply: {exc}")
+                else:
+                    self._log(f"Failed to connect power supply: {exc}")
+                return False
         self._supply_controller = controller
         if isinstance(controller, SharedBrokerSupplyController):
             self.label_supply_status.setText(
@@ -6362,6 +6592,94 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(self.label_supply_status.text())
         self._refresh_supply_snapshot(force=True)
         return True
+
+    def _start_owned_shared_broker(self) -> None:
+        if self._owned_shared_broker_server is not None:
+            return
+        port_name = str(self.combo_supply_port.currentData() or "").strip()
+        if not port_name:
+            raise RuntimeError("Select the HMP COM port before starting the shared HMP broker.")
+        current_channel = self._current_sweep_supply_channel()
+        if current_channel is None:
+            raise RuntimeError("Select a current-sweep supply channel before starting the shared HMP broker.")
+        motor_channel = self._motor_supply_channel() if self._motor_supply_enabled() else None
+        if self._motor_supply_enabled() and motor_channel is None:
+            raise RuntimeError("Select a motor supply channel before starting the shared HMP broker.")
+
+        driver = HmpSerialDriver(
+            port_name=port_name,
+            baudrate=int(self.combo_supply_baud.currentText()),
+            timeout_s=0.7,
+        )
+        try:
+            driver.connect()
+            idn_text = driver.identify()
+            if driver.profile is None:
+                raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
+            broker = SharedPowerSupplyBroker(driver, driver.profile)
+            current_limit_mA = max(
+                float(self.spin_supply_manual_current.value()),
+                float(self.spin_current_sweep_start_mA.value()),
+                float(self.spin_current_sweep_end_mA.value()),
+                float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
+                1.0,
+            )
+            broker.assign_role(
+                channel=current_channel,
+                role=ROLE_MINI_DMA_CURRENT,
+                confirmed=True,
+                voltage_limit_v=float(self.spin_supply_voltage_limit.value()),
+                current_limit_a=current_limit_mA / 1000.0,
+            )
+            if motor_channel is not None:
+                broker.assign_role(
+                    channel=motor_channel,
+                    role=ROLE_MINI_DMA_MOTOR,
+                    confirmed=True,
+                    voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
+                    current_limit_a=float(self.spin_motor_supply_current_limit.value()),
+                )
+            broker.confirm_profile(name="Mini DMA auto-started shared HMP broker")
+            server, thread = start_broker_server(
+                broker,
+                host=self.edit_shared_broker_host.text().strip() or "127.0.0.1",
+                port=int(self.spin_shared_broker_port.value()),
+            )
+        except Exception:
+            driver.close()
+            raise
+
+        self._owned_shared_broker_server = server
+        self._owned_shared_broker_thread = thread
+        self._owned_shared_broker_driver = driver
+        self._log(f"Started shared HMP broker on {self.edit_shared_broker_host.text().strip() or '127.0.0.1'}:{self.spin_shared_broker_port.value()} for {port_name}.")
+
+    def _stop_owned_shared_broker(self) -> None:
+        server = self._owned_shared_broker_server
+        thread = self._owned_shared_broker_thread
+        driver = self._owned_shared_broker_driver
+        self._owned_shared_broker_server = None
+        self._owned_shared_broker_thread = None
+        self._owned_shared_broker_driver = None
+        if server is not None:
+            try:
+                server.shutdown()
+            except Exception:
+                pass
+            try:
+                server.server_close()
+            except Exception:
+                pass
+        if thread is not None:
+            try:
+                thread.join(timeout=2.0)
+            except Exception:
+                pass
+        if driver is not None:
+            try:
+                driver.close()
+            except Exception:
+                pass
 
     def _disconnect_supply(self) -> None:
         if self._supply_controller is not None:
@@ -6391,16 +6709,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return config.motor_supply_enabled
         return self.check_motor_supply_power.isChecked()
 
-    def _motor_supply_channel(self) -> int:
-        return int(self.combo_motor_supply_channel.currentData() or 1)
+    def _motor_supply_channel(self) -> int | None:
+        configured = int(self.combo_motor_supply_channel.currentData() or 0)
+        return configured if configured > 0 else None
 
     def _current_sweep_supply_channel(self) -> int | None:
         configured = int(self.combo_current_sweep_supply_channel.currentData() or 0)
         if configured > 0:
             return configured
-        profile = SUPPLY_PROFILES.get(str(self.combo_supply_profile.currentData() or "hmp4030"), {})
-        channel = int(profile.get("channel_select", 0) or 0)
-        return channel if channel > 0 else None
+        return None
 
     def _enable_motor_supply_output(self) -> bool:
         if self._supply_controller is None or not self._supply_controller.is_connected():
@@ -6408,13 +6725,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         try:
             channel = self._motor_supply_channel()
+            if channel is None:
+                raise RuntimeError("Select a motor supply channel before enabling motor power.")
             self._supply_controller.configure_channel(
                 channel=channel,
                 voltage_v=float(self.spin_motor_supply_voltage.value()),
                 current_a=float(self.spin_motor_supply_current_limit.value()),
                 output_on=True,
             )
-            self._supply_controller.select_channel()
+            current_channel = self._current_sweep_supply_channel()
+            if current_channel is not None:
+                self._supply_controller.select_channel(current_channel)
+            output_state = self._supply_channel_output_state(channel)
+            if output_state is False:
+                raise RuntimeError(f"CH{channel} output did not report ON after motor power enable.")
         except Exception as exc:
             self._log(f"Motor supply enable failed: {exc}")
             QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to enable motor supply channel: {exc}")
@@ -6426,18 +6750,35 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return True
 
+    def _supply_channel_output_state(self, channel: int) -> bool | None:
+        if self._supply_controller is None:
+            return None
+        method = getattr(self._supply_controller, "output_state", None)
+        if not callable(method):
+            return None
+        try:
+            return method(channel)
+        except Exception as exc:
+            self._log(f"Supply CH{channel} output-state readback failed: {exc}")
+            return None
+
     def _disable_motor_supply_output(self) -> bool:
         if self._supply_controller is None or not self._supply_controller.is_connected():
             return False
         try:
             channel = self._motor_supply_channel()
+            if channel is None:
+                self._log("Select a motor supply channel before disabling motor power.")
+                return False
             self._supply_controller.configure_channel(
                 channel=channel,
                 voltage_v=float(self.spin_motor_supply_voltage.value()),
                 current_a=float(self.spin_motor_supply_current_limit.value()),
                 output_on=False,
             )
-            self._supply_controller.select_channel()
+            current_channel = self._current_sweep_supply_channel()
+            if current_channel is not None:
+                self._supply_controller.select_channel(current_channel)
         except Exception as exc:
             self._log(f"Motor supply disable failed: {exc}")
             return False
@@ -6449,7 +6790,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         channel = self._current_sweep_supply_channel()
         if channel is None:
-            return True
+            self._log("Select a current-sweep supply channel before preparing the output.")
+            return False
         current_mA = float(self.spin_supply_manual_current.value())
         try:
             self._supply_controller.configure_channel(
@@ -9771,6 +10113,47 @@ class MainWindow(QtWidgets.QMainWindow):
             seek_key=seek_key,
         )
 
+    def _current_sweep_protective_step_needed(
+        self,
+        previous_error: float | None,
+        error_value: float,
+        tolerance: float,
+    ) -> bool:
+        if previous_error is None or not self._current_sweep_freezes_live_stiffness():
+            return False
+        previous_abs = abs(float(previous_error))
+        current_abs = abs(float(error_value))
+        growth_margin = max(abs(float(tolerance)) * 0.2, 1e-9)
+        if float(previous_error) * float(error_value) >= 0.0:
+            return current_abs > previous_abs + growth_margin
+        violent_reversal_margin = max(abs(float(tolerance)) * 3.0, previous_abs * 0.5)
+        return current_abs > previous_abs + violent_reversal_margin
+
+    def _current_sweep_travel_limit_exceeded(
+        self,
+        seek_key: tuple[str, int, float],
+        next_travel_mm: float,
+    ) -> bool:
+        if not self._current_sweep_freezes_live_stiffness():
+            return False
+        limit_mm = self._seek_max_travel_mm()
+        current_travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
+        return current_travel_mm + abs(float(next_travel_mm)) > limit_mm
+
+    def _stop_for_current_sweep_travel_limit(
+        self,
+        seek_key: tuple[str, int, float],
+        next_travel_mm: float,
+    ) -> None:
+        limit_mm = self._seek_max_travel_mm()
+        current_travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
+        self._log(
+            "Recipe stopped because closed-loop load/stress correction exceeded the "
+            f"correction travel limit ({_format_compact_unit(current_travel_mm + abs(float(next_travel_mm)), 'mm')} "
+            f"> {_format_compact_unit(limit_mm, 'mm')})."
+        )
+        self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+
     def _clear_seek_state(self, seek_key: tuple[str, int, float]) -> None:
         self._seek_last_error_by_key.pop(seek_key, None)
         self._seek_last_value_by_key.pop(seek_key, None)
@@ -10768,9 +11151,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return True
         if filtered_signal is not None:
+            noise_component = filtered_signal.noise * self._current_sweep_hold_noise_sigma()
+            if self._is_current_sweep_mode(self._automation_name):
+                noise_component = self._current_sweep_bounded_noise_band(
+                    basis,
+                    filtered_signal.noise,
+                )
             noise_band = max(
                 effective_tolerance,
-                filtered_signal.noise * self._current_sweep_hold_noise_sigma(),
+                noise_component,
                 self._current_sweep_hold_min_band_for_basis(
                     basis,
                     self._current_sweep_hold_min_resume_stress_mpa(),
@@ -10985,6 +11374,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             return False
         overshot_target = previous_error is not None and previous_error * delta_value < 0.0
+        protective_single_step = self._current_sweep_protective_step_needed(
+            previous_error,
+            delta_value,
+            effective_tolerance,
+        )
         if overshot_target:
             if (
                 filtered_signal is not None
@@ -11091,6 +11485,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self._seek_no_response_count_by_key[seek_key] = 0
+        if protective_single_step:
+            nudge_mm = min(nudge_mm, self._motor_step_mm())
+            self._log(
+                "Closed-loop response worsened after the previous correction; "
+                "using a protective single-step correction."
+            )
         seek_direction = delta_value
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             seek_direction *= self._tension_motion_sign()
@@ -11104,6 +11504,22 @@ class MainWindow(QtWidgets.QMainWindow):
             and nudge_mm <= self._motor_step_mm() + 1e-12
         ):
             backlash_takeup_mm = 0.0
+        if self._current_sweep_travel_limit_exceeded(seek_key, nudge_mm + backlash_takeup_mm):
+            self._stop_for_current_sweep_travel_limit(seek_key, nudge_mm + backlash_takeup_mm)
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=effective_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                correction_mm=nudge_mm,
+                backlash_mm=backlash_takeup_mm,
+                result="stopped",
+                reason="correction_travel_limit",
+            )
+            return False
         if not zero_return_needs_more_motion and not self._reverse_correction_is_worthwhile(
             basis,
             delta_value,
@@ -11951,10 +12367,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _prepare_manual_jog_press(self) -> None:
         previous_motor_power_ok = self._tic_motor_power_ok
-        try:
-            refreshed = self._refresh_tic_status()
-        except Exception:
-            refreshed = False
+        refreshed = False
+        recent_ok_status = (
+            self._tic_motor_power_ok is True
+            and self._last_tic_status_time_s is not None
+            and time.time() - self._last_tic_status_time_s <= MANUAL_JOG_TIC_STATUS_FRESH_S
+        )
+        if recent_ok_status:
+            refreshed = True
+        else:
+            try:
+                refreshed = self._refresh_tic_status()
+            except Exception:
+                refreshed = False
         if not refreshed and previous_motor_power_ok is None:
             self._tic_motor_power_ok = None
         if self._has_unconfirmed_motion_command():
@@ -12073,10 +12498,6 @@ class MainWindow(QtWidgets.QMainWindow):
         steps = 3 + (1 if self._motor_supply_enabled() else 0)
         completed_steps = 0
         try:
-            self._set_manual_auto_connect_progress("Connecting motor controller...", completed_steps, steps)
-            if not self._ensure_tic_ready_for_recipe():
-                connected = False
-            completed_steps += 1
             self._set_manual_auto_connect_progress("Connecting scale...", completed_steps, steps)
             if self._scale_thread is None:
                 connected = self._ensure_scale_ready_for_recipe() and connected
@@ -12094,6 +12515,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 elif not self._enable_motor_supply_output():
                     connected = False
                 completed_steps += 1
+            self._set_manual_auto_connect_progress("Connecting motor controller...", completed_steps, steps)
+            if not self._ensure_tic_ready_for_recipe():
+                connected = False
+            completed_steps += 1
             if connected:
                 self._set_manual_auto_connect_progress("Hardware auto-connect completed.", steps, steps)
                 self._log("Manual hardware auto-connect completed.")
@@ -14090,39 +14515,65 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return self._tic_motor_power_ok is not False
 
-    def _preflight_recipe_hardware(self, steps: Sequence[AutomationStep]) -> bool:
+    def _recipe_preflight_needs_progress(self, steps: Sequence[AutomationStep]) -> bool:
+        if self._manual_auto_connect_progress is not None:
+            return False
+        supply_ready = self._supply_controller is not None and self._supply_controller.is_connected()
+        return (
+            (self._recipe_requires_supply(steps) and not supply_ready)
+            or (self._recipe_requires_scale(steps) and self._scale_thread is None)
+            or (self._recipe_requires_tic(steps) and self._tic_motor_power_ok is not True)
+        )
+
+    def _preflight_recipe_hardware(self, steps: Sequence[AutomationStep], *, show_progress: bool = False) -> bool:
+        started_progress = False
+        preflight_steps = 4
+        if show_progress and self._recipe_preflight_needs_progress(steps):
+            started_progress = True
+            self._show_manual_auto_connect_progress()
+            self._set_manual_auto_connect_progress("Checking recipe hardware...", 0, preflight_steps)
+            self._log("Recipe hardware auto-connect started.")
         issues: list[str] = []
-        if self._recipe_requires_supply(steps) and not self._ensure_supply_ready_for_recipe():
-            issues.append("Power supply is not connected. Use Auto-detect/connect supply and check the supply is powered on.")
-        if not issues and self._motor_supply_enabled() and not self._enable_motor_supply_output():
-            issues.append("Motor supply channel could not be enabled. Check the HMP channel wiring/settings.")
-        if self._recipe_requires_tic(steps) and not self._ensure_tic_ready_for_recipe():
-            vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
-            issues.append(
-                "Motor controller is reachable, but motor power is not ready "
-                f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V). "
-                "Turn on the motor supply, or enable the HMP motor-supply channel option and run Check motor again."
-            )
-        if not issues and self._recipe_requires_tic(steps):
-            tic_limit_ok, tic_limit_message = self._apply_tic_current_limit()
-            self._log(f"Recipe preflight: {tic_limit_message}")
-            if not tic_limit_ok:
-                issues.append(tic_limit_message.replace("FAIL: ", "", 1))
-        if self._recipe_requires_scale(steps) and not self._ensure_scale_ready_for_recipe():
-            issues.append(
-                "Scale is not connected. Use Auto-detect scale, then verify the zero-load reference, "
-                "and fix the serial link if it still fails."
-            )
-        if not issues and self._recipe_requires_scale(steps):
-            with self._scale_state_lock:
-                latest_raw_g = self._latest_scale_value_g
-            self._restore_default_zero_load_reference_if_real_grams(float(latest_raw_g))
-        if not issues:
-            return True
-        message = "Recipe preflight failed:\n\n" + "\n".join(f"- {issue}" for issue in issues)
-        self._log(message.replace("\n", " "))
-        QtWidgets.QMessageBox.warning(self, APP_NAME, message)
-        return False
+        try:
+            self._set_manual_auto_connect_progress("Checking power supply...", 0, preflight_steps)
+            if self._recipe_requires_supply(steps) and not self._ensure_supply_ready_for_recipe():
+                issues.append("Power supply is not connected. Use Auto-detect/connect supply and check the supply is powered on.")
+            self._set_manual_auto_connect_progress("Checking motor supply...", 1, preflight_steps)
+            if not issues and self._motor_supply_enabled() and not self._enable_motor_supply_output():
+                issues.append("Motor supply channel could not be enabled. Check the HMP channel wiring/settings.")
+            self._set_manual_auto_connect_progress("Checking motor controller...", 2, preflight_steps)
+            if self._recipe_requires_tic(steps) and not self._ensure_tic_ready_for_recipe():
+                vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
+                issues.append(
+                    "Motor controller is reachable, but motor power is not ready "
+                    f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V). "
+                    "Turn on the motor supply, or enable the HMP motor-supply channel option and run Check motor again."
+                )
+            if not issues and self._recipe_requires_tic(steps):
+                tic_limit_ok, tic_limit_message = self._apply_tic_current_limit()
+                self._log(f"Recipe preflight: {tic_limit_message}")
+                if not tic_limit_ok:
+                    issues.append(tic_limit_message.replace("FAIL: ", "", 1))
+            self._set_manual_auto_connect_progress("Checking scale...", 3, preflight_steps)
+            if self._recipe_requires_scale(steps) and not self._ensure_scale_ready_for_recipe():
+                issues.append(
+                    "Scale is not connected. Use Auto-detect scale, then verify the zero-load reference, "
+                    "and fix the serial link if it still fails."
+                )
+            if not issues and self._recipe_requires_scale(steps):
+                with self._scale_state_lock:
+                    latest_raw_g = self._latest_scale_value_g
+                self._restore_default_zero_load_reference_if_real_grams(float(latest_raw_g))
+            if not issues:
+                self._set_manual_auto_connect_progress("Recipe hardware ready.", preflight_steps, preflight_steps)
+                return True
+            message = "Recipe preflight failed:\n\n" + "\n".join(f"- {issue}" for issue in issues)
+            self._log(message.replace("\n", " "))
+            QtWidgets.QMessageBox.warning(self, APP_NAME, message)
+            return False
+        finally:
+            if started_progress:
+                self._close_manual_auto_connect_progress()
 
     def _apply_tic_current_limit(self) -> tuple[bool, str]:
         target_mA = float(self.spin_tic_current_limit_mA.value())
@@ -14159,6 +14610,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self._supply_controller is None:
                     raise RuntimeError("supply controller is missing after connect")
                 channel = self._motor_supply_channel()
+                if channel is None:
+                    raise RuntimeError("select a motor supply channel first")
                 voltage = float(self.spin_motor_supply_voltage.value())
                 current_limit = float(self.spin_motor_supply_current_limit.value())
                 self._supply_controller.configure_channel(
@@ -14167,7 +14620,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     current_a=current_limit,
                     output_on=True,
                 )
-                self._supply_controller.select_channel()
+                current_channel = self._current_sweep_supply_channel()
+                if current_channel is not None:
+                    self._supply_controller.select_channel(current_channel)
                 statuses.append(
                     f"PASS: Motor supply CH{channel} set to "
                     f"{_format_compact_number(voltage, decimals=2)} V / "
@@ -14178,7 +14633,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 ok = False
             channel = self._current_sweep_supply_channel()
             if channel is None:
-                statuses.append("PASS: Current-sweep supply uses the profile's direct output channel.")
+                statuses.append("FAIL: Select a current-sweep supply channel.")
+                ok = False
             else:
                 statuses.append(f"PASS: Current-sweep supply channel CH{channel} selected.")
 
@@ -14946,7 +15402,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
             return
         self._sync_stale_log_name_from_sample()
-        if not self._preflight_recipe_hardware(steps):
+        if not self._preflight_recipe_hardware(steps, show_progress=True):
             return
         if not self._prepare_continuity_current_for_recipe(steps):
             return
@@ -16532,6 +16988,12 @@ class MainWindow(QtWidgets.QMainWindow):
             SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA,
         )
 
+    def _current_sweep_bounded_noise_band(self, basis: str, noise_value: float) -> float:
+        noise_band = max(0.0, float(noise_value)) * self._current_sweep_hold_noise_sigma()
+        if not self._is_current_sweep_mode(self._automation_name):
+            return noise_band
+        return min(noise_band, self._current_sweep_hold_transformation_band_for_basis(basis))
+
     def _current_sweep_hold_min_slope_for_basis(self, basis: str) -> float:
         if basis == HSW_BASIS_STRESS_MPA:
             return SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S
@@ -16609,6 +17071,9 @@ class MainWindow(QtWidgets.QMainWindow):
             abs(float(pause_band)),
             self._current_sweep_hold_transformation_band_for_basis(step.basis),
         )
+        if abs(float(signed_error)) > transformation_band * 2.5:
+            self._reset_current_sweep_ramp_hold_candidate()
+            return True
         if abs(float(signed_error)) <= transformation_band:
             self._reset_current_sweep_ramp_hold_candidate()
             return False
@@ -16676,7 +17141,7 @@ class MainWindow(QtWidgets.QMainWindow):
         resume_factor = self._current_sweep_hold_resume_factor(step)
         pause_band = max(
             tolerance * pause_factor,
-            noise_value * self._current_sweep_hold_noise_sigma(),
+            self._current_sweep_bounded_noise_band(step.basis, noise_value),
             self._current_sweep_hold_min_band_for_basis(
                 step.basis,
                 self._current_sweep_hold_min_pause_stress_mpa(),
@@ -16685,7 +17150,7 @@ class MainWindow(QtWidgets.QMainWindow):
         resume_band = max(
             tolerance * resume_factor,
             min(
-                noise_value * self._current_sweep_hold_noise_sigma(),
+                self._current_sweep_bounded_noise_band(step.basis, noise_value),
                 self._current_sweep_hold_transformation_band_for_basis(step.basis),
             ),
             self._current_sweep_hold_min_band_for_basis(
@@ -18113,7 +18578,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("continuity_monitor_enabled", self.check_continuity_monitor.isChecked())
         self.settings.setValue("continuity_current_mA", self.spin_continuity_current_mA.value())
         self.settings.setValue("motor_supply_enabled", self.check_motor_supply_power.isChecked())
-        self.settings.setValue("motor_supply_channel", self.combo_motor_supply_channel.currentData() or 1)
+        self.settings.setValue("motor_supply_channel", self.combo_motor_supply_channel.currentData() or 0)
         self.settings.setValue("motor_supply_voltage_v", self.spin_motor_supply_voltage.value())
         self.settings.setValue("motor_supply_current_limit_a", self.spin_motor_supply_current_limit.value())
         self.settings.setValue("ticcmd_path", self.edit_ticcmd_path.text())
@@ -18362,7 +18827,7 @@ class MainWindow(QtWidgets.QMainWindow):
         current_sweep_channel = int(
             self.settings.value(
                 "current_sweep_supply_channel",
-                int(supply_profile_defaults.get("channel_select", SUPPLY_PROFILES["hmp4030"]["channel_select"]) or 0),
+                0,
             )
         )
         current_sweep_channel_index = self.combo_current_sweep_supply_channel.findData(current_sweep_channel)
@@ -18384,7 +18849,7 @@ class MainWindow(QtWidgets.QMainWindow):
         motor_channel = int(
             self.settings.value(
                 "motor_supply_channel",
-                int(supply_profile_defaults.get("motor_supply_channel", 2) or 2),
+                0,
             )
         )
         motor_channel_index = self.combo_motor_supply_channel.findData(motor_channel)
@@ -19011,6 +19476,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_session(reason="app_closed", detail="Application window closed while session was active.")
         self._release_experiment_sleep_guard()
         self._disconnect_supply()
+        self._stop_owned_shared_broker()
         super().closeEvent(event)
 
 

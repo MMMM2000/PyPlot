@@ -9,6 +9,7 @@ import importlib
 import json
 import math
 import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ pytest.importorskip(
 )
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from data_logging.shared_power_supply.profiles import HMP4040_PROFILE
 
 TEST_QSETTINGS_ROOT = Path(
     os.environ.get("PYTEST_QSETTINGS_ROOT", "artifacts/test-qsettings")
@@ -2319,6 +2321,52 @@ def test_manual_jog_press_resyncs_stale_previous_target(
         _close_test_window(window)
 
 
+def test_manual_jog_press_uses_recent_good_tic_status_without_blocking_refresh(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    refresh_calls: list[bool] = []
+
+    window._refresh_tic_status = lambda: refresh_calls.append(True) or True  # type: ignore[method-assign]
+    window._tic_motor_power_ok = True
+    window._last_tic_vin_v = 12.0
+    window._last_tic_status_time_s = time.time()
+    window._last_motion_command_time_s = None
+    window._current_position_mm = 1.25
+    window._effective_position_mm = 9.0
+    window._last_effective_move_target_mm = 9.0
+    window._last_move_target_mm = 9.0
+    window._manual_jog_uses_last_target = True
+
+    try:
+        window._prepare_manual_jog_press()
+
+        assert refresh_calls == []
+        assert window._effective_position_mm == pytest.approx(1.25)
+        assert window._last_effective_move_target_mm == pytest.approx(1.25)
+        assert window._last_move_target_mm == pytest.approx(1.25)
+        assert window._manual_jog_uses_last_target is False
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_jog_press_refreshes_stale_tic_status(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    refresh_calls: list[bool] = []
+
+    window._refresh_tic_status = lambda: refresh_calls.append(True) or True  # type: ignore[method-assign]
+    window._tic_motor_power_ok = True
+    window._last_tic_status_time_s = time.time() - (mini_dma_mod.MANUAL_JOG_TIC_STATUS_FRESH_S + 1.0)
+
+    try:
+        window._prepare_manual_jog_press()
+
+        assert refresh_calls == [True]
+    finally:
+        _close_test_window(window)
+
+
 def test_held_manual_jog_advances_by_configured_linear_speed(
     tmp_path: Path,
     qtbot,
@@ -2452,8 +2500,8 @@ def test_manual_auto_connect_button_runs_manual_preflight(tmp_path: Path, qtbot)
 
         button.clicked.emit()
 
-        qtbot.waitUntil(lambda: called == ["tic", "scale", "supply", "current"], timeout=1000)
-        assert called == ["tic", "scale", "supply", "current"]
+        qtbot.waitUntil(lambda: called == ["scale", "supply", "current", "tic"], timeout=1000)
+        assert called == ["scale", "supply", "current", "tic"]
         assert button.isEnabled()
         assert button.text() == "Auto-connect hardware"
     finally:
@@ -2482,6 +2530,25 @@ def test_manual_auto_connect_button_disables_while_queued(tmp_path: Path, qtbot)
         _close_test_window(window)
 
 
+def test_manual_auto_connect_enables_motor_supply_before_tic_status(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._enable_motor_supply_output = lambda: called.append("motor") or True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+    window.check_motor_supply_power.setChecked(True)
+
+    try:
+        window._run_manual_auto_connect_hardware()
+
+        assert called == ["scale", "supply", "current", "supply", "motor", "tic"]
+        assert "Manual hardware auto-connect completed." in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_manual_auto_connect_shows_progress_dialog_while_queued(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
@@ -2505,6 +2572,83 @@ def test_manual_auto_connect_shows_progress_dialog_while_queued(tmp_path: Path, 
 
         qtbot.waitUntil(lambda: button.isEnabled(), timeout=1000)
         assert window._manual_auto_connect_progress is None
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_preflight_shows_auto_connect_progress_when_requested(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    warnings: list[str] = []
+    progress_seen: list[bool] = []
+
+    def _fail_scale() -> bool:
+        progress = window._manual_auto_connect_progress
+        progress_seen.append(progress is not None and progress.isVisible())
+        return False
+
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(message),
+    )
+    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+    window._ensure_scale_ready_for_recipe = _fail_scale  # type: ignore[method-assign]
+    window._tic_motor_power_ok = None
+    window._scale_thread = None
+
+    try:
+        ok = window._preflight_recipe_hardware(
+            [
+                mini_dma_mod.AutomationStep(
+                    "seek_target",
+                    target_value=0.0,
+                    basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+                ),
+                mini_dma_mod.AutomationStep("record", basis=mini_dma_mod.HSW_BASIS_LOAD_G),
+            ],
+            show_progress=True,
+        )
+
+        assert ok is False
+        assert progress_seen == [True]
+        assert window._manual_auto_connect_progress is None
+        assert warnings
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_preflight_does_not_show_auto_connect_progress_by_default(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    shown: list[bool] = []
+    window._show_manual_auto_connect_progress = lambda: shown.append(True)  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+    window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+
+    try:
+        ok = window._preflight_recipe_hardware(
+            [
+                mini_dma_mod.AutomationStep(
+                    "seek_target",
+                    target_value=0.0,
+                    basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+                ),
+                mini_dma_mod.AutomationStep("record", basis=mini_dma_mod.HSW_BASIS_LOAD_G),
+            ]
+        )
+
+        assert ok is True
+        assert shown == []
     finally:
         _close_test_window(window)
 
@@ -4516,7 +4660,7 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
         _close_test_window(window)
 
 
-def test_hmp4040_profile_defaults_to_ch4_current_and_ch3_motor(tmp_path: Path, qtbot) -> None:
+def test_hmp4040_profile_change_requires_manual_channel_selection(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
@@ -4525,14 +4669,14 @@ def test_hmp4040_profile_defaults_to_ch4_current_and_ch3_motor(tmp_path: Path, q
 
         window.combo_supply_profile.setCurrentIndex(profile_index)
 
-        assert window.combo_current_sweep_supply_channel.currentData() == 4
-        assert window.combo_motor_supply_channel.currentData() == 3
-        assert window._build_supply_controller().selected_channel() == 4
+        assert window.combo_current_sweep_supply_channel.currentData() == 0
+        assert window.combo_motor_supply_channel.currentData() == 0
+        assert window._build_supply_controller().selected_channel() == 0
     finally:
         _close_test_window(window)
 
 
-def test_hmp4040_restored_profile_uses_profile_channel_defaults(tmp_path: Path, qtbot) -> None:
+def test_hmp4040_restored_profile_keeps_channels_unselected_without_saved_channels(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
     settings = _test_settings()
@@ -4546,8 +4690,8 @@ def test_hmp4040_restored_profile_uses_profile_channel_defaults(tmp_path: Path, 
     try:
         assert window.combo_supply_profile.currentData() == "hmp4040"
         assert window.combo_supply_baud.currentText() == "115200"
-        assert window.combo_current_sweep_supply_channel.currentData() == 4
-        assert window.combo_motor_supply_channel.currentData() == 3
+        assert window.combo_current_sweep_supply_channel.currentData() == 0
+        assert window.combo_motor_supply_channel.currentData() == 0
         assert window.spin_supply_voltage_limit.value() == pytest.approx(32.05)
     finally:
         _close_test_window(window)
@@ -4581,8 +4725,8 @@ def test_auto_detect_supply_port_identifies_hmp4040(tmp_path: Path, qtbot, monke
         assert window.combo_supply_port.currentData() == "COM7"
         assert window.combo_supply_baud.currentText() == "115200"
         assert window.combo_supply_profile.currentData() == "hmp4040"
-        assert window.combo_current_sweep_supply_channel.currentData() == 4
-        assert window.combo_motor_supply_channel.currentData() == 3
+        assert window.combo_current_sweep_supply_channel.currentData() == 0
+        assert window.combo_motor_supply_channel.currentData() == 0
     finally:
         _close_test_window(window)
 
@@ -6058,6 +6202,44 @@ def test_current_sweep_hold_uses_absolute_stress_error_on_current_up_ramp(
         _close_test_window(window)
 
 
+def test_current_sweep_hold_pauses_despite_large_transient_noise(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (24.0, 24.0, 0.5, 12.0)
+    )
+    signal = mini_dma_mod.ScaleControlSignal(
+        value=74.0,
+        latest_value=74.0,
+        noise=12.0,
+        slope_per_s=10.0,
+        sample_count=8,
+        timestamp_s=time.time(),
+    )
+    window._scale_control_signal_for_basis = lambda *_args, **_kwargs: signal  # type: ignore[method-assign]
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=20.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+    )
+
+    try:
+        holding, stopped = window._update_current_sweep_ramp_hold(step, 4, now_s=100.0)
+
+        assert holding is True
+        assert stopped is False
+        assert window._current_sweep_ramp_hold_step_index == 4
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_has_no_timeout_stop(
     tmp_path: Path,
     qtbot,
@@ -7475,6 +7657,10 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
             self.port = port
             self.calls: list[tuple[str, dict[str, object]]] = []
 
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
         def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
             self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
             return {"lease_id": f"lease-{channel}"}
@@ -7551,6 +7737,7 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
     assert clients[0].host == "127.0.0.1"
     assert clients[0].port == 8765
     assert clients[0].calls == [
+        ("snapshot", {}),
         (
             "lease",
             {
@@ -7630,11 +7817,295 @@ def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, q
         _close_test_window(window)
 
 
-def test_shared_broker_preflight_connects_without_serial_auto_detect(tmp_path: Path, qtbot) -> None:
+def test_supply_channels_default_to_unselected_and_have_no_profile_default_label(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        current_labels = [
+            window.combo_current_sweep_supply_channel.itemText(index)
+            for index in range(window.combo_current_sweep_supply_channel.count())
+        ]
+
+        assert "Profile default" not in current_labels
+        assert window.combo_current_sweep_supply_channel.currentData() == 0
+        assert window.combo_motor_supply_channel.currentData() == 0
+        assert window._current_sweep_supply_channel() is None
+        assert window._motor_supply_channel() is None
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_channel_setup_requires_explicit_channel(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    configured: list[object] = []
+
+    class _FakeSupply:
+        def is_connected(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            return None
+
+        def configure_channel(self, **kwargs: object) -> None:
+            configured.append(kwargs)
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+
+        assert window._prepare_current_sweep_supply_channel() is False
+
+        assert configured == []
+        assert "Select a current-sweep supply channel before preparing the output." in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_motor_supply_enable_requires_explicit_channel(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    warnings: list[str] = []
+    configured: list[object] = []
+
+    class _FakeSupply:
+        def is_connected(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            return None
+
+        def configure_channel(self, **kwargs: object) -> None:
+            configured.append(kwargs)
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        original_warning = QtWidgets.QMessageBox.warning
+        QtWidgets.QMessageBox.warning = (  # type: ignore[method-assign]
+            lambda _parent, _title, message: warnings.append(str(message))
+        )
+        try:
+            assert window._enable_motor_supply_output() is False
+        finally:
+            QtWidgets.QMessageBox.warning = original_warning  # type: ignore[method-assign]
+
+        assert configured == []
+        assert warnings == [
+            "Failed to enable motor supply channel: Select a motor supply channel before enabling motor power."
+        ]
+    finally:
+        _close_test_window(window)
+
+
+def test_motor_supply_enable_fails_when_output_readback_stays_off(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    warnings: list[str] = []
+
+    class _FakeSupply:
+        def is_connected(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            return None
+
+        def configure_channel(self, **_kwargs: object) -> None:
+            return None
+
+        def select_channel(self, channel: int | None = None) -> None:
+            return None
+
+        def output_state(self, channel: int | None = None) -> bool:
+            return False
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+        monkeypatch_warning = QtWidgets.QMessageBox.warning
+        QtWidgets.QMessageBox.warning = (  # type: ignore[method-assign]
+            lambda _parent, _title, message: warnings.append(str(message))
+        )
+        try:
+            assert window._enable_motor_supply_output() is False
+        finally:
+            QtWidgets.QMessageBox.warning = monkeypatch_warning  # type: ignore[method-assign]
+
+        assert "CH3 output did not report ON" in warnings[0]
+        assert "Motor supply CH3 enabled" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_shared_broker_supply_connect_validates_broker_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, payload))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=1.0,
+        current_channel=4,
+        motor_channel=3,
+    )
+
+    controller.connect()
+
+    assert controller.is_connected() is True
+    assert clients[0].calls == [("snapshot", {})]
+
+
+def test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    broker_started = False
+
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            if not broker_started:
+                raise TimeoutError("timed out")
+            if action == "snapshot":
+                return {"ok": True, "snapshot": {"model": "hmp4040"}}
+            if action == "measure_channel":
+                return {
+                    "ok": True,
+                    "readback": {
+                        "voltage_V": 0.0,
+                        "current_mA": 0.0,
+                        "resistance_ohm": None,
+                        "power_W": 0.0,
+                    },
+                }
+            return {"ok": True}
+
+    class _FakeDriver:
+        def __init__(self, *, port_name: str, baudrate: int, timeout_s: float) -> None:
+            self.port_name = port_name
+            self.baudrate = baudrate
+            self.timeout_s = timeout_s
+            self.profile = HMP4040_PROFILE
+            self.closed = False
+
+        def connect(self) -> None:
+            return None
+
+        def identify(self) -> str:
+            return "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62"
+
+        def close(self) -> None:
+            self.closed = True
+
+        def configure_channel(self, **_kwargs: object) -> None:
+            return None
+
+        def set_current_mA(self, **_kwargs: object) -> None:
+            return None
+
+        def set_output(self, **_kwargs: object) -> None:
+            return None
+
+        def measure(self, **_kwargs: object) -> dict[str, float | None]:
+            return {"voltage_V": 0.0, "current_mA": 0.0}
+
+    class _FakeServer:
+        def __init__(self) -> None:
+            self.shutdown_called = False
+            self.close_called = False
+
+        def shutdown(self) -> None:
+            self.shutdown_called = True
+
+        def server_close(self) -> None:
+            self.close_called = True
+
+    class _FakeThread:
+        def __init__(self) -> None:
+            self.joined = False
+
+        def join(self, timeout: float | None = None) -> None:
+            self.joined = True
+
+    started: dict[str, object] = {}
+
+    def _fake_start_broker_server(broker: object, *, host: str, port: int) -> tuple[_FakeServer, _FakeThread]:
+        nonlocal broker_started
+        broker_started = True
+        server = _FakeServer()
+        thread = _FakeThread()
+        started.update({"broker": broker, "host": host, "port": port, "server": server, "thread": thread})
+        return server, thread
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
+        monkeypatch.setattr(mini_dma_mod, "HmpSerialDriver", _FakeDriver)
+        monkeypatch.setattr(mini_dma_mod, "start_broker_server", _fake_start_broker_server)
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.combo_supply_port.addItem("COM3", "COM3")
+        window.combo_supply_port.setCurrentIndex(window.combo_supply_port.findData("COM3"))
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.check_motor_supply_power.setChecked(True)
+        window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+        window.spin_supply_voltage_limit.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(40.0)
+        window.spin_motor_supply_voltage.setValue(12.0)
+        window.spin_motor_supply_current_limit.setValue(0.4)
+
+        assert window._connect_supply(show_errors=False) is True
+
+        assert broker_started is True
+        assert started["host"] == "127.0.0.1"
+        assert started["port"] == 8765
+        assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
+        assert "Started shared HMP broker" in window.log_output.toPlainText()
+        assert "Supply connected through shared HMP broker" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_shared_broker_preflight_connects_without_serial_auto_detect(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     window = _build_window(tmp_path, qtbot)
     calls: list[str] = []
 
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
     try:
+        monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
         profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
         assert profile_index >= 0
         window.combo_supply_profile.setCurrentIndex(profile_index)
@@ -7754,6 +8225,95 @@ def test_tic_controller_sets_step_mode_with_ticcmd(monkeypatch: pytest.MonkeyPat
     controller.set_step_mode("4")
 
     assert calls == [["ticcmd.exe", "-d", "00501366", "--step-mode", "4"]]
+
+
+def test_tic_controller_run_hides_ticcmd_console_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _StartupInfo:
+        def __init__(self) -> None:
+            self.dwFlags = 0
+            self.wShowWindow = None
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args: list[str], **kwargs: object) -> _Completed:
+        captured["args"] = args
+        captured.update(kwargs)
+        return _Completed()
+
+    monkeypatch.setattr(mini_dma_mod.os, "name", "nt")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(mini_dma_mod.subprocess, "STARTF_USESHOWWINDOW", 0x00000001, raising=False)
+    monkeypatch.setattr(mini_dma_mod.subprocess, "STARTUPINFO", _StartupInfo, raising=False)
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+    controller = mini_dma_mod.TicController(command_path="ticcmd", device_serial="00501366")
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+
+    controller.run("--status")
+
+    startupinfo = captured["startupinfo"]
+    assert captured["creationflags"] == 0x08000000
+    assert startupinfo.dwFlags & 0x00000001
+    assert startupinfo.wShowWindow == 0
+
+
+def test_tic_status_falls_back_when_full_status_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = "VIN voltage: 12.00 V\nOperation state: Normal\n"
+        stderr = ""
+
+    def _fake_run(args: list[str], **kwargs: object) -> _Completed:
+        calls.append(args)
+        if "--full" in args and "--status" in args:
+            raise subprocess.TimeoutExpired(args, timeout=float(kwargs.get("timeout", 5.0)))
+        return _Completed()
+
+    controller = mini_dma_mod.TicController(command_path="ticcmd", device_serial="00501366")
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    status = controller.get_status()
+
+    assert "VIN voltage: 12.00 V" in status
+    assert calls == [
+        ["ticcmd.exe", "-d", "00501366", "--status", "--full"],
+        ["ticcmd.exe", "-d", "00501366", "--status"],
+    ]
+
+
+def test_tic_status_raises_instead_of_returning_device_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = "00501366, Tic T500\n"
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    controller = mini_dma_mod.TicController(command_path="ticcmd", device_serial="00501366")
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    with pytest.raises(RuntimeError, match="VIN voltage"):
+        controller.get_status()
+
+    assert calls == [
+        ["ticcmd.exe", "-d", "00501366", "--status", "--full"],
+        ["ticcmd.exe", "-d", "00501366", "--status"],
+        ["ticcmd.exe", "-d", "00501366", "--full"],
+    ]
 
 
 def test_tic_units_per_mm_follow_microstep_factor() -> None:
@@ -7877,6 +8437,95 @@ def test_native_tic_usb_controller_formats_status(monkeypatch: pytest.MonkeyPatc
     assert "Errors currently stopping the motor: None" in status
 
 
+def test_native_tic_usb_controller_accepts_single_device_when_serial_string_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeDevice:
+        idVendor = mini_dma_mod.TIC_USB_VENDOR_ID
+        iProduct = 2
+        iSerialNumber = 3
+
+        def ctrl_transfer(
+            self,
+            request_type: int,
+            request: int,
+            value: int = 0,
+            index: int = 0,
+            data_or_wLength: object = None,
+            *,
+            timeout: int | None = None,
+        ) -> bytes:
+            data = bytearray(0x35)
+            data[0x00] = 10
+            data[0x33:0x35] = (12000).to_bytes(2, "little")
+            return bytes(data)
+
+    device = _FakeDevice()
+
+    class _FakeCore:
+        @staticmethod
+        def find(*, find_all: bool, idVendor: int, backend: object | None = None) -> list[_FakeDevice]:
+            return [device]
+
+    class _FakeUtil:
+        @staticmethod
+        def get_string(_device: _FakeDevice, index: int) -> str:
+            raise ValueError("The device has no langid")
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "_load_pyusb_backend",
+        lambda: (_FakeCore, _FakeUtil, object()),
+    )
+
+    status = mini_dma_mod.NativeTicUsbController(device_serial="00501366").get_status()
+
+    assert "VIN voltage: 12.00 V" in status
+
+
+def test_native_tic_usb_controller_rejects_ambiguous_unreadable_serials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeDevice:
+        idVendor = mini_dma_mod.TIC_USB_VENDOR_ID
+        iProduct = 2
+        iSerialNumber = 3
+
+    class _FakeCore:
+        @staticmethod
+        def find(*, find_all: bool, idVendor: int, backend: object | None = None) -> list[_FakeDevice]:
+            return [_FakeDevice(), _FakeDevice()]
+
+    class _FakeUtil:
+        @staticmethod
+        def get_string(_device: _FakeDevice, index: int) -> str:
+            raise ValueError("The device has no langid")
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "_load_pyusb_backend",
+        lambda: (_FakeCore, _FakeUtil, object()),
+    )
+
+    with pytest.raises(RuntimeError, match="No Pololu Tic USB device"):
+        mini_dma_mod.NativeTicUsbController(device_serial="00501366")
+
+
+def test_libusb_wheel_library_finder_accepts_bundled_dll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import libusb._platform as libusb_platform
+
+    dll_path = tmp_path / "libusb-1.0.dll"
+    dll_path.write_bytes(b"fake dll")
+    monkeypatch.setattr(libusb_platform, "DLL_PATH", dll_path)
+
+    assert mini_dma_mod._find_libusb_wheel_library("usb-1.0") == str(dll_path)
+    assert mini_dma_mod._find_libusb_wheel_library("libusb-1.0") == str(dll_path)
+    assert mini_dma_mod._find_libusb_wheel_library("other") is None
+
+
 def test_tic_controller_prefers_native_usb_when_requested(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeNative:
         def __init__(self, *, device_serial: str = "") -> None:
@@ -7891,6 +8540,9 @@ def test_tic_controller_prefers_native_usb_when_requested(monkeypatch: pytest.Mo
             self.current_limits.append(target_mA)
             return 343
 
+        def get_status(self) -> str:
+            return "VIN voltage: 12.00 V\nTransport: native USB\n"
+
     created: list[_FakeNative] = []
 
     def _make_native(*, device_serial: str = "") -> _FakeNative:
@@ -7900,19 +8552,83 @@ def test_tic_controller_prefers_native_usb_when_requested(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _make_native)
 
+    logs: list[str] = []
     controller = mini_dma_mod.TicController(
         command_path="ticcmd",
         device_serial="00501366",
         prefer_native_usb=True,
+        transport_logger=logs.append,
     )
     controller.set_target_position(42, max_speed=123)
     applied_current_limit = controller.set_current_limit_mA(343)
+    status = controller.get_status()
 
     assert len(created) == 1
     assert created[0].device_serial == "00501366"
     assert created[0].targets == [(42, 123)]
     assert created[0].current_limits == [343]
     assert applied_current_limit == 343
+    assert "Transport: native USB" in status
+    assert logs == ["Tic transport: native USB active."]
+
+
+def test_tic_controller_serializes_native_usb_status_and_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeNative:
+        def __init__(self, *, device_serial: str = "") -> None:
+            self.device_serial = device_serial
+            self.active = False
+            self.calls: list[str] = []
+
+        def _enter(self, name: str) -> None:
+            if self.active:
+                raise RuntimeError(f"concurrent native USB access during {name}")
+            self.active = True
+            self.calls.append(name)
+            time.sleep(0.03)
+            self.active = False
+
+        def get_status(self) -> str:
+            self._enter("status")
+            return "VIN voltage: 12.00 V\nTransport: native USB\n"
+
+        def reset_command_timeout(self) -> None:
+            self._enter("keepalive")
+
+    created: list[_FakeNative] = []
+
+    def _make_native(*, device_serial: str = "") -> _FakeNative:
+        native = _FakeNative(device_serial=device_serial)
+        created.append(native)
+        return native
+
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _make_native)
+    controller = mini_dma_mod.TicController(
+        command_path="ticcmd",
+        device_serial="00501366",
+        prefer_native_usb=True,
+    )
+    errors: list[BaseException] = []
+
+    def _call(method: str) -> None:
+        try:
+            getattr(controller, method)()
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_call, args=("get_status",)),
+        threading.Thread(target=_call, args=("reset_command_timeout",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1.0)
+
+    assert errors == []
+    assert len(created) == 1
+    assert sorted(created[0].calls) == ["keepalive", "status"]
 
 
 def test_tic_controller_auto_falls_back_to_ticcmd_when_native_usb_unavailable(
@@ -7932,10 +8648,12 @@ def test_tic_controller_auto_falls_back_to_ticcmd_when_native_usb_unavailable(
     def _fail_native(*, device_serial: str = "") -> object:
         raise RuntimeError("no native USB access")
 
+    logs: list[str] = []
     controller = mini_dma_mod.TicController(
         command_path="ticcmd",
         device_serial="00501366",
         prefer_native_usb=True,
+        transport_logger=logs.append,
     )
     monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _fail_native)
     monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
@@ -7944,6 +8662,147 @@ def test_tic_controller_auto_falls_back_to_ticcmd_when_native_usb_unavailable(
     controller.reset_command_timeout()
 
     assert calls == [["ticcmd.exe", "-d", "00501366", "--reset-command-timeout"]]
+    assert logs == ["Tic transport fallback: using ticcmd because native USB setup failed: no native USB access"]
+
+
+def test_tic_controller_falls_back_to_ticcmd_when_native_status_call_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _FakeNative:
+        def __init__(self, *, device_serial: str = "") -> None:
+            self.device_serial = device_serial
+
+        def get_status(self) -> str:
+            raise RuntimeError("native access denied")
+
+    class _Completed:
+        returncode = 0
+        stdout = "VIN voltage: 12.00 V\nOperation state: Normal\n"
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    logs: list[str] = []
+    controller = mini_dma_mod.TicController(
+        command_path="ticcmd",
+        device_serial="00501366",
+        prefer_native_usb=True,
+        transport_logger=logs.append,
+    )
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _FakeNative)
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    status = controller.get_status()
+
+    assert "VIN voltage: 12.00 V" in status
+    assert calls == [["ticcmd.exe", "-d", "00501366", "--status", "--full"]]
+    assert logs == ["Tic transport fallback: using ticcmd because native status failed: native access denied"]
+
+
+def test_tic_controller_falls_back_to_ticcmd_when_native_move_call_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _FakeNative:
+        def __init__(self, *, device_serial: str = "") -> None:
+            self.device_serial = device_serial
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            raise RuntimeError("native access denied")
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    logs: list[str] = []
+    controller = mini_dma_mod.TicController(
+        command_path="ticcmd",
+        device_serial="00501366",
+        prefer_native_usb=True,
+        transport_logger=logs.append,
+    )
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _FakeNative)
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    controller.set_target_position(-42, max_speed=123)
+
+    assert calls == [
+        [
+            "ticcmd.exe",
+            "-d",
+            "00501366",
+            "--energize",
+            "--reset-command-timeout",
+            "--exit-safe-start",
+            "--max-speed",
+            "123",
+            "--position",
+            "-42",
+        ]
+    ]
+    assert logs == ["Tic transport fallback: using ticcmd because native position command failed: native access denied"]
+
+
+def test_tic_controller_reopens_native_usb_once_before_ticcmd_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class _FakeNative:
+        def __init__(self, *, device_serial: str = "") -> None:
+            self.device_serial = device_serial
+            self.targets: list[tuple[int, int | None]] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            if len(created) == 1:
+                raise OSError(2, "Entity not found")
+            self.targets.append((position_steps, max_speed))
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    created: list[_FakeNative] = []
+
+    def _make_native(*, device_serial: str = "") -> _FakeNative:
+        native = _FakeNative(device_serial=device_serial)
+        created.append(native)
+        return native
+
+    logs: list[str] = []
+    controller = mini_dma_mod.TicController(
+        command_path="ticcmd",
+        device_serial="00501366",
+        prefer_native_usb=True,
+        transport_logger=logs.append,
+    )
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _make_native)
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    controller.set_target_position(-42, max_speed=123)
+
+    assert len(created) == 2
+    assert created[1].targets == [(-42, 123)]
+    assert calls == []
+    assert logs == ["Tic transport: native USB active."]
 
 
 def test_tic_controller_is_reused_until_connection_settings_change(
@@ -7961,6 +8820,7 @@ def test_tic_controller_is_reused_until_connection_settings_change(
             device_serial: str,
             *,
             prefer_native_usb: bool = False,
+            transport_logger: object | None = None,
         ) -> None:
             created.append((command_path, device_serial))
 
@@ -8663,6 +9523,7 @@ def test_emergency_stop_turns_off_current_halts_tic_and_stops_session(tmp_path: 
     window._supply_output_enabled = True
     window._supply_last_setpoint_mA = 12.5
     window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+    window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(2))
 
     try:
         window._start_session()
@@ -9744,6 +10605,135 @@ def test_current_sweep_overshoot_shrinks_correction_to_target_space_step(
         _close_test_window(window)
 
 
+def test_current_sweep_large_overshoot_falls_back_to_single_motor_step(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        window._last_move_target_mm = target_mm
+        window._last_motion_command_time_s = time.time()
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0125)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(46.944)
+    window.spin_backlash_mm.setValue(0.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        197.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = 14.0
+    window._seek_last_value_by_key[seek_key] = 36.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.3
+    window._seek_last_effective_position_by_key[seek_key] = 6.7275
+    window._current_position_mm = 6.7275
+    window._effective_position_mm = 6.7275
+    window._last_move_target_mm = 6.7275
+    window._last_effective_move_target_mm = 6.7275
+    window._latest_scale_timestamp = time.time()
+    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(
+        90.0,
+        window.spin_diameter.value(),
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
+
+        assert reached is False
+        assert moves
+        _target_mm, effective_mm = moves[-1]
+        assert effective_mm is not None
+        assert abs(effective_mm - 6.7275) == pytest.approx(window._motor_step_mm())
+        assert "protective single-step correction" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_stops_when_correction_travel_exceeds_limit(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _fail_move(*_args: object, **_kwargs: object) -> bool:
+        pytest.fail("travel-limit stop should happen before sending a move")
+
+    window._move_to_position_mm = _fail_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0125)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(46.944)
+    window.spin_current_sweep_max_seek_mm.setValue(0.10)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        197.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = -20.0
+    window._seek_last_value_by_key[seek_key] = 70.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.3
+    window._seek_last_effective_position_by_key[seek_key] = 6.7275
+    window._seek_travel_by_key[seek_key] = 0.101
+    window._current_position_mm = 6.7275
+    window._effective_position_mm = 6.7275
+    window._latest_scale_timestamp = time.time()
+    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(
+        90.0,
+        window.spin_diameter.value(),
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
+
+        assert reached is False
+        assert window._automation_active is False
+        assert "exceeded the correction travel limit" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_reversal_uses_correction_step_without_predictive_backlash(
     tmp_path: Path,
     qtbot,
@@ -10327,6 +11317,63 @@ def test_current_sweep_hold_accepts_small_filtered_fluctuation_without_correctio
 
         assert reached is True
         assert moves == []
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_does_not_accept_large_error_as_noise_band(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.time()
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0125)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        690.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    for index in range(8):
+        stress = 78.0 + (0.5 if index % 2 else 0.0)
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_out_of_band_sign_by_key[seek_key] = -1.0
+    window._seek_out_of_band_since_by_key[seek_key] = now_s - 2.0
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
+
+        assert reached is False
+        assert moves
     finally:
         _close_test_window(window)
 
@@ -11334,20 +12381,23 @@ def test_motor_supply_channel_is_enabled_before_recipe_tic_preflight(tmp_path: P
 
         assert ok is True
         assert supply.configured == [(2, 12.0, 1.5, True)]
-        assert supply.selected_anneal == 1
+        assert supply.selected_anneal == 0
     finally:
         _close_test_window(window)
 
 
-def test_hmp4030_defaults_use_real_voltage_limit_and_kosice_channels(tmp_path: Path, qtbot) -> None:
+def test_hmp4030_defaults_keep_safe_voltage_and_require_manual_channel_selection(
+    tmp_path: Path,
+    qtbot,
+) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
         assert mini_dma_mod.SUPPLY_PROFILES["hmp4030"]["max_voltage"] == pytest.approx(32.05)
         assert mini_dma_mod.SUPPLY_PROFILES["hmp4030"]["channel_select"] == 3
         assert window.spin_supply_voltage_limit.value() == pytest.approx(32.05)
-        assert window.combo_current_sweep_supply_channel.currentData() == 3
-        assert window.combo_motor_supply_channel.currentData() == 2
+        assert window.combo_current_sweep_supply_channel.currentData() == 0
+        assert window.combo_motor_supply_channel.currentData() == 0
         assert window.spin_motor_supply_voltage.value() == pytest.approx(12.0)
         assert window.spin_motor_supply_current_limit.value() == pytest.approx(0.5)
         assert window.spin_tic_current_limit_mA.value() == 343
@@ -11510,6 +12560,10 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window.combo_current_sweep_supply_channel.setCurrentIndex(
+        window.combo_current_sweep_supply_channel.findData(3)
+    )
+    window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(2))
 
     try:
         ok = window._provision_bench_hardware()
