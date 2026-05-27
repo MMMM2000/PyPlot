@@ -10,10 +10,13 @@ $env:TEMP = Join-Path $artifacts "tool-temp"
 $env:TMP = $env:TEMP
 $env:UV_CACHE_DIR = Join-Path $artifacts "uv-cache"
 $env:MPLCONFIGDIR = Join-Path $artifacts "mpl-cache"
-New-Item -ItemType Directory -Force $env:TEMP, $env:UV_CACHE_DIR, $env:MPLCONFIGDIR, (Join-Path $artifacts "pytest-temp") | Out-Null
+$runId = [guid]::NewGuid().ToString("N")
+$pytestTemp = Join-Path $artifacts "pytest-temp-$runId"
+$env:PYTEST_QSETTINGS_ROOT = Join-Path $artifacts "test-qsettings-$runId"
+New-Item -ItemType Directory -Force $env:TEMP, $env:UV_CACHE_DIR, $env:MPLCONFIGDIR, $pytestTemp, $env:PYTEST_QSETTINGS_ROOT | Out-Null
 
 & .\.venv\Scripts\python.exe -m pytest `
-    --basetemp artifacts\pytest-temp `
+    --basetemp $pytestTemp `
     -p no:cacheprovider `
     tests\test_mini_dma_logger.py::test_tic_status_falls_back_when_full_status_times_out `
     tests\test_mini_dma_logger.py::test_tic_status_raises_instead_of_returning_device_list `
