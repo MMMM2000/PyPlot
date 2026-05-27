@@ -13085,10 +13085,11 @@ class CurrentDensitySection(QtWidgets.QWidget):
             )
         else:
             self._hide_internal_columns()
-        try:
-            self.table_view.resizeColumnsToContents()
-        except Exception:
-            pass
+        if not MiniDatabaseSection._project_load_batch_mode:
+            try:
+                self.table_view.resizeColumnsToContents()
+            except Exception:
+                pass
         self._restore_selection(selected_key)
         self._update_preview()
         total = len(frame.index) if isinstance(frame, pd.DataFrame) else 0

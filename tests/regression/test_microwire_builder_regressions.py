@@ -230,6 +230,40 @@ def test_auto_fit_columns_skips_during_project_load(monkeypatch: pytest.MonkeyPa
         section.close()
 
 
+def test_current_density_refresh_skips_resize_during_project_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = builder_ui.CurrentDensitySection(
+        QtWidgets.QWidget(),
+        QtWidgets.QWidget(),
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    resize_calls: list[str] = []
+    try:
+        monkeypatch.setattr(
+            section,
+            "_calculate_frame",
+            lambda: pd.DataFrame({"Composition": ["Ni50Fe27Ga23"], "Microwire": ["1/1"]}),
+        )
+        monkeypatch.setattr(
+            QtWidgets.QTableView,
+            "resizeColumnsToContents",
+            lambda *_args: resize_calls.append("resize"),
+        )
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = True
+
+        section.refresh_data()
+
+        assert resize_calls == []
+    finally:
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = False
+        section.close()
+
+
 def test_video_section_open_button_enables_and_opens_selected_sources(tmp_path: Path) -> None:
     app = QtWidgets.QApplication.instance()
     if app is None:
