@@ -3758,7 +3758,7 @@ def test_saved_sample_fields_and_builder_project_autoimport_diameter(tmp_path: P
         assert window._builder_project_path == project_path
         assert window.spin_diameter.value() == pytest.approx(0.0191)
         assert "Imported" in window.label_project_status.text()
-        assert "diameter 0.01910 mm" in window.label_project_status.text()
+        assert "diameter 19.1 um" in window.label_project_status.text()
         assert "border" not in window.spin_diameter.styleSheet()
     finally:
         _close_test_window(window)
@@ -3796,7 +3796,7 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
         window._update_recipe_mode_ui()
 
         assert "Sample: Ni50Fe27Ga23 12/2" in window.label_recipe_sample.text()
-        assert "diameter 0.03 mm" in window.label_recipe_sample.text()
+        assert "diameter 30 um" in window.label_recipe_sample.text()
         assert "0.721 g" in window.label_setup_preload_stress_equiv.text()
         assert "0.072 g/s" in window.label_setup_preload_ramp_equiv.text()
         assert window.spin_setup_zero_tolerance_g.isHidden() is True
@@ -3829,6 +3829,7 @@ def test_recipe_setup_panel_is_collapsible_and_can_disable_setup(tmp_path: Path,
         window._update_recipe_mode_ui()
 
         assert window.check_pre_measurement_setup_enabled.isChecked()
+        assert window.check_pre_measurement_setup_enabled.parent() is window.setup_details_panel
         assert window.setup_details_panel.isVisible() is False
         assert "20 MPa" in window.label_setup_summary.text()
         assert "5 s" in window.label_setup_summary.text()
@@ -3847,7 +3848,7 @@ def test_recipe_setup_panel_is_collapsible_and_can_disable_setup(tmp_path: Path,
         _close_test_window(window)
 
 
-def test_recipe_file_status_tracks_saved_and_unsaved_changes(tmp_path: Path, qtbot) -> None:
+def test_recipe_file_controls_are_hidden_until_enabled_and_track_status(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     recipe_path = tmp_path / "recipe.recipe.json"
 
@@ -3856,6 +3857,14 @@ def test_recipe_file_status_tracks_saved_and_unsaved_changes(tmp_path: Path, qtb
         assert mode_index >= 0
         window.combo_recipe_mode.setCurrentIndex(mode_index)
 
+        assert window.action_show_recipe_file_controls.isChecked() is False
+        assert window.recipe_file_controls_widget.isHidden() is True
+        assert window.label_recipe_file_status.isHidden() is True
+
+        window.action_show_recipe_file_controls.setChecked(True)
+
+        assert window.recipe_file_controls_widget.isHidden() is False
+        assert window.label_recipe_file_status.isHidden() is False
         assert "Unsaved" in window.label_recipe_file_status.text()
 
         window._save_recipe_to_path(recipe_path)
@@ -3869,6 +3878,63 @@ def test_recipe_file_status_tracks_saved_and_unsaved_changes(tmp_path: Path, qtb
 
         assert "Unsaved changes" in window.label_recipe_file_status.text()
         assert "#dc2626" in window.label_recipe_file_status.styleSheet()
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_advanced_panels_restore_defaults(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_setup_preload_stress_mpa.setValue(33.0)
+        window.spin_setup_preload_duration_s.setValue(12.0)
+        window.spin_setup_slack_speed_strain_pct_s.setValue(2.0)
+        window.spin_setup_slack_step_cap_stress_mpa.setValue(75.0)
+        window.spin_setup_preload_stable_s.setValue(8.0)
+        window.check_pre_measurement_setup_enabled.setChecked(False)
+
+        window.button_restore_setup_defaults.click()
+
+        assert window.check_pre_measurement_setup_enabled.isChecked() is True
+        assert window.spin_setup_preload_stress_mpa.value() == pytest.approx(20.0)
+        assert window.spin_setup_preload_duration_s.value() == pytest.approx(
+            mini_dma_mod.SETUP_PRELOAD_DEFAULT_DURATION_S
+        )
+        assert window.spin_setup_slack_speed_strain_pct_s.value() == pytest.approx(
+            mini_dma_mod.SETUP_SLACK_DEFAULT_STRAIN_RATE_PCT_S
+        )
+        assert window.spin_setup_slack_step_cap_stress_mpa.value() == pytest.approx(
+            mini_dma_mod.SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA
+        )
+        assert window.spin_setup_preload_stable_s.value() == pytest.approx(3.0)
+
+        window.spin_current_sweep_target_speed_mm_s.setValue(1.0)
+        window.spin_current_sweep_max_correction_stress_mpa.setValue(123.0)
+        window.spin_current_sweep_hold_filter_window_s.setValue(9.0)
+
+        window.button_restore_current_sweep_advanced_defaults.click()
+
+        assert window.spin_current_sweep_target_speed_mm_s.value() == pytest.approx(
+            mini_dma_mod.SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S
+        )
+        assert window.spin_current_sweep_max_correction_stress_mpa.value() == pytest.approx(
+            mini_dma_mod.SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA
+        )
+        assert window.spin_current_sweep_hold_filter_window_s.value() == pytest.approx(
+            mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S
+        )
+
+        window.spin_motion_speed_mm_s.setValue(2.0)
+        window.spin_jog_mm.setValue(0.5)
+        window.spin_setup_return_duration_s.setValue(12.0)
+
+        window.button_restore_manual_action_defaults.click()
+
+        assert window.spin_motion_speed_mm_s.value() == pytest.approx(1.0)
+        assert window.spin_jog_mm.value() == pytest.approx(0.1)
+        assert window.spin_setup_return_duration_s.value() == pytest.approx(
+            mini_dma_mod.SETUP_RETURN_DEFAULT_DURATION_S
+        )
     finally:
         _close_test_window(window)
 
@@ -5701,7 +5767,8 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is False
         assert window.check_current_sweep_first_overheating.isHidden() is False
-        assert window.check_current_sweep_first_overheating.text() == "First overheating: repeat first target"
+        assert window.check_current_sweep_first_overheating.text() == "First overheating preheat"
+        assert window.spin_current_sweep_first_overheating_target_mpa.isHidden() is False
         assert window.check_current_sweep_reverse_current.isHidden() is True
         assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(
             mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
@@ -5714,6 +5781,12 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.button_advanced_software_tare.isVisible() is False
         assert window.button_save_recipe.text() == "Save recipe"
         assert window.button_load_recipe.text() == "Load recipe"
+        assert window.button_manual_action_settings.text() == "Manual action settings"
+        assert window.manual_action_settings_panel.isVisible() is False
+        window.button_manual_action_settings.setChecked(True)
+        assert window.spin_motion_speed_mm_s.isHidden() is False
+        assert window.spin_jog_mm.isHidden() is False
+        assert window.spin_setup_return_duration_s.isHidden() is False
         assert window.button_start_recipe.text() == "Start recipe"
         assert window.button_start_recipe.parent() is window.recipe_action_footer
         assert window.recipe_progress.parent() is window.recipe_action_footer
@@ -6015,35 +6088,45 @@ def test_controlled_current_sweep_defaults_match_copper_test_recipe(tmp_path: Pa
         _close_test_window(window)
 
 
-def test_current_sweep_first_overheating_repeats_first_target_cycle(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_first_overheating_uses_independent_preheat_target(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
-        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
         _set_copper_current_sweep_defaults(window)
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(100.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
         window.check_current_sweep_first_overheating.setChecked(True)
+        window.spin_current_sweep_first_overheating_target_mpa.setValue(20.0)
 
         steps, summary, _interval_ms = window._build_automation_recipe()
 
         current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
-        first_target_sweeps = [
-            step for step in current_sweep_steps if step.target_value is not None and abs(step.target_value) < 1e-12
-        ]
-        later_sweeps = [
-            step for step in current_sweep_steps if step.target_value is not None and abs(step.target_value) >= 1e-12
+        ramp_steps = [
+            step
+            for step in steps
+            if step.action == "ramp_target" and step.note != "setup_preload"
         ]
 
-        assert len(current_sweep_steps) == 10
-        assert [(step.current_start_mA, step.current_end_mA) for step in first_target_sweeps] == [
-            (1.0, 3.0),
-            (3.0, 1.0),
-            (1.0, 3.0),
-            (3.0, 1.0),
+        assert [(step.basis, step.target_end_value) for step in ramp_steps[:3]] == [
+            (mini_dma_mod.HSW_BASIS_STRESS_MPA, pytest.approx(20.0)),
+            (mini_dma_mod.HSW_BASIS_STRESS_MPA, pytest.approx(50.0)),
+            (mini_dma_mod.HSW_BASIS_STRESS_MPA, pytest.approx(100.0)),
         ]
-        assert len(later_sweeps) == 6
+        assert [step.target_value for step in current_sweep_steps[:6]] == [
+            pytest.approx(20.0),
+            pytest.approx(20.0),
+            pytest.approx(50.0),
+            pytest.approx(50.0),
+            pytest.approx(100.0),
+            pytest.approx(100.0),
+        ]
+        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in current_sweep_steps[:2])
         assert "first overheating enabled" in summary.lower()
+        assert "20.0000 MPa preheat target" in summary
     finally:
         _close_test_window(window)
 
@@ -12674,9 +12757,10 @@ def test_current_sweep_recipe_filename_is_concise_and_descriptive(tmp_path: Path
         window.spin_current_sweep_step_mA.setValue(1.0)
         window.check_current_sweep_hold_on_error.setChecked(True)
         window.check_current_sweep_first_overheating.setChecked(True)
+        window.spin_current_sweep_first_overheating_target_mpa.setValue(20.0)
 
         assert window._suggest_recipe_filename() == (
-            "iso-stress_setup20MPa_target50-500x50MPa_current1-80mA_1mAps_hold_firstheat.recipe.json"
+            "iso-stress_setup20MPa_target50-500x50MPa_current1-80mA_1mAps_hold_firstheat20MPa.recipe.json"
         )
     finally:
         _close_test_window(window)
@@ -12704,6 +12788,7 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window.spin_current_sweep_step_mA.setValue(1.0)
         window.check_current_sweep_hold_on_error.setChecked(True)
         window.check_current_sweep_first_overheating.setChecked(True)
+        window.spin_current_sweep_first_overheating_target_mpa.setValue(20.0)
         window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
 
         window._save_recipe_to_path(recipe_path)
@@ -12713,6 +12798,7 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert payload["recipe"]["setup"]["slack_step_cap_stress_mpa"] == pytest.approx(75.0)
         assert payload["recipe"]["setup"]["preload_stable_s"] == pytest.approx(2.5)
         assert payload["recipe"]["setup"]["zero_stable_s"] == pytest.approx(4.0)
+        assert payload["recipe"]["current_sweep"]["first_overheating_target_mpa"] == pytest.approx(20.0)
 
         window.spin_setup_preload_stress_mpa.setValue(5.0)
         window.spin_setup_preload_stable_s.setValue(0.0)
@@ -12722,6 +12808,7 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window.spin_current_sweep_end_mA.setValue(5.0)
         window.check_current_sweep_hold_on_error.setChecked(False)
         window.check_current_sweep_first_overheating.setChecked(False)
+        window.spin_current_sweep_first_overheating_target_mpa.setValue(75.0)
 
         window._load_recipe_from_path(recipe_path)
 
@@ -12734,6 +12821,7 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert window.spin_current_sweep_end_mA.value() == pytest.approx(80.0)
         assert window.check_current_sweep_hold_on_error.isChecked() is True
         assert window.check_current_sweep_first_overheating.isChecked() is True
+        assert window.spin_current_sweep_first_overheating_target_mpa.value() == pytest.approx(20.0)
         assert "Loaded recipe" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
@@ -13472,11 +13560,11 @@ def test_recipe_sample_header_tracks_sample_name(tmp_path: Path, qtbot) -> None:
     try:
         window.edit_sample_name.setText("Ni51Fe26Ga21 156/2 s1")
 
-        assert window.label_recipe_sample.text() == "Sample: Ni51Fe26Ga21 156/2 s1 | diameter 0.03 mm"
+        assert window.label_recipe_sample.text() == "Sample: Ni51Fe26Ga21 156/2 s1 | diameter 30 um"
 
         window.edit_sample_name.clear()
 
-        assert window.label_recipe_sample.text() == "Sample: (unnamed sample) | diameter 0.03 mm"
+        assert window.label_recipe_sample.text() == "Sample: (unnamed sample) | diameter 30 um"
     finally:
         _close_test_window(window)
 

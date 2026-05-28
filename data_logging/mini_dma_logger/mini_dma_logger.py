@@ -3259,6 +3259,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ui_heartbeat_fps: float | None = None
         self._window_closing = False
         self.action_timing_settings: QtGui.QAction | None = None
+        self.action_show_recipe_file_controls: QtGui.QAction | None = None
         self.action_mirror_run_log: QtGui.QAction | None = None
         self._manual_jog_timer = QtCore.QTimer(self)
         self._manual_jog_timer.setInterval(50)
@@ -3309,6 +3310,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.action_timing_settings = settings_menu.addAction("Timing...")
         if self.action_timing_settings is not None:
             self.action_timing_settings.triggered.connect(self._show_timing_settings_dialog)
+        self.action_show_recipe_file_controls = settings_menu.addAction("Show recipe save/load")
+        if self.action_show_recipe_file_controls is not None:
+            self.action_show_recipe_file_controls.setCheckable(True)
+            self.action_show_recipe_file_controls.setChecked(False)
+            self.action_show_recipe_file_controls.toggled.connect(self._set_recipe_file_controls_visible)
 
     def _install_mini_dma_developer_menu(self) -> None:
         menu_bar = self.menuBar()
@@ -4485,19 +4491,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_recipe_mode.addItem("Constant-current stress-strain", CONSTANT_CURRENT_STRAIN_SWEEP)
         self.combo_recipe_mode.currentIndexChanged.connect(self._handle_recipe_mode_changed)
         automation_form.addRow("Recipe type", self.combo_recipe_mode)
-        recipe_file_row = QtWidgets.QHBoxLayout()
-        self.button_save_recipe = QtWidgets.QPushButton("Save recipe", automation_box)
+        self.recipe_file_controls_widget = QtWidgets.QWidget(automation_box)
+        recipe_file_row = QtWidgets.QHBoxLayout(self.recipe_file_controls_widget)
+        recipe_file_row.setContentsMargins(0, 0, 0, 0)
+        recipe_file_row.setSpacing(8)
+        self.button_save_recipe = QtWidgets.QPushButton("Save recipe", self.recipe_file_controls_widget)
         self.button_save_recipe.clicked.connect(self._save_recipe_dialog)
         self.button_save_recipe.setMinimumWidth(120)
         recipe_file_row.addWidget(self.button_save_recipe, stretch=1)
-        self.button_load_recipe = QtWidgets.QPushButton("Load recipe", automation_box)
+        self.button_load_recipe = QtWidgets.QPushButton("Load recipe", self.recipe_file_controls_widget)
         self.button_load_recipe.clicked.connect(self._load_recipe_dialog)
         self.button_load_recipe.setMinimumWidth(120)
         recipe_file_row.addWidget(self.button_load_recipe, stretch=1)
-        automation_form.addRow("Recipe file", recipe_file_row)
+        automation_form.addRow("Recipe file", self.recipe_file_controls_widget)
+        self.label_recipe_file_row = automation_form.labelForField(self.recipe_file_controls_widget)
         self.label_recipe_file_status = QtWidgets.QLabel("Unsaved recipe", automation_box)
         self.label_recipe_file_status.setWordWrap(True)
         automation_form.addRow("", self.label_recipe_file_status)
+        self._set_recipe_file_controls_visible(
+            bool(
+                self.action_show_recipe_file_controls is not None
+                and self.action_show_recipe_file_controls.isChecked()
+            )
+        )
 
         self.strain_setup_box = self._group_box("Zero-load and length setup")
         strain_setup_layout = QtWidgets.QVBoxLayout(self.strain_setup_box)
@@ -4516,14 +4532,11 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_header_layout.addWidget(self.button_setup_details)
         self.label_setup_summary = QtWidgets.QLabel("Setup on", setup_header)
         self.label_setup_summary.setWordWrap(True)
-        setup_header_layout.addWidget(self.label_setup_summary, stretch=1)
-        self.check_pre_measurement_setup_enabled = QtWidgets.QCheckBox("Use setup", setup_header)
-        self.check_pre_measurement_setup_enabled.setChecked(True)
-        self.check_pre_measurement_setup_enabled.setToolTip(
-            "Run the mounted-length/preload/return setup before the recipe. "
-            "Disable only for controlled automation tests or special diagnostics."
+        self.label_setup_summary.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        setup_header_layout.addWidget(self.check_pre_measurement_setup_enabled)
+        setup_header_layout.addWidget(self.label_setup_summary, stretch=1)
         strain_setup_layout.addWidget(setup_header)
         self.setup_details_panel = QtWidgets.QWidget(self.strain_setup_box)
         strain_setup_form = QtWidgets.QFormLayout(self.setup_details_panel)
@@ -4531,6 +4544,12 @@ class MainWindow(QtWidgets.QMainWindow):
         strain_setup_layout.addWidget(self.setup_details_panel)
         self.setup_details_panel.setVisible(False)
         self.button_setup_details.toggled.connect(self._toggle_setup_details)
+        self.check_pre_measurement_setup_enabled = QtWidgets.QCheckBox("Use setup", self.setup_details_panel)
+        self.check_pre_measurement_setup_enabled.setChecked(True)
+        self.check_pre_measurement_setup_enabled.setToolTip(
+            "Run the mounted-length/preload/return setup before the recipe. "
+            "Disable only for controlled automation tests or special diagnostics."
+        )
         self.spin_setup_preload_stress_mpa = CompactDoubleSpinBox(self.setup_details_panel)
         self.spin_setup_preload_stress_mpa.setDecimals(3)
         self.spin_setup_preload_stress_mpa.setRange(0.001, 10000.0)
@@ -4623,6 +4642,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         strain_setup_form.addRow("Zero-load settle time", self.spin_setup_zero_stable_s)
         self._hide_form_row(strain_setup_form, self.spin_setup_zero_stable_s)
+        self.button_restore_setup_defaults = QtWidgets.QPushButton("Restore setup defaults", self.setup_details_panel)
+        self.button_restore_setup_defaults.clicked.connect(self._restore_setup_defaults)
+        strain_setup_form.addRow("", self.button_restore_setup_defaults)
+        strain_setup_form.addRow("", self.check_pre_measurement_setup_enabled)
         automation_form.addRow("", self.strain_setup_box)
 
         self.recipe_stack = CurrentPageStackedWidget(automation_box)
@@ -4929,6 +4952,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis_label is not None:
             basis_label.setVisible(False)
         self.combo_current_sweep_basis.setVisible(False)
+        self.check_current_sweep_first_overheating = QtWidgets.QCheckBox(
+            "First overheating preheat",
+            automation_box,
+        )
+        self.check_current_sweep_first_overheating.setChecked(False)
+        self.check_current_sweep_first_overheating.setToolTip(
+            "Before the normal target sequence, run one current sweep at this fixed stress target. "
+            "Use this when the first heating has a higher transformation temperature than later cycles."
+        )
+        current_sweep_form.addRow("", self.check_current_sweep_first_overheating)
+        self.spin_current_sweep_first_overheating_target_mpa = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_first_overheating_target_mpa.setDecimals(3)
+        self.spin_current_sweep_first_overheating_target_mpa.setRange(0.001, 100000.0)
+        self.spin_current_sweep_first_overheating_target_mpa.setValue(20.0)
+        self.spin_current_sweep_first_overheating_target_mpa.setSuffix(" MPa")
+        self.spin_current_sweep_first_overheating_target_mpa.setToolTip(
+            "Stress target used only for the optional first-overheating preheat sweep."
+        )
+        current_sweep_form.addRow("Preheat target", self.spin_current_sweep_first_overheating_target_mpa)
         self.spin_current_sweep_target_start = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_start.setDecimals(3)
         self.spin_current_sweep_target_start.setRange(-100000.0, 100000.0)
@@ -5171,6 +5213,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "Minimum MPa-equivalent band used before current hold can resume the current ramp."
         )
         current_sweep_advanced_form.addRow("Min resume", self.spin_current_sweep_hold_min_resume_stress_mpa)
+        self.button_restore_current_sweep_advanced_defaults = QtWidgets.QPushButton(
+            "Restore advanced defaults",
+            self.current_sweep_advanced_panel,
+        )
+        self.button_restore_current_sweep_advanced_defaults.clicked.connect(
+            self._restore_current_sweep_advanced_defaults
+        )
+        current_sweep_advanced_form.addRow("", self.button_restore_current_sweep_advanced_defaults)
         self._current_sweep_advanced_control_widgets = [
             self.spin_current_sweep_target_speed_mm_s,
             self.spin_current_sweep_max_correction_strain_pct,
@@ -5185,6 +5235,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_hold_noise_sigma,
             self.spin_current_sweep_hold_min_pause_stress_mpa,
             self.spin_current_sweep_hold_min_resume_stress_mpa,
+            self.button_restore_current_sweep_advanced_defaults,
         ]
 
         def _toggle_current_sweep_advanced_controls(checked: bool) -> None:
@@ -5206,16 +5257,6 @@ class MainWindow(QtWidgets.QMainWindow):
             _toggle_current_sweep_advanced_controls
         )
         _toggle_current_sweep_advanced_controls(False)
-        self.check_current_sweep_first_overheating = QtWidgets.QCheckBox(
-            "First overheating: repeat first target",
-            automation_box,
-        )
-        self.check_current_sweep_first_overheating.setChecked(False)
-        self.check_current_sweep_first_overheating.setToolTip(
-            "Repeat the current sweep at the first target once before continuing to later targets. "
-            "Use this when the first heating has a higher transformation temperature than later cycles."
-        )
-        current_sweep_form.addRow("", self.check_current_sweep_first_overheating)
         self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
         self.check_current_sweep_reverse_current.setChecked(True)
         self.check_current_sweep_reverse_current.setVisible(False)
@@ -5411,11 +5452,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         manual_hint.setWordWrap(True)
         manual_layout.addWidget(manual_hint)
-        manual_form = QtWidgets.QFormLayout()
-        manual_form.addRow("Manual move speed", self.spin_motion_speed_mm_s)
-        manual_form.addRow("Single-click step", self.spin_jog_mm)
-        manual_form.addRow("Return-to-zero time", self.spin_setup_return_duration_s)
-        manual_layout.addLayout(manual_form)
         manual_motion_row = QtWidgets.QVBoxLayout()
         manual_motion_row.setSpacing(6)
         self.button_manual_auto_connect = QtWidgets.QPushButton("Auto-connect hardware", manual_box)
@@ -5457,6 +5493,28 @@ class MainWindow(QtWidgets.QMainWindow):
         manual_refresh = QtWidgets.QPushButton("Refresh Tic status", manual_box)
         manual_refresh.clicked.connect(self._refresh_tic_status)
         manual_layout.addWidget(manual_refresh)
+        self.button_manual_action_settings = QtWidgets.QToolButton(manual_box)
+        self.button_manual_action_settings.setText("Manual action settings")
+        self.button_manual_action_settings.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.button_manual_action_settings.setCheckable(True)
+        self.button_manual_action_settings.setChecked(False)
+        self.button_manual_action_settings.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        manual_layout.addWidget(self.button_manual_action_settings)
+        self.manual_action_settings_panel = QtWidgets.QWidget(manual_box)
+        manual_form = QtWidgets.QFormLayout(self.manual_action_settings_panel)
+        manual_form.setContentsMargins(0, 4, 0, 0)
+        manual_form.addRow("Manual move speed", self.spin_motion_speed_mm_s)
+        manual_form.addRow("Single-click step", self.spin_jog_mm)
+        manual_form.addRow("Return-to-zero time", self.spin_setup_return_duration_s)
+        self.button_restore_manual_action_defaults = QtWidgets.QPushButton(
+            "Restore manual defaults",
+            self.manual_action_settings_panel,
+        )
+        self.button_restore_manual_action_defaults.clicked.connect(self._restore_manual_action_defaults)
+        manual_form.addRow("", self.button_restore_manual_action_defaults)
+        manual_layout.addWidget(self.manual_action_settings_panel)
+        self.manual_action_settings_panel.setVisible(False)
+        self.button_manual_action_settings.toggled.connect(self._toggle_manual_action_settings)
         experiment_layout.addWidget(manual_box)
         experiment_layout.addStretch(1)
         tabs.addTab(experiment_tab, "Recipe")
@@ -5778,6 +5836,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_nudge_mm,
             self.spin_current_sweep_balance_speed_mm_s,
             self.spin_current_sweep_max_seek_mm,
+            self.spin_current_sweep_first_overheating_target_mpa,
             self.spin_current_sweep_interval,
             self.spin_current_sweep_log_interval,
             self.spin_constant_current_start_target,
@@ -7439,7 +7498,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._builder_import_in_progress = False
         self.label_project_status.setText(
             f"Imported {match.path.name} -> section {match.section}, diameter "
-            f"{'-' if match.diameter_mm is None else f'{match.diameter_mm:.5f} mm'}"
+            f"{'-' if match.diameter_mm is None else _format_compact_unit(match.diameter_mm * 1000.0, 'um', decimals=3)}"
             f"{'' if match.current_mA is None else f', current {match.current_mA:.2f} mA'}."
         )
         if not quiet:
@@ -7876,7 +7935,7 @@ class MainWindow(QtWidgets.QMainWindow):
             sample_name = "(unnamed sample)"
         diameter_mm = float(self.spin_diameter.value()) if hasattr(self, "spin_diameter") else 0.0
         diameter_text = (
-            f" | diameter {_format_compact_unit(diameter_mm, 'mm', decimals=5)}"
+            f" | diameter {_format_compact_unit(diameter_mm * 1000.0, 'um', decimals=3)}"
             if diameter_mm > 0.0
             else " | diameter -"
         )
@@ -9378,6 +9437,68 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow
             )
 
+    def _toggle_manual_action_settings(self, checked: bool) -> None:
+        if hasattr(self, "manual_action_settings_panel"):
+            self.manual_action_settings_panel.setVisible(bool(checked))
+        if hasattr(self, "button_manual_action_settings"):
+            self.button_manual_action_settings.setArrowType(
+                QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow
+            )
+
+    def _set_recipe_file_controls_visible(self, visible: bool) -> None:
+        for widget_name in ("recipe_file_controls_widget", "label_recipe_file_status"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(bool(visible))
+        label = getattr(self, "label_recipe_file_row", None)
+        if label is not None:
+            label.setVisible(bool(visible))
+        action = getattr(self, "action_show_recipe_file_controls", None)
+        if action is not None and action.isChecked() != bool(visible):
+            action.blockSignals(True)
+            action.setChecked(bool(visible))
+            action.blockSignals(False)
+
+    def _restore_setup_defaults(self) -> None:
+        self.check_pre_measurement_setup_enabled.setChecked(True)
+        self.spin_setup_preload_stress_mpa.setValue(20.0)
+        self.spin_setup_preload_duration_s.setValue(SETUP_PRELOAD_DEFAULT_DURATION_S)
+        self.spin_setup_slack_speed_strain_pct_s.setValue(SETUP_SLACK_DEFAULT_STRAIN_RATE_PCT_S)
+        self.spin_setup_slack_step_cap_stress_mpa.setValue(SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA)
+        self.spin_setup_preload_tolerance_mpa.setValue(0.25)
+        self.spin_setup_zero_tolerance_g.setValue(SERVO_AUTO_TOLERANCE_LOAD_G)
+        self.spin_setup_preload_stable_s.setValue(3.0)
+        self.spin_setup_zero_stable_s.setValue(1.0)
+        self._update_recipe_mode_ui()
+
+    def _restore_current_sweep_advanced_defaults(self) -> None:
+        self.spin_current_sweep_target_speed_mm_s.setValue(SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S)
+        self.spin_current_sweep_max_correction_strain_pct.setValue(
+            SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT
+        )
+        self.spin_current_sweep_correction_rate_pct_s.setValue(SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S)
+        self.spin_current_sweep_max_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRESS_MPA)
+        self.spin_current_sweep_hold_correction_stress_mpa.setValue(
+            SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
+        )
+        self.spin_current_sweep_mid_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_MID_CORRECTION_STRESS_MPA)
+        self.spin_current_sweep_near_correction_stress_mpa.setValue(SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA)
+        self.spin_current_sweep_hold_pause_factor.setValue(CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR)
+        self.spin_current_sweep_hold_resume_factor.setValue(CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR)
+        self.spin_current_sweep_hold_resume_stable_s.setValue(CURRENT_SWEEP_HOLD_RESUME_STABLE_S)
+        self.spin_current_sweep_hold_filter_window_s.setValue(SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S)
+        self.spin_current_sweep_hold_noise_sigma.setValue(SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA)
+        self.spin_current_sweep_hold_min_pause_stress_mpa.setValue(SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA)
+        self.spin_current_sweep_hold_min_resume_stress_mpa.setValue(SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA)
+        self._update_recipe_mode_ui()
+
+    def _restore_manual_action_defaults(self) -> None:
+        self.spin_motion_speed_mm_s.setValue(1.0)
+        self.spin_jog_mm.setValue(0.1)
+        self.spin_setup_return_duration_s.setValue(SETUP_RETURN_DEFAULT_DURATION_S)
+        self._clamp_motion_resolution_controls()
+        self._update_recipe_mode_ui()
+
     def _pre_measurement_setup_enabled(self, mode: str | None = None) -> bool:
         _ = mode
         checkbox = getattr(self, "check_pre_measurement_setup_enabled", None)
@@ -9394,7 +9515,7 @@ class MainWindow(QtWidgets.QMainWindow):
         duration_text = _format_compact_unit(float(self.spin_setup_preload_duration_s.value()), "s", decimals=2)
         settle_text = _format_compact_unit(float(self.spin_setup_preload_stable_s.value()), "s", decimals=2)
         self.label_setup_summary.setText(
-            f"On: {preload_text} setup preload, {duration_text} ramp target, {settle_text} settle"
+            f"On: {preload_text}, {duration_text} ramp, {settle_text} settle"
         )
         self.label_setup_summary.setStyleSheet("color: palette(text);")
 
@@ -13635,7 +13756,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_hold_noise_sigma": self._current_sweep_hold_noise_sigma(),
                 "current_ramp_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
                 "current_ramp_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
-                "first_overheating_repeat": self.check_current_sweep_first_overheating.isChecked(),
+                "first_overheating": self.check_current_sweep_first_overheating.isChecked(),
+                "first_overheating_target_mpa": float(
+                    self.spin_current_sweep_first_overheating_target_mpa.value()
+                ),
                 "reverse_current": True,
                 "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
                 "tolerance_mode": "automatic",
@@ -14803,7 +14927,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.check_current_sweep_hold_on_error.isChecked():
             flags.append("hold")
         if self.check_current_sweep_first_overheating.isChecked():
-            flags.append("firstheat")
+            preheat = self._recipe_number_token(self.spin_current_sweep_first_overheating_target_mpa.value())
+            flags.append(f"firstheat{preheat}MPa")
         flag_text = "" if not flags else "_" + "_".join(flags)
         return (
             f"{prefix}_setup{setup}MPa_target{target_start}-{target_end}x{target_step}{target_unit}_"
@@ -14863,6 +14988,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "near_correction_stress_mpa": float(self.spin_current_sweep_near_correction_stress_mpa.value()),
                 "return_target": bool(self.check_current_sweep_return_target.isChecked()),
                 "first_overheating": bool(self.check_current_sweep_first_overheating.isChecked()),
+                "first_overheating_target_mpa": float(
+                    self.spin_current_sweep_first_overheating_target_mpa.value()
+                ),
                 "reverse_current": bool(self.check_current_sweep_reverse_current.isChecked()),
                 "tolerance": float(self.spin_current_sweep_tolerance.value()),
                 "nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
@@ -14964,7 +15092,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_mid_correction_stress_mpa.setValue(float(current_sweep.get("mid_correction_stress_mpa", self.spin_current_sweep_mid_correction_stress_mpa.value())))
             self.spin_current_sweep_near_correction_stress_mpa.setValue(float(current_sweep.get("near_correction_stress_mpa", self.spin_current_sweep_near_correction_stress_mpa.value())))
             self.check_current_sweep_return_target.setChecked(bool(current_sweep.get("return_target", self.check_current_sweep_return_target.isChecked())))
-            self.check_current_sweep_first_overheating.setChecked(bool(current_sweep.get("first_overheating", self.check_current_sweep_first_overheating.isChecked())))
+            first_overheating_enabled = current_sweep.get(
+                "first_overheating",
+                current_sweep.get(
+                    "first_overheating_repeat",
+                    self.check_current_sweep_first_overheating.isChecked(),
+                ),
+            )
+            self.check_current_sweep_first_overheating.setChecked(bool(first_overheating_enabled))
+            self.spin_current_sweep_first_overheating_target_mpa.setValue(
+                float(
+                    current_sweep.get(
+                        "first_overheating_target_mpa",
+                        current_sweep.get("target_start", self.spin_current_sweep_first_overheating_target_mpa.value()),
+                    )
+                )
+            )
             self.check_current_sweep_reverse_current.setChecked(bool(current_sweep.get("reverse_current", self.check_current_sweep_reverse_current.isChecked())))
             self.spin_current_sweep_tolerance.setValue(float(current_sweep.get("tolerance", self.spin_current_sweep_tolerance.value())))
             self.spin_current_sweep_nudge_mm.setValue(float(current_sweep.get("nudge_mm", self.spin_current_sweep_nudge_mm.value())))
@@ -16917,7 +17060,8 @@ class MainWindow(QtWidgets.QMainWindow):
             current_end = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value()))
             current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
             current_hold_enabled = self.check_current_sweep_hold_on_error.isChecked()
-            first_overheating_repeat = self.check_current_sweep_first_overheating.isChecked()
+            first_overheating_enabled = self.check_current_sweep_first_overheating.isChecked()
+            first_overheating_target_mpa = float(self.spin_current_sweep_first_overheating_target_mpa.value())
             current_hold_pause_factor = float(self.spin_current_sweep_hold_pause_factor.value())
             current_hold_resume_factor = min(
                 current_hold_pause_factor,
@@ -16929,6 +17073,57 @@ class MainWindow(QtWidgets.QMainWindow):
             targets = self._build_numeric_targets(target_start, target_end, target_step)
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
             previous_target: float | None = 0.0
+
+            def _append_current_sweep_plateau(*, target: float, plateau_basis: str, note: str) -> None:
+                sweep_ranges = [(current_start, current_end)]
+                if abs(current_end - current_start) > 1e-12:
+                    sweep_ranges.append((current_end, current_start))
+                for sweep_start_mA, sweep_end_mA in sweep_ranges:
+                    steps.append(
+                        AutomationStep(
+                            "sweep_current",
+                            target_value=target,
+                            basis=plateau_basis,
+                            current_start_mA=sweep_start_mA,
+                            current_end_mA=sweep_end_mA,
+                            current_ramp_rate_mA_s=current_ramp_rate,
+                            current_hold_enabled=current_hold_enabled,
+                            current_hold_pause_tolerance_factor=current_hold_pause_factor,
+                            current_hold_resume_tolerance_factor=current_hold_resume_factor,
+                            current_hold_resume_stable_s=current_hold_resume_stable_s,
+                            note=note,
+                        )
+                    )
+
+            if first_overheating_enabled:
+                steps.append(
+                    AutomationStep(
+                        "set_current",
+                        target_value=first_overheating_target_mpa,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        current_mA=current_start,
+                        note="first_overheating",
+                    )
+                )
+                steps.append(
+                    AutomationStep(
+                        "ramp_target",
+                        target_value=first_overheating_target_mpa,
+                        target_start_value=previous_target,
+                        target_end_value=first_overheating_target_mpa,
+                        target_ramp_rate_value_s=target_ramp_rate,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        note="first_overheating",
+                    )
+                )
+                _append_current_sweep_plateau(
+                    target=first_overheating_target_mpa,
+                    plateau_basis=HSW_BASIS_STRESS_MPA,
+                    note="first_overheating",
+                )
+                if basis == HSW_BASIS_STRESS_MPA:
+                    previous_target = first_overheating_target_mpa
+
             for plateau_index, target in enumerate(targets, start=1):
                 steps.append(
                     AutomationStep(
@@ -16951,38 +17146,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                 )
                 previous_target = target
-                sweep_ranges = [(current_start, current_end)]
-                reverse_current = abs(current_end - current_start) > 1e-12
-                if reverse_current:
-                    sweep_ranges.append((current_end, current_start))
-                repeat_count = 2 if first_overheating_repeat and plateau_index == 1 else 1
-                for repeat_index in range(repeat_count):
-                    if repeat_index > 0 and not reverse_current and abs(current_end - current_start) > 1e-12:
-                        steps.append(
-                            AutomationStep(
-                                "set_current",
-                                target_value=target,
-                                basis=basis,
-                                current_mA=current_start,
-                                note=str(plateau_index),
-                            )
-                        )
-                    for sweep_start_mA, sweep_end_mA in sweep_ranges:
-                        steps.append(
-                            AutomationStep(
-                                "sweep_current",
-                                target_value=target,
-                                basis=basis,
-                                current_start_mA=sweep_start_mA,
-                                current_end_mA=sweep_end_mA,
-                                current_ramp_rate_mA_s=current_ramp_rate,
-                                current_hold_enabled=current_hold_enabled,
-                                current_hold_pause_tolerance_factor=current_hold_pause_factor,
-                                current_hold_resume_tolerance_factor=current_hold_resume_factor,
-                                current_hold_resume_stable_s=current_hold_resume_stable_s,
-                                note=str(plateau_index),
-                            )
-                        )
+                _append_current_sweep_plateau(target=target, plateau_basis=basis, note=str(plateau_index))
             if self.check_current_sweep_return_target.isChecked() and targets:
                 steps.append(
                     AutomationStep(
@@ -17025,8 +17189,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"resume inside {current_hold_resume_factor:.2f}x for "
                     f"{current_hold_resume_stable_s:.2f} s."
                 )
-            if first_overheating_repeat:
-                summary += " First overheating enabled: repeat the first target current sweep once."
+            if first_overheating_enabled:
+                summary += (
+                    " First overheating enabled: "
+                    f"{first_overheating_target_mpa:.4f} MPa preheat target before the normal sequence."
+                )
             summary += self._recipe_setup_summary_sentence()
             return steps, summary, control_interval_ms
 
@@ -18836,6 +19003,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("tare_on_start", self.check_tare_on_start.isChecked())
         self.settings.setValue("developer_run_log_mirror_enabled", self._run_log_mirror_enabled)
         self.settings.setValue("developer_run_log_mirror_path", str(self._run_log_mirror_path))
+        self.settings.setValue(
+            "show_recipe_file_controls",
+            bool(
+                self.action_show_recipe_file_controls is not None
+                and self.action_show_recipe_file_controls.isChecked()
+            ),
+        )
         self.settings.setValue("recipe_mode", self.combo_recipe_mode.currentData())
         self.settings.setValue("return_to_origin", self.check_return_to_origin.isChecked())
         self.settings.setValue("control_interval_ms", self._control_interval_ms())
@@ -18961,6 +19135,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue(
             "current_sweep_first_overheating",
             self.check_current_sweep_first_overheating.isChecked(),
+        )
+        self.settings.setValue(
+            "current_sweep_first_overheating_target_mpa",
+            self.spin_current_sweep_first_overheating_target_mpa.value(),
         )
         self.settings.setValue("current_sweep_reverse_current", self.check_current_sweep_reverse_current.isChecked())
         self.settings.setValue("current_sweep_tolerance", self.spin_current_sweep_tolerance.value())
@@ -19609,6 +19787,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_current_sweep_first_overheating.setChecked(
             bool(self.settings.value("current_sweep_first_overheating", False, type=bool))
         )
+        self.spin_current_sweep_first_overheating_target_mpa.setValue(
+            max(
+                0.001,
+                float(self.settings.value("current_sweep_first_overheating_target_mpa", 20.0)),
+            )
+        )
         self.check_current_sweep_reverse_current.setChecked(
             bool(self.settings.value("current_sweep_reverse_current", True, type=bool))
         )
@@ -19648,6 +19832,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._update_constant_current_basis_ui()
         self._apply_dashboard_plot_settings(str(self.combo_recipe_mode.currentData() or "ramp"))
+        show_recipe_controls = bool(self.settings.value("show_recipe_file_controls", False, type=bool))
+        self._set_recipe_file_controls_visible(show_recipe_controls)
         self._sync_auto_name_fields()
         self._update_recipe_mode_ui()
         self._settings_restore_in_progress = False
