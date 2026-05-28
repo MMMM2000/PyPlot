@@ -81,6 +81,20 @@ def _experiment_process_launcher(
     return factory
 
 
+EXPERIMENT_PROCESS_MODULES: dict[str, ExperimentProcessSpec] = {
+    "current_annealing": ExperimentProcessSpec(
+        display_name="Current Annealing Logger",
+        module="data_logging.current_annealing_logger.current_annealing_logger",
+        resource_tag="current_annealing",
+    ),
+    "mini_dma": ExperimentProcessSpec(
+        display_name="Mini DMA Logger",
+        module="data_logging.mini_dma_logger.mini_dma_logger",
+        resource_tag="mini_dma",
+    ),
+}
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -575,6 +589,12 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         help="Run or dry-run an explicitly armed Mini DMA bench automation plan JSON file.",
     )
     parser.add_argument(
+        "--experiment-process",
+        choices=tuple(EXPERIMENT_PROCESS_MODULES),
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--pyplot-list-plugins",
         action="store_true",
         help="List available PyPlot plugin names and exit.",
@@ -852,6 +872,10 @@ def _is_pyplot_automation_requested(args: argparse.Namespace) -> bool:
 
 def _is_mini_dma_bench_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "mini_dma_bench_plan", None))
+
+
+def _is_experiment_process_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "experiment_process", None))
 
 
 def _is_pyplot_session_requested(args: argparse.Namespace) -> bool:
@@ -3368,6 +3392,23 @@ def _run_mini_dma_bench_plan(args: argparse.Namespace, qt_args: list[str]) -> in
     return 0
 
 
+def _run_experiment_process(args: argparse.Namespace) -> int:
+    key = getattr(args, "experiment_process", None)
+    spec = EXPERIMENT_PROCESS_MODULES.get(key)
+    if spec is None:
+        print(f"[experiment-process] Unknown experiment process: {key}")
+        return 2
+    try:
+        module_obj = import_module(spec.module)
+        main_func = getattr(module_obj, "main")
+        main_func()
+    except Exception as exc:
+        print(f"[experiment-process] {spec.display_name}: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        return 1
+    return 0
+
+
 LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": _lazy("data_logging.data_logger", "main"),
     "Current Annealing Logger": _experiment_process_launcher(
@@ -4041,6 +4082,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_run_automation_recipe(args, qt_args))
     if _is_mini_dma_bench_requested(args):
         raise SystemExit(_run_mini_dma_bench_plan(args, qt_args))
+    if _is_experiment_process_requested(args):
+        raise SystemExit(_run_experiment_process(args))
     if _is_microwire_word_report_requested(args):
         raise SystemExit(_run_microwire_word_report_cli(args))
     if _is_microwire_eda_requested(args):
