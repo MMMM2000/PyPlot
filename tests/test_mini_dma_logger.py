@@ -8501,6 +8501,106 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
     ]
 
 
+def test_shared_broker_supply_controller_uses_scheduler_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
+            return {"lease_id": f"lease-{channel}"}
+
+        def configure_channel(
+            self,
+            *,
+            channel: int,
+            lease_id: str,
+            voltage_v: float,
+            current_a: float,
+            output_on: bool,
+        ) -> None:
+            self.calls.append(
+                (
+                    "configure_channel",
+                    {
+                        "channel": channel,
+                        "lease_id": lease_id,
+                        "voltage_v": voltage_v,
+                        "current_a": current_a,
+                        "output_on": output_on,
+                    },
+                )
+            )
+
+        def configure_polling(self, *, channel: int, interval_s: float) -> None:
+            self.calls.append(("configure_polling", {"channel": channel, "interval_s": interval_s}))
+
+        def start_scheduler(self, *, tick_s: float = 0.05) -> None:
+            self.calls.append(("start_scheduler", {"tick_s": tick_s}))
+
+        def schedule_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+            self.calls.append(
+                ("schedule_current", {"channel": channel, "lease_id": lease_id, "current_mA": current_mA})
+            )
+
+        def latest_readback(
+            self,
+            *,
+            channel: int,
+            max_age_s: float | None = None,
+            fallback_to_measure: bool = True,
+        ) -> dict[str, float | None]:
+            self.calls.append(
+                (
+                    "latest_readback",
+                    {
+                        "channel": channel,
+                        "max_age_s": max_age_s,
+                        "fallback_to_measure": fallback_to_measure,
+                    },
+                )
+            )
+            return {"voltage_V": 0.5, "current_mA": 10.0}
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=1.0,
+        current_channel=4,
+        motor_channel=3,
+    )
+
+    controller.connect()
+    controller.initialize_output(current_mA=10.0, reset_on_start=True)
+    controller.set_current_mA(10.4)
+    readback = controller.measure()
+
+    assert readback["current_mA"] == pytest.approx(10.0)
+    assert ("configure_polling", {"channel": 4, "interval_s": 1.0}) in clients[0].calls
+    assert ("start_scheduler", {"tick_s": 0.05}) in clients[0].calls
+    assert ("schedule_current", {"channel": 4, "lease_id": "lease-4", "current_mA": 10.4}) in clients[0].calls
+    assert (
+        "latest_readback",
+        {"channel": 4, "max_age_s": 2.5, "fallback_to_measure": True},
+    ) in clients[0].calls
+
+
 def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 

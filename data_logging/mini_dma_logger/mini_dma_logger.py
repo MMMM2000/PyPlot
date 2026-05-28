@@ -2888,6 +2888,18 @@ class SharedBrokerSupplyController:
                 output_on=bool(output_on),
             )
 
+    def _enable_current_channel_polling(self) -> None:
+        channel = self.selected_channel()
+        if channel <= 0:
+            return
+        client = self._require_client()
+        configure_polling = getattr(client, "configure_polling", None)
+        if callable(configure_polling):
+            configure_polling(channel=channel, interval_s=1.0)
+        start_scheduler = getattr(client, "start_scheduler", None)
+        if callable(start_scheduler):
+            start_scheduler(tick_s=0.05)
+
     def initialize_output(
         self,
         *,
@@ -2904,13 +2916,23 @@ class SharedBrokerSupplyController:
             current_a=self.quantize_current_mA(current_mA) / 1000.0,
             output_on=True,
         )
+        self._enable_current_channel_polling()
 
     def set_current_mA(self, current_mA: float) -> None:
         channel = self.selected_channel()
         if channel <= 0:
             raise RuntimeError("Select a shared HMP broker current-sweep channel first.")
         with self._io_lock:
-            self._require_client().set_current(
+            client = self._require_client()
+            schedule_current = getattr(client, "schedule_current", None)
+            if callable(schedule_current):
+                schedule_current(
+                    channel=channel,
+                    lease_id=self._lease_channel(channel),
+                    current_mA=self.quantize_current_mA(current_mA),
+                )
+                return
+            client.set_current(
                 channel=channel,
                 lease_id=self._lease_channel(channel),
                 current_mA=self.quantize_current_mA(current_mA),
@@ -2968,7 +2990,12 @@ class SharedBrokerSupplyController:
                 "resistance_ohm": None,
                 "power_W": None,
             }
-        readback = dict(self._require_client().measure_channel(channel=channel))
+        client = self._require_client()
+        latest_readback = getattr(client, "latest_readback", None)
+        if callable(latest_readback):
+            readback = dict(latest_readback(channel=channel, max_age_s=2.5, fallback_to_measure=True))
+        else:
+            readback = dict(client.measure_channel(channel=channel))
         voltage_v = readback.get("voltage_V")
         current_mA = readback.get("current_mA")
         current_a = None if current_mA is None else float(current_mA) / 1000.0

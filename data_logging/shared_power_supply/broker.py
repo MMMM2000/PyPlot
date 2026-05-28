@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import time
+from threading import Event, RLock, Thread
 from uuid import uuid4
 
 from .driver import HmpSerialDriver
@@ -114,6 +116,34 @@ class ChannelLease:
         }
 
 
+@dataclass
+class PollState:
+    interval_s: float
+    next_due_s: float | None = None
+    last_polled_s: float | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "interval_s": self.interval_s,
+            "next_due_s": self.next_due_s,
+            "last_polled_s": self.last_polled_s,
+        }
+
+
+@dataclass
+class PendingCurrent:
+    lease_id: str
+    current_mA: float
+    requested_at_s: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "lease_id": self.lease_id,
+            "current_mA": self.current_mA,
+            "requested_at_s": self.requested_at_s,
+        }
+
+
 class SharedPowerSupplyBroker:
     """Channel lease and safety layer above one serialized HMP driver."""
 
@@ -128,6 +158,12 @@ class SharedPowerSupplyBroker:
         )
         self._leases: dict[int, ChannelLease] = {}
         self._readbacks: dict[int, dict[str, float | None]] = {}
+        self._polling: dict[int, PollState] = {}
+        self._pending_currents: dict[int, PendingCurrent] = {}
+        self._setpoint_currents_mA: dict[int, float] = {}
+        self._scheduler_lock = RLock()
+        self._scheduler_stop = Event()
+        self._scheduler_thread: Thread | None = None
 
     def validate_channel(self, channel: int) -> int:
         return self.profile.validate_channel(channel)
@@ -239,6 +275,8 @@ class SharedPowerSupplyBroker:
         if config.current_limit_a is not None and current_mA / 1000.0 > config.current_limit_a:
             raise ValueError(f"Requested current exceeds CH{channel} limit.")
         self.driver.set_current_mA(channel=channel, current_mA=current_mA)
+        with self._scheduler_lock:
+            self._setpoint_currents_mA[channel] = max(0.0, float(current_mA))
 
     def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:
         self._require_lease(channel=channel, lease_id=lease_id)
@@ -252,13 +290,139 @@ class SharedPowerSupplyBroker:
         return self.driver.output_state(channel=channel)
 
     def measure_channel(self, *, channel: int) -> dict[str, float | None]:
+        return self._measure_channel_at(channel=channel, now_s=time.monotonic())
+
+    def _measure_channel_at(self, *, channel: int, now_s: float) -> dict[str, float | None]:
         channel = self.validate_channel(channel)
         config = self.bench_profile.channels.get(channel, BenchChannel())
         if config.role == ROLE_UNUSED or not config.confirmed:
             raise PermissionError(f"CH{channel} must be confirmed before measurement.")
         readback = self.driver.measure(channel=channel)
+        readback["timestamp_s"] = float(now_s)
+        readback["cached"] = False
         self._readbacks[channel] = readback
         return dict(readback)
+
+    def configure_polling(self, *, channel: int, interval_s: float) -> None:
+        channel = self.validate_channel(channel)
+        config = self.bench_profile.channels.get(channel, BenchChannel())
+        if config.role == ROLE_UNUSED or not config.confirmed:
+            raise PermissionError(f"CH{channel} must be confirmed before polling.")
+        interval = max(0.01, float(interval_s))
+        with self._scheduler_lock:
+            existing = self._polling.get(channel)
+            last_polled = None if existing is None else existing.last_polled_s
+            self._polling[channel] = PollState(interval_s=interval, last_polled_s=last_polled)
+
+    def disable_polling(self, *, channel: int) -> None:
+        channel = self.validate_channel(channel)
+        with self._scheduler_lock:
+            self._polling.pop(channel, None)
+
+    def schedule_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+        config = self._require_lease(channel=channel, lease_id=lease_id)
+        current = max(0.0, float(current_mA))
+        if config.current_limit_a is not None and current / 1000.0 > config.current_limit_a:
+            raise ValueError(f"Requested current exceeds CH{channel} limit.")
+        with self._scheduler_lock:
+            self._pending_currents[channel] = PendingCurrent(
+                lease_id=str(lease_id),
+                current_mA=current,
+                requested_at_s=time.monotonic(),
+            )
+
+    def latest_readback(
+        self,
+        *,
+        channel: int,
+        max_age_s: float | None = None,
+        fallback_to_measure: bool = True,
+        now_s: float | None = None,
+    ) -> dict[str, float | None | bool]:
+        channel = self.validate_channel(channel)
+        now = time.monotonic() if now_s is None else float(now_s)
+        with self._scheduler_lock:
+            readback = self._readbacks.get(channel)
+            pending = self._pending_currents.get(channel)
+            setpoint = self._setpoint_currents_mA.get(channel)
+            if readback is not None:
+                timestamp = readback.get("timestamp_s")
+                age_s = None if timestamp is None else max(0.0, now - float(timestamp))
+                if max_age_s is None or age_s is None or age_s <= float(max_age_s):
+                    payload: dict[str, float | None | bool] = dict(readback)
+                    payload["cached"] = True
+                    payload["age_s"] = age_s
+                    payload["setpoint_current_mA"] = setpoint
+                    payload["pending_current_mA"] = None if pending is None else pending.current_mA
+                    return payload
+        if not fallback_to_measure:
+            return {
+                "voltage_V": None,
+                "current_mA": None,
+                "timestamp_s": None,
+                "cached": False,
+                "age_s": None,
+                "setpoint_current_mA": setpoint,
+                "pending_current_mA": None if pending is None else pending.current_mA,
+            }
+        measured = self._measure_channel_at(channel=channel, now_s=now)
+        measured["age_s"] = 0.0
+        measured["setpoint_current_mA"] = self._setpoint_currents_mA.get(channel)
+        measured["pending_current_mA"] = None
+        return measured
+
+    def process_scheduler_once(self, *, now_s: float | None = None) -> None:
+        now = time.monotonic() if now_s is None else float(now_s)
+        with self._scheduler_lock:
+            pending = list(self._pending_currents.items())
+        for channel, current in pending:
+            self.set_current(channel=channel, lease_id=current.lease_id, current_mA=current.current_mA)
+            with self._scheduler_lock:
+                latest = self._pending_currents.get(channel)
+                if latest is current:
+                    self._pending_currents.pop(channel, None)
+
+        with self._scheduler_lock:
+            due_channels = [
+                channel
+                for channel, state in self._polling.items()
+                if state.next_due_s is None or state.next_due_s <= now
+            ]
+        for channel in due_channels:
+            self._measure_channel_at(channel=channel, now_s=now)
+            with self._scheduler_lock:
+                state = self._polling.get(channel)
+                if state is not None:
+                    state.last_polled_s = now
+                    state.next_due_s = now + state.interval_s
+
+    def start_scheduler(self, *, tick_s: float = 0.05) -> None:
+        with self._scheduler_lock:
+            if self._scheduler_thread is not None and self._scheduler_thread.is_alive():
+                return
+            self._scheduler_stop.clear()
+            interval = max(0.001, float(tick_s))
+
+            def _run() -> None:
+                while not self._scheduler_stop.wait(interval):
+                    try:
+                        self.process_scheduler_once()
+                    except Exception:
+                        # Individual client calls still surface errors; the background loop
+                        # must not die silently because one poll failed.
+                        continue
+
+            self._scheduler_thread = Thread(target=_run, name="shared-hmp-scheduler", daemon=True)
+            self._scheduler_thread.start()
+
+    def stop_scheduler(self) -> None:
+        thread: Thread | None
+        with self._scheduler_lock:
+            thread = self._scheduler_thread
+            self._scheduler_thread = None
+            self._scheduler_stop.set()
+        if thread is not None:
+            thread.join(timeout=2.0)
 
     def raw_command(self, command: str) -> None:
         normalized = command.strip().upper()
@@ -279,4 +443,16 @@ class SharedPowerSupplyBroker:
             "bench_profile": self.bench_profile.to_dict(),
             "leases": {str(channel): lease.to_dict() for channel, lease in self._leases.items()},
             "readbacks": {str(channel): dict(readback) for channel, readback in self._readbacks.items()},
+            "scheduler": {
+                "running": self._scheduler_thread is not None and self._scheduler_thread.is_alive(),
+                "polling": {str(channel): state.to_dict() for channel, state in self._polling.items()},
+                "pending_currents": {
+                    str(channel): current.to_dict()
+                    for channel, current in self._pending_currents.items()
+                },
+                "setpoint_currents_mA": {
+                    str(channel): current
+                    for channel, current in self._setpoint_currents_mA.items()
+                },
+            },
         }

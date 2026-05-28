@@ -54,10 +54,16 @@ The broker API is intentionally channel-scoped. Logger integrations replace dire
 - `lease`
 - `release`
 - `configure_channel`
-- `set_current`
+- `set_current` or scheduled/coalesced `schedule_current`
 - `set_output`
 - `measure_channel`
+- `configure_polling`
+- `latest_readback`
 - `snapshot`
+
+For shared measurements, the broker can run a lightweight scheduler. Clients configure a polling interval for the channels that need live readback, then consume timestamped cached readbacks with `latest_readback` instead of forcing every app request to perform a fresh HMP `MEAS` query. Current setpoint updates can be submitted through `schedule_current`; the broker keeps only the newest pending current per channel and applies it on the next scheduler tick before polling. This prevents stale intermediate current commands from building a backlog when a GUI loop runs faster than the HMP can service SCPI requests.
+
+The first scheduled mode targets reliable dual-logger `1 Hz` readback rather than high-rate acquisition. CH1/CH4 current paths are normally polled at about `1 s`; CH3 motor-supply readback should remain slower or explicit because it is mainly a rail-health check, not a per-point measurement channel.
 
 Current Annealing Logger exposes **Shared HMP broker** as an optional supply profile. In that mode it leases the selected channel with the `Current annealing` role, configures only that channel on start, reads broker voltage/current snapshots, sends current setpoints through the broker, and turns off/releases only the leased channel on stop. Its raw serial command box is disabled in broker mode.
 

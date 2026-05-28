@@ -72,6 +72,41 @@ class _FakeBrokerClient:
         return self.readbacks.pop(0)
 
 
+class _FakeScheduledBrokerClient(_FakeBrokerClient):
+    def configure_polling(self, *, channel: int, interval_s: float) -> None:
+        self.calls.append(("configure_polling", {"channel": channel, "interval_s": interval_s}))
+
+    def start_scheduler(self, *, tick_s: float = 0.05) -> None:
+        self.calls.append(("start_scheduler", {"tick_s": tick_s}))
+
+    def latest_readback(
+        self,
+        *,
+        channel: int,
+        max_age_s: float | None = None,
+        fallback_to_measure: bool = True,
+    ) -> dict[str, float]:
+        self.calls.append(
+            (
+                "latest_readback",
+                {
+                    "channel": channel,
+                    "max_age_s": max_age_s,
+                    "fallback_to_measure": fallback_to_measure,
+                },
+            )
+        )
+        return self.readbacks.pop(0)
+
+    def schedule_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+        self.calls.append(
+            (
+                "schedule_current",
+                {"channel": channel, "lease_id": lease_id, "current_mA": current_mA},
+            )
+        )
+
+
 class _FailingBrokerClient:
     def snapshot(self) -> dict[str, object]:
         raise RuntimeError("timed out")
@@ -544,6 +579,23 @@ def test_shared_broker_init_leases_and_configures_current_annealing_channel(qtbo
     ]
 
 
+def test_shared_broker_init_enables_cached_polling_when_available(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window.max_voltage = 30.0
+    window.current_current_set = 0.010
+    window.process_running = True
+
+    window.send_init_commands()
+
+    assert ("configure_polling", {"channel": 1, "interval_s": 1.0}) in fake.calls
+    assert ("start_scheduler", {"tick_s": 0.05}) in fake.calls
+
+
 def test_shared_broker_measurement_updates_live_values_without_raw_serial(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
@@ -559,6 +611,27 @@ def test_shared_broker_measurement_updates_live_values_without_raw_serial(qtbot)
     assert window.current_current_read == pytest.approx(0.010)
     assert window.current_resistance == pytest.approx(250.0)
     assert fake.calls == [("measure_channel", {"channel": 1})]
+
+
+def test_shared_broker_measurement_prefers_cached_scheduler_readback(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+
+    assert window._read_shared_broker_sample() is True
+
+    assert window.current_voltage == pytest.approx(2.5)
+    assert window.current_current_read == pytest.approx(0.010)
+    assert fake.calls == [
+            (
+                "latest_readback",
+                {"channel": 1, "max_age_s": 2.5, "fallback_to_measure": True},
+            )
+        ]
 
 
 def test_shared_broker_setpoint_and_stop_only_affect_leased_channel(qtbot) -> None:
@@ -580,6 +653,23 @@ def test_shared_broker_setpoint_and_stop_only_affect_leased_channel(qtbot) -> No
         ("release", {"channel": 2, "lease_id": "lease-1"}),
     ]
     assert window._shared_broker_lease_id is None
+
+
+def test_shared_broker_setpoint_uses_scheduled_current_when_available(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 2
+    window._shared_broker_lease_id = "lease-1"
+    window.current_current_set = 0.025
+
+    window._send_current_setpoint()
+
+    assert fake.calls == [
+        ("schedule_current", {"channel": 2, "lease_id": "lease-1", "current_mA": 25.0}),
+    ]
 
 
 def test_shared_broker_run_writes_measurements_to_log(tmp_path, qtbot) -> None:

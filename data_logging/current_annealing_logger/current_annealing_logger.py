@@ -1699,17 +1699,29 @@ class MainWindow(QtWidgets.QMainWindow):
     def _initialize_shared_broker_output(self) -> None:
         channel = self._shared_broker_channel()
         lease_id = self._ensure_shared_broker_lease()
-        self._get_shared_broker_client().configure_channel(
+        client = self._get_shared_broker_client()
+        client.configure_channel(
             channel=channel,
             lease_id=lease_id,
             voltage_v=self._voltage_limit_value(),
             current_a=max(0.0, float(self.current_current_set)),
             output_on=True,
         )
+        configure_polling = getattr(client, "configure_polling", None)
+        if callable(configure_polling):
+            configure_polling(channel=channel, interval_s=1.0)
+        start_scheduler = getattr(client, "start_scheduler", None)
+        if callable(start_scheduler):
+            start_scheduler(tick_s=0.05)
 
     def _read_shared_broker_sample(self) -> bool:
         channel = self._shared_broker_channel()
-        readback = self._get_shared_broker_client().measure_channel(channel=channel)
+        client = self._get_shared_broker_client()
+        latest_readback = getattr(client, "latest_readback", None)
+        if callable(latest_readback):
+            readback = latest_readback(channel=channel, max_age_s=2.5, fallback_to_measure=True)
+        else:
+            readback = client.measure_channel(channel=channel)
         voltage = readback.get("voltage_V")
         current_mA = readback.get("current_mA")
         if voltage is None or current_mA is None:
@@ -1735,7 +1747,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_shared_broker_current(self) -> None:
         channel = self._shared_broker_channel()
         lease_id = self._ensure_shared_broker_lease()
-        self._get_shared_broker_client().set_current(
+        client = self._get_shared_broker_client()
+        schedule_current = getattr(client, "schedule_current", None)
+        if callable(schedule_current):
+            schedule_current(
+                channel=channel,
+                lease_id=lease_id,
+                current_mA=max(0.0, float(self.current_current_set) * 1000.0),
+            )
+            return
+        client.set_current(
             channel=channel,
             lease_id=lease_id,
             current_mA=max(0.0, float(self.current_current_set) * 1000.0),
