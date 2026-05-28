@@ -56,7 +56,7 @@ SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-26.2"
+CONTROL_LOGIC_VERSION = "2026-05-28.1"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
@@ -65,7 +65,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_filtered_scale_signal",
     "current_hold_filtered_signal_change_gate",
     "current_hold_persistent_error_gate",
-    "current_hold_transformation_entry_gate",
+    "current_hold_automatic_entry_gate",
     "current_hold_recovery_tolerance_band",
     "current_hold_retry_after_filter_window",
     "current_hold_bounded_saved_cap",
@@ -80,6 +80,7 @@ CONTROL_LOGIC_FEATURES = [
     "voltage_limit_unwind_uses_measured_current_fallback",
     "voltage_limit_defers_to_current_hold",
     "wire_break_recovery_prompt_ui_thread",
+    "current_sweep_mechanical_load_loss_guard",
     "single_prompt_length_setup",
 ]
 CONTROL_TRACE_FIELDNAMES = [
@@ -213,8 +214,8 @@ SETUP_ZERO_FALLBACK_RAW_SPAN_G = 0.012
 SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
 SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
 SETUP_PRELOAD_TAKEUP_LOAD_G = 0.03
-CURRENT_SWEEP_CONTACT_LOSS_MIN_STRAIN_PCT = 0.5
-CURRENT_SWEEP_CONTACT_LOSS_MIN_MOTOR_STEPS = 20.0
+CURRENT_SWEEP_MECHANICAL_LOAD_LOSS_MIN_STRAIN_PCT = 0.5
+CURRENT_SWEEP_MECHANICAL_LOAD_LOSS_MIN_MOTOR_STEPS = 20.0
 SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA = 50.0
 SETUP_RETURN_MIN_SPEED_STRAIN_PCT = 0.10
 SETUP_UNLOAD_BASELINE_MIN_POINTS = 5
@@ -418,7 +419,10 @@ SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA = 3.0
-SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA = 5.0
+SERVO_CURRENT_SWEEP_HOLD_NOISE_CAP_TOLERANCE_FACTOR = 20.0
+SERVO_CURRENT_SWEEP_HOLD_ENTRY_TOLERANCE_FACTOR = 20.0
+SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR = 10.0
+SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR = 2.0
 SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S = 0.3
 SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S = 1.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S = 6.0
@@ -9212,17 +9216,17 @@ class MainWindow(QtWidgets.QMainWindow):
             current_load_g = self._current_effective_load_g()
         return abs(float(current_load_g))
 
-    def _current_sweep_contact_loss_min_travel_mm(self) -> float:
+    def _current_sweep_mechanical_load_loss_min_travel_mm(self) -> float:
         config = self._control_config()
         length_mm = max(
             0.001,
             config.initial_length_mm if config is not None else float(self.spin_initial_length.value()),
         )
-        strain_travel_mm = length_mm * (CURRENT_SWEEP_CONTACT_LOSS_MIN_STRAIN_PCT / 100.0)
-        motor_travel_mm = self._motor_step_mm() * CURRENT_SWEEP_CONTACT_LOSS_MIN_MOTOR_STEPS
+        strain_travel_mm = length_mm * (CURRENT_SWEEP_MECHANICAL_LOAD_LOSS_MIN_STRAIN_PCT / 100.0)
+        motor_travel_mm = self._motor_step_mm() * CURRENT_SWEEP_MECHANICAL_LOAD_LOSS_MIN_MOTOR_STEPS
         return max(strain_travel_mm, motor_travel_mm)
 
-    def _current_sweep_contact_loss_detected(
+    def _current_sweep_mechanical_load_loss_detected(
         self,
         basis: str,
         target_value: float,
@@ -9251,9 +9255,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if abs(float(current_load_g)) > self._zero_return_acceptance_tolerance_g():
             return False
         travel_mm = abs(self._tensile_displacement_mm(self._measurement_effective_position_mm()))
-        return travel_mm >= self._current_sweep_contact_loss_min_travel_mm()
+        return travel_mm >= self._current_sweep_mechanical_load_loss_min_travel_mm()
 
-    def _stop_for_current_sweep_contact_loss(
+    def _stop_for_current_sweep_mechanical_load_loss(
         self,
         basis: str,
         target_value: float,
@@ -9261,17 +9265,18 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         travel_mm = abs(self._tensile_displacement_mm(self._measurement_effective_position_mm()))
         message = (
-            "Current-sweep contact loss detected: "
+            "Current-sweep mechanical load loss detected: "
             f"target {_format_compact_unit(float(target_value), self._distribution_units(basis)[0])}, "
             f"measured {_format_compact_unit(float(current_value), self._distribution_units(basis)[0])}, "
             f"tensile travel {_format_compact_unit(travel_mm, 'mm')} with near-zero load. "
+            "Electrical continuity is not inferred from this guard; current may still be flowing. "
             "Current output was disabled and the measurement was stopped."
         )
         self._log(message)
         self._stop_auto_ramp(
             log_completion=False,
             offer_recovery=False,
-            stop_reason="wire_break_or_contact_loss",
+            stop_reason="mechanical_load_loss",
             stop_detail=message,
         )
 
@@ -11188,13 +11193,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._setup_preload_overload_exceeded(basis, target_value, current_value, effective_tolerance):
             self._stop_for_setup_preload_overload(basis, target_value, current_value)
             return False
-        if self._current_sweep_contact_loss_detected(
+        if self._current_sweep_mechanical_load_loss_detected(
             basis,
             target_value,
             current_value,
             effective_tolerance,
         ):
-            self._stop_for_current_sweep_contact_loss(basis, target_value, current_value)
+            self._stop_for_current_sweep_mechanical_load_loss(basis, target_value, current_value)
             return False
         if self._maybe_start_setup_unload_baseline_fallback():
             return False
@@ -11265,6 +11270,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 noise_component = self._current_sweep_bounded_noise_band(
                     basis,
                     filtered_signal.noise,
+                    effective_tolerance,
                 )
             noise_band = max(
                 effective_tolerance,
@@ -11277,7 +11283,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._automation_phase == "current_hold":
                 noise_band = max(
                     noise_band,
-                    self._current_sweep_hold_transformation_band_for_basis(basis),
+                    self._current_sweep_hold_entry_band_for_basis(effective_tolerance),
                 )
             if abs(delta_value) <= noise_band:
                 self._clear_seek_state(seek_key)
@@ -13393,8 +13399,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 ),
                 "current_hold_adaptive_min_samples": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES,
                 "current_hold_correction_confirm_s": SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S,
-                "current_hold_transformation_min_stress_mpa": (
-                    SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA
+                "current_hold_noise_cap_tolerance_factor": (
+                    SERVO_CURRENT_SWEEP_HOLD_NOISE_CAP_TOLERANCE_FACTOR
+                ),
+                "current_hold_entry_tolerance_factor": (
+                    SERVO_CURRENT_SWEEP_HOLD_ENTRY_TOLERANCE_FACTOR
+                ),
+                "current_hold_large_error_factor": SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR,
+                "current_hold_noisy_large_error_factor": (
+                    SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR
                 ),
                 "current_hold_entry_confirm_s": SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S,
                 "current_hold_min_away_slope_mpa_s": (
@@ -13463,6 +13476,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "manual_session_stop": ("operator", "Manual session stop"),
             "emergency_stop": ("operator", "Emergency stop"),
             "wire_break_or_contact_loss": ("fault", "Wire break or contact loss"),
+            "mechanical_load_loss": ("fault", "Mechanical load loss or slack"),
             "automation_timeout": ("fault", "Bench automation timeout"),
             "recipe_control_stop": ("fault", "Recipe stopped by control/error condition"),
             "app_closed": ("operator", "Application closed while session was active"),
@@ -17165,17 +17179,31 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0.0 if load_g is None else abs(float(load_g))
         return 0.0
 
-    def _current_sweep_hold_transformation_band_for_basis(self, basis: str) -> float:
-        return self._current_sweep_hold_min_band_for_basis(
-            basis,
-            SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA,
-        )
+    def _current_sweep_hold_noise_cap_for_basis(self, tolerance: float) -> float:
+        tolerance = abs(float(tolerance))
+        if not math.isfinite(tolerance) or tolerance <= 0.0:
+            return 0.0
+        return tolerance * SERVO_CURRENT_SWEEP_HOLD_NOISE_CAP_TOLERANCE_FACTOR
 
-    def _current_sweep_bounded_noise_band(self, basis: str, noise_value: float) -> float:
+    def _current_sweep_hold_entry_band_for_basis(self, tolerance: float) -> float:
+        tolerance = abs(float(tolerance))
+        if not math.isfinite(tolerance) or tolerance <= 0.0:
+            return 0.0
+        return tolerance * SERVO_CURRENT_SWEEP_HOLD_ENTRY_TOLERANCE_FACTOR
+
+    def _current_sweep_bounded_noise_band(
+        self,
+        basis: str,
+        noise_value: float,
+        tolerance: float,
+    ) -> float:
         noise_band = max(0.0, float(noise_value)) * self._current_sweep_hold_noise_sigma()
         if not self._is_current_sweep_mode(self._automation_name):
             return noise_band
-        return min(noise_band, self._current_sweep_hold_transformation_band_for_basis(basis))
+        cap = self._current_sweep_hold_noise_cap_for_basis(tolerance)
+        if cap <= 0.0:
+            return noise_band
+        return min(noise_band, cap)
 
     def _current_sweep_hold_min_slope_for_basis(self, basis: str) -> float:
         if basis == HSW_BASIS_STRESS_MPA:
@@ -17243,6 +17271,8 @@ class MainWindow(QtWidgets.QMainWindow):
         step_index: int,
         signed_error: float,
         pause_band: float,
+        tolerance: float,
+        noise_value: float,
         filtered_signal: ScaleControlSignal | None,
     ) -> bool:
         if step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
@@ -17250,14 +17280,31 @@ class MainWindow(QtWidgets.QMainWindow):
         if filtered_signal is None:
             self._reset_current_sweep_ramp_hold_candidate()
             return False
-        transformation_band = max(
+        entry_band = max(
             abs(float(pause_band)),
-            self._current_sweep_hold_transformation_band_for_basis(step.basis),
+            self._current_sweep_hold_entry_band_for_basis(tolerance),
         )
-        if abs(float(signed_error)) > transformation_band * 2.5:
+        raw_noise_band = max(0.0, float(noise_value)) * self._current_sweep_hold_noise_sigma()
+        if raw_noise_band > 0.0:
+            fast_band = max(
+                abs(float(pause_band)),
+                self._current_sweep_hold_noise_cap_for_basis(tolerance),
+            )
+            if (
+                fast_band > 0.0
+                and raw_noise_band > fast_band
+                and abs(float(signed_error))
+                > fast_band * SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR
+            ):
+                self._reset_current_sweep_ramp_hold_candidate()
+                return True
+        if (
+            abs(float(signed_error))
+            > entry_band * SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR
+        ):
             self._reset_current_sweep_ramp_hold_candidate()
             return True
-        if abs(float(signed_error)) <= transformation_band:
+        if abs(float(signed_error)) <= entry_band:
             self._reset_current_sweep_ramp_hold_candidate()
             return False
         slope = float(filtered_signal.slope_per_s)
@@ -17268,10 +17315,14 @@ class MainWindow(QtWidgets.QMainWindow):
             slope = 0.0 if slope_mpa is None else float(slope_mpa)
         away_slope_floor = max(
             SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S,
-            transformation_band / max(self._current_sweep_hold_filter_window_s(), 1e-9),
+            entry_band / max(self._current_sweep_hold_filter_window_s(), 1e-9),
         )
         moving_away = float(signed_error) * slope > 0.0 and abs(slope) >= away_slope_floor
-        if not moving_away and abs(float(signed_error)) <= transformation_band * 2.5:
+        if (
+            not moving_away
+            and abs(float(signed_error))
+            <= entry_band * SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR
+        ):
             self._reset_current_sweep_ramp_hold_candidate()
             return False
         sign = math.copysign(1.0, float(signed_error))
@@ -17324,7 +17375,7 @@ class MainWindow(QtWidgets.QMainWindow):
         resume_factor = self._current_sweep_hold_resume_factor(step)
         pause_band = max(
             tolerance * pause_factor,
-            self._current_sweep_bounded_noise_band(step.basis, noise_value),
+            self._current_sweep_bounded_noise_band(step.basis, noise_value, tolerance),
             self._current_sweep_hold_min_band_for_basis(
                 step.basis,
                 self._current_sweep_hold_min_pause_stress_mpa(),
@@ -17332,10 +17383,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         resume_band = max(
             tolerance * resume_factor,
-            min(
-                self._current_sweep_bounded_noise_band(step.basis, noise_value),
-                self._current_sweep_hold_transformation_band_for_basis(step.basis),
-            ),
+            self._current_sweep_bounded_noise_band(step.basis, noise_value, tolerance),
             self._current_sweep_hold_min_band_for_basis(
                 step.basis,
                 self._current_sweep_hold_min_resume_stress_mpa(),
@@ -17352,6 +17400,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 step_index,
                 signed_error,
                 pause_band,
+                tolerance,
+                noise_value,
                 filtered_signal,
             ):
                 return False, False

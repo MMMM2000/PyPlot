@@ -1239,7 +1239,7 @@ def test_setup_zero_plateau_fallback_rejects_loaded_baseline_drift(
         _close_test_window(window)
 
 
-def test_current_sweep_target_ramp_stops_on_contact_loss_after_l0(
+def test_current_sweep_target_ramp_stops_on_mechanical_load_loss_after_l0(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -1284,8 +1284,10 @@ def test_current_sweep_target_ramp_stops_on_contact_loss_after_l0(
 
         assert reached is False
         assert window._automation_active is False
-        assert window._session_stop_reason == "wire_break_or_contact_loss"
-        assert "contact loss detected" in window.log_output.toPlainText().lower()
+        assert window._session_stop_reason == "mechanical_load_loss"
+        log_text = window.log_output.toPlainText().lower()
+        assert "mechanical load loss detected" in log_text
+        assert "current may still be flowing" in log_text
     finally:
         _close_test_window(window)
 
@@ -13721,7 +13723,8 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
-        assert "current_hold_transformation_entry_gate" in first_logic["features"]
+        assert "current_hold_automatic_entry_gate" in first_logic["features"]
+        assert "current_sweep_mechanical_load_loss_guard" in first_logic["features"]
         assert "current_hold_recovery_tolerance_band" in first_logic["features"]
         assert "current_hold_retry_after_filter_window" in first_logic["features"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
