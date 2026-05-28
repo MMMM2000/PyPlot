@@ -32,6 +32,7 @@ def test_load_run_accepts_folder_and_metadata_sample_name() -> None:
 
     assert run.measurement_path.name == "measurement.csv"
     assert run.sample_name == "Ni50Fe27Ga23 12_2 test"
+    assert run.wire_diameter_mm == pytest.approx(0.0191)
     assert len(run.frame) > 3000
     assert "current_mA" in run.frame.columns
 
@@ -57,9 +58,11 @@ def test_make_figures_create_one_line_per_target() -> None:
         assert len(resistance_ax.lines) == 9
         assert all(line.get_marker() == "o" for line in strain_ax.lines)
         assert all(line.get_marker() == "o" for line in resistance_ax.lines)
-        assert strain_ax.get_xlabel() == "Measured current [mA]"
+        assert strain_ax.get_xlabel() == "Current [mA] (79.9 mA = 279 A/mm², d = 19.1 µm)"
         assert strain_ax.get_ylabel() == "Strain [%]"
         assert resistance_ax.get_ylabel() == "Resistance [Ohm]"
+        assert strain_ax.lines[0].get_label() == "50 MPa / 1.46 g"
+        assert strain_ax.get_legend().get_title().get_text() == "Stress / load"
     finally:
         plt.close(strain_fig)
         plt.close(resistance_fig)

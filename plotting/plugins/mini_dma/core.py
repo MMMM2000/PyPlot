@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 from typing import Iterable
 
@@ -39,6 +40,7 @@ class MiniDmaRun:
     frame: pd.DataFrame
     sample_name: str
     initial_length_mm: float | None = None
+    wire_diameter_mm: float | None = None
 
 
 def resolve_measurement_path(path: Path) -> Path:
@@ -93,6 +95,7 @@ def load_run(path: Path) -> MiniDmaRun:
         frame=cleaned.reset_index(drop=True),
         sample_name=sample_name,
         initial_length_mm=_initial_length_from_metadata(metadata),
+        wire_diameter_mm=_wire_diameter_from_metadata(metadata),
     )
 
 
@@ -185,11 +188,15 @@ def _make_current_figure(
         if y_column == "strain_pct" and strain_baseline_mode == STRAIN_BASELINE_GLOBAL_MINIMUM
         else None
     )
+    plotted_groups: list[tuple[float, pd.DataFrame]] = []
     for target, group in groups:
         if filter_resistance_outliers:
             group = _drop_resistance_outliers(group)
         if len(group) < MIN_POINTS_PER_TARGET:
             continue
+        plotted_groups.append((target, group))
+
+    for target, group in plotted_groups:
         if show_power_top_axis:
             power_currents.extend(group["current_mA"].to_numpy(dtype=float).tolist())
             power_resistances.extend(group["resistance_ohm"].to_numpy(dtype=float).tolist())
@@ -207,13 +214,13 @@ def _make_current_figure(
         ax.plot(
             group["current_mA"].to_numpy(dtype=float),
             y_values,
-            label=_format_target_label(target),
+            label=_format_target_label(run, target),
             linewidth=1.4,
             marker="o",
             markersize=3.5,
         )
     ax.set_title(f"{run.sample_name} - {title_suffix}")
-    ax.set_xlabel("Measured current [mA]")
+    ax.set_xlabel(_current_axis_label(run, [group for _target, group in plotted_groups]))
     ax.set_ylabel(y_label)
     ax.grid(True, alpha=0.3)
     if show_power_top_axis:
@@ -225,7 +232,7 @@ def _make_current_figure(
             label_size=11,
             tick_size=9,
         )
-    ax.legend(loc="best", fontsize=9, title="Target stress", title_fontsize=9)
+    ax.legend(loc="best", fontsize=9, title="Stress / load", title_fontsize=9)
     return fig
 
 
@@ -411,6 +418,18 @@ def _initial_length_from_metadata(payload: dict[str, object]) -> float | None:
     return parsed if parsed > 0.0 else None
 
 
+def _wire_diameter_from_metadata(payload: dict[str, object]) -> float | None:
+    for key in ("wire_diameter_mm", "diameter_mm"):
+        value = payload.get(key)
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0.0:
+            return parsed
+    return None
+
+
 def _sample_name_for_run(measurement_path: Path) -> str:
     payload = _metadata_for_run(measurement_path)
     name = payload.get("sample_name")
@@ -419,14 +438,69 @@ def _sample_name_for_run(measurement_path: Path) -> str:
     return measurement_path.parent.name
 
 
-def _format_target_label(value: float) -> str:
+def _format_stress_label(value: float) -> str:
     if float(value).is_integer():
         return f"{int(value)} MPa"
     return f"{value:g} MPa"
 
 
+def _format_target_label(run: MiniDmaRun, value: float) -> str:
+    stress_label = _format_stress_label(value)
+    load_g = _load_g_from_stress_mpa(run, value)
+    if load_g is None:
+        return stress_label
+    return f"{stress_label} / {_format_compact_number(load_g)} g"
+
+
+def _load_g_from_stress_mpa(run: MiniDmaRun, stress_mpa: float) -> float | None:
+    area_mm2 = _wire_area_mm2(run)
+    if area_mm2 is None:
+        return None
+    return stress_mpa * area_mm2 / 9.80665 * 1000.0
+
+
+def _wire_area_mm2(run: MiniDmaRun) -> float | None:
+    if run.wire_diameter_mm is None or run.wire_diameter_mm <= 0.0:
+        return None
+    return math.pi * (run.wire_diameter_mm**2) / 4.0
+
+
+def _current_axis_label(run: MiniDmaRun, groups: Iterable[pd.DataFrame]) -> str:
+    area_mm2 = _wire_area_mm2(run)
+    if area_mm2 is None:
+        return "Current [mA]"
+
+    max_current_mA: float | None = None
+    for group in groups:
+        current = pd.to_numeric(group["current_mA"], errors="coerce")
+        if current.notna().any():
+            group_max = float(current.max(skipna=True))
+            if pd.notna(group_max):
+                max_current_mA = (
+                    group_max if max_current_mA is None else max(max_current_mA, group_max)
+                )
+    if max_current_mA is None:
+        return "Current [mA]"
+
+    current_density = (max_current_mA / 1000.0) / area_mm2
+    diameter_um = run.wire_diameter_mm * 1000.0
+    return (
+        "Current [mA] "
+        f"({_format_compact_number(max_current_mA)} mA = "
+        f"{_format_compact_number(current_density, max_decimals=0)} A/mm², "
+        f"d = {_format_compact_number(diameter_um)} µm)"
+    )
+
+
+def _format_compact_number(value: float, *, max_decimals: int = 2) -> str:
+    rounded = round(float(value), max_decimals)
+    if math.isclose(rounded, round(rounded), abs_tol=0.5 * (10**-max_decimals)):
+        return str(int(round(rounded)))
+    return f"{rounded:.{max_decimals}f}".rstrip("0").rstrip(".")
+
+
 def _target_token(value: float) -> str:
-    label = _format_target_label(value).replace(" ", "_").replace(".", "p")
+    label = _format_stress_label(value).replace(" ", "_").replace(".", "p")
     return "".join(char if char.isalnum() or char == "_" else "_" for char in label)
 
 

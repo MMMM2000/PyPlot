@@ -236,6 +236,7 @@ class MiniDmaPlugin(PyPlotPlugin):
 
         axes = figure.axes[0] if figure.axes else None
         title = axes.get_title() if axes is not None else run.sample_name
+        x_label = axes.get_xlabel() if axes is not None else ""
         y_label = axes.get_ylabel() if axes is not None else ""
         lines: dict[tuple[str, float | str], GraphLineState] = {}
         window_module = window_api()
@@ -263,7 +264,7 @@ class MiniDmaPlugin(PyPlotPlugin):
             kind="mini_dma",
             title=title,
             root_label=run.sample_name,
-            x_label="Measured current [mA]",
+            x_label=x_label,
             y_label=y_label,
             canvas=canvas,
             axes=axes,
