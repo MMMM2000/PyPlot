@@ -4953,26 +4953,25 @@ class MainWindow(QtWidgets.QMainWindow):
             basis_label.setVisible(False)
         self.combo_current_sweep_basis.setVisible(False)
 
-        self.current_sweep_preheat_box = self._group_box("First overheating")
-        current_sweep_preheat_layout = QtWidgets.QVBoxLayout(self.current_sweep_preheat_box)
-        current_sweep_preheat_layout.setContentsMargins(8, 8, 8, 8)
-        current_sweep_preheat_layout.setSpacing(6)
+        self.label_current_sweep_first_overheating_section = QtWidgets.QLabel(
+            "First overheating",
+            automation_box,
+        )
+        first_overheating_font = self.label_current_sweep_first_overheating_section.font()
+        first_overheating_font.setBold(True)
+        self.label_current_sweep_first_overheating_section.setFont(first_overheating_font)
+        current_sweep_form.addRow("", self.label_current_sweep_first_overheating_section)
         self.check_current_sweep_first_overheating = QtWidgets.QCheckBox(
-            "Run preheat sweep before normal targets",
-            self.current_sweep_preheat_box,
+            "Enable first-overheating sweep",
+            automation_box,
         )
         self.check_current_sweep_first_overheating.setChecked(False)
         self.check_current_sweep_first_overheating.setToolTip(
             "Before the normal target sequence, run one current sweep at this fixed stress target. "
             "Use this when the first heating has a higher transformation temperature than later cycles."
         )
-        current_sweep_preheat_layout.addWidget(self.check_current_sweep_first_overheating)
-        current_sweep_preheat_form = QtWidgets.QFormLayout()
-        current_sweep_preheat_form.setContentsMargins(0, 0, 0, 0)
-        current_sweep_preheat_form.setHorizontalSpacing(8)
-        current_sweep_preheat_form.setVerticalSpacing(4)
-        current_sweep_preheat_layout.addLayout(current_sweep_preheat_form)
-        self.spin_current_sweep_first_overheating_target_mpa = CompactDoubleSpinBox(self.current_sweep_preheat_box)
+        current_sweep_form.addRow("", self.check_current_sweep_first_overheating)
+        self.spin_current_sweep_first_overheating_target_mpa = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_first_overheating_target_mpa.setDecimals(3)
         self.spin_current_sweep_first_overheating_target_mpa.setRange(0.001, 100000.0)
         self.spin_current_sweep_first_overheating_target_mpa.setValue(20.0)
@@ -4984,11 +4983,16 @@ class MainWindow(QtWidgets.QMainWindow):
             current_preheat_row,
             self.label_current_first_overheating_target_equiv,
         ) = self._spin_with_equivalent_label(
-            self.current_sweep_preheat_box,
+            automation_box,
             self.spin_current_sweep_first_overheating_target_mpa,
         )
-        current_sweep_preheat_form.addRow("Preheat target", current_preheat_row)
-        current_sweep_form.addRow("", self.current_sweep_preheat_box)
+        current_sweep_form.addRow("First-overheating stress", current_preheat_row)
+
+        self.label_current_sweep_targets_section = QtWidgets.QLabel("Targets", automation_box)
+        targets_font = self.label_current_sweep_targets_section.font()
+        targets_font.setBold(True)
+        self.label_current_sweep_targets_section.setFont(targets_font)
+        current_sweep_form.addRow("", self.label_current_sweep_targets_section)
         self.spin_current_sweep_target_start = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_start.setDecimals(3)
         self.spin_current_sweep_target_start.setRange(-100000.0, 100000.0)
@@ -4997,7 +5001,7 @@ class MainWindow(QtWidgets.QMainWindow):
             automation_box,
             self.spin_current_sweep_target_start,
         )
-        current_sweep_form.addRow("Target start", current_start_row)
+        current_sweep_form.addRow("Start", current_start_row)
         self.spin_current_sweep_target_end = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_end.setDecimals(3)
         self.spin_current_sweep_target_end.setRange(-100000.0, 100000.0)
@@ -5006,7 +5010,7 @@ class MainWindow(QtWidgets.QMainWindow):
             automation_box,
             self.spin_current_sweep_target_end,
         )
-        current_sweep_form.addRow("Target end", current_end_row)
+        current_sweep_form.addRow("End", current_end_row)
         self.spin_current_sweep_target_step = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_step.setDecimals(3)
         self.spin_current_sweep_target_step.setRange(0.001, 100000.0)
@@ -5015,7 +5019,7 @@ class MainWindow(QtWidgets.QMainWindow):
             automation_box,
             self.spin_current_sweep_target_step,
         )
-        current_sweep_form.addRow("Target step", current_step_row)
+        current_sweep_form.addRow("Step", current_step_row)
         self.spin_current_sweep_target_ramp_rate = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_ramp_rate.setDecimals(4)
         self.spin_current_sweep_target_ramp_rate.setRange(0.0001, 100000.0)
@@ -5028,7 +5032,7 @@ class MainWindow(QtWidgets.QMainWindow):
             automation_box,
             self.spin_current_sweep_target_ramp_rate,
         )
-        current_sweep_form.addRow("Target ramp rate", current_ramp_row)
+        current_sweep_form.addRow("Ramp rate", current_ramp_row)
         self.button_current_sweep_advanced_controls = QtWidgets.QToolButton(automation_box)
         self.button_current_sweep_advanced_controls.setText("Advanced speeds/caps")
         self.button_current_sweep_advanced_controls.setToolTip(
@@ -5125,9 +5129,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "Stress-equivalent near-target band. Inside this band, the controller only sends one motor step."
         )
         current_sweep_advanced_form.addRow("Near band", self.spin_current_sweep_near_correction_stress_mpa)
+        self.label_current_sweep_current_section = QtWidgets.QLabel("Current sweep", automation_box)
+        current_section_font = self.label_current_sweep_current_section.font()
+        current_section_font.setBold(True)
+        self.label_current_sweep_current_section.setFont(current_section_font)
+        current_sweep_form.addRow("", self.label_current_sweep_current_section)
         self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
         self.check_current_sweep_return_target.setChecked(True)
-        current_sweep_form.addRow("", self.check_current_sweep_return_target)
+        self.check_current_sweep_return_target.setVisible(False)
         self.spin_current_sweep_start_mA = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_start_mA.setDecimals(2)
         self.spin_current_sweep_start_mA.setRange(0.0, 5000.0)
@@ -5138,7 +5147,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_start_mA,
         )
         self.label_current_start_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
-        current_sweep_form.addRow("Current start", current_start_mA_row)
+        current_sweep_form.addRow("Start", current_start_mA_row)
         self.spin_current_sweep_end_mA = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_end_mA.setDecimals(2)
         self.spin_current_sweep_end_mA.setRange(0.0, 5000.0)
@@ -5149,7 +5158,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_end_mA,
         )
         self.label_current_end_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
-        current_sweep_form.addRow("Current end", current_end_mA_row)
+        current_sweep_form.addRow("End", current_end_mA_row)
         self.spin_current_sweep_step_mA = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_step_mA.setDecimals(2)
         self.spin_current_sweep_step_mA.setRange(0.01, 5000.0)
@@ -5158,9 +5167,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_step_mA.setToolTip(
             "Current ramp rate. Mini DMA converts this to smaller setpoint updates using the control interval."
         )
-        current_sweep_form.addRow("Current ramp rate", self.spin_current_sweep_step_mA)
+        current_sweep_form.addRow("Ramp rate", self.spin_current_sweep_step_mA)
         self.check_current_sweep_hold_on_error = QtWidgets.QCheckBox(
-            "Pause current ramp while target recovers",
+            "Pause while target recovers",
             automation_box,
         )
         self.check_current_sweep_hold_on_error.setToolTip(
@@ -9585,7 +9594,15 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.blockSignals(False)
 
     def _update_current_sweep_basis_ui(self) -> None:
-        suffix, decimals = self._distribution_units(self._current_sweep_basis())
+        basis = self._current_sweep_basis()
+        suffix, decimals = self._distribution_units(basis)
+        if hasattr(self, "label_current_sweep_targets_section"):
+            if basis == HSW_BASIS_LOAD_G:
+                self.label_current_sweep_targets_section.setText("Load targets")
+            elif basis == HSW_BASIS_STRAIN_PCT:
+                self.label_current_sweep_targets_section.setText("Strain targets")
+            else:
+                self.label_current_sweep_targets_section.setText("Stress targets")
         for widget in (
             self.spin_current_sweep_target_start,
             self.spin_current_sweep_target_end,
@@ -13765,7 +13782,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "correction_hold_max_stress_mpa": self._current_sweep_hold_correction_stress_mpa(),
                 "correction_mid_stress_mpa": self._current_sweep_mid_correction_stress_mpa(),
                 "correction_near_stress_mpa": self._current_sweep_near_correction_stress_mpa(),
-                "return_target": self.check_current_sweep_return_target.isChecked(),
+                "return_target": True,
                 "current_start_mA": float(self.spin_current_sweep_start_mA.value()),
                 "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
                 "current_ramp_rate_mA_s": float(self.spin_current_sweep_step_mA.value()),
@@ -15007,7 +15024,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "hold_correction_stress_mpa": float(self.spin_current_sweep_hold_correction_stress_mpa.value()),
                 "mid_correction_stress_mpa": float(self.spin_current_sweep_mid_correction_stress_mpa.value()),
                 "near_correction_stress_mpa": float(self.spin_current_sweep_near_correction_stress_mpa.value()),
-                "return_target": bool(self.check_current_sweep_return_target.isChecked()),
+                "return_target": True,
                 "first_overheating": bool(self.check_current_sweep_first_overheating.isChecked()),
                 "first_overheating_target_mpa": float(
                     self.spin_current_sweep_first_overheating_target_mpa.value()
@@ -15112,7 +15129,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_hold_correction_stress_mpa.setValue(float(current_sweep.get("hold_correction_stress_mpa", self.spin_current_sweep_hold_correction_stress_mpa.value())))
             self.spin_current_sweep_mid_correction_stress_mpa.setValue(float(current_sweep.get("mid_correction_stress_mpa", self.spin_current_sweep_mid_correction_stress_mpa.value())))
             self.spin_current_sweep_near_correction_stress_mpa.setValue(float(current_sweep.get("near_correction_stress_mpa", self.spin_current_sweep_near_correction_stress_mpa.value())))
-            self.check_current_sweep_return_target.setChecked(bool(current_sweep.get("return_target", self.check_current_sweep_return_target.isChecked())))
+            self.check_current_sweep_return_target.setChecked(True)
             first_overheating_enabled = current_sweep.get(
                 "first_overheating",
                 current_sweep.get(
@@ -17168,7 +17185,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 previous_target = target
                 _append_current_sweep_plateau(target=target, plateau_basis=basis, note=str(plateau_index))
-            if self.check_current_sweep_return_target.isChecked() and targets:
+            if targets:
                 steps.append(
                     AutomationStep(
                         "set_current",
@@ -19125,7 +19142,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_near_correction_stress_mpa.value(),
         )
         self.settings.setValue("current_sweep_servo_defaults_version", SERVO_CURRENT_SWEEP_DEFAULTS_VERSION)
-        self.settings.setValue("current_sweep_return_target", self.check_current_sweep_return_target.isChecked())
+        self.check_current_sweep_return_target.setChecked(True)
+        self.settings.setValue("current_sweep_return_target", True)
         self.settings.setValue("current_sweep_start_mA", self.spin_current_sweep_start_mA.value())
         self.settings.setValue("current_sweep_end_mA", self.spin_current_sweep_end_mA.value())
         self.settings.setValue("current_sweep_step_mA", self.spin_current_sweep_step_mA.value())
@@ -19711,9 +19729,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ),
             )
         )
-        self.check_current_sweep_return_target.setChecked(
-            bool(self.settings.value("current_sweep_return_target", True, type=bool))
-        )
+        self.check_current_sweep_return_target.setChecked(True)
         saved_current_start_mA = float(self.settings.value("current_sweep_start_mA", 1.0))
         self.spin_current_sweep_start_mA.setValue(saved_current_start_mA)
         self.spin_current_sweep_end_mA.setValue(float(self.settings.value("current_sweep_end_mA", 3.0)))

@@ -3797,6 +3797,7 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
 
         assert "Sample: Ni50Fe27Ga23 12/2" in window.label_recipe_sample.text()
         assert "diameter 30 um" in window.label_recipe_sample.text()
+        assert window.label_current_sweep_targets_section.text() == "Stress targets"
         assert "0.721 g" in window.label_setup_preload_stress_equiv.text()
         assert "0.072 g/s" in window.label_setup_preload_ramp_equiv.text()
         assert window.spin_setup_zero_tolerance_g.isHidden() is True
@@ -3810,6 +3811,7 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
         mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
         assert mode_index >= 0
         window.combo_recipe_mode.setCurrentIndex(mode_index)
+        assert window.label_current_sweep_targets_section.text() == "Load targets"
         window.spin_current_sweep_target_start.setValue(
             mini_dma_mod.load_g_from_stress_mpa(10.0, window.spin_diameter.value())
         )
@@ -5768,9 +5770,12 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is False
         assert window.check_current_sweep_first_overheating.isHidden() is False
-        assert window.current_sweep_preheat_box.title() == "First overheating"
-        assert window.check_current_sweep_first_overheating.text() == "Run preheat sweep before normal targets"
+        assert window.label_current_sweep_first_overheating_section.text() == "First overheating"
+        assert window.check_current_sweep_first_overheating.text() == "Enable first-overheating sweep"
         assert window.spin_current_sweep_first_overheating_target_mpa.isHidden() is False
+        assert window.label_current_sweep_targets_section.text() == "Load targets"
+        assert window.label_current_sweep_current_section.text() == "Current sweep"
+        assert window.check_current_sweep_return_target.isHidden() is True
         assert window.check_current_sweep_reverse_current.isHidden() is True
         assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(
             mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA
@@ -12811,6 +12816,7 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window.check_current_sweep_hold_on_error.setChecked(False)
         window.check_current_sweep_first_overheating.setChecked(False)
         window.spin_current_sweep_first_overheating_target_mpa.setValue(75.0)
+        window.check_current_sweep_return_target.setChecked(False)
 
         window._load_recipe_from_path(recipe_path)
 
@@ -12824,6 +12830,7 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert window.check_current_sweep_hold_on_error.isChecked() is True
         assert window.check_current_sweep_first_overheating.isChecked() is True
         assert window.spin_current_sweep_first_overheating_target_mpa.value() == pytest.approx(20.0)
+        assert window.check_current_sweep_return_target.isChecked() is True
         assert "Loaded recipe" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
