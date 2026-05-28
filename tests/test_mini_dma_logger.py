@@ -1292,6 +1292,70 @@ def test_current_sweep_target_ramp_stops_on_mechanical_load_loss_after_l0(
         _close_test_window(window)
 
 
+def test_bench_current_sweep_can_take_up_mechanical_slack_after_l0(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append(target_mm)
+        window._current_position_mm = target_mm
+        effective = kwargs.get("effective_target_mm")
+        if effective is not None:
+            window._effective_position_mm = float(effective)
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.set_bench_mechanical_slack_takeup(allow=True, max_seek_mm=10.0)
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0089)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(61.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "ramp_target",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            note="1",
+        )
+    ]
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        note="1",
+    )
+    window._position_reference_mm = 0.0
+    window._current_position_mm = 0.40
+    window._effective_position_mm = 0.40
+    window._last_move_target_mm = 0.40
+    window._last_effective_move_target_mm = 0.40
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.25,
+        )
+
+        assert reached is False
+        assert window._automation_active is True
+        assert moves
+        log_text = window.log_output.toPlainText().lower()
+        assert "continuing tensile take-up" in log_text
+        assert "mechanical load loss detected" not in log_text
+    finally:
+        _close_test_window(window)
+
+
 def test_run_zero_load_fallback_does_not_persist_as_default(
     tmp_path: Path,
     qtbot,
@@ -3036,6 +3100,67 @@ def test_recipe_start_keeps_timed_progress_estimate(tmp_path: Path, qtbot) -> No
         assert window._automation_total_steps == expected_ticks
         assert window.recipe_progress.maximum() == expected_ticks
         assert window._automation_completed_ticks == 0
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_start_discards_stale_resume_after_controls_change(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window.spin_current_sweep_target_start.setValue(250.0)
+        window.spin_current_sweep_target_end.setValue(1000.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(50.0)
+        window.spin_current_sweep_step_mA.setValue(1.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window._update_recipe_mode_ui()
+        stale_step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=1.0,
+            current_end_mA=50.0,
+            current_ramp_rate_mA_s=1.0,
+        )
+        window._resume_recipe_state = mini_dma_mod.AutomationResumeState(
+            steps=[stale_step],
+            index=0,
+            interval_ms=50,
+            total_steps=1,
+            name=mini_dma_mod.CURRENT_SWEEP_STRESS,
+            origin_mm=0.0,
+            summary="Started iso-stress current sweep: 50.0000 MPa to 50.0000 MPa",
+            current_setpoint_mA=1.0,
+        )
+        window._session_active = True
+        window._ask_resume_stopped_recipe = pytest.fail  # type: ignore[method-assign]
+        window._preflight_recipe_hardware = lambda _steps, **_kwargs: True  # type: ignore[method-assign]
+        window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+        window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
+
+        window._start_auto_ramp()
+
+        assert window._resume_recipe_state is None
+        assert window._automation_active is True
+        assert any(
+            step.target_value == pytest.approx(250.0)
+            for step in window._automation_steps
+            if step.action == "sweep_current"
+        )
+        assert not any(
+            step.target_value == pytest.approx(50.0)
+            for step in window._automation_steps
+            if step.action == "sweep_current"
+        )
+        assert "Discarded stopped-recipe resume state" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 

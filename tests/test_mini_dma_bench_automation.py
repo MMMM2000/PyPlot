@@ -117,6 +117,10 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
                     "starting_length_mm": 20.0,
                     "preload_length_mm": 20.4,
                 },
+                "guardrails": {
+                    "allow_mechanical_slack_takeup": True,
+                    "mechanical_slack_max_seek_mm": 10.0,
+                },
                 "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
             }
         ),
@@ -146,6 +150,9 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
         def _load_recipe_from_path(self, path: Path) -> None:
             events.append(("recipe", path.name))
 
+        def set_bench_mechanical_slack_takeup(self, *, allow: bool, max_seek_mm: float | None) -> None:
+            events.append(("slack_takeup", (allow, max_seek_mm)))
+
         def _start_auto_ramp(self) -> None:
             events.append(("start", None))
 
@@ -163,6 +170,7 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
     assert summary["runs"][0]["status"] == "completed"
     assert ("lengths", (20.0, 20.4)) in events
     assert ("recipe", "iso-strain.recipe.json") in events
+    assert ("slack_takeup", (True, 10.0)) in events
     assert ("start", None) in events
 
 
@@ -183,6 +191,10 @@ def test_mini_dma_bench_plan_uses_next_run_for_existing_output(tmp_path: Path) -
                 "length_setup": {
                     "starting_length_mm": 20.0,
                     "preload_length_mm": 20.4,
+                },
+                "guardrails": {
+                    "allow_mechanical_slack_takeup": True,
+                    "mechanical_slack_max_seek_mm": 10.0,
                 },
                 "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
             }

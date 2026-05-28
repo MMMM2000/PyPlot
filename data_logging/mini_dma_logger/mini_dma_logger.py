@@ -3251,6 +3251,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_control_loop: AutomationControlLoop | None = None
         self._automation_control_error: str | None = None
         self._active_control_config: MiniDmaControlConfig | None = None
+        self._bench_allow_mechanical_slack_takeup = False
+        self._bench_mechanical_slack_max_seek_mm: float | None = None
+        self._bench_mechanical_slack_takeup_logged_keys: set[tuple[str, int | None, float]] = set()
         self._recovery_plot_dialog: QtWidgets.QDialog | None = None
         self._recovery_plot: PyqtGraphPlotBundle | None = None
         self._recovery_plot_widget: Any | None = None
@@ -3457,7 +3460,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current_sweep_tolerance=float(self.spin_current_sweep_tolerance.value()),
             current_sweep_nudge_mm=float(self.spin_current_sweep_nudge_mm.value()),
             current_sweep_balance_speed_mm_s=float(self.spin_current_sweep_balance_speed_mm_s.value()),
-            current_sweep_max_seek_mm=float(self.spin_current_sweep_max_seek_mm.value()),
+            current_sweep_max_seek_mm=self._current_sweep_config_max_seek_mm(),
             supply_profile_id=str(self.combo_supply_profile.currentData() or "hmp4030"),
             supply_current_resolution_mA=supply_resolution,
             motor_supply_enabled=self.check_motor_supply_power.isChecked(),
@@ -3466,6 +3469,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _control_config(self) -> MiniDmaControlConfig | None:
         return self._active_control_config
+
+    def _current_sweep_config_max_seek_mm(self) -> float:
+        value = float(self.spin_current_sweep_max_seek_mm.value())
+        override = getattr(self, "_bench_mechanical_slack_max_seek_mm", None)
+        if bool(getattr(self, "_bench_allow_mechanical_slack_takeup", False)) and override is not None:
+            value = max(value, float(override))
+        return value
+
+    def set_bench_mechanical_slack_takeup(
+        self,
+        *,
+        allow: bool,
+        max_seek_mm: float | None = None,
+    ) -> None:
+        self._bench_allow_mechanical_slack_takeup = bool(allow)
+        self._bench_mechanical_slack_max_seek_mm = None if max_seek_mm is None else max(
+            self._motor_step_mm(),
+            float(max_seek_mm),
+        )
+        self._bench_mechanical_slack_takeup_logged_keys.clear()
 
     def _show_timing_settings_dialog(self) -> None:
         dialog = QtWidgets.QDialog(self)
@@ -9280,6 +9303,32 @@ class MainWindow(QtWidgets.QMainWindow):
             stop_detail=message,
         )
 
+    def _current_sweep_mechanical_slack_takeup_allowed(self) -> bool:
+        return bool(getattr(self, "_bench_allow_mechanical_slack_takeup", False))
+
+    def _note_current_sweep_mechanical_slack_takeup(
+        self,
+        basis: str,
+        target_value: float,
+        current_value: float,
+    ) -> None:
+        key = (basis, self._automation_plateau_index, round(float(target_value), 6))
+        logged_keys = getattr(self, "_bench_mechanical_slack_takeup_logged_keys", None)
+        if logged_keys is None:
+            logged_keys = set()
+            self._bench_mechanical_slack_takeup_logged_keys = logged_keys
+        if key in logged_keys:
+            return
+        logged_keys.add(key)
+        travel_mm = abs(self._tensile_displacement_mm(self._measurement_effective_position_mm()))
+        self._log(
+            "Bench automation detected mechanical slack/load loss during current sweep: "
+            f"target {_format_compact_unit(float(target_value), self._distribution_units(basis)[0])}, "
+            f"measured {_format_compact_unit(float(current_value), self._distribution_units(basis)[0])}, "
+            f"tensile travel {_format_compact_unit(travel_mm, 'mm')}. "
+            "Continuing tensile take-up because the bench plan explicitly allows it."
+        )
+
     def _clamp_motion_resolution_controls(self) -> None:
         step_mm = self._motor_step_mm()
         min_speed = self._minimum_held_speed_mm_s()
@@ -11199,8 +11248,11 @@ class MainWindow(QtWidgets.QMainWindow):
             current_value,
             effective_tolerance,
         ):
-            self._stop_for_current_sweep_mechanical_load_loss(basis, target_value, current_value)
-            return False
+            if self._current_sweep_mechanical_slack_takeup_allowed():
+                self._note_current_sweep_mechanical_slack_takeup(basis, target_value, current_value)
+            else:
+                self._stop_for_current_sweep_mechanical_load_loss(basis, target_value, current_value)
+                return False
         if self._maybe_start_setup_unload_baseline_fallback():
             return False
         if self._maybe_start_setup_zero_plateau_fallback(basis, current_value, effective_tolerance):
@@ -15539,19 +15591,24 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._automation_active:
             return
-        if self._resume_recipe_state is not None and self._session_active:
-            resume_choice = self._ask_resume_stopped_recipe()
-            if resume_choice == "cancel":
-                return
-            if resume_choice == "resume":
-                self._resume_stopped_recipe(self._resume_recipe_state)
-                return
-            self._resume_recipe_state = None
         try:
             steps, summary, interval_ms = self._build_automation_recipe()
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
             return
+        if self._resume_recipe_state is not None and self._session_active:
+            if self._resume_recipe_state.summary == summary:
+                resume_choice = self._ask_resume_stopped_recipe()
+                if resume_choice == "cancel":
+                    return
+                if resume_choice == "resume":
+                    self._resume_stopped_recipe(self._resume_recipe_state)
+                    return
+            else:
+                self._log(
+                    "Discarded stopped-recipe resume state because the visible recipe controls changed."
+                )
+            self._resume_recipe_state = None
         self._sync_stale_log_name_from_sample()
         if not self._preflight_recipe_hardware(steps, show_progress=True):
             return
