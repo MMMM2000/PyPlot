@@ -3802,6 +3802,7 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
         assert window.spin_setup_zero_tolerance_g.isHidden() is True
         assert "0.721 g" in window.label_current_target_start_equiv.text()
         assert "0.072 g/s" in window.label_current_target_ramp_equiv.text()
+        assert "1.442 g" in window.label_current_first_overheating_target_equiv.text()
         assert "70.736 A/mm<sup>2</sup>" in window.label_current_end_density.text()
         assert window.label_current_end_density.textFormat() == QtCore.Qt.TextFormat.RichText
         assert "palette(mid)" not in window.label_current_target_start_equiv.styleSheet()
@@ -5767,7 +5768,8 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is False
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is False
         assert window.check_current_sweep_first_overheating.isHidden() is False
-        assert window.check_current_sweep_first_overheating.text() == "First overheating preheat"
+        assert window.current_sweep_preheat_box.title() == "First overheating"
+        assert window.check_current_sweep_first_overheating.text() == "Run preheat sweep before normal targets"
         assert window.spin_current_sweep_first_overheating_target_mpa.isHidden() is False
         assert window.check_current_sweep_reverse_current.isHidden() is True
         assert window.spin_current_sweep_hold_correction_stress_mpa.value() == pytest.approx(

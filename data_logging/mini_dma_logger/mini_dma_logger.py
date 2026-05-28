@@ -4952,17 +4952,27 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis_label is not None:
             basis_label.setVisible(False)
         self.combo_current_sweep_basis.setVisible(False)
+
+        self.current_sweep_preheat_box = self._group_box("First overheating")
+        current_sweep_preheat_layout = QtWidgets.QVBoxLayout(self.current_sweep_preheat_box)
+        current_sweep_preheat_layout.setContentsMargins(8, 8, 8, 8)
+        current_sweep_preheat_layout.setSpacing(6)
         self.check_current_sweep_first_overheating = QtWidgets.QCheckBox(
-            "First overheating preheat",
-            automation_box,
+            "Run preheat sweep before normal targets",
+            self.current_sweep_preheat_box,
         )
         self.check_current_sweep_first_overheating.setChecked(False)
         self.check_current_sweep_first_overheating.setToolTip(
             "Before the normal target sequence, run one current sweep at this fixed stress target. "
             "Use this when the first heating has a higher transformation temperature than later cycles."
         )
-        current_sweep_form.addRow("", self.check_current_sweep_first_overheating)
-        self.spin_current_sweep_first_overheating_target_mpa = CompactDoubleSpinBox(automation_box)
+        current_sweep_preheat_layout.addWidget(self.check_current_sweep_first_overheating)
+        current_sweep_preheat_form = QtWidgets.QFormLayout()
+        current_sweep_preheat_form.setContentsMargins(0, 0, 0, 0)
+        current_sweep_preheat_form.setHorizontalSpacing(8)
+        current_sweep_preheat_form.setVerticalSpacing(4)
+        current_sweep_preheat_layout.addLayout(current_sweep_preheat_form)
+        self.spin_current_sweep_first_overheating_target_mpa = CompactDoubleSpinBox(self.current_sweep_preheat_box)
         self.spin_current_sweep_first_overheating_target_mpa.setDecimals(3)
         self.spin_current_sweep_first_overheating_target_mpa.setRange(0.001, 100000.0)
         self.spin_current_sweep_first_overheating_target_mpa.setValue(20.0)
@@ -4970,7 +4980,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_first_overheating_target_mpa.setToolTip(
             "Stress target used only for the optional first-overheating preheat sweep."
         )
-        current_sweep_form.addRow("Preheat target", self.spin_current_sweep_first_overheating_target_mpa)
+        (
+            current_preheat_row,
+            self.label_current_first_overheating_target_equiv,
+        ) = self._spin_with_equivalent_label(
+            self.current_sweep_preheat_box,
+            self.spin_current_sweep_first_overheating_target_mpa,
+        )
+        current_sweep_preheat_form.addRow("Preheat target", current_preheat_row)
+        current_sweep_form.addRow("", self.current_sweep_preheat_box)
         self.spin_current_sweep_target_start = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_start.setDecimals(3)
         self.spin_current_sweep_target_start.setRange(-100000.0, 100000.0)
@@ -8072,6 +8090,9 @@ class MainWindow(QtWidgets.QMainWindow):
             label.setText(self._target_equivalent_text(distribution_basis, float(spinbox.value())))
 
         current_basis = self._current_sweep_basis()
+        self.label_current_first_overheating_target_equiv.setText(
+            self._load_equivalent_text(float(self.spin_current_sweep_first_overheating_target_mpa.value()))
+        )
         for label, spinbox in (
             (self.label_current_target_start_equiv, self.spin_current_sweep_target_start),
             (self.label_current_target_end_equiv, self.spin_current_sweep_target_end),
