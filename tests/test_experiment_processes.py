@@ -30,6 +30,27 @@ def test_experiment_process_command_uses_module_entrypoint() -> None:
     ]
 
 
+def test_experiment_process_command_uses_launcher_entrypoint_when_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = ExperimentProcessSpec(
+        display_name="Current Annealing Logger",
+        module="data_logging.current_annealing_logger.current_annealing_logger",
+        resource_tag="current_annealing",
+    )
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    command = build_experiment_process_command(
+        spec, executable=Path("C:/apps/PyPlot/launcher.exe")
+    )
+
+    assert command == [
+        str(Path("C:/apps/PyPlot/launcher.exe")),
+        "--experiment-process",
+        "current_annealing",
+    ]
+
+
 def test_experiment_process_env_tags_run_and_removes_headless_qt() -> None:
     spec = ExperimentProcessSpec(
         display_name="Current Annealing Logger",

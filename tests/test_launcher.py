@@ -565,6 +565,33 @@ def test_hardware_experiment_loggers_launch_in_child_process(
     assert getattr(spec, "resource_tag") == resource_tag
 
 
+def test_experiment_process_cli_dispatches_registered_logger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    class _Module:
+        @staticmethod
+        def main() -> None:
+            called.append("main")
+
+    monkeypatch.setattr(
+        launcher_module,
+        "import_module",
+        lambda module: _Module
+        if module == "data_logging.current_annealing_logger.current_annealing_logger"
+        else pytest.fail(f"unexpected module import: {module}"),
+    )
+
+    args, _qt_args = launcher_module._parse_launcher_args(
+        ["--experiment-process", "current_annealing"]
+    )
+
+    assert launcher_module._is_experiment_process_requested(args)
+    assert launcher_module._run_experiment_process(args) == 0
+    assert called == ["main"]
+
+
 def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
