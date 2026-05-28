@@ -164,3 +164,6 @@ class BrokerJsonClient:
 
     def measure_channel(self, *, channel: int) -> dict[str, float | None]:
         return dict(self.request("measure_channel", channel=channel)["readback"])
+
+    def snapshot(self) -> dict[str, Any]:
+        return dict(self.request("snapshot")["snapshot"])

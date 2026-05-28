@@ -7,6 +7,7 @@ import pytest
 from data_logging.shared_power_supply.broker import (
     ROLE_CURRENT_ANNEALING,
     ROLE_MINI_DMA_CURRENT,
+    ROLE_MINI_DMA_MOTOR,
     SharedPowerSupplyBroker,
 )
 from data_logging.shared_power_supply.driver import HmpSerialDriver
@@ -143,6 +144,49 @@ def test_broker_serializes_channel_selection_and_commands() -> None:
         "MEAS:VOLT?",
         "MEAS:CURR?",
     ]
+
+
+def test_broker_allows_current_annealing_and_mini_dma_on_separate_channels() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(
+        channel=1,
+        role=ROLE_CURRENT_ANNEALING,
+        confirmed=True,
+        voltage_limit_v=32.05,
+        current_limit_a=0.1,
+    )
+    broker.assign_role(
+        channel=3,
+        role=ROLE_MINI_DMA_MOTOR,
+        confirmed=True,
+        voltage_limit_v=12.0,
+        current_limit_a=0.4,
+    )
+    broker.assign_role(
+        channel=4,
+        role=ROLE_MINI_DMA_CURRENT,
+        confirmed=True,
+        voltage_limit_v=32.05,
+        current_limit_a=0.06,
+    )
+    broker.confirm_profile()
+
+    anneal = broker.lease(channel=1, owner="current-annealing", role=ROLE_CURRENT_ANNEALING)
+    motor = broker.lease(channel=3, owner="mini-dma", role=ROLE_MINI_DMA_MOTOR)
+    current = broker.lease(channel=4, owner="mini-dma", role=ROLE_MINI_DMA_CURRENT)
+
+    broker.configure_channel(channel=1, lease_id=anneal.lease_id, voltage_v=2.0, current_a=0.001, output_on=True)
+    broker.configure_channel(channel=3, lease_id=motor.lease_id, voltage_v=12.0, current_a=0.4, output_on=True)
+    broker.configure_channel(channel=4, lease_id=current.lease_id, voltage_v=32.05, current_a=0.02, output_on=True)
+
+    snapshot = broker.snapshot()
+    assert set(snapshot["leases"]) == {"1", "3", "4"}
+    assert driver._serial.channels[1]["current"] == pytest.approx(0.001)  # type: ignore[union-attr]
+    assert driver._serial.channels[3]["voltage"] == pytest.approx(12.0)  # type: ignore[union-attr]
+    assert driver._serial.channels[4]["current"] == pytest.approx(0.02)  # type: ignore[union-attr]
+    with pytest.raises(PermissionError, match="assigned to"):
+        broker.lease(channel=1, owner="mini-dma", role=ROLE_MINI_DMA_CURRENT)
 
 
 def test_broker_reports_channel_output_state() -> None:

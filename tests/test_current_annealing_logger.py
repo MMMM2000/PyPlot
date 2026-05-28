@@ -17,6 +17,10 @@ class _FakeBrokerClient:
             {"voltage_V": 2.5, "current_mA": 10.0},
         ]
 
+    def snapshot(self) -> dict[str, object]:
+        self.calls.append(("snapshot", {}))
+        return {"profile": {"profile_id": "hmp4040", "channel_count": 4}}
+
     def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
         self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
         return {"lease_id": "lease-1", "channel": channel, "owner": owner, "role": role}
@@ -67,8 +71,400 @@ class _FakeBrokerClient:
         return self.readbacks.pop(0)
 
 
+class _FailingBrokerClient:
+    def snapshot(self) -> dict[str, object]:
+        raise RuntimeError("timed out")
+
+
+class _FakeHmpDriver:
+    instances: list["_FakeHmpDriver"] = []
+    responses: dict[tuple[str, int], tuple[object, str] | Exception] = {}
+
+    def __init__(self, *, port_name: str, baudrate: int, timeout_s: float) -> None:
+        self.port_name = port_name
+        self.baudrate = baudrate
+        self.timeout_s = timeout_s
+        self.profile = logger_mod.HMP4040_PROFILE
+        self.closed = False
+        _FakeHmpDriver.instances.append(self)
+
+    def connect(self) -> None:
+        result = self.responses.get((self.port_name, self.baudrate))
+        if self.responses and result is None:
+            raise RuntimeError("not configured")
+        if isinstance(result, Exception):
+            raise result
+        pass
+
+    def identify(self) -> str:
+        result = self.responses.get((self.port_name, self.baudrate))
+        if self.responses and result is None:
+            raise RuntimeError("not configured")
+        if isinstance(result, Exception):
+            raise result
+        if isinstance(result, tuple):
+            self.profile = result[0]
+            return result[1]
+        return "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62"
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeOwnedBroker:
+    def __init__(self, driver: object, profile: object) -> None:
+        self.driver = driver
+        self.profile = profile
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def assign_role(self, **payload: object) -> object:
+        self.calls.append(("assign_role", payload))
+        return object()
+
+    def confirm_profile(self, **payload: object) -> object:
+        self.calls.append(("confirm_profile", payload))
+        return object()
+
+
 def test_shared_broker_profile_is_available() -> None:
     assert "shared_hmp_broker" in logger_mod.SUPPLY_PROFILES
+
+
+def test_current_annealing_defaults_to_shared_broker_without_channel(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    assert window.supply_profile_id == "shared_hmp_broker"
+    assert window.channel_select == 0
+    assert window.ui.comboBox_channel.currentData() is None
+    assert window.ui.comboBox_channel.isEnabled()
+    assert not window.ui.comboBox_channel.isHidden()
+    assert window.max_voltage == pytest.approx(32.05)
+    assert window.ui.spinBox_broker_port.value() == 8765
+
+
+def test_current_annealing_shared_broker_keeps_hmp_port_available(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._apply_supply_profile("shared_hmp_broker")
+
+    assert not window.ui.comboBox_port.isHidden()
+    assert not window.ui.comboBox_baudrate.isHidden()
+    assert not window.ui.pushButton_refresh_ports.isHidden()
+    assert window.ui.pushButton_connect_port.text() == "Connect broker"
+
+
+def test_current_annealing_auto_detect_hmp_port_in_shared_mode(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM6 - scale", "COM6")
+    window.ui.comboBox_port.addItem("COM3 - unknown", "COM3")
+    window.ui.comboBox_baudrate.setCurrentText("9600")
+    _FakeHmpDriver.instances = []
+    _FakeHmpDriver.responses = {
+        ("COM6", 115200): RuntimeError("not an HMP"),
+        ("COM6", 9600): RuntimeError("not an HMP"),
+        (
+            "COM3",
+            115200,
+        ): (
+            logger_mod.HMP4040_PROFILE,
+            "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62",
+        ),
+    }
+    monkeypatch.setattr(logger_mod, "HmpSerialDriver", _FakeHmpDriver)
+
+    assert window._auto_detect_hmp_port(show_errors=False) is True
+
+    assert window.supply_profile_id == "shared_hmp_broker"
+    assert window.ui.comboBox_port.currentData() == "COM3"
+    assert window.ui.comboBox_baudrate.currentText() == "115200"
+    assert window.ui.comboBox_channel.count() == 5
+
+
+def test_current_annealing_auto_detect_blocks_nonpreferred_hmp_baud(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM3 - unknown", "COM3")
+    window.ui.comboBox_baudrate.setCurrentText("9600")
+    _FakeHmpDriver.instances = []
+    _FakeHmpDriver.responses = {
+        (
+            "COM3",
+            9600,
+        ): (
+            logger_mod.HMP4040_PROFILE,
+            "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62",
+        ),
+    }
+    messages: list[str] = []
+    monkeypatch.setattr(logger_mod, "HmpSerialDriver", _FakeHmpDriver)
+    window._show_status_message = lambda message, timeout_ms=10000: messages.append(message)  # type: ignore[method-assign]
+
+    assert window._auto_detect_hmp_port(show_errors=False) is False
+
+    assert window.ui.comboBox_port.currentData() == "COM3"
+    assert window.ui.comboBox_baudrate.currentText() == "9600"
+    assert any("115200" in message and "power supply settings" in message for message in messages)
+
+
+def test_current_annealing_hides_legacy_hold_controls(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    assert window.ui.pushButton_hold_current.isHidden()
+    assert window.ui.spinBox_hold_duration.isHidden()
+    assert window.ui.label_hold_duration.isHidden()
+    assert window.ui.label_resistance_at_hold_current.isHidden()
+    assert window.ui.label_resistance_percent_from_hold.isHidden()
+    assert window.ui.comboBox_max_voltage_action.findData("hold") < 0
+
+
+def test_current_annealing_channel_dropdown_tracks_detected_hmp_model(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._set_detected_hmp_profile(logger_mod.HMP4030_PROFILE)
+    assert [window.ui.comboBox_channel.itemText(i) for i in range(window.ui.comboBox_channel.count())] == [
+        "Select channel...",
+        "CH1",
+        "CH2",
+        "CH3",
+    ]
+    assert window.ui.comboBox_channel.currentData() is None
+
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(2))
+    assert window.channel_select == 2
+
+    window._set_detected_hmp_profile(logger_mod.HMP4040_PROFILE)
+    assert [window.ui.comboBox_channel.itemText(i) for i in range(window.ui.comboBox_channel.count())] == [
+        "Select channel...",
+        "CH1",
+        "CH2",
+        "CH3",
+        "CH4",
+    ]
+    assert window.ui.comboBox_channel.currentData() is None
+    assert window.channel_select == 0
+
+
+def test_current_annealing_ramp_rate_rounds_to_hmp_resolution(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.spinBox_step_mA.setValue(0.3)
+    window.handle_step_changed()
+
+    assert window.current_step_mA == pytest.approx(0.2)
+    assert window.ui.spinBox_step_mA.value() == pytest.approx(0.2)
+
+
+def test_current_annealing_preflight_blocks_shared_broker_without_channel(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    errors = window._start_preflight_errors()
+
+    assert any("channel" in error.lower() for error in errors)
+
+
+def test_shared_broker_connect_verifies_broker_before_marking_connected(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+
+    window._connect_shared_broker_mode()
+
+    assert window.is_connected is True
+    assert fake.calls == [("snapshot", {})]
+
+
+def test_shared_broker_connect_preserves_confirmed_channel(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+
+    window._connect_shared_broker_mode()
+
+    assert window.channel_select == 1
+    assert window.ui.comboBox_channel.currentData() == 1
+
+
+def test_shared_broker_connect_falls_back_to_standard_port(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.spinBox_broker_port.setValue(49685)
+    created_ports: list[int] = []
+
+    def _client_factory(*, host: str, port: int) -> object:
+        created_ports.append(port)
+        if port == 49685:
+            return _FailingBrokerClient()
+        return _FakeBrokerClient()
+
+    monkeypatch.setattr(logger_mod, "BrokerJsonClient", _client_factory)
+
+    window._connect_shared_broker_mode()
+
+    assert created_ports == [49685, 8765]
+    assert window.is_connected is True
+    assert window.ui.spinBox_broker_port.value() == 8765
+
+
+def test_shared_broker_connect_starts_owned_broker_when_no_existing_broker(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+    window.ui.spinBox_max_current.setValue(30)
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM3 - HMP4040", "COM3")
+    window.ui.comboBox_baudrate.setCurrentText("115200")
+    started: list[tuple[object, str, int]] = []
+
+    def _client_factory(*, host: str, port: int) -> object:
+        if not started:
+            return _FailingBrokerClient()
+        return _FakeBrokerClient()
+
+    def _start_server(broker: object, *, host: str, port: int) -> tuple[object, object]:
+        started.append((broker, host, port))
+        return object(), object()
+
+    _FakeHmpDriver.instances = []
+    monkeypatch.setattr(logger_mod, "BrokerJsonClient", _client_factory)
+    monkeypatch.setattr(logger_mod, "HmpSerialDriver", _FakeHmpDriver)
+    monkeypatch.setattr(logger_mod, "SharedPowerSupplyBroker", _FakeOwnedBroker)
+    monkeypatch.setattr(logger_mod, "start_broker_server", _start_server)
+
+    window._connect_shared_broker_mode()
+
+    assert window.is_connected is True
+    assert len(started) == 1
+    assert _FakeHmpDriver.instances[0].port_name == "COM3"
+    owned_broker = started[0][0]
+    assert isinstance(owned_broker, _FakeOwnedBroker)
+    assert owned_broker.calls == [
+        (
+            "assign_role",
+            {
+                "channel": 1,
+                "role": "current_annealing",
+                "confirmed": True,
+                "voltage_limit_v": pytest.approx(32.05),
+                "current_limit_a": pytest.approx(0.03),
+            },
+        ),
+        ("confirm_profile", {"name": "Current Annealing auto-started shared HMP broker"}),
+    ]
+
+
+def test_current_annealing_prepare_output_file_creates_metadata_sidecar(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("sample_run01")
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+
+    assert window.prepare_output_file() is True
+
+    assert (tmp_path / "sample_run01.txt").exists()
+    metadata_path = tmp_path / "metadata" / "sample_run01" / "metadata.json"
+    assert metadata_path.exists()
+    payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["data_file"] == "sample_run01.txt"
+    assert payload["supply"]["profile_id"] == "shared_hmp_broker"
+    assert payload["supply"]["channel"] == 1
+
+
+def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("sample_run02")
+    window._apply_supply_profile("shared_hmp_broker")
+    window._set_detected_hmp_profile(logger_mod.HMP4040_PROFILE)
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM3 - HMP4040", "COM3")
+    window.ui.comboBox_port.setCurrentIndex(0)
+    window.ui.comboBox_baudrate.setCurrentText("115200")
+    window._owned_shared_broker_server = object()
+
+    assert window.prepare_output_file() is True
+
+    metadata_path = tmp_path / "metadata" / "sample_run02" / "metadata.json"
+    payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    supply = payload["supply"]
+    assert supply["detected_model"] == "hmp4040"
+    assert supply["port"] == "COM3"
+    assert supply["baud"] == 115200
+    assert supply["broker_owned_by_app"] is True
+    assert supply["broker_source"] == "owned"
+
+
+def test_live_dashboard_uses_pyqtgraph_backend(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._plot_backend == "pyqtgraph"
+    assert window.canvas is None
+    assert window.pg_plot_resistance_vs_current is not None
+    assert window.pg_plot_resistance_vs_sample is not None
+
+
+def test_live_dashboard_draws_pyqtgraph_segments(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window.current_step_mA = 1.0
+    window._append_measurement_sample(5.0, 100.0)
+    window._append_measurement_sample(6.0, 105.0)
+    window._append_measurement_sample(5.0, 103.0)
+
+    assert window._plot_backend == "pyqtgraph"
+    assert len(window._segment_lines_ax1) == 2
+    assert len(window._segment_lines_ax2) == 2
+    assert all(hasattr(item, "setData") for item in window._segment_lines_ax1)
+
+
+def test_live_dashboard_groups_pyqtgraph_segments_by_direction(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window.current_step_mA = 1.0
+    for offset in range(20):
+        current = 5.0 + (offset % 4)
+        window._append_measurement_sample(current, 100.0 + offset)
+
+    assert window._plot_backend == "pyqtgraph"
+    assert len(window._segment_lines_ax1) <= 3
+    assert len(window._segment_lines_ax2) <= 3
 
 
 def test_shared_broker_init_leases_and_configures_current_annealing_channel(qtbot) -> None:

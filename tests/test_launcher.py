@@ -565,6 +565,10 @@ def test_hardware_experiment_loggers_launch_in_child_process(
     assert getattr(spec, "resource_tag") == resource_tag
 
 
+def test_shared_hmp_setup_is_not_a_launcher_experiment() -> None:
+    assert "Shared HMP PSU Setup" not in launcher_module.LOGGERS
+
+
 def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

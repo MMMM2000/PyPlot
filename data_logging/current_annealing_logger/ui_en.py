@@ -200,35 +200,79 @@ class Ui_MainWindow(object):
         self.frame_serial_settings.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
         main_layout.addWidget(self.frame_serial_settings)
 
-        gb_serial = QtWidgets.QGroupBox("Serial settings", self.frame_serial_settings)
-        gb_layout = QtWidgets.QHBoxLayout(gb_serial)
+        gb_serial = QtWidgets.QGroupBox("Hardware connection", self.frame_serial_settings)
+        gb_layout = QtWidgets.QVBoxLayout(gb_serial)
+        gb_layout.setContentsMargins(12, 10, 12, 10)
+        gb_layout.setSpacing(8)
         self.groupBox_serial_settings = gb_serial
 
-        # Port selection (modernized): list available ports with names
-        self.label_port = QtWidgets.QLabel("Port:")
-        gb_layout.addWidget(self.label_port)
-        self.comboBox_port = QtWidgets.QComboBox()
-        gb_layout.addWidget(self.comboBox_port)
-        self.pushButton_refresh_ports = QtWidgets.QPushButton("Refresh")
-        gb_layout.addWidget(self.pushButton_refresh_ports)
-
+        primary_row = QtWidgets.QHBoxLayout()
+        primary_row.setSpacing(8)
         self.label_supply = QtWidgets.QLabel("Supply:")
-        gb_layout.addWidget(self.label_supply)
+        primary_row.addWidget(self.label_supply)
         self.comboBox_supply = QtWidgets.QComboBox()
-        gb_layout.addWidget(self.comboBox_supply)
+        self.comboBox_supply.setMinimumWidth(180)
+        primary_row.addWidget(self.comboBox_supply, 2)
+
+        self.pushButton_connect_port = QtWidgets.QPushButton("Connect to port")
+        self.pushButton_connect_port.setMinimumWidth(160)
+        primary_row.addWidget(self.pushButton_connect_port, 1)
+        gb_layout.addLayout(primary_row)
+
+        channel_row = QtWidgets.QHBoxLayout()
+        channel_row.setSpacing(8)
+        self.label_channel = QtWidgets.QLabel("Channel:")
+        channel_row.addWidget(self.label_channel)
+        self.comboBox_channel = QtWidgets.QComboBox()
+        self.comboBox_channel.setMinimumWidth(170)
+        self.comboBox_channel.setToolTip("Select the physically connected PSU channel for this wire.")
+        channel_row.addWidget(self.comboBox_channel, 1)
+        gb_layout.addLayout(channel_row)
+
+        broker_row = QtWidgets.QHBoxLayout()
+        broker_row.setSpacing(8)
+        self.broker_connection_row = broker_row
 
         self.label_broker_host = QtWidgets.QLabel("Broker:")
-        gb_layout.addWidget(self.label_broker_host)
+        broker_row.addWidget(self.label_broker_host)
         self.lineEdit_broker_host = QtWidgets.QLineEdit("127.0.0.1")
-        self.lineEdit_broker_host.setMaximumWidth(110)
+        self.lineEdit_broker_host.setMinimumWidth(150)
         self.lineEdit_broker_host.setToolTip("Shared HMP broker host.")
-        gb_layout.addWidget(self.lineEdit_broker_host)
+        broker_row.addWidget(self.lineEdit_broker_host, 1)
         self.spinBox_broker_port = QtWidgets.QSpinBox()
         self.spinBox_broker_port.setRange(1, 65535)
         self.spinBox_broker_port.setValue(8765)
-        self.spinBox_broker_port.setMaximumWidth(84)
+        self.spinBox_broker_port.setMinimumWidth(90)
         self.spinBox_broker_port.setToolTip("Shared HMP broker port.")
-        gb_layout.addWidget(self.spinBox_broker_port)
+        broker_row.addWidget(self.spinBox_broker_port)
+        self.label_broker_hint = QtWidgets.QLabel("Auto-starts from HMP port if needed.")
+        self.label_broker_hint.setToolTip(
+            "Current Annealing connects to an existing shared HMP broker when available; "
+            "otherwise it starts a broker from the selected HMP port."
+        )
+        broker_row.addWidget(self.label_broker_hint, 1)
+        gb_layout.addLayout(broker_row)
+
+        serial_row = QtWidgets.QHBoxLayout()
+        serial_row.setSpacing(8)
+        self.serial_connection_row = serial_row
+
+        # Port selection (modernized): list available ports with names
+        self.label_port = QtWidgets.QLabel("HMP port:")
+        serial_row.addWidget(self.label_port)
+        self.comboBox_port = QtWidgets.QComboBox()
+        self.comboBox_port.setMinimumWidth(320)
+        serial_row.addWidget(self.comboBox_port, 1)
+        gb_layout.addLayout(serial_row)
+
+        serial_tools_row = QtWidgets.QHBoxLayout()
+        serial_tools_row.setSpacing(8)
+        self.serial_tools_row = serial_tools_row
+        self.pushButton_refresh_ports = QtWidgets.QPushButton("Refresh")
+        serial_tools_row.addWidget(self.pushButton_refresh_ports)
+        self.pushButton_auto_detect_hmp = QtWidgets.QPushButton("Auto-detect")
+        self.pushButton_auto_detect_hmp.setToolTip("Find the connected HMP4030/HMP4040 port and baud rate automatically.")
+        serial_tools_row.addWidget(self.pushButton_auto_detect_hmp)
 
         # Legacy numeric COM spin kept for compatibility, but hidden
         self.label_port_number = QtWidgets.QLabel("COM:")
@@ -240,7 +284,7 @@ class Ui_MainWindow(object):
 
         # Baudrate combo
         self.label_baudrate = QtWidgets.QLabel("Baud:")
-        gb_layout.addWidget(self.label_baudrate)
+        serial_tools_row.addWidget(self.label_baudrate)
         self.comboBox_baudrate = QtWidgets.QComboBox()
         self.comboBox_baudrate.addItems([
             "921600",
@@ -251,12 +295,10 @@ class Ui_MainWindow(object):
             "9600",
         ])
         self.comboBox_baudrate.setCurrentText("115200")
-        gb_layout.addWidget(self.comboBox_baudrate)
-
-        gb_layout.addStretch(1)
-
-        self.pushButton_connect_port = QtWidgets.QPushButton("Connect to port")
-        gb_layout.addWidget(self.pushButton_connect_port)
+        self.comboBox_baudrate.setMinimumWidth(100)
+        serial_tools_row.addWidget(self.comboBox_baudrate)
+        serial_tools_row.addStretch(1)
+        gb_layout.addLayout(serial_tools_row)
 
         # Fit the group box into the frame
         frame_layout_serial = QtWidgets.QVBoxLayout(self.frame_serial_settings)
@@ -337,20 +379,24 @@ class Ui_MainWindow(object):
         self.spinBox_max_current.setMaximumWidth(90)
         ramp.addWidget(self.label_max_current, 0, 0)
         ramp.addWidget(self.spinBox_max_current, 0, 1)
-        self.label_step = QtWidgets.QLabel("Step [mA]:")
-        self.spinBox_step_mA = QtWidgets.QSpinBox()
-        self.spinBox_step_mA.setRange(1, 10000)
-        self.spinBox_step_mA.setValue(1)
+        self.label_step = QtWidgets.QLabel("Current ramp rate [mA/s]:")
+        self.spinBox_step_mA = QtWidgets.QDoubleSpinBox()
+        self.spinBox_step_mA.setRange(0.2, 10000.0)
+        self.spinBox_step_mA.setDecimals(1)
+        self.spinBox_step_mA.setSingleStep(0.2)
+        self.spinBox_step_mA.setValue(1.0)
         self.spinBox_step_mA.setMaximumWidth(90)
         ramp.addWidget(self.label_step, 0, 2)
         ramp.addWidget(self.spinBox_step_mA, 0, 3)
         self.label_hold_duration = QtWidgets.QLabel("Hold time [s]:")
         self.spinBox_hold_duration = QtWidgets.QSpinBox()
-        self.spinBox_hold_duration.setRange(1, 36000)
-        self.spinBox_hold_duration.setValue(1)
+        self.spinBox_hold_duration.setRange(0, 36000)
+        self.spinBox_hold_duration.setValue(0)
         self.spinBox_hold_duration.setMaximumWidth(90)
         ramp.addWidget(self.label_hold_duration, 1, 0)
         ramp.addWidget(self.spinBox_hold_duration, 1, 1)
+        self.label_hold_duration.hide()
+        self.spinBox_hold_duration.hide()
         self.label_start_current = QtWidgets.QLabel("Start current [mA]:")
         self.spinBox_start_current = QtWidgets.QSpinBox()
         self.spinBox_start_current.setRange(1, 10000)
@@ -380,6 +426,7 @@ class Ui_MainWindow(object):
         )
         self.pushButton_hold_current.setMinimumWidth(220)
         grid.addWidget(self.pushButton_hold_current, 3, 0, 1, 2)
+        self.pushButton_hold_current.hide()
 
         # Reverse sweep and loops controls
         rev = QtWidgets.QHBoxLayout()
@@ -408,30 +455,27 @@ class Ui_MainWindow(object):
 
         self.label_voltage_limit = QtWidgets.QLabel("Voltage limit [V]:")
         limit_grid.addWidget(self.label_voltage_limit, 0, 0)
-        self.spinBox_max_voltage = QtWidgets.QSpinBox()
-        self.spinBox_max_voltage.setRange(1, 200)
-        self.spinBox_max_voltage.setValue(30)
+        self.spinBox_max_voltage = QtWidgets.QDoubleSpinBox()
+        self.spinBox_max_voltage.setRange(1.0, 200.0)
+        self.spinBox_max_voltage.setDecimals(2)
+        self.spinBox_max_voltage.setSingleStep(0.05)
+        self.spinBox_max_voltage.setValue(32.05)
         self.spinBox_max_voltage.setMaximumWidth(90)
         limit_grid.addWidget(self.spinBox_max_voltage, 0, 1)
 
-        self.label_channel = QtWidgets.QLabel("Channel:")
-        limit_grid.addWidget(self.label_channel, 0, 2)
         self.spinBox_channel = QtWidgets.QSpinBox()
         self.spinBox_channel.setRange(0, 4)
-        self.spinBox_channel.setValue(3)
-        self.spinBox_channel.setMaximumWidth(60)
-        self.spinBox_channel.setToolTip("Set to 0 to skip channel selection (for single-channel supplies).")
-        limit_grid.addWidget(self.spinBox_channel, 0, 3)
+        self.spinBox_channel.setValue(0)
+        self.spinBox_channel.hide()
 
         self.checkBox_reset_on_start = QtWidgets.QCheckBox("Reset supply on start")
         self.checkBox_reset_on_start.setChecked(True)
-        limit_grid.addWidget(self.checkBox_reset_on_start, 0, 4, 1, 3)
+        limit_grid.addWidget(self.checkBox_reset_on_start, 0, 2, 1, 5)
 
         self.label_limit_action = QtWidgets.QLabel("When the limit is hit:")
         limit_grid.addWidget(self.label_limit_action, 1, 0, 1, 2)
         self.comboBox_max_voltage_action = QtWidgets.QComboBox()
         self.comboBox_max_voltage_action.addItem("Ask every time", "ask")
-        self.comboBox_max_voltage_action.addItem("Hold current (stop increasing)", "hold")
         self.comboBox_max_voltage_action.addItem("Reverse to zero", "reverse")
         self.comboBox_max_voltage_action.addItem("Stop measurement", "stop")
         self.comboBox_max_voltage_action.setToolTip(
@@ -577,15 +621,26 @@ class Ui_MainWindow(object):
         self.label_resistance_percent_from_hold = QtWidgets.QLabel("0")
         self.label_resistance_ohm_suffix = QtWidgets.QLabel("Ohm")
         self.label_percent_suffix = QtWidgets.QLabel("%")
-        hr_layout.addWidget(QtWidgets.QLabel("Hold resistance:"))
+        self.label_hold_resistance_caption = QtWidgets.QLabel("Hold resistance:")
+        hr_layout.addWidget(self.label_hold_resistance_caption)
         hr_layout.addWidget(self.label_resistance_at_hold_current)
         hr_layout.addWidget(self.label_resistance_ohm_suffix)
         hr_layout.addSpacing(16)
-        hr_layout.addWidget(QtWidgets.QLabel("Percent from hold:"))
+        self.label_percent_from_hold_caption = QtWidgets.QLabel("Percent from hold:")
+        hr_layout.addWidget(self.label_percent_from_hold_caption)
         hr_layout.addWidget(self.label_resistance_percent_from_hold)
         hr_layout.addWidget(self.label_percent_suffix)
         hr_layout.addStretch(1)
         grid.addLayout(hr_layout, 11, 0, 1, 2)
+        for widget in (
+            self.label_hold_resistance_caption,
+            self.label_resistance_at_hold_current,
+            self.label_resistance_ohm_suffix,
+            self.label_percent_from_hold_caption,
+            self.label_resistance_percent_from_hold,
+            self.label_percent_suffix,
+        ):
+            widget.hide()
 
         # Start/Stop and reverse buttons (pinned below the scroll area)
         self.pushButton_start_process = QtWidgets.QPushButton("Start annealing process")

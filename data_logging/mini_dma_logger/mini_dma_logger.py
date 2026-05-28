@@ -169,6 +169,7 @@ FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)
 RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
 WINDOWS: list[QtWidgets.QWidget] = []
 GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
+PREFERRED_SCALE_BAUD = 9600
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
@@ -6281,7 +6282,33 @@ class MainWindow(QtWidgets.QMainWindow):
                 }
         return None
 
-    def _auto_detect_supply_port(self) -> bool:
+    def _set_supply_detection_match(self, match: Mapping[str, Any]) -> None:
+        index = self.combo_supply_port.findData(match["port"])
+        if index >= 0:
+            self.combo_supply_port.setCurrentIndex(index)
+        profile_index = self.combo_supply_profile.findData(str(match["profile_id"]))
+        if profile_index >= 0:
+            self.combo_supply_profile.setCurrentIndex(profile_index)
+        if self.combo_supply_baud.findText(str(match["baudrate"])) >= 0:
+            self.combo_supply_baud.setCurrentText(str(match["baudrate"]))
+
+    def _nonpreferred_supply_baud_message(self, match: Mapping[str, Any]) -> str:
+        profile_id = str(match.get("profile_id") or "")
+        profile = SUPPLY_PROFILES.get(profile_id, {})
+        preferred = int(profile.get("baudrate", 115200) or 115200)
+        label = str(profile.get("label") or profile_id or "power supply")
+        return (
+            f"Detected {label} on {match.get('port')} at {match.get('baudrate')} baud, "
+            f"but the preferred baud rate is {preferred}. Change the baud rate in the power supply settings "
+            f"to {preferred}, then retry auto-detect/connect."
+        )
+
+    def _show_hardware_detection_warning(self, title: str, message: str, *, show_errors: bool) -> None:
+        self._log(message)
+        if show_errors:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, message)
+
+    def _auto_detect_supply_port(self, *, show_errors: bool = True) -> bool:
         if list_ports is None:
             self._log("Supply auto-detect unavailable because pyserial is missing.")
             return False
@@ -6289,14 +6316,16 @@ class MainWindow(QtWidgets.QMainWindow):
             match = self._probe_supply_candidate(port.device)
             if match is None:
                 continue
-            index = self.combo_supply_port.findData(match["port"])
-            if index >= 0:
-                self.combo_supply_port.setCurrentIndex(index)
-            if self.combo_supply_baud.findText(str(match["baudrate"])) >= 0:
-                self.combo_supply_baud.setCurrentText(str(match["baudrate"]))
-            profile_index = self.combo_supply_profile.findData(str(match["profile_id"]))
-            if profile_index >= 0:
-                self.combo_supply_profile.setCurrentIndex(profile_index)
+            self._set_supply_detection_match(match)
+            profile = SUPPLY_PROFILES.get(str(match["profile_id"]), {})
+            preferred_baud = int(profile.get("baudrate", 115200) or 115200)
+            if int(match["baudrate"]) != preferred_baud:
+                self._show_hardware_detection_warning(
+                    "Power supply baud rate",
+                    self._nonpreferred_supply_baud_message(match),
+                    show_errors=show_errors,
+                )
+                return False
             self._log(
                 f"Auto-detected supply on {match['port']} at {match['baudrate']} baud "
                 f"({match['idn_text']})."
@@ -6371,7 +6400,23 @@ class MainWindow(QtWidgets.QMainWindow):
             }
         return None
 
-    def _auto_detect_scale_port(self) -> bool:
+    def _set_scale_detection_match(self, match: Mapping[str, Any]) -> None:
+        index = self.combo_scale_port.findData(match["port"])
+        if index >= 0:
+            self.combo_scale_port.setCurrentIndex(index)
+        if self.combo_scale_baud.findText(str(match["baudrate"])) >= 0:
+            self.combo_scale_baud.setCurrentText(str(match["baudrate"]))
+        self.edit_scale_request.setText(str(match["request_command"]))
+        self.edit_scale_terminator.setText(str(match["terminator"]))
+
+    def _nonpreferred_scale_baud_message(self, match: Mapping[str, Any]) -> str:
+        return (
+            f"Detected scale on {match.get('port')} at {match.get('baudrate')} baud, "
+            f"but the preferred baud rate is {PREFERRED_SCALE_BAUD}. Change the baud rate in the scale settings "
+            f"to {PREFERRED_SCALE_BAUD}, then retry auto-detect/connect."
+        )
+
+    def _auto_detect_scale_port(self, *, show_errors: bool = True) -> bool:
         if list_ports is None:
             self._log("Scale auto-detect unavailable because pyserial is missing.")
             return False
@@ -6379,13 +6424,14 @@ class MainWindow(QtWidgets.QMainWindow):
             match = self._probe_scale_candidate(port.device)
             if match is None:
                 continue
-            index = self.combo_scale_port.findData(match["port"])
-            if index >= 0:
-                self.combo_scale_port.setCurrentIndex(index)
-            if self.combo_scale_baud.findText(str(match["baudrate"])) >= 0:
-                self.combo_scale_baud.setCurrentText(str(match["baudrate"]))
-            self.edit_scale_request.setText(str(match["request_command"]))
-            self.edit_scale_terminator.setText(str(match["terminator"]))
+            self._set_scale_detection_match(match)
+            if int(match["baudrate"]) != PREFERRED_SCALE_BAUD:
+                self._show_hardware_detection_warning(
+                    "Scale baud rate",
+                    self._nonpreferred_scale_baud_message(match),
+                    show_errors=show_errors,
+                )
+                return False
             self._log(
                 f"Auto-detected scale on {match['port']} at {match['baudrate']} baud "
                 f"(sample reply: {match['raw_text']})."
@@ -13452,6 +13498,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "scale": {
                 "port": str(self.combo_scale_port.currentData() or ""),
                 "baud": int(self.combo_scale_baud.currentText()),
+                "preferred_baud": PREFERRED_SCALE_BAUD,
+                "baud_is_preferred": int(self.combo_scale_baud.currentText()) == PREFERRED_SCALE_BAUD,
                 "poll_interval_ms": int(self.spin_scale_interval.value()),
                 "request_command": self.edit_scale_request.text(),
                 "line_ending": self.edit_scale_terminator.text(),
@@ -13492,6 +13540,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 "port": str(self.combo_supply_port.currentData() or ""),
                 "baud": int(self.combo_supply_baud.currentText()),
                 "profile": str(self.combo_supply_profile.currentData() or "hmp4030"),
+                "preferred_baud": int(
+                    SUPPLY_PROFILES.get(
+                        str(self.combo_supply_profile.currentData() or "hmp4030"),
+                        SUPPLY_PROFILES["hmp4030"],
+                    ).get("baudrate", 0)
+                    or 0
+                ),
+                "baud_is_preferred": (
+                    int(self.combo_supply_baud.currentText())
+                    == int(
+                        SUPPLY_PROFILES.get(
+                            str(self.combo_supply_profile.currentData() or "hmp4030"),
+                            SUPPLY_PROFILES["hmp4030"],
+                        ).get("baudrate", 0)
+                        or 0
+                    )
+                ),
+                "shared_broker": self._using_shared_broker_supply(),
+                "broker_host": self.edit_shared_broker_host.text().strip(),
+                "broker_port": int(self.spin_shared_broker_port.value()),
+                "broker_owned_by_app": bool(self._owned_shared_broker_server is not None),
+                "broker_source": "owned"
+                if self._owned_shared_broker_server is not None
+                else ("existing" if self._using_shared_broker_supply() else "direct"),
                 "current_sweep_channel": self._current_sweep_supply_channel(),
                 "voltage_limit_v": float(self.spin_supply_voltage_limit.value()),
                 "mode": HEATING_MODE_OFF,
@@ -13503,6 +13575,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 "motor_supply_channel": self._motor_supply_channel(),
                 "motor_supply_voltage_v": float(self.spin_motor_supply_voltage.value()),
                 "motor_supply_current_limit_a": float(self.spin_motor_supply_current_limit.value()),
+            },
+            "tic": {
+                "serial": self.edit_tic_serial.text().strip(),
+                "native_usb_preferred": bool(self.check_tic_native_usb.isChecked()),
+                "native_usb_required_for_recipes": True,
+                "ticcmd_path": self.edit_ticcmd_path.text().strip(),
+                "current_limit_mA": int(self.spin_tic_current_limit_mA.value()),
+                "step_mode": self._selected_tic_step_mode(),
+                "status_interval_ms": self._tic_status_interval_ms(),
+                "keepalive_interval_ms": self._tic_keepalive_interval_ms(),
             },
             "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
             "recipe_summary": self._last_recipe_summary,
@@ -14512,7 +14594,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Preflight: scale is not connected, trying auto-detect/connect.")
         if not str(self.combo_scale_port.currentData() or "").strip():
             self._refresh_scale_ports()
-        self._auto_detect_scale_port()
+        self._auto_detect_scale_port(show_errors=False)
         return self._connect_scale(show_errors=False)
 
     def _ensure_supply_ready_for_recipe(self) -> bool:
@@ -14522,7 +14604,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._using_shared_broker_supply() and not str(self.combo_supply_port.currentData() or "").strip():
             self._refresh_supply_ports()
         if not self._using_shared_broker_supply():
-            self._auto_detect_supply_port()
+            self._auto_detect_supply_port(show_errors=False)
         return self._connect_supply(show_errors=False)
 
     def _ensure_tic_ready_for_recipe(self) -> bool:

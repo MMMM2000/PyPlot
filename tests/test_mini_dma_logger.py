@@ -4791,6 +4791,42 @@ def test_auto_detect_supply_port_identifies_hmp4040(tmp_path: Path, qtbot, monke
         _close_test_window(window)
 
 
+def test_auto_detect_supply_port_blocks_nonpreferred_hmp_baud(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        monkeypatch.setattr(
+            mini_dma_mod.list_ports,
+            "comports",
+            lambda: [SimpleNamespace(device="COM7", description="Rohde supply")],
+        )
+
+        def _probe_supply(port_name: str):
+            return {
+                "port": port_name,
+                "baudrate": 9600,
+                "profile_id": "hmp4040",
+                "idn_text": "Rohde&Schwarz,HMP4040,123456,HW1.0/SW3.0",
+            }
+
+        monkeypatch.setattr(window, "_probe_supply_candidate", _probe_supply)
+
+        window._refresh_supply_ports()
+        detected = window._auto_detect_supply_port(show_errors=False)
+
+        assert detected is False
+        assert window.combo_supply_port.currentData() == "COM7"
+        assert window.combo_supply_baud.currentText() == "9600"
+        assert "preferred baud rate is 115200" in window.log_output.toPlainText()
+        assert "power supply settings" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_supply_idn_parser_distinguishes_hmp4040_from_hmp4030() -> None:
     assert (
         mini_dma_mod._supply_profile_id_from_idn("Rohde&Schwarz,HMP4040,123456,HW1.0/SW3.0")
@@ -13793,6 +13829,43 @@ def test_auto_detect_supply_port_applies_detected_settings(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_auto_detect_scale_port_blocks_nonpreferred_baud(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        monkeypatch.setattr(
+            mini_dma_mod.list_ports,
+            "comports",
+            lambda: [SimpleNamespace(device="COM6", description="G&G scale")],
+        )
+
+        def _probe_scale(port_name: str):
+            return {
+                "port": port_name,
+                "baudrate": 600,
+                "request_command": "\\x1bp",
+                "terminator": "",
+                "raw_text": "21.210 g",
+            }
+
+        monkeypatch.setattr(window, "_probe_scale_candidate", _probe_scale)
+
+        window._refresh_scale_ports()
+        detected = window._auto_detect_scale_port(show_errors=False)
+
+        assert detected is False
+        assert window.combo_scale_port.currentData() == "COM6"
+        assert window.combo_scale_baud.currentText() == "600"
+        assert "preferred baud rate is 9600" in window.log_output.toPlainText()
+        assert "scale settings" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_auto_detect_tic_sets_path_and_serial(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -13815,6 +13888,48 @@ def test_auto_detect_tic_sets_path_and_serial(tmp_path: Path, qtbot, monkeypatch
         assert detected is True
         assert window.edit_ticcmd_path.text() == r"C:\\tools\\ticcmd.exe"
         assert window.edit_tic_serial.text() == "00501366"
+    finally:
+        _close_test_window(window)
+
+
+def test_session_metadata_records_hardware_backend_details(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM6 - scale", "COM6")
+        window.combo_scale_port.setCurrentIndex(0)
+        window.combo_scale_baud.setCurrentText("9600")
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.combo_supply_port.clear()
+        window.combo_supply_port.addItem("COM3 - HMP4040", "COM3")
+        window.combo_supply_port.setCurrentIndex(0)
+        window.combo_supply_baud.setCurrentText("115200")
+        window.edit_shared_broker_host.setText("127.0.0.1")
+        window.spin_shared_broker_port.setValue(8765)
+        window._owned_shared_broker_server = object()
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.check_motor_supply_power.setChecked(True)
+        window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+        window.check_tic_native_usb.setChecked(True)
+        window.edit_tic_serial.setText("00501366")
+
+        payload = window._session_metadata()
+
+        assert payload["scale"]["preferred_baud"] == 9600
+        assert payload["scale"]["baud_is_preferred"] is True
+        assert payload["heating"]["shared_broker"] is True
+        assert payload["heating"]["broker_source"] == "owned"
+        assert payload["heating"]["broker_host"] == "127.0.0.1"
+        assert payload["heating"]["broker_port"] == 8765
+        assert payload["heating"]["current_sweep_channel"] == 4
+        assert payload["heating"]["motor_supply_channel"] == 3
+        assert payload["tic"]["native_usb_required_for_recipes"] is True
+        assert payload["tic"]["native_usb_preferred"] is True
+        assert payload["tic"]["serial"] == "00501366"
     finally:
         _close_test_window(window)
 

@@ -3380,9 +3380,6 @@ LOGGERS: Dict[str, LauncherFactory] = {
         "data_logging.mini_dma_logger.mini_dma_logger",
         "mini_dma",
     ),
-    "Shared HMP PSU Setup": _lazy(
-        "data_logging.shared_power_supply.setup_ui", "main"
-    ),
     "Manual Stress/Strain Logger": _lazy(
         "data_logging.manual_stress_strain_logger", "main"
     ),
