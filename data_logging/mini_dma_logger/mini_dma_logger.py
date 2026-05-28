@@ -10685,6 +10685,39 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return self._scale_control_signal_for_basis(basis)
 
+    def _current_sweep_filtered_window_spans_target(
+        self,
+        basis: str,
+        target_value: float,
+        tolerance: float,
+    ) -> bool:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return True
+        latest = self._scale_signal_buffer.latest()
+        if latest is None:
+            return False
+        samples = self._scale_signal_buffer.recent_samples(
+            now_s=latest.timestamp_s,
+            window_s=self._current_sweep_hold_filter_window_s(),
+        )
+        if len(samples) < 3:
+            return False
+        values: list[float] = []
+        if basis == HSW_BASIS_LOAD_G:
+            values = [float(sample.applied_load_g) for sample in samples]
+        else:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            for sample in samples:
+                stress = stress_mpa_from_load_g(float(sample.applied_load_g), diameter_mm)
+                if stress is not None and math.isfinite(float(stress)):
+                    values.append(float(stress))
+        if len(values) < 3:
+            return False
+        padding = max(0.0, abs(float(tolerance)))
+        target = float(target_value)
+        return min(values) <= target + padding and max(values) >= target - padding
+
     def _seek_step_mm(self, error_value: float, tolerance: float, *, basis: str | None = None) -> float:
         if self._automation_name == RECOVERY_LOAD:
             interval_s = self._seek_decision_interval_s(basis)
@@ -11558,7 +11591,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     noise_band,
                     self._current_sweep_hold_entry_band_for_basis(effective_tolerance),
                 )
-            if abs(delta_value) <= noise_band:
+            if (
+                abs(delta_value) <= noise_band
+                and self._current_sweep_filtered_window_spans_target(
+                    basis,
+                    target_value,
+                    effective_tolerance,
+                )
+            ):
                 self._clear_seek_state(seek_key)
                 self._write_control_trace(
                     decision="accept",
@@ -17732,9 +17772,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_sweep_hold_min_pause_stress_mpa(),
             ),
         )
+        resume_noise_band = self._current_sweep_bounded_noise_band(step.basis, noise_value, tolerance)
+        if not self._current_sweep_filtered_window_spans_target(
+            step.basis,
+            float(step.target_value),
+            tolerance,
+        ):
+            resume_noise_band = 0.0
         resume_band = max(
             tolerance * resume_factor,
-            self._current_sweep_bounded_noise_band(step.basis, noise_value, tolerance),
+            resume_noise_band,
             self._current_sweep_hold_min_band_for_basis(
                 step.basis,
                 self._current_sweep_hold_min_resume_stress_mpa(),
