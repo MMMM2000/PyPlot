@@ -213,6 +213,8 @@ SETUP_ZERO_FALLBACK_RAW_SPAN_G = 0.012
 SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
 SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
 SETUP_PRELOAD_TAKEUP_LOAD_G = 0.03
+CURRENT_SWEEP_CONTACT_LOSS_MIN_STRAIN_PCT = 0.5
+CURRENT_SWEEP_CONTACT_LOSS_MIN_MOTOR_STEPS = 20.0
 SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA = 50.0
 SETUP_RETURN_MIN_SPEED_STRAIN_PCT = 0.10
 SETUP_UNLOAD_BASELINE_MIN_POINTS = 5
@@ -416,9 +418,11 @@ SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA = 3.0
-SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA = 8.0
-SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S = 1.0
+SERVO_CURRENT_SWEEP_HOLD_TRANSFORMATION_MIN_STRESS_MPA = 5.0
+SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S = 0.3
 SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S = 1.0
+SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S = 6.0
+SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR = 0.6
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
@@ -3128,12 +3132,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_step_index: int | None = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_wall_started_s = 0.0
+        self._active_current_sweep_last_schedule_update_s = 0.0
+        self._current_sweep_post_hold_throttle_until_s = 0.0
         self._active_current_sweep_last_setpoint_mA: float | None = None
         self._active_current_sweep_display_target_mA: float | None = None
         self._active_current_sweep_display_direction = 0.0
         self._current_sweep_ramp_hold_step_index: int | None = None
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s: float | None = None
+        self._current_sweep_ramp_hold_seek_accepted_since_s: float | None = None
         self._current_sweep_ramp_hold_candidate_step_index: int | None = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s: float | None = None
@@ -9118,6 +9125,19 @@ class MainWindow(QtWidgets.QMainWindow):
             return None if load_cap_g is None else abs(float(load_cap_g))
         return None
 
+    def _current_sweep_hold_fast_recovery_needed(self, basis: str | None, error_value: float) -> bool:
+        if self._automation_phase != "current_hold" or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        threshold_mpa = min(
+            self._current_sweep_hold_correction_stress_mpa(),
+            SERVO_CURRENT_SWEEP_HOLD_MAX_CORRECTION_STRESS_MPA,
+        )
+        fast_recovery_threshold = self._current_sweep_basis_value_from_stress_cap(
+            basis,
+            threshold_mpa,
+        )
+        return fast_recovery_threshold is not None and abs(float(error_value)) >= fast_recovery_threshold
+
     def _current_sweep_stage_speed_cap_mm_s(self) -> float:
         config = self._control_config()
         speed_mm_s = (
@@ -9191,6 +9211,69 @@ class MainWindow(QtWidgets.QMainWindow):
         if current_load_g is None:
             current_load_g = self._current_effective_load_g()
         return abs(float(current_load_g))
+
+    def _current_sweep_contact_loss_min_travel_mm(self) -> float:
+        config = self._control_config()
+        length_mm = max(
+            0.001,
+            config.initial_length_mm if config is not None else float(self.spin_initial_length.value()),
+        )
+        strain_travel_mm = length_mm * (CURRENT_SWEEP_CONTACT_LOSS_MIN_STRAIN_PCT / 100.0)
+        motor_travel_mm = self._motor_step_mm() * CURRENT_SWEEP_CONTACT_LOSS_MIN_MOTOR_STEPS
+        return max(strain_travel_mm, motor_travel_mm)
+
+    def _current_sweep_contact_loss_detected(
+        self,
+        basis: str,
+        target_value: float,
+        current_value: float,
+        tolerance: float,
+    ) -> bool:
+        if (
+            not self._is_current_sweep_mode(self._automation_name)
+            or self._automation_phase != "target_ramp"
+            or self._automation_step_note in {"setup_preload", "setup_return_zero"}
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+        ):
+            return False
+        target_load_g = self._basis_value_as_load_g(basis, target_value)
+        tolerance_load_g = self._basis_value_as_load_g(basis, tolerance)
+        current_load_g = self._basis_value_as_load_g(basis, current_value)
+        if target_load_g is None or current_load_g is None:
+            return False
+        required_target_g = max(
+            self._zero_return_acceptance_tolerance_g(),
+            SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G,
+            0.0 if tolerance_load_g is None else abs(float(tolerance_load_g)),
+        )
+        if abs(float(target_load_g)) <= required_target_g:
+            return False
+        if abs(float(current_load_g)) > self._zero_return_acceptance_tolerance_g():
+            return False
+        travel_mm = abs(self._tensile_displacement_mm(self._measurement_effective_position_mm()))
+        return travel_mm >= self._current_sweep_contact_loss_min_travel_mm()
+
+    def _stop_for_current_sweep_contact_loss(
+        self,
+        basis: str,
+        target_value: float,
+        current_value: float,
+    ) -> None:
+        travel_mm = abs(self._tensile_displacement_mm(self._measurement_effective_position_mm()))
+        message = (
+            "Current-sweep contact loss detected: "
+            f"target {_format_compact_unit(float(target_value), self._distribution_units(basis)[0])}, "
+            f"measured {_format_compact_unit(float(current_value), self._distribution_units(basis)[0])}, "
+            f"tensile travel {_format_compact_unit(travel_mm, 'mm')} with near-zero load. "
+            "Current output was disabled and the measurement was stopped."
+        )
+        self._log(message)
+        self._stop_auto_ramp(
+            log_completion=False,
+            offer_recovery=False,
+            stop_reason="wire_break_or_contact_loss",
+            stop_detail=message,
+        )
 
     def _clamp_motion_resolution_controls(self) -> None:
         step_mm = self._motor_step_mm()
@@ -10150,6 +10233,8 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> bool:
         if not self._current_sweep_freezes_live_stiffness():
             return False
+        if self._automation_phase == "current_hold":
+            return False
         limit_mm = self._seek_max_travel_mm()
         current_travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
         return current_travel_mm + abs(float(next_travel_mm)) > limit_mm
@@ -10370,6 +10455,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._is_current_sweep_mode(self._automation_name)
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}
         ):
+            if self._current_sweep_hold_fast_recovery_needed(basis, error_value):
+                return self._current_sweep_dynamic_speed_cap_mm_s()
             sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
             if sensitivity is not None and abs(float(sensitivity)) > 0.0:
                 away_rate = 0.0
@@ -11060,6 +11147,7 @@ class MainWindow(QtWidgets.QMainWindow):
             target_value,
             tolerance,
         )
+        delta_value = target_value - current_value
         require_after_last_move = self._seek_requires_fresh_after_last_move(
             basis,
             setup_preload_relaxation=setup_preload_relaxation,
@@ -11088,7 +11176,6 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self._automation_step_note == "setup_return_zero":
             self._record_length_setup_point()
             early_recorded_seek_point = True
-        delta_value = target_value - current_value
         seek_sample_time_s = time.monotonic()
         current_effective_tensile_position_mm = self._current_effective_tensile_position_mm()
         self._update_live_seek_stiffness(seek_key, basis, current_value)
@@ -11100,6 +11187,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_setup_preload_engagement(seek_key, basis, current_value)
         if self._setup_preload_overload_exceeded(basis, target_value, current_value, effective_tolerance):
             self._stop_for_setup_preload_overload(basis, target_value, current_value)
+            return False
+        if self._current_sweep_contact_loss_detected(
+            basis,
+            target_value,
+            current_value,
+            effective_tolerance,
+        ):
+            self._stop_for_current_sweep_contact_loss(basis, target_value, current_value)
             return False
         if self._maybe_start_setup_unload_baseline_fallback():
             return False
@@ -11254,10 +11349,13 @@ class MainWindow(QtWidgets.QMainWindow):
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             and self._last_motion_command_time_s is not None
         ):
-            if not self._filtered_signal_changed_after_last_correction(
+            if (
+                not self._current_sweep_hold_fast_recovery_needed(basis, delta_value)
+                and not self._filtered_signal_changed_after_last_correction(
                 seek_key,
                 filtered_signal,
                 effective_tolerance,
+                )
             ):
                 self._log_waiting_for_feedback(
                     "Waiting for the filtered control signal to update before repeating the load/stress correction."
@@ -11499,7 +11597,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self._seek_no_response_count_by_key[seek_key] = 0
-        if protective_single_step:
+        if protective_single_step and not self._current_sweep_hold_fast_recovery_needed(basis, delta_value):
             nudge_mm = min(nudge_mm, self._motor_step_mm())
             self._log(
                 "Closed-loop response worsened after the previous correction; "
@@ -15354,6 +15452,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_wall_started_s = 0.0
+        self._active_current_sweep_last_schedule_update_s = 0.0
+        self._current_sweep_post_hold_throttle_until_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
         self._clear_current_sweep_ramp_hold()
         self._active_mechanical_scan_step_index = None
@@ -15455,6 +15555,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_wall_started_s = 0.0
+        self._active_current_sweep_last_schedule_update_s = 0.0
+        self._current_sweep_post_hold_throttle_until_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
         self._clear_current_sweep_ramp_hold()
         self._active_mechanical_scan_step_index = None
@@ -16337,6 +16439,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_step_index = None
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_wall_started_s = 0.0
+        self._active_current_sweep_last_schedule_update_s = 0.0
+        self._current_sweep_post_hold_throttle_until_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
         self._clear_current_sweep_ramp_hold()
         self._active_target_ramp_step_index = None
@@ -16971,6 +17075,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_step_index = None
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s = None
+        self._current_sweep_ramp_hold_seek_accepted_since_s = None
         self._current_sweep_ramp_hold_candidate_step_index = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s = None
@@ -16978,8 +17083,32 @@ class MainWindow(QtWidgets.QMainWindow):
     def _resume_current_sweep_ramp_from_hold(self, *, now_s: float, reason: str) -> None:
         held_s = max(0.0, float(now_s) - self._current_sweep_ramp_hold_started_s)
         self._active_current_sweep_started_s += held_s
+        self._active_current_sweep_last_schedule_update_s = float(now_s)
+        if self._active_current_sweep_display_direction > 0.0:
+            self._current_sweep_post_hold_throttle_until_s = float(now_s) + max(
+                0.0,
+                SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S,
+            )
+        else:
+            self._current_sweep_post_hold_throttle_until_s = 0.0
         self._clear_current_sweep_ramp_hold()
         self._log(f"Resumed current ramp after holding for {held_s:.2f} s; {reason}.")
+
+    def _apply_current_sweep_post_hold_ramp_throttle(self, *, now_s: float) -> None:
+        if self._current_sweep_post_hold_throttle_until_s <= 0.0:
+            self._active_current_sweep_last_schedule_update_s = float(now_s)
+            return
+        last_s = self._active_current_sweep_last_schedule_update_s
+        if last_s <= 0.0:
+            self._active_current_sweep_last_schedule_update_s = float(now_s)
+            return
+        active_until_s = min(float(now_s), self._current_sweep_post_hold_throttle_until_s)
+        active_dt_s = max(0.0, active_until_s - float(last_s))
+        factor = min(1.0, max(0.0, SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR))
+        self._active_current_sweep_started_s += active_dt_s * (1.0 - factor)
+        if float(now_s) >= self._current_sweep_post_hold_throttle_until_s:
+            self._current_sweep_post_hold_throttle_until_s = 0.0
+        self._active_current_sweep_last_schedule_update_s = float(now_s)
 
     def _current_sweep_hold_setting(
         self,
@@ -17012,6 +17141,19 @@ class MainWindow(QtWidgets.QMainWindow):
             CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
         )
         return max(0.0, min(pause_factor, resume_factor))
+
+    def _current_sweep_hold_resume_stable_s(self, step: AutomationStep) -> float:
+        config = self._control_config()
+        return max(
+            0.0,
+            self._current_sweep_hold_setting(
+                step.current_hold_resume_stable_s,
+                config.current_sweep_hold_resume_stable_s
+                if config is not None
+                else float(self.spin_current_sweep_hold_resume_stable_s.value()),
+                CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
+            ),
+        )
 
     def _current_sweep_hold_min_band_for_basis(self, basis: str, stress_mpa: float) -> float:
         if basis == HSW_BASIS_STRESS_MPA:
@@ -17234,16 +17376,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if resume_error <= resume_band:
             if self._current_sweep_ramp_hold_in_band_since_s is None:
                 self._current_sweep_ramp_hold_in_band_since_s = now_s
-            stable_s = max(
-                0.0,
-                self._current_sweep_hold_setting(
-                    step.current_hold_resume_stable_s,
-                    self._control_config().current_sweep_hold_resume_stable_s
-                    if self._control_config() is not None
-                    else float(self.spin_current_sweep_hold_resume_stable_s.value()),
-                    CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
-                ),
-            )
+            stable_s = self._current_sweep_hold_resume_stable_s(step)
             if now_s - self._current_sweep_ramp_hold_in_band_since_s >= stable_s:
                 self._resume_current_sweep_ramp_from_hold(
                     now_s=now_s,
@@ -17303,6 +17436,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_step_index = None
             self._active_current_sweep_started_s = 0.0
             self._active_current_sweep_wall_started_s = 0.0
+            self._active_current_sweep_last_schedule_update_s = 0.0
+            self._current_sweep_post_hold_throttle_until_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0
@@ -17479,6 +17614,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_step_index = step_index
             self._active_current_sweep_started_s = now_s
             self._active_current_sweep_wall_started_s = now_s
+            self._active_current_sweep_last_schedule_update_s = now_s
+            self._current_sweep_post_hold_throttle_until_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
             self._clear_current_sweep_ramp_hold()
             if not self._set_recipe_current_mA(start_mA, measure_after=False):
@@ -17525,10 +17662,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return True
             if target_recovered:
-                self._resume_current_sweep_ramp_from_hold(
-                    now_s=time.monotonic(),
-                    reason="held-current recovery seek accepted the target",
-                )
+                recovered_s = time.monotonic()
+                if self._current_sweep_ramp_hold_seek_accepted_since_s is None:
+                    self._current_sweep_ramp_hold_seek_accepted_since_s = recovered_s
+                stable_s = self._current_sweep_hold_resume_stable_s(step)
+                if recovered_s - self._current_sweep_ramp_hold_seek_accepted_since_s >= stable_s:
+                    self._resume_current_sweep_ramp_from_hold(
+                        now_s=recovered_s,
+                        reason=(
+                            "held-current recovery seek stayed accepted for "
+                            f"{stable_s:.2f} s"
+                        ),
+                    )
+                else:
+                    self._log_waiting_for_feedback(
+                        "Held-current recovery reached the target; confirming stable recovery before resuming current."
+                    )
+            else:
+                self._current_sweep_ramp_hold_seek_accepted_since_s = None
             if len(self._session_points) == point_count_before_seek:
                 self._maybe_record_scheduled_point(
                     quiet=True,
@@ -17537,6 +17688,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             return False
 
+        elapsed_s = max(0.0, now_s - self._active_current_sweep_started_s)
+        self._apply_current_sweep_post_hold_ramp_throttle(now_s=now_s)
         elapsed_s = max(0.0, now_s - self._active_current_sweep_started_s)
         desired_mA = start_mA + direction * ramp_rate_mA_s * elapsed_s
         if direction >= 0.0:
@@ -17574,6 +17727,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_step_index = None
             self._active_current_sweep_started_s = 0.0
             self._active_current_sweep_wall_started_s = 0.0
+            self._active_current_sweep_last_schedule_update_s = 0.0
+            self._current_sweep_post_hold_throttle_until_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0

@@ -166,6 +166,72 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
     assert ("start", None) in events
 
 
+def test_mini_dma_bench_plan_uses_next_run_for_existing_output(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "log_dir": str(tmp_path / "logs"),
+                "default_max_run_duration_s": 1,
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    events: list[tuple[str, object]] = []
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            events.append(("process", None))
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = False
+            self._session_active = False
+            self._session_json_path = tmp_path / "logs" / "run02" / "metadata.json"
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            pass
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            pass
+
+        def _ask_existing_output_action(self, paths: object) -> str:
+            return "cancel"
+
+        def _start_auto_ramp(self) -> None:
+            events.append(("collision_action", self._ask_existing_output_action(())))
+
+        def close(self) -> None:
+            pass
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert summary["runs"][0]["status"] == "completed"
+    assert ("collision_action", "next") in events
+
+
 def test_mini_dma_bench_plan_timeout_records_automation_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)

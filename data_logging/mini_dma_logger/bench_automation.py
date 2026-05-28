@@ -250,6 +250,14 @@ def _apply_length_setup_automation(window: Any, run: MiniDmaBenchRun) -> None:
         )
 
 
+def _prefer_next_output_run(window: Any) -> None:
+    def _next_run(_paths: Sequence[Path]) -> str:
+        return "next"
+
+    if hasattr(window, "_ask_existing_output_action"):
+        window._ask_existing_output_action = _next_run  # type: ignore[method-assign]
+
+
 def _window_active(window: Any) -> bool:
     return bool(getattr(window, "_automation_active", False) or getattr(window, "_session_active", False))
 
@@ -346,6 +354,7 @@ def _execute_run(
 
     window._load_recipe_from_path(run.recipe_path)
     _apply_length_setup_automation(window, run)
+    _prefer_next_output_run(window)
     window._start_auto_ramp()
     app.processEvents()
     if not _window_active(window):
