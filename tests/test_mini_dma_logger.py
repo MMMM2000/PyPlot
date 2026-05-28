@@ -12791,6 +12791,88 @@ def test_current_sweep_hold_resume_band_does_not_expand_with_transformation_nois
         _close_test_window(window)
 
 
+def test_current_sweep_target_acceptance_excludes_motor_step_floor(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(1000.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._active_control_config = window._freeze_control_config()
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=30.0,
+    )
+    monkeypatch.setattr(
+        window,
+        "_basis_sensitivity_per_mm",
+        lambda *_args, **_kwargs: 45_000.0,
+    )
+
+    try:
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 30.0)
+
+        assert window._seek_effective_tolerance(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            0.2,
+            seek_key=seek_key,
+        ) == pytest.approx(45.0)
+        assert window._seek_target_acceptance_tolerance(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            0.2,
+            seek_key=seek_key,
+        ) == pytest.approx(0.2)
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_target_ramp_does_not_accept_zero_load_inside_step_floor(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.monotonic()
+    window.spin_steps_per_mm.setValue(1000.0)
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._active_control_config = window._freeze_control_config()
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=30.0,
+    )
+    window._latest_scale_timestamp = now_s
+    window._latest_scale_value_g = 0.0
+    monkeypatch.setattr(window, "_has_fresh_scale_reading", lambda *args, **kwargs: True)
+    monkeypatch.setattr(window, "_current_distribution_value", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(window, "_seek_filtered_control_signal", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(window, "_basis_sensitivity_per_mm", lambda *args, **kwargs: 45_000.0)
+    monkeypatch.setattr(
+        window,
+        "_move_to_position_mm",
+        lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True,
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=30.0,
+            tolerance=0.2,
+        )
+
+        assert reached is False
+        assert moves
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_does_not_update_live_stiffness_from_sweep_fluctuations(
     tmp_path: Path,
     qtbot,
