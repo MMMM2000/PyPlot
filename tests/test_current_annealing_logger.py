@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 
 import pytest
 
@@ -162,6 +163,81 @@ def test_shared_broker_run_writes_measurements_to_log(tmp_path, qtbot) -> None:
 
     lines = (tmp_path / "annealing.tsv").read_text(encoding="utf-8").splitlines()
     assert lines == ["3\t0.6\t200"]
+
+
+def test_accepting_direct_serial_sample_writes_one_row(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.f_name = str(tmp_path / "annealing.tsv")
+    window.first_sample = False
+    window.current_current_read = 0.061
+    window.current_voltage = 5.063
+    window.current_resistance = window.current_voltage / window.current_current_read
+    window.curr_value_x = window.current_current_read * 1000.0
+    window.curr_value_y = window.current_resistance
+    window._reset_sample_buffers()
+
+    window._accept_measurement_sample()
+
+    lines = (tmp_path / "annealing.tsv").read_text(encoding="utf-8").splitlines()
+    assert lines == ["61\t5.063\t83"]
+
+
+def test_zero_current_sample_does_not_add_plot_point(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._reset_sample_buffers()
+    window.ax1 = logger_mod.Figure().add_subplot(111)
+    window.ax2 = logger_mod.Figure().add_subplot(111)
+
+    window._record_zero_placeholder()
+
+    assert window._samples_current == []
+    assert window._samples_resistance == []
+    assert len(window.ax1.lines) == 0
+    assert len(window.ax2.lines) == 0
+
+
+def test_logger_segments_use_current_annealing_cycle_palette(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.current_step_mA = 1
+
+    colors = window._segment_colors([1.0, 2.0, 3.0, 2.0, 1.0, 2.0])
+
+    assert colors == [
+        "#dc2626",
+        "#dc2626",
+        "#2563eb",
+        "#2563eb",
+        "#f97316",
+    ]
+
+
+def test_prepare_output_file_writes_current_ui_metadata(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("Ni50Fe27Ga23 12_2 100mA test")
+    window.ui.lineEdit_composition.setText("Ni50Fe27Ga23")
+    window.ui.lineEdit_microwire.setText("12_2")
+    window.ui.lineEdit_sample.setText("s1")
+    window.ui.spinBox_max_current.setValue(100)
+    window.ui.spinBox_step_mA.setValue(1)
+    window.ui.checkBox_reverse.setChecked(True)
+    window.ui.spinBox_loops.setValue(2)
+
+    assert window.prepare_output_file() is True
+
+    output = logger_mod.Path(window.f_name)
+    metadata_path = tmp_path / "metadata" / output.stem / "metadata.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["output_file"] == str(output)
+    assert payload["composition"] == "Ni50Fe27Ga23"
+    assert payload["microwire"] == "12_2"
+    assert payload["max_current_mA"] == 100
+    assert payload["reverse_enabled"] is True
+    assert payload["loops"] == 2
 
 
 def test_annealing_run_holds_sleep_guard_until_safe_end(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:

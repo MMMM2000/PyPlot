@@ -108,7 +108,7 @@ Each run is saved into its own folder. The important files are:
 - `metadata.json`: settings, sample identity, hardware timing, recipe parameters, calibration report, and run state.
 - `scale_raw.csv`: every acquired balance reply with raw and applied load.
 - `control_trace.csv`: every closed-loop decision, wait, correction, acceptance, backlash decision, and command speed.
-- `setup.csv`: mandatory length setup/preload data separated from the main recipe.
+- `setup.csv`: enabled length setup/preload data separated from the main recipe.
 - `setup.txt`: setup text companion.
 
 How to explain it:
@@ -117,7 +117,7 @@ How to explain it:
 
 ### 6. Normal Measurement Workflow
 
-Every recipe now starts with mandatory length setup before the main recipe log begins:
+Recipes normally start with length setup before the main recipe log begins:
 
 1. Operator enters the measured mounted wire length.
 2. Mini DMA ramps to the configured setup preload stress if the wire is below it.
@@ -250,7 +250,7 @@ Motor step calibration:
 
 Load/stiffness/backlash calibration:
 
-- Runs mandatory length setup.
+- Runs length setup when enabled.
 - Records baseline load noise.
 - Seeks configured preload loads.
 - Performs forward and reverse micro-move sweeps.

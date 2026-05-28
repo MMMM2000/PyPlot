@@ -17,7 +17,8 @@
       "current_end_mA": 80.0,
       "current_ramp_rate_mA_s": 1.0,
       "hold_on_error": true,
-      "first_overheating_repeat": false
+      "first_overheating": false,
+      "first_overheating_target_mpa": 20.0
     }
   }
 }
