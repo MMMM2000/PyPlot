@@ -748,8 +748,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
 
     def _record_zero_placeholder(self) -> None:
-        """Ignore leading zero-current samples without drawing fake points."""
+        """Ignore leading zero-current samples without plotting or persisting them."""
 
+        if self._nonzero_current_seen:
+            return
         self._clear_zero_placeholders()
 
     def _clear_zero_placeholders(self) -> None:
@@ -1873,15 +1875,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.f_out.close()
             self.f_out = None
 
-    def _accept_measurement_sample(self, *, record_voltage_progress: bool = False) -> None:
-        if self._skip_current_sample:
-            return
-        if self.first_sample:
-            self.first_sample = False
-            return
-
-        self._write_sample_to_file(initial_sample=False)
-        self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
+    def _record_sample_progress(self) -> None:
+        """Update progress/rate counters for a persisted non-initial sample."""
 
         now = time.perf_counter()
         if self.last_sample_time is not None:
@@ -1899,8 +1894,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'progressBar_process') and self.total_steps:
             self.ui.progressBar_process.setMaximum(self.total_steps)
             self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
+
+    def _record_acquired_sample(self, *, record_voltage_progress: bool = False) -> None:
+        """Write, plot, and account for the latest accepted measurement once."""
+
+        if self._skip_current_sample:
+            return
+        initial_sample = self.first_sample
+        self._write_sample_to_file(initial_sample=initial_sample)
+        if self.first_sample:
+            self.first_sample = False
+        self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
+        if not initial_sample:
+            self._record_sample_progress()
         if record_voltage_progress:
             self._record_voltage_progress()
+
+    def _accept_measurement_sample(self, *, record_voltage_progress: bool = False) -> None:
+        self._record_acquired_sample(record_voltage_progress=record_voltage_progress)
 
     def handle_checkBox_infinite_loops_toggled(self, checked: bool) -> None:
         spin = getattr(self.ui, 'spinBox_loops', None)
@@ -3482,7 +3493,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             # Signal that a new sample arrived so command sequencing can continue
-            self._accept_measurement_sample()
+            self._record_acquired_sample()
 
 
             # Iterate the current set point
@@ -3537,9 +3548,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             # Signal that a new sample arrived so command sequencing can continue
-            skip_sample = bool(self._skip_current_sample)
-            if not skip_sample:
-                self._accept_measurement_sample(record_voltage_progress=True)
+            self._record_acquired_sample(record_voltage_progress=True)
 
             # Trigger the hold-current routine as if the button were pressed
             if (self.current_current_set >= (self.max_current_mA/1000.0)) and (self.current_increment > 0):
@@ -4241,7 +4250,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _metadata_payload(self, output_path: str) -> Dict[str, Any]:
         output = Path(output_path)
         loops, infinite = self._current_loop_settings()
-        reverse = bool(getattr(getattr(self, "ui", None), "checkBox_reverse", None).isChecked()) if hasattr(self.ui, "checkBox_reverse") else False
+        reverse_widget = getattr(self.ui, "checkBox_reverse", None)
+        reverse = (
+            bool(reverse_widget.isChecked())
+            if isinstance(reverse_widget, QtWidgets.QCheckBox)
+            else bool(getattr(self, "reverse_enabled", False))
+        )
         supply_widget = getattr(self.ui, "comboBox_supply", None)
         supply = ""
         if supply_widget is not None:
@@ -4295,8 +4309,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "max_current_mA": float(getattr(self, "max_current_mA", 0.0) or 0.0),
                 "current_ramp_rate_mA_s": float(getattr(self, "current_step_mA", 0.0) or 0.0),
                 "reverse_enabled": reverse,
-                "loops": loops,
-                "loops_infinite": infinite,
+                "loops": int(loops),
+                "loops_infinite": bool(infinite),
+                "infinite_loops": bool(infinite),
                 "max_voltage_action": str(getattr(self, "max_voltage_action", MAX_VOLTAGE_DEFAULT_ACTION)),
             },
         }
@@ -4318,6 +4333,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         Returns True if ready to proceed, False if the user canceled.
         """
+        self._sync_runtime_settings()
+        self._store_loop_preferences()
         path = self.build_log_path()
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)

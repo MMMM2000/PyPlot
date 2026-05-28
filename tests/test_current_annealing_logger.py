@@ -386,16 +386,18 @@ def test_current_annealing_prepare_output_file_creates_metadata_sidecar(tmp_path
     qtbot.addWidget(window)
     window.ui.lineEdit_log_dir.setText(str(tmp_path))
     window.ui.lineEdit_log_file.setText("sample_run01")
+    window.ui.spinBox_loops.setValue(1)
     window._apply_supply_profile("shared_hmp_broker")
     window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
 
     assert window.prepare_output_file() is True
 
-    assert (tmp_path / "sample_run01.txt").exists()
-    metadata_path = tmp_path / "metadata" / "sample_run01" / "metadata.json"
+    data_path = logger_mod.Path(window.f_name)
+    assert data_path.exists()
+    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
     assert metadata_path.exists()
     payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert payload["data_file"] == "sample_run01.txt"
+    assert payload["data_file"] == data_path.name
     assert payload["supply"]["profile_id"] == "shared_hmp_broker"
     assert payload["supply"]["channel"] == 1
 
@@ -405,6 +407,8 @@ def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) ->
     qtbot.addWidget(window)
     window.ui.lineEdit_log_dir.setText(str(tmp_path))
     window.ui.lineEdit_log_file.setText("sample_run02")
+    window.ui.checkBox_reverse.setChecked(True)
+    window.ui.spinBox_loops.setValue(2)
     window._apply_supply_profile("shared_hmp_broker")
     window._set_detected_hmp_profile(logger_mod.HMP4040_PROFILE)
     window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
@@ -416,7 +420,8 @@ def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) ->
 
     assert window.prepare_output_file() is True
 
-    metadata_path = tmp_path / "metadata" / "sample_run02" / "metadata.json"
+    data_path = logger_mod.Path(window.f_name)
+    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
     payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
     supply = payload["supply"]
     assert supply["detected_model"] == "hmp4040"
@@ -424,6 +429,8 @@ def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) ->
     assert supply["baud"] == 115200
     assert supply["broker_owned_by_app"] is True
     assert supply["broker_source"] == "owned"
+    assert payload["recipe"]["reverse_enabled"] is True
+    assert payload["recipe"]["loops"] == 2
 
 
 def test_live_dashboard_uses_pyqtgraph_backend(qtbot) -> None:
@@ -466,6 +473,47 @@ def test_live_dashboard_groups_pyqtgraph_segments_by_direction(qtbot) -> None:
     assert window._plot_backend == "pyqtgraph"
     assert len(window._segment_lines_ax1) <= 3
     assert len(window._segment_lines_ax2) <= 3
+
+
+def test_live_dashboard_ignores_initial_zero_current_placeholder(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._record_zero_placeholder()
+
+    assert window._samples_current == []
+    assert window._samples_resistance == []
+    assert window._segment_lines_ax1 == []
+    assert window._segment_lines_ax2 == []
+    assert window._zero_placeholder_count == 0
+
+
+def test_record_acquired_sample_writes_each_non_initial_sample_once(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.f_name = str(tmp_path / "annealing.tsv")
+    window.first_sample = True
+    window.current_current_read = 0.002
+    window.current_voltage = 0.5
+    window.current_resistance = 250.0
+    window.curr_value_x = 2.0
+    window.curr_value_y = 250.0
+    window._reset_sample_buffers()
+
+    window._record_acquired_sample()
+    window.current_current_read = 0.003
+    window.current_voltage = 0.6
+    window.current_resistance = 200.0
+    window.curr_value_x = 3.0
+    window.curr_value_y = 200.0
+    window._record_acquired_sample()
+
+    assert (tmp_path / "annealing.tsv").read_text(encoding="utf-8").splitlines() == [
+        "3\t0.6\t200"
+    ]
+    assert window._samples_current == [2.0, 3.0]
+    assert window._samples_resistance == [250.0, 200.0]
 
 
 def test_shared_broker_init_leases_and_configures_current_annealing_channel(qtbot) -> None:
