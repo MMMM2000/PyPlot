@@ -381,10 +381,7 @@ def _normalise_strain_baseline_mode(
 
 
 def _strain_axis_label(mode: str) -> str:
-    if mode == STRAIN_BASELINE_GLOBAL_MINIMUM:
-        return "Strain from global minimum length [%]"
-    if mode == STRAIN_BASELINE_PER_TARGET_MINIMUM:
-        return "Strain from trace-minimum length [%]"
+    _ = mode
     return "Strain [%]"
 
 

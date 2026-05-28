@@ -102,7 +102,7 @@ def test_strain_current_figure_can_use_each_trace_minimum_as_l0() -> None:
     fig = core.make_strain_current_figure(run, zero_minimum_strain=True)
     try:
         ax = fig.axes[0]
-        assert ax.get_ylabel() == "Strain from trace-minimum length [%]"
+        assert ax.get_ylabel() == "Strain [%]"
         assert len(ax.lines) == 9
         groups = core.current_sweep_groups(run.frame)
         for line, (_target, group) in zip(ax.lines, groups, strict=True):
@@ -128,7 +128,7 @@ def test_strain_current_figure_can_use_global_minimum_as_shared_l0() -> None:
     )
     try:
         ax = fig.axes[0]
-        assert ax.get_ylabel() == "Strain from global minimum length [%]"
+        assert ax.get_ylabel() == "Strain [%]"
         minima = [min(line.get_ydata()) for line in ax.lines]
         assert min(minima) == pytest.approx(0.0)
         assert any(value > 0.0 for value in minima)
