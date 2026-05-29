@@ -14197,7 +14197,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 "saved_utc": _utc_timestamp(),
             }
             metadata_path = self._session_recovery_path / SESSION_METADATA_JSON
+            recovery_sidecar_path = _session_metadata_sidecar_path(metadata_path)
+            try:
+                recovery_payload["logging"] = dict(recovery_payload.get("logging") or {})
+                recovery_payload["logging"]["metadata_sidecar_json"] = (
+                    recovery_sidecar_path.relative_to(metadata_path.parent.parent).as_posix()
+                )
+            except Exception:
+                pass
             metadata_path.write_text(json.dumps(recovery_payload, indent=2), encoding="utf-8")
+            recovery_sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+            recovery_sidecar_path.write_text(json.dumps(recovery_payload, indent=2), encoding="utf-8")
 
             txt_path = self._session_recovery_path / SESSION_MEASUREMENT_TX
             csv_path = self._session_recovery_path / SESSION_MEASUREMENT_CSV

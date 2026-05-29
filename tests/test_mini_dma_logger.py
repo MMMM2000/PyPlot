@@ -14430,12 +14430,20 @@ def test_session_stop_recovers_metadata_when_output_folder_was_moved(
         recovery_dirs = list(recovery_root.glob("MiniDMA_recovered_*"))
         assert len(recovery_dirs) == 1
         recovered_metadata = json.loads((recovery_dirs[0] / "metadata.json").read_text(encoding="utf-8"))
+        recovery_sidecar_path = recovery_root / "metadata" / recovery_dirs[0].name / "metadata.json"
+        assert recovery_sidecar_path.exists()
+        recovered_sidecar_metadata = json.loads(recovery_sidecar_path.read_text(encoding="utf-8"))
         with (recovery_dirs[0] / "measurement.csv").open("r", encoding="utf-8", newline="") as handle:
             recovered_rows = list(csv.DictReader(handle))
         assert recovered_metadata["session_state"] == "finished"
+        assert recovered_sidecar_metadata == recovered_metadata
         assert recovered_metadata["point_count"] == 1
         assert recovered_metadata["stop"]["reason"] == "recipe_control_stop"
         assert recovered_metadata["recovery"]["reason"] == "metadata_write_failed"
+        assert (
+            recovered_metadata["logging"]["metadata_sidecar_json"]
+            == f"metadata/{recovery_dirs[0].name}/metadata.json"
+        )
         assert len(recovered_rows) == 1
         assert recovered_rows[0]["stress_mpa"] == "12.300000"
         assert "Emergency session recovery saved" in window.log_output.toPlainText()
