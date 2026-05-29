@@ -181,9 +181,9 @@ def test_origin_export_legend_is_shrunk_and_placed_away_from_right_edge() -> Non
     window._style_origin_legend_for_export(layer)  # noqa: SLF001
 
     assert layer.activated is True
-    assert layer.legend.floats["fsize"] == 8.0
+    assert layer.legend.floats["fsize"] == 10.0
     assert layer.legend.ints["show"] == 1
-    assert "legend.fsize=8;" in layer.commands
+    assert "legend.fsize=10;" in layer.commands
     assert "legend.x=layer.x.from + legend.dx / 2;" in layer.commands
     assert "legend.y=layer.y.to - legend.dy / 2;" in layer.commands
 
