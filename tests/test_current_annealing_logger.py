@@ -289,6 +289,8 @@ def test_current_annealing_hides_legacy_hold_controls(qtbot) -> None:
     assert window.ui.label_resistance_at_hold_current.isHidden()
     assert window.ui.label_resistance_percent_from_hold.isHidden()
     assert window.ui.comboBox_max_voltage_action.findData("hold") < 0
+    assert not hasattr(window, "hold_timer")
+    assert not hasattr(logger_mod.MainWindow, "_percent_from_hold")
 
 
 def test_current_annealing_voltage_limit_no_longer_holds_current(qtbot) -> None:
@@ -333,6 +335,7 @@ def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
     window.operation_mode = 2
     window.process_running = True
     window.first_sample = False
+    window.ui.spinBox_max_current.setValue(3)
     window.max_current_mA = 3
     window.current_step_mA = 1.0
     window.current_step_A = 0.001
@@ -342,7 +345,7 @@ def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
 
     window.handle_send_new_command()
 
-    assert window.hold_timer_running is False
+    assert not hasattr(window, "hold_timer_running")
     assert window.current_increment == pytest.approx(-0.001)
     assert window.current_current_set == pytest.approx(0.002)
     assert (
@@ -925,15 +928,3 @@ def test_annealing_run_holds_sleep_guard_until_safe_end(qtbot, monkeypatch: pyte
 
     window.send_safe_end_commands()
     assert calls == ["acquire", "release"]
-
-
-def test_percent_from_hold_handles_zero() -> None:
-    assert logger_mod.MainWindow._percent_from_hold(10.0, 0.0) is None
-
-
-def test_percent_from_hold_nominal() -> None:
-    assert logger_mod.MainWindow._percent_from_hold(200.0, 100.0) == pytest.approx(200.0)
-
-
-def test_percent_from_hold_handles_nan() -> None:
-    assert logger_mod.MainWindow._percent_from_hold(float("nan"), 100.0) is None
