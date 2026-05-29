@@ -10047,11 +10047,62 @@ def test_session_writes_ui_refresh_telemetry(tmp_path: Path, qtbot) -> None:
         assert rows[0]["ui_heartbeat_fps"] == "62.500"
         assert rows[0]["handler_duration_ms"] == "12.000"
         assert rows[0]["graph_refresh_interval_ms"] == "500"
+        assert rows[0]["task_text"] == "Manual mode"
         assert rows[0]["scale_sample_changed"] == "1"
         assert rows[0]["live_plot_sample_recorded"] == "1"
         assert rows[0]["dashboard_plot_refreshed"] == "1"
         assert metadata["logging"]["ui_telemetry_sample_count"] == 1
     finally:
+        _close_test_window(window)
+
+
+def test_session_control_trace_logs_current_task_text(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("control_trace_task")
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep(
+                "sweep_current",
+                target_value=30.0,
+                basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                current_start_mA=1.0,
+                current_end_mA=70.0,
+                current_ramp_rate_mA_s=1.0,
+                note="1",
+            )
+        ]
+        window._automation_index = 0
+        window._set_automation_context(
+            phase="current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=30.0,
+            plateau_index=1,
+        )
+        window._active_current_sweep_display_target_mA = 70.0
+        window._active_current_sweep_display_direction = 1.0
+        window._write_control_trace(
+            decision="accept",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=30.0,
+            current_value=29.8,
+            error_value=-0.2,
+            tolerance=1.0,
+            result="reached",
+        )
+        window._stop_session()
+
+        rows = list(
+            csv.DictReader((tmp_path / "control_trace_task" / "control_trace.csv").open(encoding="utf-8", newline=""))
+        )
+
+        assert len(rows) == 1
+        assert rows[0]["task_text"] == "At 30 MPa: increasing current to 70 mA"
+    finally:
+        window._automation_active = False
         _close_test_window(window)
 
 
