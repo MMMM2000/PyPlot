@@ -16464,7 +16464,7 @@ class MainWindow(QtWidgets.QMainWindow):
         widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Ignored)
         widget.setMouseEnabled(x=True, y=True)
         plot_item = widget.getPlotItem()
-        plot_item.showGrid(x=True, y=True, alpha=0.28)
+        plot_item.showGrid(x=False, y=False)
         plot_item.setClipToView(True)
         plot_item.vb.setDefaultPadding(0.05)
         left_curve_kwargs: dict[str, Any] = {"pen": pg.mkPen(left_color, width=0.8)}

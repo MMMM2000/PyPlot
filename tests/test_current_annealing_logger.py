@@ -655,6 +655,36 @@ def test_live_dashboard_uses_pyqtgraph_backend(qtbot) -> None:
     assert window.pg_plot_resistance_vs_sample is not None
 
 
+def test_live_dashboard_pyqtgraph_axes_are_visible_without_gridlines(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._plot_backend == "pyqtgraph"
+    for plot in (
+        window.pg_plot_resistance_vs_current,
+        window.pg_plot_resistance_vs_sample,
+    ):
+        plot_item = plot.getPlotItem()
+        bottom_axis = plot_item.getAxis("bottom")
+        left_axis = plot_item.getAxis("left")
+        top_axis = plot_item.getAxis("top")
+        right_axis = plot_item.getAxis("right")
+
+        assert top_axis.isVisible()
+        assert right_axis.isVisible()
+        assert bottom_axis.grid is False
+        assert left_axis.grid is False
+        assert plot_item.ctrl.xGridCheck.isChecked() is False
+        assert plot_item.ctrl.yGridCheck.isChecked() is False
+        assert top_axis.labelText == ""
+        assert right_axis.labelText == ""
+        assert top_axis.style["showValues"] is False
+        assert right_axis.style["showValues"] is False
+        assert top_axis.style["tickLength"] == 0
+        assert right_axis.style["tickLength"] == 0
+
+
 def test_live_dashboard_draws_pyqtgraph_segments(qtbot) -> None:
     pytest.importorskip("pyqtgraph")
     window = logger_mod.MainWindow()

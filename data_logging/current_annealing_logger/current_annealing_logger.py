@@ -4038,11 +4038,15 @@ class MainWindow(QtWidgets.QMainWindow):
             axis = plot.getAxis(axis_name)
             axis.setPen(pg.mkPen(text))
             axis.setTextPen(pg.mkPen(text))
+            axis.setGrid(False)
+            axis.setStyle(maxTickLevel=0, maxTextLevel=0)
         for axis_name in ("top", "right"):
             axis = plot.getAxis(axis_name)
             axis.setPen(pg.mkPen(text))
             axis.setTextPen(pg.mkPen(text))
             axis.setTicks([])
+            axis.setGrid(False)
+            axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
         plot.getPlotItem().getViewBox().setBackgroundColor(base)
         plot.getPlotItem().showGrid(x=False, y=False)
         try:

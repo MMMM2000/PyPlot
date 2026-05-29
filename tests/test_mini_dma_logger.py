@@ -1748,7 +1748,7 @@ def test_dashboard_plot_viewboxes_keep_data_edge_padding(tmp_path: Path, qtbot) 
         _close_test_window(window)
 
 
-def test_dashboard_pyqtgraph_axes_match_curve_colors_and_use_major_grid_only(
+def test_dashboard_pyqtgraph_axes_match_curve_colors_and_disable_gridlines(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -1773,6 +1773,8 @@ def test_dashboard_pyqtgraph_axes_match_curve_colors_and_use_major_grid_only(
         assert right_axis.style["maxTickLevel"] == 0
         assert left_axis.grid is False
         assert right_axis.grid is False
+        assert bundle.plot_item.ctrl.xGridCheck.isChecked() is False
+        assert bundle.plot_item.ctrl.yGridCheck.isChecked() is False
         assert left_axis.autoSIPrefix is False
         assert right_axis.autoSIPrefix is False
         assert left_axis.autoSIPrefixScale == 1.0
