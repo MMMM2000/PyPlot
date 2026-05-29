@@ -46,14 +46,14 @@ def _ensure_app() -> QtWidgets.QApplication:
 
 def test_microwire_word_graph_sections_require_origin_graph_descriptors() -> None:
     source_only = {
-        "Shape memory stress/strain graphs": [
+        "Manual stress/strain graphs": [
             "20mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
             "30mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
         ],
     }
     with_origin = {
-        "Shape memory stress/strain graphs": ["30mA"],
-        "Shape memory stress/strain graphs (Origin)": "shape_memory.oggu",
+        "Manual stress/strain graphs": ["30mA"],
+        "Manual stress/strain graphs (Origin)": "shape_memory.oggu",
     }
 
     assert launcher_module._microwire_word_graph_sections_for_row(source_only) == {}
@@ -62,6 +62,21 @@ def test_microwire_word_graph_sections_require_origin_graph_descriptors() -> Non
             "sources": [],
             "graphs": ["shape_memory.oggu"],
             "references": ["30mA", "shape_memory.oggu"],
+        }
+    }
+
+
+def test_microwire_word_graph_sections_accept_legacy_shape_memory_columns() -> None:
+    row = {
+        "Shape memory stress/strain graphs": ["30mA"],
+        "Shape memory stress/strain graphs (Origin)": "legacy_shape_memory.oggu",
+    }
+
+    assert launcher_module._microwire_word_graph_sections_for_row(row) == {
+        "Manual stress/strain": {
+            "sources": [],
+            "graphs": ["legacy_shape_memory.oggu"],
+            "references": ["30mA", "legacy_shape_memory.oggu"],
         }
     }
 
@@ -1146,7 +1161,7 @@ def test_builder_automation_recipe_updates_shape_memory_copy(
     row = section_payload["rows"][0]
     assert row["_sample"] == "Ni50Fe27Ga23 12-2"
     expected_graphs = ["Ni50Fe27Ga23 12_2"]
-    assert row["Shape memory stress/strain graphs"] == expected_graphs
+    assert row["Manual stress/strain graphs"] == expected_graphs
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     update_command = manifest["commands"][0]
     assert update_command["section"] == "shape_memory_stress_strain"
@@ -1159,7 +1174,7 @@ def test_builder_automation_recipe_updates_shape_memory_copy(
     assemble_row = assemble_rows[0]
     assert assemble_row["Composition"] == "Ni50Fe27Ga23"
     assert assemble_row["Microwire"] == "12/2"
-    assert assemble_row["Shape memory stress/strain graphs"] == expected_graphs
+    assert assemble_row["Manual stress/strain graphs"] == expected_graphs
 
 
 def _write_mini_dma_run(path: Path, *, sample_name: str = "Ni50Fe27Ga23 12_2") -> Path:

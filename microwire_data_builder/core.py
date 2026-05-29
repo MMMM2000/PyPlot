@@ -230,7 +230,7 @@ OUTPUT_COLUMNS = [
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
     "Mini DMA graphs",
-    "Shape memory stress/strain graphs",
+    "Manual stress/strain graphs",
     *SHAPE_MEMORY_VALUE_COLUMNS,
     *SHAPE_MEMORY_FRACTURE_COLUMNS,
     "FMR graphs",
@@ -258,12 +258,12 @@ MINI_DMA_COLUMN = "Mini DMA graphs"
 MINI_DMA_STRAIN_COLUMN = "Mini DMA strain by stress/load"
 MINI_DMA_TRANSITION_COLUMN = "Mini DMA transition currents by stress/load"
 MINI_DMA_BREAK_COLUMN = "Mini DMA break point"
-SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
+SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Manual stress/strain graphs"
 VSM_HYSTERESIS_ORIGIN_COLUMN = "VSM hysteresis graphs (Origin)"
 VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN = "VSM temperature scan graphs (Origin)"
 DMA_ISOSTRESS_ORIGIN_COLUMN = "DMA iso-stress graphs (Origin)"
 MINI_DMA_ORIGIN_COLUMN = "Mini DMA graphs (Origin)"
-SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Shape memory stress/strain graphs (Origin)"
+SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Manual stress/strain graphs (Origin)"
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Displacement (mm)"
 SHAPE_MEMORY_LOAD_COLUMN = "Load (g)"
 SHAPE_MEMORY_STRAIN_COLUMN = "Strain (%)"

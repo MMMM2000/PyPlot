@@ -89,6 +89,7 @@ from .core import (
     MINI_DMA_TRANSITION_COLUMN,
     MINI_DMA_BREAK_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     SHAPE_MEMORY_DISPLACEMENT_COLUMN,
     SHAPE_MEMORY_LOAD_COLUMN,
     SHAPE_MEMORY_STRAIN_COLUMN,
@@ -301,6 +302,8 @@ TRANSITION_TEMP_COLUMNS = [
 ]
 
 _SHAPE_MEMORY_COLUMN_ALIASES = {
+    "Shape memory stress/strain graphs": SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+    "Shape memory stress/strain graphs (Origin)": SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     "Shape memory displacement (mm)": SHAPE_MEMORY_DISPLACEMENT_COLUMN,
     "Shape memory load (g)": SHAPE_MEMORY_LOAD_COLUMN,
     "Shape memory strain (%)": SHAPE_MEMORY_STRAIN_COLUMN,
@@ -25729,6 +25732,8 @@ class AssemblySection(QtWidgets.QWidget):
             "Fracture current (mA)": SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
             "Fracture current density (A/mm^2)": SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
             "Graph — other mA": ANNEALING_OTHER_GRAPH_COLUMN,
+            "Shape memory stress/strain graphs": SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+            "Shape memory stress/strain graphs (Origin)": SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
         }
         return legacy_map.get(text, text)
 
@@ -27940,7 +27945,7 @@ class AssemblySection(QtWidgets.QWidget):
       if (field === 'DMA iso-stress graphs') {{
         return row.dataset.dma || '';
       }}
-      if (field === 'Shape memory stress/strain graphs') {{
+      if (field === 'Manual stress/strain graphs') {{
         return row.dataset.shapeMemory || '';
       }}
       if (field === 'FMR graphs') {{
@@ -27992,7 +27997,7 @@ class AssemblySection(QtWidgets.QWidget):
         'VSM hysteresis graphs',
         'VSM temperature scan graphs',
         'DMA iso-stress graphs',
-        'Shape memory stress/strain graphs',
+        'Manual stress/strain graphs',
         'FMR graphs',
       ]);
       const compare = document.createElement('table');

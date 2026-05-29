@@ -2040,8 +2040,8 @@ _WORD_PROJECT_GRAPH_SOURCE_SPECS: dict[str, tuple[str, str, str, str, str]] = {
     ),
     "shape_memory_stress_strain": (
         "_word_shape_memory_stress_strain_sources",
-        "Shape memory stress/strain graphs",
-        "Shape memory stress/strain graphs (Origin)",
+        "Manual stress/strain graphs",
+        "Manual stress/strain graphs (Origin)",
         "Manual Stress/Strain",
         "Manual stress/strain Origin graph",
     ),
@@ -2089,7 +2089,12 @@ _WORD_REPORT_GRAPH_MANIFEST_SECTIONS: tuple[tuple[str, tuple[str, ...], tuple[st
     (
         "Manual stress/strain",
         ("_word_shape_memory_stress_strain_sources",),
-        ("Shape memory stress/strain graphs", "Shape memory stress/strain graphs (Origin)"),
+        (
+            "Manual stress/strain graphs",
+            "Manual stress/strain graphs (Origin)",
+            "Shape memory stress/strain graphs",
+            "Shape memory stress/strain graphs (Origin)",
+        ),
     ),
     (
         "FMR",
