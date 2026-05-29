@@ -1,6 +1,6 @@
-# Current Annealing Plan
+# Current Annealing Reference
 
-This note captures the agreed direction for a later implementation pass in a separate worktree.
+This note records the current Builder model for current annealing and the reasoning behind it.
 
 ## Goal
 
@@ -34,15 +34,12 @@ The user-facing rule is:
 
 ## Why This Is Enough For Now
 
-The current code already groups multiple annealing files per microwire and can keep extra records. The problem is mainly presentation and exported structure, not basic ingestion.
-
-Today the builder still thinks in terms of:
+The Builder groups multiple annealing files per microwire and keeps extra records. The main table exposes the shape we currently need:
 
 - `Graph — 1000 mA`
-- `Graph — low mA`
-- `Graph — other mA`
+- `Graph — other annealing`
 
-That is more complicated than needed for the current workflow and does not match the desired mental model.
+Legacy saved projects may still contain `Graph — low mA` or `Graph — other mA`, but those fields are migrated into `Graph — other annealing` when projects are loaded.
 
 ## Target Behavior
 
@@ -124,53 +121,28 @@ Preferred output fields:
 
 `Setpoints (mA)` and `Sources` should continue to act as the complete audit trail.
 
-## Scope For The Future Implementation
-
-### In Scope
+## Implemented Scope
 
 - simplify the current annealing UI model to `1000 mA + other`
 - simplify exported/current section columns accordingly
 - keep all non-anchor measurements visible and accessible
 - keep compatibility with current grouped-record behavior
 
-### Out Of Scope
+## Still Out Of Scope
 
 - redesigning current density calculations
 - changing phase-point picking rules
 - inventing new condition taxonomies
 - forcing one row per annealing condition
-- touching the active video review workflow
 
-## Likely Code Areas
+## Main Code Areas
 
-The later work will probably touch:
+The implementation lives mainly in:
 
 - `microwire_data_builder/core.py`
 - `microwire_data_builder/ui.py`
 - `docs/database_builder.md`
-- regression tests under `tests/regression/`
-
-Main hotspots to revisit:
-
-- high/low selection helpers
-- `other` measurement selection
-- annealing section table columns
-- preview rendering for grouped measurements
-- worksheet/export column naming
-- assemble integration
-
-## Suggested Implementation Steps
-
-1. Replace the conceptual model of `high + low + other` with `anchor + other`.
-2. Rename the UI/export columns to match that simpler model.
-3. Update preview rendering and open-graph actions to use the new bucket names.
-4. Update assemble/export wiring so no logic still expects `low mA`.
-5. Add regression tests for:
-   - one `1000 mA` + one other file
-   - one `1000 mA` + many other files
-   - no `1000 mA` file
-   - duplicate `1000 mA` variants
-6. Update `docs/database_builder.md` once behavior is actually changed.
+- regression tests in `tests/test_microwire_data_builder.py`
 
 ## Test Cases To Preserve
 
@@ -188,12 +160,8 @@ Concrete examples previously observed in Praha include samples shaped like:
 
 ## Migration Notes
 
-When implementing later, be careful with persisted builder state:
+Persisted builder state can still contain old column names:
 
 - old projects may still contain `Graph — low mA`
 - old exports and hidden-column preferences may reference the previous column names
-- any migration should preserve existing payloads where possible and silently map legacy fields forward
-
-## Important Constraint
-
-Do this work only in a separate worktree after the current video-review fixes are safely out of the way.
+- migration should preserve existing payloads where possible and silently map legacy fields forward
