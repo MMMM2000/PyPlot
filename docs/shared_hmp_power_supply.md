@@ -54,7 +54,7 @@ The broker API is intentionally channel-scoped. Logger integrations replace dire
 - `lease`
 - `release`
 - `configure_channel`
-- `set_current` or scheduled/coalesced `schedule_current`
+- `set_current`, scheduled/coalesced `schedule_current`, or rate-limited `schedule_current_ramp`
 - `set_output`
 - `measure_channel`
 - `configure_polling`
@@ -63,11 +63,13 @@ The broker API is intentionally channel-scoped. Logger integrations replace dire
 
 For shared measurements, the broker can run a lightweight scheduler. Clients configure a polling interval for the channels that need live readback, then consume timestamped cached readbacks with `latest_readback` instead of forcing every app request to perform a fresh HMP `MEAS` query. Current setpoint updates can be submitted through `schedule_current`; the broker keeps only the newest pending current per channel and applies it on the next scheduler tick before polling. This prevents stale intermediate current commands from building a backlog when a GUI loop runs faster than the HMP can service SCPI requests.
 
+Current ramps should use `schedule_current_ramp`. The broker quantizes requested ramp rates and targets to the supply current resolution, sends at most one configured resolution-sized step per scheduler pass, and does not catch up a delayed tick by issuing a larger current jump. Direct setpoints and ramp setpoints override each other per channel, so a manual/direct safety setpoint cannot leave an older ramp active behind it.
+
 The first scheduled mode targets reliable dual-logger `1 Hz` readback rather than high-rate acquisition. CH1/CH4 current paths are normally polled at about `1 s`; CH3 motor-supply readback should remain slower or explicit because it is mainly a rail-health check, not a per-point measurement channel.
 
-Current Annealing Logger exposes **Shared HMP broker** as an optional supply profile. In that mode it leases the selected channel with the `Current annealing` role, configures only that channel on start, reads broker voltage/current snapshots, sends current setpoints through the broker, and turns off/releases only the leased channel on stop. Its raw serial command box is disabled in broker mode.
+Current Annealing Logger exposes **Shared HMP broker** as an optional supply profile. In that mode it leases the selected channel with the `Current annealing` role, configures only that channel on start, reads broker voltage/current snapshots, sends current ramp targets through the broker scheduler when available, and turns off/releases only the leased channel on stop. Its raw serial command box is disabled in broker mode.
 
-Mini DMA Logger exposes **Shared HMP broker** as an optional current-annealing supply profile. In that mode it connects to the localhost broker instead of opening the HMP serial port directly, leases the configured current-sweep channel with the `Mini DMA current sweep` role, and leases the motor-supply channel with the `Mini DMA motor supply` role only when that channel is configured. Direct HMP4030/HMP4040 serial profiles remain available for non-shared benches.
+Mini DMA Logger exposes **Shared HMP broker** as an optional current-annealing supply profile. In that mode it connects to the localhost broker instead of opening the HMP serial port directly, leases the configured current-sweep channel with the `Mini DMA current sweep` role, and leases the motor-supply channel with the `Mini DMA motor supply` role only when that channel is configured. During recipe current sweeps it passes the recipe ramp rate to the broker so delayed GUI/control ticks do not produce oversized current jumps at the PSU. Direct HMP4030/HMP4040 serial profiles remain available for non-shared benches.
 
 Mini DMA does not use profile-default output channels. The current-sweep and motor-supply channel selectors start at **Select channel...**, and changing or auto-detecting a supply profile clears the channel selectors. Operators must choose the real wired channels before preparing current output or enabling motor power.
 

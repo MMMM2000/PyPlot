@@ -285,6 +285,71 @@ def test_scheduler_coalesces_current_setpoints_until_next_tick() -> None:
     cached = broker.latest_readback(channel=1, max_age_s=1.0, now_s=20.0)
     assert cached["setpoint_current_mA"] == pytest.approx(1.4)
     assert cached["pending_current_mA"] is None
+    assert broker.snapshot()["scheduler"]["metrics"]["coalesced_current_requests"] == 1
+
+
+def test_scheduler_rate_limited_ramp_sends_small_steps_without_catchup() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+    broker.configure_polling(channel=1, interval_s=10.0)
+
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=3.0,
+        rate_mA_s=1.0,
+        max_step_mA=0.2,
+        resolution_mA=0.2,
+        now_s=0.0,
+    )
+    broker.process_scheduler_once(now_s=0.1)
+    broker.process_scheduler_once(now_s=0.2)
+    broker.process_scheduler_once(now_s=1.2)
+
+    commands = driver.command_log()
+    assert "CURR 0.0020" not in commands
+    assert "CURR 0.0012" in commands
+    assert "CURR 0.0014" in commands
+    assert driver._serial.channels[1]["current"] == pytest.approx(0.0014)  # type: ignore[union-attr]
+    metrics = broker.snapshot()["scheduler"]["metrics"]
+    assert metrics["ramp_steps_sent"] == 2
+    assert metrics["current_commands_sent"] == 2
+
+
+def test_scheduler_direct_and_ramp_requests_override_each_other() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+
+    broker.schedule_current(channel=1, lease_id=lease.lease_id, current_mA=2.0)
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=3.0,
+        rate_mA_s=1.0,
+        max_step_mA=0.2,
+        resolution_mA=0.2,
+        now_s=0.0,
+    )
+    broker.process_scheduler_once(now_s=0.2)
+
+    commands = driver.command_log()
+    assert "CURR 0.0020" not in commands
+    assert "CURR 0.0012" in commands
+
+    broker.schedule_current(channel=1, lease_id=lease.lease_id, current_mA=1.0)
+    broker.process_scheduler_once(now_s=0.4)
+
+    commands = driver.command_log()
+    assert commands.count("CURR 0.0010") == 2
+    assert "CURR 0.0014" not in commands
 
 
 def test_scheduler_thread_keeps_cached_readbacks_fresh() -> None:
@@ -346,3 +411,32 @@ def test_broker_json_client_exposes_scheduler_cached_readbacks() -> None:
     assert readback["current_mA"] == pytest.approx(1.4)
     assert readback["pending_current_mA"] is None
     assert "CURR 0.0012" not in driver.command_log()
+
+
+def test_broker_json_client_schedules_rate_limited_current_ramps() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    server, thread = start_broker_server(broker)
+    try:
+        host, port = server.server_address
+        client = BrokerJsonClient(host=host, port=port)
+        lease = client.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+        client.configure_channel(channel=1, lease_id=lease["lease_id"], voltage_v=1.0, current_a=0.001, output_on=True)
+
+        client.schedule_current_ramp(
+            channel=1,
+            lease_id=lease["lease_id"],
+            target_mA=3.0,
+            rate_mA_s=1.0,
+            max_step_mA=0.2,
+            resolution_mA=0.2,
+        )
+        broker.process_scheduler_once(now_s=time.monotonic() + 0.2)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert "CURR 0.0012" in driver.command_log()

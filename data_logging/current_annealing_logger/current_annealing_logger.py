@@ -1748,18 +1748,35 @@ class MainWindow(QtWidgets.QMainWindow):
         channel = self._shared_broker_channel()
         lease_id = self._ensure_shared_broker_lease()
         client = self._get_shared_broker_client()
+        target_mA = max(0.0, float(self.current_current_set) * 1000.0)
+        resolution_mA = self._current_resolution_mA()
+        ramp_rate_mA_s = max(
+            resolution_mA,
+            abs(float(getattr(self, "current_step_mA", resolution_mA) or resolution_mA)),
+        )
+        schedule_current_ramp = getattr(client, "schedule_current_ramp", None)
+        if callable(schedule_current_ramp):
+            schedule_current_ramp(
+                channel=channel,
+                lease_id=lease_id,
+                target_mA=target_mA,
+                rate_mA_s=ramp_rate_mA_s,
+                max_step_mA=resolution_mA,
+                resolution_mA=resolution_mA,
+            )
+            return
         schedule_current = getattr(client, "schedule_current", None)
         if callable(schedule_current):
             schedule_current(
                 channel=channel,
                 lease_id=lease_id,
-                current_mA=max(0.0, float(self.current_current_set) * 1000.0),
+                current_mA=target_mA,
             )
             return
         client.set_current(
             channel=channel,
             lease_id=lease_id,
-            current_mA=max(0.0, float(self.current_current_set) * 1000.0),
+            current_mA=target_mA,
         )
 
     def _shutdown_shared_broker_output(self) -> None:

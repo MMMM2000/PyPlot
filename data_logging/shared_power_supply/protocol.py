@@ -109,6 +109,20 @@ class BrokerTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 current_mA=float(request["current_mA"]),
             )
             return {"ok": True}
+        if action == "schedule_current_ramp":
+            broker.schedule_current_ramp(
+                channel=int(request["channel"]),
+                lease_id=str(request["lease_id"]),
+                target_mA=float(request["target_mA"]),
+                rate_mA_s=float(request["rate_mA_s"]),
+                max_step_mA=(
+                    None if request.get("max_step_mA") is None else float(request["max_step_mA"])
+                ),
+                resolution_mA=(
+                    None if request.get("resolution_mA") is None else float(request["resolution_mA"])
+                ),
+            )
+            return {"ok": True}
         if action == "latest_readback":
             max_age = request.get("max_age_s")
             return {
@@ -211,6 +225,26 @@ class BrokerJsonClient:
 
     def schedule_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
         self.request("schedule_current", channel=channel, lease_id=lease_id, current_mA=current_mA)
+
+    def schedule_current_ramp(
+        self,
+        *,
+        channel: int,
+        lease_id: str,
+        target_mA: float,
+        rate_mA_s: float,
+        max_step_mA: float | None = None,
+        resolution_mA: float | None = None,
+    ) -> None:
+        self.request(
+            "schedule_current_ramp",
+            channel=channel,
+            lease_id=lease_id,
+            target_mA=target_mA,
+            rate_mA_s=rate_mA_s,
+            max_step_mA=max_step_mA,
+            resolution_mA=resolution_mA,
+        )
 
     def latest_readback(
         self,

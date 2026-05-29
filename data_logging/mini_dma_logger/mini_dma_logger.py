@@ -2804,6 +2804,7 @@ class SharedBrokerSupplyController:
         self._leases: dict[int, str] = {}
         self._connected = False
         self._io_lock = RLock()
+        self._current_ramp_rate_mA_s: float | None = None
 
     def connect(self) -> None:
         if self._client is None:
@@ -2870,6 +2871,16 @@ class SharedBrokerSupplyController:
         resolution_mA = self.current_resolution_mA()
         return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
 
+    def set_current_ramp_rate_mA_s(self, rate_mA_s: float | None) -> None:
+        if rate_mA_s is None:
+            self._current_ramp_rate_mA_s = None
+            return
+        try:
+            rate = abs(float(rate_mA_s))
+        except Exception:
+            rate = 0.0
+        self._current_ramp_rate_mA_s = None if rate <= 0.0 else max(self.current_resolution_mA(), rate)
+
     def configure_channel(
         self,
         *,
@@ -2924,18 +2935,32 @@ class SharedBrokerSupplyController:
             raise RuntimeError("Select a shared HMP broker current-sweep channel first.")
         with self._io_lock:
             client = self._require_client()
+            target_mA = self.quantize_current_mA(current_mA)
+            ramp_rate_mA_s = self._current_ramp_rate_mA_s
+            schedule_current_ramp = getattr(client, "schedule_current_ramp", None)
+            if ramp_rate_mA_s is not None and callable(schedule_current_ramp):
+                resolution_mA = self.current_resolution_mA()
+                schedule_current_ramp(
+                    channel=channel,
+                    lease_id=self._lease_channel(channel),
+                    target_mA=target_mA,
+                    rate_mA_s=ramp_rate_mA_s,
+                    max_step_mA=resolution_mA,
+                    resolution_mA=resolution_mA,
+                )
+                return
             schedule_current = getattr(client, "schedule_current", None)
             if callable(schedule_current):
                 schedule_current(
                     channel=channel,
                     lease_id=self._lease_channel(channel),
-                    current_mA=self.quantize_current_mA(current_mA),
+                    current_mA=target_mA,
                 )
                 return
             client.set_current(
                 channel=channel,
                 lease_id=self._lease_channel(channel),
-                current_mA=self.quantize_current_mA(current_mA),
+                current_mA=target_mA,
             )
 
     def output_on(self) -> None:
@@ -7248,6 +7273,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(f"Recipe current update failed: {exc}")
             return False
         return True
+
+    def _set_supply_current_ramp_rate_mA_s(self, rate_mA_s: float | None) -> None:
+        controller = self._supply_controller
+        setter = getattr(controller, "set_current_ramp_rate_mA_s", None)
+        if callable(setter):
+            setter(rate_mA_s)
 
     def _continuity_monitor_enabled(self) -> bool:
         return hasattr(self, "check_continuity_monitor") and self.check_continuity_monitor.isChecked()
@@ -18128,6 +18159,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_post_hold_throttle_until_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
             self._clear_current_sweep_ramp_hold()
+            self._set_supply_current_ramp_rate_mA_s(ramp_rate_mA_s)
             if not self._set_recipe_current_mA(start_mA, measure_after=False):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return True
@@ -18243,6 +18275,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0
             self._clear_current_sweep_ramp_hold()
+            self._set_supply_current_ramp_rate_mA_s(None)
             return True
         return False
 

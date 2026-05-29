@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from .driver import HmpSerialDriver
 from .profiles import HMP_PROFILES, SupplyProfile
+from .ramp import RateLimitedCurrentRamp
 
 
 ROLE_UNUSED = "unused"
@@ -160,7 +161,15 @@ class SharedPowerSupplyBroker:
         self._readbacks: dict[int, dict[str, float | None]] = {}
         self._polling: dict[int, PollState] = {}
         self._pending_currents: dict[int, PendingCurrent] = {}
+        self._current_ramps: dict[int, tuple[str, RateLimitedCurrentRamp]] = {}
         self._setpoint_currents_mA: dict[int, float] = {}
+        self._metrics: dict[str, int] = {
+            "coalesced_current_requests": 0,
+            "current_commands_sent": 0,
+            "ramp_steps_sent": 0,
+            "polls_completed": 0,
+            "poll_errors": 0,
+        }
         self._scheduler_lock = RLock()
         self._scheduler_stop = Event()
         self._scheduler_thread: Thread | None = None
@@ -269,6 +278,8 @@ class SharedPowerSupplyBroker:
             current_a=current_a,
             output_on=output_on,
         )
+        with self._scheduler_lock:
+            self._setpoint_currents_mA[channel] = max(0.0, float(current_a) * 1000.0)
 
     def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
         config = self._require_lease(channel=channel, lease_id=lease_id)
@@ -277,6 +288,7 @@ class SharedPowerSupplyBroker:
         self.driver.set_current_mA(channel=channel, current_mA=current_mA)
         with self._scheduler_lock:
             self._setpoint_currents_mA[channel] = max(0.0, float(current_mA))
+            self._metrics["current_commands_sent"] += 1
 
     def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:
         self._require_lease(channel=channel, lease_id=lease_id)
@@ -325,10 +337,54 @@ class SharedPowerSupplyBroker:
         if config.current_limit_a is not None and current / 1000.0 > config.current_limit_a:
             raise ValueError(f"Requested current exceeds CH{channel} limit.")
         with self._scheduler_lock:
+            if channel in self._pending_currents:
+                self._metrics["coalesced_current_requests"] += 1
+            self._current_ramps.pop(channel, None)
             self._pending_currents[channel] = PendingCurrent(
                 lease_id=str(lease_id),
                 current_mA=current,
                 requested_at_s=time.monotonic(),
+            )
+
+    def schedule_current_ramp(
+        self,
+        *,
+        channel: int,
+        lease_id: str,
+        target_mA: float,
+        rate_mA_s: float,
+        max_step_mA: float | None = None,
+        resolution_mA: float | None = None,
+        now_s: float | None = None,
+    ) -> None:
+        config = self._require_lease(channel=channel, lease_id=lease_id)
+        target = max(0.0, float(target_mA))
+        if config.current_limit_a is not None and target / 1000.0 > config.current_limit_a:
+            raise ValueError(f"Requested current exceeds CH{channel} limit.")
+        resolution = max(0.001, float(resolution_mA or self.profile.current_resolution_mA))
+        max_step = max(resolution, float(max_step_mA or resolution))
+        now = time.monotonic() if now_s is None else float(now_s)
+        with self._scheduler_lock:
+            self._pending_currents.pop(channel, None)
+            current = self._setpoint_currents_mA.get(channel)
+            if current is None:
+                readback = self._readbacks.get(channel)
+                measured = None if readback is None else readback.get("current_mA")
+                current = 0.0 if measured is None else float(measured)
+            existing = self._current_ramps.get(channel)
+            if existing is not None and existing[0] == lease_id:
+                existing[1].update_target(target_mA=target, rate_mA_s=rate_mA_s, now_s=now)
+                return
+            self._current_ramps[channel] = (
+                str(lease_id),
+                RateLimitedCurrentRamp(
+                    initial_mA=float(current),
+                    target_mA=target,
+                    rate_mA_s=float(rate_mA_s),
+                    resolution_mA=resolution,
+                    max_step_mA=max_step,
+                    now_s=now,
+                ),
             )
 
     def latest_readback(
@@ -375,12 +431,25 @@ class SharedPowerSupplyBroker:
         now = time.monotonic() if now_s is None else float(now_s)
         with self._scheduler_lock:
             pending = list(self._pending_currents.items())
+            ramps = list(self._current_ramps.items())
         for channel, current in pending:
             self.set_current(channel=channel, lease_id=current.lease_id, current_mA=current.current_mA)
             with self._scheduler_lock:
                 latest = self._pending_currents.get(channel)
                 if latest is current:
                     self._pending_currents.pop(channel, None)
+        for channel, (lease_id, ramp) in ramps:
+            next_mA = ramp.next_setpoint(now_s=now)
+            if next_mA is None:
+                if ramp.is_complete:
+                    with self._scheduler_lock:
+                        latest = self._current_ramps.get(channel)
+                        if latest is not None and latest[1] is ramp:
+                            self._current_ramps.pop(channel, None)
+                continue
+            self.set_current(channel=channel, lease_id=lease_id, current_mA=next_mA)
+            with self._scheduler_lock:
+                self._metrics["ramp_steps_sent"] += 1
 
         with self._scheduler_lock:
             due_channels = [
@@ -389,7 +458,14 @@ class SharedPowerSupplyBroker:
                 if state.next_due_s is None or state.next_due_s <= now
             ]
         for channel in due_channels:
-            self._measure_channel_at(channel=channel, now_s=now)
+            try:
+                self._measure_channel_at(channel=channel, now_s=now)
+                with self._scheduler_lock:
+                    self._metrics["polls_completed"] += 1
+            except Exception:
+                with self._scheduler_lock:
+                    self._metrics["poll_errors"] += 1
+                raise
             with self._scheduler_lock:
                 state = self._polling.get(channel)
                 if state is not None:
@@ -450,9 +526,22 @@ class SharedPowerSupplyBroker:
                     str(channel): current.to_dict()
                     for channel, current in self._pending_currents.items()
                 },
+                "current_ramps": {
+                    str(channel): {
+                        "lease_id": lease_id,
+                        "current_mA": ramp.current_mA,
+                        "target_mA": ramp.target_mA,
+                        "rate_mA_s": ramp.rate_mA_s,
+                        "resolution_mA": ramp.resolution_mA,
+                        "max_step_mA": ramp.max_step_mA,
+                        "complete": ramp.is_complete,
+                    }
+                    for channel, (lease_id, ramp) in self._current_ramps.items()
+                },
                 "setpoint_currents_mA": {
                     str(channel): current
                     for channel, current in self._setpoint_currents_mA.items()
                 },
+                "metrics": dict(self._metrics),
             },
         }

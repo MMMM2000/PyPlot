@@ -106,6 +106,30 @@ class _FakeScheduledBrokerClient(_FakeBrokerClient):
             )
         )
 
+    def schedule_current_ramp(
+        self,
+        *,
+        channel: int,
+        lease_id: str,
+        target_mA: float,
+        rate_mA_s: float,
+        max_step_mA: float | None = None,
+        resolution_mA: float | None = None,
+    ) -> None:
+        self.calls.append(
+            (
+                "schedule_current_ramp",
+                {
+                    "channel": channel,
+                    "lease_id": lease_id,
+                    "target_mA": target_mA,
+                    "rate_mA_s": rate_mA_s,
+                    "max_step_mA": max_step_mA,
+                    "resolution_mA": resolution_mA,
+                },
+            )
+        )
+
 
 class _FailingBrokerClient:
     def snapshot(self) -> dict[str, object]:
@@ -655,7 +679,7 @@ def test_shared_broker_setpoint_and_stop_only_affect_leased_channel(qtbot) -> No
     assert window._shared_broker_lease_id is None
 
 
-def test_shared_broker_setpoint_uses_scheduled_current_when_available(qtbot) -> None:
+def test_shared_broker_setpoint_uses_rate_limited_ramp_when_available(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     fake = _FakeScheduledBrokerClient()
@@ -664,11 +688,22 @@ def test_shared_broker_setpoint_uses_scheduled_current_when_available(qtbot) -> 
     window.channel_select = 2
     window._shared_broker_lease_id = "lease-1"
     window.current_current_set = 0.025
+    window.current_step_mA = 1.0
 
     window._send_current_setpoint()
 
     assert fake.calls == [
-        ("schedule_current", {"channel": 2, "lease_id": "lease-1", "current_mA": 25.0}),
+        (
+            "schedule_current_ramp",
+            {
+                "channel": 2,
+                "lease_id": "lease-1",
+                "target_mA": 25.0,
+                "rate_mA_s": 1.0,
+                "max_step_mA": 0.2,
+                "resolution_mA": 0.2,
+            },
+        ),
     ]
 
 

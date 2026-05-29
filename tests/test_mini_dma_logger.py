@@ -6538,6 +6538,69 @@ def test_current_sweep_ramp_uses_elapsed_time_and_milliamp_resolution(
         _close_test_window(window)
 
 
+def test_current_sweep_ramp_tells_shared_controller_the_recipe_ramp_rate(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+            self.ramp_rates: list[float | None] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def set_current_ramp_rate_mA_s(self, rate_mA_s: float | None) -> None:
+            self.ramp_rates.append(rate_mA_s)
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def initialize_output(self, *, current_mA: float, reset_on_start: bool) -> None:
+            self.commands.append(current_mA)
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._seek_distribution_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+    ticks = iter([100.0, 100.0, 100.25])
+
+    def _fake_monotonic() -> float:
+        try:
+            return next(ticks)
+        except StopIteration:
+            return 100.25
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=3.0,
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        current_start_mA=1.0,
+        current_end_mA=2.0,
+        current_ramp_rate_mA_s=1.0,
+    )
+
+    try:
+        assert window._handle_current_sweep_step(step, 4) is False
+        assert window._handle_current_sweep_step(step, 4) is False
+        assert supply.commands == pytest.approx([1.0, 1.2])
+        assert supply.ramp_rates == [1.0]
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_logs_scheduled_points_when_strain_target_is_already_reached(
     tmp_path: Path,
     qtbot,
@@ -8598,6 +8661,109 @@ def test_shared_broker_supply_controller_uses_scheduler_when_available(
     assert (
         "latest_readback",
         {"channel": 4, "max_age_s": 2.5, "fallback_to_measure": True},
+    ) in clients[0].calls
+
+
+def test_shared_broker_supply_controller_uses_rate_limited_ramp_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
+            return {"lease_id": f"lease-{channel}"}
+
+        def configure_channel(
+            self,
+            *,
+            channel: int,
+            lease_id: str,
+            voltage_v: float,
+            current_a: float,
+            output_on: bool,
+        ) -> None:
+            self.calls.append(
+                (
+                    "configure_channel",
+                    {
+                        "channel": channel,
+                        "lease_id": lease_id,
+                        "voltage_v": voltage_v,
+                        "current_a": current_a,
+                        "output_on": output_on,
+                    },
+                )
+            )
+
+        def configure_polling(self, *, channel: int, interval_s: float) -> None:
+            self.calls.append(("configure_polling", {"channel": channel, "interval_s": interval_s}))
+
+        def start_scheduler(self, *, tick_s: float = 0.05) -> None:
+            self.calls.append(("start_scheduler", {"tick_s": tick_s}))
+
+        def schedule_current_ramp(
+            self,
+            *,
+            channel: int,
+            lease_id: str,
+            target_mA: float,
+            rate_mA_s: float,
+            max_step_mA: float,
+            resolution_mA: float,
+        ) -> None:
+            self.calls.append(
+                (
+                    "schedule_current_ramp",
+                    {
+                        "channel": channel,
+                        "lease_id": lease_id,
+                        "target_mA": target_mA,
+                        "rate_mA_s": rate_mA_s,
+                        "max_step_mA": max_step_mA,
+                        "resolution_mA": resolution_mA,
+                    },
+                )
+            )
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=1.0,
+        current_channel=4,
+        motor_channel=3,
+    )
+
+    controller.connect()
+    controller.initialize_output(current_mA=10.0, reset_on_start=True)
+    controller.set_current_ramp_rate_mA_s(1.0)
+    controller.set_current_mA(10.4)
+
+    assert (
+        "schedule_current_ramp",
+        {
+            "channel": 4,
+            "lease_id": "lease-4",
+            "target_mA": 10.4,
+            "rate_mA_s": 1.0,
+            "max_step_mA": 0.2,
+            "resolution_mA": 0.2,
+        },
     ) in clients[0].calls
 
 
