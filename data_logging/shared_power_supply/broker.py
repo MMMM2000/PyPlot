@@ -301,6 +301,10 @@ class SharedPowerSupplyBroker:
     def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:
         self._require_lease(channel=channel, lease_id=lease_id)
         self.driver.set_output(channel=channel, output_on=output_on)
+        if not output_on:
+            with self._scheduler_lock:
+                self._pending_currents.pop(channel, None)
+                self._current_ramps.pop(channel, None)
 
     def output_state(self, *, channel: int) -> bool | None:
         channel = self.validate_channel(channel)
