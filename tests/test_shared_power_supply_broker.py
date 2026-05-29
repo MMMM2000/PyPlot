@@ -360,6 +360,7 @@ def test_release_clears_scheduler_state_for_channel() -> None:
     lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
     broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
     broker.configure_polling(channel=1, interval_s=1.0)
+    broker.process_scheduler_once(now_s=1.0)
     broker.schedule_current_ramp(
         channel=1,
         lease_id=lease.lease_id,
@@ -371,10 +372,13 @@ def test_release_clears_scheduler_state_for_channel() -> None:
     )
 
     assert "1" in broker.snapshot()["scheduler"]["current_ramps"]
+    assert "1" in broker.snapshot()["readbacks"]
 
     broker.release(channel=1, lease_id=lease.lease_id)
 
-    scheduler = broker.snapshot()["scheduler"]
+    snapshot = broker.snapshot()
+    assert "1" not in snapshot["readbacks"]
+    scheduler = snapshot["scheduler"]
     assert "1" not in scheduler["current_ramps"]
     assert "1" not in scheduler["pending_currents"]
     assert "1" not in scheduler["polling"]

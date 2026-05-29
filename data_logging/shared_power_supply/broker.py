@@ -252,6 +252,7 @@ class SharedPowerSupplyBroker:
             self._current_ramps.pop(channel, None)
             self._polling.pop(channel, None)
             self._setpoint_currents_mA.pop(channel, None)
+            self._readbacks.pop(channel, None)
 
     def _require_lease(self, *, channel: int, lease_id: str) -> BenchChannel:
         channel = self.validate_channel(channel)
