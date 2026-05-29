@@ -606,6 +606,44 @@ def test_current_annealing_metadata_preserves_decimal_ramp_rate(tmp_path, qtbot)
     assert payload["recipe"]["current_ramp_rate_mA_s"] == pytest.approx(0.2)
 
 
+def test_current_annealing_metadata_records_source_control_snapshot(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("metadata_git")
+
+    replies = {
+        ("branch", "--show-current"): "codex/current-annealing-pyqtgraph\n",
+        ("rev-parse", "HEAD"): "abc123\n",
+        ("status", "--short"): " M data_logging/current_annealing_logger/current_annealing_logger.py\n",
+        ("config", "--get", "remote.origin.url"): "https://example.test/repo.git\n",
+    }
+
+    def _fake_run(args: list[str], **_kwargs: object) -> object:
+        class Result:
+            returncode = 0
+            stdout = replies[tuple(args[3:])]
+
+        return Result()
+
+    monkeypatch.setattr(logger_mod.subprocess, "run", _fake_run)
+
+    assert window.prepare_output_file() is True
+
+    data_path = logger_mod.Path(window.f_name)
+    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    source_control = payload["source_control"]
+    assert source_control["branch"] == "codex/current-annealing-pyqtgraph"
+    assert source_control["commit"] == "abc123"
+    assert source_control["is_dirty"] is True
+    assert source_control["remote_url"] == "https://example.test/repo.git"
+
+
 def test_live_dashboard_uses_pyqtgraph_backend(qtbot) -> None:
     pytest.importorskip("pyqtgraph")
     window = logger_mod.MainWindow()

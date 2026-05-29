@@ -13,6 +13,7 @@ import time
 import math
 import re
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
@@ -69,6 +70,19 @@ fig_size[1] = 10 #10
 plt.rcParams["figure.figsize"] = fig_size
 plt.rcParams["font.family"] = ["sans-serif"]
 plt.rcParams["font.size"] = 12
+
+
+def _hidden_subprocess_kwargs() -> dict[str, object]:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
+
 
 def _apply_app_font_to_matplotlib(app: QtWidgets.QApplication | None = None) -> None:
     """Keep Matplotlib fonts aligned with the active Qt application font."""
@@ -4191,6 +4205,36 @@ class MainWindow(QtWidgets.QMainWindow):
                 return ""
         return ""
 
+    def _source_control_metadata(self) -> Dict[str, Any]:
+        repo_root = Path(__file__).resolve().parents[2]
+
+        def _git_text(*args: str) -> str | None:
+            try:
+                completed = subprocess.run(
+                    ["git", "-C", str(repo_root), *args],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                    check=False,
+                    **_hidden_subprocess_kwargs(),
+                )
+            except Exception:
+                return None
+            if completed.returncode != 0:
+                return None
+            text = completed.stdout.strip()
+            return text or None
+
+        status = _git_text("status", "--short")
+        return {
+            "repo_root": str(repo_root),
+            "branch": _git_text("branch", "--show-current"),
+            "commit": _git_text("rev-parse", "HEAD"),
+            "is_dirty": bool(status),
+            "status_short": status or "",
+            "remote_url": _git_text("config", "--get", "remote.origin.url"),
+        }
+
     def _metadata_payload(self, output_path: str) -> Dict[str, Any]:
         output = Path(output_path)
         loops, infinite = self._current_loop_settings()
@@ -4247,6 +4291,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "supply_display": supply,
             "supply_profile": supply_profile_id,
             "hardware": hardware_payload,
+            "source_control": self._source_control_metadata(),
             "recipe": {
                 "start_current_mA": float(getattr(self, "start_current_mA", 0.0) or 0.0),
                 "max_current_mA": float(getattr(self, "max_current_mA", 0.0) or 0.0),
