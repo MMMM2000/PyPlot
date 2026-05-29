@@ -291,6 +291,22 @@ def test_current_annealing_hides_legacy_hold_controls(qtbot) -> None:
     assert window.ui.comboBox_max_voltage_action.findData("hold") < 0
 
 
+def test_current_annealing_voltage_limit_no_longer_holds_current(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.process_running = True
+    window.current_step_A = 0.001
+    window.current_increment = 0.001
+    window.max_voltage = 32.05
+
+    assert "hold" not in logger_mod.MAX_VOLTAGE_ACTION_LABELS
+
+    window._apply_max_voltage_action("hold")
+
+    assert window.current_increment == pytest.approx(-0.001)
+    assert window.direction_ascending is False
+
+
 def test_current_annealing_planned_time_ignores_hidden_hold_duration(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)

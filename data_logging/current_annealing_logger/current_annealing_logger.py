@@ -119,7 +119,6 @@ DEFAULT_PRESET = {
 MAX_VOLTAGE_DEFAULT_ACTION = "ask"
 MAX_VOLTAGE_ACTION_LABELS = {
     "ask": "Ask every time",
-    "hold": "Hold current (stop increasing)",
     "reverse": "Reverse to zero",
     "stop": "Stop measurement",
 }
@@ -3905,8 +3904,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recalculate_total_steps(remaining_steps, self._projected_loop_samples)
 
     def _apply_max_voltage_action(self, action: str) -> None:
-        if action not in MAX_VOLTAGE_ACTION_LABELS:
-            action = MAX_VOLTAGE_DEFAULT_ACTION
+        if action not in {"reverse", "stop"}:
+            action = "reverse"
         limit_label = f"{self._format_voltage_limit()} V"
         if action == "reverse":
             step = abs(getattr(self, "current_step_A", 0.0))
@@ -3945,7 +3944,6 @@ class MainWindow(QtWidgets.QMainWindow):
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle("Voltage limit reached")
         msg.setText(f"Power supply reached {self._format_voltage_limit()} V. What do you want to do?")
-        _hold_btn = msg.addButton("Hold current", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
         reverse_btn = msg.addButton("Reverse to zero", QtWidgets.QMessageBox.ButtonRole.ActionRole)
         stop_btn = msg.addButton("Stop measurement", QtWidgets.QMessageBox.ButtonRole.RejectRole)
         msg.setIcon(QtWidgets.QMessageBox.Icon.Warning)
@@ -3956,7 +3954,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif clicked is stop_btn:
             self._apply_max_voltage_action("stop")
         else:
-            self._apply_max_voltage_action("hold")
+            self._apply_max_voltage_action("reverse")
     
     def init_graph_window(self):
         """
