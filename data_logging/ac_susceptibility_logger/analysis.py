@@ -1,0 +1,645 @@
+"""Repeatable AC susceptibility analysis for logger TSV files.
+
+The functions in this module are deliberately UI-free so Codex or a human can
+rerun the same analysis from a shell, from tests, or later from a PyPlot panel.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import json
+import math
+from pathlib import Path
+import shutil
+from typing import Sequence
+
+import numpy as np
+import pandas as pd
+
+try:  # matplotlib is a declared runtime dependency, but keep imports lazy-ish.
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+except Exception:  # pragma: no cover - exercised only in stripped environments
+    plt = None  # type: ignore[assignment]
+
+
+MU0_H_PER_M = 4.0 * math.pi * 1e-7
+OE_A_PER_M = 79.57747154594767
+
+SWEEP_COLUMNS = [
+    "timestamp_utc",
+    "elapsed_s",
+    "setting_index",
+    "setting_count",
+    "function",
+    "frequency_hz",
+    "level_mode",
+    "level",
+    "current_set_a",
+    "current_actual_a",
+    "voltage_actual_v",
+    "psu_resistance_ohm",
+    "psu_power_w",
+    "direction",
+    "repeat_index",
+    "lcr_primary",
+    "lcr_secondary",
+    "lcr_monitor1",
+    "lcr_monitor2",
+    "lcr_comparator",
+    "lcr_raw",
+    "psu_backend",
+    "psu_resource",
+    "psu_status",
+    "error",
+]
+
+BASELINE_COLUMNS = [
+    "timestamp_utc",
+    "baseline_setting_index",
+    "baseline_repeat_index",
+    "frequency_hz",
+    "level_mode",
+    "level",
+    "function",
+    "lcr_primary",
+    "lcr_secondary",
+    "lcr_monitor1",
+    "lcr_monitor2",
+    "lcr_comparator",
+    "lcr_raw",
+]
+
+NUMERIC_SWEEP_COLUMNS = [
+    "elapsed_s",
+    "frequency_hz",
+    "level",
+    "current_set_a",
+    "current_actual_a",
+    "voltage_actual_v",
+    "psu_resistance_ohm",
+    "psu_power_w",
+    "lcr_primary",
+    "lcr_secondary",
+    "lcr_monitor1",
+    "lcr_monitor2",
+]
+
+NUMERIC_BASELINE_COLUMNS = [
+    "frequency_hz",
+    "level",
+    "lcr_primary",
+    "lcr_secondary",
+    "lcr_monitor1",
+    "lcr_monitor2",
+]
+
+
+@dataclass(frozen=True)
+class ExcitationCoilGeometry:
+    name: str = "Liptaci excitation coil"
+    turns: int = 350
+    length_mm: float = 11.0
+    inner_diameter_mm: float = 1.3
+    outer_diameter_mm: float = 1.7
+    wire_diameter_mm: float = 0.05
+
+    @property
+    def length_m(self) -> float:
+        return self.length_mm / 1000.0
+
+    @property
+    def inner_diameter_m(self) -> float:
+        return self.inner_diameter_mm / 1000.0
+
+    @property
+    def mean_diameter_m(self) -> float:
+        return ((self.inner_diameter_mm + self.outer_diameter_mm) / 2.0) / 1000.0
+
+    @property
+    def h_oe_per_ampere(self) -> float:
+        return (float(self.turns) / self.length_m) / OE_A_PER_M
+
+
+@dataclass(frozen=True)
+class SensingCoilGeometry:
+    name: str = "Liptaci sensing coil"
+    turns: int = 250
+    length_mm: float = 1.0
+    inner_diameter_mm: float = 1.7
+    outer_diameter_mm: float = 3.6
+    wire_diameter_mm: float = 0.05
+
+
+@dataclass(frozen=True)
+class SampleGeometry:
+    name: str
+    core_diameter_um: float
+    glass_diameter_um: float | None = None
+
+    @property
+    def core_diameter_m(self) -> float:
+        return self.core_diameter_um * 1e-6
+
+    @property
+    def glass_diameter_m(self) -> float | None:
+        if self.glass_diameter_um is None:
+            return None
+        return self.glass_diameter_um * 1e-6
+
+
+@dataclass(frozen=True)
+class SusceptibilityAnalysisConfig:
+    sweep_files: Sequence[Path]
+    baseline_file: Path
+    output_dir: Path
+    sample: SampleGeometry
+    excitation_coil: ExcitationCoilGeometry = ExcitationCoilGeometry()
+    sensing_coil: SensingCoilGeometry = SensingCoilGeometry()
+    use_inner_diameter_for_filling: bool = True
+    low_current_max_mA: float = 20.0
+    high_current_min_mA: float = 60.0
+    negative_fraction_limit: float = 0.05
+    reliable_negative_percent_limit: float = 0.1
+    reliable_min_snr: float = 10.0
+
+    @property
+    def filling_factor(self) -> float:
+        coil_diameter = (
+            self.excitation_coil.inner_diameter_m
+            if self.use_inner_diameter_for_filling
+            else self.excitation_coil.mean_diameter_m
+        )
+        return (self.sample.core_diameter_m / coil_diameter) ** 2
+
+
+def _robust_sigma(values: pd.Series | np.ndarray) -> float:
+    series = pd.Series(values, dtype="float64").dropna()
+    if series.empty:
+        return float("nan")
+    median = float(series.median())
+    mad = float((series - median).abs().median())
+    return 1.4826 * mad
+
+
+def _read_tsv(path: Path, columns: Sequence[str]) -> pd.DataFrame:
+    return pd.read_csv(path, sep="\t", comment="#", header=None, names=list(columns), low_memory=False)
+
+
+def load_baseline(path: Path) -> pd.DataFrame:
+    frame = _read_tsv(path, BASELINE_COLUMNS)
+    for column in NUMERIC_BASELINE_COLUMNS:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame[(frame["function"] == "Ls-Rs") & frame["lcr_primary"].notna()].copy()
+    frame["excitation_mA"] = frame["level"] * 1000.0
+    return frame
+
+
+def load_sweeps(paths: Sequence[Path]) -> pd.DataFrame:
+    frames = []
+    for path in paths:
+        frame = _read_tsv(path, SWEEP_COLUMNS)
+        frame["source_file"] = path.name
+        frames.append(frame)
+    if not frames:
+        raise ValueError("at least one sweep TSV is required")
+    sweep = pd.concat(frames, ignore_index=True)
+    for column in NUMERIC_SWEEP_COLUMNS:
+        sweep[column] = pd.to_numeric(sweep[column], errors="coerce")
+    sweep = sweep[(sweep["function"] == "Ls-Rs") & sweep["error"].isna() & sweep["lcr_primary"].notna()].copy()
+    sweep["excitation_mA"] = sweep["level"] * 1000.0
+    sweep["current_set_mA"] = (sweep["current_set_a"] * 1000.0).round(6)
+    sweep["current_actual_mA"] = sweep["current_actual_a"] * 1000.0
+    sweep["ls_nH"] = sweep["lcr_primary"] * 1e9
+    return sweep
+
+
+def summarize_baseline(baseline: pd.DataFrame) -> pd.DataFrame:
+    return (
+        baseline.groupby(["frequency_hz", "excitation_mA"])
+        .agg(
+            l_empty_h=("lcr_primary", "median"),
+            l_empty_nH=("lcr_primary", lambda s: float(np.nanmedian(s)) * 1e9),
+            l_empty_noise_nH=("lcr_primary", lambda s: _robust_sigma(s) * 1e9),
+            r_empty_ohm=("lcr_secondary", "median"),
+            n_empty=("lcr_primary", "size"),
+        )
+        .reset_index()
+    )
+
+
+def summarize_sweep_points(sweep: pd.DataFrame, config: SusceptibilityAnalysisConfig) -> pd.DataFrame:
+    sweep = sweep.copy()
+    sweep["h_ac_oe"] = sweep["level"] * config.excitation_coil.h_oe_per_ampere
+    return (
+        sweep.groupby(["frequency_hz", "excitation_mA", "h_ac_oe", "direction", "current_set_mA"], dropna=False)
+        .agg(
+            l_wire_h=("lcr_primary", "median"),
+            l_wire_nH=("lcr_primary", lambda s: float(np.nanmedian(s)) * 1e9),
+            l_wire_noise_nH=("lcr_primary", lambda s: _robust_sigma(s) * 1e9),
+            r_wire_ohm=("lcr_secondary", "median"),
+            current_actual_mA=("current_actual_mA", "median"),
+            n_reads=("lcr_primary", "size"),
+            negative_fraction=("lcr_primary", lambda s: float((s < 0).mean())),
+        )
+        .reset_index()
+    )
+
+
+def compute_apparent_susceptibility(
+    points: pd.DataFrame,
+    baseline_summary: pd.DataFrame,
+    config: SusceptibilityAnalysisConfig,
+) -> pd.DataFrame:
+    result = points.merge(baseline_summary, on=["frequency_hz", "excitation_mA"], how="left")
+    filling = config.filling_factor
+    result["filling_factor"] = filling
+    result["chi_prime_app"] = (result["l_wire_h"] - result["l_empty_h"]) / (result["l_empty_h"] * filling)
+    omega = 2.0 * math.pi * result["frequency_hz"]
+    result["chi_double_prime_app"] = (result["r_wire_ohm"] - result["r_empty_ohm"]) / (
+        omega * result["l_empty_h"] * filling
+    )
+    result["delta_l_vs_empty_nH"] = result["l_wire_nH"] - result["l_empty_nH"]
+    result["chi_prime_noise"] = (
+        np.sqrt(result["l_wire_noise_nH"] ** 2 + result["l_empty_noise_nH"] ** 2) * 1e-9
+    ) / (result["l_empty_h"] * filling)
+    return result
+
+
+def compute_change_metrics(points: pd.DataFrame, sweep: pd.DataFrame, config: SusceptibilityAnalysisConfig) -> pd.DataFrame:
+    rows: list[dict[str, float | str]] = []
+    working = points[points["direction"].isin(["up", "down"])].copy()
+    for (frequency, excitation, h_oe), condition in working.groupby(["frequency_hz", "excitation_mA", "h_ac_oe"]):
+        raw_condition = sweep[(sweep["frequency_hz"] == frequency) & np.isclose(sweep["excitation_mA"], excitation)]
+        negative_percent = float((raw_condition["lcr_primary"] < 0).mean() * 100.0) if len(raw_condition) else float("nan")
+        for direction in ("up", "down"):
+            direction_points = condition[condition["direction"] == direction].sort_values("current_set_mA")
+            direction_points = direction_points[
+                (direction_points["negative_fraction"] <= config.negative_fraction_limit)
+                & np.isfinite(direction_points["chi_prime_app"])
+            ].copy()
+            if len(direction_points) < 5:
+                continue
+            low = direction_points[
+                (direction_points["current_set_mA"] >= 15.0)
+                & (direction_points["current_set_mA"] <= config.low_current_max_mA)
+            ]
+            high = direction_points[direction_points["current_set_mA"] >= config.high_current_min_mA]
+            if low.empty:
+                low = direction_points.head(min(5, len(direction_points)))
+            else:
+                low = low.head(5)
+            if high.empty:
+                high = direction_points.tail(min(5, len(direction_points)))
+            else:
+                high = high.tail(5)
+            chi_low = float(np.nanmedian(low["chi_prime_app"]))
+            chi_high = float(np.nanmedian(high["chi_prime_app"]))
+            dchi = chi_high - chi_low
+            chi_noise = float(np.nanmedian(direction_points["chi_prime_noise"]))
+            rows.append(
+                {
+                    "frequency_hz": float(frequency),
+                    "excitation_mA": float(excitation),
+                    "h_ac_oe": float(h_oe),
+                    "direction": direction,
+                    "chi_prime_low_window": chi_low,
+                    "chi_prime_high_window": chi_high,
+                    "delta_chi_prime_high_minus_low": dchi,
+                    "abs_delta_chi_prime": abs(dchi),
+                    "percent_change_vs_low": dchi / abs(chi_low) * 100.0 if chi_low else float("nan"),
+                    "chi_prime_noise": chi_noise,
+                    "chi_prime_snr": abs(dchi) / (chi_noise * math.sqrt(2.0)) if chi_noise > 0 else float("nan"),
+                    "negative_ls_percent_raw": negative_percent,
+                    "low_current_min_mA": float(low["current_set_mA"].min()),
+                    "low_current_max_mA": float(low["current_set_mA"].max()),
+                    "high_current_min_mA": float(high["current_set_mA"].min()),
+                    "high_current_max_mA": float(high["current_set_mA"].max()),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def rank_conditions(metrics: pd.DataFrame, config: SusceptibilityAnalysisConfig) -> pd.DataFrame:
+    if metrics.empty:
+        return pd.DataFrame()
+    paired = metrics.pivot_table(
+        index=["frequency_hz", "excitation_mA", "h_ac_oe"],
+        columns="direction",
+        values=[
+            "delta_chi_prime_high_minus_low",
+            "abs_delta_chi_prime",
+            "percent_change_vs_low",
+            "chi_prime_noise",
+            "chi_prime_snr",
+            "negative_ls_percent_raw",
+        ],
+        aggfunc="first",
+    )
+    paired.columns = [f"{name}_{direction}" for name, direction in paired.columns]
+    paired = paired.reset_index()
+    paired["mean_abs_delta_chi_prime"] = paired[["abs_delta_chi_prime_up", "abs_delta_chi_prime_down"]].mean(axis=1)
+    paired["mean_chi_prime_snr"] = paired[["chi_prime_snr_up", "chi_prime_snr_down"]].mean(axis=1)
+    paired["mean_abs_percent_change_vs_low"] = (
+        paired[["percent_change_vs_low_up", "percent_change_vs_low_down"]].abs().mean(axis=1)
+    )
+    paired["negative_ls_percent"] = paired[["negative_ls_percent_raw_up", "negative_ls_percent_raw_down"]].mean(axis=1)
+    paired["literature_field_range"] = paired["h_ac_oe"].between(1.0, 10.0)
+    paired["recommended_quality"] = (
+        (paired["negative_ls_percent"] < config.reliable_negative_percent_limit)
+        & (paired["mean_chi_prime_snr"] >= config.reliable_min_snr)
+    )
+    return paired.sort_values(
+        ["recommended_quality", "literature_field_range", "mean_chi_prime_snr", "mean_abs_delta_chi_prime"],
+        ascending=[False, False, False, False],
+    )
+
+
+def export_origin_ready_tables(points: pd.DataFrame, output_dir: Path) -> None:
+    base_columns = ["frequency_hz", "excitation_mA", "h_ac_oe", "direction", "current_set_mA", "current_actual_mA"]
+    prime = points[base_columns + ["chi_prime_app", "chi_prime_noise", "l_wire_nH", "l_empty_nH"]].copy()
+    loss = points[base_columns + ["chi_double_prime_app", "r_wire_ohm", "r_empty_ohm"]].copy()
+    prime.to_csv(output_dir / "origin_chi_prime_curves.csv", index=False)
+    loss.to_csv(output_dir / "origin_chi_double_prime_curves.csv", index=False)
+
+
+def _format_float(value: float, digits: int = 3) -> str:
+    if not math.isfinite(float(value)):
+        return ""
+    return f"{float(value):.{digits}g}"
+
+
+def _write_markdown_report(ranking: pd.DataFrame, config: SusceptibilityAnalysisConfig, output_dir: Path) -> None:
+    lines = [
+        "# AC Susceptibility Analysis",
+        "",
+        f"Generated UTC: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "## Inputs",
+        "",
+        f"- Baseline: `{config.baseline_file}`",
+    ]
+    lines.extend(f"- Sweep: `{path}`" for path in config.sweep_files)
+    lines.extend(
+        [
+            "",
+            "## Geometry",
+            "",
+            f"- Sample: `{config.sample.name}`",
+            f"- Metallic core diameter: `{config.sample.core_diameter_um:g} um`",
+            f"- Glass diameter: `{config.sample.glass_diameter_um:g} um`"
+            if config.sample.glass_diameter_um is not None
+            else "- Glass diameter: not set",
+            f"- Excitation coil: `{config.excitation_coil.turns}` turns, `{config.excitation_coil.length_mm:g} mm` long, "
+            f"`{config.excitation_coil.inner_diameter_mm:g} mm` ID",
+            f"- Sensing coil metadata: `{config.sensing_coil.turns}` turns, `{config.sensing_coil.length_mm:g} mm` long, "
+            f"`{config.sensing_coil.inner_diameter_mm:g} mm` ID",
+            f"- Filling factor: `{config.filling_factor:.6g}`",
+            "",
+            "## Formula",
+            "",
+            "`chi_prime_app = (L_wire - L_empty) / (L_empty * filling_factor)`",
+            "",
+            "`chi_double_prime_app = (R_wire - R_empty) / (2*pi*f*L_empty*filling_factor)`",
+            "",
+            "## Recommended Conditions",
+            "",
+            "| Frequency | Excitation | H_ac | mean abs delta chi_prime | SNR | approx percent |",
+            "|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    recommended = ranking[ranking["recommended_quality"] & ranking["literature_field_range"]]
+    for _, row in recommended.head(12).iterrows():
+        lines.append(
+            "| "
+            f"{row.frequency_hz:g} Hz | "
+            f"{row.excitation_mA:g} mA | "
+            f"{row.h_ac_oe:.2f} Oe | "
+            f"{_format_float(row.mean_abs_delta_chi_prime)} | "
+            f"{row.mean_chi_prime_snr:.1f} | "
+            f"{row.mean_abs_percent_change_vs_low:.1f}% |"
+        )
+    lines.extend(
+        [
+            "",
+            "Percent changes can exceed 1000 percent when low-current apparent susceptibility is near zero or noisy. "
+            "Use SNR and the actual curves before treating a large percent as physically meaningful.",
+            "",
+            "## Outputs",
+            "",
+            "- `apparent_complex_susceptibility_points.csv`",
+            "- `apparent_susceptibility_change_by_direction.csv`",
+            "- `apparent_susceptibility_condition_ranking.csv`",
+            "- `origin_chi_prime_curves.csv`",
+            "- `origin_chi_double_prime_curves.csv`",
+            "- `recommended_chi_prime_curves.png`",
+            "- `recommended_chi_double_prime_curves.png`",
+            "- `top_complex_susceptibility_curves.png`",
+        ]
+    )
+    (output_dir / "SUSCEPTIBILITY_REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def plot_recommended_curves(points: pd.DataFrame, ranking: pd.DataFrame, output_dir: Path) -> None:
+    if plt is None:
+        return
+    recommended = ranking[ranking["recommended_quality"] & ranking["literature_field_range"]]
+    selection = recommended.sort_values(["mean_chi_prime_snr", "mean_abs_delta_chi_prime"], ascending=False).head(6)
+    if selection.empty:
+        selection = ranking.sort_values(["mean_chi_prime_snr", "mean_abs_delta_chi_prime"], ascending=False).head(6)
+    _plot_component(points, selection, "chi_prime_app", "apparent chi'", output_dir / "recommended_chi_prime_curves.png")
+    _plot_component(
+        points,
+        selection,
+        "chi_double_prime_app",
+        "apparent chi''",
+        output_dir / "recommended_chi_double_prime_curves.png",
+    )
+    _plot_complex(points, selection.head(3), output_dir / "top_complex_susceptibility_curves.png")
+
+
+def _clean_component_points(points: pd.DataFrame, row: pd.Series, component: str, config_negative_limit: float = 0.05) -> pd.DataFrame:
+    data = points[
+        (points["frequency_hz"] == row.frequency_hz)
+        & np.isclose(points["excitation_mA"], row.excitation_mA)
+        & points["direction"].isin(["up", "down"])
+    ].copy()
+    data = data[(data["negative_fraction"] <= config_negative_limit) & np.isfinite(data[component])]
+    return data.sort_values("current_set_mA")
+
+
+def _plot_component(points: pd.DataFrame, selection: pd.DataFrame, component: str, label: str, path: Path) -> None:
+    if selection.empty:
+        return
+    fig, axes = plt.subplots(len(selection), 1, figsize=(10, 2.8 * len(selection)), dpi=160, sharex=True)
+    if len(selection) == 1:
+        axes = [axes]
+    for axis, (_, row) in zip(axes, selection.iterrows()):
+        data = _clean_component_points(points, row, component)
+        for direction, marker in (("up", "o"), ("down", "s")):
+            direction_data = data[data["direction"] == direction]
+            axis.plot(
+                direction_data["current_set_mA"],
+                direction_data[component],
+                marker=marker,
+                markersize=3,
+                linewidth=1.2,
+                label=direction,
+            )
+        axis.axhline(0.0, color="0.35", linewidth=0.6)
+        axis.set_ylabel(label)
+        axis.set_title(
+            f"{row.frequency_hz:g} Hz, {row.excitation_mA:g} mA ({row.h_ac_oe:.2f} Oe), "
+            f"dchi'={row.mean_abs_delta_chi_prime:.3g}, SNR={row.mean_chi_prime_snr:.1f}"
+        )
+        axis.legend(fontsize=8)
+    axes[-1].set_xlabel("DC heating current set [mA]")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def _plot_complex(points: pd.DataFrame, selection: pd.DataFrame, path: Path) -> None:
+    if selection.empty:
+        return
+    fig, axes = plt.subplots(len(selection), 2, figsize=(12, 3.2 * len(selection)), dpi=160, sharex=True)
+    if len(selection) == 1:
+        axes = np.array([axes])
+    for row_index, (_, row) in enumerate(selection.iterrows()):
+        for col_index, (component, label) in enumerate(
+            (("chi_prime_app", "apparent chi'"), ("chi_double_prime_app", "apparent chi''"))
+        ):
+            axis = axes[row_index, col_index]
+            data = _clean_component_points(points, row, component)
+            for direction, marker in (("up", "o"), ("down", "s")):
+                direction_data = data[data["direction"] == direction]
+                axis.plot(
+                    direction_data["current_set_mA"],
+                    direction_data[component],
+                    marker=marker,
+                    markersize=3,
+                    linewidth=1.2,
+                    label=direction,
+                )
+            axis.axhline(0.0, color="0.35", linewidth=0.6)
+            axis.set_ylabel(label)
+            axis.set_title(f"{row.frequency_hz:g} Hz, {row.excitation_mA:g} mA ({row.h_ac_oe:.2f} Oe)")
+            axis.legend(fontsize=8)
+    for axis in axes[-1, :]:
+        axis.set_xlabel("DC heating current set [mA]")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def run_analysis(config: SusceptibilityAnalysisConfig) -> dict[str, Path]:
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    baseline = load_baseline(config.baseline_file)
+    sweep = load_sweeps(config.sweep_files)
+    baseline_summary = summarize_baseline(baseline)
+    point_summary = summarize_sweep_points(sweep, config)
+    susceptibility = compute_apparent_susceptibility(point_summary, baseline_summary, config)
+    metrics = compute_change_metrics(susceptibility, sweep, config)
+    ranking = rank_conditions(metrics, config)
+
+    baseline_summary.to_csv(config.output_dir / "empty_coil_baseline_summary.csv", index=False)
+    point_summary.to_csv(config.output_dir / "point_medians.csv", index=False)
+    susceptibility.to_csv(config.output_dir / "apparent_complex_susceptibility_points.csv", index=False)
+    metrics.to_csv(config.output_dir / "apparent_susceptibility_change_by_direction.csv", index=False)
+    ranking.to_csv(config.output_dir / "apparent_susceptibility_condition_ranking.csv", index=False)
+    export_origin_ready_tables(susceptibility, config.output_dir)
+    plot_recommended_curves(susceptibility, ranking, config.output_dir)
+    _write_markdown_report(ranking, config, config.output_dir)
+
+    metadata = {
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "config": {
+            "sweep_files": [str(path) for path in config.sweep_files],
+            "baseline_file": str(config.baseline_file),
+            "output_dir": str(config.output_dir),
+            "sample": asdict(config.sample),
+            "excitation_coil": asdict(config.excitation_coil),
+            "sensing_coil": asdict(config.sensing_coil),
+            "filling_factor": config.filling_factor,
+            "h_oe_per_ampere": config.excitation_coil.h_oe_per_ampere,
+        },
+    }
+    (config.output_dir / "analysis_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return {
+        "output_dir": config.output_dir,
+        "report": config.output_dir / "SUSCEPTIBILITY_REPORT.md",
+        "ranking": config.output_dir / "apparent_susceptibility_condition_ranking.csv",
+        "chi_prime_plot": config.output_dir / "recommended_chi_prime_curves.png",
+        "complex_plot": config.output_dir / "top_complex_susceptibility_curves.png",
+    }
+
+
+def copy_preview_images(outputs: dict[str, Path], preview_dir: Path) -> dict[str, Path]:
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    copied: dict[str, Path] = {}
+    for key in ("chi_prime_plot", "complex_plot"):
+        path = outputs.get(key)
+        if path is None or not path.exists():
+            continue
+        destination = preview_dir / path.name
+        if destination.exists():
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            destination = preview_dir / f"{path.stem}_{timestamp}{path.suffix}"
+        try:
+            shutil.copy2(path, destination)
+        except OSError:
+            continue
+        copied[key] = destination
+    return copied
+
+
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Analyze AC susceptibility logger TSV files.")
+    parser.add_argument("--sweep", action="append", required=True, type=Path, help="Microwire sweep TSV. Repeatable.")
+    parser.add_argument("--baseline", required=True, type=Path, help="Empty-coil baseline TSV.")
+    parser.add_argument("--out-dir", required=True, type=Path, help="Output analysis folder.")
+    parser.add_argument("--sample-name", default="microwire", help="Sample name for metadata.")
+    parser.add_argument("--core-diameter-um", required=True, type=float, help="Metallic core diameter in micrometers.")
+    parser.add_argument("--glass-diameter-um", type=float, help="Glass outer diameter in micrometers.")
+    parser.add_argument("--coil-turns", default=350, type=int)
+    parser.add_argument("--coil-length-mm", default=11.0, type=float)
+    parser.add_argument("--coil-inner-diameter-mm", default=1.3, type=float)
+    parser.add_argument("--coil-outer-diameter-mm", default=1.7, type=float)
+    parser.add_argument("--preview-dir", type=Path, help="Optional ASCII/simple folder for copied preview PNGs.")
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parse_args(argv)
+    config = SusceptibilityAnalysisConfig(
+        sweep_files=tuple(args.sweep),
+        baseline_file=args.baseline,
+        output_dir=args.out_dir,
+        sample=SampleGeometry(
+            name=args.sample_name,
+            core_diameter_um=args.core_diameter_um,
+            glass_diameter_um=args.glass_diameter_um,
+        ),
+        excitation_coil=ExcitationCoilGeometry(
+            turns=args.coil_turns,
+            length_mm=args.coil_length_mm,
+            inner_diameter_mm=args.coil_inner_diameter_mm,
+            outer_diameter_mm=args.coil_outer_diameter_mm,
+        ),
+    )
+    outputs = run_analysis(config)
+    print(f"Output directory: {outputs['output_dir']}")
+    print(f"Report: {outputs['report']}")
+    if args.preview_dir is not None:
+        copied = copy_preview_images(outputs, args.preview_dir)
+        for key, path in copied.items():
+            print(f"Preview {key}: {path}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
