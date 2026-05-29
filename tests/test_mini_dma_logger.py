@@ -3986,6 +3986,171 @@ def test_saved_sample_fields_and_builder_project_autoimport_diameter(tmp_path: P
         _close_test_window(window)
 
 
+def test_fabrication_suggestions_fill_diameter_when_project_has_no_diameter(tmp_path: Path, qtbot) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            "Ni50Fe27Ga23": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=12,
+                    piece=2,
+                    label="12/2",
+                    diameter_mm=0.011,
+                ),
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=12,
+                    piece=3,
+                    label="12/3",
+                    diameter_mm=0.0125,
+                ),
+            ]
+        }
+        window._refresh_fabrication_completers()
+
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        window._sync_auto_name_fields()
+
+        assert window.spin_diameter.value() == pytest.approx(0.0125)
+        assert "no project diameter" in window.label_project_status.text()
+        assert "fabrication diameter 12.5 um" in window.label_fabrication_status.text()
+        assert "border" not in window.spin_diameter.styleSheet()
+        completer_model = window.edit_name_wire.completer().model()
+        suggestions = [
+            completer_model.data(completer_model.index(row, 0))
+            for row in range(completer_model.rowCount())
+        ]
+        assert suggestions == ["12/2", "12/3"]
+    finally:
+        _close_test_window(window)
+
+
+def test_loading_fabrication_folder_indexes_workbooks_without_blocking_ui(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    folder = tmp_path / "fabrication"
+    composition_folder = folder / "Ni50Fe27Ga23"
+    composition_folder.mkdir(parents=True)
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_fabrication_folder.setText(str(folder))
+        started_s = time.monotonic()
+        window._load_fabrication_folder_from_ui()
+        elapsed_s = time.monotonic() - started_s
+
+        assert elapsed_s < 0.05
+        assert window._fabrication_load_active()
+        assert window.button_load_fabrication.text() == "Cancel loading"
+        qtbot.waitUntil(lambda: not window._fabrication_load_active(), timeout=3000)
+        assert "Ni50Fe27Ga23" in window._fabrication_records_by_composition
+        assert "composition suggestion" in window.label_fabrication_status.text()
+    finally:
+        window._cancel_fabrication_folder_load()
+        _close_test_window(window)
+
+
+def test_fabrication_worker_indexes_real_builder_workbooks(qtbot) -> None:
+    root = Path("sample_data/database_builder/microwire data/Ni50Fe27Ga23")
+    if not root.exists():
+        pytest.skip("sample fabrication data is unavailable")
+    worker = mini_dma_mod.FabricationSuggestionWorker(root, composition="Ni50Fe27Ga23")
+    result: dict[str, object] = {}
+
+    worker.succeeded.connect(
+        lambda root_obj, records_obj, file_count, composition_obj: result.update(
+            root=root_obj,
+            records=records_obj,
+            file_count=file_count,
+            composition=composition_obj,
+        )
+    )
+    worker.failed.connect(lambda root_obj, message: result.update(error=message))
+    worker.cancelled.connect(lambda root_obj: result.update(cancelled=True))
+    worker.run()
+
+    assert "error" not in result
+    assert "cancelled" not in result
+    assert result["root"] == root
+    assert result["composition"] == "Ni50Fe27Ga23"
+    assert int(result["file_count"]) > 0
+    records = result["records"]
+    assert isinstance(records, dict)
+    assert "Ni50Fe27Ga23" in records
+    assert any(record.diameter_mm is not None for record in records["Ni50Fe27Ga23"])
+
+
+def test_project_diameter_is_preferred_over_fabrication_suggestion(tmp_path: Path, qtbot) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "d (um)": 19.1,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            "Ni50Fe27Ga23": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=12,
+                    piece=3,
+                    label="12/3",
+                    diameter_mm=0.011,
+                )
+            ]
+        }
+        window._refresh_fabrication_completers()
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+
+        window._sync_auto_name_fields()
+
+        assert window.spin_diameter.value() == pytest.approx(0.0191)
+        assert "Imported" in window.label_project_status.text()
+        assert "diameter 19.1 um" in window.label_project_status.text()
+    finally:
+        _close_test_window(window)
+
+
 def test_wire_diameter_is_marked_until_imported_but_manual_edits_still_work(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 

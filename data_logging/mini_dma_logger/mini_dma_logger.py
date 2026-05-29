@@ -468,7 +468,7 @@ RECIPE_FILENAME_TOKENS = {
     CONSTANT_CURRENT_STRAIN_SWEEP: "iso-current",
 }
 CALIBRATION_MODES = frozenset({CALIBRATION, CALIBRATION_COPPER})
-PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d", "Diameter", "diameter_um")
+PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d_um", "d", "Diameter", "diameter_um")
 PROJECT_ROW_CURRENT_KEYS = (
     "Stress/strain current (mA)",
     "Current (mA)",
@@ -1423,6 +1423,15 @@ class ProjectImportResult:
     matched_row: dict[str, Any]
 
 
+@dataclass
+class FabricationSampleRecord:
+    composition: str
+    draw: int
+    piece: int
+    label: str
+    diameter_mm: float | None
+
+
 class MicrowireLineEdit(QtWidgets.QLineEdit):
     """Microwire entry with slash display and filename-safe token conversion."""
 
@@ -1491,6 +1500,36 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
         self.setText(normalized)
         self.setCursorPosition(cursor)
         self._normalizing = False
+
+
+def _fabrication_records_from_index(index: Any) -> dict[str, list[FabricationSampleRecord]]:
+    records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
+    piece_level = getattr(index, "piece_level", {})
+    if not isinstance(piece_level, Mapping):
+        return records_by_composition
+    for key, data in piece_level.items():
+        if not isinstance(key, tuple) or len(key) != 3:
+            continue
+        composition, draw, piece = key
+        if not composition or not isinstance(data, Mapping):
+            continue
+        try:
+            draw_int = int(draw)
+            piece_int = int(piece)
+        except (TypeError, ValueError):
+            continue
+        diameter_um = _safe_float(_project_row_value(data, PROJECT_ROW_DIAMETER_KEYS))
+        record = FabricationSampleRecord(
+            composition=str(composition).strip(),
+            draw=draw_int,
+            piece=piece_int,
+            label=f"{draw_int}/{piece_int}",
+            diameter_mm=None if diameter_um is None else diameter_um / 1000.0,
+        )
+        records_by_composition.setdefault(record.composition, []).append(record)
+    for records in records_by_composition.values():
+        records.sort(key=lambda item: (item.draw, item.piece, item.label))
+    return dict(sorted(records_by_composition.items(), key=lambda item: item[0].lower()))
 
 
 class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
@@ -1717,6 +1756,127 @@ class ScaleWorker(QtCore.QObject):
     @QtCore.pyqtSlot()
     def stop(self) -> None:
         self._stop_event.set()
+
+
+class FabricationSuggestionWorker(QtCore.QObject):
+    progress_changed = QtCore.pyqtSignal(str)
+    succeeded = QtCore.pyqtSignal(object, object, int, object)
+    failed = QtCore.pyqtSignal(object, str)
+    cancelled = QtCore.pyqtSignal(object)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(self, root: Path, *, composition: str | None = None) -> None:
+        super().__init__()
+        self.root = root
+        self.composition = composition
+        self._cancel_event = Event()
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            root = self.root
+
+            if not root.exists() or not root.is_dir():
+                self.failed.emit(root, "Fabrication folder path is saved, but the folder was not found.")
+                return
+            if self.composition:
+                self._read_composition_workbooks(root, self.composition)
+            else:
+                self._scan_composition_folders(root)
+        finally:
+            self.finished.emit()
+
+    def _scan_composition_folders(self, root: Path) -> None:
+        self.progress_changed.emit("Scanning fabrication composition folders...")
+        records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
+        try:
+            for child in root.iterdir():
+                if self._cancel_event.is_set():
+                    self.cancelled.emit(root)
+                    return
+                if child.is_dir() and not child.name.startswith((".", "~")):
+                    records_by_composition.setdefault(child.name.strip(), [])
+        except Exception as exc:
+            self.failed.emit(root, f"Failed to scan fabrication folder: {exc}")
+            return
+        records_by_composition = {
+            composition: records
+            for composition, records in sorted(records_by_composition.items(), key=lambda item: item[0].lower())
+            if composition
+        }
+        if not records_by_composition:
+            self.failed.emit(root, "No fabrication composition folders were found in that folder.")
+            return
+        self.succeeded.emit(root, records_by_composition, 0, None)
+
+    def _read_composition_workbooks(self, root: Path, composition: str) -> None:
+        from microwire_data_builder import core as builder_core
+
+        normalized_composition = _normalized_token(composition)
+        target = root
+        try:
+            for child in root.iterdir():
+                if self._cancel_event.is_set():
+                    self.cancelled.emit(root)
+                    return
+                if child.is_dir() and _normalized_token(child.name) == normalized_composition:
+                    target = child
+                    break
+        except Exception as exc:
+            self.failed.emit(root, f"Failed to inspect fabrication folder: {exc}")
+            return
+        if target == root and _normalized_token(root.name) != normalized_composition:
+            self.failed.emit(root, f"No fabrication folder matched composition {composition}.")
+            return
+        files: list[Path] = []
+        scanned = 0
+        self.progress_changed.emit(f"Scanning fabrication workbooks for {composition}...")
+        try:
+            for path in target.rglob("*.xlsx"):
+                if self._cancel_event.is_set():
+                    self.cancelled.emit(root)
+                    return
+                scanned += 1
+                if path.is_file() and not path.name.startswith("~$"):
+                    files.append(path)
+                if scanned % 100 == 0:
+                    self.progress_changed.emit(
+                        f"Scanning {composition}... {len(files)} workbook(s) found"
+                    )
+        except Exception as exc:
+            self.failed.emit(root, f"Failed to scan fabrication folder: {exc}")
+            return
+        if not files:
+            self.failed.emit(root, f"No fabrication Excel workbooks were found for {composition}.")
+            return
+        self.progress_changed.emit(f"Reading {len(files)} {composition} workbook(s)...")
+        try:
+            def _progress(current: int, total: int) -> None:
+                if current == total or current % 10 == 0:
+                    self.progress_changed.emit(
+                        f"Reading {composition} workbook {current}/{total}..."
+                    )
+
+            index = builder_core.build_fabrication_index(
+                files,
+                progress_callback=_progress,
+                cancel_callback=self._cancel_event.is_set,
+            )
+        except Exception as exc:
+            if self._cancel_event.is_set():
+                self.cancelled.emit(root)
+            else:
+                self.failed.emit(root, f"Failed to read fabrication workbooks for {composition}: {exc}")
+            return
+        if self._cancel_event.is_set():
+            self.cancelled.emit(root)
+            return
+        records_by_composition = _fabrication_records_from_index(index)
+        self.succeeded.emit(root, records_by_composition, len(files), composition)
+
+    @QtCore.pyqtSlot()
+    def cancel(self) -> None:
+        self._cancel_event.set()
 
 
 class AutomationControlLoop:
@@ -3100,6 +3260,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preload_trigger_elapsed_s: float | None = None
         self._builder_project_path: Path | None = None
         self._builder_project_match: ProjectImportResult | None = None
+        self._fabrication_folder_path: Path | None = None
+        self._fabrication_records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
+        self._fabrication_loaded_compositions: set[str] = set()
+        self._fabrication_loading_composition: str | None = None
+        self._fabrication_thread: QtCore.QThread | None = None
+        self._fabrication_worker: FabricationSuggestionWorker | None = None
         self._supply_controller: PowerSupplyController | None = None
         self._supply_snapshot: dict[str, float | None] = {
             "voltage_V": None,
@@ -4409,6 +4575,22 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.label_project_status.setWordWrap(True)
         project_form.addRow("", self.label_project_status)
+
+        self.edit_fabrication_folder = QtWidgets.QLineEdit(project_box)
+        fabrication_path_row = QtWidgets.QHBoxLayout()
+        fabrication_path_row.addWidget(self.edit_fabrication_folder, stretch=1)
+        browse_fabrication_button = QtWidgets.QPushButton("Browse", project_box)
+        browse_fabrication_button.clicked.connect(self._choose_fabrication_folder)
+        fabrication_path_row.addWidget(browse_fabrication_button)
+        self.button_load_fabrication = QtWidgets.QPushButton("Load suggestions", project_box)
+        self.button_load_fabrication.clicked.connect(self._handle_fabrication_load_button)
+        fabrication_path_row.addWidget(self.button_load_fabrication)
+        project_form.addRow("Fabrication folder", fabrication_path_row)
+        self.label_fabrication_status = QtWidgets.QLabel(
+            "Connect a fabrication folder to suggest compositions and microwires while typing."
+        )
+        self.label_fabrication_status.setWordWrap(True)
+        project_form.addRow("", self.label_fabrication_status)
         specimen_layout.addWidget(project_box)
 
         logging_box = self._group_box("Session")
@@ -5829,6 +6011,7 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda: self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
         )
         self.edit_project_path.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
+        self.edit_fabrication_folder.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.spin_diameter.valueChanged.connect(self._refresh_recipe_sample_label)
         self.spin_diameter.valueChanged.connect(self._refresh_equivalent_labels)
         self.spin_diameter.valueChanged.connect(self._refresh_diameter_import_state)
@@ -7429,6 +7612,274 @@ class MainWindow(QtWidgets.QMainWindow):
             self._builder_project_path = Path(path_str)
             self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
 
+    def _fabrication_load_active(self) -> bool:
+        return self._fabrication_thread is not None and self._fabrication_thread.isRunning()
+
+    def _set_fabrication_loading_ui(self, loading: bool) -> None:
+        if not hasattr(self, "button_load_fabrication"):
+            return
+        self.button_load_fabrication.setText("Cancel loading" if loading else "Load suggestions")
+
+    def _choose_fabrication_folder(self) -> None:
+        start_dir = (
+            str(self._fabrication_folder_path)
+            if self._fabrication_folder_path is not None
+            else self.edit_log_dir.text().strip()
+        )
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select fabrication data folder",
+            start_dir,
+        )
+        if folder:
+            self.edit_fabrication_folder.setText(folder)
+            self._load_fabrication_folder_from_ui(async_load=True)
+
+    def _handle_fabrication_load_button(self) -> None:
+        if self._fabrication_load_active():
+            self._cancel_fabrication_folder_load()
+            return
+        self._load_fabrication_folder_from_ui(async_load=True)
+
+    def _load_fabrication_folder_from_ui(self, *, async_load: bool = True) -> None:
+        path_text = self.edit_fabrication_folder.text().strip()
+        if not path_text:
+            self._cancel_fabrication_folder_load()
+            self._fabrication_folder_path = None
+            self._fabrication_records_by_composition = {}
+            self._fabrication_loaded_compositions = set()
+            self._fabrication_loading_composition = None
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText(
+                "Connect a fabrication folder to suggest compositions and microwires while typing."
+            )
+            return
+        if async_load:
+            self._start_fabrication_folder_load(Path(path_text), composition=None)
+        else:
+            self._load_fabrication_folder_sync(Path(path_text))
+
+    def _start_fabrication_folder_load(self, root: Path, *, composition: str | None = None) -> None:
+        self._cancel_fabrication_folder_load()
+        self._fabrication_folder_path = root
+        self._fabrication_loading_composition = composition
+        if composition:
+            self.label_fabrication_status.setText(f"Loading fabrication data for {composition}...")
+        else:
+            self._fabrication_loaded_compositions = set()
+            self.label_fabrication_status.setText(f"Scanning fabrication folder: {root}")
+        self._set_fabrication_loading_ui(True)
+        thread = QtCore.QThread(self)
+        worker = FabricationSuggestionWorker(root, composition=composition)
+        worker.moveToThread(thread)
+        worker.progress_changed.connect(self.label_fabrication_status.setText)
+        worker.succeeded.connect(self._handle_fabrication_load_success)
+        worker.failed.connect(self._handle_fabrication_load_failure)
+        worker.cancelled.connect(self._handle_fabrication_load_cancelled)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda thread=thread, worker=worker: self._finish_fabrication_thread(thread, worker))
+        thread.started.connect(worker.run)
+        self._fabrication_thread = thread
+        self._fabrication_worker = worker
+        thread.start()
+
+    def _cancel_fabrication_folder_load(self) -> None:
+        worker = self._fabrication_worker
+        if worker is not None:
+            worker.cancel()
+
+    def _finish_fabrication_thread(
+        self,
+        thread: QtCore.QThread,
+        worker: FabricationSuggestionWorker,
+    ) -> None:
+        if self._fabrication_thread is thread:
+            self._fabrication_thread = None
+            self._fabrication_worker = None
+            self._fabrication_loading_composition = None
+            self._set_fabrication_loading_ui(False)
+            QtCore.QTimer.singleShot(0, self._ensure_fabrication_composition_loaded)
+        thread.deleteLater()
+
+    def _handle_fabrication_load_success(
+        self,
+        root_obj: object,
+        records_obj: object,
+        file_count: int,
+        composition_obj: object,
+    ) -> None:
+        root = Path(root_obj)
+        if self._fabrication_folder_path != root:
+            return
+        records_by_composition = (
+            records_obj if isinstance(records_obj, dict) else {}
+        )
+        composition = str(composition_obj).strip() if composition_obj else None
+        if composition:
+            merged_records = dict(self._fabrication_records_by_composition)
+            for name, records in records_by_composition.items():
+                merged_records[name] = records
+                self._fabrication_loaded_compositions.add(_normalized_token(name))
+            if not records_by_composition:
+                self._fabrication_loaded_compositions.add(_normalized_token(composition))
+            self._fabrication_records_by_composition = dict(
+                sorted(merged_records.items(), key=lambda item: item[0].lower())
+            )
+            self._refresh_fabrication_completers()
+            sample_count = sum(len(records) for records in records_by_composition.values())
+            self.label_fabrication_status.setText(
+                f"Loaded {sample_count} {composition} microwire suggestion(s) from {file_count} fabrication workbook(s)."
+            )
+        else:
+            self._fabrication_records_by_composition = records_by_composition
+            self._fabrication_loaded_compositions = set()
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText(
+                f"Loaded {len(self._fabrication_records_by_composition)} composition suggestion(s). "
+                "Type/select a composition to load microwires."
+            )
+        self._apply_fabrication_sample_if_possible()
+        self._ensure_fabrication_composition_loaded()
+
+    def _handle_fabrication_load_failure(self, root_obj: object, message: str) -> None:
+        root = Path(root_obj)
+        if self._fabrication_folder_path != root:
+            return
+        if self._fabrication_loading_composition is None:
+            self._fabrication_records_by_composition = {}
+            self._fabrication_loaded_compositions = set()
+            self._refresh_fabrication_completers()
+        self.label_fabrication_status.setText(message)
+
+    def _handle_fabrication_load_cancelled(self, root_obj: object) -> None:
+        root = Path(root_obj)
+        if self._fabrication_folder_path == root:
+            self.label_fabrication_status.setText("Fabrication suggestion loading cancelled.")
+
+    def _load_fabrication_folder_sync(self, root: Path) -> bool:
+        self._fabrication_folder_path = root
+        self._fabrication_loaded_compositions = set()
+        self._fabrication_loading_composition = None
+        if not root.exists() or not root.is_dir():
+            self._fabrication_records_by_composition = {}
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText("Fabrication folder path is saved, but the folder was not found.")
+            return False
+        try:
+            files = [
+                path
+                for path in root.rglob("*.xlsx")
+                if path.is_file() and not path.name.startswith("~$")
+            ]
+        except Exception as exc:
+            self._fabrication_records_by_composition = {}
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText(f"Failed to scan fabrication folder: {exc}")
+            return False
+        if not files:
+            self._fabrication_records_by_composition = {}
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText("No fabrication Excel workbooks were found in that folder.")
+            return False
+        try:
+            from microwire_data_builder import core as builder_core
+
+            index = builder_core.build_fabrication_index(files)
+        except Exception as exc:
+            self._fabrication_records_by_composition = {}
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText(f"Failed to read fabrication workbooks: {exc}")
+            return False
+        self._fabrication_records_by_composition = _fabrication_records_from_index(index)
+        self._fabrication_loaded_compositions = {
+            _normalized_token(composition)
+            for composition, records in self._fabrication_records_by_composition.items()
+            if records
+        }
+        self._refresh_fabrication_completers()
+        sample_count = sum(len(records) for records in self._fabrication_records_by_composition.values())
+        self.label_fabrication_status.setText(
+            f"Loaded {sample_count} microwire suggestion(s) from {len(files)} fabrication workbook(s)."
+        )
+        self._apply_fabrication_sample_if_possible()
+        return True
+
+    def _refresh_fabrication_completers(self) -> None:
+        compositions = list(self._fabrication_records_by_composition)
+        composition_completer = QtWidgets.QCompleter(compositions, self.edit_name_composition)
+        composition_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+        composition_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+        self.edit_name_composition.setCompleter(composition_completer)
+        self._update_fabrication_microwire_completer()
+
+    def _update_fabrication_microwire_completer(self) -> None:
+        composition = self._matching_fabrication_composition()
+        labels = [
+            record.label
+            for record in self._fabrication_records_by_composition.get(composition or "", [])
+        ]
+        microwire_completer = QtWidgets.QCompleter(labels, self.edit_name_wire)
+        microwire_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+        microwire_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+        self.edit_name_wire.setCompleter(microwire_completer)
+        self._ensure_fabrication_composition_loaded()
+
+    def _ensure_fabrication_composition_loaded(self) -> None:
+        root = self._fabrication_folder_path
+        composition = self._matching_fabrication_composition()
+        if root is None or composition is None:
+            return
+        normalized = _normalized_token(composition)
+        if not normalized:
+            return
+        if normalized in self._fabrication_loaded_compositions:
+            return
+        if self._fabrication_loading_composition and _normalized_token(self._fabrication_loading_composition) == normalized:
+            return
+        if self._fabrication_load_active():
+            return
+        records = self._fabrication_records_by_composition.get(composition, [])
+        if records:
+            self._fabrication_loaded_compositions.add(normalized)
+            return
+        self._start_fabrication_folder_load(root, composition=composition)
+
+    def _matching_fabrication_composition(self) -> str | None:
+        current = _normalized_token(self.edit_name_composition.text())
+        if not current:
+            return None
+        for composition in self._fabrication_records_by_composition:
+            if _normalized_token(composition) == current:
+                return composition
+        return None
+
+    def _matching_fabrication_record(self) -> FabricationSampleRecord | None:
+        composition = self._matching_fabrication_composition()
+        if not composition:
+            return None
+        current_wire = _normalized_microwire_token(self.edit_name_wire.text())
+        if not current_wire:
+            return None
+        for record in self._fabrication_records_by_composition.get(composition, []):
+            if _normalized_microwire_token(record.label) == current_wire:
+                return record
+        return None
+
+    def _apply_fabrication_sample_if_possible(self) -> bool:
+        if self._diameter_imported:
+            return False
+        record = self._matching_fabrication_record()
+        if record is None or record.diameter_mm is None:
+            return False
+        self.spin_diameter.setValue(record.diameter_mm)
+        self._mark_diameter_imported(True)
+        self.label_fabrication_status.setText(
+            f"Using fabrication diameter {_format_compact_unit(record.diameter_mm * 1000.0, 'um', decimals=3)} "
+            f"for {record.composition} {record.label}."
+        )
+        return True
+
     def _refresh_diameter_import_state(self) -> None:
         self._mark_diameter_imported(self._diameter_imported)
 
@@ -7438,12 +7889,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._diameter_imported:
             self.spin_diameter.setStyleSheet("")
-            self.spin_diameter.setToolTip("Wire diameter imported from the Microwire Data Builder project; manual edits are allowed.")
+            self.spin_diameter.setToolTip("Wire diameter imported from the Microwire Data Builder project or fabrication folder; manual edits are allowed.")
         else:
             self.spin_diameter.setStyleSheet(
                 "QDoubleSpinBox { border: 1px solid #dc2626; background-color: rgba(220, 38, 38, 0.10); }"
             )
-            self.spin_diameter.setToolTip("Wire diameter has not been imported from the Builder project; manual edits are allowed.")
+            self.spin_diameter.setToolTip("Wire diameter has not been imported from the Builder project or fabrication folder; manual edits are allowed.")
 
     def _read_builder_project_payload(self, path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -7559,9 +8010,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.spin_current_sweep_end_mA.setValue(match.current_mA)
         finally:
             self._builder_import_in_progress = False
+        if match.diameter_mm is None:
+            diameter_status = "no project diameter"
+        else:
+            diameter_status = _format_compact_unit(match.diameter_mm * 1000.0, "um", decimals=3)
         self.label_project_status.setText(
-            f"Imported {match.path.name} -> section {match.section}, diameter "
-            f"{'-' if match.diameter_mm is None else _format_compact_unit(match.diameter_mm * 1000.0, 'um', decimals=3)}"
+            f"Imported {match.path.name} -> section {match.section}, diameter {diameter_status}"
             f"{'' if match.current_mA is None else f', current {match.current_mA:.2f} mA'}."
         )
         if not quiet:
@@ -7955,7 +8409,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._last_auto_sample_name = built
             self._last_auto_log_name = safe_name
         self._refresh_recipe_sample_label()
+        self._update_fabrication_microwire_completer()
         self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+        self._apply_fabrication_sample_if_possible()
         self._persist_settings_if_enabled()
 
     def _sync_stale_log_name_from_sample(self) -> None:
@@ -19374,6 +19830,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("sample_name", self.edit_sample_name.text())
         self.settings.setValue("run_notes", self.edit_run_notes.toPlainText())
         self.settings.setValue("builder_project_path", self.edit_project_path.text())
+        self.settings.setValue("fabrication_folder_path", self.edit_fabrication_folder.text())
         log_dir_to_save = self.edit_log_dir.text()
         if self._provided_log_dir and log_dir_to_save == self._provided_log_dir:
             log_dir_to_save = self._restored_log_dir or log_dir_to_save
@@ -19761,6 +20218,13 @@ class MainWindow(QtWidgets.QMainWindow):
         builder_project_path = self.settings.value("builder_project_path", "", type=str)
         self.edit_project_path.setText(builder_project_path)
         self._builder_project_path = Path(builder_project_path) if builder_project_path else None
+        fabrication_folder_path = self.settings.value("fabrication_folder_path", "", type=str)
+        self.edit_fabrication_folder.setText(fabrication_folder_path)
+        if fabrication_folder_path:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda path=fabrication_folder_path: self._start_fabrication_folder_load(Path(path)),
+            )
         restored_log_dir = self.settings.value("log_dir", self.edit_log_dir.text(), type=str)
         self._restored_log_dir = restored_log_dir
         if self._provided_log_dir:
@@ -20232,6 +20696,7 @@ class MainWindow(QtWidgets.QMainWindow):
             stop_detail="Application window closed while automation was active.",
         )
         self._stop_tic_dispatcher()
+        self._cancel_fabrication_folder_load()
         self._disconnect_scale()
         self._stop_session(reason="app_closed", detail="Application window closed while session was active.")
         self._release_experiment_sleep_guard()
