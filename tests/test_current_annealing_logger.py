@@ -366,6 +366,8 @@ def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
     window.process_running = True
     window.first_sample = False
     window.ui.spinBox_max_current.setValue(3)
+    window.ui.spinBox_step_mA.setValue(1.0)
+    window.handle_step_changed()
     window.max_current_mA = 3
     window.current_step_mA = 1.0
     window.current_step_A = 0.001
@@ -385,6 +387,63 @@ def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
             "lease_id": "lease-1",
             "target_mA": 2.0,
             "rate_mA_s": 1.0,
+            "max_step_mA": 0.2,
+            "resolution_mA": 0.2,
+        },
+    ) in fake.calls
+
+
+def test_current_annealing_shared_broker_clamps_overshoot_to_max_current(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.max_current_mA = 2
+    window.current_step_mA = 0.2
+    window.current_current_set = 0.0022
+
+    window._send_current_setpoint()
+
+    assert window.current_current_set == pytest.approx(0.002)
+    assert (
+        "schedule_current_ramp",
+        {
+            "channel": 1,
+            "lease_id": "lease-1",
+            "target_mA": 2.0,
+            "rate_mA_s": 0.2,
+            "max_step_mA": 0.2,
+            "resolution_mA": 0.2,
+        },
+    ) in fake.calls
+
+
+def test_current_annealing_clamps_to_confirmed_broker_current_limit(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.max_current_mA = 30
+    window._shared_broker_current_limit_mA = 2.0
+    window.current_step_mA = 0.2
+    window.current_current_set = 0.0022
+
+    window._send_current_setpoint()
+
+    assert window.current_current_set == pytest.approx(0.002)
+    assert (
+        "schedule_current_ramp",
+        {
+            "channel": 1,
+            "lease_id": "lease-1",
+            "target_mA": 2.0,
+            "rate_mA_s": 0.2,
             "max_step_mA": 0.2,
             "resolution_mA": 0.2,
         },

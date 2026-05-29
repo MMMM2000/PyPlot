@@ -336,6 +336,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shared_broker_client: Any = None
         self._shared_broker_lease_id: str | None = None
         self._shared_broker_owner = "current_annealing_logger"
+        self._shared_broker_current_limit_mA: float | None = None
         self._owned_shared_broker_server: Any = None
         self._owned_shared_broker_thread: Any = None
         self._owned_shared_broker_driver: Any = None
@@ -1455,6 +1456,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_detected_hmp_profile(HMP4030_PROFILE, selected=selected_channel)
         elif profile_id == HMP4040_PROFILE.profile_id:
             self._set_detected_hmp_profile(HMP4040_PROFILE, selected=selected_channel)
+        self._remember_shared_broker_channel_limit(snapshot)
         self.is_connected = True
         self.ui.pushButton_connect_port.setText("Disconnect broker")
         self._set_port_controls_enabled(False)
@@ -1630,6 +1632,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 values.append(float(widget.value()))
         return max(values or [1.0], default=1.0) / 1000.0
 
+    def _remember_shared_broker_channel_limit(self, snapshot: dict[str, Any] | None) -> None:
+        self._shared_broker_current_limit_mA = None
+        if not isinstance(snapshot, dict):
+            return
+        try:
+            channel = str(self._shared_broker_channel())
+        except Exception:
+            return
+        bench_profile = snapshot.get("bench_profile")
+        if not isinstance(bench_profile, dict):
+            return
+        channels = bench_profile.get("channels")
+        if not isinstance(channels, dict):
+            return
+        payload = channels.get(channel)
+        if not isinstance(payload, dict):
+            return
+        try:
+            limit_a = payload.get("current_limit_a")
+            if limit_a is not None:
+                self._shared_broker_current_limit_mA = max(0.0, float(limit_a) * 1000.0)
+        except Exception:
+            self._shared_broker_current_limit_mA = None
+
     def _start_owned_shared_broker(self) -> None:
         if self._owned_shared_broker_server is not None:
             return
@@ -1656,12 +1682,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 if driver.profile is None:
                     raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
                 broker = SharedPowerSupplyBroker(driver, driver.profile)
+                current_limit_a = self._shared_broker_current_limit_a()
                 broker.assign_role(
                     channel=channel,
                     role=ROLE_CURRENT_ANNEALING,
                     confirmed=True,
                     voltage_limit_v=float(getattr(self, "max_voltage", HMP4040_PROFILE.max_voltage_v)),
-                    current_limit_a=self._shared_broker_current_limit_a(),
+                    current_limit_a=current_limit_a,
                 )
                 broker.confirm_profile(name="Current Annealing auto-started shared HMP broker")
                 server, thread = start_broker_server(broker, host=host, port=port)
@@ -1676,6 +1703,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._owned_shared_broker_server = server
             self._owned_shared_broker_thread = thread
             self._owned_shared_broker_driver = driver
+            self._shared_broker_current_limit_mA = max(0.0, current_limit_a * 1000.0)
             self.port_name = port_name
             self._show_status_message(
                 f"Started shared HMP broker on {host}:{port} for {port_name}.",
@@ -1720,6 +1748,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.send_safe_end_commands()
         self._shared_broker_client = None
         self._shared_broker_lease_id = None
+        self._shared_broker_current_limit_mA = None
         self._stop_owned_shared_broker()
         self.is_connected = False
         self.ui.pushButton_connect_port.setText("Connect to broker")
@@ -3033,6 +3062,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _send_current_setpoint(self) -> None:
         """Apply the next current setpoint, refreshing voltage first when required."""
 
+        current_limits_mA: list[float] = []
+        for value in (
+            getattr(self, "max_current_mA", 0.0),
+            getattr(self, "_shared_broker_current_limit_mA", None),
+        ):
+            try:
+                limit = float(value)
+            except Exception:
+                continue
+            if limit > 0.0:
+                current_limits_mA.append(limit)
+        max_current_mA = min(current_limits_mA) if current_limits_mA else 0.0
+        if max_current_mA > 0.0:
+            requested_mA = float(self.current_current_set) * 1000.0
+            tolerance_mA = max(1e-9, self._current_resolution_mA() * 1e-6)
+            if requested_mA > max_current_mA + tolerance_mA:
+                self.current_current_set = max_current_mA / 1000.0
         if self._using_shared_broker():
             self._set_shared_broker_current()
             self.ui.label_last_command.setText(
