@@ -4151,6 +4151,117 @@ def test_project_diameter_is_preferred_over_fabrication_suggestion(tmp_path: Pat
         _close_test_window(window)
 
 
+def test_wire_diameter_displays_micrometers_while_storing_mm(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_diameter.setValue(0.0149)
+
+        assert window.spin_diameter.value() == pytest.approx(0.0149)
+        assert window.spin_diameter.suffix().strip() == "um"
+        assert "14.9" in window.spin_diameter.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_project_row_uses_show_annealing_instead_of_manual_import_button(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        button_labels = {button.text() for button in window.findChildren(QtWidgets.QPushButton)}
+
+        assert "Show annealing" in button_labels
+        assert "Import sample info" not in button_labels
+    finally:
+        _close_test_window(window)
+
+
+def test_project_annealing_preview_loads_sources_for_current_sample(tmp_path: Path, qtbot) -> None:
+    annealing_path = tmp_path / "Ni50Fe27Ga23 12_3 1000mA.txt"
+    annealing_path.write_text(
+        "\n".join(
+            [
+                "0.001\t0.18\t180",
+                "0.002\t0.39\t195",
+                "0.003\t0.63\t210",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "annealing": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "_sources": [str(annealing_path)],
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        payload = window._read_builder_project_payload(project_path)
+        candidates = window._extract_project_annealing_candidates(payload)
+        candidate_index = window._choose_project_annealing_candidate(candidates)
+
+        assert candidate_index == 0
+        series, missing_sources, failed_sources = window._load_annealing_preview_series(
+            project_path=project_path,
+            sources=candidates[candidate_index]["sources"],
+        )
+
+        assert missing_sources == []
+        assert failed_sources == []
+        assert len(series) == 1
+        assert series[0]["setpoint_mA"] == pytest.approx(1000.0)
+        assert list(series[0]["currents"]) == pytest.approx([1.0, 2.0, 3.0])
+        assert list(series[0]["resistances"]) == pytest.approx([180.0, 195.0, 210.0])
+    finally:
+        _close_test_window(window)
+
+
+def test_annealing_preview_dialog_stacks_each_graph_in_scroll_area(qtbot) -> None:
+    if mini_dma_mod.FigureCanvas is None:
+        pytest.skip("Matplotlib Qt backend is unavailable")
+
+    dialog = mini_dma_mod.AnnealingPreviewDialog(
+        None,
+        "Ni50Fe27Ga23 12/3",
+        [
+            {
+                "label": "100 mA",
+                "currents": [1.0, 2.0, 3.0],
+                "resistances": [180.0, 190.0, 205.0],
+            },
+            {
+                "label": "1000 mA",
+                "currents": [1.0, 2.0, 3.0],
+                "resistances": [210.0, 225.0, 260.0],
+            },
+        ],
+    )
+    qtbot.addWidget(dialog)
+
+    try:
+        assert dialog.findChild(QtWidgets.QScrollArea) is not None
+        assert len(dialog.findChildren(mini_dma_mod.FigureCanvas)) == 2
+    finally:
+        dialog.close()
+
+
 def test_wire_diameter_is_marked_until_imported_but_manual_edits_still_work(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
