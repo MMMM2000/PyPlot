@@ -73,12 +73,14 @@ CONTROL_LOGIC_FEATURES = [
     "adaptive_current_hold_response_stiffness",
     "current_hold_waits_for_natural_target_return",
     "current_hold_response_requires_directional_motor_response",
+    "current_hold_large_error_bypasses_persistence",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
     "zero_load_reference_sidecar",
     "voltage_limit_unwind_uses_measured_current_fallback",
     "voltage_limit_defers_to_current_hold",
+    "voltage_limit_unwind_keeps_shortened_return_leg",
     "wire_break_recovery_prompt_ui_thread",
     "current_sweep_mechanical_load_loss_guard",
     "single_prompt_length_setup",
@@ -3155,6 +3157,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_voltage_limit_step_index: int | None = None
         self._current_sweep_voltage_limit_started_s: float | None = None
         self._current_sweep_voltage_limit_start_mA = 0.0
+        self._current_sweep_voltage_limited_return_steps: set[int] = set()
         self._supply_voltage_limit_logged = False
         self._wire_break_stop_in_progress = False
         self._active_target_ramp_step_index: int | None = None
@@ -7416,6 +7419,71 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_voltage_limit_started_s = None
         self._current_sweep_voltage_limit_start_mA = 0.0
 
+    def _is_voltage_limited_return_pair(self, step_index: int, step: AutomationStep) -> bool:
+        previous_index = int(step_index) - 1
+        if previous_index < 0 or previous_index >= len(self._automation_steps):
+            return False
+        previous = self._automation_steps[previous_index]
+        if previous.action != "sweep_current" or step.action != "sweep_current":
+            return False
+        if previous.basis != step.basis or previous.target_value != step.target_value:
+            return False
+        if previous.note != step.note:
+            return False
+        if (
+            previous.current_start_mA is None
+            or previous.current_end_mA is None
+            or step.current_start_mA is None
+            or step.current_end_mA is None
+        ):
+            return False
+        resolution = max(self._supply_current_resolution_mA(), 1e-9)
+        return (
+            abs(float(previous.current_start_mA) - float(step.current_end_mA)) <= resolution
+            and abs(float(previous.current_end_mA) - float(step.current_start_mA)) <= resolution
+        )
+
+    def _mark_voltage_limited_return_step(self, step_index: int, step: AutomationStep) -> None:
+        return_index = int(step_index) + 1
+        if return_index >= len(self._automation_steps):
+            return
+        return_step = self._automation_steps[return_index]
+        if not self._is_voltage_limited_return_pair(return_index, return_step):
+            return
+        self._current_sweep_voltage_limited_return_steps.add(return_index)
+        start_text = self._automation_current_target_text(return_step.current_start_mA)
+        end_text = self._automation_current_target_text(return_step.current_end_mA)
+        self._log(
+            "Voltage limit reversed the current before the requested maximum was reached; "
+            f"keeping the unwind as the return leg and skipping the paired nominal {start_text} -> {end_text} sweep "
+            "to avoid a high-current restart."
+        )
+
+    def _complete_voltage_limited_return_step(self, step: AutomationStep, step_index: int) -> bool:
+        if step_index not in self._current_sweep_voltage_limited_return_steps:
+            return False
+        self._current_sweep_voltage_limited_return_steps.discard(step_index)
+        plateau_index = int(step.note) if step.note.isdigit() else None
+        self._set_automation_context(
+            phase="current_limit_return_skipped",
+            basis=step.basis,
+            target_value=step.target_value,
+            plateau_index=plateau_index,
+            note=step.note,
+        )
+        self._write_control_trace(
+            decision="skip_voltage_limited_return",
+            basis=step.basis,
+            target_value=step.target_value,
+            result="completed",
+            reason="paired_return_already_recorded_by_voltage_limit_unwind",
+        )
+        self._log(
+            "Skipped paired nominal reverse current sweep because the voltage-limit unwind already returned "
+            "current to the sweep start."
+        )
+        return True
+
     def _choose_builder_project(self) -> None:
         start_dir = str(self._builder_project_path.parent) if self._builder_project_path is not None else self.edit_log_dir.text().strip()
         path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -10633,6 +10701,14 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if abs(slope) >= min_slope:
                 return False
+        large_error_band = max(
+            recovery_band,
+            self._current_sweep_hold_entry_band_for_basis(effective_tolerance),
+        ) * SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR
+        if abs(float(error_value)) > large_error_band:
+            self._seek_out_of_band_since_by_key.pop(seek_key, None)
+            self._seek_out_of_band_sign_by_key.pop(seek_key, None)
+            return True
         sign = math.copysign(1.0, float(error_value))
         previous_sign = self._seek_out_of_band_sign_by_key.get(seek_key)
         timestamp_s = float(filtered_signal.timestamp_s)
@@ -15870,6 +15946,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_last_schedule_update_s = 0.0
         self._current_sweep_post_hold_throttle_until_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
+        self._current_sweep_voltage_limited_return_steps.clear()
         self._clear_current_sweep_ramp_hold()
         self._active_mechanical_scan_step_index = None
         self._active_mechanical_scan_started_s = 0.0
@@ -15978,6 +16055,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_last_schedule_update_s = 0.0
         self._current_sweep_post_hold_throttle_until_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
+        self._current_sweep_voltage_limited_return_steps.clear()
         self._clear_current_sweep_ramp_hold()
         self._active_mechanical_scan_step_index = None
         self._active_mechanical_scan_started_s = 0.0
@@ -16862,6 +16940,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_last_schedule_update_s = 0.0
         self._current_sweep_post_hold_throttle_until_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
+        self._current_sweep_voltage_limited_return_steps.clear()
         self._clear_current_sweep_ramp_hold()
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
@@ -17740,6 +17819,18 @@ class MainWindow(QtWidgets.QMainWindow):
             entry_band / max(self._current_sweep_hold_filter_window_s(), 1e-9),
         )
         moving_away = float(signed_error) * slope > 0.0 and abs(slope) >= away_slope_floor
+        current_ramping_up = (
+            step.current_start_mA is not None
+            and step.current_end_mA is not None
+            and float(step.current_end_mA) >= float(step.current_start_mA)
+        )
+        if (
+            current_ramping_up
+            and float(signed_error) < -entry_band * 2.0
+            and slope < -away_slope_floor * 2.0
+        ):
+            self._reset_current_sweep_ramp_hold_candidate()
+            return True
         if (
             not moving_away
             and abs(float(signed_error))
@@ -17911,6 +18002,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if setpoint_mA <= target_mA + 1e-12:
             self._record_current_sweep_duration(step, finished_s=time.monotonic())
+            self._write_control_trace(
+                decision="voltage_limit_unwind_complete",
+                basis=step.basis,
+                target_value=step.target_value,
+                current_value=self._current_distribution_value(step.basis, require_after_last_move=False),
+                tolerance=tolerance,
+                result="completed",
+                reason="current_returned_to_sweep_start",
+            )
+            self._mark_voltage_limited_return_step(step_index, step)
             self._clear_current_sweep_voltage_limit()
             self._active_current_sweep_step_index = None
             self._active_current_sweep_started_s = 0.0
@@ -18079,6 +18180,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if step.target_value is None or not step.basis:
             self._log("Recipe stopped because the current ramp has no control target.")
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        if self._complete_voltage_limited_return_step(step, step_index):
             return True
 
         start_mA = self._recipe_current_setpoint_mA(float(step.current_start_mA))

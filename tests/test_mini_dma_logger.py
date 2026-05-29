@@ -6731,11 +6731,6 @@ def test_current_sweep_hold_uses_absolute_stress_error_on_current_up_ramp(
     try:
         holding, stopped = window._update_current_sweep_ramp_hold(step, 4, now_s=100.0)
 
-        assert holding is False
-        assert stopped is False
-
-        holding, stopped = window._update_current_sweep_ramp_hold(step, 4, now_s=102.0)
-
         assert holding is True
         assert stopped is False
         assert window._current_sweep_ramp_hold_step_index == 4
@@ -7981,6 +7976,99 @@ def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_
         assert supply.commands == [3.0, 2.0]
         assert window._supply_last_setpoint_mA == pytest.approx(2.0)
         assert "reversing recipe current back to the sweep start current" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_voltage_limited_unwind_keeps_return_leg_without_high_current_restart(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 1.0}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 1.0
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 4.0
+    window._active_current_sweep_step_index = 4
+    window._active_current_sweep_started_s = 99.0
+    window._active_current_sweep_last_setpoint_mA = 4.0
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._seek_distribution_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    ticks = iter([100.0, 100.6])
+
+    def _fake_monotonic() -> float:
+        try:
+            return next(ticks)
+        except StopIteration:
+            return 101.6
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    up_step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=70.0,
+        current_ramp_rate_mA_s=5.0,
+        note="1",
+    )
+    return_step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=70.0,
+        current_end_mA=1.0,
+        current_ramp_rate_mA_s=5.0,
+        note="1",
+    )
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep("set_current", target_value=50.0, basis=mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        mini_dma_mod.AutomationStep("ramp_target", target_value=50.0, basis=mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        mini_dma_mod.AutomationStep("record", target_value=50.0, basis=mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        mini_dma_mod.AutomationStep("settle", target_value=50.0, basis=mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        up_step,
+        return_step,
+    ]
+    window._current_sweep_voltage_limit_step_index = 4
+    window._current_sweep_voltage_limit_started_s = 100.0
+    window._current_sweep_voltage_limit_start_mA = 4.0
+
+    try:
+        assert window._handle_current_sweep_step(up_step, 4) is False
+        assert supply.commands == []
+
+        assert window._handle_current_sweep_step(up_step, 4) is True
+        assert supply.commands == [1.0]
+        assert 5 in window._current_sweep_voltage_limited_return_steps
+
+        assert window._handle_current_sweep_step(return_step, 5) is True
+
+        assert supply.commands == [1.0]
+        assert 5 not in window._current_sweep_voltage_limited_return_steps
+        log_text = window.log_output.toPlainText()
+        assert "keeping the unwind as the return leg" in log_text
+        assert "Skipped paired nominal reverse current sweep" in log_text
     finally:
         _close_test_window(window)
 
@@ -12217,7 +12305,7 @@ def test_current_sweep_hold_retries_when_filtered_signal_stays_unchanged_for_ful
     seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
     window._seek_out_of_band_sign_by_key[seek_key] = 1.0
     window._seek_out_of_band_since_by_key[seek_key] = now_s - 2.0
-    load_g = mini_dma_mod.load_g_from_stress_mpa(35.0, window.spin_diameter.value())
+    load_g = mini_dma_mod.load_g_from_stress_mpa(44.0, window.spin_diameter.value())
     assert load_g is not None
     for index in range(5):
         timestamp_s = now_s + index * 0.25
@@ -12291,7 +12379,7 @@ def test_current_sweep_hold_requires_persistent_out_of_band_error_before_correct
         target_value=50.0,
         plateau_index=1,
     )
-    load_g = mini_dma_mod.load_g_from_stress_mpa(35.0, window.spin_diameter.value())
+    load_g = mini_dma_mod.load_g_from_stress_mpa(44.0, window.spin_diameter.value())
     assert load_g is not None
     for index in range(5):
         timestamp_s = now_s + index * 0.25
@@ -12314,6 +12402,60 @@ def test_current_sweep_hold_requires_persistent_out_of_band_error_before_correct
         assert reached is False
         assert moves == []
         assert "persist" in window.log_output.toPlainText().lower()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_large_error_bypasses_persistent_gate(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.time()
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        500.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    load_g = mini_dma_mod.load_g_from_stress_mpa(35.0, window.spin_diameter.value())
+    assert load_g is not None
+    for index in range(5):
+        timestamp_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert len(moves) == 1
+        assert "persist" not in window.log_output.toPlainText().lower()
     finally:
         _close_test_window(window)
 
