@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PyQt6 import QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -742,6 +743,64 @@ def _write_mini_dma_run(path: Path, *, sample_name: str = "Ni50Fe27Ga23 12_2") -
     return path
 
 
+def _write_transition_mini_dma_run(
+    path: Path,
+    *,
+    sample_name: str = "Ni50Fe27Ga23 12_2",
+) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "sample_name": sample_name,
+                "initial_length_mm": 10.0,
+                "wire_diameter_mm": 0.0191,
+            }
+        ),
+        encoding="utf-8",
+    )
+    heating_current = np.linspace(1.0, 100.0, 120)
+    cooling_current = np.linspace(100.0, 1.0, 120)
+
+    def piecewise(current: np.ndarray, start: float, finish: float) -> np.ndarray:
+        before = 0.1 + current * 0.002
+        start_value = 0.1 + start * 0.002
+        transition = start_value + (current - start) * 0.04
+        finish_value = start_value + (finish - start) * 0.04
+        after = finish_value + (current - finish) * 0.003
+        return np.where(current < start, before, np.where(current <= finish, transition, after))
+
+    current = np.concatenate([heating_current, cooling_current])
+    strain = np.concatenate(
+        [
+            piecewise(heating_current, 30.0, 70.0),
+            piecewise(cooling_current, 25.0, 65.0),
+        ]
+    )
+    rows = [
+        "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,stress_mpa,resistance_ohm,current_set_mA,current_measured_mA,position_mm"
+    ]
+    for index, (current_mA, strain_pct) in enumerate(zip(current, strain, strict=True)):
+        rows.append(
+            ",".join(
+                [
+                    str(index),
+                    "current",
+                    "50",
+                    "1",
+                    f"{strain_pct:.6f}",
+                    "50",
+                    "100",
+                    f"{current_mA:.6f}",
+                    f"{current_mA:.6f}",
+                    f"{strain_pct / 1000.0:.6f}",
+                ]
+            )
+        )
+    (path / "measurement.csv").write_text("\n".join(rows), encoding="utf-8")
+    return path
+
+
 def test_builder_automation_recipe_updates_mini_dma_copy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -825,6 +884,68 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
     assert assemble_row["Mini DMA strain by stress/load"] == [
         "50 MPa: 0.1% @ 20 mA",
         "100 MPa: 0.2% @ 20 mA",
+    ]
+
+
+def test_builder_automation_recipe_updates_mini_dma_transition_currents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_path = _write_transition_mini_dma_run(tmp_path / "Ni50Fe27Ga23 12_2 test_run02")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "mini_dma",
+                        "paths": [str(run_path)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["mini_dma"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    row = output_payload["sections"]["mini_dma"]["rows"][0]
+    assert row["Mini DMA transition currents by stress/load"] == [
+        "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 26 mA"
+    ]
+    assemble_row = output_payload["sections"]["assemble"]["rows"][0]
+    assert assemble_row["Mini DMA transition currents by stress/load"] == [
+        "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 26 mA"
     ]
 
 
