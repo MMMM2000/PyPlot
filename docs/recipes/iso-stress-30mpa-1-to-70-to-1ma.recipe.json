@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "recipe": {
+    "mode": "current_sweep_stress",
+    "setup": {
+      "preload_stress_mpa": 20.0,
+      "preload_duration_s": 5.0,
+      "preload_stable_s": 3.0
+    },
+    "current_sweep": {
+      "basis": "stress_mpa",
+      "target_start": 30.0,
+      "target_end": 30.0,
+      "target_step": 30.0,
+      "target_ramp_rate": 5.0,
+      "target_speed_mm_s": 5.0,
+      "current_start_mA": 1.0,
+      "current_end_mA": 70.0,
+      "current_ramp_rate_mA_s": 1.0,
+      "hold_on_error": true,
+      "hold_pause_factor": 1.5,
+      "hold_resume_factor": 0.75,
+      "hold_resume_stable_s": 1.0,
+      "max_correction_strain_pct": 5.0,
+      "correction_rate_pct_s": 15.0,
+      "max_correction_stress_mpa": 10.0,
+      "hold_correction_stress_mpa": 40.0,
+      "max_seek_mm": 3.0,
+      "return_target": true,
+      "reverse_current": true,
+      "first_overheating": false
+    }
+  }
+}

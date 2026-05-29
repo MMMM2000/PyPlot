@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from plotting.shared.experiment_processes import (
     ExperimentProcessSpec,
     build_experiment_process_command,
@@ -25,6 +27,27 @@ def test_experiment_process_command_uses_module_entrypoint() -> None:
         "python.exe",
         "-m",
         "data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
+    ]
+
+
+def test_experiment_process_command_uses_launcher_entrypoint_when_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = ExperimentProcessSpec(
+        display_name="Current Annealing Logger",
+        module="data_logging.current_annealing_logger.current_annealing_logger",
+        resource_tag="current_annealing",
+    )
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    command = build_experiment_process_command(
+        spec, executable=Path("C:/apps/PyPlot/launcher.exe")
+    )
+
+    assert command == [
+        str(Path("C:/apps/PyPlot/launcher.exe")),
+        "--experiment-process",
+        "current_annealing",
     ]
 
 
@@ -53,7 +76,7 @@ def test_experiment_process_env_tags_run_and_removes_headless_qt() -> None:
 
 def test_launch_experiment_process_starts_child_from_repo_root(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = ExperimentProcessSpec(
         display_name="Mini DMA Logger",
@@ -62,7 +85,7 @@ def test_launch_experiment_process_starts_child_from_repo_root(
     )
     calls: list[dict[str, object]] = []
 
-    class FakePopen:
+    class _FakePopen:
         def __init__(self, args: list[str], **kwargs: object) -> None:
             calls.append({"args": args, **kwargs})
             self.pid = 1234
@@ -70,7 +93,7 @@ def test_launch_experiment_process_starts_child_from_repo_root(
     monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
     monkeypatch.chdir(tmp_path)
 
-    process = launch_experiment_process(spec, popen_factory=FakePopen)
+    process = launch_experiment_process(spec, popen_factory=_FakePopen)
 
     assert process.pid == 1234
     assert calls

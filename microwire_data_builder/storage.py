@@ -12,6 +12,14 @@ from PyQt6 import QtCore
 
 
 def _storage_root() -> Path:
+    override = os.environ.get("MICROWIRE_BUILDER_STORAGE_ROOT", "").strip()
+    if override:
+        root = Path(override).expanduser()
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return root
     candidate = QtCore.QStandardPaths.writableLocation(
         QtCore.QStandardPaths.StandardLocation.AppDataLocation
     )

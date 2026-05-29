@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -156,10 +157,10 @@ def test_vsm_temperature_preview_keeps_dual_axis_legend_in_section_order() -> No
         assert legend is not None
         labels = [text.get_text() for text in legend.get_texts()]
         assert labels == [
-            "10000 Oe ↑",
-            "10000 Oe ↓",
-            "5 Oe ↑",
-            "5 Oe ↓",
+            "10000 Oe ↑ S1",
+            "10000 Oe ↓ S2",
+            "5 Oe ↑ S1",
+            "5 Oe ↓ S2",
         ]
     finally:
         builder_ui.plt.close(figure)
@@ -3808,6 +3809,381 @@ def test_build_database_origin_backend(tmp_path: Path, monkeypatch: pytest.Monke
     assert pd.isna(row[core.STRAIN_COLUMN])
 
 
+def test_word_report_export_embeds_available_origin_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 1_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+
+    captured_pyplot: list[tuple[str, list[Path]]] = []
+
+    def fake_pyplot_origin(
+        *,
+        paths: list[Path],
+        plugin_name: str,
+        origin_dir: Path,
+        descriptor_prefix: str,
+        display_prefix: str,
+        log: logging.Logger | None,
+    ) -> list[OriginArtifact]:
+        del descriptor_prefix, display_prefix, log
+        captured_pyplot.append((plugin_name, list(paths)))
+        origin_dir.mkdir(parents=True, exist_ok=True)
+        artifacts: list[OriginArtifact] = []
+        for source in paths:
+            artifact_path = origin_dir / f"{source.stem}.oggu"
+            artifact_path.write_bytes(b"origin graph object")
+            artifacts.append(
+                OriginArtifact(
+                    descriptor=artifact_path.name,
+                    object_path=artifact_path,
+                    display_text=f"Origin graph for {source.stem}",
+                )
+            )
+        return artifacts
+
+    captured_insertions: list[tuple[Path, list[core.WordOleInsertion]]] = []
+
+    def fake_embed(
+        docx_path: Path,
+        insertions: list[core.WordOleInsertion],
+        log: logging.Logger,
+    ) -> None:
+        captured_insertions.append((docx_path, list(insertions)))
+
+    monkeypatch.setattr(core, "export_pyplot_origin_artifacts_for_paths", fake_pyplot_origin)
+    monkeypatch.setattr(core, "_embed_origin_objects_with_word", fake_embed)
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[high, low],
+            output_dir=tmp_path / "out",
+            make_plots=True,
+            plot_backends=("origin",),
+            export_formats=("word",),
+            column_filter=("Composition", "Microwire"),
+        )
+    )
+
+    assert "word" in result.exports
+    assert result.exports["word"].is_dir()
+    assert len(result.word_reports) == 1
+    assert result.word_reports[0].name == "Ni55Fe18Ga27_1-1.docx"
+    assert captured_pyplot == [
+        ("Current Annealing", [high]),
+        ("Current Annealing", [low]),
+    ]
+    assert len(captured_insertions) == 1
+    assert captured_insertions[0][0] == result.word_reports[0]
+    assert {item.object_path.name for item in captured_insertions[0][1]} == {
+        f"{high.stem}.oggu",
+        f"{low.stem}.oggu",
+    }
+
+    from zipfile import ZipFile
+
+    with ZipFile(result.word_reports[0], "r") as archive:
+        names = set(archive.namelist())
+        assert "word/document.xml" in names
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+
+    assert "Ni55Fe18Ga27 1/1" in document_xml
+    assert "Microwire data" in document_xml
+    assert "Stress/strain current (mA)" in document_xml
+    assert 'w:pStyle w:val="Heading1"' in document_xml
+    assert "Microscope and dimensions" in document_xml
+    assert "Current annealing" in document_xml
+    assert "VSM temperature scan" in document_xml
+    assert "DMA iso-stress" in document_xml
+    assert "Measurement references" not in document_xml
+    assert "Graph:" not in document_xml
+    assert "Book:" not in document_xml
+    assert "Origin object placeholder" in document_xml
+
+
+def test_word_report_export_accepts_clipboard_only_origin_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_insertions: list[core.WordOleInsertion] = []
+
+    def fake_embed(
+        docx_path: Path,
+        insertions: list[core.WordOleInsertion],
+        log: logging.Logger,
+    ) -> None:
+        del docx_path, log
+        captured_insertions.extend(insertions)
+
+    monkeypatch.setattr(core, "_embed_origin_objects_with_word", fake_embed)
+
+    descriptor = "live-origin-graph.oggu"
+    reports = core.export_word_reports(
+        pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    f"{core.FIGURE_COLUMNS[0]} (Origin)": descriptor,
+                }
+            ]
+        ),
+        tmp_path / "reports",
+        origin_artifacts={
+            descriptor: OriginArtifact(
+                descriptor=descriptor,
+                object_path=None,
+                graph_name="Graph1",
+                display_text="Live Origin graph",
+                clipboard_fallback=True,
+            )
+        },
+    )
+
+    assert len(reports) == 1
+    assert len(captured_insertions) == 1
+    insertion = captured_insertions[0]
+    assert insertion.object_path == Path(descriptor)
+    assert insertion.graph_name == "Graph1"
+    assert insertion.clipboard_fallback is True
+
+
+def test_word_report_microwire_data_uses_requested_column_order_and_empty_values() -> None:
+    values = core._word_assemble_values(
+        pd.Series(
+            {
+                "Microwire": "12/2",
+                "Composition": "Ni50Fe27Ga23",
+                "Stress/strain current (mA)": "",
+                "As (°C)": np.nan,
+                "Custom data": "kept",
+                "Data source": "hidden",
+                "R vs T graphs (Origin)": "hidden.oggu",
+            }
+        )
+    )
+
+    labels = [label for label, _value in values]
+    value_map = dict(values)
+    assert labels[:4] == [
+        "Composition",
+        "Microwire",
+        "e/a",
+        "Strain (%)",
+    ]
+    assert labels.index("Stress/strain current (mA)") < labels.index("As (°C)")
+    assert value_map["Stress/strain current (mA)"] == ""
+    assert value_map["As (°C)"] == ""
+    assert "Custom data" not in value_map
+    assert "Data source" not in value_map
+    assert "R vs T graphs (Origin)" not in value_map
+
+
+def test_word_report_microwire_data_table_only_expands_multi_value_rows() -> None:
+    table_xml = core._word_microwire_data_table(
+        [
+            ("Composition", ["Ni50Fe27Ga23"]),
+            ("Strain (%)", ["22.6904", "21.8579", "4.85437"]),
+            ("As (Â°C)", [""]),
+        ]
+    )
+
+    rows = re.findall(r"<w:tr>(.*?)</w:tr>", table_xml)
+    assert len(rows) == 3
+    assert rows[0].count("<w:tc>") == 4
+    assert rows[1].count("<w:tc>") == 4
+    assert rows[2].count("<w:tc>") == 4
+    assert "Composition" in rows[0]
+    assert "As (" in rows[2]
+
+
+def test_word_report_microwire_data_table_fills_columns_top_to_bottom() -> None:
+    table_xml = core._word_microwire_data_table(
+        [
+            ("A", ["1"]),
+            ("B", ["2"]),
+            ("C", ["3"]),
+            ("D", ["4"]),
+            ("E", ["5"]),
+        ]
+    )
+
+    rows = re.findall(r"<w:tr>(.*?)</w:tr>", table_xml)
+    assert len(rows) == 3
+    assert "A" in rows[0] and "D" in rows[0]
+    assert "B" in rows[1] and "E" in rows[1]
+    assert "C" in rows[2]
+
+
+def test_word_report_sections_start_on_new_pages() -> None:
+    xml, _origin_insertions, _picture_insertions = core._word_document_xml(
+        pd.Series({"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}),
+        0,
+        {},
+        {},
+    )
+
+    assert xml.count('w:type="page"') >= 8
+    assert xml.index("Microwire data") < xml.index('w:type="page"') < xml.index("Microscope and dimensions")
+
+
+def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    high.write_text("0.1 40 1\n0.2 41 1\n", encoding="utf-8")
+    vsm_path = tmp_path / "Ni55Fe18Ga27 1_1 scan.VSM-TSCN-Data"
+    vsm_path.write_text("stub", encoding="utf-8")
+    captured: list[tuple[str, list[Path]]] = []
+    captured_insertions: list[core.WordOleInsertion] = []
+
+    def fake_pyplot_origin(
+        *,
+        paths: list[Path],
+        plugin_name: str,
+        origin_dir: Path,
+        descriptor_prefix: str,
+        display_prefix: str,
+        log: logging.Logger | None,
+    ) -> list[OriginArtifact]:
+        del origin_dir, descriptor_prefix, display_prefix, log
+        captured.append((plugin_name, list(paths)))
+        artifact_name = (
+            "current.oggu"
+            if plugin_name == "Current Annealing"
+            else "vsm-temperature.oggu"
+        )
+        artifact_path = tmp_path / artifact_name
+        artifact_path.write_bytes(b"origin graph object")
+        return [
+            OriginArtifact(
+                descriptor=artifact_path.name,
+                object_path=artifact_path,
+                display_text=f"{plugin_name} Origin graph",
+            )
+        ]
+
+    def fake_embed(
+        docx_path: Path,
+        insertions: list[core.WordOleInsertion],
+        log: logging.Logger,
+    ) -> None:
+        del docx_path, log
+        captured_insertions.extend(insertions)
+
+    monkeypatch.setattr(core, "export_pyplot_origin_artifacts_for_paths", fake_pyplot_origin)
+    monkeypatch.setattr(core, "_embed_origin_objects_with_word", fake_embed)
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[high],
+            output_dir=tmp_path / "out",
+            make_plots=True,
+            plot_backends=("origin",),
+            export_formats=("word",),
+        ),
+        vsm_temperature_scan_records=[
+            core.VsmTemperatureScanRecord(
+                path=vsm_path,
+                sample="Ni55Fe18Ga27 1/1",
+                data=pd.DataFrame(),
+                key=("Ni55Fe18Ga27", 1, 1),
+                label="temperature scan",
+            )
+        ],
+    )
+
+    assert {plugin_name: paths for plugin_name, paths in captured} == {
+        "Current Annealing": [high],
+        "VSM Temperature Scan": [vsm_path],
+    }
+    assert result.dataframe.iloc[0][core.VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN] == "vsm-temperature.oggu"
+    assert result.origin_artifacts["vsm-temperature.oggu"].object_path == tmp_path / "vsm-temperature.oggu"
+    assert {item.object_path.name for item in captured_insertions} == {
+        "current.oggu",
+        "vsm-temperature.oggu",
+    }
+
+
+def test_word_report_export_embeds_microscope_images(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = tmp_path / "core-crop.png"
+    image_path.write_bytes(b"fake png")
+    captured_insertions: list[tuple[Path, list[core.WordPictureInsertion]]] = []
+
+    def fake_embed_pictures(
+        docx_path: Path,
+        insertions: list[core.WordPictureInsertion],
+        log: logging.Logger,
+    ) -> None:
+        captured_insertions.append((docx_path, list(insertions)))
+
+    monkeypatch.setattr(core, "_embed_pictures_with_word", fake_embed_pictures)
+    monkeypatch.setattr(core, "_embed_origin_objects_with_word", lambda *args, **kwargs: None)
+
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                core.DIAMETER_COLUMN: 13.2,
+                core.GLASS_DIAMETER_COLUMN: 26.4,
+                core.DIAMETER_RATIO_COLUMN: 0.5,
+                core.MICROSCOPE_IMAGE_COLUMNS[0]: "core-crop",
+            }
+        ]
+    )
+
+    reports = core.export_word_reports(
+        frame,
+        tmp_path / "reports",
+        microscope_crops={"core-crop": image_path},
+    )
+
+    assert len(reports) == 1
+    assert len(captured_insertions) == 1
+    assert captured_insertions[0][0] == reports[0]
+    assert [item.image_path for item in captured_insertions[0][1]] == [image_path]
+    assert captured_insertions[0][1][0].label == "Core diameter image"
+
+    from zipfile import ZipFile
+
+    with ZipFile(reports[0], "r") as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+
+    assert "Microscope and dimensions" in document_xml
+    assert "Core diameter image" in document_xml
+    assert "d/D" in document_xml
+
+
+def test_assembly_export_dialog_word_reports_enable_origin(qtbot) -> None:
+    dialog = builder_ui._AssemblyExportDialog(
+        output_dir=".",
+        output_name="microwire_database",
+        export_csv=False,
+        export_excel=False,
+        export_html=False,
+        export_word=False,
+        export_matplotlib=False,
+        export_origin=False,
+    )
+    qtbot.addWidget(dialog)
+
+    dialog.word_checkbox.setChecked(True)
+
+    settings = dialog.export_settings()
+    assert settings["export_word"] is True
+    assert settings["export_origin"] is True
+
+
 def test_build_database_groups_all_non_anchor_measurements_into_other_bucket(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5407,7 +5783,7 @@ def test_assemble_prepare_inputs_respects_hide_other_ends_setting(qtbot, tmp_pat
         )
 
         assert payload is not None
-        prepared_index = payload[8]
+        prepared_index = payload[9]
         assert ("Ni50Fe27Ga23", 5, 4, None) in prepared_index
         assert ("Ni50Fe27Ga23", 5, 4, "oe") not in prepared_index
     finally:
@@ -5636,7 +6012,7 @@ def test_assemble_prepare_inputs_keeps_fabrication_and_video_baselines_when_not_
 
         assert payload is not None
         fabrication_index = payload[0]
-        video_index = payload[9]
+        video_index = payload[10]
 
         piece_info = fabrication_index.get_piece("Ni50Fe27Ga23", 6, 2)
         draw_info = fabrication_index.get_draw("Ni50Fe27Ga23", 6)

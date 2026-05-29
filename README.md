@@ -6,36 +6,33 @@ loggers, plotters, emulators, and builders without starting individual scripts.
 
 ## Quick Start
 
-1. Install Python 3.14.x (we pin dependencies with Python 3.14; 3.14.4 is the current reference build).
-2. Create a virtual environment with that interpreter:
-   `python3.14 -m venv .venv` (macOS/Linux) or `py -3.14 -m venv .venv` (Windows)
-   If the Windows launcher has not registered 3.14 yet, use
-   `%LOCALAPPDATA%\Programs\Python\Python314\python.exe -m venv .venv`.
-3. Activate it (`source .venv/bin/activate` on macOS/Linux or
-   `.\.venv\Scripts\Activate.ps1` on Windows PowerShell)
-4. Upgrade pip: `python -m pip install --upgrade pip`
-5. Install the runtime stack for every non-experiment tool:
-   - macOS/Linux: `pip install -r requirements.txt`
-   - Windows:
-     `pip install -r requirements.txt`
-     `pip install -r requirements-win.txt`
-6. (Optional) Install experiment helpers and test tooling:
-   `pip install '.[test]'`
-7. Launch the hub: `python -m launcher`
+1. Install Python 3.14.x. The project currently declares
+   `requires-python = ">=3.14,<3.15"` in `pyproject.toml`; 3.14.4 is the current reference build.
+2. Install uv if it is not already available:
+   - macOS/Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+   - Windows PowerShell:
+     `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+     or `winget install --id=astral-sh.uv -e`
+3. Sync the project environment:
+   - Runtime only: `uv sync`
+   - Runtime plus tests: `uv sync --extra test`
+4. Launch the hub: `uv run python -m launcher`
 
-> **Tip:** If `.venv` was created with the wrong Python minor version or has stale
-> dependencies, delete it and recreate it with Python 3.14 before reinstalling
-> the requirements.
+> **Tip:** `uv sync` creates and updates the project `.venv` from `pyproject.toml`
+> and `uv.lock`. If the environment was created with the wrong Python minor
+> version or has stale dependencies, rerun `uv sync --extra test`; uv will repair
+> the disposable `.venv` when Python 3.14 is available.
 
-> **Tip:** The `pip install -r requirements.txt` command pulls in every
-> dependency required to run the launcher and builder tools. Run `pip install '.[test]'`
-> afterwards if you also plan to execute the bundled tests or
-> experiment scripts.
+> **Tip:** On Windows, run `py -0p` first if setup fails; Python 3.14 must be
+> listed there before a Codex/worktree setup can install the project. If the
+> Windows launcher has not registered 3.14 yet, install or repair the Python 3.14
+> per-user installation before running `uv sync`.
 
-**Windows-only Origin exports:** Install `requirements.txt` first on Windows, then
-`requirements-win.txt` to layer the Origin automation wheels on top of the shared
-dependency lock. The Windows-only wheels remain excluded from the cross-platform
-`requirements.txt` because they are not published for macOS/Linux.
+**pip compatibility:** `pyproject.toml` is the source of truth and `uv.lock` is
+the preferred lock. `requirements.txt` and `requirements-win.txt` remain exported
+compatibility files for machines or packaging scripts that still use pip. For the
+fallback path, create `.venv` with Python 3.14, activate it, upgrade pip, install
+`requirements.txt`, and on Windows install `requirements-win.txt` afterwards.
 
 OriginPro users should also install `originpro`, `numpy`, `pandas`,
 `python-dateutil`, `pytz`, `six`, and `tzdata` inside Origin's embedded Python
@@ -65,12 +62,11 @@ before choosing the Origin backend.
 
 ## Building
 
-Create a standalone application with PyInstaller after installing the project
-dependencies (`pip install -r requirements.txt && pip install -r requirements-win.txt`
-on Windows, `pip install -r requirements.txt` on macOS/Linux):
+Create a standalone application with PyInstaller after syncing the project
+environment (`uv sync`):
 
 ```bash
-pyinstaller launcher.spec
+uv run pyinstaller launcher.spec
 ```
 
 The build appears under `dist/launcher`; zip that folder when sharing the tools.

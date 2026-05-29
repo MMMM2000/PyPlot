@@ -40,7 +40,11 @@ def build_experiment_process_command(
     *,
     executable: Path | None = None,
 ) -> list[str]:
-    python_exe = gui_python_executable(Path(sys.executable) if executable is None else executable)
+    python_exe = gui_python_executable(
+        Path(sys.executable) if executable is None else executable
+    )
+    if getattr(sys, "frozen", False):
+        return [str(python_exe), "--experiment-process", spec.resource_tag]
     return [str(python_exe), "-m", spec.module]
 
 

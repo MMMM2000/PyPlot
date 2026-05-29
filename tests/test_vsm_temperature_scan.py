@@ -31,26 +31,26 @@ def test_field_axis_order_preserves_measurement_order() -> None:
     assert ordered == [50.0, 10000.0, 5.0]
 
 
-def test_series_color_map_uses_red_blue_then_orange_green_per_field_order() -> None:
+def test_series_color_map_uses_distinct_cycle_colors_per_field_bucket() -> None:
     processor = module.VSMTemperatureScanProcessor()
     up_frame = pd.DataFrame({"temperature": [10, 20, 30], "signal": [1.0, 1.1, 1.2]})
     down_frame = pd.DataFrame({"temperature": [30, 20, 10], "signal": [1.2, 1.1, 1.0]})
     series = [
         module.PlotSeries(field=10000.0, direction="up", segment_index=0, frame=up_frame),
-        module.PlotSeries(field=10000.0, direction="down", segment_index=0, frame=down_frame),
+        module.PlotSeries(field=10000.0, direction="down", segment_index=1, frame=down_frame),
         module.PlotSeries(field=5.0, direction="up", segment_index=0, frame=up_frame),
-        module.PlotSeries(field=5.0, direction="down", segment_index=0, frame=down_frame),
+        module.PlotSeries(field=5.0, direction="down", segment_index=1, frame=down_frame),
     ]
 
     color_map = processor.series_color_map(series)
 
-    assert color_map[(10000.0, "up", 0)] == "#dc2626"
-    assert color_map[(10000.0, "down", 0)] == "#2563eb"
-    assert color_map[(5.0, "up", 0)] == "#f97316"
-    assert color_map[(5.0, "down", 0)] == "#16a34a"
+    assert color_map[(10000.0, "up", 0)] == "#f97316"
+    assert color_map[(10000.0, "down", 1)] == "#16a34a"
+    assert color_map[(5.0, "up", 0)] == "#dc2626"
+    assert color_map[(5.0, "down", 1)] == "#2563eb"
 
 
-def test_prepare_series_uses_arrow_direction_labels_without_section_text() -> None:
+def test_prepare_series_uses_arrow_direction_labels_with_section_number() -> None:
     processor = module.VSMTemperatureScanProcessor()
     frame = pd.DataFrame(
         {
@@ -64,6 +64,7 @@ def test_prepare_series_uses_arrow_direction_labels_without_section_text() -> No
     prepared = processor._prepare_series(series)
     assert prepared
     assert "Section" not in prepared[0].legend
+    assert "S1" in prepared[0].legend
     assert "↑" in prepared[0].legend or "↓" in prepared[0].legend or "flat" in prepared[0].legend
 
 
@@ -161,6 +162,7 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
         def __init__(self) -> None:
             self._axes: dict[str, _FakeAxis] = {}
             self.axis_calls: list[str] = []
+            self.commands: list[str] = []
             self._plot_count = 0
             self._legend = _FakeLabel()
 
@@ -181,6 +183,7 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
             return plot
 
         def lt_exec(self, _cmd: str) -> None:
+            self.commands.append(_cmd)
             return
 
         def rescale(self) -> None:
@@ -309,6 +312,8 @@ def test_plot_origin_uses_named_axes_and_sets_titles(monkeypatch) -> None:
     assert layer._axes["x2"].label.text == ""
     assert layer._axes["x2"].title == ""
     assert "[emu]" in layer._axes["y"].label.text
+    assert any("layer.y.color=color(black)" in cmd for cmd in layer.commands)
+    assert any("layer.y.ticklabel.color=color(black)" in cmd for cmd in layer.commands)
     assert "\\l(" in layer._legend.text
     titles = [str(getattr(item, "title_meta", "") or "") for item in fake_origin.graphs]
     assert any("Smoothed dSignal/dT" in title for title in titles)
@@ -346,6 +351,7 @@ def test_plot_origin_combines_legend_entries_for_dual_axis(monkeypatch) -> None:
             self._axes: dict[str, _FakeAxis] = {}
             self._plot_count = 0
             self._legend = _FakeLabel()
+            self.commands: list[str] = []
 
         def axis(self, axis_name: str) -> _FakeAxis:
             return self._axes.setdefault(axis_name, _FakeAxis())
@@ -362,6 +368,7 @@ def test_plot_origin_combines_legend_entries_for_dual_axis(monkeypatch) -> None:
             return plot
 
         def lt_exec(self, _cmd: str) -> None:
+            self.commands.append(_cmd)
             return
 
         def rescale(self) -> None:
@@ -478,12 +485,15 @@ def test_plot_origin_combines_legend_entries_for_dual_axis(monkeypatch) -> None:
 
     assert fake_origin.graphs
     graph = fake_origin.graphs[0]
-    assert len(graph) >= 2
+    assert len(graph) == 2
     primary = graph[0]
     secondary = graph[1]
     assert "\\L(1." in primary._legend.text
     assert "\\L(2." in primary._legend.text
-    assert secondary._legend.text == ""
+    assert any("axis -ps Y A 1" in cmd for cmd in primary.commands)
+    assert any("axis -ps Y A 2" in cmd for cmd in secondary.commands)
+    assert any("layer.y2.ticklabel.color=color(black)" in cmd for cmd in secondary.commands)
+    assert "10kOe" in secondary._axes["y2"].label.text
 
 
 def test_plot_origin_keeps_primary_legend_when_layer_wrappers_change(monkeypatch) -> None:
@@ -664,7 +674,8 @@ def test_plot_origin_keeps_primary_legend_when_layer_wrappers_change(monkeypatch
     assert fake_origin.graphs
     graph = fake_origin.graphs[0]
     primary = graph[0]
-    secondary = graph[1]
     assert "\\L(1." in primary._legend.text
     assert "\\L(2." in primary._legend.text
-    assert secondary._legend.text == ""
+    assert "10000" in primary._legend.text
+    assert "50" in primary._legend.text
+    assert len(graph) == 2

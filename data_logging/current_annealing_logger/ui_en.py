@@ -217,6 +217,19 @@ class Ui_MainWindow(object):
         self.comboBox_supply = QtWidgets.QComboBox()
         gb_layout.addWidget(self.comboBox_supply)
 
+        self.label_broker_host = QtWidgets.QLabel("Broker:")
+        gb_layout.addWidget(self.label_broker_host)
+        self.lineEdit_broker_host = QtWidgets.QLineEdit("127.0.0.1")
+        self.lineEdit_broker_host.setMaximumWidth(110)
+        self.lineEdit_broker_host.setToolTip("Shared HMP broker host.")
+        gb_layout.addWidget(self.lineEdit_broker_host)
+        self.spinBox_broker_port = QtWidgets.QSpinBox()
+        self.spinBox_broker_port.setRange(1, 65535)
+        self.spinBox_broker_port.setValue(8765)
+        self.spinBox_broker_port.setMaximumWidth(84)
+        self.spinBox_broker_port.setToolTip("Shared HMP broker port.")
+        gb_layout.addWidget(self.spinBox_broker_port)
+
         # Legacy numeric COM spin kept for compatibility, but hidden
         self.label_port_number = QtWidgets.QLabel("COM:")
         self.label_port_number.hide()

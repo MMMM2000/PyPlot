@@ -74,6 +74,7 @@ from .core import (
     VsmHysteresisRecord,
     VsmTemperatureScanRecord,
     DmaIsoStressRecord,
+    MiniDmaRecord,
     ShapeMemoryStressStrainRecord,
     FmrRecord,
     OUTPUT_COLUMNS,
@@ -82,6 +83,7 @@ from .core import (
     VSM_HYSTERESIS_COLUMN,
     VSM_TEMPERATURE_SCAN_COLUMN,
     DMA_ISOSTRESS_COLUMN,
+    MINI_DMA_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
     SHAPE_MEMORY_DISPLACEMENT_COLUMN,
     SHAPE_MEMORY_LOAD_COLUMN,
@@ -138,6 +140,11 @@ try:
     from plotting.plugins.dma_iso_stress.parser import parse_dma_txt
 except Exception:  # pragma: no cover - optional dependency
     parse_dma_txt = None  # type: ignore[assignment]
+
+try:
+    from plotting.plugins.mini_dma import core as mini_dma_core
+except Exception:  # pragma: no cover - optional dependency
+    mini_dma_core = None  # type: ignore[assignment]
 
 try:
     from plotting.plugins.shape_memory_stress_strain.core import (
@@ -17661,6 +17668,184 @@ class DmaIsoStressSection(MiniDatabaseSection):
                     continue
         return sources
 
+
+class MiniDmaSection(MiniDatabaseSection):
+    section_key = "mini_dma"
+    section_title = "Mini DMA"
+    supported_suffixes = (".csv",)
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[int, str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self._record_groups: Dict[str, List[MiniDmaRecord]] = {}
+        self._record_groups_by_key: Dict[str, List[MiniDmaRecord]] = {}
+        super().__init__(logger, log_callback, parent)
+        self.open_pyplot_button = QtWidgets.QPushButton("Open in PyPlot")
+        self.open_pyplot_button.setToolTip("Open the selected Mini DMA runs in PyPlot.")
+        self.open_pyplot_button.clicked.connect(self._open_selected_in_pyplot)
+        self.controls_layout.addWidget(self.open_pyplot_button)
+        self.open_origin_button = QtWidgets.QPushButton("Open in Origin")
+        self.open_origin_button.setToolTip("Send the selected Mini DMA runs to Origin via PyPlot.")
+        self.open_origin_button.clicked.connect(self._open_selected_in_origin)
+        self.controls_layout.addWidget(self.open_origin_button)
+        self._refresh_record_groups()
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+
+    def process(
+        self,
+        paths: List[Path],
+        progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
+    ) -> SectionProcessResult:
+        if mini_dma_core is None:
+            raise RuntimeError("Mini DMA parser is not available.")
+        records: List[MiniDmaRecord] = []
+        processed: Dict[str, float] = {}
+        total = len(paths)
+        for idx, path in enumerate(paths, start=1):
+            self._check_cancelled()
+            path = Path(path)
+            try:
+                measurement_path = mini_dma_core.resolve_measurement_path(path)
+            except Exception:
+                if progress is not None:
+                    try:
+                        progress(idx, total, f"Skipped {path.name}")
+                    except Exception:
+                        pass
+                continue
+            try:
+                run = mini_dma_core.load_run(measurement_path)
+            except Exception:
+                self.logger.exception("Failed to parse Mini DMA run %s", path)
+                if progress is not None:
+                    try:
+                        progress(idx, total, f"Skipped {path.name}")
+                    except Exception:
+                        pass
+                continue
+            run_path = Path(getattr(run, "path", path.parent))
+            raw_sample = _sample_from_path(run_path, self.data.sources)
+            sample, variant = _split_sample_variant(raw_sample)
+            key = _microwire_key_from_path(run_path, sample or raw_sample)
+            if key is None:
+                key = _microwire_key_from_path(run_path, getattr(run, "sample_name", "") or run_path.name)
+            label = run_path.name
+            if variant:
+                label = f"{variant} - {label}"
+            record = MiniDmaRecord(
+                path=run_path,
+                sample=sample or raw_sample or getattr(run, "sample_name", "") or run_path.name,
+                data=run.frame,
+                key=key,
+                label=label,
+            )
+            if variant:
+                setattr(record, "variant", variant)
+            records.append(record)
+            try:
+                processed[str(measurement_path)] = float(measurement_path.stat().st_mtime)
+            except OSError:
+                processed[str(measurement_path)] = 0.0
+            if progress is not None:
+                try:
+                    progress(idx, total, f"Parsed {run_path.name}")
+                except Exception:
+                    pass
+        table = _graph_records_to_frame(
+            records,
+            MINI_DMA_COLUMN,
+            sample_column="_sample",
+        )
+        return SectionProcessResult(
+            table=table,
+            processed=processed,
+            payloads={"mini_dma_records": records},
+        )
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._refresh_record_groups()
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+
+    def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
+        super().import_project_payload(payload)
+        _drop_visible_sample_column(self)
+        self._refresh_record_groups()
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+
+    def _handle_worker_finished(self, result: SectionProcessResult) -> None:
+        super()._handle_worker_finished(result)
+        self._refresh_record_groups()
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+
+    def _refresh_record_groups(self) -> None:
+        grouped: Dict[str, List[MiniDmaRecord]] = {}
+        try:
+            payload = self.store.load_payload("mini_dma_records")
+        except Exception:
+            payload = None
+        records = list(payload) if isinstance(payload, list) else []
+        for record in records:
+            sample = getattr(record, "sample", None)
+            if isinstance(sample, str) and sample.strip():
+                grouped.setdefault(sample.strip(), []).append(record)
+        self._record_groups = grouped
+        self._record_groups_by_key = _group_graph_records_by_key(records)
+
+    def _selected_records(self) -> List[MiniDmaRecord]:
+        rows = self._selected_rows()
+        records: List[MiniDmaRecord] = []
+        for row_index in rows:
+            series = self._row_series(row_index)
+            if series is None:
+                continue
+            sample = _row_sample_value(series)
+            matched: Sequence[MiniDmaRecord] = ()
+            if sample:
+                matched = self._record_groups.get(sample, [])
+            if not matched:
+                row_key = _row_to_microwire_key(series)
+                if row_key:
+                    matched = self._record_groups_by_key.get(row_key, [])
+            records.extend(matched)
+        return records
+
+    def _open_selected_in_pyplot(self) -> None:
+        self._open_selected(open_origin=False)
+
+    def _open_selected_in_origin(self) -> None:
+        self._open_selected(open_origin=True)
+
+    def _open_selected(self, *, open_origin: bool) -> None:
+        records = self._selected_records()
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to open their graphs.",
+            )
+            return
+        paths = [record.path for record in records if isinstance(record.path, Path)]
+        paths = list(dict.fromkeys(paths))
+        if not paths:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No files are available for the selected rows.",
+            )
+            return
+        _open_pyplot_for_paths(
+            paths,
+            "Mini DMA",
+            self.logger,
+            auto_plot=True,
+            open_origin=open_origin,
+        )
+
+
 class ShapeMemoryStressStrainSection(MiniDatabaseSection):
     section_key = "shape_memory_stress_strain"
     section_title = "Shape memory stress/strain"
@@ -21599,6 +21784,7 @@ class _AssemblyExportDialog(QtWidgets.QDialog):
         export_csv: bool,
         export_excel: bool,
         export_html: bool,
+        export_word: bool,
         export_matplotlib: bool,
         export_origin: bool,
         parent: QtWidgets.QWidget | None = None,
@@ -21636,6 +21822,9 @@ class _AssemblyExportDialog(QtWidgets.QDialog):
         self.html_checkbox = QtWidgets.QCheckBox("HTML (self-contained)")
         self.html_checkbox.setChecked(export_html)
         formats_layout.addWidget(self.html_checkbox)
+        self.word_checkbox = QtWidgets.QCheckBox("Word sample reports")
+        self.word_checkbox.setChecked(export_word)
+        formats_layout.addWidget(self.word_checkbox)
         formats_layout.addStretch(1)
         layout.addWidget(formats_box)
 
@@ -21649,6 +21838,8 @@ class _AssemblyExportDialog(QtWidgets.QDialog):
         plot_layout.addWidget(self.origin_checkbox)
         plot_layout.addStretch(1)
         layout.addWidget(plot_box)
+        self.word_checkbox.toggled.connect(self._sync_word_origin_requirement)
+        self._sync_word_origin_requirement(self.word_checkbox.isChecked())
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -21666,9 +21857,14 @@ class _AssemblyExportDialog(QtWidgets.QDialog):
             "export_csv": self.csv_checkbox.isChecked(),
             "export_excel": self.excel_checkbox.isChecked(),
             "export_html": self.html_checkbox.isChecked(),
+            "export_word": self.word_checkbox.isChecked(),
             "export_matplotlib": self.matplotlib_checkbox.isChecked(),
             "export_origin": self.origin_checkbox.isChecked(),
         }
+
+    def _sync_word_origin_requirement(self, enabled: bool) -> None:
+        if enabled:
+            self.origin_checkbox.setChecked(True)
 
     def _choose_output_dir(self) -> None:
         start_dir = _dialog_start_directory(self.output_dir_edit.text().strip())
@@ -21703,6 +21899,8 @@ class CompareSection(MiniDatabaseSection):
         self._cached_vsm_temperature_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
         self._cached_dma_isostress_records: List[DmaIsoStressRecord] = []
         self._cached_dma_isostress_groups: Dict[str, List[DmaIsoStressRecord]] = {}
+        self._cached_mini_dma_records: List[MiniDmaRecord] = []
+        self._cached_mini_dma_groups: Dict[str, List[MiniDmaRecord]] = {}
         self._cached_shape_memory_stress_strain_records: List[ShapeMemoryStressStrainRecord] = []
         self._cached_shape_memory_stress_strain_groups: Dict[str, List[ShapeMemoryStressStrainRecord]] = {}
         self._cached_shape_memory_entries: Dict[str, Dict[str, Any]] = {}
@@ -21722,6 +21920,7 @@ class CompareSection(MiniDatabaseSection):
             VSM_HYSTERESIS_COLUMN,
             VSM_TEMPERATURE_SCAN_COLUMN,
             DMA_ISOSTRESS_COLUMN,
+            MINI_DMA_COLUMN,
             SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
             FMR_COLUMN,
         }
@@ -23165,6 +23364,7 @@ class AssemblySection(QtWidgets.QWidget):
             VSM_HYSTERESIS_COLUMN,
             VSM_TEMPERATURE_SCAN_COLUMN,
             DMA_ISOSTRESS_COLUMN,
+            MINI_DMA_COLUMN,
             SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
             FMR_COLUMN,
         }
@@ -23199,6 +23399,7 @@ class AssemblySection(QtWidgets.QWidget):
         self._export_matplotlib = False
         self._export_origin = False
         self._export_html = False
+        self._export_word = False
         self._section_choices = [
             ("fabrication", "Fabrication"),
             ("annealing", "Current annealing"),
@@ -23209,6 +23410,7 @@ class AssemblySection(QtWidgets.QWidget):
             ("vsm_temperature_scan", "VSM temperature scan"),
             ("transition_temps", "Transition temps"),
             ("dma_iso_stress", "DMA iso-stress"),
+            ("mini_dma", "Mini DMA"),
             ("shape_memory_stress_strain", "Shape memory stress/strain"),
             ("fmr", "FMR"),
             ("strain", "Strain"),
@@ -23712,6 +23914,7 @@ class AssemblySection(QtWidgets.QWidget):
             export_csv=self._export_csv,
             export_excel=self._export_excel,
             export_html=self._export_html,
+            export_word=self._export_word,
             export_matplotlib=self._export_matplotlib,
             export_origin=self._export_origin,
             parent=self,
@@ -23727,6 +23930,7 @@ class AssemblySection(QtWidgets.QWidget):
             "export_csv": self._export_csv,
             "export_excel": self._export_excel,
             "export_html": self._export_html,
+            "export_word": self._export_word,
             "export_matplotlib": self._export_matplotlib,
             "export_origin": self._export_origin,
             "sections": dict(self._section_states),
@@ -23744,8 +23948,11 @@ class AssemblySection(QtWidgets.QWidget):
         self._export_csv = bool(settings.get("export_csv", self._export_csv))
         self._export_excel = bool(settings.get("export_excel", self._export_excel))
         self._export_html = bool(settings.get("export_html", self._export_html))
+        self._export_word = bool(settings.get("export_word", self._export_word))
         self._export_matplotlib = bool(settings.get("export_matplotlib", self._export_matplotlib))
         self._export_origin = bool(settings.get("export_origin", self._export_origin))
+        if self._export_word:
+            self._export_origin = True
         sections = settings.get("sections")
         if isinstance(sections, Mapping):
             for key, _label in self._section_choices:
@@ -24107,6 +24314,8 @@ class AssemblySection(QtWidgets.QWidget):
             formats.append("Excel")
         if self._export_html:
             formats.append("HTML")
+        if self._export_word:
+            formats.append("Word reports")
         if self._export_matplotlib:
             formats.append("Matplotlib")
         if self._export_origin:
@@ -24174,6 +24383,7 @@ class AssemblySection(QtWidgets.QWidget):
             List[VsmHysteresisRecord],
             List[VsmTemperatureScanRecord],
             List[DmaIsoStressRecord],
+            List[MiniDmaRecord],
             List[ShapeMemoryStressStrainRecord],
             Dict[str, Dict[str, Any]],
             List[FmrRecord],
@@ -24320,6 +24530,16 @@ class AssemblySection(QtWidgets.QWidget):
         self._cached_dma_isostress_records = list(dma_isostress_records)
         self._cached_dma_isostress_groups = _group_graph_records_by_key(dma_isostress_records)
 
+        mini_dma_records: List[MiniDmaRecord] = []
+        if "mini_dma" in selected:
+            payload = self._load_payload("mini_dma", "mini_dma_records")
+            if isinstance(payload, list):
+                mini_dma_records = list(payload)
+            else:
+                _mark_missing("Mini DMA")
+        self._cached_mini_dma_records = list(mini_dma_records)
+        self._cached_mini_dma_groups = _group_graph_records_by_key(mini_dma_records)
+
         shape_memory_stress_strain_records: List[ShapeMemoryStressStrainRecord] = []
         if "shape_memory_stress_strain" in selected:
             payload = self._load_payload(
@@ -24415,6 +24635,7 @@ class AssemblySection(QtWidgets.QWidget):
             vsm_hysteresis_records,
             vsm_temperature_records,
             dma_isostress_records,
+            mini_dma_records,
             shape_memory_stress_strain_records,
             shape_memory_entries,
             fmr_records,
@@ -26260,6 +26481,7 @@ class AssemblySection(QtWidgets.QWidget):
         add_group("VSM temperature scan", section_map.get("vsm_temperature_scan", []))
         add_group("Transition temps", section_map.get("transition_temps", []))
         add_group("DMA iso-stress", section_map.get("dma_iso_stress", []))
+        add_group("Mini DMA", section_map.get("mini_dma", []))
         add_group(
             "Shape memory stress/strain",
             section_map.get("shape_memory_stress_strain", []),
@@ -27682,6 +27904,7 @@ class AssemblySection(QtWidgets.QWidget):
             vsm_hysteresis_records,
             vsm_temperature_records,
             dma_isostress_records,
+            mini_dma_records,
             shape_memory_stress_strain_records,
             shape_memory_entries,
             fmr_records,
@@ -27710,10 +27933,12 @@ class AssemblySection(QtWidgets.QWidget):
             formats.append("csv")
         if self._export_excel:
             formats.append("excel")
+        if self._export_word:
+            formats.append("word")
         backends: List[str] = []
         if self._export_matplotlib:
             backends.append("matplotlib")
-        if self._export_origin:
+        if self._export_origin or self._export_word:
             backends.append("origin")
         column_filter = self._current_column_filter()
         column_order = self._current_column_order_for_export()
@@ -27726,7 +27951,7 @@ class AssemblySection(QtWidgets.QWidget):
             microscope_files=[],
             video_files=[],
             strain_files=[],
-            make_plots=bool(self._export_matplotlib or self._export_origin),
+            make_plots=bool(self._export_matplotlib or self._export_origin or self._export_word),
             export_formats=tuple(formats),
             plot_backends=tuple(backends),
             output_name=output_name,
@@ -27747,6 +27972,7 @@ class AssemblySection(QtWidgets.QWidget):
             "dma_iso_stress_records": (
                 dma_isostress_records if "dma_iso_stress" in selected else []
             ),
+            "mini_dma_records": mini_dma_records if "mini_dma" in selected else [],
             "shape_memory_stress_strain_records": (
                 shape_memory_stress_strain_records
                 if "shape_memory_stress_strain" in selected
@@ -27816,6 +28042,7 @@ class AssemblySection(QtWidgets.QWidget):
             vsm_hysteresis_records,
             vsm_temperature_records,
             dma_isostress_records,
+            mini_dma_records,
             shape_memory_stress_strain_records,
             shape_memory_entries,
             fmr_records,
@@ -27865,6 +28092,7 @@ class AssemblySection(QtWidgets.QWidget):
             "dma_iso_stress_records": (
                 dma_isostress_records if "dma_iso_stress" in selected else []
             ),
+            "mini_dma_records": mini_dma_records if "mini_dma" in selected else [],
             "shape_memory_stress_strain_records": (
                 shape_memory_stress_strain_records
                 if "shape_memory_stress_strain" in selected
@@ -28227,6 +28455,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.dma_iso_stress_section = DmaIsoStressSection(self.logger, _append_log)
         self.tab_widget.addTab(self.dma_iso_stress_section, "DMA iso-stress")
         self.sections["dma_iso_stress"] = self.dma_iso_stress_section
+        _pump_events()
+
+        self.mini_dma_section = MiniDmaSection(self.logger, _append_log)
+        self.tab_widget.addTab(self.mini_dma_section, "Mini DMA")
+        self.sections["mini_dma"] = self.mini_dma_section
         _pump_events()
 
         self.shape_memory_stress_strain_section = ShapeMemoryStressStrainSection(

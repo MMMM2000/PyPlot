@@ -28,15 +28,25 @@ def _ensure_origin_sdk_on_path() -> None:
 
 
 @contextmanager
-def origin_session(*, keep_open: bool = False) -> Iterator[Any]:
+def origin_session(*, keep_open: bool = False, release_on_exit: bool = True) -> Iterator[Any]:
     """Return an Origin session; optionally leave Origin open on exit."""
 
     _ensure_origin_sdk_on_path()
     import originpro as op  # lazy import
-    # OriginExt on some Windows setups can leave an invalid automation pointer
-    # after a prior crash. Prefer re-attaching before any LT/set_show calls.
     attach = getattr(op, "attach", None)
-    if callable(attach):
+    lt_int = getattr(op, "lt_int", None)
+
+    # OriginExt can abort the whole Python process when attach() is called while
+    # an automation session is already healthy. Probe first and re-attach only
+    # when the existing pointer is unusable.
+    probe_ok = False
+    if callable(lt_int):
+        try:
+            _ = lt_int("@V")
+            probe_ok = True
+        except Exception:
+            probe_ok = False
+    if not probe_ok and callable(attach):
         try:
             attach()
         except Exception:
@@ -48,7 +58,6 @@ def origin_session(*, keep_open: bool = False) -> Iterator[Any]:
     # Probe automation health early so callers get a deterministic error dialog
     # instead of delayed low-level OriginExt crashes.
     probe_ok = False
-    lt_int = getattr(op, "lt_int", None)
     if callable(lt_int):
         try:
             _ = lt_int("@V")
@@ -77,14 +86,15 @@ def origin_session(*, keep_open: bool = False) -> Iterator[Any]:
         yield cast(Any, op)
     finally:
         if keep_open:
-            try:
-                cast(Any, op).detach()
-            except Exception:
-                pass
-            try:
-                schedule_origin_release()
-            except Exception:
-                pass
+            if release_on_exit:
+                try:
+                    cast(Any, op).detach()
+                except Exception:
+                    pass
+                try:
+                    schedule_origin_release()
+                except Exception:
+                    pass
         else:
             try:
                 cast(Any, op).exit()
@@ -254,7 +264,7 @@ def origin_safe_token(text: str, *, fallback: str = "Graph", max_len: int | None
 
 
 def origin_title_xy(layer: Any) -> tuple[float, float] | None:
-    """Compute a centered title position above the plot area in data coords."""
+    """Compute a centered title position just above the plot area in data coords."""
 
     get_float = getattr(layer, "get_float", None)
     if not callable(get_float):
@@ -273,10 +283,10 @@ def origin_title_xy(layer: Any) -> tuple[float, float] | None:
     y_span = y_to - y_from
     if x_span <= 0.0 or y_span <= 0.0:
         return None
-    # Keep the title well above the plotting range. Dual-axis exports need
-    # extra clearance so the centered title does not collide with top-axis
-    # tick labels or the mirrored x-axis caption.
-    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.08))
+    # Keep the title above the top-axis label band while staying inside the
+    # larger report-export OLE frame. Word's EMF preview clips labels that sit
+    # too close to the page boundary, so this deliberately leaves headroom.
+    return ((x_from + x_to) / 2.0, y_to + (y_span * 0.24))
 
 
 def _origin_title_font_size(text: str, default: float) -> float:
@@ -286,6 +296,15 @@ def _origin_title_font_size(text: str, default: float) -> float:
     if length >= 30:
         return min(default, 14.0)
     return default
+
+
+def _set_origin_label_font_size(label_obj: Any, size: float = 14.0) -> None:
+    set_float = getattr(label_obj, "set_float", None)
+    if callable(set_float):
+        try:
+            set_float("fsize", float(size))
+        except Exception:
+            pass
 
 
 def position_origin_title_label(
@@ -418,6 +437,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
             try:
                 label_obj.text = display_title
                 title_set = True
+                _set_origin_label_font_size(label_obj)
             except Exception:
                 pass
         if not title_set:
@@ -456,6 +476,19 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
             origin_lt_exec(lt_exec, f"layer.{key}.color = color(black);")
         if key == "y2":
             origin_lt_exec(lt_exec, "layer.y2.showlabel = 1;")
+    if key == "x":
+        label_getter = getattr(layer, "label", None)
+        if callable(label_getter):
+            for token in ("xb", "XB", "Xb"):
+                try:
+                    axis_label = label_getter(token)
+                except Exception:
+                    axis_label = None
+                if axis_label is not None:
+                    _set_origin_label_font_size(axis_label)
+                    break
+        return
+
     if key not in {"x2", "y", "y2"}:
         return
 
@@ -490,6 +523,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         layer_get_float = getattr(layer, "get_float", None)
         if not callable(set_float) or not callable(layer_get_float):
             return
+        _set_origin_label_font_size(axis_label)
         try:
             x_from = float(layer_get_float("x.from"))
             x_to = float(layer_get_float("x.to"))
@@ -508,9 +542,9 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         except Exception:
             pass
         try:
-            # Keep the top-axis caption just above the top ticks instead of
-            # inside the plotting area, where it can overlap the graph title.
-            set_float("y", y_to + (y_span * 0.02))
+            # Keep the top-axis caption above the native top tick labels while
+            # leaving enough room for the graph title in Word's EMF preview.
+            set_float("y", y_to + (y_span * 0.135))
         except Exception:
             pass
         return
@@ -541,6 +575,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
     layer_get_float = getattr(layer, "get_float", None)
     if not callable(set_float) or not callable(layer_get_float):
         return
+    _set_origin_label_font_size(axis_label)
     label_get_float = getattr(axis_label, "get_float", None)
     existing_label_x: float | None = None
     if callable(label_get_float):
@@ -565,7 +600,7 @@ def set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
         return
 
     # Keep titles just outside axes (not inside data area) while avoiding export clipping.
-    offset = x_span * 0.03
+    offset = x_span * (0.12 if key == "y2" else 0.03)
     target_x = x_to + offset
     if key == "y":
         target_y = (y_from + y_to) / 2.0

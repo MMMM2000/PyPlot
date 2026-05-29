@@ -49,6 +49,7 @@ OriginC/OC??Tmp*/
 logs/**
 !logs/.gitkeep
 artifacts/
+output/
 pytest-cache-files-*/
 
 # Local per-worktree scratch notes

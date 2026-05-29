@@ -43,6 +43,28 @@ def _ensure_app() -> QtWidgets.QApplication:
     return app
 
 
+def test_microwire_word_graph_sections_require_origin_graph_descriptors() -> None:
+    source_only = {
+        "Shape memory stress/strain graphs": [
+            "20mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
+            "30mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
+        ],
+    }
+    with_origin = {
+        "Shape memory stress/strain graphs": ["30mA"],
+        "Shape memory stress/strain graphs (Origin)": "shape_memory.oggu",
+    }
+
+    assert launcher_module._microwire_word_graph_sections_for_row(source_only) == {}
+    assert launcher_module._microwire_word_graph_sections_for_row(with_origin) == {
+        "Shape memory stress/strain": {
+            "sources": [],
+            "graphs": ["shape_memory.oggu"],
+            "references": ["30mA", "shape_memory.oggu"],
+        }
+    }
+
+
 def _wait_for_registry(window: launcher_module.MasterLauncher, app: QtWidgets.QApplication) -> None:
     for _ in range(40):
         app.processEvents()
@@ -284,6 +306,333 @@ def test_launcher_detects_microwire_eda_cli_flags() -> None:
     assert args.out == "artifacts/eda"
     assert args.microwire_eda_copy_project is True
     assert args.microwire_eda_force_project_rebuild is False
+
+
+def test_launcher_detects_mini_dma_bench_plan_flag() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(
+        [
+            "--mini-dma-bench-plan",
+            "bench-plan.json",
+        ]
+    )
+    assert launcher_module._is_mini_dma_bench_requested(args) is True  # noqa: SLF001
+    assert args.mini_dma_bench_plan == "bench-plan.json"
+
+
+def test_launcher_detects_microwire_word_report_cli_flags() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(
+        [
+            "--microwire-word-report",
+            "Ni50Fe27Ga23_12_2.csv",
+            "--microwire-word-sample",
+            "Ni50Fe27Ga23 12/2",
+            "--out",
+            "artifacts/word-report",
+        ]
+    )
+
+    assert launcher_module._is_microwire_word_report_requested(args) is True  # noqa: SLF001
+    assert args.microwire_word_report == "Ni50Fe27Ga23_12_2.csv"
+    assert args.microwire_word_sample == "Ni50Fe27Ga23 12/2"
+    assert args.microwire_word_origin is True
+    assert args.out == "artifacts/word-report"
+
+
+def test_run_microwire_word_report_cli_accepts_rvst_csv(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "Ni50Fe27Ga23_12_2.csv"
+    source.write_text(
+        "\n".join(
+            [
+                "iso_time;t_elapsed_s;sp_c;pv_c;resistance_ohm",
+                "2026-02-06T08:22:38;0.1;-100;-40.5;43.2903",
+                "2026-02-06T08:22:48;10.1;-90;-39.0;43.2882",
+                "2026-02-06T08:22:58;20.1;-80;-37.5;43.2700",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "reports"
+    args = argparse.Namespace(
+        microwire_word_report=str(source),
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_force_project_rebuild=False,
+        microwire_word_origin=False,
+        out=str(output_dir),
+    )
+
+    exit_code = launcher_module._run_microwire_word_report_cli(args)  # noqa: SLF001 - internal automation hook
+
+    report_path = output_dir / "Ni50Fe27Ga23_12-2.docx"
+    assert exit_code == 0
+    assert report_path.exists()
+    output = capsys.readouterr().out
+    assert "reports=1" in output
+    assert str(report_path) in output
+
+
+def test_microwire_word_report_project_merges_section_rows_and_rvst(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "Praha"
+    project_path = tmp_path / "copied" / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir()
+    annealing_path = data_root / "current annealing" / "Ni50Fe27Ga23 12_2 s1 1000mA.txt"
+    annealing_path.parent.mkdir(parents=True)
+    annealing_path.write_text("0.1 40 1\n0.2 41 1\n", encoding="utf-8")
+    rvt_path = data_root / "RvsT" / "RvsT" / "Ni50Fe27Ga23_12_2.csv"
+    rvt_path.parent.mkdir(parents=True)
+    rvt_path.write_text(
+        "\n".join(
+            [
+                "iso_time;t_elapsed_s;sp_c;pv_c;resistance_ohm",
+                "2026-02-06T08:22:38;0.1;-100;-40.5;43.2903",
+                "2026-02-06T08:22:48;10.1;-90;-39.0;43.2882",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    mini_dma_path = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 test_run32" / "measurement.csv"
+    mini_dma_path.parent.mkdir(parents=True)
+    mini_dma_path.write_text(
+        "\n".join(
+            [
+                "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,resistance_ohm,current_measured_mA",
+                "0.1,current,50,1,0.0,100.0,1.0",
+                "0.2,current,50,1,0.1,101.0,2.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 1,
+                "sections": {
+                    "assemble": {"rows": [], "columns": []},
+                    "annealing": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "_sources": [str(annealing_path)],
+                            }
+                        ]
+                    },
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "d (µm)": 19.1,
+                                "D (µm)": 58.6,
+                                "d/D": 0.326,
+                                "_core_image": str(tmp_path / "core.jpg"),
+                            }
+                        ]
+                    },
+                    "vsm_temperature_scan": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "VSM temperature scan graphs": ["scan-a", "scan-b"],
+                            }
+                        ]
+                    },
+                    "strain": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Legacy strain": 1.37,
+                            }
+                        ]
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_origin=False,
+    )
+
+    frame, origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        args,
+        tmp_path / "reports",
+    )
+
+    copied_projects = list((tmp_path / "reports" / "_project_copy").glob("*.pydpj"))
+    assert len(copied_projects) == 1
+    assert copied_projects[0] != project_path
+    assert copied_projects[0].read_text(encoding="utf-8") == project_path.read_text(encoding="utf-8")
+    assert origin_artifacts == {}
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert row["Composition"] == "Ni50Fe27Ga23"
+    assert row["Microwire"] == "12/2"
+    assert row["d (µm)"] == 19.1
+    assert row["D (µm)"] == 58.6
+    assert row["d/D"] == 0.326
+    assert row["Legacy strain"] == 1.37
+    assert row["Figure — 1000 mA"] == annealing_path.name
+    assert row["VSM temperature scan graphs"] == ["scan-a", "scan-b"]
+    assert row["R vs T graphs"] == [rvt_path.name]
+    assert row["R vs T points"] == 2
+    assert row["R vs T temperature range (deg C)"] == "-40.5 to -39"
+    assert row["Mini DMA graphs"] == mini_dma_path.parent.name
+
+
+def test_microwire_word_report_project_exports_rvst_through_pyplot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "Praha"
+    project_path = data_root / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir(parents=True)
+    rvt_path = data_root / "RvsT" / "RvsT" / "Ni50Fe27Ga23_12_2.csv"
+    rvt_path.parent.mkdir(parents=True)
+    rvt_path.write_text(
+        "\n".join(
+            [
+                "iso_time;t_elapsed_s;sp_c;pv_c;resistance_ohm",
+                "2026-02-06T08:22:38;0.1;-100;-40.5;43.2903",
+                "2026-02-06T08:22:48;10.1;-90;-39.0;43.2882",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 1,
+                "sections": {
+                    "assemble": {"rows": [], "columns": []},
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                            }
+                        ]
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: list[tuple[str, list[Path]]] = []
+
+    def fake_export_pyplot_origin_artifacts_for_paths(**kwargs: object) -> list[object]:
+        captured.append(
+            (
+                str(kwargs["plugin_name"]),
+                [Path(path) for path in kwargs["paths"]],  # type: ignore[index]
+                str(kwargs.get("plot_mode") or "raw"),
+            )
+        )
+        descriptor = "rvst_residual.oggu" if kwargs.get("plot_mode") == "residual" else "rvst.oggu"
+        return [
+            argparse.Namespace(
+                descriptor=descriptor,
+                display_text="R vs T residual from PyPlot" if kwargs.get("plot_mode") == "residual" else "R vs T from PyPlot",
+            )
+        ]
+
+    monkeypatch.setattr(
+        launcher_module,
+        "_export_pyplot_origin_artifacts_for_paths",
+        fake_export_pyplot_origin_artifacts_for_paths,
+    )
+    args = argparse.Namespace(
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_origin=True,
+    )
+
+    frame, origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        args,
+        tmp_path / "reports",
+    )
+
+    assert captured == [("R vs T", [rvt_path], "raw"), ("R vs T", [rvt_path], "residual")]
+    assert origin_artifacts["rvst.oggu"].display_text == "R vs T from PyPlot"
+    assert origin_artifacts["rvst_residual.oggu"].display_text == "R vs T residual from PyPlot"
+    assert frame.iloc[0]["R vs T graphs (Origin)"] == "rvst.oggu"
+    assert frame.iloc[0]["R vs T residual graphs (Origin)"] == "rvst_residual.oggu"
+
+
+@pytest.mark.parametrize(
+    ("name", "module", "resource_tag"),
+    [
+        (
+            "Mini DMA Logger",
+            "data_logging.mini_dma_logger.mini_dma_logger",
+            "mini_dma",
+        ),
+        (
+            "Current Annealing Logger",
+            "data_logging.current_annealing_logger.current_annealing_logger",
+            "current_annealing",
+        ),
+    ],
+)
+def test_hardware_experiment_loggers_launch_in_child_process(
+    name: str,
+    module: str,
+    resource_tag: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[object] = []
+    monkeypatch.setattr(
+        launcher_module,
+        "launch_experiment_process",
+        lambda spec: launched.append(spec),
+    )
+
+    result = launcher_module.LOGGERS[name]()
+
+    assert result is None
+    assert launched
+    spec = launched[0]
+    assert getattr(spec, "display_name") == name
+    assert getattr(spec, "module") == module
+    assert getattr(spec, "resource_tag") == resource_tag
+
+
+def test_experiment_process_cli_dispatches_registered_logger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    class _Module:
+        @staticmethod
+        def main() -> None:
+            called.append("main")
+
+    monkeypatch.setattr(
+        launcher_module,
+        "import_module",
+        lambda module: _Module
+        if module == "data_logging.current_annealing_logger.current_annealing_logger"
+        else pytest.fail(f"unexpected module import: {module}"),
+    )
+
+    args, _qt_args = launcher_module._parse_launcher_args(
+        ["--experiment-process", "current_annealing"]
+    )
+
+    assert launcher_module._is_experiment_process_requested(args)
+    assert launcher_module._run_experiment_process(args) == 0
+    assert called == ["main"]
 
 
 def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(

@@ -1012,17 +1012,20 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                         f"Raw{idx}": window_module.WorksheetColumnMeta(
                             long_name="Signal X",
                             units="emu",
-                            comments=f"{entry_series.field:.0f} Oe{self._processor._direction_label(entry_series.direction, entry_series.segment_index)} (raw) [{color}]",
+                            comments=f"{entry_series.field:.0f} Oe{self._processor._direction_label(entry_series.direction, entry_series.segment_index)}",
+                            plot_color=color,
                         ),
                         f"Smooth{idx}": window_module.WorksheetColumnMeta(
                             long_name="Signal X (smoothed)",
                             units="emu",
-                            comments=f"{entry_series.field:.0f} Oe{self._processor._direction_label(entry_series.direction, entry_series.segment_index)} (smoothed) [{color}]",
+                            comments=f"{entry_series.field:.0f} Oe{self._processor._direction_label(entry_series.direction, entry_series.segment_index)}",
+                            plot_color=color,
                         ),
                         f"dSmooth{idx}": window_module.WorksheetColumnMeta(
                             long_name="dSignal/dT (smoothed)",
                             units="emu/°C",
-                            comments=f"{entry_series.field:.0f} Oe{self._processor._direction_label(entry_series.direction, entry_series.segment_index)} d/dT (smoothed) [{color}]",
+                            comments=f"{entry_series.field:.0f} Oe{self._processor._direction_label(entry_series.direction, entry_series.segment_index)} d/dT",
+                            plot_color=color,
                         ),
                     }
                     frame_df = pd.DataFrame(cols)
@@ -1073,7 +1076,13 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             frame, _ = self._processor._dedupe_temperatures(entry_series.frame)
             working = frame.sort_values("temperature")
             units = "emu"
-            long_name = "Signal X"
+            axis_title = self._processor._axis_label_for_fields(
+                [entry_series.field],
+                base="Magnetization",
+            )
+            long_name = axis_title[:-6] if axis_title.endswith(" [emu]") else axis_title
+            if not long_name:
+                long_name = "Magnetization"
             color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
             color = getattr(self._processor, "series_color_map", lambda s: {})(series).get(
                 color_key,
@@ -1113,7 +1122,8 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             meta[vcol] = window_module.WorksheetColumnMeta(
                 long_name=long_name,
                 units=units,
-                comments=f"{comment} [{color}]",
+                comments=f"{entry_series.field:.0f} Oe{self._processor._direction_label(entry_series.direction, entry_series.segment_index)}",
+                plot_color=color,
             )
             axis_roles += "XY"
 
