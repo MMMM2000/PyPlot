@@ -212,11 +212,16 @@ def test_current_annealing_shared_broker_hides_advanced_hmp_port_options(qtbot) 
     assert not window.ui.checkBox_show_hmp_port_options.isHidden()
     assert not window.ui.checkBox_show_hmp_port_options.isChecked()
     assert window.ui.frame_hmp_port_options.isHidden()
+    assert not window.ui.label_broker_hint.isHidden()
+    assert window.ui.lineEdit_broker_host.isHidden()
+    assert window.ui.spinBox_broker_port.isHidden()
     assert window.ui.pushButton_connect_port.text() == "Connect broker"
 
     window.ui.checkBox_show_hmp_port_options.setChecked(True)
 
     assert not window.ui.frame_hmp_port_options.isHidden()
+    assert not window.ui.lineEdit_broker_host.isHidden()
+    assert not window.ui.spinBox_broker_port.isHidden()
     assert not window.ui.comboBox_port.isHidden()
     assert not window.ui.comboBox_baudrate.isHidden()
 
@@ -229,6 +234,8 @@ def test_current_annealing_direct_hmp_profile_shows_port_options(qtbot) -> None:
 
     assert window.ui.checkBox_show_hmp_port_options.isHidden()
     assert not window.ui.frame_hmp_port_options.isHidden()
+    assert window.ui.lineEdit_broker_host.isHidden()
+    assert window.ui.spinBox_broker_port.isHidden()
     assert not window.ui.comboBox_port.isHidden()
     assert not window.ui.comboBox_baudrate.isHidden()
     assert window.ui.pushButton_connect_port.text() == "Connect to port"

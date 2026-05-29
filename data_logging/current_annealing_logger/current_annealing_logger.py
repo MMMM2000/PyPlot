@@ -1268,16 +1268,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sync_hardware_connection_controls(self) -> None:
         shared = self._using_shared_broker()
-        for name in ('label_broker_host', 'lineEdit_broker_host', 'spinBox_broker_port', 'label_broker_hint'):
-            widget = getattr(self.ui, name, None)
-            if widget is not None:
-                widget.setVisible(shared)
         disclosure = getattr(self.ui, "checkBox_show_hmp_port_options", None)
         if isinstance(disclosure, QtWidgets.QCheckBox):
             disclosure.setVisible(shared)
         show_hmp_port_options = not shared
         if shared and isinstance(disclosure, QtWidgets.QCheckBox):
             show_hmp_port_options = bool(disclosure.isChecked())
+        endpoint_visible = shared and show_hmp_port_options
+        for name in ('label_broker_host', 'lineEdit_broker_host', 'spinBox_broker_port'):
+            widget = getattr(self.ui, name, None)
+            if widget is not None:
+                widget.setVisible(endpoint_visible)
+        hint = getattr(self.ui, "label_broker_hint", None)
+        if hint is not None:
+            hint.setVisible(shared)
         frame = getattr(self.ui, "frame_hmp_port_options", None)
         if isinstance(frame, QtWidgets.QWidget):
             frame.setVisible(show_hmp_port_options)

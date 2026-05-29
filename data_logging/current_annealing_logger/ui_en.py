@@ -229,6 +229,26 @@ class Ui_MainWindow(object):
         channel_row.addWidget(self.comboBox_channel, 1)
         gb_layout.addLayout(channel_row)
 
+        self.label_broker_hint = QtWidgets.QLabel("Uses the shared HMP broker; auto-starts it from an HMP port if needed.")
+        self.label_broker_hint.setWordWrap(True)
+        self.label_broker_hint.setToolTip(
+            "Current Annealing connects to an existing shared HMP broker when available; "
+            "otherwise it starts a broker from the selected HMP port."
+        )
+        gb_layout.addWidget(self.label_broker_hint)
+
+        self.checkBox_show_hmp_port_options = QtWidgets.QCheckBox("Show broker and HMP port options")
+        self.checkBox_show_hmp_port_options.setToolTip(
+            "Reveal broker endpoint, HMP COM port, and baud controls for diagnostics or broker auto-start."
+        )
+        gb_layout.addWidget(self.checkBox_show_hmp_port_options)
+
+        self.frame_hmp_port_options = QtWidgets.QFrame(gb_serial)
+        self.frame_hmp_port_options.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        hmp_options_layout = QtWidgets.QVBoxLayout(self.frame_hmp_port_options)
+        hmp_options_layout.setContentsMargins(0, 0, 0, 0)
+        hmp_options_layout.setSpacing(8)
+
         broker_row = QtWidgets.QHBoxLayout()
         broker_row.setSpacing(8)
         self.broker_connection_row = broker_row
@@ -246,27 +266,7 @@ class Ui_MainWindow(object):
         self.spinBox_broker_port.setToolTip("Shared HMP broker port.")
         broker_row.addWidget(self.spinBox_broker_port)
         broker_row.addStretch(1)
-        gb_layout.addLayout(broker_row)
-
-        self.label_broker_hint = QtWidgets.QLabel("Auto-starts from HMP port if needed.")
-        self.label_broker_hint.setWordWrap(True)
-        self.label_broker_hint.setToolTip(
-            "Current Annealing connects to an existing shared HMP broker when available; "
-            "otherwise it starts a broker from the selected HMP port."
-        )
-        gb_layout.addWidget(self.label_broker_hint)
-
-        self.checkBox_show_hmp_port_options = QtWidgets.QCheckBox("Show HMP port options")
-        self.checkBox_show_hmp_port_options.setToolTip(
-            "Reveal the HMP COM port and baud controls used when this app starts its own shared broker."
-        )
-        gb_layout.addWidget(self.checkBox_show_hmp_port_options)
-
-        self.frame_hmp_port_options = QtWidgets.QFrame(gb_serial)
-        self.frame_hmp_port_options.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        hmp_options_layout = QtWidgets.QVBoxLayout(self.frame_hmp_port_options)
-        hmp_options_layout.setContentsMargins(0, 0, 0, 0)
-        hmp_options_layout.setSpacing(8)
+        hmp_options_layout.addLayout(broker_row)
 
         serial_row = QtWidgets.QHBoxLayout()
         serial_row.setSpacing(8)
