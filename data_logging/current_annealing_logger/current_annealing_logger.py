@@ -339,6 +339,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._owned_shared_broker_server: Any = None
         self._owned_shared_broker_thread: Any = None
         self._owned_shared_broker_driver: Any = None
+        self._hardware_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._sleep_guard: Any = None
         self.is_connected = False
         self._init_supply_profile()
@@ -453,6 +454,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.comboBox_baudrate.currentIndexChanged.connect(self.handle_comboBox_baudrate_currentIndexChanged)
         if hasattr(self.ui, "pushButton_auto_detect_hmp"):
             self.ui.pushButton_auto_detect_hmp.clicked.connect(self.handle_auto_detect_hmp_clicked)
+        if hasattr(self.ui, "checkBox_show_hmp_port_options"):
+            self.ui.checkBox_show_hmp_port_options.toggled.connect(self._sync_hardware_connection_controls)
         self.ui.pushButton_send_serial_command.clicked.connect(self.handle_send_serial_command_clicked)
         
         
@@ -1251,6 +1254,7 @@ class MainWindow(QtWidgets.QMainWindow):
             'comboBox_port',
             'pushButton_refresh_ports',
             'pushButton_auto_detect_hmp',
+            'checkBox_show_hmp_port_options',
         ):
             w = getattr(self.ui, name, None)
             if w is not None:
@@ -1268,8 +1272,15 @@ class MainWindow(QtWidgets.QMainWindow):
             widget = getattr(self.ui, name, None)
             if widget is not None:
                 widget.setVisible(shared)
-        # The HMP COM controls stay visible in shared mode because Current Annealing
-        # can start its own local broker when no existing broker is running.
+        disclosure = getattr(self.ui, "checkBox_show_hmp_port_options", None)
+        if isinstance(disclosure, QtWidgets.QCheckBox):
+            disclosure.setVisible(shared)
+        show_hmp_port_options = not shared
+        if shared and isinstance(disclosure, QtWidgets.QCheckBox):
+            show_hmp_port_options = bool(disclosure.isChecked())
+        frame = getattr(self.ui, "frame_hmp_port_options", None)
+        if isinstance(frame, QtWidgets.QWidget):
+            frame.setVisible(show_hmp_port_options)
         for name in (
             'label_port',
             'comboBox_port',
@@ -1326,14 +1337,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         dialog: QtWidgets.QProgressDialog | None = None
         try:
-            dialog = QtWidgets.QProgressDialog("Connecting hardware...", None, 0, 0, self)
+            text = "Connecting shared HMP broker..." if self._using_shared_broker() else "Connecting hardware..."
+            dialog = QtWidgets.QProgressDialog(text, None, 0, 0, self)
             dialog.setWindowTitle("Current Annealing hardware")
             dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
             dialog.setCancelButton(None)
             dialog.setMinimumDuration(0)
+            self._hardware_auto_connect_progress = dialog
             dialog.show()
             QtWidgets.QApplication.processEvents()
         except Exception:
+            self._hardware_auto_connect_progress = None
             dialog = None
         try:
             if self._using_shared_broker():
@@ -1351,6 +1365,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     dialog.close()
                 except Exception:
                     pass
+            self._hardware_auto_connect_progress = None
 
     def _shared_broker_port(self) -> int:
         widget = getattr(self.ui, "spinBox_broker_port", None)

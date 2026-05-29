@@ -13,3 +13,5 @@
 - Added a Current Annealing metadata indexer that scans `metadata/<data-file-stem>/metadata.json` sidecars and writes CSV/JSONL summaries for run review.
 - The launcher CLI now exposes Mini DMA and Current Annealing metadata indexing commands so run review indexes are discoverable through `launcher.py --help`.
 - A single launcher metadata-index command can now build Mini DMA and Current Annealing indexes together when both source flags are provided.
+- Current Annealing shared-broker mode now keeps HMP COM/baud controls behind an advanced disclosure so the main hardware panel stays focused on supply, channel, broker, and connect state.
+- Current Annealing start auto-connect now exposes a tested progress dialog while shared-broker hardware is being connected.

@@ -203,16 +203,35 @@ def test_current_annealing_defaults_to_shared_broker_without_channel(qtbot) -> N
     assert window.ui.spinBox_broker_port.value() == 8765
 
 
-def test_current_annealing_shared_broker_keeps_hmp_port_available(qtbot) -> None:
+def test_current_annealing_shared_broker_hides_advanced_hmp_port_options(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
 
     window._apply_supply_profile("shared_hmp_broker")
 
+    assert not window.ui.checkBox_show_hmp_port_options.isHidden()
+    assert not window.ui.checkBox_show_hmp_port_options.isChecked()
+    assert window.ui.frame_hmp_port_options.isHidden()
+    assert window.ui.pushButton_connect_port.text() == "Connect broker"
+
+    window.ui.checkBox_show_hmp_port_options.setChecked(True)
+
+    assert not window.ui.frame_hmp_port_options.isHidden()
     assert not window.ui.comboBox_port.isHidden()
     assert not window.ui.comboBox_baudrate.isHidden()
-    assert not window.ui.pushButton_refresh_ports.isHidden()
-    assert window.ui.pushButton_connect_port.text() == "Connect broker"
+
+
+def test_current_annealing_direct_hmp_profile_shows_port_options(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._apply_supply_profile("hmp4040")
+
+    assert window.ui.checkBox_show_hmp_port_options.isHidden()
+    assert not window.ui.frame_hmp_port_options.isHidden()
+    assert not window.ui.comboBox_port.isHidden()
+    assert not window.ui.comboBox_baudrate.isHidden()
+    assert window.ui.pushButton_connect_port.text() == "Connect to port"
 
 
 def test_current_annealing_auto_detect_hmp_port_in_shared_mode(
@@ -431,6 +450,29 @@ def test_current_annealing_start_auto_connects_selected_shared_broker(qtbot, mon
 
     assert calls == ["connect"]
     assert errors == []
+    assert window.process_running is True
+
+
+def test_current_annealing_start_shows_auto_connect_progress(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window.operation_mode = 0
+    progress_seen: list[str] = []
+
+    def _connect() -> None:
+        progress = window._hardware_auto_connect_progress
+        assert progress is not None
+        progress_seen.append(progress.labelText())
+        window.is_connected = True
+
+    monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect)
+
+    window.handle_toggle_process_clicked()
+
+    assert progress_seen == ["Connecting shared HMP broker..."]
+    assert window._hardware_auto_connect_progress is None
     assert window.process_running is True
 
 

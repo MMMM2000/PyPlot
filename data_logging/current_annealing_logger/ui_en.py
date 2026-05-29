@@ -245,13 +245,28 @@ class Ui_MainWindow(object):
         self.spinBox_broker_port.setMinimumWidth(90)
         self.spinBox_broker_port.setToolTip("Shared HMP broker port.")
         broker_row.addWidget(self.spinBox_broker_port)
+        broker_row.addStretch(1)
+        gb_layout.addLayout(broker_row)
+
         self.label_broker_hint = QtWidgets.QLabel("Auto-starts from HMP port if needed.")
+        self.label_broker_hint.setWordWrap(True)
         self.label_broker_hint.setToolTip(
             "Current Annealing connects to an existing shared HMP broker when available; "
             "otherwise it starts a broker from the selected HMP port."
         )
-        broker_row.addWidget(self.label_broker_hint, 1)
-        gb_layout.addLayout(broker_row)
+        gb_layout.addWidget(self.label_broker_hint)
+
+        self.checkBox_show_hmp_port_options = QtWidgets.QCheckBox("Show HMP port options")
+        self.checkBox_show_hmp_port_options.setToolTip(
+            "Reveal the HMP COM port and baud controls used when this app starts its own shared broker."
+        )
+        gb_layout.addWidget(self.checkBox_show_hmp_port_options)
+
+        self.frame_hmp_port_options = QtWidgets.QFrame(gb_serial)
+        self.frame_hmp_port_options.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        hmp_options_layout = QtWidgets.QVBoxLayout(self.frame_hmp_port_options)
+        hmp_options_layout.setContentsMargins(0, 0, 0, 0)
+        hmp_options_layout.setSpacing(8)
 
         serial_row = QtWidgets.QHBoxLayout()
         serial_row.setSpacing(8)
@@ -263,7 +278,7 @@ class Ui_MainWindow(object):
         self.comboBox_port = QtWidgets.QComboBox()
         self.comboBox_port.setMinimumWidth(320)
         serial_row.addWidget(self.comboBox_port, 1)
-        gb_layout.addLayout(serial_row)
+        hmp_options_layout.addLayout(serial_row)
 
         serial_tools_row = QtWidgets.QHBoxLayout()
         serial_tools_row.setSpacing(8)
@@ -298,7 +313,8 @@ class Ui_MainWindow(object):
         self.comboBox_baudrate.setMinimumWidth(100)
         serial_tools_row.addWidget(self.comboBox_baudrate)
         serial_tools_row.addStretch(1)
-        gb_layout.addLayout(serial_tools_row)
+        hmp_options_layout.addLayout(serial_tools_row)
+        gb_layout.addWidget(self.frame_hmp_port_options)
 
         # Fit the group box into the frame
         frame_layout_serial = QtWidgets.QVBoxLayout(self.frame_serial_settings)
