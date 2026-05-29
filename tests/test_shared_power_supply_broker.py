@@ -95,6 +95,28 @@ def test_broker_accepts_channel_four_for_hmp4040() -> None:
     assert channel.confirmed is True
 
 
+def test_broker_allows_float_roundoff_at_current_limit() -> None:
+    broker = SharedPowerSupplyBroker(_driver(HMP4040_PROFILE), HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.002)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="test", role=ROLE_CURRENT_ANNEALING)
+
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=2.0000000000000004,
+        rate_mA_s=0.2,
+    )
+
+    with pytest.raises(ValueError, match="current exceeds"):
+        broker.schedule_current_ramp(
+            channel=1,
+            lease_id=lease.lease_id,
+            target_mA=2.01,
+            rate_mA_s=0.2,
+        )
+
+
 def test_broker_prevents_two_owners_from_leasing_same_channel() -> None:
     broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
     broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True)
