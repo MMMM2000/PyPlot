@@ -5857,6 +5857,37 @@ def test_builder_auto_open_prefers_configured_latest_database(
         QtWidgets.QApplication.processEvents()
 
 
+def test_builder_auto_open_skips_reentrant_project_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    database_dir = tmp_path / "microwire_database"
+    database_dir.mkdir()
+    latest = database_dir / "microwire_database_latest.pydpj"
+    latest.write_text("{}", encoding="utf-8")
+    window = BuilderWindow()
+    try:
+        window._auto_open_latest_database = True
+        window._database_project_dir = database_dir
+        window._project_load_in_progress = True
+        opened: list[Path] = []
+        monkeypatch.setattr(window, "_load_project_from_path", lambda path: opened.append(path))
+
+        window._maybe_auto_open_last_project()
+
+        assert opened == []
+    finally:
+        window._project_load_in_progress = False
+        window._auto_open_latest_database = False
+        window._auto_open_last = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_builder_settings_menu_names_latest_database_option(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

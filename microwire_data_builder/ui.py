@@ -28643,6 +28643,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._retabify_pending = False
         self._dirty = False
         self._suppress_dirty = False
+        self._project_load_in_progress = False
+        self._auto_open_in_progress = False
 
         self.log_view = QtWidgets.QPlainTextEdit(self)
         self.log_view.setReadOnly(True)
@@ -29911,6 +29913,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.logger.info("Microwire database folder set to %s", database_dir)
 
     def _maybe_auto_open_last_project(self) -> None:
+        if getattr(self, "_auto_open_in_progress", False) or getattr(
+            self, "_project_load_in_progress", False
+        ):
+            return
         candidate: Optional[Path] = None
         if self._auto_open_latest_database and isinstance(self._database_project_dir, Path):
             candidate = _latest_database_project_in_dir(self._database_project_dir)
@@ -29946,7 +29952,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 and candidate.name.endswith("_latest.pydpj")
             ):
                 self.logger.info("Opening latest Microwire database project: %s", candidate)
-            self._load_project_from_path(candidate)
+            self._auto_open_in_progress = True
+            try:
+                self._load_project_from_path(candidate)
+            finally:
+                self._auto_open_in_progress = False
         except Exception:
             self.logger.exception("Failed to auto-open last project %s", candidate)
 
@@ -30059,6 +30069,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._load_project_from_path(target)
 
     def _load_project_from_path(self, target: Path) -> None:
+        if getattr(self, "_project_load_in_progress", False):
+            self.logger.warning("Project load already in progress; ignoring request for %s", target)
+            return
+        self._project_load_in_progress = True
         progress_dialog: Optional[QtWidgets.QProgressDialog] = None
         total_steps = max(len(self.sections) + 1, 1)
         last_pump = 0.0
@@ -30185,6 +30199,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 f"Failed to load project file:\n{exc}",
             )
         finally:
+            self._project_load_in_progress = False
             MiniDatabaseSection._project_load_batch_mode = False
             self._suppress_dirty = False
             if progress_dialog is not None:
