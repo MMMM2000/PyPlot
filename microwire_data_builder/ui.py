@@ -9887,6 +9887,21 @@ class AnnealingSection(MiniDatabaseSection):
         for idx, path in enumerate(paths, start=1):
             self._check_cancelled()
             metadata = _metadata_from_path(path)
+            if (
+                not getattr(metadata, "composition_token", None)
+                or getattr(metadata, "draw_x", None) is None
+                or getattr(metadata, "piece_y", None) is None
+            ):
+                self.logger.warning(
+                    "Skipping %s because the microwire draw/piece identifiers could not be parsed",
+                    path,
+                )
+                if progress is not None:
+                    try:
+                        progress(idx, total, f"Skipped: {path.name}")
+                    except Exception:
+                        pass
+                continue
             try:
                 df = _load_annealing(path, expected_setpoint_mA=metadata.setpoint_mA)
             except Exception:

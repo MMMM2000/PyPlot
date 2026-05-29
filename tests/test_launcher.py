@@ -724,6 +724,84 @@ def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
     assert '"kind": "builder"' in capsys.readouterr().out
 
 
+def test_builder_automation_recipe_updates_annealing_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    annealing_path = tmp_path / "Ni50Fe27Ga23 12_2 s1 1000mA.txt"
+    annealing_path.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n", encoding="utf-8")
+    bad_path = tmp_path / "bad_annealing.txt"
+    bad_path.write_text("not valid annealing data\n", encoding="utf-8")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "annealing",
+                        "paths": [str(annealing_path), str(bad_path)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["annealing"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["annealing"]
+    assert section_payload["payloads"]["annealing_records"]["encoding"] == "pickle-base64"
+    assert section_payload["rows"]
+    row = section_payload["rows"][0]
+    assert row["Composition"] == "Ni50Fe27Ga23"
+    assert row["Microwire"] == "12/2"
+    assert row["_sources"] == [str(annealing_path)]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    update_command = manifest["commands"][0]
+    assert update_command["section"] == "annealing"
+    assert update_command["record_count"] == 1
+    assert update_command["updated_count"] == 1
+    assert update_command["skipped_count"] == 1
+    assert update_command["skipped_sources"] == [str(bad_path)]
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Composition"] == "Ni50Fe27Ga23"
+    assert assemble_row["Microwire"] == "12/2"
+
+
 def _write_mini_dma_run(path: Path, *, sample_name: str = "Ni50Fe27Ga23 12_2") -> Path:
     path.mkdir(parents=True, exist_ok=True)
     (path / "metadata.json").write_text(
