@@ -3751,49 +3751,28 @@ def _render_measurement_pixmap(
             title = format_annealing_title(metadata)
         except Exception:
             title = ""
+    if not title:
+        path = getattr(record, "path", None)
+        if path:
+            try:
+                title = format_annealing_title(Path(path).stem)
+            except Exception:
+                title = ""
+    if not title:
+        title = "Current annealing"
     target_width = max(int(width_px * 2), width_px)
     target_height = max(int(height_px * 2), height_px)
     figsize = (max(target_width / 96.0, 1.0), max(target_height / 96.0, 1.0))
     canvas_agg: FigureCanvasAgg | None = None
     figure = None
-    rc_overrides = {
-        "axes.titlesize": ANNEALING_TITLE_FONT_SIZE,
-        "axes.labelsize": ANNEALING_AXIS_FONT_SIZE,
-        "xtick.labelsize": ANNEALING_TICK_FONT_SIZE,
-        "ytick.labelsize": ANNEALING_TICK_FONT_SIZE,
-        "lines.linewidth": 1.0,
-        "lines.markersize": 3.0,
-    }
     try:
-        with plt.rc_context(rc_overrides):
-            figure, _ = plot_annealing_curve(
-                plot_df,
-                title,
-                target_px=(target_width, target_height),
-            )
+        figure, _ = plot_annealing_curve(
+            plot_df,
+            title,
+            target_px=(target_width, target_height),
+        )
         if figure is not None:
             figure.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.16)
-            for ax in figure.axes:
-                try:
-                    ax.tick_params(labelsize=ANNEALING_TICK_FONT_SIZE)
-                except Exception:
-                    pass
-                try:
-                    ax.xaxis.label.set_fontsize(ANNEALING_AXIS_FONT_SIZE)
-                    ax.yaxis.label.set_fontsize(ANNEALING_AXIS_FONT_SIZE)
-                except Exception:
-                    pass
-                if ax.get_title():
-                    try:
-                        ax.set_title(ax.get_title(), fontsize=ANNEALING_TITLE_FONT_SIZE)
-                    except Exception:
-                        pass
-                legend = ax.get_legend()
-                if legend is not None:
-                    try:
-                        legend.remove()
-                    except Exception:
-                        legend.set_visible(False)
         canvas_agg = FigureCanvasAgg(figure)
         canvas_agg.draw()
         width, height = canvas_agg.get_width_height()

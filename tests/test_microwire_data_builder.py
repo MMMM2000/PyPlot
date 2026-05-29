@@ -557,6 +557,46 @@ def test_render_measurement_pixmap_uses_readable_default_preview_size() -> None:
     assert pixmap.height() >= builder_ui.ANNEALING_GRAPH_HEIGHT
 
 
+def test_render_measurement_pixmap_keeps_pyplot_legend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    captured_figures = []
+    original = builder_ui.plot_annealing_curve
+
+    def _wrapped(*args: object, **kwargs: object) -> object:
+        figure, config = original(*args, **kwargs)
+        captured_figures.append(figure)
+        return figure, config
+
+    monkeypatch.setattr(builder_ui, "plot_annealing_curve", _wrapped)
+    record = SimpleNamespace(
+        dataframe=pd.DataFrame(
+            {
+                "I_mA": [10.0, 50.0, 100.0, 60.0, 20.0],
+                "R_ohm": [120.0, 150.0, 180.0, 160.0, 130.0],
+            }
+        ),
+        path=Path("Ni50Fe27Ga23 11_1 s1 1000mA.txt"),
+        metadata=None,
+    )
+
+    try:
+        pixmap = builder_ui._render_measurement_pixmap(record, logging.getLogger("test"))
+        assert isinstance(pixmap, QtGui.QPixmap)
+        assert not pixmap.isNull()
+        assert captured_figures
+        axes = captured_figures[0].axes[0]
+        title = axes.get_title()
+        assert "Ni" in title and "Fe" in title and "Ga" in title
+        assert "11/1" in title
+        assert "1000" in title and "mA" in title
+        assert axes.get_legend() is not None
+    finally:
+        for figure in captured_figures:
+            builder_ui.plt.close(figure)
+
+
 def test_annealing_display_keeps_pyplot_title_and_axis_labels() -> None:
     display = builder_ui._AnnealingPlotDisplay.__new__(builder_ui._AnnealingPlotDisplay)
     record = SimpleNamespace(
