@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "kind": "mini_dma_bench_sequence",
+  "summary_path": "artifacts/mini-dma-30mpa-speed-ladder-summary.json",
+  "log_dir": "G:/My Drive/1 Projects/Praha/mini DMA/automated_speed_ladder",
+  "default_max_run_duration_s": 2400,
+  "max_total_duration_s": 28800,
+  "length_setup": {
+    "starting_length_mm": 16.5,
+    "preload_length_mm": 16.5
+  },
+  "guardrails": {
+    "max_stress_mpa": 120.0,
+    "recovery_stress_mpa": 30.0,
+    "wire_break_stops_plan": true,
+    "allow_mechanical_slack_takeup": true,
+    "mechanical_slack_max_seek_mm": 4.0
+  },
+  "runs": [
+    {
+      "name": "iso-stress-30mpa-1p0ma-s",
+      "recipe_path": "recipes/iso-stress-30mpa-1-to-70-to-1ma.recipe.json",
+      "repeat": 2,
+      "max_run_duration_s": 1800
+    },
+    {
+      "name": "iso-stress-30mpa-0p8ma-s",
+      "recipe_path": "recipes/iso-stress-30mpa-1-to-70-to-1ma-0p8ma-s.recipe.json",
+      "repeat": 2,
+      "max_run_duration_s": 1800
+    },
+    {
+      "name": "iso-stress-30mpa-0p6ma-s",
+      "recipe_path": "recipes/iso-stress-30mpa-1-to-70-to-1ma-0p6ma-s.recipe.json",
+      "repeat": 2,
+      "max_run_duration_s": 1800
+    },
+    {
+      "name": "iso-stress-30mpa-0p4ma-s",
+      "recipe_path": "recipes/iso-stress-30mpa-1-to-70-to-1ma-0p4ma-s.recipe.json",
+      "repeat": 2,
+      "max_run_duration_s": 1800
+    },
+    {
+      "name": "iso-stress-30mpa-0p2ma-s",
+      "recipe_path": "recipes/iso-stress-30mpa-1-to-70-to-1ma-0p2ma-s.recipe.json",
+      "repeat": 2,
+      "max_run_duration_s": 2400
+    }
+  ]
+}
