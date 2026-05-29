@@ -276,6 +276,28 @@ def test_launcher_detects_mini_dma_bench_plan_flag() -> None:
     assert args.mini_dma_bench_plan == "bench-plan.json"
 
 
+def test_launcher_detects_metadata_index_cli_flags() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(
+        [
+            "--mini-dma-index-source",
+            "mini=C:/runs/mini",
+            "--mini-dma-index-output-dir",
+            "artifacts/mini-index",
+            "--current-annealing-index-source",
+            "annealing=C:/runs/annealing",
+            "--current-annealing-index-output-dir",
+            "artifacts/annealing-index",
+        ]
+    )
+
+    assert launcher_module._is_mini_dma_index_requested(args) is True  # noqa: SLF001
+    assert launcher_module._is_current_annealing_index_requested(args) is True  # noqa: SLF001
+    assert args.mini_dma_index_source == ["mini=C:/runs/mini"]
+    assert args.mini_dma_index_output_dir == "artifacts/mini-index"
+    assert args.current_annealing_index_source == ["annealing=C:/runs/annealing"]
+    assert args.current_annealing_index_output_dir == "artifacts/annealing-index"
+
+
 def test_launcher_detects_microwire_word_report_cli_flags() -> None:
     args, _qt_args = launcher_module._parse_launcher_args(
         [
@@ -293,6 +315,48 @@ def test_launcher_detects_microwire_word_report_cli_flags() -> None:
     assert args.microwire_word_sample == "Ni50Fe27Ga23 12/2"
     assert args.microwire_word_origin is True
     assert args.out == "artifacts/word-report"
+
+
+def test_run_metadata_index_clis_write_outputs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mini_source = tmp_path / "mini"
+    mini_run = mini_source / "run01"
+    mini_run.mkdir(parents=True)
+    (mini_run / "metadata.json").write_text(
+        json.dumps({"sample_name": "mini sample"}),
+        encoding="utf-8",
+    )
+    annealing_source = tmp_path / "annealing"
+    annealing_metadata = annealing_source / "metadata" / "runA"
+    annealing_metadata.mkdir(parents=True)
+    (annealing_metadata / "metadata.json").write_text(
+        json.dumps({"sample": "annealing sample"}),
+        encoding="utf-8",
+    )
+
+    mini_output = tmp_path / "mini_index"
+    annealing_output = tmp_path / "annealing_index"
+    mini_args = argparse.Namespace(
+        mini_dma_index_source=[f"mini={mini_source}"],
+        mini_dma_index_output_dir=str(mini_output),
+    )
+    annealing_args = argparse.Namespace(
+        current_annealing_index_source=[f"annealing={annealing_source}"],
+        current_annealing_index_output_dir=str(annealing_output),
+    )
+
+    assert launcher_module._run_mini_dma_index_cli(mini_args) == 0  # noqa: SLF001
+    assert launcher_module._run_current_annealing_index_cli(annealing_args) == 0  # noqa: SLF001
+
+    output = capsys.readouterr().out
+    assert "[mini-dma-index] rows=1" in output
+    assert "[current-annealing-index] rows=1" in output
+    assert (mini_output / "runs_index.csv").exists()
+    assert (mini_output / "runs_index.jsonl").exists()
+    assert (annealing_output / "current_annealing_index.csv").exists()
+    assert (annealing_output / "current_annealing_index.jsonl").exists()
 
 
 def test_run_microwire_word_report_cli_accepts_rvst_csv(

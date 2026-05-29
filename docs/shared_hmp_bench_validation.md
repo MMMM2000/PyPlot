@@ -196,7 +196,7 @@ Current Annealing:
 - Output file path and row count.
 - Current, voltage, and resistance ranges.
 - `metadata/<data-file-stem>/metadata.json`: `supply.profile_id`, `supply.channel`, `supply.voltage_limit_v`, `supply.broker_source`, and `recipe.current_ramp_rate_mA_s`.
-- Optional metadata index: run `scripts/current_annealing_metadata_index.py --source annealing=<output-root> --output-dir <review-folder>` to write `current_annealing_index.csv` and `.jsonl` from the metadata sidecar tree.
+- Optional metadata index: run `launcher.py --current-annealing-index-source annealing=<output-root> --current-annealing-index-output-dir <review-folder>` to write `current_annealing_index.csv` and `.jsonl` from the metadata sidecar tree.
 
 Mini DMA:
 
@@ -204,6 +204,7 @@ Mini DMA:
 - `measurement.csv`: row count, current setpoint, measured current, voltage, resistance, power.
 - `control_trace.csv`: row count and any wait/correction/hold/fault phases.
 - Optional `ui_telemetry.csv`: session/plot heartbeat when diagnosing UI responsiveness.
+- Optional metadata index: run `launcher.py --mini-dma-index-source mini=<output-root> --mini-dma-index-output-dir <review-folder>` to write `runs_index.csv` and `.jsonl`.
 
 HMP final state:
 

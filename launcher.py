@@ -589,6 +589,28 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         help="Run or dry-run an explicitly armed Mini DMA bench automation plan JSON file.",
     )
     parser.add_argument(
+        "--mini-dma-index-source",
+        action="append",
+        default=[],
+        help="Build a Mini DMA run index from NAME=PATH or PATH. Repeat for multiple roots.",
+    )
+    parser.add_argument(
+        "--mini-dma-index-output-dir",
+        default=None,
+        help="Directory that receives Mini DMA runs_index.csv/jsonl.",
+    )
+    parser.add_argument(
+        "--current-annealing-index-source",
+        action="append",
+        default=[],
+        help="Build a Current Annealing metadata index from NAME=PATH or PATH. Repeat for multiple roots.",
+    )
+    parser.add_argument(
+        "--current-annealing-index-output-dir",
+        default=None,
+        help="Directory that receives current_annealing_index.csv/jsonl.",
+    )
+    parser.add_argument(
         "--experiment-process",
         choices=tuple(EXPERIMENT_PROCESS_MODULES),
         default=None,
@@ -874,6 +896,14 @@ def _is_mini_dma_bench_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "mini_dma_bench_plan", None))
 
 
+def _is_mini_dma_index_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "mini_dma_index_source", None))
+
+
+def _is_current_annealing_index_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "current_annealing_index_source", None))
+
+
 def _is_experiment_process_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "experiment_process", None))
 
@@ -938,6 +968,42 @@ def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
     if result.findings:
         for finding in result.findings[:3]:
             print(f"[microwire-eda] finding={finding.get('headline', 'Finding')}")
+    return 0
+
+
+def _run_mini_dma_index_cli(args: argparse.Namespace) -> int:
+    from scripts import mini_dma_automation_index
+
+    sources = [
+        mini_dma_automation_index._parse_source(value)  # noqa: SLF001 - CLI adapter
+        for value in getattr(args, "mini_dma_index_source", [])
+    ]
+    output_value = getattr(args, "mini_dma_index_output_dir", None)
+    output_dir = Path(str(output_value)).expanduser() if output_value else Path("logs") / "mini_dma_index"
+    rows = mini_dma_automation_index.discover_runs(sources)
+    mini_dma_automation_index.write_index(rows, output_dir)
+    print(f"[mini-dma-index] output_dir={output_dir}")
+    print(f"[mini-dma-index] rows={len(rows)}")
+    return 0
+
+
+def _run_current_annealing_index_cli(args: argparse.Namespace) -> int:
+    from scripts import current_annealing_metadata_index
+
+    sources = [
+        current_annealing_metadata_index._parse_source(value)  # noqa: SLF001 - CLI adapter
+        for value in getattr(args, "current_annealing_index_source", [])
+    ]
+    output_value = getattr(args, "current_annealing_index_output_dir", None)
+    output_dir = (
+        Path(str(output_value)).expanduser()
+        if output_value
+        else Path("logs") / "current_annealing_index"
+    )
+    rows = current_annealing_metadata_index.discover_runs(sources)
+    current_annealing_metadata_index.write_index(rows, output_dir)
+    print(f"[current-annealing-index] output_dir={output_dir}")
+    print(f"[current-annealing-index] rows={len(rows)}")
     return 0
 
 
@@ -4082,6 +4148,10 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_run_automation_recipe(args, qt_args))
     if _is_mini_dma_bench_requested(args):
         raise SystemExit(_run_mini_dma_bench_plan(args, qt_args))
+    if _is_mini_dma_index_requested(args):
+        raise SystemExit(_run_mini_dma_index_cli(args))
+    if _is_current_annealing_index_requested(args):
+        raise SystemExit(_run_current_annealing_index_cli(args))
     if _is_experiment_process_requested(args):
         raise SystemExit(_run_experiment_process(args))
     if _is_microwire_word_report_requested(args):
