@@ -43,6 +43,30 @@ class MiniDmaRun:
     wire_diameter_mm: float | None = None
 
 
+@dataclass(frozen=True)
+class CurrentSweepTargetSummary:
+    stress_mpa: float
+    load_g: float | None
+    l0_mm: float | None
+    max_current_mA: float | None
+    max_strain_pct: float | None
+    strain_at_max_current_pct: float | None
+
+
+@dataclass(frozen=True)
+class CurrentSweepBreakSummary:
+    stress_mpa: float
+    load_g: float | None
+    current_mA: float | None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class CurrentSweepSummary:
+    targets: tuple[CurrentSweepTargetSummary, ...]
+    break_point: CurrentSweepBreakSummary | None = None
+
+
 def resolve_measurement_path(path: Path) -> Path:
     candidate = Path(path)
     if candidate.is_dir():
@@ -288,6 +312,66 @@ def strain_from_global_minimum_length(
     ]
 
 
+def summarize_current_sweep(
+    run: MiniDmaRun,
+    *,
+    voltage_limit_v: float | None = None,
+) -> CurrentSweepSummary:
+    target_summaries: list[CurrentSweepTargetSummary] = []
+    for target, group in current_sweep_groups(run.frame):
+        strain = _strain_from_trace_minimum_length(run, group)
+        current = pd.to_numeric(group["current_mA"], errors="coerce")
+        max_current_mA: float | None = None
+        strain_at_max_current: float | None = None
+        if current.notna().any():
+            max_index = current.idxmax(skipna=True)
+            max_current_mA = float(current.loc[max_index])
+            strain_at_max_current = float(strain.loc[max_index])
+        max_strain_pct: float | None = None
+        if strain.notna().any():
+            max_strain_pct = float(strain.max(skipna=True))
+        l0_mm = _group_l0_mm(run, group)
+        target_summaries.append(
+            CurrentSweepTargetSummary(
+                stress_mpa=float(target),
+                load_g=_load_g_from_stress_mpa(run, float(target)),
+                l0_mm=l0_mm,
+                max_current_mA=max_current_mA,
+                max_strain_pct=max_strain_pct,
+                strain_at_max_current_pct=strain_at_max_current,
+            )
+        )
+    return CurrentSweepSummary(
+        targets=tuple(target_summaries),
+        break_point=_detect_break_point(run, voltage_limit_v=voltage_limit_v),
+    )
+
+
+def format_current_sweep_strain_summary(summary: CurrentSweepSummary) -> list[str]:
+    lines: list[str] = []
+    for target in summary.targets:
+        strain = target.max_strain_pct
+        current = target.max_current_mA
+        if strain is None or current is None:
+            continue
+        label = _format_target_summary_label(target.stress_mpa, target.load_g)
+        lines.append(
+            f"{label}: {_format_compact_number(strain, max_decimals=2)}% "
+            f"@ {_format_compact_number(current, max_decimals=0)} mA"
+        )
+    return lines
+
+
+def format_current_sweep_break_summary(summary: CurrentSweepSummary) -> str:
+    break_point = summary.break_point
+    if break_point is None:
+        return ""
+    label = _format_target_summary_label(break_point.stress_mpa, break_point.load_g)
+    if break_point.current_mA is None:
+        return f"{label}: break detected"
+    return f"{label} @ {_format_compact_number(break_point.current_mA, max_decimals=0)} mA"
+
+
 def _drop_resistance_outliers(group: pd.DataFrame) -> pd.DataFrame:
     if "resistance_ohm" not in group or len(group) < 6:
         return group
@@ -316,6 +400,16 @@ def _strain_from_trace_minimum_length(run: MiniDmaRun, group: pd.DataFrame) -> p
 
     strain_pct = pd.to_numeric(group["strain_pct"], errors="coerce")
     return strain_pct - strain_pct.min(skipna=True)
+
+
+def _group_l0_mm(run: MiniDmaRun, group: pd.DataFrame) -> float | None:
+    length_mm = _length_trace_mm(run, group)
+    if length_mm is None or not length_mm.notna().any():
+        return None
+    l0_mm = float(length_mm.min(skipna=True))
+    if pd.notna(l0_mm) and l0_mm > 0.0:
+        return l0_mm
+    return None
 
 
 def _strain_from_global_minimum_length(
@@ -471,6 +565,13 @@ def _load_g_from_stress_mpa(run: MiniDmaRun, stress_mpa: float) -> float | None:
     return stress_mpa * area_mm2 / 9.80665 * 1000.0
 
 
+def _format_target_summary_label(stress_mpa: float, load_g: float | None) -> str:
+    stress_label = _format_stress_label(stress_mpa)
+    if load_g is None:
+        return stress_label
+    return f"{stress_label} / {_format_compact_number(load_g)} g"
+
+
 def _wire_area_mm2(run: MiniDmaRun) -> float | None:
     if run.wire_diameter_mm is None or run.wire_diameter_mm <= 0.0:
         return None
@@ -509,6 +610,99 @@ def _format_compact_number(value: float, *, max_decimals: int = 2) -> str:
     if math.isclose(rounded, round(rounded), abs_tol=0.5 * (10**-max_decimals)):
         return str(int(round(rounded)))
     return f"{rounded:.{max_decimals}f}".rstrip("0").rstrip(".")
+
+
+def _detect_break_point(
+    run: MiniDmaRun,
+    *,
+    voltage_limit_v: float | None = None,
+) -> CurrentSweepBreakSummary | None:
+    explicit = _explicit_break_point(run)
+    if explicit is not None:
+        return explicit
+    return _voltage_limit_break_point(run, voltage_limit_v=voltage_limit_v)
+
+
+def _explicit_break_point(run: MiniDmaRun) -> CurrentSweepBreakSummary | None:
+    metadata = _metadata_for_run(run.measurement_path)
+    for section_name in ("break", "break_point", "wire_break"):
+        section = metadata.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        stress = _dict_float(section, "stress_mpa", "target_mpa", "target")
+        current = _dict_float(section, "current_mA", "current_ma", "current_set_mA")
+        if stress is None:
+            continue
+        return CurrentSweepBreakSummary(
+            stress_mpa=stress,
+            load_g=_load_g_from_stress_mpa(run, stress),
+            current_mA=current,
+            reason="metadata",
+        )
+    return None
+
+
+def _voltage_limit_break_point(
+    run: MiniDmaRun,
+    *,
+    voltage_limit_v: float | None = None,
+) -> CurrentSweepBreakSummary | None:
+    frame = run.frame
+    required = {"automation_target_value", "current_set_mA", "current_measured_mA", "voltage_V"}
+    if not required.issubset(frame.columns):
+        return None
+    limit_v = voltage_limit_v
+    if limit_v is None:
+        limit_v = _metadata_voltage_limit_v(run.measurement_path)
+    if limit_v is None or limit_v <= 0.0:
+        return None
+
+    stress = pd.to_numeric(frame["automation_target_value"], errors="coerce")
+    set_current = pd.to_numeric(frame["current_set_mA"], errors="coerce")
+    measured_current = pd.to_numeric(frame["current_measured_mA"], errors="coerce")
+    voltage = pd.to_numeric(frame["voltage_V"], errors="coerce")
+    mask = (
+        stress.notna()
+        & set_current.notna()
+        & measured_current.notna()
+        & voltage.notna()
+        & (set_current.abs() >= 5.0)
+        & (voltage >= limit_v * 0.95)
+        & (measured_current.abs() <= set_current.abs().clip(lower=10.0) * 0.1)
+    )
+    if not bool(mask.any()):
+        return None
+    first_index = mask[mask].index[0]
+    stress_mpa = float(stress.loc[first_index])
+    current_mA = float(set_current.loc[first_index])
+    return CurrentSweepBreakSummary(
+        stress_mpa=stress_mpa,
+        load_g=_load_g_from_stress_mpa(run, stress_mpa),
+        current_mA=current_mA,
+        reason="voltage_limit_current_collapse",
+    )
+
+
+def _metadata_voltage_limit_v(measurement_path: Path) -> float | None:
+    metadata = _metadata_for_run(measurement_path)
+    heating = metadata.get("heating")
+    if isinstance(heating, dict):
+        parsed = _dict_float(heating, "voltage_limit_v", "max_voltage")
+        if parsed is not None:
+            return parsed
+    return _dict_float(metadata, "voltage_limit_v", "max_voltage")
+
+
+def _dict_float(payload: dict[str, object], *keys: str) -> float | None:
+    for key in keys:
+        value = payload.get(key)
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(parsed):
+            return parsed
+    return None
 
 
 def _target_token(value: float) -> str:

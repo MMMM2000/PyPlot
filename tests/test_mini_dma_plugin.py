@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
+import pandas as pd
 import pytest
 from PyQt6 import QtWidgets
 
@@ -155,6 +156,58 @@ def test_power_axis_points_use_current_and_resistance() -> None:
     assert len(currents) > 1000
     assert min(currents) >= 0.0
     assert min(resistances) > 0.0
+
+
+def test_summarize_current_sweep_reports_per_target_strain_with_per_curve_l0() -> None:
+    run = core.load_run(SAMPLE_RUN)
+
+    summary = core.summarize_current_sweep(run)
+
+    assert len(summary.targets) == 9
+    first = summary.targets[0]
+    assert first.stress_mpa == pytest.approx(50.0)
+    assert first.load_g == pytest.approx(1.46, abs=0.01)
+    assert first.l0_mm == pytest.approx(52.8, abs=0.1)
+    assert first.max_current_mA == pytest.approx(79.9, abs=0.2)
+    assert first.max_strain_pct >= first.strain_at_max_current_pct >= 0.0
+    lines = core.format_current_sweep_strain_summary(summary)
+    assert lines[0].startswith("50 MPa / 1.46 g:")
+    assert "@ 80 mA" in lines[0]
+    assert core.format_current_sweep_break_summary(summary) == ""
+
+
+def test_summarize_current_sweep_detects_voltage_limit_break() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0, 2.0],
+            "automation_phase": ["current", "current", "current"],
+            "automation_target_value": [400.0, 400.0, 400.0],
+            "plateau_index": [1, 1, 1],
+            "strain_pct": [0.0, 0.5, 0.7],
+            "resistance_ohm": [100.0, 110.0, 0.0],
+            "current_mA": [5.0, 20.0, 0.2],
+            "current_set_mA": [5.0, 20.0, 35.0],
+            "current_measured_mA": [5.0, 20.0, 0.2],
+            "voltage_V": [0.5, 2.0, 9.9],
+            "position_mm": [0.0, 0.05, 0.07],
+        }
+    )
+    run = core.MiniDmaRun(
+        path=Path("run"),
+        measurement_path=Path("run") / "measurement.csv",
+        frame=frame,
+        sample_name="Ni50Fe27Ga23 12_3",
+        initial_length_mm=10.0,
+        wire_diameter_mm=0.0191,
+    )
+
+    summary = core.summarize_current_sweep(run, voltage_limit_v=10.0)
+
+    assert summary.break_point is not None
+    assert summary.break_point.stress_mpa == pytest.approx(400.0)
+    assert summary.break_point.load_g == pytest.approx(11.69, abs=0.01)
+    assert summary.break_point.current_mA == pytest.approx(35.0)
+    assert "400 MPa / 11.69 g @ 35 mA" in core.format_current_sweep_break_summary(summary)
 
 
 def test_plugin_is_registered() -> None:

@@ -436,6 +436,7 @@ def _builder_section_specs(builder_ui: Any) -> dict[str, dict[str, Any]]:
             "class": builder_ui.MiniDmaSection,
             "payload": "mini_dma_records",
             "graph_column": builder_ui.MINI_DMA_COLUMN,
+            "table_builder": builder_ui._mini_dma_records_to_frame,
         },
         "shape_memory_stress_strain": {
             "class": builder_ui.ShapeMemoryStressStrainSection,

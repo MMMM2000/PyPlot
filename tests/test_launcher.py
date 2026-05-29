@@ -797,6 +797,12 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["mini_dma"]
     assert section_payload["rows"]
+    row = section_payload["rows"][0]
+    assert row["Mini DMA strain by stress/load"] == [
+        "50 MPa: 0.1% @ 20 mA",
+        "100 MPa: 0.2% @ 20 mA",
+    ]
+    assert row["Mini DMA break point"] == ""
     assert section_payload["payloads"]["mini_dma_records"]["encoding"] == "pickle-base64"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     command = manifest["commands"][0]

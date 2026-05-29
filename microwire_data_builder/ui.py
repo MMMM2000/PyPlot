@@ -84,6 +84,8 @@ from .core import (
     VSM_TEMPERATURE_SCAN_COLUMN,
     DMA_ISOSTRESS_COLUMN,
     MINI_DMA_COLUMN,
+    MINI_DMA_STRAIN_COLUMN,
+    MINI_DMA_BREAK_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
     SHAPE_MEMORY_DISPLACEMENT_COLUMN,
     SHAPE_MEMORY_LOAD_COLUMN,
@@ -7079,6 +7081,43 @@ def _graph_records_to_frame(
             }
         )
     return pd.DataFrame(rows, columns=columns)
+
+
+def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame:
+    frame = _graph_records_to_frame(
+        records,
+        MINI_DMA_COLUMN,
+        sample_column="_sample",
+    )
+    if MINI_DMA_STRAIN_COLUMN not in frame.columns:
+        frame[MINI_DMA_STRAIN_COLUMN] = [[] for _ in range(len(frame.index))]
+    if MINI_DMA_BREAK_COLUMN not in frame.columns:
+        frame[MINI_DMA_BREAK_COLUMN] = ""
+    if not records or frame.empty:
+        return frame
+
+    grouped: Dict[str, List[MiniDmaRecord]] = {}
+    for record in records:
+        sample = getattr(record, "sample", None)
+        if isinstance(sample, str) and sample.strip():
+            grouped.setdefault(sample, []).append(record)
+    for index, row in frame.iterrows():
+        sample = row.get("_sample", "")
+        group = grouped.get(sample, []) if isinstance(sample, str) else []
+        strain_lines: List[str] = []
+        break_lines: List[str] = []
+        for record in group:
+            for line in getattr(record, "strain_summary", ()) or ():
+                if line and line not in strain_lines:
+                    strain_lines.append(str(line))
+            break_summary = getattr(record, "break_summary", "") or ""
+            if break_summary and break_summary not in break_lines:
+                break_lines.append(str(break_summary))
+        frame.at[index, MINI_DMA_STRAIN_COLUMN] = strain_lines
+        frame.at[index, MINI_DMA_BREAK_COLUMN] = (
+            list(dict.fromkeys(break_lines)) if break_lines else ""
+        )
+    return frame
 
 
 def _drop_visible_sample_column(section: "MiniDatabaseSection") -> None:
@@ -17907,12 +17946,24 @@ class MiniDmaSection(MiniDatabaseSection):
             label = run_path.name
             if variant:
                 label = f"{variant} - {label}"
+            strain_summary: Tuple[str, ...] = ()
+            break_summary = ""
+            try:
+                sweep_summary = mini_dma_core.summarize_current_sweep(run)
+                strain_summary = tuple(
+                    mini_dma_core.format_current_sweep_strain_summary(sweep_summary)
+                )
+                break_summary = mini_dma_core.format_current_sweep_break_summary(sweep_summary)
+            except Exception:
+                self.logger.exception("Failed to summarize Mini DMA run %s", run_path)
             record = MiniDmaRecord(
                 path=run_path,
                 sample=sample or raw_sample or getattr(run, "sample_name", "") or run_path.name,
                 data=run.frame,
                 key=key,
                 label=label,
+                strain_summary=strain_summary,
+                break_summary=break_summary,
             )
             if variant:
                 setattr(record, "variant", variant)
@@ -17926,11 +17977,7 @@ class MiniDmaSection(MiniDatabaseSection):
                     progress(idx, total, f"Parsed {run_path.name}")
                 except Exception:
                     pass
-        table = _graph_records_to_frame(
-            records,
-            MINI_DMA_COLUMN,
-            sample_column="_sample",
-        )
+        table = _mini_dma_records_to_frame(records)
         return SectionProcessResult(
             table=table,
             processed=processed,

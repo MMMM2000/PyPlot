@@ -45,7 +45,12 @@ FabricationIndex = core.FabricationIndex
 MeasurementMetadata = core.MeasurementMetadata
 MeasurementRecord = core.MeasurementRecord
 ShapeMemoryStressStrainRecord = core.ShapeMemoryStressStrainRecord
+MiniDmaRecord = core.MiniDmaRecord
+VsmTemperatureScanRecord = core.VsmTemperatureScanRecord
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = core.SHAPE_MEMORY_STRESS_STRAIN_COLUMN
+MINI_DMA_COLUMN = core.MINI_DMA_COLUMN
+MINI_DMA_STRAIN_COLUMN = core.MINI_DMA_STRAIN_COLUMN
+MINI_DMA_BREAK_COLUMN = core.MINI_DMA_BREAK_COLUMN
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = core.SHAPE_MEMORY_DISPLACEMENT_COLUMN
 SHAPE_MEMORY_LOAD_COLUMN = core.SHAPE_MEMORY_LOAD_COLUMN
 SHAPE_MEMORY_STRAIN_COLUMN = core.SHAPE_MEMORY_STRAIN_COLUMN
@@ -1000,6 +1005,58 @@ def test_build_database_populates_shape_memory_graph_column(tmp_path: Path) -> N
 
     assert SHAPE_MEMORY_STRESS_STRAIN_COLUMN in result.dataframe.columns
     assert result.dataframe.iloc[0][SHAPE_MEMORY_STRESS_STRAIN_COLUMN] == ["loop"]
+
+
+def test_build_database_includes_mini_dma_strain_and_break_summary(tmp_path: Path) -> None:
+    anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
+    anneal_path.write_text("placeholder", encoding="utf-8")
+    metadata = MeasurementMetadata(
+        composition_token="Ni50Fe27Ga23",
+        draw_x=5,
+        piece_y=4,
+        setpoint_mA=1000,
+        alt_variant=False,
+        measurement_id="test-measurement",
+        file_name=anneal_path.name,
+        relpath=anneal_path.name,
+        timestamp_mtime_utc="2026-03-11T00:00:00+00:00",
+    )
+    measurement = MeasurementRecord(
+        path=anneal_path,
+        metadata=metadata,
+        dataframe=pd.DataFrame({"I_A": [0.1], "V_V": [0.2], "R_ohm": [2.0], "I_mA": [100.0]}),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    mini_dma = MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 mini_run01",
+        sample="Ni50Fe27Ga23 5_4",
+        data=pd.DataFrame({"current_mA": [20.0]}),
+        key=("Ni50Fe27Ga23", 5, 4, None),
+        label="mini_run01",
+        strain_summary=("50 MPa / 1.46 g: 0.1% @ 20 mA",),
+        break_summary="400 MPa / 11.69 g @ 35 mA",
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path,
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+        ),
+        measurement_records=[measurement],
+        mini_dma_records=[mini_dma],
+        fabrication_index=FabricationIndex(),
+        skip_exports=True,
+    )
+
+    row = result.dataframe.iloc[0]
+    assert row[MINI_DMA_COLUMN] == ["mini_run01"]
+    assert row[MINI_DMA_STRAIN_COLUMN] == ["50 MPa / 1.46 g: 0.1% @ 20 mA"]
+    assert row[MINI_DMA_BREAK_COLUMN] == ["400 MPa / 11.69 g @ 35 mA"]
 
 
 def test_build_database_populates_shape_memory_value_columns(tmp_path: Path) -> None:
@@ -4388,6 +4445,64 @@ def test_build_database_merges_current_density_and_transition_entries(tmp_path: 
     assert row["Af (°C)"] == pytest.approx(35.0)
     assert row["Ms (°C)"] == pytest.approx(18.0)
     assert row["Mf (°C)"] == pytest.approx(8.0)
+
+
+def test_build_database_estimates_transition_temps_from_vsm_scan_records(tmp_path: Path) -> None:
+    anneal_path = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    anneal_path.write_text("0.1 0.2 2.0\n")
+    heating_x = np.linspace(0.0, 100.0, 101)
+    cooling_x = heating_x[::-1]
+    heating_y = np.piecewise(
+        heating_x,
+        [heating_x <= 30.0, (heating_x > 30.0) & (heating_x < 70.0), heating_x >= 70.0],
+        [
+            lambda value: 0.01 * value,
+            lambda value: 0.3 + 0.09 * (value - 30.0),
+            lambda value: 3.9 + 0.012 * (value - 70.0),
+        ],
+    )
+    cooling_y = np.piecewise(
+        cooling_x,
+        [cooling_x <= 25.0, (cooling_x > 25.0) & (cooling_x < 65.0), cooling_x >= 65.0],
+        [
+            lambda value: 0.01 * value,
+            lambda value: 0.25 + 0.09 * (value - 25.0),
+            lambda value: 3.85 + 0.012 * (value - 65.0),
+        ],
+    )
+    scan = VsmTemperatureScanRecord(
+        path=tmp_path / "scan.txt",
+        sample="Ni55Fe18Ga27 1_1",
+        data=pd.DataFrame(
+            {
+                "temperature": np.concatenate([heating_x, cooling_x]),
+                "field": [10000.0] * 202,
+                "signal": np.concatenate([heating_y, cooling_y]),
+                "section_index": [0] * 101 + [1] * 101,
+            }
+        ),
+        key=("Ni55Fe18Ga27", 1, 1, None),
+        label="scan",
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[anneal_path],
+            output_dir=tmp_path / "out",
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+        ),
+        vsm_temperature_scan_records=[scan],
+        skip_exports=True,
+    )
+
+    row = result.dataframe.iloc[0]
+    assert row["As (°C)"] == pytest.approx(30.0, abs=1.0)
+    assert row["Af (°C)"] == pytest.approx(70.0, abs=1.0)
+    assert row["Ms (°C)"] == pytest.approx(65.0, abs=1.0)
+    assert row["Mf (°C)"] == pytest.approx(25.0, abs=1.0)
 
 
 def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
