@@ -16932,6 +16932,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_post_hold_throttle_until_s = 0.0
         self._active_current_sweep_last_setpoint_mA = None
         self._clear_current_sweep_ramp_hold()
+        self._set_supply_current_ramp_rate_mA_s(None)
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
@@ -17983,6 +17984,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0
             self._clear_current_sweep_ramp_hold()
+            self._set_supply_current_ramp_rate_mA_s(None)
             return True
         return False
 

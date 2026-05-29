@@ -7959,6 +7959,7 @@ def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_
 
         def __init__(self) -> None:
             self.commands: list[float] = []
+            self.ramp_rates: list[float | None] = []
 
         def is_connected(self) -> bool:
             return True
@@ -7968,6 +7969,9 @@ def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_
 
         def set_current_mA(self, current_mA: float) -> None:
             self.commands.append(current_mA)
+
+        def set_current_ramp_rate_mA_s(self, rate_mA_s: float | None) -> None:
+            self.ramp_rates.append(rate_mA_s)
 
         def initialize_output(self, *, current_mA: float, reset_on_start: bool) -> None:
             self.commands.append(current_mA)
@@ -8022,6 +8026,7 @@ def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_
 
         assert window._handle_current_sweep_step(step, 4) is True
         assert supply.commands == [3.0, 2.0]
+        assert supply.ramp_rates == [None]
         assert window._supply_last_setpoint_mA == pytest.approx(2.0)
         assert "reversing recipe current back to the sweep start current" in window.log_output.toPlainText()
     finally:
@@ -13545,12 +13550,16 @@ def test_manual_recipe_stop_turns_current_off_and_keeps_resume_state(tmp_path: P
     class _FakeSupply:
         def __init__(self) -> None:
             self.off_count = 0
+            self.ramp_rates: list[float | None] = []
 
         def is_connected(self) -> bool:
             return True
 
         def output_off(self) -> None:
             self.off_count += 1
+
+        def set_current_ramp_rate_mA_s(self, rate_mA_s: float | None) -> None:
+            self.ramp_rates.append(rate_mA_s)
 
         def disconnect(self) -> None:
             return None
@@ -13583,6 +13592,7 @@ def test_manual_recipe_stop_turns_current_off_and_keeps_resume_state(tmp_path: P
         window._stop_auto_ramp(user_initiated=True)
 
         assert supply.off_count == 1
+        assert supply.ramp_rates == [None]
         assert window._supply_output_enabled is False
         assert window._resume_recipe_state is not None
         assert window._resume_recipe_state.index == 1
