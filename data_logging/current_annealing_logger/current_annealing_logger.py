@@ -4344,7 +4344,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "start_current_mA": int(getattr(self, "start_current_mA", 1)),
             "max_current_mA": int(getattr(self, "max_current_mA", 10)),
             "step_mA": int(getattr(self, "current_step_mA", 1)),
-            "hold_duration_s": int(getattr(self, "hold_duration_s", 0)),
             "reverse_enabled": reverse,
             "loops": loops,
             "loops_infinite": infinite,

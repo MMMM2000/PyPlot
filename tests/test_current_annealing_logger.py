@@ -549,6 +549,7 @@ def test_current_annealing_prepare_output_file_creates_metadata_sidecar(tmp_path
     assert payload["data_file"] == data_path.name
     assert payload["supply"]["profile_id"] == "shared_hmp_broker"
     assert payload["supply"]["channel"] == 1
+    assert "hold_duration_s" not in payload
 
 
 def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) -> None:
