@@ -472,6 +472,26 @@ def _clean_component_points(points: pd.DataFrame, row: pd.Series, component: str
     return data.sort_values("current_set_mA")
 
 
+def _set_tight_y_limits(axis: object, values: pd.Series) -> None:
+    clean = pd.Series(values, dtype="float64").replace([np.inf, -np.inf], np.nan).dropna()
+    if clean.empty:
+        return
+    y_min = float(clean.min())
+    y_max = float(clean.max())
+    span = y_max - y_min
+    if not math.isfinite(span):
+        return
+    if span <= 0:
+        margin = max(abs(y_min) * 0.05, 1.0)
+    else:
+        margin = max(span * 0.08, abs(y_max) * 0.01, 1e-12)
+    lower = y_min - margin
+    upper = y_max + margin
+    axis.set_ylim(lower, upper)
+    if lower <= 0.0 <= upper:
+        axis.axhline(0.0, color="0.35", linewidth=0.6)
+
+
 def _plot_component(points: pd.DataFrame, selection: pd.DataFrame, component: str, label: str, path: Path) -> None:
     if selection.empty:
         return
@@ -490,7 +510,7 @@ def _plot_component(points: pd.DataFrame, selection: pd.DataFrame, component: st
                 linewidth=1.2,
                 label=direction,
             )
-        axis.axhline(0.0, color="0.35", linewidth=0.6)
+        _set_tight_y_limits(axis, data[component])
         axis.set_ylabel(label)
         axis.set_title(
             f"{row.frequency_hz:g} Hz, {row.excitation_mA:g} mA ({row.h_ac_oe:.2f} Oe), "
@@ -525,7 +545,7 @@ def _plot_complex(points: pd.DataFrame, selection: pd.DataFrame, path: Path) -> 
                     linewidth=1.2,
                     label=direction,
                 )
-            axis.axhline(0.0, color="0.35", linewidth=0.6)
+            _set_tight_y_limits(axis, data[component])
             axis.set_ylabel(label)
             axis.set_title(f"{row.frequency_hz:g} Hz, {row.excitation_mA:g} mA ({row.h_ac_oe:.2f} Oe)")
             axis.legend(fontsize=8)
