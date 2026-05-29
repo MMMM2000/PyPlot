@@ -388,22 +388,13 @@ class Ui_MainWindow(object):
         self.spinBox_step_mA.setMaximumWidth(90)
         ramp.addWidget(self.label_step, 0, 2)
         ramp.addWidget(self.spinBox_step_mA, 0, 3)
-        self.label_hold_duration = QtWidgets.QLabel("Hold time [s]:")
-        self.spinBox_hold_duration = QtWidgets.QSpinBox()
-        self.spinBox_hold_duration.setRange(0, 36000)
-        self.spinBox_hold_duration.setValue(0)
-        self.spinBox_hold_duration.setMaximumWidth(90)
-        ramp.addWidget(self.label_hold_duration, 1, 0)
-        ramp.addWidget(self.spinBox_hold_duration, 1, 1)
-        self.label_hold_duration.hide()
-        self.spinBox_hold_duration.hide()
         self.label_start_current = QtWidgets.QLabel("Start current [mA]:")
         self.spinBox_start_current = QtWidgets.QSpinBox()
         self.spinBox_start_current.setRange(1, 10000)
         self.spinBox_start_current.setValue(10)
         self.spinBox_start_current.setMaximumWidth(90)
-        ramp.addWidget(self.label_start_current, 1, 2)
-        ramp.addWidget(self.spinBox_start_current, 1, 3)
+        ramp.addWidget(self.label_start_current, 1, 0)
+        ramp.addWidget(self.spinBox_start_current, 1, 1)
         ramp.addItem(
             QtWidgets.QSpacerItem(
                 0,
@@ -417,16 +408,6 @@ class Ui_MainWindow(object):
             1,
         )
         grid.addLayout(ramp, 2, 0, 1, 2)
-
-        # Hold/Stop button spans the main columns to stay visible
-        self.pushButton_hold_current = QtWidgets.QPushButton("Hold current now!")
-        self.pushButton_hold_current.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
-        self.pushButton_hold_current.setMinimumWidth(220)
-        grid.addWidget(self.pushButton_hold_current, 3, 0, 1, 2)
-        self.pushButton_hold_current.hide()
 
         # Reverse sweep and loops controls
         rev = QtWidgets.QHBoxLayout()
@@ -614,33 +595,6 @@ class Ui_MainWindow(object):
         lv.addWidget(lcd_resistance, 0, 2)
         lv.addWidget(self.label_Ohm, 0, 3)
         grid.addWidget(self.groupBox_live_values, 10, 0, 1, 2)
-
-        # Hold resistance and percent
-        hr_layout = QtWidgets.QHBoxLayout()
-        self.label_resistance_at_hold_current = QtWidgets.QLabel("0")
-        self.label_resistance_percent_from_hold = QtWidgets.QLabel("0")
-        self.label_resistance_ohm_suffix = QtWidgets.QLabel("Ohm")
-        self.label_percent_suffix = QtWidgets.QLabel("%")
-        self.label_hold_resistance_caption = QtWidgets.QLabel("Hold resistance:")
-        hr_layout.addWidget(self.label_hold_resistance_caption)
-        hr_layout.addWidget(self.label_resistance_at_hold_current)
-        hr_layout.addWidget(self.label_resistance_ohm_suffix)
-        hr_layout.addSpacing(16)
-        self.label_percent_from_hold_caption = QtWidgets.QLabel("Percent from hold:")
-        hr_layout.addWidget(self.label_percent_from_hold_caption)
-        hr_layout.addWidget(self.label_resistance_percent_from_hold)
-        hr_layout.addWidget(self.label_percent_suffix)
-        hr_layout.addStretch(1)
-        grid.addLayout(hr_layout, 11, 0, 1, 2)
-        for widget in (
-            self.label_hold_resistance_caption,
-            self.label_resistance_at_hold_current,
-            self.label_resistance_ohm_suffix,
-            self.label_percent_from_hold_caption,
-            self.label_resistance_percent_from_hold,
-            self.label_percent_suffix,
-        ):
-            widget.hide()
 
         # Start/Stop and reverse buttons (pinned below the scroll area)
         self.pushButton_start_process = QtWidgets.QPushButton("Start annealing process")

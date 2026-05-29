@@ -283,11 +283,13 @@ def test_current_annealing_hides_legacy_hold_controls(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
 
-    assert window.ui.pushButton_hold_current.isHidden()
-    assert window.ui.spinBox_hold_duration.isHidden()
-    assert window.ui.label_hold_duration.isHidden()
-    assert window.ui.label_resistance_at_hold_current.isHidden()
-    assert window.ui.label_resistance_percent_from_hold.isHidden()
+    assert not hasattr(window.ui, "pushButton_hold_current")
+    assert not hasattr(window.ui, "spinBox_hold_duration")
+    assert not hasattr(window.ui, "label_hold_duration")
+    assert not hasattr(window.ui, "label_resistance_at_hold_current")
+    assert not hasattr(window.ui, "label_resistance_percent_from_hold")
+    assert not hasattr(window.ui, "label_hold_resistance_caption")
+    assert not hasattr(window.ui, "label_percent_from_hold_caption")
     assert window.ui.comboBox_max_voltage_action.findData("hold") < 0
     assert not hasattr(window, "hold_timer")
     assert not hasattr(logger_mod.MainWindow, "_percent_from_hold")
@@ -309,14 +311,13 @@ def test_current_annealing_voltage_limit_no_longer_holds_current(qtbot) -> None:
     assert window.direction_ascending is False
 
 
-def test_current_annealing_planned_time_ignores_hidden_hold_duration(qtbot) -> None:
+def test_current_annealing_planned_time_has_no_hidden_hold_duration(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
 
     window.ui.spinBox_start_current.setValue(1)
     window.ui.spinBox_max_current.setValue(3)
     window.ui.spinBox_step_mA.setValue(1.0)
-    window.ui.spinBox_hold_duration.setValue(99)
     window.ui.checkBox_reverse.setChecked(True)
     window.ui.spinBox_loops.setValue(1)
 
