@@ -2,7 +2,7 @@
 
 The shared HMP broker is the foundation for running multiple bench tools against one multi-channel HMP supply without letting independent programs write to the same serial command stream. It supports HMP4030 and HMP4040 supplies through the same HMP40xx model layer.
 
-The first implementation adds the broker, JSON-line localhost protocol, fake-driver tests, and a setup utility. Current Annealing Logger and Mini DMA Logger can opt into the shared broker path while keeping their existing direct serial supply modes.
+The shared HMP broker adds channel leases, a JSON-line localhost protocol, fake-driver tests, and logger integrations. Current Annealing Logger and Mini DMA Logger can opt into the shared broker path while keeping their existing direct serial supply modes.
 
 ## Safety Model
 
@@ -22,9 +22,9 @@ The first implementation adds the broker, JSON-line localhost protocol, fake-dri
 
 Both models use the same relevant channel-selection pattern, `INST:NSEL <channel>`, for broker-controlled channel operations.
 
-## Setup Utility
+## Bench Wiring
 
-Open **Shared HMP PSU Setup** from the launcher to review a bench profile. The utility shows only the channels that exist on the selected model and lets the operator assign each channel one role:
+The broker profile shows only the channels that exist on the selected model and assigns each channel one role:
 
 - Unused
 - Mini DMA motor supply
@@ -32,7 +32,7 @@ Open **Shared HMP PSU Setup** from the launcher to review a bench profile. The u
 - Current annealing
 - Other/manual
 
-Saved profiles are bench memory, not silent defaults. Loading a profile can pre-fill known wiring, but the setup utility requires review when the model, port identity, or confirmation state changes before output enable is allowed.
+Saved profiles are bench memory, not silent defaults. Logger UIs still start channel selectors at **Select channel...** after model changes or detection, and the operator must choose the physically wired channel before output enable is allowed. Routine broker startup now happens from Current Annealing or Mini DMA after those explicit channel choices, instead of through a separate launcher entry.
 
 ## Current HMP4040 Bench Example
 
@@ -67,7 +67,7 @@ Current ramps should use `schedule_current_ramp`. The broker quantizes requested
 
 The first scheduled mode targets reliable dual-logger `1 Hz` readback rather than high-rate acquisition. CH1/CH4 current paths are normally polled at about `1 s`; CH3 motor-supply readback should remain slower or explicit because it is mainly a rail-health check, not a per-point measurement channel.
 
-Current Annealing Logger exposes **Shared HMP broker** as an optional supply profile. In that mode it leases the selected channel with the `Current annealing` role, configures only that channel on start, reads broker voltage/current snapshots, sends current ramp targets through the broker scheduler when available, and turns off/releases only the leased channel on stop. Its raw serial command box is disabled in broker mode.
+Current Annealing Logger defaults to **Shared HMP broker**. In that mode it leases the selected channel with the `Current annealing` role, configures only that channel on start, reads broker voltage/current snapshots, sends current ramp targets through the broker scheduler when available, and turns off/releases only the leased channel on stop. Start can auto-connect or start the broker after the operator has selected a real channel; it does not guess the wiring. Its raw serial command box is disabled in broker mode, and obsolete hold-current actions fall back to reversing toward the start current.
 
 Mini DMA Logger exposes **Shared HMP broker** as an optional current-annealing supply profile. In that mode it connects to the localhost broker instead of opening the HMP serial port directly, leases the configured current-sweep channel with the `Mini DMA current sweep` role, and leases the motor-supply channel with the `Mini DMA motor supply` role only when that channel is configured. During recipe current sweeps it passes the recipe ramp rate to the broker so delayed GUI/control ticks do not produce oversized current jumps at the PSU. Direct HMP4030/HMP4040 serial profiles remain available for non-shared benches.
 

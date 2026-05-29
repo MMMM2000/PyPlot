@@ -3932,14 +3932,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.update_time_estimate()
             if self.process_running:
                 self.stop_annealing(f"{limit_label} reached — stopping measurement.", show_dialog=False)
-        else:  # hold current
-            self.current_increment = 0
-            self.force_stop_at_zero = False
-            self.direction_ascending = False
-            self._note_voltage_limit_reached()
-            self.update_time_estimate()
-            self._show_status_message(f"{limit_label} reached — holding current.")
-
     def _show_max_voltage_prompt(self) -> None:
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle("Voltage limit reached")
