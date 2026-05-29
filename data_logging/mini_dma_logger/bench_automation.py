@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -17,6 +18,7 @@ MINI_DMA_BENCH_CONFIRMATION = "MINI_DMA_BENCH_ARMED"
 PLAN_KIND = "mini_dma_bench_sequence"
 PLAN_SCHEMA_VERSION = 1
 DEFAULT_MAX_RUN_DURATION_S = 3600.0
+DEFAULT_BENCH_LOCK_TIMEOUT_S = 300.0
 
 
 class MiniDmaBenchAutomationError(RuntimeError):
@@ -43,6 +45,15 @@ class MiniDmaBenchGuardrails:
 
 
 @dataclass(frozen=True)
+class MiniDmaBenchLockConfig:
+    enabled: bool
+    timeout_s: float = DEFAULT_BENCH_LOCK_TIMEOUT_S
+    owner: str = "mini_dma_bench_automation"
+    purpose: str | None = None
+    lock_path: Path | None = None
+
+
+@dataclass(frozen=True)
 class MiniDmaBenchPlan:
     path: Path
     execute: bool
@@ -50,6 +61,7 @@ class MiniDmaBenchPlan:
     summary_path: Path | None
     max_total_duration_s: float | None
     guardrails: MiniDmaBenchGuardrails
+    bench_lock: MiniDmaBenchLockConfig
     runs: tuple[MiniDmaBenchRun, ...]
 
 
@@ -141,6 +153,36 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         allow_mechanical_slack_takeup=bool(raw_guardrails.get("allow_mechanical_slack_takeup", False)),
         mechanical_slack_max_seek_mm=mechanical_slack_max_seek_mm,
     )
+    raw_bench_lock = payload.get("bench_lock", {})
+    if raw_bench_lock is None:
+        raw_bench_lock = {}
+    if not isinstance(raw_bench_lock, Mapping):
+        raise MiniDmaBenchAutomationError("Mini DMA bench plan field 'bench_lock' must be an object.")
+    bench_lock_path = None
+    if raw_bench_lock.get("lock_path") is not None:
+        bench_lock_path = _resolve_plan_path(
+            base,
+            raw_bench_lock["lock_path"],
+            field="bench_lock.lock_path",
+            must_exist=False,
+        )
+    bench_lock_owner = str(raw_bench_lock.get("owner") or "mini_dma_bench_automation").strip()
+    if not bench_lock_owner:
+        raise MiniDmaBenchAutomationError("Mini DMA bench plan bench_lock.owner must not be empty.")
+    bench_lock_purpose = raw_bench_lock.get("purpose")
+    if bench_lock_purpose is not None:
+        bench_lock_purpose = str(bench_lock_purpose).strip() or None
+    bench_lock = MiniDmaBenchLockConfig(
+        enabled=bool(raw_bench_lock.get("enabled", execute)),
+        timeout_s=_as_float(
+            raw_bench_lock.get("timeout_s", DEFAULT_BENCH_LOCK_TIMEOUT_S),
+            field="bench_lock.timeout_s",
+            minimum=0.0,
+        ),
+        owner=bench_lock_owner,
+        purpose=bench_lock_purpose,
+        lock_path=bench_lock_path,
+    )
     default_max_run_duration_s = _as_float(
         payload.get("default_max_run_duration_s", DEFAULT_MAX_RUN_DURATION_S),
         field="default_max_run_duration_s",
@@ -217,6 +259,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         summary_path=summary_path,
         max_total_duration_s=max_total_duration_s,
         guardrails=guardrails,
+        bench_lock=bench_lock,
         runs=tuple(runs),
     )
 
@@ -557,6 +600,7 @@ def run_mini_dma_bench_plan(
     qt_args: Sequence[str] | None = None,
     app_factory: Callable[[Sequence[str] | None], Any] | None = None,
     window_factory: Callable[..., Any] | None = None,
+    bench_lock_factory: Callable[..., AbstractContextManager[Any]] | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     plan = load_mini_dma_bench_plan(path)
@@ -567,6 +611,13 @@ def run_mini_dma_bench_plan(
             "mode": "dry_run",
             "plan_path": str(plan.path),
             "run_count": len(plan.runs),
+            "bench_lock": {
+                "enabled": plan.bench_lock.enabled,
+                "timeout_s": plan.bench_lock.timeout_s,
+                "owner": plan.bench_lock.owner,
+                "purpose": plan.bench_lock.purpose,
+                "lock_path": None if plan.bench_lock.lock_path is None else str(plan.bench_lock.lock_path),
+            },
             "runs": [
                 {
                     "name": run.name,
@@ -589,60 +640,87 @@ def run_mini_dma_bench_plan(
 
     from .mini_dma_logger import MainWindow
 
-    app = app_factory(qt_args) if app_factory is not None else _ensure_qapplication(qt_args)
-    factory = window_factory or MainWindow
-    restore_warning = _suppress_modal_warnings()
     run_summaries: list[dict[str, Any]] = []
     total_start_s = time.monotonic()
     total_deadline_s = None
     if plan.max_total_duration_s is not None:
         total_deadline_s = total_start_s + plan.max_total_duration_s
-    try:
-        stop_after_wire_break = False
-        for run in plan.runs:
-            if stop_after_wire_break:
-                run_summaries.append(
-                    {
-                        "name": run.name,
-                        "recipe_path": str(run.recipe_path),
-                        "repeat_index": run.repeat_index,
-                        "status": "skipped_after_wire_break",
-                    }
-                )
-                continue
-            if total_deadline_s is not None and time.monotonic() >= total_deadline_s:
-                run_summaries.append(
-                    {
-                        "name": run.name,
-                        "recipe_path": str(run.recipe_path),
-                        "repeat_index": run.repeat_index,
-                        "status": "skipped_total_timeout",
-                    }
-                )
-                continue
-            window = factory(log_dir=None if plan.log_dir is None else str(plan.log_dir), persist_settings=True)
-            try:
-                run_summary = _execute_run(
-                    run,
-                    app=app,
-                    window=window,
-                    guardrails=plan.guardrails,
-                    sleep_fn=sleep_fn,
-                    total_deadline_s=total_deadline_s,
-                )
-                run_summaries.append(_attach_control_trace_replay(run_summary))
-                if (
-                    run_summaries[-1].get("status") == "wire_break"
-                    and plan.guardrails.wire_break_stops_plan
-                ):
-                    stop_after_wire_break = True
-            finally:
-                close = getattr(window, "close", None)
-                if callable(close):
-                    close()
-                app.processEvents()
-    finally:
-        restore_warning()
+    if plan.bench_lock.enabled:
+        from data_logging.shared_power_supply.bench_guard import wait_for_bench_lock
+
+        lock_factory = bench_lock_factory or wait_for_bench_lock
+        bench_lock_context = lock_factory(
+            owner=plan.bench_lock.owner,
+            purpose=plan.bench_lock.purpose or f"Mini DMA bench plan {plan.path.name}",
+            timeout_s=plan.bench_lock.timeout_s,
+            lock_path=plan.bench_lock.lock_path,
+        )
+    else:
+        bench_lock_context = nullcontext()
+
+    with bench_lock_context:
+        app = app_factory(qt_args) if app_factory is not None else _ensure_qapplication(qt_args)
+        factory = window_factory or MainWindow
+        restore_warning = _suppress_modal_warnings()
+        try:
+            stop_after_wire_break = False
+            for run in plan.runs:
+                if stop_after_wire_break:
+                    run_summaries.append(
+                        {
+                            "name": run.name,
+                            "recipe_path": str(run.recipe_path),
+                            "repeat_index": run.repeat_index,
+                            "status": "skipped_after_wire_break",
+                        }
+                    )
+                    continue
+                if total_deadline_s is not None and time.monotonic() >= total_deadline_s:
+                    run_summaries.append(
+                        {
+                            "name": run.name,
+                            "recipe_path": str(run.recipe_path),
+                            "repeat_index": run.repeat_index,
+                            "status": "skipped_total_timeout",
+                        }
+                    )
+                    continue
+                window = factory(log_dir=None if plan.log_dir is None else str(plan.log_dir), persist_settings=True)
+                try:
+                    run_summary = _execute_run(
+                        run,
+                        app=app,
+                        window=window,
+                        guardrails=plan.guardrails,
+                        sleep_fn=sleep_fn,
+                        total_deadline_s=total_deadline_s,
+                    )
+                    run_summaries.append(_attach_control_trace_replay(run_summary))
+                    if (
+                        run_summaries[-1].get("status") == "wire_break"
+                        and plan.guardrails.wire_break_stops_plan
+                    ):
+                        stop_after_wire_break = True
+                finally:
+                    close = getattr(window, "close", None)
+                    if callable(close):
+                        close()
+                    app.processEvents()
+        finally:
+            restore_warning()
+
+    bench_lock_summary = {
+        "enabled": plan.bench_lock.enabled,
+        "timeout_s": plan.bench_lock.timeout_s,
+        "owner": plan.bench_lock.owner,
+        "purpose": plan.bench_lock.purpose or f"Mini DMA bench plan {plan.path.name}",
+        "lock_path": None if plan.bench_lock.lock_path is None else str(plan.bench_lock.lock_path),
+    }
+    if hasattr(bench_lock_context, "path"):
+        try:
+            bench_lock_summary["lock_path"] = str(bench_lock_context.path)
+        except Exception:
+            pass
 
     summary = {
         "kind": PLAN_KIND,
@@ -650,6 +728,7 @@ def run_mini_dma_bench_plan(
         "mode": "execute",
         "plan_path": str(plan.path),
         "log_dir": None if plan.log_dir is None else str(plan.log_dir),
+        "bench_lock": bench_lock_summary,
         "run_count": len(run_summaries),
         "elapsed_s": max(0.0, time.monotonic() - total_start_s),
         "runs": run_summaries,

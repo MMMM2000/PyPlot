@@ -17,7 +17,7 @@ Mini DMA intentionally has no profile-default output channel. Before using suppl
 ## Preconditions
 
 - Confirm no Mini DMA recipe or Current Annealing process is already running.
-- Coordinate Codex/hardware automation threads with the shared bench guard before touching the HMP. Use `python scripts/hmp_bench_guard.py status --probe` to inspect the default shared lock at `C:\tmp\pyplot_hmp_bench.lock` and the HMP readback state. Use `python scripts/hmp_bench_guard.py acquire --owner <thread-or-user> --purpose "<test>" --timeout <seconds>` when a script needs a short exclusive hardware window.
+- Coordinate Codex/hardware automation threads with the shared bench guard before touching the HMP. Use `python scripts/hmp_bench_guard.py status --probe` to inspect the default shared lock at `C:\tmp\pyplot_hmp_bench.lock` and the HMP readback state. Use `python scripts/hmp_bench_guard.py acquire --owner <thread-or-user> --purpose "<test>" --timeout <seconds>` when a script needs a short exclusive hardware window. Mini DMA bench automation takes this lock automatically for execute-mode plans unless the plan explicitly sets `"bench_lock": {"enabled": false}`.
 - Confirm HMP4040 is on `COM3` at `115200` baud.
 - Confirm the Current Annealing wire is connected to CH1 before any CH1 current test.
 - Confirm whether the Mini DMA current path is connected to CH4. If no wire/sample is connected, keep CH4 at a low voltage limit and treat the expected result as open-circuit behavior.
