@@ -4985,13 +4985,14 @@ def test_builder_column_groups_include_transition_and_current_density_columns() 
         assert "Af1 (mA)" in current_density_group
         assert "As2 (mA)" in current_density_group
         assert "Mf2-Af2 (mA)" in current_density_group
-        transition_group = groups.get("Transition temps")
-        assert transition_group == [
-            "As (°C)",
-            "Af (°C)",
-            "Ms (°C)",
-            "Mf (°C)",
-        ]
+        assert groups.get("Transition temps") == list(core.TRANSITION_TEMP_COLUMNS)
+        mini_dma_group = groups.get("Mini DMA")
+        assert isinstance(mini_dma_group, list)
+        assert core.MINI_DMA_COLUMN in mini_dma_group
+        assert core.MINI_DMA_ORIGIN_COLUMN in mini_dma_group
+        assert MINI_DMA_STRAIN_COLUMN in mini_dma_group
+        assert MINI_DMA_TRANSITION_COLUMN in mini_dma_group
+        assert MINI_DMA_BREAK_COLUMN in mini_dma_group
     finally:
         window._dirty = False
         window.hide()

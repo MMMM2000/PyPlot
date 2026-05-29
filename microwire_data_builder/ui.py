@@ -84,6 +84,7 @@ from .core import (
     VSM_TEMPERATURE_SCAN_COLUMN,
     DMA_ISOSTRESS_COLUMN,
     MINI_DMA_COLUMN,
+    MINI_DMA_ORIGIN_COLUMN,
     MINI_DMA_STRAIN_COLUMN,
     MINI_DMA_TRANSITION_COLUMN,
     MINI_DMA_BREAK_COLUMN,
@@ -26658,6 +26659,16 @@ class AssemblySection(QtWidgets.QWidget):
         add("vsm_hysteresis", [VSM_HYSTERESIS_COLUMN])
         add("vsm_temperature_scan", [VSM_TEMPERATURE_SCAN_COLUMN])
         add("dma_iso_stress", [DMA_ISOSTRESS_COLUMN])
+        add(
+            "mini_dma",
+            [
+                MINI_DMA_COLUMN,
+                MINI_DMA_ORIGIN_COLUMN,
+                MINI_DMA_STRAIN_COLUMN,
+                MINI_DMA_TRANSITION_COLUMN,
+                MINI_DMA_BREAK_COLUMN,
+            ],
+        )
         add(
             "shape_memory_stress_strain",
             [
