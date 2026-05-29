@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
 
 from data_logging.mini_dma_logger import bench_automation
+
+
+@pytest.fixture(autouse=True)
+def _avoid_real_bench_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "data_logging.shared_power_supply.bench_guard.wait_for_bench_lock",
+        lambda **_kwargs: nullcontext(),
+    )
 
 
 def _write_recipe(path: Path) -> None:
@@ -450,6 +459,91 @@ def test_mini_dma_bench_plan_writes_control_trace_replay_after_run(tmp_path: Pat
     assert (run_dir / "diagnostics" / "control_trace_replay" / "control_trace_replay.csv").exists()
     written_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert written_summary["runs"][0]["control_trace_replay"]["status"] == "written"
+
+
+def test_mini_dma_bench_plan_acquires_shared_hmp_lock_for_execution(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    lock_path = tmp_path / "hmp.lock"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "default_max_run_duration_s": 1,
+                "bench_lock": {
+                    "owner": "codex-test",
+                    "purpose": "coordinated hardware smoke",
+                    "timeout_s": 12.5,
+                    "lock_path": str(lock_path),
+                },
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    lock_calls: list[dict[str, object]] = []
+    events: list[tuple[str, object]] = []
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            events.append(("process", None))
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = False
+            self._session_active = False
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            return
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            return
+
+        def _start_auto_ramp(self) -> None:
+            events.append(("start", None))
+
+        def close(self) -> None:
+            events.append(("close", None))
+
+    def _lock_factory(**kwargs: object):
+        lock_calls.append(kwargs)
+        return nullcontext()
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        bench_lock_factory=_lock_factory,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert summary["mode"] == "execute"
+    assert summary["bench_lock"]["enabled"] is True
+    assert summary["bench_lock"]["owner"] == "codex-test"
+    assert summary["bench_lock"]["purpose"] == "coordinated hardware smoke"
+    assert lock_calls == [
+        {
+            "owner": "codex-test",
+            "purpose": "coordinated hardware smoke",
+            "timeout_s": 12.5,
+            "lock_path": lock_path,
+        }
+    ]
+    assert ("start", None) in events
 
 
 def test_mini_dma_bench_plan_uses_next_run_for_existing_output(tmp_path: Path) -> None:
