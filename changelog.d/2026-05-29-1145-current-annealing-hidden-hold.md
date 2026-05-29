@@ -12,3 +12,4 @@
 - Mini DMA automation indexing now reads the mirrored `metadata/<run-folder>/metadata.json` tree, including metadata-only recovered runs, while deduplicating normal run folders.
 - Added a Current Annealing metadata indexer that scans `metadata/<data-file-stem>/metadata.json` sidecars and writes CSV/JSONL summaries for run review.
 - The launcher CLI now exposes Mini DMA and Current Annealing metadata indexing commands so run review indexes are discoverable through `launcher.py --help`.
+- A single launcher metadata-index command can now build Mini DMA and Current Annealing indexes together when both source flags are provided.

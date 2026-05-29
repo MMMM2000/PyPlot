@@ -292,6 +292,7 @@ def test_launcher_detects_metadata_index_cli_flags() -> None:
 
     assert launcher_module._is_mini_dma_index_requested(args) is True  # noqa: SLF001
     assert launcher_module._is_current_annealing_index_requested(args) is True  # noqa: SLF001
+    assert launcher_module._is_metadata_index_requested(args) is True  # noqa: SLF001
     assert args.mini_dma_index_source == ["mini=C:/runs/mini"]
     assert args.mini_dma_index_output_dir == "artifacts/mini-index"
     assert args.current_annealing_index_source == ["annealing=C:/runs/annealing"]
@@ -338,17 +339,14 @@ def test_run_metadata_index_clis_write_outputs(
 
     mini_output = tmp_path / "mini_index"
     annealing_output = tmp_path / "annealing_index"
-    mini_args = argparse.Namespace(
+    args = argparse.Namespace(
         mini_dma_index_source=[f"mini={mini_source}"],
         mini_dma_index_output_dir=str(mini_output),
-    )
-    annealing_args = argparse.Namespace(
         current_annealing_index_source=[f"annealing={annealing_source}"],
         current_annealing_index_output_dir=str(annealing_output),
     )
 
-    assert launcher_module._run_mini_dma_index_cli(mini_args) == 0  # noqa: SLF001
-    assert launcher_module._run_current_annealing_index_cli(annealing_args) == 0  # noqa: SLF001
+    assert launcher_module._run_metadata_index_cli(args) == 0  # noqa: SLF001
 
     output = capsys.readouterr().out
     assert "[mini-dma-index] rows=1" in output

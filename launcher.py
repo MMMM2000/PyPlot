@@ -904,6 +904,10 @@ def _is_current_annealing_index_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "current_annealing_index_source", None))
 
 
+def _is_metadata_index_requested(args: argparse.Namespace) -> bool:
+    return _is_mini_dma_index_requested(args) or _is_current_annealing_index_requested(args)
+
+
 def _is_experiment_process_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "experiment_process", None))
 
@@ -1005,6 +1009,15 @@ def _run_current_annealing_index_cli(args: argparse.Namespace) -> int:
     print(f"[current-annealing-index] output_dir={output_dir}")
     print(f"[current-annealing-index] rows={len(rows)}")
     return 0
+
+
+def _run_metadata_index_cli(args: argparse.Namespace) -> int:
+    status = 0
+    if _is_mini_dma_index_requested(args):
+        status = max(status, _run_mini_dma_index_cli(args))
+    if _is_current_annealing_index_requested(args):
+        status = max(status, _run_current_annealing_index_cli(args))
+    return status
 
 
 _RVST_CSV_HEADER = ("iso_time", "t_elapsed_s", "sp_c", "pv_c", "resistance_ohm")
@@ -4148,10 +4161,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_run_automation_recipe(args, qt_args))
     if _is_mini_dma_bench_requested(args):
         raise SystemExit(_run_mini_dma_bench_plan(args, qt_args))
-    if _is_mini_dma_index_requested(args):
-        raise SystemExit(_run_mini_dma_index_cli(args))
-    if _is_current_annealing_index_requested(args):
-        raise SystemExit(_run_current_annealing_index_cli(args))
+    if _is_metadata_index_requested(args):
+        raise SystemExit(_run_metadata_index_cli(args))
     if _is_experiment_process_requested(args):
         raise SystemExit(_run_experiment_process(args))
     if _is_microwire_word_report_requested(args):
