@@ -6682,6 +6682,11 @@ def _sample_from_path(path: Path, sources: Sequence[str]) -> str:
     for source in sources:
         root = Path(source).expanduser()
         try:
+            if root.is_file() and path.resolve() == root.resolve():
+                return path.stem
+        except Exception:
+            pass
+        try:
             rel = path.resolve().relative_to(root.resolve())
         except Exception:
             continue
