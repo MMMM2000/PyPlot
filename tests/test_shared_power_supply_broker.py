@@ -352,6 +352,31 @@ def test_scheduler_direct_and_ramp_requests_override_each_other() -> None:
     assert "CURR 0.0014" not in commands
 
 
+def test_repeated_lease_for_same_owner_returns_existing_lease() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=3.0,
+        rate_mA_s=1.0,
+        max_step_mA=0.2,
+        resolution_mA=0.2,
+        now_s=0.0,
+    )
+
+    repeated = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+
+    assert repeated.lease_id == lease.lease_id
+    broker.process_scheduler_once(now_s=0.2)
+    assert "CURR 0.0012" in driver.command_log()
+
+
 def test_release_clears_scheduler_state_for_channel() -> None:
     driver = _driver()
     broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)

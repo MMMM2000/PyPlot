@@ -235,6 +235,8 @@ class SharedPowerSupplyBroker:
         existing = self._leases.get(channel)
         if existing is not None and existing.owner != owner:
             raise PermissionError(f"CH{channel} is already leased by {existing.owner}.")
+        if existing is not None:
+            return existing
         lease = ChannelLease(channel=channel, owner=owner, role=role, lease_id=uuid4().hex)
         self._leases[channel] = lease
         return lease
