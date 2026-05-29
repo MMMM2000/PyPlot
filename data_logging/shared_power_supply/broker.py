@@ -433,6 +433,9 @@ class SharedPowerSupplyBroker:
             pending = list(self._pending_currents.items())
             ramps = list(self._current_ramps.items())
         for channel, current in pending:
+            with self._scheduler_lock:
+                if self._pending_currents.get(channel) is not current:
+                    continue
             self.set_current(channel=channel, lease_id=current.lease_id, current_mA=current.current_mA)
             with self._scheduler_lock:
                 latest = self._pending_currents.get(channel)
@@ -447,6 +450,10 @@ class SharedPowerSupplyBroker:
                         if latest is not None and latest[1] is ramp:
                             self._current_ramps.pop(channel, None)
                 continue
+            with self._scheduler_lock:
+                latest = self._current_ramps.get(channel)
+                if latest is None or latest[0] != lease_id or latest[1] is not ramp:
+                    continue
             self.set_current(channel=channel, lease_id=lease_id, current_mA=next_mA)
             with self._scheduler_lock:
                 self._metrics["ramp_steps_sent"] += 1

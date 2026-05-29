@@ -352,6 +352,44 @@ def test_scheduler_direct_and_ramp_requests_override_each_other() -> None:
     assert "CURR 0.0014" not in commands
 
 
+def test_scheduler_skips_ramp_snapshot_if_newer_request_arrives_before_write() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=3.0,
+        rate_mA_s=1.0,
+        max_step_mA=0.2,
+        resolution_mA=0.2,
+        now_s=0.0,
+    )
+
+    _lease_id, ramp = broker._current_ramps[1]  # type: ignore[attr-defined]
+    original_next_setpoint = ramp.next_setpoint
+
+    def _next_setpoint_with_direct_override(*, now_s: float) -> float | None:
+        next_mA = original_next_setpoint(now_s=now_s)
+        broker.schedule_current(channel=1, lease_id=lease.lease_id, current_mA=1.0)
+        return next_mA
+
+    ramp.next_setpoint = _next_setpoint_with_direct_override  # type: ignore[method-assign]
+
+    broker.process_scheduler_once(now_s=0.2)
+
+    assert "CURR 0.0012" not in driver.command_log()
+    assert broker.snapshot()["scheduler"]["pending_currents"]["1"]["current_mA"] == pytest.approx(1.0)
+
+    broker.process_scheduler_once(now_s=0.4)
+
+    assert driver.command_log().count("CURR 0.0010") == 2
+    assert "CURR 0.0012" not in driver.command_log()
+
+
 def test_scheduler_thread_keeps_cached_readbacks_fresh() -> None:
     broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
     broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True)
