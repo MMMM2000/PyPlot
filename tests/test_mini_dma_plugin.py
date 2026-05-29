@@ -48,6 +48,26 @@ def test_current_sweep_groups_by_target_mpa() -> None:
     assert all(len(group) >= 2 for _target, group in groups)
 
 
+def test_current_sweep_groups_preserve_return_leg_duplicate_states() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0, 2.0, 3.0],
+            "automation_phase": ["current"] * 4,
+            "automation_target_value": [50.0] * 4,
+            "plateau_index": [1] * 4,
+            "strain_pct": [0.0, 0.5, 0.5, 0.0],
+            "resistance_ohm": [100.0] * 4,
+            "current_mA": [10.0, 20.0, 20.0, 10.0],
+        }
+    )
+
+    groups = core.current_sweep_groups(frame)
+
+    assert len(groups) == 1
+    _target, group = groups[0]
+    assert group["current_mA"].tolist() == [10.0, 20.0, 10.0]
+
+
 def test_make_figures_create_one_line_per_target() -> None:
     run = core.load_run(SAMPLE_RUN)
 

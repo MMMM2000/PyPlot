@@ -793,7 +793,7 @@ def _write_transition_mini_dma_run(
                     "100",
                     f"{current_mA:.6f}",
                     f"{current_mA:.6f}",
-                    f"{strain_pct / 1000.0:.6f}",
+                    f"{strain_pct / 10.0:.6f}",
                 ]
             )
         )
@@ -941,11 +941,11 @@ def test_builder_automation_recipe_updates_mini_dma_transition_currents(
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     row = output_payload["sections"]["mini_dma"]["rows"][0]
     assert row["Mini DMA transition currents by stress/load"] == [
-        "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 26 mA"
+        "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
     ]
     assemble_row = output_payload["sections"]["assemble"]["rows"][0]
     assert assemble_row["Mini DMA transition currents by stress/load"] == [
-        "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 26 mA"
+        "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
     ]
 
 

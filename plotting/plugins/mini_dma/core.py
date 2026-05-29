@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import pandas as pd
 from matplotlib.figure import Figure
@@ -143,9 +143,9 @@ def current_sweep_groups(frame: pd.DataFrame) -> list[tuple[float, pd.DataFrame]
         target_value = float(target)
         usable = group.sort_values("elapsed_s", kind="stable").copy()
         usable = usable[usable["current_mA"].abs() > 0.0]
-        usable = usable.drop_duplicates(
+        usable = _drop_consecutive_duplicate_rows(
+            usable,
             subset=["current_mA", "strain_pct", "resistance_ohm"],
-            keep="first",
         )
         if len(usable) < MIN_POINTS_PER_TARGET:
             continue
@@ -415,6 +415,19 @@ def _drop_resistance_outliers(group: pd.DataFrame) -> pd.DataFrame:
     if len(filtered) < MIN_POINTS_PER_TARGET:
         return group
     return filtered.reset_index(drop=True)
+
+
+def _drop_consecutive_duplicate_rows(
+    frame: pd.DataFrame,
+    *,
+    subset: Sequence[str],
+) -> pd.DataFrame:
+    available = [column for column in subset if column in frame.columns]
+    if not available or len(frame.index) < 2:
+        return frame
+    comparable = frame[available]
+    duplicate_previous = comparable.eq(comparable.shift()).all(axis=1)
+    return frame.loc[~duplicate_previous].copy()
 
 
 def _strain_from_trace_minimum_length(run: MiniDmaRun, group: pd.DataFrame) -> pd.Series:

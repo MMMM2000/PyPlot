@@ -39,6 +39,8 @@ def fit_tangent_transition(
     *,
     min_segment_points: int = 8,
     max_points: int = 240,
+    min_slope_gain_ratio: float = 1.5,
+    min_transition_width_fraction: float = 0.03,
 ) -> TangentTransitionFit | None:
     """Fit before/transition/after tangents and return their intersections."""
 
@@ -60,9 +62,14 @@ def fit_tangent_transition(
             after = _fit_segment(x[right_start:], y[right_start:])
             if before is None or transition is None or after is None:
                 continue
-            slope_gain = abs(transition.slope) - max(abs(before.slope), abs(after.slope))
+            baseline_slope = max(abs(before.slope), abs(after.slope))
+            slope_gain = abs(transition.slope) - baseline_slope
             if slope_gain <= 0.0:
                 continue
+            if baseline_slope > 1e-12:
+                slope_ratio = abs(transition.slope) / baseline_slope
+                if slope_ratio < min_slope_gain_ratio:
+                    continue
             total_rmse = _combined_rmse(
                 before.rmse,
                 left_end,
@@ -88,6 +95,12 @@ def fit_tangent_transition(
     finish_x = min(max(finish_x, lower), upper)
     if finish_x < start_x:
         start_x, finish_x = finish_x, start_x
+    width = finish_x - start_x
+    scan_width = upper - lower
+    if scan_width <= 0.0:
+        return None
+    if width < scan_width * min_transition_width_fraction:
+        return None
     return TangentTransitionFit(
         start_x=start_x,
         finish_x=finish_x,

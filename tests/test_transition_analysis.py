@@ -33,6 +33,16 @@ def test_tangent_transition_fit_recovers_piecewise_intersections() -> None:
     assert result.transition_slope > result.after.slope
 
 
+def test_tangent_transition_fit_rejects_noisy_linear_false_positive() -> None:
+    x = np.linspace(0.0, 100.0, 101)
+    rng = np.random.default_rng(1)
+    y = 0.1 + (0.02 * x) + rng.normal(0.0, 0.02, len(x))
+
+    result = fit_tangent_transition(x, y, min_segment_points=8)
+
+    assert result is None
+
+
 def test_vsm_temperature_processor_estimates_heating_and_cooling_points() -> None:
     processor = VSMTemperatureScanProcessor()
     processor.set_split_directions(True)
