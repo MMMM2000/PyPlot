@@ -11,9 +11,9 @@ Use the post-calibration empty-coil baseline and the two completed microwire
 sweep chunks:
 
 ```text
-C:\Users\Martin Eliáš\Downloads\ac_susceptibility\ac_susc_empty_coil_baseline_20260528_170049.tsv
-C:\Users\Martin Eliáš\Downloads\ac_susceptibility\12-2microwire_20260525_173416.tsv
-C:\Users\Martin Eliáš\Downloads\ac_susceptibility\12-2microwire_20260527_111344.tsv
+G:\My Drive\1 Projects\Praha\ac_susceptibility\ac_susc_empty_coil_baseline_20260528_170049.tsv
+G:\My Drive\1 Projects\Praha\ac_susceptibility\12-2microwire_20260525_173416.tsv
+G:\My Drive\1 Projects\Praha\ac_susceptibility\12-2microwire_20260527_111344.tsv
 ```
 
 The current sample metadata used for the automated analysis:
@@ -56,10 +56,10 @@ Run from the PyPlot repo root with the project virtual environment:
 
 ```powershell
 .\.venv\Scripts\python.exe -m data_logging.ac_susceptibility_logger.analysis `
-  --sweep "$env:USERPROFILE\Downloads\ac_susceptibility\12-2microwire_20260525_173416.tsv" `
-  --sweep "$env:USERPROFILE\Downloads\ac_susceptibility\12-2microwire_20260527_111344.tsv" `
-  --baseline "$env:USERPROFILE\Downloads\ac_susceptibility\ac_susc_empty_coil_baseline_20260528_170049.tsv" `
-  --out-dir "artifacts\ac_susceptibility_analysis\automation_12-2_20260529" `
+  --sweep "G:\My Drive\1 Projects\Praha\ac_susceptibility\12-2microwire_20260525_173416.tsv" `
+  --sweep "G:\My Drive\1 Projects\Praha\ac_susceptibility\12-2microwire_20260527_111344.tsv" `
+  --baseline "G:\My Drive\1 Projects\Praha\ac_susceptibility\ac_susc_empty_coil_baseline_20260528_170049.tsv" `
+  --out-dir "artifacts\ac_susceptibility_analysis\automation_12-2_20260529_pc" `
   --sample-name "Ni50Fe27Ga23 12/2" `
   --core-diameter-um 17 `
   --glass-diameter-um 55 `
@@ -68,6 +68,13 @@ Run from the PyPlot repo root with the project virtual environment:
 
 `--preview-dir` copies the most important PNGs to an ASCII/simple path so the
 Codex UI can preview them reliably when paths with diacritics fail.
+
+This command was rerun successfully on the Windows PC on 2026-05-29. The
+generated artifacts are in:
+
+```text
+artifacts\ac_susceptibility_analysis\automation_12-2_20260529_pc
+```
 
 ## Formula
 
