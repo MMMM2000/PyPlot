@@ -11875,6 +11875,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_recovery_position_target(self, target_mm: float, label: str) -> None:
         self._sync_manual_motion_base_from_current_position()
         distance_mm = abs(target_mm - self._current_position_mm)
+        step_tolerance_mm = max(1e-6, 0.5 / max(1.0, float(self.spin_steps_per_mm.value())))
+        if distance_mm <= step_tolerance_mm:
+            self._log(f"Skipped displacement recovery: already at {label}.")
+            return
         return_duration_s = self._pending_recovery_return_duration_s or self._setup_return_duration_s()
         self._pending_recovery_return_duration_s = None
         speed_mm_s = self._setup_return_speed_for_distance_mm_s(

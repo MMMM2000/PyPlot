@@ -535,6 +535,7 @@ def test_eda_window_shows_progress_dialog(qtbot, monkeypatch: pytest.MonkeyPatch
     qtbot.addWidget(window)
     window._run_analysis()
     qtbot.waitUntil(lambda: window._last_result is not None, timeout=5000)
+    qtbot.waitUntil(lambda: window._thread is None, timeout=5000)
 
     assert window._progress_dialog is None
     assert "Working..." in window.log_view.toPlainText()
