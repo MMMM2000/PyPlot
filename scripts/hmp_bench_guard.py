@@ -49,8 +49,11 @@ def main(argv: list[str] | None = None) -> int:
             probe = probe_hmp_bench(port_name=args.port, baudrate=args.baud)
             payload["probe"] = {
                 "available": probe.available,
+                "electrically_idle": probe.electrically_idle,
                 "message": probe.message,
                 "idn": probe.idn,
+                "busy_channels": list(probe.busy_channels),
+                "unknown_output_channels": list(probe.unknown_output_channels),
                 "channel_readbacks": probe.channel_readbacks or {},
             }
         print(json.dumps(payload, indent=2, sort_keys=True))

@@ -167,6 +167,12 @@ class BenchProbeResult:
     message: str
     idn: str = ""
     channel_readbacks: dict[int, dict[str, Any]] | None = None
+    busy_channels: tuple[int, ...] = ()
+    unknown_output_channels: tuple[int, ...] = ()
+
+    @property
+    def electrically_idle(self) -> bool:
+        return self.available and not self.busy_channels and not self.unknown_output_channels
 
 
 def probe_hmp_bench(
@@ -182,9 +188,16 @@ def probe_hmp_bench(
         driver.connect()
         idn = driver.identify()
         readbacks: dict[int, dict[str, Any]] = {}
+        busy_channels: list[int] = []
+        unknown_output_channels: list[int] = []
         for channel in channels:
+            output_on = driver.output_state(channel=int(channel))
+            if output_on is True:
+                busy_channels.append(int(channel))
+            elif output_on is None:
+                unknown_output_channels.append(int(channel))
             readbacks[int(channel)] = {
-                "output_on": driver.output_state(channel=int(channel)),
+                "output_on": output_on,
                 "readback": driver.measure(channel=int(channel)),
             }
         return BenchProbeResult(
@@ -192,6 +205,8 @@ def probe_hmp_bench(
             message=f"HMP bench available on {port_name} at {baudrate} baud.",
             idn=idn,
             channel_readbacks=readbacks,
+            busy_channels=tuple(busy_channels),
+            unknown_output_channels=tuple(unknown_output_channels),
         )
     except Exception as exc:
         return BenchProbeResult(

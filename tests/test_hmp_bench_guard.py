@@ -68,8 +68,39 @@ def test_bench_probe_reads_requested_channels() -> None:
     result = probe_hmp_bench(channels=(1, 3), driver_factory=FakeDriver)
 
     assert result.available is True
+    assert result.electrically_idle is False
+    assert result.busy_channels == (3,)
+    assert result.unknown_output_channels == ()
     assert result.idn.startswith("ROHDE&SCHWARZ")
     assert result.channel_readbacks == {
         1: {"output_on": False, "readback": {"voltage_V": 1.0, "current_mA": 10.0}},
         3: {"output_on": True, "readback": {"voltage_V": 3.0, "current_mA": 30.0}},
     }
+
+
+def test_bench_probe_reports_unknown_output_as_not_idle() -> None:
+    class FakeDriver:
+        def __init__(self, **_kwargs: object) -> None:
+            self.closed = False
+
+        def connect(self) -> None:
+            pass
+
+        def identify(self) -> str:
+            return "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62"
+
+        def output_state(self, *, channel: int) -> bool | None:
+            return None if channel == 4 else False
+
+        def measure(self, *, channel: int) -> dict[str, float]:
+            return {"voltage_V": float(channel), "current_mA": 0.0}
+
+        def close(self) -> None:
+            self.closed = True
+
+    result = probe_hmp_bench(channels=(1, 4), driver_factory=FakeDriver)
+
+    assert result.available is True
+    assert result.electrically_idle is False
+    assert result.busy_channels == ()
+    assert result.unknown_output_channels == (4,)
