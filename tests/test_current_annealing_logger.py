@@ -291,6 +291,57 @@ def test_current_annealing_hides_legacy_hold_controls(qtbot) -> None:
     assert window.ui.comboBox_max_voltage_action.findData("hold") < 0
 
 
+def test_current_annealing_planned_time_ignores_hidden_hold_duration(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window.ui.spinBox_start_current.setValue(1)
+    window.ui.spinBox_max_current.setValue(3)
+    window.ui.spinBox_step_mA.setValue(1.0)
+    window.ui.spinBox_hold_duration.setValue(99)
+    window.ui.checkBox_reverse.setChecked(True)
+    window.ui.spinBox_loops.setValue(1)
+
+    assert window.compute_planned_seconds() == 4
+
+
+def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    fake.readbacks = [{"voltage_V": 0.5, "current_mA": 3.0}]
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.operation_mode = 2
+    window.process_running = True
+    window.first_sample = False
+    window.max_current_mA = 3
+    window.current_step_mA = 1.0
+    window.current_step_A = 0.001
+    window.current_current_set = 0.003
+    window.current_increment = 0.001
+    window.reverse_enabled = True
+
+    window.handle_send_new_command()
+
+    assert window.hold_timer_running is False
+    assert window.current_increment == pytest.approx(-0.001)
+    assert window.current_current_set == pytest.approx(0.002)
+    assert (
+        "schedule_current_ramp",
+        {
+            "channel": 1,
+            "lease_id": "lease-1",
+            "target_mA": 2.0,
+            "rate_mA_s": 1.0,
+            "max_step_mA": 0.2,
+            "resolution_mA": 0.2,
+        },
+    ) in fake.calls
+
+
 def test_current_annealing_channel_dropdown_tracks_detected_hmp_model(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)

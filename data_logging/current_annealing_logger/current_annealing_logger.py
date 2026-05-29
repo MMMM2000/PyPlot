@@ -2290,12 +2290,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.update_time_estimate()
             return
         ascend_steps = max(1, int(math.ceil(max(0.0, limit_value - 1.0) / step_mA)))
-        try:
-            hold_steps = int(self.ui.spinBox_hold_duration.value())
-        except Exception:
-            hold_steps = int(getattr(self, 'hold_duration_s', 0))
-        if limit_value < planned_max - tolerance:
-            hold_steps = 0
+        hold_steps = 0
         reverse_steps = ascend_steps if getattr(self, 'reverse_enabled', False) else 0
         projected_loop = max(1, ascend_steps + hold_steps + reverse_steps)
         self._projected_loop_samples = projected_loop
@@ -2806,7 +2801,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             max_mA = int(self.ui.spinBox_max_current.value())
             start_mA = int(self.ui.spinBox_start_current.value()) if hasattr(self.ui, 'spinBox_start_current') else 1
-            hold_s = int(self.ui.spinBox_hold_duration.value())
+            hold_s = 0
             loops = int(self.ui.spinBox_loops.value()) if hasattr(self.ui, 'spinBox_loops') else 1
             reverse = bool(self.ui.checkBox_reverse.isChecked()) if hasattr(self.ui, 'checkBox_reverse') else False
             infinite = bool(self.ui.checkBox_infinite_loops.isChecked()) if hasattr(self.ui, 'checkBox_infinite_loops') else False
@@ -3355,7 +3350,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     start_mA = max(min_start, min(start_mA, max_mA))
                 step_mA = max(self._current_resolution_mA(), float(step_mA))
                 up_steps = max(0, math.ceil(max(0, int(self.ui.spinBox_max_current.value()) - start_mA) / step_mA))
-                hold_steps = int(self.ui.spinBox_hold_duration.value())
+                hold_steps = 0
                 down_steps = up_steps if self.reverse_enabled else 0
                 per_loop = max(1, up_steps + hold_steps + down_steps)
                 self._init_loop_tracking(per_loop, int(self.loop_target or 1), self.infinite_loops)
@@ -3588,34 +3583,21 @@ class MainWindow(QtWidgets.QMainWindow):
             # Signal that a new sample arrived so command sequencing can continue
             self._record_acquired_sample(record_voltage_progress=True)
 
-            # Trigger the hold-current routine as if the button were pressed
+            # Reverse or stop immediately at the configured maximum current.
             if (self.current_current_set >= (self.max_current_mA/1000.0)) and (self.current_increment > 0):
-                if not self.hold_timer_running:
-                    self.current_increment = 0.000
-                    self.line_color="g"
-                    self.elapsed_seconds = 0
-                    self.resistance_at_hold_current = self.current_resistance
-                    self.ui.label_resistance_at_hold_current.setText("{:.1f}".format(self.resistance_at_hold_current))
-                    self.hold_timer.start(1000)
-                    self.hold_timer_running = True
-                    self.direction_ascending = False
-                    self._reset_voltage_projection()
-            
-            # Iterate the current set point
-            self.current_current_set += self.current_increment
-            self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
-
-            # end of hold: either reverse (if enabled) or stop
-            if (self.hold_timer_running and (self.elapsed_seconds >= self.hold_duration_s)):
-                self.hold_timer.stop()
-                self.hold_timer_running = False
                 if getattr(self, 'reverse_enabled', False):
                     self.current_increment = -self.current_step_A
                     self.line_color = "b"
                     self.direction_ascending = False
                     self._reset_voltage_projection()
                 else:
-                    self.stop_annealing("Hold complete; stopping measurement.", show_dialog=True)
+                    self.stop_annealing("Max current reached; stopping measurement.", show_dialog=True)
+
+            # Iterate the current set point
+            if not self.process_running:
+                return
+            self.current_current_set += self.current_increment
+            self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
 
             if not self.process_running:
                 return
