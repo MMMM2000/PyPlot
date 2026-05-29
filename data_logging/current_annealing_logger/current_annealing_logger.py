@@ -1056,20 +1056,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         series_current: dict[str, tuple[list[float], list[float]]] = {}
         series_sample: dict[str, tuple[list[float], list[float]]] = {}
-        step_value = abs(float(getattr(self, 'current_step_mA', 1) or 1))
-        tolerance = max(0.5, step_value * 0.6)
+        colors = self._segment_colors(currents)
         for idx in range(1, len(currents)):
             prev_c = currents[idx - 1]
             curr_c = currents[idx]
             prev_r = resistances[idx - 1]
             curr_r = resistances[idx]
-            diff = curr_c - prev_c
-            if abs(diff) <= tolerance * 0.2:
-                color = '#27ae60'
-            elif diff >= 0:
-                color = '#d32f2f'
-            else:
-                color = '#1976d2'
+            color = colors[idx - 1] if idx - 1 < len(colors) else self._cycle_color(1.0, 1)
 
             x_current, y_current = series_current.setdefault(color, ([], []))
             x_current.extend([prev_c, curr_c, math.nan])

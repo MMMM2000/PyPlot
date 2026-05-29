@@ -840,8 +840,33 @@ def test_live_dashboard_groups_pyqtgraph_segments_by_direction(qtbot) -> None:
         window._append_measurement_sample(current, 100.0 + offset)
 
     assert window._plot_backend == "pyqtgraph"
-    assert len(window._segment_lines_ax1) <= 3
-    assert len(window._segment_lines_ax2) <= 3
+    assert len(window._segment_lines_ax1) <= len(set(window._segment_colors(window._samples_current)))
+    assert len(window._segment_lines_ax2) <= len(set(window._segment_colors(window._samples_current)))
+
+
+def test_live_dashboard_pyqtgraph_uses_cycle_palette(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window.current_step_mA = 1.0
+    for current, resistance in [
+        (5.0, 100.0),
+        (6.0, 101.0),
+        (7.0, 102.0),
+        (6.0, 103.0),
+        (5.0, 104.0),
+        (6.0, 105.0),
+    ]:
+        window._append_measurement_sample(current, resistance)
+
+    assert window._plot_backend == "pyqtgraph"
+    curve_colors = {
+        item.opts["pen"].color().name()
+        for item in window._segment_lines_ax1
+        if hasattr(item, "opts")
+    }
+    assert {"#dc2626", "#2563eb", "#f97316"}.issubset(curve_colors)
 
 
 def test_live_dashboard_ignores_initial_zero_current_placeholder(qtbot) -> None:
