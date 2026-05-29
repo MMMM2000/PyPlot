@@ -8,3 +8,4 @@
 - Current Annealing metadata now records a best-effort source-control snapshot so later run reviews can identify the branch, commit, dirty state, and origin URL.
 - Shared HMP output-off now cancels queued current and ramp work for that channel so no scheduled setpoints are applied after an app turns its output off.
 - Current Annealing and Mini DMA pyqtgraph dashboards now keep frame axes visible while disabling dashboard gridlines consistently.
+- Mini DMA now mirrors each run's `metadata.json` under `metadata/<run-folder>/metadata.json` beside the run folders, matching the metadata-only browsing layout used by Current Annealing while keeping the existing run-folder metadata file.

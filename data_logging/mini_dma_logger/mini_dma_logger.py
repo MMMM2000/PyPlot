@@ -544,6 +544,11 @@ def _session_setup_paths_for_measurement(txt_path: Path) -> tuple[Path, Path]:
     return txt_path.parent / SESSION_SETUP_TX, txt_path.parent / SESSION_SETUP_CSV
 
 
+def _session_metadata_sidecar_path(json_path: Path) -> Path:
+    run_dir = json_path.parent
+    return run_dir.parent / "metadata" / run_dir.name / SESSION_METADATA_JSON
+
+
 def _clean_session_basename(basename: str) -> str:
     clean_basename = (basename or "").strip() or DEFAULT_LOG_BASENAME
     return RUN_SUFFIX_PATTERN.sub("", clean_basename).strip() or DEFAULT_LOG_BASENAME
@@ -3129,6 +3134,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_base_path: Path | None = None
         self._session_csv_path: Path | None = None
         self._session_json_path: Path | None = None
+        self._session_metadata_sidecar_path: Path | None = None
         self._session_raw_scale_path: Path | None = None
         self._session_control_trace_path: Path | None = None
         self._session_ui_telemetry_path: Path | None = None
@@ -13885,6 +13891,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_detail = detail
         self._session_stop_recorded_utc = _utc_timestamp()
 
+    def _metadata_sidecar_relative_path(self) -> str | None:
+        if self._session_metadata_sidecar_path is None:
+            return None
+        if self._session_json_path is None:
+            return self._session_metadata_sidecar_path.as_posix()
+        try:
+            return self._session_metadata_sidecar_path.relative_to(
+                self._session_json_path.parent.parent
+            ).as_posix()
+        except ValueError:
+            return self._session_metadata_sidecar_path.as_posix()
+
     def _session_metadata(self) -> dict[str, Any]:
         calibration_metadata = {
             "baseline_s": float(self.spin_calibration_baseline_s.value()),
@@ -13956,6 +13974,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "measurement_txt": None if self._session_base_path is None else self._session_base_path.name,
                 "measurement_csv": None if self._session_csv_path is None else self._session_csv_path.name,
                 "metadata_json": None if self._session_json_path is None else self._session_json_path.name,
+                "metadata_sidecar_json": self._metadata_sidecar_relative_path(),
                 "log_interval_ms": self._log_interval_ms(),
                 "raw_scale_sidecar": None
                 if self._session_raw_scale_path is None
@@ -14134,6 +14153,12 @@ class MainWindow(QtWidgets.QMainWindow):
             payload["finished_utc"] = finished_utc
         try:
             self._session_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            if self._session_metadata_sidecar_path is not None:
+                self._session_metadata_sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+                self._session_metadata_sidecar_path.write_text(
+                    json.dumps(payload, indent=2),
+                    encoding="utf-8",
+                )
         except OSError as exc:
             self._write_emergency_session_snapshot(
                 payload,
@@ -14339,6 +14364,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_base_path = txt_path
         self._session_csv_path = csv_path
         self._session_json_path = json_path
+        self._session_metadata_sidecar_path = _session_metadata_sidecar_path(json_path)
         self._session_raw_scale_path = raw_scale_path
         self._session_control_trace_path = control_trace_path
         self._session_ui_telemetry_path = ui_telemetry_path

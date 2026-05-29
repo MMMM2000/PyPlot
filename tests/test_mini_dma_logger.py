@@ -14253,8 +14253,12 @@ def test_session_metadata_keeps_original_created_timestamp(
 
         window._write_session_metadata()
         second_payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert window._session_metadata_sidecar_path is not None
+        sidecar_payload = json.loads(window._session_metadata_sidecar_path.read_text(encoding="utf-8"))
 
         assert first_payload["created_utc"] == second_payload["created_utc"]
+        assert sidecar_payload == second_payload
+        assert second_payload["logging"]["metadata_sidecar_json"] == "metadata/metadata_smoke/metadata.json"
         window._stop_session()
     finally:
         _close_test_window(window)
