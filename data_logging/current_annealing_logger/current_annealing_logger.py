@@ -1304,12 +1304,12 @@ class MainWindow(QtWidgets.QMainWindow):
             raise RuntimeError("Select a confirmed shared HMP broker channel first.")
         return channel
 
-    def _start_preflight_errors(self) -> list[str]:
+    def _start_preflight_errors(self, *, check_connection: bool = True) -> list[str]:
         errors: list[str] = []
         profile = SUPPLY_PROFILES.get(str(getattr(self, "supply_profile_id", "")), {})
         if bool(profile.get("requires_channel", False)) and int(getattr(self, "channel_select", 0) or 0) <= 0:
             errors.append("Select the physically connected PSU channel before starting.")
-        if self._using_shared_broker() and not bool(getattr(self, "is_connected", False)):
+        if check_connection and self._using_shared_broker() and not bool(getattr(self, "is_connected", False)):
             errors.append("Connect or auto-connect the shared HMP broker before starting.")
         return errors
 
@@ -1322,6 +1322,37 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Recipe preflight failed", message)
         except Exception:
             pass
+
+    def _auto_connect_for_start(self) -> bool:
+        if bool(getattr(self, "is_connected", False)):
+            return True
+        dialog: QtWidgets.QProgressDialog | None = None
+        try:
+            dialog = QtWidgets.QProgressDialog("Connecting hardware...", None, 0, 0, self)
+            dialog.setWindowTitle("Current Annealing hardware")
+            dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+            dialog.setCancelButton(None)
+            dialog.setMinimumDuration(0)
+            dialog.show()
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            dialog = None
+        try:
+            if self._using_shared_broker():
+                self._connect_shared_broker_mode()
+            else:
+                self.handle_connect_port_clicked()
+            return bool(getattr(self, "is_connected", False))
+        except Exception as exc:
+            message = f"Hardware auto-connect failed: {exc}"
+            self._show_status_message(message, timeout_ms=15000)
+            return False
+        finally:
+            if dialog is not None:
+                try:
+                    dialog.close()
+                except Exception:
+                    pass
 
     def _shared_broker_port(self) -> int:
         widget = getattr(self.ui, "spinBox_broker_port", None)
@@ -3240,6 +3271,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def handle_toggle_process_clicked(self):
         if not self.process_running:
+            preflight_errors = self._start_preflight_errors(check_connection=False)
+            if preflight_errors:
+                self._show_start_preflight_errors(preflight_errors)
+                return
+            if not bool(getattr(self, "is_connected", False)) and not self._auto_connect_for_start():
+                self._show_start_preflight_errors(["Hardware auto-connect did not complete."])
+                return
             preflight_errors = self._start_preflight_errors()
             if preflight_errors:
                 self._show_start_preflight_errors(preflight_errors)

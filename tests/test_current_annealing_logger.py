@@ -391,6 +391,29 @@ def test_current_annealing_preflight_blocks_shared_broker_without_channel(qtbot)
     assert any("channel" in error.lower() for error in errors)
 
 
+def test_current_annealing_start_auto_connects_selected_shared_broker(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window.operation_mode = 0
+    calls: list[str] = []
+    errors: list[list[str]] = []
+
+    def _connect() -> None:
+        calls.append("connect")
+        window.is_connected = True
+
+    monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect)
+    monkeypatch.setattr(window, "_show_start_preflight_errors", lambda payload: errors.append(payload))
+
+    window.handle_toggle_process_clicked()
+
+    assert calls == ["connect"]
+    assert errors == []
+    assert window.process_running is True
+
+
 def test_shared_broker_connect_verifies_broker_before_marking_connected(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
