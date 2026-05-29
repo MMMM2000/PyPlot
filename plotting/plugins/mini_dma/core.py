@@ -10,6 +10,7 @@ import pandas as pd
 from matplotlib.figure import Figure
 
 from plotting.shared.power_axis import add_power_top_axis
+from plotting.shared.transition_analysis import TangentTransitionFit, fit_tangent_transition
 
 MEASUREMENT_FILE = "measurement.csv"
 PLOT_PHASES = {"current"}
@@ -51,6 +52,10 @@ class CurrentSweepTargetSummary:
     max_current_mA: float | None
     max_strain_pct: float | None
     strain_at_max_current_pct: float | None
+    as_current_mA: float | None = None
+    af_current_mA: float | None = None
+    ms_current_mA: float | None = None
+    mf_current_mA: float | None = None
 
 
 @dataclass(frozen=True)
@@ -339,6 +344,7 @@ def summarize_current_sweep(
                 max_current_mA=max_current_mA,
                 max_strain_pct=max_strain_pct,
                 strain_at_max_current_pct=strain_at_max_current,
+                **_transition_currents_for_group(strain, group),
             )
         )
     return CurrentSweepSummary(
@@ -370,6 +376,27 @@ def format_current_sweep_break_summary(summary: CurrentSweepSummary) -> str:
     if break_point.current_mA is None:
         return f"{label}: break detected"
     return f"{label} @ {_format_compact_number(break_point.current_mA, max_decimals=0)} mA"
+
+
+def format_current_sweep_transition_summary(summary: CurrentSweepSummary) -> list[str]:
+    lines: list[str] = []
+    for target in summary.targets:
+        values = (
+            ("As", target.as_current_mA),
+            ("Af", target.af_current_mA),
+            ("Ms", target.ms_current_mA),
+            ("Mf", target.mf_current_mA),
+        )
+        if not all(value is not None for _label, value in values):
+            continue
+        label = _format_target_summary_label(target.stress_mpa, target.load_g)
+        parts = [
+            f"{name} {_format_compact_number(float(value), max_decimals=0)} mA"
+            for name, value in values
+            if value is not None
+        ]
+        lines.append(f"{label}: " + ", ".join(parts))
+    return lines
 
 
 def _drop_resistance_outliers(group: pd.DataFrame) -> pd.DataFrame:
@@ -610,6 +637,62 @@ def _format_compact_number(value: float, *, max_decimals: int = 2) -> str:
     if math.isclose(rounded, round(rounded), abs_tol=0.5 * (10**-max_decimals)):
         return str(int(round(rounded)))
     return f"{rounded:.{max_decimals}f}".rstrip("0").rstrip(".")
+
+
+def _transition_currents_for_group(
+    strain_pct: pd.Series,
+    group: pd.DataFrame,
+) -> dict[str, float | None]:
+    result: dict[str, float | None] = {
+        "as_current_mA": None,
+        "af_current_mA": None,
+        "ms_current_mA": None,
+        "mf_current_mA": None,
+    }
+    heating, cooling = _split_current_sweep_legs(group)
+    heating_fit = _fit_current_transition(heating, strain_pct)
+    if heating_fit is not None:
+        result["as_current_mA"] = heating_fit.start_x
+        result["af_current_mA"] = heating_fit.finish_x
+    cooling_fit = _fit_current_transition(cooling, strain_pct)
+    if cooling_fit is not None:
+        result["mf_current_mA"] = cooling_fit.start_x
+        result["ms_current_mA"] = cooling_fit.finish_x
+    return result
+
+
+def _split_current_sweep_legs(group: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if group.empty or "current_mA" not in group.columns:
+        return group.iloc[0:0], group.iloc[0:0]
+    current = pd.to_numeric(group["current_mA"], errors="coerce")
+    if not current.notna().any():
+        return group.iloc[0:0], group.iloc[0:0]
+    max_index = current.idxmax(skipna=True)
+    index_positions = {index: position for position, index in enumerate(group.index)}
+    max_position = index_positions.get(max_index)
+    if max_position is None:
+        return group.iloc[0:0], group.iloc[0:0]
+    heating = group.iloc[: max_position + 1].copy()
+    cooling = group.iloc[max_position:].copy()
+    if len(heating.index) < 3:
+        heating = group.iloc[0:0]
+    if len(cooling.index) < 3:
+        cooling = group.iloc[0:0]
+    return heating, cooling
+
+
+def _fit_current_transition(
+    group: pd.DataFrame,
+    strain_pct: pd.Series,
+) -> TangentTransitionFit | None:
+    if group.empty or len(group.index) < 18:
+        return None
+    strain = strain_pct.reindex(group.index)
+    return fit_tangent_transition(
+        pd.to_numeric(group["current_mA"], errors="coerce"),
+        pd.to_numeric(strain, errors="coerce"),
+        min_segment_points=6,
+    )
 
 
 def _detect_break_point(

@@ -256,6 +256,7 @@ VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
 MINI_DMA_COLUMN = "Mini DMA graphs"
 MINI_DMA_STRAIN_COLUMN = "Mini DMA strain by stress/load"
+MINI_DMA_TRANSITION_COLUMN = "Mini DMA transition currents by stress/load"
 MINI_DMA_BREAK_COLUMN = "Mini DMA break point"
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
 VSM_HYSTERESIS_ORIGIN_COLUMN = "VSM hysteresis graphs (Origin)"
@@ -304,7 +305,9 @@ for _graph_column, _origin_column in (
     if _graph_column in OUTPUT_COLUMNS and _origin_column not in OUTPUT_COLUMNS:
         OUTPUT_COLUMNS.insert(OUTPUT_COLUMNS.index(_graph_column) + 1, _origin_column)
 
-for _mini_dma_extra_column in reversed((MINI_DMA_STRAIN_COLUMN, MINI_DMA_BREAK_COLUMN)):
+for _mini_dma_extra_column in reversed(
+    (MINI_DMA_STRAIN_COLUMN, MINI_DMA_TRANSITION_COLUMN, MINI_DMA_BREAK_COLUMN)
+):
     if _mini_dma_extra_column not in OUTPUT_COLUMNS:
         OUTPUT_COLUMNS.insert(OUTPUT_COLUMNS.index(MINI_DMA_ORIGIN_COLUMN) + 1, _mini_dma_extra_column)
 
@@ -821,6 +824,7 @@ class MiniDmaRecord:
     key: Optional[Tuple[str, int, int]] = None
     label: Optional[str] = None
     strain_summary: Tuple[str, ...] = ()
+    transition_summary: Tuple[str, ...] = ()
     break_summary: str = ""
 
 
@@ -7491,16 +7495,22 @@ def build_database(
             if labels:
                 row[MINI_DMA_COLUMN] = list(dict.fromkeys(labels))
             strain_lines: List[str] = []
+            transition_lines: List[str] = []
             break_lines: List[str] = []
             for record in mini_dma_entries:
                 for line in getattr(record, "strain_summary", ()) or ():
                     if line and line not in strain_lines:
                         strain_lines.append(str(line))
+                for line in getattr(record, "transition_summary", ()) or ():
+                    if line and line not in transition_lines:
+                        transition_lines.append(str(line))
                 break_summary = getattr(record, "break_summary", "") or ""
                 if break_summary and break_summary not in break_lines:
                     break_lines.append(str(break_summary))
             if strain_lines:
                 row[MINI_DMA_STRAIN_COLUMN] = strain_lines
+            if transition_lines:
+                row[MINI_DMA_TRANSITION_COLUMN] = transition_lines
             if break_lines:
                 row[MINI_DMA_BREAK_COLUMN] = list(dict.fromkeys(break_lines))
             _assign_pyplot_origin_artifacts(
@@ -7918,6 +7928,7 @@ __all__ = [
     "DMA_ISOSTRESS_COLUMN",
     "MINI_DMA_COLUMN",
     "MINI_DMA_STRAIN_COLUMN",
+    "MINI_DMA_TRANSITION_COLUMN",
     "MINI_DMA_BREAK_COLUMN",
     "SHAPE_MEMORY_STRESS_STRAIN_COLUMN",
     "VSM_HYSTERESIS_ORIGIN_COLUMN",

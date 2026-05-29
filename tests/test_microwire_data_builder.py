@@ -50,6 +50,7 @@ VsmTemperatureScanRecord = core.VsmTemperatureScanRecord
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = core.SHAPE_MEMORY_STRESS_STRAIN_COLUMN
 MINI_DMA_COLUMN = core.MINI_DMA_COLUMN
 MINI_DMA_STRAIN_COLUMN = core.MINI_DMA_STRAIN_COLUMN
+MINI_DMA_TRANSITION_COLUMN = core.MINI_DMA_TRANSITION_COLUMN
 MINI_DMA_BREAK_COLUMN = core.MINI_DMA_BREAK_COLUMN
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = core.SHAPE_MEMORY_DISPLACEMENT_COLUMN
 SHAPE_MEMORY_LOAD_COLUMN = core.SHAPE_MEMORY_LOAD_COLUMN
@@ -1035,6 +1036,7 @@ def test_build_database_includes_mini_dma_strain_and_break_summary(tmp_path: Pat
         key=("Ni50Fe27Ga23", 5, 4, None),
         label="mini_run01",
         strain_summary=("50 MPa / 1.46 g: 0.1% @ 20 mA",),
+        transition_summary=("50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA",),
         break_summary="400 MPa / 11.69 g @ 35 mA",
     )
 
@@ -1056,6 +1058,9 @@ def test_build_database_includes_mini_dma_strain_and_break_summary(tmp_path: Pat
     row = result.dataframe.iloc[0]
     assert row[MINI_DMA_COLUMN] == ["mini_run01"]
     assert row[MINI_DMA_STRAIN_COLUMN] == ["50 MPa / 1.46 g: 0.1% @ 20 mA"]
+    assert row[MINI_DMA_TRANSITION_COLUMN] == [
+        "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
+    ]
     assert row[MINI_DMA_BREAK_COLUMN] == ["400 MPa / 11.69 g @ 35 mA"]
 
 

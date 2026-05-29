@@ -85,6 +85,7 @@ from .core import (
     DMA_ISOSTRESS_COLUMN,
     MINI_DMA_COLUMN,
     MINI_DMA_STRAIN_COLUMN,
+    MINI_DMA_TRANSITION_COLUMN,
     MINI_DMA_BREAK_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
     SHAPE_MEMORY_DISPLACEMENT_COLUMN,
@@ -7091,6 +7092,8 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
     )
     if MINI_DMA_STRAIN_COLUMN not in frame.columns:
         frame[MINI_DMA_STRAIN_COLUMN] = [[] for _ in range(len(frame.index))]
+    if MINI_DMA_TRANSITION_COLUMN not in frame.columns:
+        frame[MINI_DMA_TRANSITION_COLUMN] = [[] for _ in range(len(frame.index))]
     if MINI_DMA_BREAK_COLUMN not in frame.columns:
         frame[MINI_DMA_BREAK_COLUMN] = ""
     if not records or frame.empty:
@@ -7105,15 +7108,20 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
         sample = row.get("_sample", "")
         group = grouped.get(sample, []) if isinstance(sample, str) else []
         strain_lines: List[str] = []
+        transition_lines: List[str] = []
         break_lines: List[str] = []
         for record in group:
             for line in getattr(record, "strain_summary", ()) or ():
                 if line and line not in strain_lines:
                     strain_lines.append(str(line))
+            for line in getattr(record, "transition_summary", ()) or ():
+                if line and line not in transition_lines:
+                    transition_lines.append(str(line))
             break_summary = getattr(record, "break_summary", "") or ""
             if break_summary and break_summary not in break_lines:
                 break_lines.append(str(break_summary))
         frame.at[index, MINI_DMA_STRAIN_COLUMN] = strain_lines
+        frame.at[index, MINI_DMA_TRANSITION_COLUMN] = transition_lines
         frame.at[index, MINI_DMA_BREAK_COLUMN] = (
             list(dict.fromkeys(break_lines)) if break_lines else ""
         )
@@ -17947,11 +17955,15 @@ class MiniDmaSection(MiniDatabaseSection):
             if variant:
                 label = f"{variant} - {label}"
             strain_summary: Tuple[str, ...] = ()
+            transition_summary: Tuple[str, ...] = ()
             break_summary = ""
             try:
                 sweep_summary = mini_dma_core.summarize_current_sweep(run)
                 strain_summary = tuple(
                     mini_dma_core.format_current_sweep_strain_summary(sweep_summary)
+                )
+                transition_summary = tuple(
+                    mini_dma_core.format_current_sweep_transition_summary(sweep_summary)
                 )
                 break_summary = mini_dma_core.format_current_sweep_break_summary(sweep_summary)
             except Exception:
@@ -17963,6 +17975,7 @@ class MiniDmaSection(MiniDatabaseSection):
                 key=key,
                 label=label,
                 strain_summary=strain_summary,
+                transition_summary=transition_summary,
                 break_summary=break_summary,
             )
             if variant:

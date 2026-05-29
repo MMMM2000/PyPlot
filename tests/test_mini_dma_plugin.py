@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 import pandas as pd
 import pytest
 from PyQt6 import QtWidgets
@@ -174,6 +175,54 @@ def test_summarize_current_sweep_reports_per_target_strain_with_per_curve_l0() -
     assert lines[0].startswith("50 MPa / 1.46 g:")
     assert "@ 80 mA" in lines[0]
     assert core.format_current_sweep_break_summary(summary) == ""
+
+
+def test_summarize_current_sweep_estimates_transition_currents_from_up_down_legs() -> None:
+    heating_current = np.linspace(1.0, 100.0, 120)
+    cooling_current = np.linspace(100.0, 1.0, 120)
+
+    def piecewise(current: np.ndarray, start: float, finish: float) -> np.ndarray:
+        before = 0.1 + current * 0.002
+        start_value = 0.1 + start * 0.002
+        transition = start_value + (current - start) * 0.04
+        finish_value = start_value + (finish - start) * 0.04
+        after = finish_value + (current - finish) * 0.003
+        return np.where(current < start, before, np.where(current <= finish, transition, after))
+
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": np.arange(240, dtype=float),
+            "automation_phase": ["current"] * 240,
+            "automation_target_value": [50.0] * 240,
+            "plateau_index": [1] * 240,
+            "strain_pct": np.concatenate(
+                [
+                    piecewise(heating_current, 30.0, 70.0),
+                    piecewise(cooling_current, 25.0, 65.0),
+                ]
+            ),
+            "resistance_ohm": [100.0] * 240,
+            "current_mA": np.concatenate([heating_current, cooling_current]),
+            "current_set_mA": np.concatenate([heating_current, cooling_current]),
+            "current_measured_mA": np.concatenate([heating_current, cooling_current]),
+        }
+    )
+    run = core.MiniDmaRun(
+        path=Path("run"),
+        measurement_path=Path("run") / "measurement.csv",
+        frame=frame,
+        sample_name="Ni50Fe27Ga23 12_2",
+    )
+
+    summary = core.summarize_current_sweep(run)
+
+    target = summary.targets[0]
+    assert target.as_current_mA == pytest.approx(30.0, abs=1.5)
+    assert target.af_current_mA == pytest.approx(70.0, abs=1.5)
+    assert target.ms_current_mA == pytest.approx(65.0, abs=1.5)
+    assert target.mf_current_mA == pytest.approx(25.0, abs=1.5)
+    lines = core.format_current_sweep_transition_summary(summary)
+    assert lines == ["50 MPa: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"]
 
 
 def test_summarize_current_sweep_detects_voltage_limit_break() -> None:
