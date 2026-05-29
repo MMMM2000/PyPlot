@@ -1721,6 +1721,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shared_broker_client = None
         self._shared_broker_lease_id = None
         self._stop_owned_shared_broker()
+        self.is_connected = False
         self.ui.pushButton_connect_port.setText("Connect to broker")
         self._set_port_controls_enabled(True)
         self.ui.frame_command_and_response.setEnabled(False)
@@ -2618,6 +2619,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         shared = self._using_shared_broker()
+        if isinstance(reset_box, QtWidgets.QCheckBox):
+            reset_box.setVisible(not shared)
         self._set_broker_controls_visible(shared)
         for name in (
             "lineEdit_serial_command",

@@ -14,4 +14,5 @@
 - The launcher CLI now exposes Mini DMA and Current Annealing metadata indexing commands so run review indexes are discoverable through `launcher.py --help`.
 - A single launcher metadata-index command can now build Mini DMA and Current Annealing indexes together when both source flags are provided.
 - Current Annealing shared-broker mode now keeps broker endpoint and HMP COM/baud controls behind an advanced disclosure so the main hardware panel stays focused on supply, channel, and connect state.
+- Current Annealing shared-broker mode now hides the whole-instrument reset checkbox because broker startup only configures the leased channel.
 - Current Annealing start auto-connect now exposes a tested progress dialog while shared-broker hardware is being connected.

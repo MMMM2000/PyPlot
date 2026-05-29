@@ -215,6 +215,8 @@ def test_current_annealing_shared_broker_hides_advanced_hmp_port_options(qtbot) 
     assert not window.ui.label_broker_hint.isHidden()
     assert window.ui.lineEdit_broker_host.isHidden()
     assert window.ui.spinBox_broker_port.isHidden()
+    assert window.ui.checkBox_reset_on_start.isHidden()
+    assert window.reset_on_start is False
     assert window.ui.pushButton_connect_port.text() == "Connect broker"
 
     window.ui.checkBox_show_hmp_port_options.setChecked(True)
@@ -236,6 +238,7 @@ def test_current_annealing_direct_hmp_profile_shows_port_options(qtbot) -> None:
     assert not window.ui.frame_hmp_port_options.isHidden()
     assert window.ui.lineEdit_broker_host.isHidden()
     assert window.ui.spinBox_broker_port.isHidden()
+    assert not window.ui.checkBox_reset_on_start.isHidden()
     assert not window.ui.comboBox_port.isHidden()
     assert not window.ui.comboBox_baudrate.isHidden()
     assert window.ui.pushButton_connect_port.text() == "Connect to port"
@@ -581,6 +584,23 @@ def test_shared_broker_connect_starts_owned_broker_when_no_existing_broker(
         ),
         ("confirm_profile", {"name": "Current Annealing auto-started shared HMP broker"}),
     ]
+
+
+def test_shared_broker_disconnect_clears_connected_state(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.is_connected = True
+    window._shared_broker_client = object()
+    window._shared_broker_lease_id = None
+    monkeypatch.setattr(window, "send_safe_end_commands", lambda: None)
+    monkeypatch.setattr(window, "_stop_owned_shared_broker", lambda: None)
+
+    window._disconnect_shared_broker_mode()
+
+    assert window.is_connected is False
+    assert window._shared_broker_client is None
+    assert window.ui.pushButton_connect_port.text() == "Connect broker"
 
 
 def test_current_annealing_prepare_output_file_creates_metadata_sidecar(tmp_path, qtbot) -> None:
