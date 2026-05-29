@@ -79,6 +79,13 @@ def test_hmp_idn_detection_maps_supported_models() -> None:
     assert detect_hmp_profile("OWON,SPE6102,serial,fw") is None
 
 
+def test_hmp_profile_current_normalization_matches_measured_floor() -> None:
+    assert HMP4040_PROFILE.normalize_current_mA(0.0) == pytest.approx(0.0)
+    assert HMP4040_PROFILE.normalize_current_mA(0.2) == pytest.approx(1.0)
+    assert HMP4040_PROFILE.normalize_current_mA(0.5) == pytest.approx(1.0)
+    assert HMP4040_PROFILE.normalize_current_mA(1.2) == pytest.approx(1.2)
+
+
 def test_broker_rejects_channel_four_for_hmp4030() -> None:
     broker = SharedPowerSupplyBroker(_driver(HMP4030_PROFILE), HMP4030_PROFILE)
 
@@ -112,7 +119,7 @@ def test_broker_allows_float_roundoff_at_current_limit() -> None:
         broker.schedule_current_ramp(
             channel=1,
             lease_id=lease.lease_id,
-            target_mA=2.01,
+            target_mA=2.11,
             rate_mA_s=0.2,
         )
 
@@ -210,6 +217,32 @@ def test_broker_allows_current_annealing_and_mini_dma_on_separate_channels() -> 
     assert driver._serial.channels[4]["current"] == pytest.approx(0.02)  # type: ignore[union-attr]
     with pytest.raises(PermissionError, match="assigned to"):
         broker.lease(channel=1, owner="mini-dma", role=ROLE_MINI_DMA_CURRENT)
+
+
+def test_broker_sends_normalized_minimum_positive_current() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.002)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.0002, output_on=True)
+    broker.set_current(channel=1, lease_id=lease.lease_id, current_mA=0.2)
+
+    commands = driver.command_log()
+    assert commands.count("CURR 0.0010") == 2
+    assert driver._serial.channels[1]["current"] == pytest.approx(0.001)  # type: ignore[union-attr]
+    assert broker.snapshot()["scheduler"]["setpoint_currents_mA"]["1"] == pytest.approx(1.0)
+
+
+def test_broker_rejects_positive_current_that_quantizes_above_limit() -> None:
+    broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.0005)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+
+    with pytest.raises(ValueError, match="current exceeds"):
+        broker.set_current(channel=1, lease_id=lease.lease_id, current_mA=0.2)
 
 
 def test_broker_reports_channel_output_state() -> None:

@@ -250,6 +250,7 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": True,
         "voltage_first": False,
         "current_resolution_mA": 0.2,
+        "min_current_mA": 1.0,
     },
     "hmp4040": {
         "label": "HMP4040 (4-channel)",
@@ -263,6 +264,7 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": True,
         "voltage_first": False,
         "current_resolution_mA": 0.2,
+        "min_current_mA": 1.0,
     },
     "owon_spe6102": {
         "label": "Owon SPE6102",
@@ -276,6 +278,7 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": False,
         "voltage_first": True,
         "current_resolution_mA": 1.0,
+        "min_current_mA": 10.0,
     },
     "shared_hmp_broker": {
         "label": "Shared HMP broker",
@@ -289,6 +292,7 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": False,
         "voltage_first": False,
         "current_resolution_mA": 0.2,
+        "min_current_mA": 1.0,
         "shared_broker": True,
     },
 }
@@ -2694,9 +2698,15 @@ class PowerSupplyController:
     def current_resolution_mA(self) -> float:
         return max(0.001, float(self.profile.get("current_resolution_mA", 1.0)))
 
+    def min_current_mA(self) -> float:
+        return max(self.current_resolution_mA(), float(self.profile.get("min_current_mA", 0.0)))
+
     def quantize_current_mA(self, current_mA: float) -> float:
         resolution_mA = self.current_resolution_mA()
-        return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
+        quantized = max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
+        if quantized <= 0.0:
+            return 0.0
+        return max(self.min_current_mA(), quantized)
 
     def configure_channel(
         self,
@@ -2709,7 +2719,7 @@ class PowerSupplyController:
         with self._io_lock:
             self.select_channel(channel)
             self.command(f"VOLT {max(0.0, float(voltage_v)):.3f}")
-            self.command(f"CURR {max(0.0, float(current_a)):.3f}")
+            self.command(f"CURR {self.quantize_current_mA(float(current_a) * 1000.0) / 1000.0:.4f}")
             self.command("OUTP ON" if output_on else "OUTP OFF")
 
     def initialize_output(
@@ -2872,9 +2882,15 @@ class SharedBrokerSupplyController:
     def current_resolution_mA(self) -> float:
         return max(0.001, float(self.profile.get("current_resolution_mA", 1.0)))
 
+    def min_current_mA(self) -> float:
+        return max(self.current_resolution_mA(), float(self.profile.get("min_current_mA", 0.0)))
+
     def quantize_current_mA(self, current_mA: float) -> float:
         resolution_mA = self.current_resolution_mA()
-        return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
+        quantized = max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
+        if quantized <= 0.0:
+            return 0.0
+        return max(self.min_current_mA(), quantized)
 
     def set_current_ramp_rate_mA_s(self, rate_mA_s: float | None) -> None:
         if rate_mA_s is None:

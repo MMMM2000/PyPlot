@@ -138,15 +138,17 @@ class HmpSerialDriver:
     ) -> None:
         with self._io_lock:
             self.select_channel(channel)
+            current_mA = max(0.0, float(current_a) * 1000.0)
+            if self.profile is not None:
+                current_mA = self.profile.normalize_current_mA(current_mA)
             self._write_command(f"VOLT {max(0.0, float(voltage_v)):.3f}")
-            self._write_command(f"CURR {max(0.0, float(current_a)):.4f}")
+            self._write_command(f"CURR {current_mA / 1000.0:.4f}")
             self._write_command("OUTP ON" if output_on else "OUTP OFF")
 
     def set_current_mA(self, *, channel: int, current_mA: float) -> None:
         if self.profile is None:
             raise RuntimeError("Detect the HMP model before setting current.")
-        resolution = max(0.001, self.profile.current_resolution_mA)
-        quantized = round(max(0.0, float(current_mA)) / resolution) * resolution
+        quantized = self.profile.normalize_current_mA(current_mA)
         with self._io_lock:
             self.select_channel(channel)
             self._write_command(f"CURR {quantized / 1000.0:.4f}")

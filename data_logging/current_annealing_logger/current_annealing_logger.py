@@ -146,6 +146,7 @@ SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
         "channel_select": 0,
         "channel_count": HMP4030_PROFILE.channel_count,
         "current_resolution_mA": HMP4030_PROFILE.current_resolution_mA,
+        "min_current_mA": HMP4030_PROFILE.min_current_mA,
         "hmp_profile_id": HMP4030_PROFILE.profile_id,
         "requires_channel": True,
         "reset_on_start": True,
@@ -159,6 +160,7 @@ SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
         "channel_select": 0,
         "channel_count": HMP4040_PROFILE.channel_count,
         "current_resolution_mA": HMP4040_PROFILE.current_resolution_mA,
+        "min_current_mA": HMP4040_PROFILE.min_current_mA,
         "hmp_profile_id": HMP4040_PROFILE.profile_id,
         "requires_channel": True,
         "reset_on_start": True,
@@ -182,6 +184,7 @@ SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
         "channel_select": 0,
         "channel_count": HMP4040_PROFILE.channel_count,
         "current_resolution_mA": HMP4040_PROFILE.current_resolution_mA,
+        "min_current_mA": HMP4040_PROFILE.min_current_mA,
         "requires_channel": True,
         "reset_on_start": False,
         "voltage_first": False,
@@ -2825,16 +2828,16 @@ class MainWindow(QtWidgets.QMainWindow):
             commands_init.append(f"INST:NSEL {channel}\n")
         if bool(getattr(self, "voltage_first", False)):
             commands_init.append(f"VOLT {limit_v:.1f}\n")
-            commands_init.append(f"CURR {start_a:.3f}\n")
+            commands_init.append(f"CURR {start_a:.4f}\n")
         else:
-            commands_init.append(f"CURR {start_a:.3f}\n")
+            commands_init.append(f"CURR {start_a:.4f}\n")
             commands_init.append(f"VOLT {limit_v:.1f}\n")
         commands_init.append("OUTP ON\n")
         self.commands_init = commands_init
         safe_end = [
             "OUTP OFF\n",
             "VOLT 1.0\n",
-            f"CURR {start_a:.3f}\n",
+            f"CURR {start_a:.4f}\n",
             "SYST:LOC\n",
         ]
         if channel > 0:
@@ -3093,7 +3096,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Owon responds more reliably when voltage is refreshed slightly
             # ahead of each current update.
             self.simple_delay(80)
-        self.serial_command = f"CURR {self.current_current_set:.3f}\n"
+        self.serial_command = f"CURR {self.current_current_set:.4f}\n"
         self.send_serial_command()
         
     def handle_raw_vcp_mode_selected(self):

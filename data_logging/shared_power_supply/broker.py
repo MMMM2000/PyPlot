@@ -287,22 +287,26 @@ class SharedPowerSupplyBroker:
             raise ValueError(f"Requested voltage exceeds CH{channel} limit.")
         if _exceeds_limit(current_a, config.current_limit_a):
             raise ValueError(f"Requested current exceeds CH{channel} limit.")
+        actual_current_mA = self.profile.normalize_current_mA(float(current_a) * 1000.0)
+        if _exceeds_limit(actual_current_mA / 1000.0, config.current_limit_a):
+            raise ValueError(f"Requested current exceeds CH{channel} limit after supply quantization.")
         self.driver.configure_channel(
             channel=channel,
             voltage_v=voltage_v,
-            current_a=current_a,
+            current_a=actual_current_mA / 1000.0,
             output_on=output_on,
         )
         with self._scheduler_lock:
-            self._setpoint_currents_mA[channel] = max(0.0, float(current_a) * 1000.0)
+            self._setpoint_currents_mA[channel] = actual_current_mA
 
     def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
         config = self._require_lease(channel=channel, lease_id=lease_id)
-        if _exceeds_limit(current_mA / 1000.0, config.current_limit_a):
+        actual_current_mA = self.profile.normalize_current_mA(current_mA)
+        if _exceeds_limit(actual_current_mA / 1000.0, config.current_limit_a):
             raise ValueError(f"Requested current exceeds CH{channel} limit.")
-        self.driver.set_current_mA(channel=channel, current_mA=current_mA)
+        self.driver.set_current_mA(channel=channel, current_mA=actual_current_mA)
         with self._scheduler_lock:
-            self._setpoint_currents_mA[channel] = max(0.0, float(current_mA))
+            self._setpoint_currents_mA[channel] = actual_current_mA
             self._metrics["current_commands_sent"] += 1
 
     def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:
@@ -352,7 +356,7 @@ class SharedPowerSupplyBroker:
 
     def schedule_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
         config = self._require_lease(channel=channel, lease_id=lease_id)
-        current = max(0.0, float(current_mA))
+        current = self.profile.normalize_current_mA(current_mA)
         if _exceeds_limit(current / 1000.0, config.current_limit_a):
             raise ValueError(f"Requested current exceeds CH{channel} limit.")
         with self._scheduler_lock:
@@ -377,7 +381,7 @@ class SharedPowerSupplyBroker:
         now_s: float | None = None,
     ) -> None:
         config = self._require_lease(channel=channel, lease_id=lease_id)
-        target = max(0.0, float(target_mA))
+        target = self.profile.normalize_current_mA(target_mA)
         if _exceeds_limit(target / 1000.0, config.current_limit_a):
             raise ValueError(f"Requested current exceeds CH{channel} limit.")
         resolution = max(0.001, float(resolution_mA or self.profile.current_resolution_mA))

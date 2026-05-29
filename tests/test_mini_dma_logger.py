@@ -8364,7 +8364,7 @@ def test_current_sweep_length_setup_starts_continuity_current(tmp_path: Path, qt
         _close_test_window(window)
 
 
-def test_hmp4030_initial_current_command_preserves_sub_milliamp_resolution() -> None:
+def test_hmp_initial_current_command_clamps_to_measured_positive_floor() -> None:
     written: list[bytes] = []
 
     class _FakePort:
@@ -8389,7 +8389,29 @@ def test_hmp4030_initial_current_command_preserves_sub_milliamp_resolution() -> 
 
     controller.initialize_output(current_mA=0.2, reset_on_start=False)
 
-    assert b"CURR 0.0002\n" in written
+    assert b"CURR 0.0010\n" in written
+
+
+def test_supply_controllers_quantize_zero_and_positive_current_floor() -> None:
+    direct = mini_dma_mod.PowerSupplyController(
+        port_name="COM3",
+        baudrate=115200,
+        profile_id="hmp4040",
+        max_voltage_v=5.0,
+    )
+    shared = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=5.0,
+        current_channel=4,
+        motor_channel=3,
+    )
+
+    assert direct.quantize_current_mA(0.0) == pytest.approx(0.0)
+    assert direct.quantize_current_mA(0.2) == pytest.approx(1.0)
+    assert direct.quantize_current_mA(1.2) == pytest.approx(1.2)
+    assert shared.quantize_current_mA(0.2) == pytest.approx(1.0)
+    assert shared.quantize_current_mA(1.2) == pytest.approx(1.2)
 
 
 def test_supply_shutdown_turns_output_off_and_resets_current_channel() -> None:
