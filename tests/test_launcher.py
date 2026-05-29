@@ -781,7 +781,11 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
                         "action": "update_section",
                         "section": "mini_dma",
                         "paths": [str(run_path), str(bad_run)],
-                    }
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["mini_dma"],
+                    },
                 ],
             }
         ),
@@ -811,6 +815,17 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
     assert command["updated_count"] == 1
     assert command["skipped_count"] == 1
     assert str(bad_run / "measurement.csv") in command["skipped_sources"]
+    rebuild_command = manifest["commands"][1]
+    assert rebuild_command["action"] == "rebuild_assemble"
+    assert rebuild_command["status"] == "ok"
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Mini DMA graphs"] == [run_path.name]
+    assert assemble_row["Mini DMA strain by stress/load"] == [
+        "50 MPa: 0.1% @ 20 mA",
+        "100 MPa: 0.2% @ 20 mA",
+    ]
 
 
 def test_builder_automation_recipe_promotes_database_latest_and_archives_previous(

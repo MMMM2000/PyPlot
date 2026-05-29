@@ -7062,6 +7062,18 @@ def build_database(
         for candidate_key in microscope_index.keys():
             if candidate_key not in grouped:
                 grouped[candidate_key] = []
+    for collection in (
+        vsm_hysteresis_groups,
+        vsm_temperature_groups,
+        dma_isostress_groups,
+        mini_dma_groups,
+        shape_memory_stress_strain_groups,
+        fmr_groups,
+        strain_records,
+    ):
+        for candidate_key in collection.keys():
+            if candidate_key not in grouped:
+                grouped[candidate_key] = []
 
     if include_fabrication_draw_siblings and fabrication_index.piece_level:
         relevant_piece_limits: Dict[Tuple[str, int], Optional[int]] = {}
@@ -7089,6 +7101,7 @@ def build_database(
             vsm_hysteresis_groups,
             vsm_temperature_groups,
             dma_isostress_groups,
+            mini_dma_groups,
             shape_memory_stress_strain_groups,
             fmr_groups,
             strain_records,

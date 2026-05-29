@@ -22,8 +22,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple, Sequence, cast, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Tuple, Sequence, cast, Protocol
 
+import pandas as pd
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PIL import Image
 
@@ -760,6 +761,199 @@ def _run_builder_rebuild_assemble_command(
             pass
 
 
+def _decode_builder_section_payload(
+    builder_ui: Any,
+    sections: Mapping[str, Any],
+    section_name: str,
+    payload_name: str,
+) -> Any:
+    section = sections.get(section_name)
+    if not isinstance(section, Mapping):
+        return None
+    payloads = section.get("payloads")
+    if not isinstance(payloads, Mapping):
+        return None
+    encoded = payloads.get(payload_name)
+    decoder = getattr(builder_ui, "_decode_project_payload", None)
+    if not callable(decoder):
+        return None
+    return decoder(encoded)
+
+
+def _builder_section_rows_as_frame(
+    sections: Mapping[str, Any],
+    section_name: str,
+) -> pd.DataFrame:
+    section = sections.get(section_name)
+    if not isinstance(section, Mapping):
+        return pd.DataFrame()
+    rows = section.get("rows")
+    columns = section.get("columns")
+    if not isinstance(rows, list):
+        return pd.DataFrame()
+    frame = pd.DataFrame(rows)
+    if isinstance(columns, list):
+        ordered = [str(column) for column in columns if str(column) in frame.columns]
+        extra = [column for column in frame.columns if column not in ordered]
+        frame = frame[ordered + extra]
+    return frame
+
+
+def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, float]]:
+    if frame.empty:
+        return {}
+    result: dict[str, dict[str, float]] = {}
+    for row in frame.to_dict(orient="records"):
+        key = str(row.get("_group_key") or "").strip()
+        if not key:
+            composition = str(row.get("Composition") or "").strip()
+            microwire = str(row.get("Microwire") or "").strip()
+            if composition and microwire:
+                key = f"{composition}|{microwire.replace('/', '|')}"
+        if not key:
+            continue
+        entry: dict[str, float] = {}
+        for label, column in {
+            "As": "As (°C)",
+            "Af": "Af (°C)",
+            "Ms": "Ms (°C)",
+            "Mf": "Mf (°C)",
+        }.items():
+            value = row.get(column)
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                entry[label] = numeric
+        if entry:
+            result[key] = entry
+    return result
+
+
+def _run_builder_rebuild_assemble_command_lightweight(
+    *,
+    builder_ui: Any,
+    command: dict[str, Any],
+    command_index: int,
+    sections: dict[str, Any],
+    output_project: Path,
+) -> dict[str, Any]:
+    selected = _builder_rebuild_sections_from_command(
+        command,
+        sections=sections,
+        command_index=command_index,
+    )
+    if not selected:
+        raise _AutomationRecipeError(
+            f"Builder rebuild_assemble command {command_index} has no section payloads to assemble."
+        )
+
+    def _payload(section_name: str, payload_name: str, fallback: Any) -> Any:
+        value = _decode_builder_section_payload(builder_ui, sections, section_name, payload_name)
+        return value if value is not None else fallback
+
+    config = builder_ui.BuilderConfig(
+        annealing_files=[],
+        fabrication_files=[],
+        output_dir=output_project.parent,
+        microscope_files=[],
+        video_files=[],
+        strain_files=[],
+        make_plots=False,
+        export_formats=(),
+        plot_backends=(),
+        output_name=output_project.stem,
+        include_microscope_crops=False,
+    )
+    transition_points = _transition_rows_to_map(
+        _builder_section_rows_as_frame(sections, "transition_temps")
+    )
+    result = builder_ui.build_database(
+        config,
+        logger=LOGGER,
+        fabrication_index=_payload("fabrication", "fabrication_index", builder_ui.FabricationIndex()),
+        measurement_records=(
+            _payload("annealing", "annealing_records", [])
+            if "annealing" in selected
+            else []
+        ),
+        vsm_hysteresis_records=(
+            _payload("vsm_hysteresis", "vsm_hysteresis_records", [])
+            if "vsm_hysteresis" in selected
+            else []
+        ),
+        vsm_temperature_scan_records=(
+            _payload("vsm_temperature_scan", "vsm_temperature_scan_records", [])
+            if "vsm_temperature_scan" in selected
+            else []
+        ),
+        dma_iso_stress_records=(
+            _payload("dma_iso_stress", "dma_iso_stress_records", [])
+            if "dma_iso_stress" in selected
+            else []
+        ),
+        mini_dma_records=(
+            _payload("mini_dma", "mini_dma_records", [])
+            if "mini_dma" in selected
+            else []
+        ),
+        shape_memory_stress_strain_records=(
+            _payload(
+                "shape_memory_stress_strain",
+                "shape_memory_stress_strain_records",
+                [],
+            )
+            if "shape_memory_stress_strain" in selected
+            else []
+        ),
+        fmr_records=(
+            _payload("fmr", "fmr_records", [])
+            if "fmr" in selected
+            else []
+        ),
+        microscope_index=(
+            _payload("microscope", "microscope_index", {})
+            if "microscope" in selected
+            else {}
+        ),
+        video_index=(
+            _payload("videos", "video_index", {})
+            if "videos" in selected
+            else {}
+        ),
+        strain_records=(
+            _payload("strain", "strain_records", {})
+            if "strain" in selected
+            else {}
+        ),
+        transition_temps=transition_points if "transition_temps" in selected else {},
+        skip_exports=True,
+        include_fabrication_draw_siblings=True,
+    )
+    dataframe = result.dataframe if hasattr(result, "dataframe") else pd.DataFrame()
+    if not isinstance(dataframe, pd.DataFrame):
+        dataframe = pd.DataFrame()
+    rows = [
+        {str(column): builder_ui._json_safe(row.get(column)) for column in dataframe.columns}
+        for row in dataframe.to_dict(orient="records")
+    ]
+    sections["assemble"] = {
+        "section": "assemble",
+        "title": "Assemble",
+        "columns": [str(column) for column in dataframe.columns],
+        "rows": rows,
+        "index": [builder_ui._json_safe(index) for index in dataframe.index.tolist()],
+    }
+    return {
+        "action": "rebuild_assemble",
+        "status": "ok",
+        "sections": sorted(selected),
+        "row_count": int(len(dataframe.index)),
+        "column_count": int(len(dataframe.columns)),
+    }
+
+
 def _timestamp_for_builder_database(recipe: Mapping[str, Any]) -> str:
     raw = recipe.get("timestamp")
     if raw is not None:
@@ -951,11 +1145,13 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                 section_name = str(command.get("section") or "").strip()
                 if action == "rebuild_assemble":
                     command_results.append(
-                        {
-                            "action": action,
-                            "status": "skipped",
-                            "reason": "Assemble rebuild is not implemented in builder automation v1.",
-                        }
+                        _run_builder_rebuild_assemble_command_lightweight(
+                            builder_ui=builder_ui,
+                            command=command,
+                            command_index=index,
+                            sections=sections,
+                            output_project=output_project,
+                        )
                     )
                     continue
                 if action != "update_section":
