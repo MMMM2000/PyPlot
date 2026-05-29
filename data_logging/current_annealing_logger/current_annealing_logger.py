@@ -4239,7 +4239,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "notes": self._ui_text("lineEdit_notes"),
             "start_current_mA": int(getattr(self, "start_current_mA", 1)),
             "max_current_mA": int(getattr(self, "max_current_mA", 10)),
-            "step_mA": int(getattr(self, "current_step_mA", 1)),
+            "step_mA": float(getattr(self, "current_step_mA", 1.0) or 0.0),
             "reverse_enabled": reverse,
             "loops": loops,
             "loops_infinite": infinite,

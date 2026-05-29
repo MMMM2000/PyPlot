@@ -587,6 +587,25 @@ def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) ->
     assert payload["recipe"]["loops"] == 2
 
 
+def test_current_annealing_metadata_preserves_decimal_ramp_rate(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("decimal_ramp")
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+    window.ui.spinBox_step_mA.setValue(0.2)
+    window.handle_step_changed()
+
+    assert window.prepare_output_file() is True
+
+    data_path = logger_mod.Path(window.f_name)
+    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["step_mA"] == pytest.approx(0.2)
+    assert payload["recipe"]["current_ramp_rate_mA_s"] == pytest.approx(0.2)
+
+
 def test_live_dashboard_uses_pyqtgraph_backend(qtbot) -> None:
     pytest.importorskip("pyqtgraph")
     window = logger_mod.MainWindow()

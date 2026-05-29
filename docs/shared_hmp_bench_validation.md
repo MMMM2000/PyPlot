@@ -99,8 +99,8 @@ Expected no-wire behavior:
 
 Pass criteria:
 
-- `metadata.json` says `heating.profile == "shared_hmp_broker"`.
-- `metadata.json` says current-sweep channel `4`.
+- `metadata.json` says `supply.profile_id == "shared_hmp_broker"`.
+- `metadata.json` says `supply.channel == 4`.
 - `measurement.csv` contains rows with voltage/resistance/power fields present.
 - CH4 is off and lease-free after stop.
 
@@ -195,10 +195,11 @@ Current Annealing:
 
 - Output file path and row count.
 - Current, voltage, and resistance ranges.
+- `metadata/<data-file-stem>/metadata.json`: `supply.profile_id`, `supply.channel`, `supply.voltage_limit_v`, `supply.broker_source`, and `recipe.current_ramp_rate_mA_s`.
 
 Mini DMA:
 
-- `metadata.json`: `heating.profile`, current channel, motor channel, motor supply enabled flag, voltage limit, session state, point count.
+- `metadata.json`: shared-HMP heating/supply profile, current channel, motor channel, motor supply enabled flag, voltage limit, session state, point count.
 - `measurement.csv`: row count, current setpoint, measured current, voltage, resistance, power.
 - `control_trace.csv`: row count and any wait/correction/hold/fault phases.
 - Optional `ui_telemetry.csv`: session/plot heartbeat when diagnosing UI responsiveness.
