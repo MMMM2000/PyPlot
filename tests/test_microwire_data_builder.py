@@ -5957,6 +5957,46 @@ def test_load_project_handles_missing_sections(
         QtWidgets.QApplication.processEvents()
 
 
+def test_load_project_suppressed_dialogs_skip_progress_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    window._auto_open_last = False
+    progress_dialog_attempts: list[object] = []
+
+    class _UnexpectedProgressDialog:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            progress_dialog_attempts.append(_args)
+            raise AssertionError("suppressed Builder project loads should not create dialogs")
+
+    try:
+        monkeypatch.setattr(QtWidgets, "QProgressDialog", _UnexpectedProgressDialog)
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "information",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Ok,
+        )
+        project_path = tmp_path / "partial_project.pydpj"
+        payload = {
+            "kind": window.PROJECT_KIND,
+            "version": window.PROJECT_VERSION,
+            "sections": {},
+        }
+        project_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        window._load_project_from_path(project_path)
+
+        assert progress_dialog_attempts == []
+        assert window._project_path == project_path
+    finally:
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_assemble_prepare_inputs_allows_export_without_annealing_section_selected(
     qtbot,
     tmp_path: Path,

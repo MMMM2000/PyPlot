@@ -30037,6 +30037,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         progress_dialog: Optional[QtWidgets.QProgressDialog] = None
         total_steps = max(len(self.sections) + 1, 1)
         last_pump = 0.0
+        show_progress_dialog = not _builder_dialogs_suppressed()
 
         def _pump_events(step: int | None = None, label: str | None = None) -> None:
             """Keep the UI responsive while loading a project."""
@@ -30060,19 +30061,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     pass
                 last_pump = now
 
-        try:
-            progress_dialog = QtWidgets.QProgressDialog(
-                "Loading project…", "", 0, total_steps, self
-            )
-            progress_dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-            progress_dialog.setCancelButton(None)
-            progress_dialog.setMinimumDuration(150)
-            progress_dialog.setAutoClose(False)
-            progress_dialog.setAutoReset(False)
-            progress_dialog.show()
-            _pump_events(0, "Loading project…")
-        except Exception:
-            progress_dialog = None
+        if show_progress_dialog:
+            try:
+                progress_dialog = QtWidgets.QProgressDialog(
+                    "Loading project…", "", 0, total_steps, self
+                )
+                progress_dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+                progress_dialog.setCancelButton(None)
+                progress_dialog.setMinimumDuration(150)
+                progress_dialog.setAutoClose(False)
+                progress_dialog.setAutoReset(False)
+                progress_dialog.show()
+                _pump_events(0, "Loading project…")
+            except Exception:
+                progress_dialog = None
 
         self._suppress_dirty = True
         try:
