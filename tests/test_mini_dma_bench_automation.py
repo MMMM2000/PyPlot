@@ -41,6 +41,29 @@ def _write_recipe(path: Path) -> None:
     )
 
 
+def _write_minimal_trace_run(run_dir: Path) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "wire_diameter_mm": 0.0125,
+                "stop": {"detail": "synthetic complete"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "control_trace.csv").write_text(
+        "\n".join(
+            [
+                "elapsed_s,automation_phase,automation_basis,automation_target_value,decision,result,current_value,error_value,tolerance,sensitivity_per_mm,motor_step_mm",
+                "1.0,current,stress_mpa,30.0,accept,reached,0.0,30.0,45.0,45000.0,0.001",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_mini_dma_bench_plan_rejects_unarmed_execution(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)
@@ -188,6 +211,7 @@ def test_mini_dma_bench_plan_acquires_shared_hmp_lock_for_execution(tmp_path: Pa
     _write_recipe(recipe_path)
     plan_path = tmp_path / "bench-plan.json"
     lock_path = tmp_path / "hmp.lock"
+
     plan_path.write_text(
         json.dumps(
             {
@@ -266,6 +290,76 @@ def test_mini_dma_bench_plan_acquires_shared_hmp_lock_for_execution(tmp_path: Pa
         }
     ]
     assert ("start", None) in events
+
+
+def test_mini_dma_bench_plan_writes_control_trace_replay_after_run(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    run_dir = tmp_path / "logs" / "run01"
+    _write_minimal_trace_run(run_dir)
+    summary_path = tmp_path / "summary.json"
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "log_dir": str(tmp_path / "logs"),
+                "summary_path": str(summary_path),
+                "default_max_run_duration_s": 1,
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            pass
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = False
+            self._session_active = False
+            self._session_json_path = run_dir / "metadata.json"
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            pass
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            pass
+
+        def _start_auto_ramp(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    replay = summary["runs"][0]["control_trace_replay"]
+    assert replay["status"] == "written"
+    assert replay["summary"]["step_floor_only_accept_count"] == 1
+    assert (run_dir / "diagnostics" / "control_trace_replay" / "control_trace_replay.csv").exists()
+    written_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert written_summary["runs"][0]["control_trace_replay"]["status"] == "written"
 
 
 def test_mini_dma_bench_plan_uses_next_run_for_existing_output(tmp_path: Path) -> None:

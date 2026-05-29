@@ -11,6 +11,8 @@ from PyQt6 import QtWidgets
 
 from plotting.shared.utils import ensure_app_theme
 
+from .trace_replay import analyze_control_trace, write_replay_outputs
+
 
 MINI_DMA_BENCH_CONFIRMATION = "MINI_DMA_BENCH_ARMED"
 PLAN_KIND = "mini_dma_bench_sequence"
@@ -329,6 +331,35 @@ def _metadata_path(window: Any) -> str | None:
     return None if path is None else str(path)
 
 
+def _run_dir_from_metadata_path(metadata_path: str | None) -> Path | None:
+    if metadata_path is None:
+        return None
+    return Path(metadata_path).expanduser().resolve().parent
+
+
+def _attach_control_trace_replay(run_summary: dict[str, Any]) -> dict[str, Any]:
+    run_dir = _run_dir_from_metadata_path(run_summary.get("metadata_path"))
+    if run_dir is None:
+        run_summary["control_trace_replay"] = {"status": "not_available", "reason": "missing_metadata_path"}
+        return run_summary
+    try:
+        replay = analyze_control_trace(run_dir)
+        output_paths = write_replay_outputs(replay, run_dir / "diagnostics" / "control_trace_replay")
+    except Exception as exc:
+        run_summary["control_trace_replay"] = {
+            "status": "not_available",
+            "reason": str(exc),
+            "run_dir": str(run_dir),
+        }
+        return run_summary
+    run_summary["control_trace_replay"] = {
+        "status": "written",
+        "summary": replay.summary.to_dict(),
+        "outputs": {key: str(value) for key, value in output_paths.items()},
+    }
+    return run_summary
+
+
 def _latest_stress_mpa(window: Any) -> float | None:
     method = getattr(window, "_bench_latest_stress_mpa", None)
     if callable(method):
@@ -567,16 +598,15 @@ def run_mini_dma_bench_plan(
                     continue
                 window = factory(log_dir=None if plan.log_dir is None else str(plan.log_dir), persist_settings=True)
                 try:
-                    run_summaries.append(
-                        _execute_run(
-                            run,
-                            app=app,
-                            window=window,
-                            guardrails=plan.guardrails,
-                            sleep_fn=sleep_fn,
-                            total_deadline_s=total_deadline_s,
-                        )
+                    run_summary = _execute_run(
+                        run,
+                        app=app,
+                        window=window,
+                        guardrails=plan.guardrails,
+                        sleep_fn=sleep_fn,
+                        total_deadline_s=total_deadline_s,
                     )
+                    run_summaries.append(_attach_control_trace_replay(run_summary))
                     if (
                         run_summaries[-1].get("status") == "wire_break"
                         and plan.guardrails.wire_break_stops_plan

@@ -87,6 +87,7 @@ CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
     "timestamp_utc",
     "recipe_mode",
+    "task_text",
     "automation_phase",
     "automation_basis",
     "automation_target_value",
@@ -117,6 +118,7 @@ UI_TELEMETRY_FIELDNAMES = [
     "ui_heartbeat_fps",
     "handler_duration_ms",
     "graph_refresh_interval_ms",
+    "task_text",
     "automation_active",
     "session_active",
     "session_logging_enabled",
@@ -10345,6 +10347,29 @@ class MainWindow(QtWidgets.QMainWindow):
             effective_tolerance = min(effective_tolerance, setup_preload_cap)
         return effective_tolerance
 
+    def _seek_target_acceptance_tolerance(
+        self,
+        basis: str,
+        requested_tolerance: float,
+        *,
+        seek_key: tuple[str, int, float] | None = None,
+    ) -> float:
+        if not (
+            self._is_current_sweep_mode(self._automation_name)
+            and self._automation_phase in {"target_ramp", "current", "current_hold", "current_limit_unwind"}
+            and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
+            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+        ):
+            return self._seek_effective_tolerance(
+                basis,
+                requested_tolerance,
+                seek_key=seek_key,
+            )
+        tolerance = abs(float(requested_tolerance))
+        sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        noise_floor = self._basis_noise_floor(basis, sensitivity_per_mm=sensitivity)
+        return max(tolerance, noise_floor)
+
     def _setup_preload_acceptance_cap_for_basis(
         self,
         basis: str,
@@ -10810,6 +10835,39 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_phase not in {"current", "current_hold"}:
             return None
         return self._scale_control_signal_for_basis(basis)
+
+    def _current_sweep_filtered_window_spans_target(
+        self,
+        basis: str,
+        target_value: float,
+        tolerance: float,
+    ) -> bool:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return True
+        latest = self._scale_signal_buffer.latest()
+        if latest is None:
+            return False
+        samples = self._scale_signal_buffer.recent_samples(
+            now_s=latest.timestamp_s,
+            window_s=self._current_sweep_hold_filter_window_s(),
+        )
+        if len(samples) < 3:
+            return False
+        values: list[float] = []
+        if basis == HSW_BASIS_LOAD_G:
+            values = [float(sample.applied_load_g) for sample in samples]
+        else:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            for sample in samples:
+                stress = stress_mpa_from_load_g(float(sample.applied_load_g), diameter_mm)
+                if stress is not None and math.isfinite(float(stress)):
+                    values.append(float(stress))
+        if len(values) < 3:
+            return False
+        padding = max(0.0, abs(float(tolerance)))
+        target = float(target_value)
+        return min(values) <= target + padding and max(values) >= target - padding
 
     def _seek_step_mm(self, error_value: float, tolerance: float, *, basis: str | None = None) -> float:
         if self._automation_name == RECOVERY_LOAD:
@@ -11585,6 +11643,11 @@ class MainWindow(QtWidgets.QMainWindow):
             tolerance,
             seek_key=seek_key,
         )
+        acceptance_tolerance = self._seek_target_acceptance_tolerance(
+            basis,
+            tolerance,
+            seek_key=seek_key,
+        )
         self._update_setup_preload_engagement(seek_key, basis, current_value)
         if self._setup_preload_overload_exceeded(basis, target_value, current_value, effective_tolerance):
             self._stop_for_setup_preload_overload(basis, target_value, current_value)
@@ -11624,13 +11687,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_value=target_value,
                 current_value=current_value,
                 error_value=delta_value,
-                tolerance=effective_tolerance,
+                tolerance=acceptance_tolerance,
                 sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
                 result="reached",
                 reason="setup_l0_baseline_committed",
             )
             return True
-        if abs(delta_value) <= effective_tolerance:
+        if abs(delta_value) <= acceptance_tolerance:
             if self._zero_return_requires_true_zero(basis, target_value):
                 current_load_g = self._zero_return_current_load_g(basis, current_value)
                 if current_load_g > self._zero_return_acceptance_tolerance_g():
@@ -11645,7 +11708,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         target_value=target_value,
                         current_value=current_value,
                         error_value=delta_value,
-                        tolerance=effective_tolerance,
+                        tolerance=acceptance_tolerance,
                         sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
                         result="reached",
                     )
@@ -11658,7 +11721,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     target_value=target_value,
                     current_value=current_value,
                     error_value=delta_value,
-                    tolerance=effective_tolerance,
+                    tolerance=acceptance_tolerance,
                     sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
                     result="reached",
                 )
@@ -11669,10 +11732,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 noise_component = self._current_sweep_bounded_noise_band(
                     basis,
                     filtered_signal.noise,
-                    effective_tolerance,
+                    acceptance_tolerance,
                 )
             noise_band = max(
-                effective_tolerance,
+                acceptance_tolerance,
                 noise_component,
                 self._current_sweep_hold_min_band_for_basis(
                     basis,
@@ -11682,9 +11745,16 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._automation_phase == "current_hold":
                 noise_band = max(
                     noise_band,
-                    self._current_sweep_hold_entry_band_for_basis(effective_tolerance),
+                    self._current_sweep_hold_entry_band_for_basis(acceptance_tolerance),
                 )
-            if abs(delta_value) <= noise_band:
+            if (
+                abs(delta_value) <= noise_band
+                and self._current_sweep_filtered_window_spans_target(
+                    basis,
+                    target_value,
+                    acceptance_tolerance,
+                )
+            ):
                 self._clear_seek_state(seek_key)
                 self._write_control_trace(
                     decision="accept",
@@ -11692,15 +11762,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     target_value=target_value,
                     current_value=current_value,
                     error_value=delta_value,
-                    tolerance=max(effective_tolerance, noise_band),
+                    tolerance=max(acceptance_tolerance, noise_band),
                     sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
                     result="filtered_noise_band",
                     reason="filtered_control_signal",
                 )
                 return True
-        if abs(delta_value) <= effective_tolerance and self._zero_return_requires_true_zero(basis, target_value):
+        if abs(delta_value) <= acceptance_tolerance and self._zero_return_requires_true_zero(basis, target_value):
             pass
-        elif abs(delta_value) <= effective_tolerance:
+        elif abs(delta_value) <= acceptance_tolerance:
             self._clear_seek_state(seek_key)
             self._write_control_trace(
                 decision="accept",
@@ -11708,7 +11778,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_value=target_value,
                 current_value=current_value,
                 error_value=delta_value,
-                tolerance=effective_tolerance,
+                tolerance=acceptance_tolerance,
                 sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
                 result="reached",
             )
@@ -11721,7 +11791,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_value=target_value,
                 current_value=current_value,
                 error_value=delta_value,
-                tolerance=effective_tolerance,
+                tolerance=acceptance_tolerance,
                 sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
                 result="waiting",
                 reason="new_scale_sample",
@@ -11731,7 +11801,7 @@ class MainWindow(QtWidgets.QMainWindow):
             seek_key,
             basis,
             delta_value,
-            effective_tolerance,
+            acceptance_tolerance,
             filtered_signal,
         ):
             self._log_waiting_for_feedback(
@@ -11743,7 +11813,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_value=target_value,
                 current_value=current_value,
                 error_value=delta_value,
-                tolerance=effective_tolerance,
+                tolerance=acceptance_tolerance,
                 sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
                 result="waiting",
                 reason="hold_error_not_persistent",
@@ -11759,7 +11829,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 and not self._filtered_signal_changed_after_last_correction(
                 seek_key,
                 filtered_signal,
-                effective_tolerance,
+                acceptance_tolerance,
                 )
             ):
                 self._log_waiting_for_feedback(
@@ -11771,7 +11841,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     target_value=target_value,
                     current_value=current_value,
                     error_value=delta_value,
-                    tolerance=effective_tolerance,
+                    tolerance=acceptance_tolerance,
                     sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
                     result="waiting",
                     reason="filtered_signal_unchanged",
@@ -11946,7 +12016,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 and self._target_reversal_is_practical_hold(
                 basis,
                 delta_value,
-                effective_tolerance,
+                acceptance_tolerance,
                 seek_key=seek_key,
                 )
             ):
@@ -11961,7 +12031,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     target_value=target_value,
                     current_value=current_value,
                     error_value=delta_value,
-                    tolerance=effective_tolerance,
+                    tolerance=acceptance_tolerance,
                     sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
                     result="reversal_hold",
                 )
@@ -14573,6 +14643,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "elapsed_s": f"{elapsed_s:.6f}",
                 "timestamp_utc": _utc_timestamp(),
                 "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
+                "task_text": self._current_task_summary(),
                 "automation_phase": self._automation_phase,
                 "automation_basis": "" if basis is None else basis,
                 "automation_target_value": _number(target_value),
@@ -17801,13 +17872,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         tolerance = self._automation_tolerance_for_step(step)
         seek_key = self._seek_error_key(step.basis, step.target_value)
-        effective_tolerance = self._seek_effective_tolerance(
+        acceptance_tolerance = self._seek_target_acceptance_tolerance(
             step.basis,
             tolerance,
             seek_key=seek_key,
         )
         signed_error = current_value - float(step.target_value)
-        return signed_error, abs(signed_error), max(1e-12, abs(float(effective_tolerance))), max(0.0, noise_value)
+        return signed_error, abs(signed_error), max(1e-12, abs(float(acceptance_tolerance))), max(0.0, noise_value)
 
     def _current_sweep_hold_entry_confirmed(
         self,
@@ -17925,9 +17996,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_sweep_hold_min_pause_stress_mpa(),
             ),
         )
+        resume_noise_band = self._current_sweep_bounded_noise_band(step.basis, noise_value, tolerance)
+        if not self._current_sweep_filtered_window_spans_target(
+            step.basis,
+            float(step.target_value),
+            tolerance,
+        ):
+            resume_noise_band = 0.0
         resume_band = max(
             tolerance * resume_factor,
-            self._current_sweep_bounded_noise_band(step.basis, noise_value, tolerance),
+            resume_noise_band,
             self._current_sweep_hold_min_band_for_basis(
                 step.basis,
                 self._current_sweep_hold_min_resume_stress_mpa(),
@@ -19055,6 +19133,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "ui_heartbeat_fps": _number(self._ui_heartbeat_fps, decimals=3),
                 "handler_duration_ms": _number(max(0.0, (finished_s - started_s) * 1000.0), decimals=3),
                 "graph_refresh_interval_ms": int(self._graph_refresh_interval_ms()),
+                "task_text": self._current_task_summary(),
                 "automation_active": int(bool(self._automation_active)),
                 "session_active": int(bool(self._session_active)),
                 "session_logging_enabled": int(bool(self._session_logging_enabled)),

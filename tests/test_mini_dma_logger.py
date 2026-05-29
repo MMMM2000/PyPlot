@@ -6918,7 +6918,7 @@ def test_current_sweep_hold_has_no_timeout_stop(
         _close_test_window(window)
 
 
-def test_current_sweep_hold_resumes_inside_calculated_noise_recovery_band(
+def test_current_sweep_hold_resumes_inside_calculated_noise_recovery_band_when_window_spans_target(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -6929,6 +6929,17 @@ def test_current_sweep_hold_resumes_inside_calculated_noise_recovery_band(
     window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
         lambda *_args, **_kwargs: (4.5, 4.5, 0.25, 2.5)
     )
+    now_s = time.time()
+    for index, stress in enumerate((46.0, 48.5, 51.0, 54.0)):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
+        assert load_g is not None
+        sample_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=sample_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
     step = mini_dma_mod.AutomationStep(
         "sweep_current",
         target_value=50.0,
@@ -6948,6 +6959,51 @@ def test_current_sweep_hold_resumes_inside_calculated_noise_recovery_band(
         assert stopped is False
         assert window._current_sweep_ramp_hold_step_index is None
         assert "inside resume band" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_stays_paused_when_noise_band_is_one_sided(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._current_sweep_ramp_hold_step_index = 4
+    window._current_sweep_ramp_hold_started_s = 100.0
+    window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (22.0, 22.0, 1.8, 12.0)
+    )
+    now_s = time.time()
+    for index, stress in enumerate((68.0, 71.0, 72.0, 76.0, 80.0)):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
+        assert load_g is not None
+        sample_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=sample_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=5.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.0,
+    )
+
+    try:
+        holding, stopped = window._update_current_sweep_ramp_hold(step, 4, now_s=102.0)
+
+        assert holding is True
+        assert stopped is False
+        assert window._current_sweep_ramp_hold_step_index == 4
+        assert "inside resume band" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -10322,11 +10378,62 @@ def test_session_writes_ui_refresh_telemetry(tmp_path: Path, qtbot) -> None:
         assert rows[0]["ui_heartbeat_fps"] == "62.500"
         assert rows[0]["handler_duration_ms"] == "12.000"
         assert rows[0]["graph_refresh_interval_ms"] == "500"
+        assert rows[0]["task_text"] == "Manual mode"
         assert rows[0]["scale_sample_changed"] == "1"
         assert rows[0]["live_plot_sample_recorded"] == "1"
         assert rows[0]["dashboard_plot_refreshed"] == "1"
         assert metadata["logging"]["ui_telemetry_sample_count"] == 1
     finally:
+        _close_test_window(window)
+
+
+def test_session_control_trace_logs_current_task_text(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("control_trace_task")
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep(
+                "sweep_current",
+                target_value=30.0,
+                basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                current_start_mA=1.0,
+                current_end_mA=70.0,
+                current_ramp_rate_mA_s=1.0,
+                note="1",
+            )
+        ]
+        window._automation_index = 0
+        window._set_automation_context(
+            phase="current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=30.0,
+            plateau_index=1,
+        )
+        window._active_current_sweep_display_target_mA = 70.0
+        window._active_current_sweep_display_direction = 1.0
+        window._write_control_trace(
+            decision="accept",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=30.0,
+            current_value=29.8,
+            error_value=-0.2,
+            tolerance=1.0,
+            result="reached",
+        )
+        window._stop_session()
+
+        rows = list(
+            csv.DictReader((tmp_path / "control_trace_task" / "control_trace.csv").open(encoding="utf-8", newline=""))
+        )
+
+        assert len(rows) == 1
+        assert rows[0]["task_text"] == "At 30 MPa: increasing current to 70 mA"
+    finally:
+        window._automation_active = False
         _close_test_window(window)
 
 
@@ -12542,7 +12649,7 @@ def test_current_sweep_hold_requires_persistent_out_of_band_error_before_correct
         _close_test_window(window)
 
 
-def test_current_sweep_hold_accepts_small_filtered_fluctuation_without_correction(
+def test_current_sweep_hold_accepts_small_filtered_fluctuation_around_target_without_correction(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -12569,9 +12676,10 @@ def test_current_sweep_hold_accepts_small_filtered_fluctuation_without_correctio
         target_value=50.0,
         plateau_index=1,
     )
-    load_g = mini_dma_mod.load_g_from_stress_mpa(54.0, window.spin_diameter.value())
-    assert load_g is not None
     for index in range(8):
+        stress = 49.0 if index % 2 == 0 else 51.0
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
+        assert load_g is not None
         timestamp_s = now_s + index * 0.25
         window._scale_signal_buffer.add_sample(
             timestamp_s=timestamp_s,
@@ -12648,6 +12756,59 @@ def test_current_sweep_hold_does_not_accept_large_error_as_noise_band(
 
         assert reached is False
         assert moves
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_does_not_accept_one_sided_transformation_scatter_as_noise(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.time()
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        500.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    for index, stress in enumerate((60.0, 65.0, 72.0, 79.0, 84.0)):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=1.8,
+        )
+
+        assert reached is False
+        assert "filtered control signal" not in window.log_output.toPlainText().lower()
     finally:
         _close_test_window(window)
 
@@ -13008,6 +13169,88 @@ def test_current_sweep_hold_resume_band_does_not_expand_with_transformation_nois
         assert holding is True
         assert window._current_sweep_ramp_hold_step_index == 0
         assert "Resumed current ramp" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_target_acceptance_excludes_motor_step_floor(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(1000.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._active_control_config = window._freeze_control_config()
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=30.0,
+    )
+    monkeypatch.setattr(
+        window,
+        "_basis_sensitivity_per_mm",
+        lambda *_args, **_kwargs: 45_000.0,
+    )
+
+    try:
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 30.0)
+
+        assert window._seek_effective_tolerance(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            0.2,
+            seek_key=seek_key,
+        ) == pytest.approx(45.0)
+        assert window._seek_target_acceptance_tolerance(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            0.2,
+            seek_key=seek_key,
+        ) == pytest.approx(0.2)
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_target_ramp_does_not_accept_zero_load_inside_step_floor(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.monotonic()
+    window.spin_steps_per_mm.setValue(1000.0)
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._active_control_config = window._freeze_control_config()
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=30.0,
+    )
+    window._latest_scale_timestamp = now_s
+    window._latest_scale_value_g = 0.0
+    monkeypatch.setattr(window, "_has_fresh_scale_reading", lambda *args, **kwargs: True)
+    monkeypatch.setattr(window, "_current_distribution_value", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(window, "_seek_filtered_control_signal", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(window, "_basis_sensitivity_per_mm", lambda *args, **kwargs: 45_000.0)
+    monkeypatch.setattr(
+        window,
+        "_move_to_position_mm",
+        lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True,
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=30.0,
+            tolerance=0.2,
+        )
+
+        assert reached is False
+        assert moves
     finally:
         _close_test_window(window)
 
