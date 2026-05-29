@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from plotting.plugins import builtin_plugin_registry
 from plotting.plugins.mini_dma import core
 from plotting.plugins.mini_dma.mini_dma_plugin import MiniDmaPlugin
+from plotting.pyplot.window import PyPlotWindow
 
 
 SAMPLE_RUN = Path("sample_data/mini dma/Ni50Fe27Ga23 12_2 test_run32")
@@ -88,6 +89,42 @@ def test_make_figures_create_one_line_per_target() -> None:
     finally:
         plt.close(strain_fig)
         plt.close(resistance_fig)
+
+
+def test_mini_dma_axis_labels_survive_origin_export_label_splitting() -> None:
+    x_label = "Current [mA] (80 mA = 279 A/mm², d = 19.1 µm)"
+    y_label = "Strain [%] (l₀ = 52.8 mm)"
+
+    assert PyPlotWindow._label_parts(x_label) == (x_label, "")
+    assert PyPlotWindow._label_parts(y_label) == (y_label, "")
+    assert PyPlotWindow._label_parts("Resistance [Ohm]") == ("Resistance", "Ohm")
+
+
+def test_origin_line_symbol_style_uses_mini_dma_markers() -> None:
+    class _FakePlot:
+        def __init__(self) -> None:
+            self.commands: list[str] = []
+            self.symbol_shape = 0
+            self.symbol_size = 0.0
+
+        def set_cmd(self, command: str, *_args: object) -> None:
+            self.commands.append(command)
+
+    plot = _FakePlot()
+
+    assert PyPlotWindow._origin_marker_active("o", 3.5) is True
+    PyPlotWindow._apply_origin_plot_style(
+        plot,
+        color="#1f77b4",
+        show_symbols=True,
+        symbol_size=6.0,
+    )
+
+    assert "-k 2" in plot.commands
+    assert "-kf 0" in plot.commands
+    assert "-z 6" in plot.commands
+    assert plot.symbol_shape == 2
+    assert plot.symbol_size == pytest.approx(6.0)
 
 
 def test_resistance_current_figure_can_show_power_top_axis() -> None:

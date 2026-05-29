@@ -4797,12 +4797,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         label = str(text or "").strip()
         if not label:
             return "", ""
+        if UNIT_SUFFIX_BRACKET_RE.search(label) is None and re.search(r"\[[^\[\]]+\]", label):
+            return label, ""
         for pattern in (UNIT_SUFFIX_BRACKET_RE, UNIT_SUFFIX_PAREN_RE):
             match = pattern.match(label)
             if not match:
                 continue
             prefix = str(match.group("prefix") or "").strip()
             unit = str(match.group("unit") or "").strip()
+            if pattern is UNIT_SUFFIX_PAREN_RE and re.search(r"\[[^\[\]]+\]", prefix):
+                return label, ""
             return prefix or label, unit
         return label, ""
 
@@ -6312,7 +6316,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 except Exception:
                     continue
 
-    @staticmethod
     @staticmethod
     def _origin_marker_active(marker: str | None, markersize: float | None) -> bool:
         marker_text = str(marker or "").strip().lower()
