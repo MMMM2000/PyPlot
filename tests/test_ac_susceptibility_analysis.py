@@ -53,6 +53,13 @@ def test_compute_apparent_susceptibility_uses_empty_coil_and_filling_factor() ->
     assert result.loc[0, "delta_l_vs_empty_nH"] == pytest.approx(300.0)
 
 
+def test_format_frequency_uses_khz_for_readability() -> None:
+    assert analysis.format_frequency(200.0) == "200 Hz"
+    assert analysis.format_frequency(1000.0) == "1 kHz"
+    assert analysis.format_frequency(20_000.0) == "20 kHz"
+    assert analysis.format_frequency(100_000.0) == "100 kHz"
+
+
 def test_run_analysis_writes_repeatable_tables_report_and_plots(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.tsv"
     sweep = tmp_path / "sweep.tsv"
@@ -77,11 +84,15 @@ def test_run_analysis_writes_repeatable_tables_report_and_plots(tmp_path: Path) 
         "apparent_complex_susceptibility_points.csv",
         "apparent_susceptibility_change_by_direction.csv",
         "apparent_susceptibility_condition_ranking.csv",
+        "origin_condition_summary.csv",
         "origin_chi_prime_curves.csv",
         "origin_chi_double_prime_curves.csv",
         "recommended_chi_prime_curves.png",
         "recommended_chi_double_prime_curves.png",
         "top_complex_susceptibility_curves.png",
+        "all_conditions_delta_chi_heatmap.png",
+        "all_conditions_snr_heatmap.png",
+        "all_conditions_percent_heatmap.png",
         "SUSCEPTIBILITY_REPORT.md",
         "analysis_metadata.json",
     ]
@@ -98,9 +109,13 @@ def test_run_analysis_writes_repeatable_tables_report_and_plots(tmp_path: Path) 
     report = (out_dir / "SUSCEPTIBILITY_REPORT.md").read_text(encoding="utf-8")
     assert "AC Susceptibility Analysis" in report
     assert "synthetic" in report
+    assert "1 kHz" in report
+    assert "The percent column is normalized by the low-current apparent susceptibility window" in report
     assert "origin_chi_prime_curves.csv" in report
+    assert "origin_condition_summary.csv" in report
     assert copied["chi_prime_plot"].exists()
     assert copied["complex_plot"].exists()
+    assert copied["delta_heatmap"].exists()
 
 
 def _write_baseline(path: Path) -> None:

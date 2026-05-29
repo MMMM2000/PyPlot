@@ -332,6 +332,8 @@ def rank_conditions(metrics: pd.DataFrame, config: SusceptibilityAnalysisConfig)
         columns="direction",
         values=[
             "delta_chi_prime_high_minus_low",
+            "chi_prime_low_window",
+            "chi_prime_high_window",
             "abs_delta_chi_prime",
             "percent_change_vs_low",
             "chi_prime_noise",
@@ -343,6 +345,10 @@ def rank_conditions(metrics: pd.DataFrame, config: SusceptibilityAnalysisConfig)
     paired.columns = [f"{name}_{direction}" for name, direction in paired.columns]
     paired = paired.reset_index()
     paired["mean_abs_delta_chi_prime"] = paired[["abs_delta_chi_prime_up", "abs_delta_chi_prime_down"]].mean(axis=1)
+    paired["mean_abs_chi_prime_low_window"] = (
+        paired[["chi_prime_low_window_up", "chi_prime_low_window_down"]].abs().mean(axis=1)
+    )
+    paired["mean_chi_prime_high_window"] = paired[["chi_prime_high_window_up", "chi_prime_high_window_down"]].mean(axis=1)
     paired["mean_chi_prime_snr"] = paired[["chi_prime_snr_up", "chi_prime_snr_down"]].mean(axis=1)
     paired["mean_abs_percent_change_vs_low"] = (
         paired[["percent_change_vs_low_up", "percent_change_vs_low_down"]].abs().mean(axis=1)
@@ -367,10 +373,41 @@ def export_origin_ready_tables(points: pd.DataFrame, output_dir: Path) -> None:
     loss.to_csv(output_dir / "origin_chi_double_prime_curves.csv", index=False)
 
 
+def export_condition_summary_for_origin(ranking: pd.DataFrame, output_dir: Path) -> None:
+    if ranking.empty:
+        return
+    columns = [
+        "frequency_hz",
+        "frequency_label",
+        "frequency_khz",
+        "excitation_mA",
+        "h_ac_oe",
+        "mean_abs_delta_chi_prime",
+        "mean_abs_chi_prime_low_window",
+        "mean_chi_prime_high_window",
+        "mean_chi_prime_snr",
+        "mean_abs_percent_change_vs_low",
+        "negative_ls_percent",
+        "recommended_quality",
+        "literature_field_range",
+    ]
+    summary = ranking.copy()
+    summary["frequency_label"] = summary["frequency_hz"].map(format_frequency)
+    summary["frequency_khz"] = summary["frequency_hz"] / 1000.0
+    summary[columns].to_csv(output_dir / "origin_condition_summary.csv", index=False)
+
+
 def _format_float(value: float, digits: int = 3) -> str:
     if not math.isfinite(float(value)):
         return ""
     return f"{float(value):.{digits}g}"
+
+
+def format_frequency(value_hz: float) -> str:
+    value = float(value_hz)
+    if abs(value) >= 1000.0:
+        return f"{_format_float(value / 1000.0)} kHz"
+    return f"{_format_float(value)} Hz"
 
 
 def _write_markdown_report(ranking: pd.DataFrame, config: SusceptibilityAnalysisConfig, output_dir: Path) -> None:
@@ -416,29 +453,64 @@ def _write_markdown_report(ranking: pd.DataFrame, config: SusceptibilityAnalysis
     for _, row in recommended.head(12).iterrows():
         lines.append(
             "| "
-            f"{row.frequency_hz:g} Hz | "
+            f"{format_frequency(row.frequency_hz)} | "
             f"{row.excitation_mA:g} mA | "
             f"{row.h_ac_oe:.2f} Oe | "
             f"{_format_float(row.mean_abs_delta_chi_prime)} | "
             f"{row.mean_chi_prime_snr:.1f} | "
             f"{row.mean_abs_percent_change_vs_low:.1f}% |"
         )
+    high_percent = ranking[
+        np.isfinite(ranking["mean_abs_percent_change_vs_low"])
+        & (ranking["mean_abs_percent_change_vs_low"] >= 500.0)
+    ].sort_values("mean_abs_percent_change_vs_low", ascending=False)
     lines.extend(
         [
             "",
-            "Percent changes can exceed 1000 percent when low-current apparent susceptibility is near zero or noisy. "
-            "Use SNR and the actual curves before treating a large percent as physically meaningful.",
+            "The percent column is normalized by the low-current apparent susceptibility window. "
+            "Very high percentages appear when that low-current denominator is small, crosses near zero, or is noisy. "
+            "For choosing report conditions, prefer the actual chi' curves, mean abs delta chi', and SNR.",
+        ]
+    )
+    if not high_percent.empty:
+        lines.extend(
+            [
+                "",
+                "## High Percent Conditions",
+                "",
+                "| Frequency | Excitation | H_ac | mean low-window abs chi_prime | mean abs delta chi_prime | approx percent | SNR |",
+                "|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for _, row in high_percent.head(12).iterrows():
+            lines.append(
+                "| "
+                f"{format_frequency(row.frequency_hz)} | "
+                f"{row.excitation_mA:g} mA | "
+                f"{row.h_ac_oe:.2f} Oe | "
+                f"{_format_float(row.mean_abs_chi_prime_low_window)} | "
+                f"{_format_float(row.mean_abs_delta_chi_prime)} | "
+                f"{row.mean_abs_percent_change_vs_low:.1f}% | "
+                f"{row.mean_chi_prime_snr:.1f} |"
+            )
+    lines.extend(
+        [
             "",
             "## Outputs",
             "",
             "- `apparent_complex_susceptibility_points.csv`",
             "- `apparent_susceptibility_change_by_direction.csv`",
             "- `apparent_susceptibility_condition_ranking.csv`",
+            "- `origin_condition_summary.csv`",
             "- `origin_chi_prime_curves.csv`",
             "- `origin_chi_double_prime_curves.csv`",
             "- `recommended_chi_prime_curves.png`",
             "- `recommended_chi_double_prime_curves.png`",
             "- `top_complex_susceptibility_curves.png`",
+            "- `high_percent_chi_prime_curves.png`",
+            "- `all_conditions_delta_chi_heatmap.png`",
+            "- `all_conditions_snr_heatmap.png`",
+            "- `all_conditions_percent_heatmap.png`",
         ]
     )
     (output_dir / "SUSCEPTIBILITY_REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -460,6 +532,20 @@ def plot_recommended_curves(points: pd.DataFrame, ranking: pd.DataFrame, output_
         output_dir / "recommended_chi_double_prime_curves.png",
     )
     _plot_complex(points, selection.head(3), output_dir / "top_complex_susceptibility_curves.png")
+    high_percent = ranking[
+        np.isfinite(ranking["mean_abs_percent_change_vs_low"])
+        & (ranking["mean_abs_percent_change_vs_low"] >= 500.0)
+    ].sort_values("mean_abs_percent_change_vs_low", ascending=False)
+    if not high_percent.empty:
+        _plot_component(
+            points,
+            high_percent.head(6),
+            "chi_prime_app",
+            "apparent chi'",
+            output_dir / "high_percent_chi_prime_curves.png",
+            include_percent=True,
+        )
+    _plot_condition_heatmaps(ranking, output_dir)
 
 
 def _clean_component_points(points: pd.DataFrame, row: pd.Series, component: str, config_negative_limit: float = 0.05) -> pd.DataFrame:
@@ -492,10 +578,36 @@ def _set_tight_y_limits(axis: object, values: pd.Series) -> None:
         axis.axhline(0.0, color="0.35", linewidth=0.6)
 
 
-def _plot_component(points: pd.DataFrame, selection: pd.DataFrame, component: str, label: str, path: Path) -> None:
+def _condition_title(row: pd.Series, *, include_delta: bool = True, include_percent: bool = False) -> str:
+    title = f"{format_frequency(row.frequency_hz)}, {row.excitation_mA:g} mA ({row.h_ac_oe:.2f} Oe)"
+    details: list[str] = []
+    if include_delta:
+        details.append(f"dchi'={row.mean_abs_delta_chi_prime:.3g}")
+    if include_percent:
+        details.append(f"{row.mean_abs_percent_change_vs_low:.1f}% vs low chi'")
+        if "mean_abs_chi_prime_low_window" in row:
+            details.append(f"low |chi'|={row.mean_abs_chi_prime_low_window:.3g}")
+    if "mean_chi_prime_snr" in row:
+        details.append(f"SNR={row.mean_chi_prime_snr:.1f}")
+    if details:
+        separator = "\n" if include_percent else ", "
+        title = f"{title}{separator}" + ", ".join(details)
+    return title
+
+
+def _plot_component(
+    points: pd.DataFrame,
+    selection: pd.DataFrame,
+    component: str,
+    label: str,
+    path: Path,
+    *,
+    include_percent: bool = False,
+) -> None:
     if selection.empty:
         return
-    fig, axes = plt.subplots(len(selection), 1, figsize=(10, 2.8 * len(selection)), dpi=160, sharex=True)
+    height_per_panel = 3.1 if include_percent else 2.8
+    fig, axes = plt.subplots(len(selection), 1, figsize=(10, height_per_panel * len(selection)), dpi=160, sharex=True)
     if len(selection) == 1:
         axes = [axes]
     for axis, (_, row) in zip(axes, selection.iterrows()):
@@ -512,10 +624,7 @@ def _plot_component(points: pd.DataFrame, selection: pd.DataFrame, component: st
             )
         _set_tight_y_limits(axis, data[component])
         axis.set_ylabel(label)
-        axis.set_title(
-            f"{row.frequency_hz:g} Hz, {row.excitation_mA:g} mA ({row.h_ac_oe:.2f} Oe), "
-            f"dchi'={row.mean_abs_delta_chi_prime:.3g}, SNR={row.mean_chi_prime_snr:.1f}"
-        )
+        axis.set_title(_condition_title(row, include_percent=include_percent), fontsize=10 if include_percent else None)
         axis.legend(fontsize=8)
     axes[-1].set_xlabel("DC heating current set [mA]")
     fig.tight_layout()
@@ -547,10 +656,88 @@ def _plot_complex(points: pd.DataFrame, selection: pd.DataFrame, path: Path) -> 
                 )
             _set_tight_y_limits(axis, data[component])
             axis.set_ylabel(label)
-            axis.set_title(f"{row.frequency_hz:g} Hz, {row.excitation_mA:g} mA ({row.h_ac_oe:.2f} Oe)")
+            axis.set_title(_condition_title(row, include_delta=False))
             axis.legend(fontsize=8)
     for axis in axes[-1, :]:
         axis.set_xlabel("DC heating current set [mA]")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def _plot_condition_heatmaps(ranking: pd.DataFrame, output_dir: Path) -> None:
+    if ranking.empty:
+        return
+    delta_data = ranking.copy()
+    delta_data["delta_plot_value"] = np.log10(delta_data["mean_abs_delta_chi_prime"].clip(lower=1.0))
+    _plot_condition_heatmap(
+        delta_data,
+        "delta_plot_value",
+        "log10 mean abs delta chi'",
+        output_dir / "all_conditions_delta_chi_heatmap.png",
+        annotate_column="mean_abs_delta_chi_prime",
+    )
+    _plot_condition_heatmap(
+        ranking,
+        "mean_chi_prime_snr",
+        "SNR",
+        output_dir / "all_conditions_snr_heatmap.png",
+    )
+    percent_data = ranking.copy()
+    percent_data["percent_plot_value"] = np.log10(percent_data["mean_abs_percent_change_vs_low"].clip(lower=1.0))
+    _plot_condition_heatmap(
+        percent_data,
+        "percent_plot_value",
+        "log10 approx percent vs low chi'",
+        output_dir / "all_conditions_percent_heatmap.png",
+        annotate_column="mean_abs_percent_change_vs_low",
+        annotation_suffix="%",
+    )
+
+
+def _plot_condition_heatmap(
+    ranking: pd.DataFrame,
+    value_column: str,
+    title: str,
+    path: Path,
+    *,
+    annotate_column: str | None = None,
+    annotation_suffix: str = "",
+) -> None:
+    if ranking.empty or value_column not in ranking.columns:
+        return
+    frequencies = sorted(float(value) for value in ranking["frequency_hz"].dropna().unique())
+    excitations = sorted(float(value) for value in ranking["excitation_mA"].dropna().unique())
+    if not frequencies or not excitations:
+        return
+    values = np.full((len(frequencies), len(excitations)), np.nan)
+    annotations = np.full((len(frequencies), len(excitations)), np.nan)
+    for row in ranking.itertuples(index=False):
+        y = frequencies.index(float(row.frequency_hz))
+        x = excitations.index(float(row.excitation_mA))
+        values[y, x] = float(getattr(row, value_column))
+        if annotate_column is not None:
+            annotations[y, x] = float(getattr(row, annotate_column))
+    fig_width = max(7.0, 0.9 * len(excitations) + 3.0)
+    fig_height = max(5.0, 0.42 * len(frequencies) + 2.0)
+    fig, axis = plt.subplots(figsize=(fig_width, fig_height), dpi=170)
+    image = axis.imshow(values, aspect="auto", origin="lower", cmap="viridis")
+    axis.set_xticks(range(len(excitations)))
+    axis.set_xticklabels([f"{value:g}" for value in excitations], rotation=45, ha="right")
+    axis.set_yticks(range(len(frequencies)))
+    axis.set_yticklabels([format_frequency(value) for value in frequencies])
+    axis.set_xlabel("LCR excitation current [mA]")
+    axis.set_ylabel("Frequency")
+    axis.set_title(title)
+    colorbar = fig.colorbar(image, ax=axis)
+    colorbar.set_label(title)
+    for y, frequency in enumerate(frequencies):
+        for x, excitation in enumerate(excitations):
+            raw_value = annotations[y, x] if annotate_column is not None else values[y, x]
+            if not np.isfinite(raw_value):
+                continue
+            text = f"{raw_value:.0f}{annotation_suffix}" if abs(raw_value) >= 100 else f"{raw_value:.1f}{annotation_suffix}"
+            axis.text(x, y, text, ha="center", va="center", color="white", fontsize=7)
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -572,6 +759,7 @@ def run_analysis(config: SusceptibilityAnalysisConfig) -> dict[str, Path]:
     metrics.to_csv(config.output_dir / "apparent_susceptibility_change_by_direction.csv", index=False)
     ranking.to_csv(config.output_dir / "apparent_susceptibility_condition_ranking.csv", index=False)
     export_origin_ready_tables(susceptibility, config.output_dir)
+    export_condition_summary_for_origin(ranking, config.output_dir)
     plot_recommended_curves(susceptibility, ranking, config.output_dir)
     _write_markdown_report(ranking, config, config.output_dir)
 
@@ -594,6 +782,10 @@ def run_analysis(config: SusceptibilityAnalysisConfig) -> dict[str, Path]:
         "report": config.output_dir / "SUSCEPTIBILITY_REPORT.md",
         "ranking": config.output_dir / "apparent_susceptibility_condition_ranking.csv",
         "chi_prime_plot": config.output_dir / "recommended_chi_prime_curves.png",
+        "high_percent_plot": config.output_dir / "high_percent_chi_prime_curves.png",
+        "delta_heatmap": config.output_dir / "all_conditions_delta_chi_heatmap.png",
+        "snr_heatmap": config.output_dir / "all_conditions_snr_heatmap.png",
+        "percent_heatmap": config.output_dir / "all_conditions_percent_heatmap.png",
         "complex_plot": config.output_dir / "top_complex_susceptibility_curves.png",
     }
 
@@ -601,7 +793,7 @@ def run_analysis(config: SusceptibilityAnalysisConfig) -> dict[str, Path]:
 def copy_preview_images(outputs: dict[str, Path], preview_dir: Path) -> dict[str, Path]:
     preview_dir.mkdir(parents=True, exist_ok=True)
     copied: dict[str, Path] = {}
-    for key in ("chi_prime_plot", "complex_plot"):
+    for key in ("chi_prime_plot", "complex_plot", "high_percent_plot", "delta_heatmap", "snr_heatmap", "percent_heatmap"):
         path = outputs.get(key)
         if path is None or not path.exists():
             continue

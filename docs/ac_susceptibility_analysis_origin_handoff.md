@@ -110,9 +110,14 @@ apparent_susceptibility_change_by_direction.csv
 apparent_susceptibility_condition_ranking.csv
 origin_chi_prime_curves.csv
 origin_chi_double_prime_curves.csv
+origin_condition_summary.csv
 recommended_chi_prime_curves.png
 recommended_chi_double_prime_curves.png
 top_complex_susceptibility_curves.png
+high_percent_chi_prime_curves.png
+all_conditions_delta_chi_heatmap.png
+all_conditions_snr_heatmap.png
+all_conditions_percent_heatmap.png
 SUSCEPTIBILITY_REPORT.md
 analysis_metadata.json
 ```
@@ -121,6 +126,8 @@ The Origin-ready CSVs are intentionally long-form. In Origin, import
 `origin_chi_prime_curves.csv`, filter by selected frequency/excitation/current
 direction, then plot `current_set_mA` against `chi_prime_app`. Use
 `origin_chi_double_prime_curves.csv` the same way for the loss component.
+Use `origin_condition_summary.csv` for report overview graphs across all
+measured frequency/excitation conditions.
 
 ## Current Best Conditions
 
@@ -137,6 +144,21 @@ The prior manual analysis ranked these conditions as strongest and cleanest:
 Percent changes can look huge, including over 1000 percent, when the low-current
 denominator is near zero or noisy. Prefer the curves, direction consistency,
 absolute `delta chi_prime`, and SNR ranking over percent alone.
+
+The generated high-percent plot is mostly a diagnostic: it shows that the
+largest percent values come from low-frequency or low-excitation conditions
+where the low-current apparent susceptibility is small, noisy, or crosses near
+zero. For a supervisor-facing report, the better overview is:
+
+1. `all_conditions_snr_heatmap.png` to show where the response is stable.
+2. `all_conditions_delta_chi_heatmap.png` to show the magnitude of the change
+   across every frequency/excitation pair.
+3. `recommended_chi_prime_curves.png` and `top_complex_susceptibility_curves.png`
+   for the selected high-quality conditions.
+
+When recreating these as Origin objects, import `origin_condition_summary.csv`
+for the heatmap-style overview and `origin_chi_prime_curves.csv` /
+`origin_chi_double_prime_curves.csv` for the selected current-sweep curves.
 
 ## Origin PC Follow-Up
 
