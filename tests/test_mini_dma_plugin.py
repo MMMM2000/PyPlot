@@ -58,8 +58,8 @@ def test_make_figures_create_one_line_per_target() -> None:
         assert len(resistance_ax.lines) == 9
         assert all(line.get_marker() == "o" for line in strain_ax.lines)
         assert all(line.get_marker() == "o" for line in resistance_ax.lines)
-        assert strain_ax.get_xlabel() == "Current [mA] (79.9 mA = 279 A/mm², d = 19.1 µm)"
-        assert strain_ax.get_ylabel() == "Strain [%]"
+        assert strain_ax.get_xlabel() == "Current [mA] (80 mA = 279 A/mm², d = 19.1 µm)"
+        assert strain_ax.get_ylabel() == "Strain [%] (l₀ = 58.3 mm)"
         assert resistance_ax.get_ylabel() == "Resistance [Ohm]"
         assert strain_ax.lines[0].get_label() == "50 MPa / 1.46 g"
         assert strain_ax.get_legend().get_title().get_text() == "Stress / load"
@@ -102,7 +102,7 @@ def test_strain_current_figure_can_use_each_trace_minimum_as_l0() -> None:
     fig = core.make_strain_current_figure(run, zero_minimum_strain=True)
     try:
         ax = fig.axes[0]
-        assert ax.get_ylabel() == "Strain [%]"
+        assert ax.get_ylabel() == "Strain [%] (per-curve l₀)"
         assert len(ax.lines) == 9
         groups = core.current_sweep_groups(run.frame)
         for line, (_target, group) in zip(ax.lines, groups, strict=True):
@@ -128,7 +128,7 @@ def test_strain_current_figure_can_use_global_minimum_as_shared_l0() -> None:
     )
     try:
         ax = fig.axes[0]
-        assert ax.get_ylabel() == "Strain [%]"
+        assert ax.get_ylabel() == "Strain [%] (l₀ = 52.8 mm)"
         minima = [min(line.get_ydata()) for line in ax.lines]
         assert min(minima) == pytest.approx(0.0)
         assert any(value > 0.0 for value in minima)

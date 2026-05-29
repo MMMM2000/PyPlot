@@ -138,7 +138,7 @@ def make_strain_current_figure(
     return _make_current_figure(
         run,
         y_column="strain_pct",
-        y_label=_strain_axis_label(baseline_mode),
+        y_label="Strain [%]",
         title_suffix="Strain vs Current",
         strain_baseline_mode=baseline_mode,
         show_power_top_axis=show_power_top_axis,
@@ -221,6 +221,12 @@ def _make_current_figure(
         )
     ax.set_title(f"{run.sample_name} - {title_suffix}")
     ax.set_xlabel(_current_axis_label(run, [group for _target, group in plotted_groups]))
+    if y_column == "strain_pct":
+        y_label = _strain_axis_label(
+            run,
+            strain_baseline_mode,
+            global_l0_mm=global_l0_mm,
+        )
     ax.set_ylabel(y_label)
     ax.grid(True, alpha=0.3)
     if show_power_top_axis:
@@ -380,9 +386,18 @@ def _normalise_strain_baseline_mode(
     return STRAIN_BASELINE_RAW
 
 
-def _strain_axis_label(mode: str) -> str:
-    _ = mode
-    return "Strain [%]"
+def _strain_axis_label(
+    run: MiniDmaRun,
+    mode: str,
+    *,
+    global_l0_mm: float | None = None,
+) -> str:
+    if mode == STRAIN_BASELINE_PER_TARGET_MINIMUM:
+        return "Strain [%] (per-curve l₀)"
+    l0_mm = global_l0_mm if mode == STRAIN_BASELINE_GLOBAL_MINIMUM else run.initial_length_mm
+    if l0_mm is None or not pd.notna(l0_mm) or l0_mm <= 0.0:
+        return "Strain [%]"
+    return f"Strain [%] (l₀ = {_format_compact_number(l0_mm, max_decimals=1)} mm)"
 
 
 def _choose_current_column(frame: pd.DataFrame) -> str | None:
@@ -483,7 +498,7 @@ def _current_axis_label(run: MiniDmaRun, groups: Iterable[pd.DataFrame]) -> str:
     diameter_um = run.wire_diameter_mm * 1000.0
     return (
         "Current [mA] "
-        f"({_format_compact_number(max_current_mA)} mA = "
+        f"({_format_compact_number(max_current_mA, max_decimals=0)} mA = "
         f"{_format_compact_number(current_density, max_decimals=0)} A/mm², "
         f"d = {_format_compact_number(diameter_um)} µm)"
     )
