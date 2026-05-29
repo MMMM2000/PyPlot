@@ -2516,6 +2516,14 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             return 0.2
 
+    def _min_positive_current_mA(self) -> float:
+        profile = SUPPLY_PROFILES.get(str(getattr(self, "supply_profile_id", "")), {})
+        fallback = profile.get("min_start_current_mA", 1.0)
+        try:
+            return max(0.0, float(profile.get("min_current_mA", fallback) or 0.0))
+        except Exception:
+            return 0.0
+
     def _quantize_current_ramp_mA_s(self, value: float) -> float:
         resolution = self._current_resolution_mA()
         try:
@@ -4330,6 +4338,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "channel": int(getattr(self, "channel_select", 0) or 0),
             "voltage_limit_v": float(getattr(self, "max_voltage", 0.0) or 0.0),
             "current_resolution_mA": self._current_resolution_mA(),
+            "min_positive_current_mA": self._min_positive_current_mA(),
             "shared_broker": bool(self._using_shared_broker()),
             "broker_host": self._shared_broker_host() if self._using_shared_broker() else None,
             "broker_port": self._shared_broker_port() if self._using_shared_broker() else None,

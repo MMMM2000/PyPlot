@@ -709,6 +709,8 @@ def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) ->
     assert supply["detected_model"] == "hmp4040"
     assert supply["port"] == "COM3"
     assert supply["baud"] == 115200
+    assert supply["current_resolution_mA"] == pytest.approx(0.2)
+    assert supply["min_positive_current_mA"] == pytest.approx(1.0)
     assert supply["broker_owned_by_app"] is True
     assert supply["broker_source"] == "owned"
     assert payload["recipe"]["reverse_enabled"] is True

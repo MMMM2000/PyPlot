@@ -196,7 +196,7 @@ Current Annealing:
 
 - Output file path and row count.
 - Current, voltage, and resistance ranges.
-- `metadata/<data-file-stem>/metadata.json`: `supply.profile_id`, `supply.channel`, `supply.voltage_limit_v`, `supply.broker_source`, and `recipe.current_ramp_rate_mA_s`.
+- `metadata/<data-file-stem>/metadata.json`: `supply.profile_id`, `supply.channel`, `supply.voltage_limit_v`, `supply.current_resolution_mA`, `supply.min_positive_current_mA`, `supply.broker_source`, and `recipe.current_ramp_rate_mA_s`.
 - Optional metadata index: run `launcher.py --current-annealing-index-source annealing=<output-root> --current-annealing-index-output-dir <review-folder>` to write `current_annealing_index.csv` and `.jsonl` from the metadata sidecar tree.
 
 Mini DMA:
