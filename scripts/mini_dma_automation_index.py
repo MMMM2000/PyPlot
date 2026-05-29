@@ -78,8 +78,36 @@ def _file_last_write_utc(path: Path) -> str:
     return stamp.isoformat(timespec="seconds")
 
 
+def _metadata_sidecar_path(source_root: Path, run_name: str) -> Path:
+    return source_root / "metadata" / run_name / "metadata.json"
+
+
+def _metadata_path_for_run(source_root: Path, run_dir: Path) -> Path:
+    run_metadata = run_dir / "metadata.json"
+    if run_metadata.exists():
+        return run_metadata
+    return _metadata_sidecar_path(source_root, run_dir.name)
+
+
+def _run_names(source_root: Path) -> set[str]:
+    ignored = {"reports", "plans", "campaigns", "legacy_imports", "metadata"}
+    names = {
+        path.name
+        for path in source_root.iterdir()
+        if path.is_dir() and path.name.lower() not in ignored
+    }
+    metadata_root = source_root / "metadata"
+    if metadata_root.exists():
+        names.update(
+            path.name
+            for path in metadata_root.iterdir()
+            if path.is_dir() and (path / "metadata.json").exists()
+        )
+    return names
+
+
 def _run_row(source: SourceRoot, run_dir: Path, indexed_utc: str) -> dict[str, Any]:
-    metadata_path = run_dir / "metadata.json"
+    metadata_path = _metadata_path_for_run(source.path, run_dir)
     metadata = _read_json(metadata_path) or {}
     name_fields = metadata.get("name_fields")
     if not isinstance(name_fields, Mapping):
@@ -102,7 +130,7 @@ def _run_row(source: SourceRoot, run_dir: Path, indexed_utc: str) -> dict[str, A
         "source_name": source.name,
         "run_name": run_dir.name,
         "run_path": str(run_dir),
-        "last_write_time": _file_last_write_utc(run_dir),
+        "last_write_time": _file_last_write_utc(run_dir) or _file_last_write_utc(metadata_path),
         "metadata_exists": str(metadata_path.exists()).lower(),
         "created_utc": metadata.get("created_utc", ""),
         "sample_name": metadata.get("sample_name", ""),
@@ -136,9 +164,8 @@ def discover_runs(sources: Sequence[SourceRoot]) -> list[dict[str, Any]]:
     for source in sources:
         if not source.path.exists():
             continue
-        for run_dir in sorted((path for path in source.path.iterdir() if path.is_dir()), key=lambda path: path.name.lower()):
-            if run_dir.name.lower() in {"reports", "plans", "campaigns", "legacy_imports"}:
-                continue
+        for run_name in sorted(_run_names(source.path), key=str.lower):
+            run_dir = source.path / run_name
             rows.append(_run_row(source, run_dir, indexed_utc))
     rows.sort(key=lambda row: (str(row["source_name"]).lower(), str(row["run_name"]).lower()))
     return rows
