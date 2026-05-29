@@ -247,6 +247,11 @@ class SharedPowerSupplyBroker:
         if existing.lease_id != lease_id:
             raise PermissionError(f"Lease mismatch for CH{channel}.")
         self._leases.pop(channel, None)
+        with self._scheduler_lock:
+            self._pending_currents.pop(channel, None)
+            self._current_ramps.pop(channel, None)
+            self._polling.pop(channel, None)
+            self._setpoint_currents_mA.pop(channel, None)
 
     def _require_lease(self, *, channel: int, lease_id: str) -> BenchChannel:
         channel = self.validate_channel(channel)

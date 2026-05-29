@@ -352,6 +352,35 @@ def test_scheduler_direct_and_ramp_requests_override_each_other() -> None:
     assert "CURR 0.0014" not in commands
 
 
+def test_release_clears_scheduler_state_for_channel() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+    broker.configure_polling(channel=1, interval_s=1.0)
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=3.0,
+        rate_mA_s=1.0,
+        max_step_mA=0.2,
+        resolution_mA=0.2,
+        now_s=0.0,
+    )
+
+    assert "1" in broker.snapshot()["scheduler"]["current_ramps"]
+
+    broker.release(channel=1, lease_id=lease.lease_id)
+
+    scheduler = broker.snapshot()["scheduler"]
+    assert "1" not in scheduler["current_ramps"]
+    assert "1" not in scheduler["pending_currents"]
+    assert "1" not in scheduler["polling"]
+    assert "1" not in scheduler["setpoint_currents_mA"]
+
+
 def test_scheduler_skips_ramp_snapshot_if_newer_request_arrives_before_write() -> None:
     driver = _driver()
     broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
