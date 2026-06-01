@@ -63,8 +63,9 @@ SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
 CONTROL_LOGIC_VERSION = "2026-05-29.2"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
-RECIPE_SPINBOX_WIDTH_PX = 340
-RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 112
+RECIPE_SPINBOX_WIDTH_PX = 220
+RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
+RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
     "setup_slack_stress_cap",
@@ -3570,6 +3571,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._owned_shared_broker_driver: HmpSerialDriver | None = None
         self._diameter_imported = False
         self._builder_import_in_progress = False
+        self._sync_name_fields_in_progress = False
         self._plot_tiles: list[PlotTileWidgets] = []
         self._dashboard_plot_bundles: list[PyqtGraphPlotBundle] = []
         self._dashboard_plot_widgets: list[Any] = []
@@ -3952,7 +3954,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row = QtWidgets.QWidget(parent)
         layout = QtWidgets.QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(RECIPE_EQUIVALENT_ROW_SPACING_PX)
         if spinbox_width is None:
             spinbox.setMinimumWidth(max(spinbox.minimumWidth(), 130))
             layout.addWidget(spinbox, stretch=1)
@@ -3960,10 +3962,13 @@ class MainWindow(QtWidgets.QMainWindow):
             spinbox.setFixedWidth(max(130, int(spinbox_width)))
             layout.addWidget(spinbox)
         label = QtWidgets.QLabel("-", row)
+        label.setWordWrap(False)
+        label.setProperty("_mini_dma_no_word_wrap", True)
         if label_width is None:
             label.setMinimumWidth(88)
         else:
             label.setFixedWidth(max(88, int(label_width)))
+        label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
         label.setStyleSheet("color: palette(text);")
         layout.addWidget(label)
         return row, label
@@ -5404,7 +5409,7 @@ class MainWindow(QtWidgets.QMainWindow):
             spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
-        current_sweep_form.addRow("First-overheating stress", current_preheat_row)
+        current_sweep_form.addRow("Stress", current_preheat_row)
 
         self.label_current_sweep_targets_section = QtWidgets.QLabel("Targets", automation_box)
         targets_font = self.label_current_sweep_targets_section.font()
@@ -6382,6 +6387,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._make_layout_width_friendly(root.layout())
         for widget in root.findChildren(QtWidgets.QWidget):
+            is_nowrap_label = (
+                isinstance(widget, QtWidgets.QLabel)
+                and (bool(widget.property("_mini_dma_no_word_wrap")) or widget.buddy() is not None)
+            )
             if not isinstance(
                 widget,
                 (
@@ -6389,11 +6398,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtWidgets.QPushButton,
                     QtWidgets.QToolButton,
                 ),
-            ):
+            ) and not is_nowrap_label:
                 widget.setMinimumWidth(0)
             policy = widget.sizePolicy()
             if isinstance(widget, QtWidgets.QLabel):
-                widget.setWordWrap(True)
+                widget.setWordWrap(not is_nowrap_label)
+                if is_nowrap_label:
+                    widget.setMinimumWidth(max(widget.minimumWidth(), widget.sizeHint().width()))
             if isinstance(widget, QtWidgets.QAbstractSpinBox):
                 widget.setMinimumWidth(max(widget.minimumWidth(), 130))
                 widget.lineEdit().setMinimumWidth(96)
@@ -6430,6 +6441,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if isinstance(layout, QtWidgets.QFormLayout):
             layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            for row in range(layout.rowCount()):
+                label_item = layout.itemAt(row, QtWidgets.QFormLayout.ItemRole.LabelRole)
+                if label_item is None:
+                    continue
+                label_widget = label_item.widget()
+                if isinstance(label_widget, QtWidgets.QLabel):
+                    label_widget.setProperty("_mini_dma_no_word_wrap", True)
             if bool(layout.property("_mini_dma_keep_rows_unwrapped")):
                 layout.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.DontWrapRows)
             else:
@@ -8671,7 +8689,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Project loaded, but no matching sample row was found from the current naming fields."
             )
             return False
-        self._apply_project_match(match, update_identity=update_identity, quiet=quiet)
+        try:
+            self._apply_project_match(match, update_identity=update_identity, quiet=quiet)
+        except Exception as exc:
+            self._mark_diameter_imported(False)
+            self.label_project_status.setText(f"Failed to apply saved project sample match: {exc}")
+            return False
         return True
 
     def _import_builder_project(self) -> None:
@@ -9010,30 +9033,40 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(f"Applied naming fields: {built}")
 
     def _sync_auto_name_fields(self) -> None:
-        built = self._build_sample_name()
-        if built:
-            log_label = self._log_name_with_recipe_token(self._build_log_name_label(built))
-            safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
-            safe_name = safe_name or DEFAULT_LOG_BASENAME
-            current_sample_name = self.edit_sample_name.text().strip()
-            current_log_name = self.edit_log_name.text().strip()
-            if not current_sample_name or current_sample_name == self._last_auto_sample_name:
-                self.edit_sample_name.setText(built)
-                current_sample_name = built
-            if (
-                not current_log_name
-                or current_log_name == DEFAULT_LOG_BASENAME
-                or current_log_name == self._last_auto_log_name
-            ):
-                self.edit_log_name.setText(safe_name)
-                current_log_name = safe_name
-            self._last_auto_sample_name = built
-            self._last_auto_log_name = safe_name
-        self._refresh_recipe_sample_label()
-        self._update_fabrication_microwire_completer()
-        self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
-        self._apply_fabrication_sample_if_possible()
-        self._persist_settings_if_enabled()
+        if self._sync_name_fields_in_progress:
+            return
+        self._sync_name_fields_in_progress = True
+        try:
+            built = self._build_sample_name()
+            if built:
+                log_label = self._log_name_with_recipe_token(self._build_log_name_label(built))
+                safe_name = re.sub(r'[<>:"/\\\\|?*]+', "_", log_label).strip(" .")
+                safe_name = safe_name or DEFAULT_LOG_BASENAME
+                current_sample_name = self.edit_sample_name.text().strip()
+                current_log_name = self.edit_log_name.text().strip()
+                if not current_sample_name or current_sample_name == self._last_auto_sample_name:
+                    self.edit_sample_name.setText(built)
+                    current_sample_name = built
+                if (
+                    not current_log_name
+                    or current_log_name == DEFAULT_LOG_BASENAME
+                    or current_log_name == self._last_auto_log_name
+                ):
+                    self.edit_log_name.setText(safe_name)
+                    current_log_name = safe_name
+                self._last_auto_sample_name = built
+                self._last_auto_log_name = safe_name
+            self._refresh_recipe_sample_label()
+            self._update_fabrication_microwire_completer()
+            self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+            try:
+                self._apply_fabrication_sample_if_possible()
+            except Exception as exc:
+                self._mark_diameter_imported(False)
+                self.label_fabrication_status.setText(f"Failed to apply fabrication sample suggestion: {exc}")
+            self._persist_settings_if_enabled()
+        finally:
+            self._sync_name_fields_in_progress = False
 
     def _sync_stale_log_name_from_sample(self) -> None:
         sample_name = self.edit_sample_name.text().strip()

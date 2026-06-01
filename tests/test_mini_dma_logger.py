@@ -4175,6 +4175,107 @@ def test_project_diameter_is_preferred_over_fabrication_suggestion(tmp_path: Pat
         _close_test_window(window)
 
 
+def test_sample_wire_change_from_project_to_fabrication_fallback_is_safe(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "10/1",
+                                "d (um)": 12.4,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            "Ni50Fe27Ga23": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=10,
+                    piece=4,
+                    label="10/4",
+                    diameter_mm=0.0136,
+                )
+            ]
+        }
+        window._refresh_fabrication_completers()
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("10/1")
+        qtbot.wait(20)
+
+        assert window.spin_diameter.value() == pytest.approx(0.0124)
+        assert "Imported" in window.label_project_status.text()
+
+        window.edit_name_wire.setText("10/4")
+        qtbot.wait(20)
+
+        assert window.edit_sample_name.text() == "Ni50Fe27Ga23 10/4"
+        assert window.edit_log_name.text() == "Ni50Fe27Ga23 10_4"
+        assert "no matching sample row" in window.label_project_status.text()
+        assert window.spin_diameter.value() == pytest.approx(0.0136)
+        assert "fabrication diameter 13.6 um" in window.label_fabrication_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_sample_name_auto_import_failure_is_reported_without_crashing(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "10/4",
+                                "d (um)": 13.6,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    def fail_apply(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("simulated sample import failure")
+
+    try:
+        monkeypatch.setattr(window, "_apply_project_match", fail_apply)
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("10/4")
+        qtbot.wait(20)
+
+        assert window.edit_sample_name.text() == "Ni50Fe27Ga23 10/4"
+        assert "Failed to apply saved project sample match" in window.label_project_status.text()
+        assert window._sync_name_fields_in_progress is False
+    finally:
+        _close_test_window(window)
+
+
 def test_wire_diameter_displays_micrometers_while_storing_mm(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -4333,6 +4434,8 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
     window = _build_window(tmp_path, qtbot)
 
     try:
+        window.resize(760, 980)
+        window.show()
         window.edit_name_composition.setText("Ni50Fe27Ga23")
         window.edit_name_wire.setText("12/2")
         window.spin_diameter.setValue(0.03)
@@ -4358,12 +4461,28 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
         assert window.spin_current_sweep_step_mA.singleStep() == pytest.approx(0.2)
         assert window.spin_current_sweep_target_start.width() == window.spin_current_sweep_target_end.width()
         assert window.spin_current_sweep_target_end.width() == window.spin_current_sweep_step_mA.width()
-        assert window.label_current_target_start_equiv.width() == window.label_current_end_density.width()
+        assert window.spin_current_sweep_target_start.width() <= 260
+        assert window.label_current_target_start_equiv.wordWrap() is False
+        assert window.label_current_end_density.wordWrap() is False
+        assert window.label_current_target_start_equiv.width() >= window.label_current_target_start_equiv.sizeHint().width()
+        assert window.label_current_end_density.width() >= window.label_current_end_density.sizeHint().width()
         assert "70.7 A/mm<sup>2</sup>" in window.label_current_end_density.text()
         assert "1.41 A/mm<sup>2</sup>/s" in window.label_current_rate_density.text()
         assert window.label_current_end_density.textFormat() == QtCore.Qt.TextFormat.RichText
         assert window.label_current_rate_density.textFormat() == QtCore.Qt.TextFormat.RichText
         assert "palette(mid)" not in window.label_current_target_start_equiv.styleSheet()
+        qtbot.wait(50)
+        single_line_height = window.fontMetrics().lineSpacing() * 1.8
+        for label_text in ("Stress", "Ramp rate"):
+            labels = [
+                label
+                for label in window.findChildren(QtWidgets.QLabel)
+                if label.text() == label_text and label.isVisible()
+            ]
+            assert labels
+            assert all(label.wordWrap() is False for label in labels)
+            assert max(label.height() for label in labels) <= single_line_height * 1.25
+        assert window.label_current_rate_density.height() <= single_line_height
 
         mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
         assert mode_index >= 0
