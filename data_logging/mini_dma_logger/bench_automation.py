@@ -331,6 +331,28 @@ def _metadata_path(window: Any) -> str | None:
     return None if path is None else str(path)
 
 
+def _session_stop_metadata(window: Any) -> dict[str, Any] | None:
+    method = getattr(window, "_session_stop_metadata", None)
+    if not callable(method):
+        return None
+    try:
+        metadata = method()
+    except Exception:
+        return None
+    return dict(metadata) if isinstance(metadata, Mapping) else None
+
+
+def _task_text(window: Any) -> str:
+    label = getattr(window, "label_task_status", None)
+    text_method = getattr(label, "text", None)
+    if not callable(text_method):
+        return ""
+    try:
+        return str(text_method())
+    except Exception:
+        return ""
+
+
 def _window_log_tail(window: Any, *, max_chars: int = 4000) -> str:
     log_widget = getattr(window, "log_output", None)
     text_method = getattr(log_widget, "toPlainText", None)
@@ -349,6 +371,34 @@ def _run_dir_from_metadata_path(metadata_path: str | None) -> Path | None:
     if metadata_path is None:
         return None
     return Path(metadata_path).expanduser().resolve().parent
+
+
+def _last_control_trace_stop(run_dir: Path | None) -> dict[str, Any] | None:
+    if run_dir is None:
+        return None
+    trace_path = run_dir / "control_trace.csv"
+    if not trace_path.exists():
+        return None
+    try:
+        import csv
+
+        last_row: dict[str, str] | None = None
+        with trace_path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                if row.get("result") == "stopped" or row.get("reason"):
+                    last_row = dict(row)
+    except Exception:
+        return None
+    if not last_row:
+        return None
+    return {
+        "elapsed_s": last_row.get("elapsed_s"),
+        "task_text": last_row.get("task_text"),
+        "result": last_row.get("result"),
+        "reason": last_row.get("reason"),
+        "current_value": last_row.get("current_value"),
+        "error_value": last_row.get("error_value"),
+    }
 
 
 def _attach_control_trace_replay(run_summary: dict[str, Any]) -> dict[str, Any]:
@@ -489,6 +539,23 @@ def _execute_run(
             if guard_event["type"] == "high_stress":
                 status = "guard_recovered" if guard_event.get("recovery_started") else "guard_tripped"
                 break
+        if (
+            bool(getattr(window, "_session_active", False))
+            and not bool(getattr(window, "_automation_active", False))
+        ):
+            status = "stopped"
+            stop_session = getattr(window, "_stop_session", None)
+            prior_stop_metadata = _session_stop_metadata(window)
+            detail = "Bench automation detected that recipe automation stopped while the session remained active."
+            if callable(stop_session):
+                stop_reason = "recipe_control_stop"
+                if prior_stop_metadata and prior_stop_metadata.get("reason"):
+                    stop_reason = str(prior_stop_metadata["reason"])
+                stop_session(
+                    reason=stop_reason,
+                    detail=detail,
+                )
+            break
         if time.monotonic() >= deadline_s:
             status = "timeout"
             stop = getattr(window, "_stop_auto_ramp", None)
@@ -509,14 +576,19 @@ def _execute_run(
             break
         sleep_fn(0.05)
     app.processEvents()
+    metadata_path = _metadata_path(window)
+    run_dir = _run_dir_from_metadata_path(metadata_path)
     return {
         "name": run.name,
         "recipe_path": str(run.recipe_path),
         "repeat_index": run.repeat_index,
         "status": status,
         "elapsed_s": max(0.0, time.monotonic() - start_s),
-        "metadata_path": _metadata_path(window),
+        "metadata_path": metadata_path,
         "guard_events": guard_events,
+        "stop_metadata": _session_stop_metadata(window),
+        "task_text": _task_text(window),
+        "control_trace_stop": _last_control_trace_stop(run_dir),
     }
 
 
