@@ -161,6 +161,24 @@ def wait_for_bench_lock(
             raise last_error
 
 
+def identify_hmp_with_blank_retry(
+    driver: HmpSerialDriver,
+    *,
+    attempts: int = 3,
+    delay_s: float = 0.2,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> str:
+    tries = max(1, int(attempts))
+    last_idn = ""
+    for index in range(tries):
+        last_idn = str(driver.identify() or "")
+        if getattr(driver, "profile", None) is not None or last_idn.strip():
+            return last_idn
+        if index + 1 < tries:
+            sleep_fn(max(0.0, float(delay_s)))
+    return last_idn
+
+
 @dataclass(frozen=True)
 class BenchProbeResult:
     available: bool
@@ -180,7 +198,7 @@ def probe_hmp_bench(
     driver = driver_factory(port_name=port_name, baudrate=baudrate, timeout_s=timeout_s)
     try:
         driver.connect()
-        idn = driver.identify()
+        idn = identify_hmp_with_blank_retry(driver)
         readbacks: dict[int, dict[str, Any]] = {}
         for channel in channels:
             readbacks[int(channel)] = {

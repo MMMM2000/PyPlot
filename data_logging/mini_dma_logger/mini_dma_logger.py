@@ -36,6 +36,7 @@ from plotting.shared.logfiles import append_text_with_rotation
 from plotting.shared.power_guard import create_experiment_sleep_guard
 from plotting.shared.utils import ensure_app_theme, install_standard_menu
 from data_logging.shared_power_supply.broker import SharedPowerSupplyBroker, ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
+from data_logging.shared_power_supply.bench_guard import identify_hmp_with_blank_retry
 from data_logging.shared_power_supply.driver import HmpSerialDriver
 from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
 
@@ -7465,7 +7466,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         try:
             driver.connect()
-            idn_text = driver.identify()
+            idn_text = identify_hmp_with_blank_retry(driver)
             if driver.profile is None:
                 raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
             broker = SharedPowerSupplyBroker(driver, driver.profile)
