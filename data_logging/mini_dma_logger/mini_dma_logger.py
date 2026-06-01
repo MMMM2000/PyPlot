@@ -10673,12 +10673,27 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         limit_mm = self._seek_max_travel_mm()
         current_travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
+        total_travel_mm = current_travel_mm + abs(float(next_travel_mm))
+        detail = (
+            "Closed-loop load/stress correction exceeded the correction travel limit "
+            f"for {seek_key[0]} target {seek_key[2]:.6g}"
+            f"{'' if seek_key[1] is None else f' plateau {seek_key[1]}'}: "
+            f"{_format_compact_unit(total_travel_mm, 'mm')} > "
+            f"{_format_compact_unit(limit_mm, 'mm')} "
+            f"(previous {_format_compact_unit(current_travel_mm, 'mm')}, "
+            f"next {_format_compact_unit(abs(float(next_travel_mm)), 'mm')})."
+        )
         self._log(
             "Recipe stopped because closed-loop load/stress correction exceeded the "
-            f"correction travel limit ({_format_compact_unit(current_travel_mm + abs(float(next_travel_mm)), 'mm')} "
+            f"correction travel limit ({_format_compact_unit(total_travel_mm, 'mm')} "
             f"> {_format_compact_unit(limit_mm, 'mm')})."
         )
-        self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+        self._stop_auto_ramp(
+            log_completion=False,
+            offer_recovery=True,
+            stop_reason="correction_travel_limit",
+            stop_detail=detail,
+        )
 
     def _clear_seek_state(self, seek_key: tuple[str, int, float]) -> None:
         self._seek_last_error_by_key.pop(seek_key, None)
@@ -13949,6 +13964,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "emergency_stop": ("operator", "Emergency stop"),
             "wire_break_or_contact_loss": ("fault", "Wire break or contact loss"),
             "mechanical_load_loss": ("fault", "Mechanical load loss or slack"),
+            "correction_travel_limit": ("fault", "Correction travel limit"),
             "automation_timeout": ("fault", "Bench automation timeout"),
             "recipe_control_stop": ("fault", "Recipe stopped by control/error condition"),
             "app_closed": ("operator", "Application closed while session was active"),

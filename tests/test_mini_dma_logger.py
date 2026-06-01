@@ -11901,6 +11901,13 @@ def test_current_sweep_stops_when_correction_travel_exceeds_limit(
         assert reached is False
         assert window._automation_active is False
         assert "exceeded the correction travel limit" in window.log_output.toPlainText()
+        stop = window._session_stop_metadata()
+        assert stop["reason"] == "correction_travel_limit"
+        assert stop["category"] == "fault"
+        assert stop["label"] == "Correction travel limit"
+        assert "stress_mpa target 50 plateau 1" in str(stop["detail"])
+        assert "previous" in str(stop["detail"])
+        assert "next" in str(stop["detail"])
     finally:
         _close_test_window(window)
 
