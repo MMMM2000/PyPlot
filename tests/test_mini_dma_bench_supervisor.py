@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+from typing import Any
+
+from data_logging.mini_dma_logger import bench_supervisor
+
+
+def _write_recipe(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "recipe": {
+                    "mode": "current_sweep_stress",
+                    "setup": {"enabled": True},
+                    "current_sweep": {
+                        "basis": "stress_mpa",
+                        "target_start": 50.0,
+                        "target_end": 50.0,
+                        "target_step": 50.0,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_plan(plan_path: Path, recipe_path: Path, *, summary_path: Path | None = None) -> None:
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": "MINI_DMA_BENCH_ARMED",
+                "summary_path": None if summary_path is None else str(summary_path),
+                "log_dir": "runs",
+                "length_setup": {
+                    "starting_length_mm": 52.0,
+                    "preload_length_mm": 52.0,
+                },
+                "bench_lock": {
+                    "enabled": True,
+                    "timeout_s": 0,
+                    "owner": "test-owner",
+                    "lock_path": "bench.lock",
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class _FakePopen:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.args = args
+        self.kwargs = kwargs
+        self.pid = 12345
+        self._polls = [None, 0]
+        _FakePopen.instances.append(self)
+
+    instances: list["_FakePopen"] = []
+
+    def poll(self) -> int | None:
+        if len(self._polls) > 1:
+            return self._polls.pop(0)
+        return self._polls[0]
+
+    def terminate(self) -> None:
+        self._polls = [1]
+
+    def kill(self) -> None:
+        self._polls = [1]
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.poll() or 0
+
+
+def test_supervised_mini_dma_bench_writes_status_and_safe_off(tmp_path: Path, monkeypatch) -> None:
+    recipe_path = tmp_path / "recipe.json"
+    plan_path = tmp_path / "bench-plan.json"
+    summary_path = tmp_path / "summary.json"
+    status_path = tmp_path / "status.json"
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    _write_recipe(recipe_path)
+    _write_plan(plan_path, recipe_path, summary_path=summary_path)
+    summary_path.write_text(json.dumps({"runs": [{"status": "completed"}]}), encoding="utf-8")
+
+    safe_off_calls: list[dict[str, Any]] = []
+
+    def _fake_safe_off(**kwargs: Any) -> dict[str, Any]:
+        safe_off_calls.append(dict(kwargs))
+        return {
+            "status": "ok",
+            "channel": kwargs["channel"],
+            "states": {"4": {"output_on": False}},
+        }
+
+    monkeypatch.setattr(bench_supervisor.time, "sleep", lambda _seconds: None)
+    _FakePopen.instances.clear()
+
+    result = bench_supervisor.run_supervised_mini_dma_bench(
+        plan_path,
+        python_executable="python-test",
+        launcher_path="launcher.py",
+        status_path=status_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        poll_interval_s=0.1,
+        popen_factory=_FakePopen,
+        safe_off_fn=_fake_safe_off,
+    )
+
+    assert result["state"] == "completed"
+    assert result["child_pid"] == 12345
+    assert result["child_returncode"] == 0
+    assert result["summary"] == {"runs": [{"status": "completed"}]}
+    assert result["safe_off"]["status"] == "ok"
+    assert safe_off_calls == [{"channel": 4, "port_name": "COM3", "baudrate": 115200}]
+    saved = json.loads(status_path.read_text(encoding="utf-8"))
+    assert saved["child_pid"] == 12345
+    assert saved["safe_off"]["states"]["4"]["output_on"] is False
+    assert _FakePopen.instances[0].args[0][:3] == [
+        "python-test",
+        "launcher.py",
+        "--mini-dma-bench-plan",
+    ]
+    assert _FakePopen.instances[0].kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_normalize_windows_path_env_keeps_one_path_key() -> None:
+    env = bench_supervisor._normalize_windows_path_env(  # noqa: SLF001
+        {"PATH": "A", "Path": "B", "OTHER": "C"}
+    )
+
+    path_keys = [key for key in env if key.lower() == "path"]
+    assert path_keys == ["Path"]
+    assert env["Path"] == "A"
+    assert env["OTHER"] == "C"
