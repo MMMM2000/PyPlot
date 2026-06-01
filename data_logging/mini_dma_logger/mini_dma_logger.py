@@ -14,6 +14,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from itertools import zip_longest
 from pathlib import Path
 from threading import Condition, Event, RLock, Thread, current_thread, get_ident
 from time import perf_counter
@@ -58,6 +59,13 @@ SESSION_METADATA_JSON = "metadata.json"
 SESSION_RAW_SCALE_CSV = "scale_raw.csv"
 SESSION_CONTROL_TRACE_CSV = "control_trace.csv"
 SESSION_SETUP_TX = "setup.txt"
+RUNTIME_LOCKED_SPINBOX_STYLE = (
+    "QDoubleSpinBox {"
+    " background-color: rgba(107, 114, 128, 0.16);"
+    " color: palette(text);"
+    " border: 1px solid rgba(107, 114, 128, 0.45);"
+    "}"
+)
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
@@ -98,6 +106,7 @@ CONTROL_LOGIC_FEATURES = [
     "fault_stop_metadata_preserved_on_app_close",
     "control_trace_row_local_task_text",
     "single_prompt_length_setup",
+    "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
 ]
 CONTROL_TRACE_FIELDNAMES = [
@@ -3481,6 +3490,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_plateau_index: int | None = None
         self._automation_plateau_label: str | None = None
         self._resume_recipe_state: AutomationResumeState | None = None
+        self._current_sweep_recipe_overrides: list[dict[str, object]] = []
         self._last_recipe_summary = ""
         self._loaded_recipe_path: Path | None = None
         self._saved_recipe_signature: str | None = None
@@ -5910,6 +5920,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_stop_recipe.setMinimumWidth(82)
         ramp_buttons.addWidget(self.button_stop_recipe, stretch=1)
         self.recipe_action_footer_layout.addLayout(ramp_buttons)
+        self.button_apply_current_sweep_edits = QtWidgets.QPushButton(
+            "Update remaining sweeps",
+            self.recipe_action_footer,
+        )
+        self.button_apply_current_sweep_edits.setToolTip(
+            "Apply the visible current-sweep recipe edits only to future, not-yet-started current sweeps."
+        )
+        self.button_apply_current_sweep_edits.clicked.connect(self._apply_current_sweep_pending_overrides)
+        self.button_apply_current_sweep_edits.setVisible(False)
+        self.button_apply_current_sweep_edits.setEnabled(False)
+        self.recipe_action_footer_layout.addWidget(self.button_apply_current_sweep_edits)
         experiment_layout.addWidget(automation_box)
 
         manual_box = self._group_box("Manual Actions")
@@ -15159,6 +15180,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "legacy_interval_ms": int(self.spin_current_sweep_interval.value()),
                 "control_interval_ms": self._control_interval_ms(),
                 "log_interval_ms": self._log_interval_ms(),
+                "runtime_overrides": list(self._current_sweep_recipe_overrides),
             },
             "builder_project": None if self._builder_project_path is None else str(self._builder_project_path),
         }
@@ -16732,6 +16754,370 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_current_task_display()
         self._update_length_setup_progress(value=value, total=total, complete=complete, percent=percent)
 
+    def _current_sweep_override_values_from_controls(self) -> dict[str, float | bool]:
+        pause_factor = float(self.spin_current_sweep_hold_pause_factor.value())
+        return {
+            "target_start": float(self.spin_current_sweep_target_start.value()),
+            "target_end": float(self.spin_current_sweep_target_end.value()),
+            "target_step": max(1e-9, abs(float(self.spin_current_sweep_target_step.value()))),
+            "current_start_mA": self._recipe_current_setpoint_mA(float(self.spin_current_sweep_start_mA.value())),
+            "current_end_mA": self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value())),
+            "current_ramp_rate_mA_s": max(1e-9, abs(float(self.spin_current_sweep_step_mA.value()))),
+            "target_ramp_rate_value_s": max(1e-9, abs(float(self.spin_current_sweep_target_ramp_rate.value()))),
+            "return_target": bool(self.check_current_sweep_return_target.isChecked()),
+            "current_hold_enabled": bool(self.check_current_sweep_hold_on_error.isChecked()),
+            "current_hold_pause_tolerance_factor": pause_factor,
+            "current_hold_resume_tolerance_factor": min(
+                pause_factor,
+                float(self.spin_current_sweep_hold_resume_factor.value()),
+            ),
+            "current_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
+        }
+
+    def _current_active_recipe_step_index(self) -> int:
+        if not self._automation_steps:
+            return 0
+        active_candidates = [min(max(0, self._automation_index), len(self._automation_steps) - 1)]
+        if self._active_current_sweep_step_index is not None:
+            active_candidates.append(self._active_current_sweep_step_index)
+        if self._active_target_ramp_step_index is not None:
+            active_candidates.append(self._active_target_ramp_step_index)
+        return min(max(active_candidates), len(self._automation_steps) - 1)
+
+    @staticmethod
+    def _current_sweep_step_override_summary(step: AutomationStep) -> dict[str, object]:
+        return {
+            "action": step.action,
+            "note": step.note,
+            "basis": step.basis,
+            "target_value": step.target_value,
+            "target_start_value": step.target_start_value,
+            "target_end_value": step.target_end_value,
+            "current_mA": step.current_mA,
+            "current_start_mA": step.current_start_mA,
+            "current_end_mA": step.current_end_mA,
+            "current_ramp_rate_mA_s": step.current_ramp_rate_mA_s,
+            "target_ramp_rate_value_s": step.target_ramp_rate_value_s,
+            "current_hold_enabled": step.current_hold_enabled,
+            "current_hold_pause_tolerance_factor": step.current_hold_pause_tolerance_factor,
+            "current_hold_resume_tolerance_factor": step.current_hold_resume_tolerance_factor,
+            "current_hold_resume_stable_s": step.current_hold_resume_stable_s,
+        }
+
+    def _current_sweep_runtime_boundary_target(self, basis: str, active_index: int) -> float | None:
+        if self._automation_basis == basis and self._automation_target_value is not None:
+            return float(self._automation_target_value)
+        for index in range(min(active_index, len(self._automation_steps) - 1), -1, -1):
+            step = self._automation_steps[index]
+            if step.basis == basis and step.target_value is not None:
+                return float(step.target_value)
+        return None
+
+    def _current_sweep_runtime_basis(self, active_index: int) -> str:
+        if self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
+            return str(self._automation_basis)
+        for index in range(min(active_index, len(self._automation_steps) - 1), -1, -1):
+            basis = self._automation_steps[index].basis
+            if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
+                return str(basis)
+        if str(self._automation_name) in CURRENT_SWEEP_BASIS_BY_MODE:
+            return CURRENT_SWEEP_BASIS_BY_MODE[str(self._automation_name)]
+        return self._current_sweep_basis()
+
+    @staticmethod
+    def _target_values_close(left: float, right: float) -> bool:
+        return math.isclose(float(left), float(right), rel_tol=1e-9, abs_tol=1e-6)
+
+    def _current_sweep_future_targets_from_controls(
+        self,
+        values: Mapping[str, float | bool],
+        active_target: float,
+    ) -> list[float] | None:
+        targets = self._build_numeric_targets(
+            float(values["target_start"]),
+            float(values["target_end"]),
+            float(values["target_step"]),
+        )
+        for index, target in enumerate(targets):
+            if self._target_values_close(float(target), active_target):
+                return [float(value) for value in targets[index + 1 :]]
+
+        direction = math.copysign(1.0, float(values["target_end"]) - float(values["target_start"]))
+        future = [
+            float(target)
+            for target in targets
+            if (float(target) - active_target) * direction > 1e-6
+        ]
+        return future or None
+
+    def _build_runtime_current_sweep_tail(
+        self,
+        values: Mapping[str, float | bool],
+        *,
+        basis: str,
+        active_index: int,
+    ) -> list[AutomationStep] | None:
+        active_target = self._current_sweep_runtime_boundary_target(basis, active_index)
+        if active_target is None:
+            return None
+        future_targets = self._current_sweep_future_targets_from_controls(values, active_target)
+        if future_targets is None:
+            return None
+
+        tail: list[AutomationStep] = []
+        previous_target = active_target
+        current_start = float(values["current_start_mA"])
+        current_end = float(values["current_end_mA"])
+        current_ramp_rate = float(values["current_ramp_rate_mA_s"])
+        target_ramp_rate = float(values["target_ramp_rate_value_s"])
+
+        def _append_plateau(target: float, note: str) -> None:
+            nonlocal previous_target
+            tail.append(
+                AutomationStep(
+                    "set_current",
+                    target_value=target,
+                    basis=basis,
+                    current_mA=current_start,
+                    note=note,
+                )
+            )
+            tail.append(
+                AutomationStep(
+                    "ramp_target",
+                    target_value=target,
+                    target_start_value=previous_target,
+                    target_end_value=target,
+                    target_ramp_rate_value_s=target_ramp_rate,
+                    basis=basis,
+                    note=note,
+                )
+            )
+            previous_target = target
+            sweep_ranges = [(current_start, current_end)]
+            if abs(current_end - current_start) > 1e-12:
+                sweep_ranges.append((current_end, current_start))
+            for sweep_start_mA, sweep_end_mA in sweep_ranges:
+                tail.append(
+                    AutomationStep(
+                        "sweep_current",
+                        target_value=target,
+                        basis=basis,
+                        current_start_mA=sweep_start_mA,
+                        current_end_mA=sweep_end_mA,
+                        current_ramp_rate_mA_s=current_ramp_rate,
+                        current_hold_enabled=bool(values["current_hold_enabled"]),
+                        current_hold_pause_tolerance_factor=float(values["current_hold_pause_tolerance_factor"]),
+                        current_hold_resume_tolerance_factor=float(values["current_hold_resume_tolerance_factor"]),
+                        current_hold_resume_stable_s=float(values["current_hold_resume_stable_s"]),
+                        note=note,
+                    )
+                )
+
+        start_note = self._next_current_sweep_plateau_number_after(active_index)
+        for offset, target in enumerate(future_targets):
+            _append_plateau(float(target), str(start_note + offset))
+
+        if bool(values["return_target"]):
+            return_target = float(values["target_start"])
+            if not self._target_values_close(previous_target, return_target):
+                note = str(start_note + len(future_targets))
+                tail.append(
+                    AutomationStep(
+                        "set_current",
+                        target_value=return_target,
+                        basis=basis,
+                        current_mA=current_start,
+                        note=note,
+                    )
+                )
+                tail.append(
+                    AutomationStep(
+                        "ramp_target",
+                        target_value=return_target,
+                        target_start_value=previous_target,
+                        target_end_value=return_target,
+                        target_ramp_rate_value_s=target_ramp_rate,
+                        basis=basis,
+                        current_mA=current_start,
+                        note=note,
+                    )
+                )
+        return tail
+
+    def _next_current_sweep_plateau_number_after(self, active_index: int) -> int:
+        for index in range(min(active_index, len(self._automation_steps) - 1), -1, -1):
+            note = self._automation_steps[index].note
+            if str(note).isdigit():
+                return int(note) + 1
+        return 1
+
+    def _runtime_tail_change_summaries(
+        self,
+        old_tail: Sequence[AutomationStep],
+        new_tail: Sequence[AutomationStep],
+        *,
+        start_index: int,
+    ) -> list[dict[str, object]]:
+        changed_steps: list[dict[str, object]] = []
+        sentinel = object()
+        for offset, pair in enumerate(zip_longest(old_tail, new_tail, fillvalue=sentinel)):
+            old_step, new_step = pair
+            old_summary = (
+                None
+                if old_step is sentinel
+                else self._current_sweep_step_override_summary(old_step)  # type: ignore[arg-type]
+            )
+            new_summary = (
+                None
+                if new_step is sentinel
+                else self._current_sweep_step_override_summary(new_step)  # type: ignore[arg-type]
+            )
+            if old_summary != new_summary:
+                changed_steps.append(
+                    {
+                        "index": start_index + offset,
+                        "old": old_summary,
+                        "new": new_summary,
+                    }
+                )
+        return changed_steps
+
+    def _apply_current_sweep_pending_overrides(
+        self,
+        _checked: bool = False,
+        *,
+        show_message: bool = True,
+    ) -> bool:
+        if not self._automation_active or not self._is_current_sweep_mode(self._automation_name):
+            if show_message:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    APP_NAME,
+                    "Start a Mini DMA current-sweep recipe before updating remaining sweeps.",
+                )
+            return False
+        if not self._automation_steps:
+            return False
+
+        values = self._current_sweep_override_values_from_controls()
+        active_index = self._current_active_recipe_step_index()
+        basis = self._current_sweep_runtime_basis(active_index)
+        replacement_tail = self._build_runtime_current_sweep_tail(
+            values,
+            basis=basis,
+            active_index=active_index,
+        )
+        tail_replanned = replacement_tail is not None
+        if replacement_tail is not None:
+            old_tail = self._automation_steps[active_index + 1 :]
+            updated_steps = [
+                *self._automation_steps[: active_index + 1],
+                *replacement_tail,
+            ]
+            changed_steps = self._runtime_tail_change_summaries(
+                old_tail,
+                replacement_tail,
+                start_index=active_index + 1,
+            )
+        else:
+            changed_steps = []
+            updated_steps = list(self._automation_steps)
+            for index, step in enumerate(self._automation_steps):
+                if index <= active_index:
+                    continue
+                old_summary = self._current_sweep_step_override_summary(step)
+                new_step = step
+                if step.action == "set_current" and step.current_mA is not None:
+                    new_step = replace(
+                        step,
+                        current_mA=float(values["current_start_mA"]),
+                    )
+                elif step.action == "ramp_target" and step.target_ramp_rate_value_s is not None:
+                    new_step = replace(
+                        step,
+                        target_ramp_rate_value_s=float(values["target_ramp_rate_value_s"]),
+                    )
+                elif step.action == "sweep_current":
+                    old_start = float(step.current_start_mA) if step.current_start_mA is not None else 0.0
+                    old_end = float(step.current_end_mA) if step.current_end_mA is not None else old_start
+                    if old_end >= old_start:
+                        new_start = float(values["current_start_mA"])
+                        new_end = float(values["current_end_mA"])
+                    else:
+                        new_start = float(values["current_end_mA"])
+                        new_end = float(values["current_start_mA"])
+                    new_step = replace(
+                        step,
+                        current_start_mA=new_start,
+                        current_end_mA=new_end,
+                        current_ramp_rate_mA_s=float(values["current_ramp_rate_mA_s"]),
+                        current_hold_enabled=bool(values["current_hold_enabled"]),
+                        current_hold_pause_tolerance_factor=float(values["current_hold_pause_tolerance_factor"]),
+                        current_hold_resume_tolerance_factor=float(values["current_hold_resume_tolerance_factor"]),
+                        current_hold_resume_stable_s=float(values["current_hold_resume_stable_s"]),
+                    )
+                if new_step is not step:
+                    new_summary = self._current_sweep_step_override_summary(new_step)
+                    if new_summary != old_summary:
+                        updated_steps[index] = new_step
+                        changed_steps.append(
+                            {
+                                "index": index,
+                                "old": old_summary,
+                                "new": new_summary,
+                            }
+                        )
+
+        if not changed_steps:
+            if show_message:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    APP_NAME,
+                    "There are no future current-sweep steps left to update.",
+                )
+            return False
+
+        self._automation_steps = updated_steps
+        self._recipe_estimated_points, self._automation_total_steps = self._estimate_recipe_points_and_ticks(
+            self._automation_steps,
+            self._automation_interval_ms,
+        )
+        self._automation_completed_ticks = min(
+            self._automation_completed_ticks,
+            max(0, self._automation_total_steps),
+        )
+        payload: dict[str, object] = {
+            "timestamp_utc": _utc_timestamp(),
+            "applied_after_step_index": active_index,
+            "changed_step_count": len(changed_steps),
+            "tail_replanned": tail_replanned,
+            "visible_values": values,
+            "changes": changed_steps[:25],
+            "truncated": len(changed_steps) > 25,
+        }
+        self._current_sweep_recipe_overrides.append(payload)
+        reason = json.dumps(payload, separators=(",", ":"), default=str)
+        self._write_control_trace(
+            decision="recipe_update",
+            result="applied_to_future_steps",
+            reason=reason,
+            task_text="Updated remaining current sweeps",
+        )
+        self._write_session_metadata()
+        self._update_recipe_progress()
+        self._log(
+            "Updated remaining current sweeps from the visible recipe controls "
+            f"({len(changed_steps)} future step(s)); active step was left unchanged."
+        )
+        if show_message:
+            QtWidgets.QMessageBox.information(
+                self,
+                APP_NAME,
+                f"Updated {len(changed_steps)} future current-sweep step(s). The active step was not changed.",
+            )
+        return True
+
     def _timed_step_elapsed_for_progress_s(self, step_index: int) -> float:
         if self._active_timed_step_index != step_index:
             return 0.0
@@ -16904,7 +17290,79 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_pause_recipe.setEnabled(self._automation_active)
         self.button_pause_recipe.setText("Resume recipe" if self._automation_paused else "Pause recipe")
         self.button_stop_recipe.setEnabled(self._automation_active)
+        can_update_current_sweep = (
+            self._automation_active
+            and not self._automation_paused
+            and self._is_current_sweep_mode(self._automation_name)
+        )
+        self.button_apply_current_sweep_edits.setVisible(
+            self._automation_active and self._is_current_sweep_mode(self._automation_name)
+        )
+        self.button_apply_current_sweep_edits.setEnabled(can_update_current_sweep)
+        self._update_current_sweep_runtime_edit_state()
         self._update_length_setup_controls()
+
+    def _current_sweep_runtime_editable_widgets(self) -> tuple[QtWidgets.QWidget, ...]:
+        return (
+            self.spin_current_sweep_target_start,
+            self.spin_current_sweep_target_end,
+            self.spin_current_sweep_target_step,
+            self.spin_current_sweep_target_ramp_rate,
+            self.check_current_sweep_return_target,
+            self.spin_current_sweep_start_mA,
+            self.spin_current_sweep_end_mA,
+            self.spin_current_sweep_step_mA,
+            self.check_current_sweep_hold_on_error,
+            self.spin_current_sweep_hold_pause_factor,
+            self.spin_current_sweep_hold_resume_factor,
+            self.spin_current_sweep_hold_resume_stable_s,
+        )
+
+    def _current_sweep_runtime_locked_widgets(self) -> tuple[QtWidgets.QWidget, ...]:
+        return (
+            self.combo_current_sweep_basis,
+            self.check_current_sweep_first_overheating,
+            self.spin_current_sweep_first_overheating_target_mpa,
+            self.spin_current_sweep_target_speed_mm_s,
+            self.spin_current_sweep_max_correction_strain_pct,
+            self.spin_current_sweep_correction_rate_pct_s,
+            self.spin_current_sweep_max_correction_stress_mpa,
+            self.spin_current_sweep_hold_correction_stress_mpa,
+            self.spin_current_sweep_mid_correction_stress_mpa,
+            self.spin_current_sweep_near_correction_stress_mpa,
+            self.spin_current_sweep_hold_filter_window_s,
+            self.spin_current_sweep_hold_noise_sigma,
+            self.spin_current_sweep_hold_min_pause_stress_mpa,
+            self.spin_current_sweep_hold_min_resume_stress_mpa,
+            self.spin_current_sweep_tolerance,
+            self.spin_current_sweep_nudge_mm,
+            self.spin_current_sweep_balance_speed_mm_s,
+            self.spin_current_sweep_max_seek_mm,
+            self.spin_current_sweep_interval,
+            self.spin_current_sweep_log_interval,
+        )
+
+    def _set_current_sweep_runtime_locked(self, widget: QtWidgets.QWidget, locked: bool) -> None:
+        widget.setProperty("_mini_dma_runtime_locked", bool(locked))
+        if isinstance(widget, QtWidgets.QAbstractSpinBox):
+            widget.setReadOnly(bool(locked))
+            widget.setStyleSheet(RUNTIME_LOCKED_SPINBOX_STYLE if locked else "")
+            line_edit = widget.lineEdit()
+            line_edit.setReadOnly(bool(locked))
+            line_edit.setProperty("_mini_dma_runtime_locked", bool(locked))
+            line_edit.setStyleSheet("color: palette(text);" if locked else "")
+        elif isinstance(widget, (QtWidgets.QComboBox, QtWidgets.QAbstractButton)):
+            widget.setEnabled(not locked)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _update_current_sweep_runtime_edit_state(self) -> None:
+        runtime_active = self._automation_active and self._is_current_sweep_mode(self._automation_name)
+        editable_widgets = set(self._current_sweep_runtime_editable_widgets())
+        for widget in editable_widgets:
+            self._set_current_sweep_runtime_locked(widget, False)
+        for widget in self._current_sweep_runtime_locked_widgets():
+            self._set_current_sweep_runtime_locked(widget, runtime_active)
 
     def _update_length_setup_controls(self) -> None:
         if self._button_length_setup_pause is not None:
@@ -17158,6 +17616,7 @@ class MainWindow(QtWidgets.QMainWindow):
             float(self._automation_total_steps) * max(0.001, float(interval_ms) / 1000.0),
         )
         self._current_sweep_duration_overheads_s = []
+        self._current_sweep_recipe_overrides = []
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = interval_ms
