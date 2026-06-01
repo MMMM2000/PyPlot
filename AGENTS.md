@@ -31,6 +31,7 @@
 - Do not run hardware commands unless explicitly authorized in that worker task.
 - For UI or graph work, verify with screenshots or generated-output evidence from the worker branch.
 - Report completion with branch, commit, tests/checks, screenshot paths when relevant, and integration notes.
+- When ready or blocked, send a concise completion handoff back to the master coordination thread.
 - If blocked, report the blocker, current branch, git status, and what was already verified.
 
 ## Delegation Strategy
