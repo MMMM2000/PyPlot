@@ -93,6 +93,7 @@ CONTROL_LOGIC_FEATURES = [
     "fault_stop_metadata_preserved_on_app_close",
     "control_trace_row_local_task_text",
     "single_prompt_length_setup",
+    "current_sweep_pending_recipe_overrides",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -3140,6 +3141,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_plateau_index: int | None = None
         self._automation_plateau_label: str | None = None
         self._resume_recipe_state: AutomationResumeState | None = None
+        self._current_sweep_recipe_overrides: list[dict[str, object]] = []
         self._last_recipe_summary = ""
         self._loaded_recipe_path: Path | None = None
         self._saved_recipe_signature: str | None = None
@@ -5552,6 +5554,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_stop_recipe.setMinimumWidth(82)
         ramp_buttons.addWidget(self.button_stop_recipe, stretch=1)
         self.recipe_action_footer_layout.addLayout(ramp_buttons)
+        self.button_apply_current_sweep_edits = QtWidgets.QPushButton(
+            "Update remaining sweeps",
+            self.recipe_action_footer,
+        )
+        self.button_apply_current_sweep_edits.setToolTip(
+            "Apply the visible current-sweep recipe edits only to future, not-yet-started current sweeps."
+        )
+        self.button_apply_current_sweep_edits.clicked.connect(self._apply_current_sweep_pending_overrides)
+        self.button_apply_current_sweep_edits.setVisible(False)
+        self.button_apply_current_sweep_edits.setEnabled(False)
+        self.recipe_action_footer_layout.addWidget(self.button_apply_current_sweep_edits)
         experiment_layout.addWidget(automation_box)
 
         manual_box = self._group_box("Manual Actions")
@@ -14236,6 +14249,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "legacy_interval_ms": int(self.spin_current_sweep_interval.value()),
                 "control_interval_ms": self._control_interval_ms(),
                 "log_interval_ms": self._log_interval_ms(),
+                "runtime_overrides": list(self._current_sweep_recipe_overrides),
             },
             "builder_project": None if self._builder_project_path is None else str(self._builder_project_path),
         }
@@ -15809,6 +15823,165 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_current_task_display()
         self._update_length_setup_progress(value=value, total=total, complete=complete, percent=percent)
 
+    def _current_sweep_override_values_from_controls(self) -> dict[str, float | bool]:
+        pause_factor = float(self.spin_current_sweep_hold_pause_factor.value())
+        return {
+            "current_start_mA": self._recipe_current_setpoint_mA(float(self.spin_current_sweep_start_mA.value())),
+            "current_end_mA": self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value())),
+            "current_ramp_rate_mA_s": max(1e-9, abs(float(self.spin_current_sweep_step_mA.value()))),
+            "target_ramp_rate_value_s": max(1e-9, abs(float(self.spin_current_sweep_target_ramp_rate.value()))),
+            "current_hold_enabled": bool(self.check_current_sweep_hold_on_error.isChecked()),
+            "current_hold_pause_tolerance_factor": pause_factor,
+            "current_hold_resume_tolerance_factor": min(
+                pause_factor,
+                float(self.spin_current_sweep_hold_resume_factor.value()),
+            ),
+            "current_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
+        }
+
+    def _current_active_recipe_step_index(self) -> int:
+        if not self._automation_steps:
+            return 0
+        active_candidates = [min(max(0, self._automation_index), len(self._automation_steps) - 1)]
+        if self._active_current_sweep_step_index is not None:
+            active_candidates.append(self._active_current_sweep_step_index)
+        if self._active_target_ramp_step_index is not None:
+            active_candidates.append(self._active_target_ramp_step_index)
+        return min(max(active_candidates), len(self._automation_steps) - 1)
+
+    @staticmethod
+    def _current_sweep_step_override_summary(step: AutomationStep) -> dict[str, object]:
+        return {
+            "action": step.action,
+            "note": step.note,
+            "basis": step.basis,
+            "target_value": step.target_value,
+            "current_mA": step.current_mA,
+            "current_start_mA": step.current_start_mA,
+            "current_end_mA": step.current_end_mA,
+            "current_ramp_rate_mA_s": step.current_ramp_rate_mA_s,
+            "target_ramp_rate_value_s": step.target_ramp_rate_value_s,
+            "current_hold_enabled": step.current_hold_enabled,
+            "current_hold_pause_tolerance_factor": step.current_hold_pause_tolerance_factor,
+            "current_hold_resume_tolerance_factor": step.current_hold_resume_tolerance_factor,
+            "current_hold_resume_stable_s": step.current_hold_resume_stable_s,
+        }
+
+    def _apply_current_sweep_pending_overrides(
+        self,
+        _checked: bool = False,
+        *,
+        show_message: bool = True,
+    ) -> bool:
+        if not self._automation_active or not self._is_current_sweep_mode(self._automation_name):
+            if show_message:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    APP_NAME,
+                    "Start a Mini DMA current-sweep recipe before updating remaining sweeps.",
+                )
+            return False
+        if not self._automation_steps:
+            return False
+
+        values = self._current_sweep_override_values_from_controls()
+        active_index = self._current_active_recipe_step_index()
+        changed_steps: list[dict[str, object]] = []
+        updated_steps = list(self._automation_steps)
+        for index, step in enumerate(self._automation_steps):
+            if index <= active_index:
+                continue
+            old_summary = self._current_sweep_step_override_summary(step)
+            new_step = step
+            if step.action == "set_current" and step.current_mA is not None:
+                new_step = replace(
+                    step,
+                    current_mA=float(values["current_start_mA"]),
+                )
+            elif step.action == "ramp_target" and step.target_ramp_rate_value_s is not None:
+                new_step = replace(
+                    step,
+                    target_ramp_rate_value_s=float(values["target_ramp_rate_value_s"]),
+                )
+            elif step.action == "sweep_current":
+                old_start = float(step.current_start_mA) if step.current_start_mA is not None else 0.0
+                old_end = float(step.current_end_mA) if step.current_end_mA is not None else old_start
+                if old_end >= old_start:
+                    new_start = float(values["current_start_mA"])
+                    new_end = float(values["current_end_mA"])
+                else:
+                    new_start = float(values["current_end_mA"])
+                    new_end = float(values["current_start_mA"])
+                new_step = replace(
+                    step,
+                    current_start_mA=new_start,
+                    current_end_mA=new_end,
+                    current_ramp_rate_mA_s=float(values["current_ramp_rate_mA_s"]),
+                    current_hold_enabled=bool(values["current_hold_enabled"]),
+                    current_hold_pause_tolerance_factor=float(values["current_hold_pause_tolerance_factor"]),
+                    current_hold_resume_tolerance_factor=float(values["current_hold_resume_tolerance_factor"]),
+                    current_hold_resume_stable_s=float(values["current_hold_resume_stable_s"]),
+                )
+            if new_step is not step:
+                new_summary = self._current_sweep_step_override_summary(new_step)
+                if new_summary != old_summary:
+                    updated_steps[index] = new_step
+                    changed_steps.append(
+                        {
+                            "index": index,
+                            "old": old_summary,
+                            "new": new_summary,
+                        }
+                    )
+
+        if not changed_steps:
+            if show_message:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    APP_NAME,
+                    "There are no future current-sweep steps left to update.",
+                )
+            return False
+
+        self._automation_steps = updated_steps
+        self._recipe_estimated_points, self._automation_total_steps = self._estimate_recipe_points_and_ticks(
+            self._automation_steps,
+            self._automation_interval_ms,
+        )
+        self._automation_completed_ticks = min(
+            self._automation_completed_ticks,
+            max(0, self._automation_total_steps),
+        )
+        payload: dict[str, object] = {
+            "timestamp_utc": _utc_timestamp(),
+            "applied_after_step_index": active_index,
+            "changed_step_count": len(changed_steps),
+            "visible_values": values,
+            "changes": changed_steps[:25],
+            "truncated": len(changed_steps) > 25,
+        }
+        self._current_sweep_recipe_overrides.append(payload)
+        reason = json.dumps(payload, separators=(",", ":"), default=str)
+        self._write_control_trace(
+            decision="recipe_update",
+            result="applied_to_future_steps",
+            reason=reason,
+            task_text="Updated remaining current sweeps",
+        )
+        self._write_session_metadata()
+        self._update_recipe_progress()
+        self._log(
+            "Updated remaining current sweeps from the visible recipe controls "
+            f"({len(changed_steps)} future step(s)); active step was left unchanged."
+        )
+        if show_message:
+            QtWidgets.QMessageBox.information(
+                self,
+                APP_NAME,
+                f"Updated {len(changed_steps)} future current-sweep step(s). The active step was not changed.",
+            )
+        return True
+
     def _timed_step_elapsed_for_progress_s(self, step_index: int) -> float:
         if self._active_timed_step_index != step_index:
             return 0.0
@@ -15981,6 +16154,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_pause_recipe.setEnabled(self._automation_active)
         self.button_pause_recipe.setText("Resume recipe" if self._automation_paused else "Pause recipe")
         self.button_stop_recipe.setEnabled(self._automation_active)
+        can_update_current_sweep = (
+            self._automation_active
+            and not self._automation_paused
+            and self._is_current_sweep_mode(self._automation_name)
+        )
+        self.button_apply_current_sweep_edits.setVisible(
+            self._automation_active and self._is_current_sweep_mode(self._automation_name)
+        )
+        self.button_apply_current_sweep_edits.setEnabled(can_update_current_sweep)
         self._update_length_setup_controls()
 
     def _update_length_setup_controls(self) -> None:
@@ -16235,6 +16417,7 @@ class MainWindow(QtWidgets.QMainWindow):
             float(self._automation_total_steps) * max(0.001, float(interval_ms) / 1000.0),
         )
         self._current_sweep_duration_overheads_s = []
+        self._current_sweep_recipe_overrides = []
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = interval_ms

@@ -10500,6 +10500,121 @@ def test_session_control_trace_accepts_row_local_task_text(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_current_sweep_runtime_update_changes_only_future_steps_and_logs_trace(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_recipe_update")
+
+    active_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=70.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.5,
+        note="1",
+    )
+    future_set_current = mini_dma_mod.AutomationStep(
+        "set_current",
+        target_value=100.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_mA=1.0,
+        note="2",
+    )
+    future_ramp = mini_dma_mod.AutomationStep(
+        "ramp_target",
+        target_value=100.0,
+        target_start_value=50.0,
+        target_end_value=100.0,
+        target_ramp_rate_value_s=5.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        note="2",
+    )
+    future_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=100.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=70.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.5,
+        note="2",
+    )
+    future_reverse = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=100.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=70.0,
+        current_end_mA=1.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.5,
+        note="2",
+    )
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [active_sweep, future_set_current, future_ramp, future_sweep, future_reverse]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._automation_interval_ms = 250
+        window._recipe_estimated_points, window._automation_total_steps = window._estimate_recipe_points_and_ticks(
+            window._automation_steps,
+            window._automation_interval_ms,
+        )
+
+        window.spin_current_sweep_start_mA.setValue(2.0)
+        window.spin_current_sweep_end_mA.setValue(80.0)
+        window.spin_current_sweep_step_mA.setValue(0.6)
+        window.spin_current_sweep_target_ramp_rate.setValue(3.0)
+        window.check_current_sweep_hold_on_error.setChecked(False)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window._automation_steps[0] is active_sweep
+        assert window._automation_steps[0].current_end_mA == pytest.approx(70.0)
+        assert window._automation_steps[1].current_mA == pytest.approx(2.0)
+        assert window._automation_steps[2].target_ramp_rate_value_s == pytest.approx(3.0)
+        assert window._automation_steps[3].current_start_mA == pytest.approx(2.0)
+        assert window._automation_steps[3].current_end_mA == pytest.approx(80.0)
+        assert window._automation_steps[3].current_ramp_rate_mA_s == pytest.approx(0.6)
+        assert window._automation_steps[3].current_hold_enabled is False
+        assert window._automation_steps[4].current_start_mA == pytest.approx(80.0)
+        assert window._automation_steps[4].current_end_mA == pytest.approx(2.0)
+        assert window._current_sweep_recipe_overrides
+
+        window._stop_session()
+        rows = list(
+            csv.DictReader((tmp_path / "runtime_recipe_update" / "control_trace.csv").open(encoding="utf-8", newline=""))
+        )
+        assert len(rows) == 1
+        assert rows[0]["decision"] == "recipe_update"
+        assert rows[0]["task_text"] == "Updated remaining current sweeps"
+        reason = json.loads(rows[0]["reason"])
+        assert reason["changed_step_count"] == 4
+        assert reason["visible_values"]["current_end_mA"] == pytest.approx(80.0)
+
+        metadata = json.loads((tmp_path / "runtime_recipe_update" / "metadata.json").read_text(encoding="utf-8"))
+        overrides = metadata["controlled_current_sweep"]["runtime_overrides"]
+        assert overrides[0]["changed_step_count"] == 4
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_setup_raw_scale_samples_are_logged_before_main_measurement_starts(
     tmp_path: Path,
     qtbot,
