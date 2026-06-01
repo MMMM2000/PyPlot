@@ -5274,7 +5274,7 @@ def test_length_setup_dialog_contains_live_graph_and_records_setup_points(tmp_pa
         assert window._length_setup_load_curve is not None
         assert window._length_setup_displacement_curve is not None
         assert window._length_setup_stress_curve.opts.get("symbol") == "o"
-        assert window._length_setup_displacement_curve.opts.get("symbol") is None
+        assert window._length_setup_displacement_curve.opts.get("symbol") == "o"
         stress_x, stress_y = window._length_setup_stress_curve.getData()
         load_x, load_y = window._length_setup_load_curve.getData()
         displacement_x, displacement_y = window._length_setup_displacement_curve.getData()
@@ -5284,6 +5284,40 @@ def test_length_setup_dialog_contains_live_graph_and_records_setup_points(tmp_pa
         assert list(stress_y) == pytest.approx([point.stress_mpa])
         assert list(load_y) == pytest.approx([0.3])
         assert list(displacement_y) == pytest.approx([point.position_mm])
+    finally:
+        _close_test_window(window)
+
+
+def test_length_setup_plot_sorts_points_by_elapsed_time(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._show_length_setup_dialog()
+        window._latest_scale_value_g = 21.5
+        window._latest_scale_timestamp = time.time()
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window.check_tension_load_positive.setChecked(False)
+        window._current_position_mm = -0.2
+        window._effective_position_mm = -0.2
+        window._record_length_setup_point()
+
+        base = window._length_setup_points[0]
+        window._length_setup_points = [
+            dataclasses.replace(base, elapsed_s=2.0, position_mm=-0.2, load_g=0.3),
+            dataclasses.replace(base, elapsed_s=0.0, position_mm=0.0, load_g=0.1),
+            dataclasses.replace(base, elapsed_s=1.0, position_mm=-0.1, load_g=0.2),
+        ]
+
+        window._refresh_length_setup_plot()
+
+        assert window._length_setup_displacement_curve is not None
+        displacement_x, displacement_y = window._length_setup_displacement_curve.getData()
+        assert list(displacement_x) == pytest.approx([0.0, 1.0, 2.0])
+        assert list(displacement_y) == pytest.approx([0.0, -0.1, -0.2])
+        assert all(
+            float(next_x) >= float(current_x)
+            for current_x, next_x in zip(displacement_x, displacement_x[1:])
+        )
     finally:
         _close_test_window(window)
 
