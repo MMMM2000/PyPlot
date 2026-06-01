@@ -721,7 +721,9 @@ def _plot_condition_heatmap(
     fig_width = max(7.0, 0.9 * len(excitations) + 3.0)
     fig_height = max(5.0, 0.42 * len(frequencies) + 2.0)
     fig, axis = plt.subplots(figsize=(fig_width, fig_height), dpi=170)
-    image = axis.imshow(values, aspect="auto", origin="lower", cmap="viridis")
+    colormap = plt.get_cmap("viridis").copy()
+    colormap.set_bad("#d9d9d9")
+    image = axis.imshow(np.ma.masked_invalid(values), aspect="auto", origin="lower", cmap=colormap)
     axis.set_xticks(range(len(excitations)))
     axis.set_xticklabels([f"{value:g}" for value in excitations], rotation=45, ha="right")
     axis.set_yticks(range(len(frequencies)))
@@ -735,6 +737,7 @@ def _plot_condition_heatmap(
         for x, excitation in enumerate(excitations):
             raw_value = annotations[y, x] if annotate_column is not None else values[y, x]
             if not np.isfinite(raw_value):
+                axis.text(x, y, "filtered", ha="center", va="center", color="0.25", fontsize=6)
                 continue
             text = f"{raw_value:.0f}{annotation_suffix}" if abs(raw_value) >= 100 else f"{raw_value:.1f}{annotation_suffix}"
             axis.text(x, y, text, ha="center", va="center", color="white", fontsize=7)
