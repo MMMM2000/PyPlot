@@ -5273,6 +5273,8 @@ def test_length_setup_dialog_contains_live_graph_and_records_setup_points(tmp_pa
         assert window._length_setup_stress_curve is not None
         assert window._length_setup_load_curve is not None
         assert window._length_setup_displacement_curve is not None
+        assert window._length_setup_stress_curve.opts.get("symbol") == "o"
+        assert window._length_setup_displacement_curve.opts.get("symbol") is None
         stress_x, stress_y = window._length_setup_stress_curve.getData()
         load_x, load_y = window._length_setup_load_curve.getData()
         displacement_x, displacement_y = window._length_setup_displacement_curve.getData()

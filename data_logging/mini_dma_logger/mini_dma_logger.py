@@ -16372,7 +16372,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     left_label="Displacement (mm)",
                     right_label=None,
                     left_color=self._plot_channel_color("position_mm"),
-                    symbols=True,
+                    symbols=False,
                 )
                 self._length_setup_stress_plot_widget = self._length_setup_stress_plot.widget
                 self._length_setup_displacement_plot_widget = self._length_setup_displacement_plot.widget
