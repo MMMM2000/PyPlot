@@ -14,12 +14,18 @@ import time
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from itertools import zip_longest
 from pathlib import Path
 from threading import Condition, Event, RLock, Thread, current_thread, get_ident
 from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+try:
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+except Exception:
+    FigureCanvas = None  # type: ignore[assignment]
+
 try:
     import pyqtgraph as pg
     pg.setConfigOptions(antialias=False)
@@ -53,6 +59,13 @@ SESSION_METADATA_JSON = "metadata.json"
 SESSION_RAW_SCALE_CSV = "scale_raw.csv"
 SESSION_CONTROL_TRACE_CSV = "control_trace.csv"
 SESSION_SETUP_TX = "setup.txt"
+RUNTIME_LOCKED_SPINBOX_STYLE = (
+    "QDoubleSpinBox {"
+    " background-color: rgba(107, 114, 128, 0.16);"
+    " color: palette(text);"
+    " border: 1px solid rgba(107, 114, 128, 0.45);"
+    "}"
+)
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
@@ -94,6 +107,7 @@ CONTROL_LOGIC_FEATURES = [
     "control_trace_row_local_task_text",
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
+    "length_setup_commits_run_zero_load_reference",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -480,7 +494,7 @@ RECIPE_FILENAME_TOKENS = {
     CONSTANT_CURRENT_STRAIN_SWEEP: "iso-current",
 }
 CALIBRATION_MODES = frozenset({CALIBRATION, CALIBRATION_COPPER})
-PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d", "Diameter", "diameter_um")
+PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d_um", "d", "Diameter", "diameter_um")
 PROJECT_ROW_CURRENT_KEYS = (
     "Stress/strain current (mA)",
     "Current (mA)",
@@ -488,6 +502,10 @@ PROJECT_ROW_CURRENT_KEYS = (
 )
 PROJECT_ROW_MICROWIRE_KEYS = ("Microwire", "Wire")
 PROJECT_ROW_SPECIMEN_KEYS = ("Specimen", "Sample", "Piece", "Sample name")
+ANNEALING_FALLBACK_DIRS = (
+    "sample_data/database_builder/current annealing data",
+    "sample_data/current_annealing",
+)
 
 
 def _default_download_dir() -> str:
@@ -1435,6 +1453,15 @@ class ProjectImportResult:
     matched_row: dict[str, Any]
 
 
+@dataclass
+class FabricationSampleRecord:
+    composition: str
+    draw: int
+    piece: int
+    label: str
+    diameter_mm: float | None
+
+
 class MicrowireLineEdit(QtWidgets.QLineEdit):
     """Microwire entry with slash display and filename-safe token conversion."""
 
@@ -1505,6 +1532,36 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
         self._normalizing = False
 
 
+def _fabrication_records_from_index(index: Any) -> dict[str, list[FabricationSampleRecord]]:
+    records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
+    piece_level = getattr(index, "piece_level", {})
+    if not isinstance(piece_level, Mapping):
+        return records_by_composition
+    for key, data in piece_level.items():
+        if not isinstance(key, tuple) or len(key) != 3:
+            continue
+        composition, draw, piece = key
+        if not composition or not isinstance(data, Mapping):
+            continue
+        try:
+            draw_int = int(draw)
+            piece_int = int(piece)
+        except (TypeError, ValueError):
+            continue
+        diameter_um = _safe_float(_project_row_value(data, PROJECT_ROW_DIAMETER_KEYS))
+        record = FabricationSampleRecord(
+            composition=str(composition).strip(),
+            draw=draw_int,
+            piece=piece_int,
+            label=f"{draw_int}/{piece_int}",
+            diameter_mm=None if diameter_um is None else diameter_um / 1000.0,
+        )
+        records_by_composition.setdefault(record.composition, []).append(record)
+    for records in records_by_composition.values():
+        records.sort(key=lambda item: (item.draw, item.piece, item.label))
+    return dict(sorted(records_by_composition.items(), key=lambda item: item[0].lower()))
+
+
 class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
     """Double spin box that avoids padded zero-only decimals in the editor text."""
 
@@ -1549,6 +1606,170 @@ class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
             parsed = self.value()
         clamped = min(max(parsed, self.minimum()), self.maximum())
         return _format_compact_number(clamped, decimals=self.decimals())
+
+
+class MicrometerDiameterSpinBox(CompactDoubleSpinBox):
+    """Diameter spin box that stores millimeters but displays micrometers."""
+
+    def textFromValue(self, value: float) -> str:  # type: ignore[override]
+        return _format_compact_number(value * 1000.0, decimals=self.decimals())
+
+    def valueFromText(self, text: str) -> float:  # type: ignore[override]
+        suffix = self.suffix().strip()
+        cleaned = text.strip()
+        if suffix and cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)].strip()
+        parsed = _parse_first_float(cleaned)
+        return self.value() if parsed is None else parsed / 1000.0
+
+    def validate(self, text: str, pos: int) -> tuple[QtGui.QValidator.State, str, int]:  # type: ignore[override]
+        suffix = self.suffix().strip()
+        cleaned = text.strip()
+        if suffix and cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)].strip()
+        if cleaned in {"", "+", "-", ".", ",", "+.", "-.", "+,", "-,"}:
+            return (QtGui.QValidator.State.Intermediate, text, pos)
+        parsed = _parse_first_float(cleaned)
+        if parsed is None:
+            return (QtGui.QValidator.State.Invalid, text, pos)
+        value_mm = parsed / 1000.0
+        if self.minimum() <= value_mm <= self.maximum():
+            return (QtGui.QValidator.State.Acceptable, text, pos)
+        return (QtGui.QValidator.State.Intermediate, text, pos)
+
+    def fixup(self, text: str) -> str:  # type: ignore[override]
+        suffix = self.suffix().strip()
+        cleaned = text.strip()
+        if suffix and cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)].strip()
+        parsed = _parse_first_float(cleaned)
+        value_mm = self.value() if parsed is None else parsed / 1000.0
+        clamped_mm = min(max(value_mm, self.minimum()), self.maximum())
+        return _format_compact_number(clamped_mm * 1000.0, decimals=self.decimals())
+
+
+class AnnealingPreviewDialog(QtWidgets.QDialog):
+    """Non-modal preview of current annealing curves for a selected sample."""
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        title: str,
+        series: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Current Annealing Preview - {title}")
+        self.resize(980, 820)
+        self._canvases: list[Any] = []
+        self._scroll_area: QtWidgets.QScrollArea | None = None
+        self._annealing_core: Any = None
+        self._pending_preview_panels: deque[tuple[dict[str, Any], QtWidgets.QFrame, QtWidgets.QVBoxLayout, QtWidgets.QLabel]] = deque()
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        if FigureCanvas is None:
+            label = QtWidgets.QLabel("Matplotlib Qt backend is unavailable.", self)
+            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(label, stretch=1)
+            return
+
+        try:
+            from plotting.plugins.current_annealing import core as annealing_core
+        except Exception as exc:
+            label = QtWidgets.QLabel(f"Current annealing plotter is unavailable:\n{exc}", self)
+            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            label.setWordWrap(True)
+            layout.addWidget(label, stretch=1)
+            return
+        self._annealing_core = annealing_core
+
+        summary = QtWidgets.QLabel(f"{len(series)} current annealing graph(s) for {title}", self)
+        summary.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(summary)
+
+        scroll_area = QtWidgets.QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self._scroll_area = scroll_area
+        layout.addWidget(scroll_area, stretch=1)
+
+        content = QtWidgets.QWidget(scroll_area)
+        content_layout = QtWidgets.QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(10)
+        scroll_area.setWidget(content)
+
+        for entry in series:
+            frame = entry.get("frame")
+            if frame is None or getattr(frame, "empty", False):
+                continue
+
+            panel = QtWidgets.QFrame(content)
+            panel.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+            panel.setObjectName("annealingPreviewPanel")
+            panel_layout = QtWidgets.QVBoxLayout(panel)
+            panel_layout.setContentsMargins(8, 8, 8, 8)
+            panel_layout.setSpacing(4)
+
+            placeholder = QtWidgets.QLabel(f"Rendering {entry.get('label', 'current annealing')}...", panel)
+            placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            placeholder.setMinimumHeight(480)
+            placeholder.setWordWrap(True)
+            panel_layout.addWidget(placeholder)
+            content_layout.addWidget(panel)
+            self._pending_preview_panels.append((entry, panel, panel_layout, placeholder))
+
+        content_layout.addStretch(1)
+        QtCore.QTimer.singleShot(0, self._render_next_preview_graph)
+
+    def _render_next_preview_graph(self) -> None:
+        if not self._pending_preview_panels:
+            return
+        entry, panel, panel_layout, placeholder = self._pending_preview_panels.popleft()
+        frame = entry.get("frame")
+        try:
+            figure, _filename = self._annealing_core.plot_one(
+                frame,
+                str(entry.get("label", "Current annealing")),
+            )
+        except Exception as exc:
+            placeholder.setText(f"Failed to plot {entry.get('label', 'current annealing')}:\n{exc}")
+            if self._pending_preview_panels:
+                QtCore.QTimer.singleShot(0, self._render_next_preview_graph)
+            return
+        canvas = FigureCanvas(figure)
+        canvas.setMinimumHeight(480)
+        canvas.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        panel_layout.replaceWidget(placeholder, canvas)
+        placeholder.deleteLater()
+        self._canvases.append(canvas)
+        canvas.installEventFilter(self)
+        canvas.draw_idle()
+        if self._pending_preview_panels:
+            QtCore.QTimer.singleShot(0, self._render_next_preview_graph)
+
+    def _scroll_preview_by_wheel_delta(self, delta: int) -> bool:
+        scroll_area = self._scroll_area
+        if scroll_area is None or not delta:
+            return False
+        bar = scroll_area.verticalScrollBar()
+        bar.setValue(bar.value() - int(delta))
+        return True
+
+    def eventFilter(self, watched: QtCore.QObject | None, event: QtCore.QEvent | None) -> bool:  # type: ignore[override]
+        if event is not None and event.type() == QtCore.QEvent.Type.Wheel and watched in self._canvases:
+            wheel_event = event
+            if isinstance(wheel_event, QtGui.QWheelEvent):
+                delta = wheel_event.pixelDelta().y() or wheel_event.angleDelta().y()
+                if self._scroll_preview_by_wheel_delta(delta):
+                    event.accept()
+                    return True
+        return super().eventFilter(watched, event)
 
 
 class CurrentPageStackedWidget(QtWidgets.QStackedWidget):
@@ -1729,6 +1950,127 @@ class ScaleWorker(QtCore.QObject):
     @QtCore.pyqtSlot()
     def stop(self) -> None:
         self._stop_event.set()
+
+
+class FabricationSuggestionWorker(QtCore.QObject):
+    progress_changed = QtCore.pyqtSignal(str)
+    succeeded = QtCore.pyqtSignal(object, object, int, object)
+    failed = QtCore.pyqtSignal(object, str)
+    cancelled = QtCore.pyqtSignal(object)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(self, root: Path, *, composition: str | None = None) -> None:
+        super().__init__()
+        self.root = root
+        self.composition = composition
+        self._cancel_event = Event()
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            root = self.root
+
+            if not root.exists() or not root.is_dir():
+                self.failed.emit(root, "Fabrication folder path is saved, but the folder was not found.")
+                return
+            if self.composition:
+                self._read_composition_workbooks(root, self.composition)
+            else:
+                self._scan_composition_folders(root)
+        finally:
+            self.finished.emit()
+
+    def _scan_composition_folders(self, root: Path) -> None:
+        self.progress_changed.emit("Scanning fabrication composition folders...")
+        records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
+        try:
+            for child in root.iterdir():
+                if self._cancel_event.is_set():
+                    self.cancelled.emit(root)
+                    return
+                if child.is_dir() and not child.name.startswith((".", "~")):
+                    records_by_composition.setdefault(child.name.strip(), [])
+        except Exception as exc:
+            self.failed.emit(root, f"Failed to scan fabrication folder: {exc}")
+            return
+        records_by_composition = {
+            composition: records
+            for composition, records in sorted(records_by_composition.items(), key=lambda item: item[0].lower())
+            if composition
+        }
+        if not records_by_composition:
+            self.failed.emit(root, "No fabrication composition folders were found in that folder.")
+            return
+        self.succeeded.emit(root, records_by_composition, 0, None)
+
+    def _read_composition_workbooks(self, root: Path, composition: str) -> None:
+        from microwire_data_builder import core as builder_core
+
+        normalized_composition = _normalized_token(composition)
+        target = root
+        try:
+            for child in root.iterdir():
+                if self._cancel_event.is_set():
+                    self.cancelled.emit(root)
+                    return
+                if child.is_dir() and _normalized_token(child.name) == normalized_composition:
+                    target = child
+                    break
+        except Exception as exc:
+            self.failed.emit(root, f"Failed to inspect fabrication folder: {exc}")
+            return
+        if target == root and _normalized_token(root.name) != normalized_composition:
+            self.failed.emit(root, f"No fabrication folder matched composition {composition}.")
+            return
+        files: list[Path] = []
+        scanned = 0
+        self.progress_changed.emit(f"Scanning fabrication workbooks for {composition}...")
+        try:
+            for path in target.rglob("*.xlsx"):
+                if self._cancel_event.is_set():
+                    self.cancelled.emit(root)
+                    return
+                scanned += 1
+                if path.is_file() and not path.name.startswith("~$"):
+                    files.append(path)
+                if scanned % 100 == 0:
+                    self.progress_changed.emit(
+                        f"Scanning {composition}... {len(files)} workbook(s) found"
+                    )
+        except Exception as exc:
+            self.failed.emit(root, f"Failed to scan fabrication folder: {exc}")
+            return
+        if not files:
+            self.failed.emit(root, f"No fabrication Excel workbooks were found for {composition}.")
+            return
+        self.progress_changed.emit(f"Reading {len(files)} {composition} workbook(s)...")
+        try:
+            def _progress(current: int, total: int) -> None:
+                if current == total or current % 10 == 0:
+                    self.progress_changed.emit(
+                        f"Reading {composition} workbook {current}/{total}..."
+                    )
+
+            index = builder_core.build_fabrication_index(
+                files,
+                progress_callback=_progress,
+                cancel_callback=self._cancel_event.is_set,
+            )
+        except Exception as exc:
+            if self._cancel_event.is_set():
+                self.cancelled.emit(root)
+            else:
+                self.failed.emit(root, f"Failed to read fabrication workbooks for {composition}: {exc}")
+            return
+        if self._cancel_event.is_set():
+            self.cancelled.emit(root)
+            return
+        records_by_composition = _fabrication_records_from_index(index)
+        self.succeeded.emit(root, records_by_composition, len(files), composition)
+
+    @QtCore.pyqtSlot()
+    def cancel(self) -> None:
+        self._cancel_event.set()
 
 
 class AutomationControlLoop:
@@ -3112,6 +3454,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preload_trigger_elapsed_s: float | None = None
         self._builder_project_path: Path | None = None
         self._builder_project_match: ProjectImportResult | None = None
+        self._fabrication_folder_path: Path | None = None
+        self._fabrication_records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
+        self._fabrication_loaded_compositions: set[str] = set()
+        self._fabrication_loading_composition: str | None = None
+        self._fabrication_thread: QtCore.QThread | None = None
+        self._fabrication_worker: FabricationSuggestionWorker | None = None
+        self._annealing_preview_windows: list[QtWidgets.QWidget] = []
         self._supply_controller: PowerSupplyController | None = None
         self._supply_snapshot: dict[str, float | None] = {
             "voltage_V": None,
@@ -4383,11 +4732,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_initial_length.setSuffix(" mm")
         self.spin_initial_length.setVisible(False)
 
-        self.spin_diameter = CompactDoubleSpinBox(sample_box)
-        self.spin_diameter.setDecimals(5)
+        self.spin_diameter = MicrometerDiameterSpinBox(sample_box)
+        self.spin_diameter.setDecimals(6)
         self.spin_diameter.setRange(0.0, 10.0)
         self.spin_diameter.setValue(0.03)
-        self.spin_diameter.setSuffix(" mm")
+        self.spin_diameter.setSuffix(" um")
+        self.spin_diameter.setSingleStep(0.001)
         sample_form.addRow("Wire diameter", self.spin_diameter)
 
         self.check_zero_on_preload = QtWidgets.QCheckBox(
@@ -4424,15 +4774,31 @@ class MainWindow(QtWidgets.QMainWindow):
         browse_project_button = QtWidgets.QPushButton("Browse", project_box)
         browse_project_button.clicked.connect(self._choose_builder_project)
         project_path_row.addWidget(browse_project_button)
-        import_project_button = QtWidgets.QPushButton("Import sample info", project_box)
-        import_project_button.clicked.connect(self._import_builder_project)
-        project_path_row.addWidget(import_project_button)
+        self.button_show_annealing = QtWidgets.QPushButton("Show annealing", project_box)
+        self.button_show_annealing.clicked.connect(self.show_project_annealing_graphs)
+        project_path_row.addWidget(self.button_show_annealing)
         project_form.addRow("Project (.pydpj)", project_path_row)
         self.label_project_status = QtWidgets.QLabel(
             "Load a Microwire Data Builder project to auto-fill diameter and sample metadata."
         )
         self.label_project_status.setWordWrap(True)
         project_form.addRow("", self.label_project_status)
+
+        self.edit_fabrication_folder = QtWidgets.QLineEdit(project_box)
+        fabrication_path_row = QtWidgets.QHBoxLayout()
+        fabrication_path_row.addWidget(self.edit_fabrication_folder, stretch=1)
+        browse_fabrication_button = QtWidgets.QPushButton("Browse", project_box)
+        browse_fabrication_button.clicked.connect(self._choose_fabrication_folder)
+        fabrication_path_row.addWidget(browse_fabrication_button)
+        self.button_load_fabrication = QtWidgets.QPushButton("Load suggestions", project_box)
+        self.button_load_fabrication.clicked.connect(self._handle_fabrication_load_button)
+        fabrication_path_row.addWidget(self.button_load_fabrication)
+        project_form.addRow("Fabrication folder", fabrication_path_row)
+        self.label_fabrication_status = QtWidgets.QLabel(
+            "Connect a fabrication folder to suggest compositions and microwires while typing."
+        )
+        self.label_fabrication_status.setWordWrap(True)
+        project_form.addRow("", self.label_fabrication_status)
         specimen_layout.addWidget(project_box)
 
         logging_box = self._group_box("Session")
@@ -5888,6 +6254,7 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda: self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
         )
         self.edit_project_path.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
+        self.edit_fabrication_folder.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.spin_diameter.valueChanged.connect(self._refresh_recipe_sample_label)
         self.spin_diameter.valueChanged.connect(self._refresh_equivalent_labels)
         self.spin_diameter.valueChanged.connect(self._refresh_diameter_import_state)
@@ -7596,6 +7963,274 @@ class MainWindow(QtWidgets.QMainWindow):
             self._builder_project_path = Path(path_str)
             self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
 
+    def _fabrication_load_active(self) -> bool:
+        return self._fabrication_thread is not None and self._fabrication_thread.isRunning()
+
+    def _set_fabrication_loading_ui(self, loading: bool) -> None:
+        if not hasattr(self, "button_load_fabrication"):
+            return
+        self.button_load_fabrication.setText("Cancel loading" if loading else "Load suggestions")
+
+    def _choose_fabrication_folder(self) -> None:
+        start_dir = (
+            str(self._fabrication_folder_path)
+            if self._fabrication_folder_path is not None
+            else self.edit_log_dir.text().strip()
+        )
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select fabrication data folder",
+            start_dir,
+        )
+        if folder:
+            self.edit_fabrication_folder.setText(folder)
+            self._load_fabrication_folder_from_ui(async_load=True)
+
+    def _handle_fabrication_load_button(self) -> None:
+        if self._fabrication_load_active():
+            self._cancel_fabrication_folder_load()
+            return
+        self._load_fabrication_folder_from_ui(async_load=True)
+
+    def _load_fabrication_folder_from_ui(self, *, async_load: bool = True) -> None:
+        path_text = self.edit_fabrication_folder.text().strip()
+        if not path_text:
+            self._cancel_fabrication_folder_load()
+            self._fabrication_folder_path = None
+            self._fabrication_records_by_composition = {}
+            self._fabrication_loaded_compositions = set()
+            self._fabrication_loading_composition = None
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText(
+                "Connect a fabrication folder to suggest compositions and microwires while typing."
+            )
+            return
+        if async_load:
+            self._start_fabrication_folder_load(Path(path_text), composition=None)
+        else:
+            self._load_fabrication_folder_sync(Path(path_text))
+
+    def _start_fabrication_folder_load(self, root: Path, *, composition: str | None = None) -> None:
+        self._cancel_fabrication_folder_load()
+        self._fabrication_folder_path = root
+        self._fabrication_loading_composition = composition
+        if composition:
+            self.label_fabrication_status.setText(f"Loading fabrication data for {composition}...")
+        else:
+            self._fabrication_loaded_compositions = set()
+            self.label_fabrication_status.setText(f"Scanning fabrication folder: {root}")
+        self._set_fabrication_loading_ui(True)
+        thread = QtCore.QThread(self)
+        worker = FabricationSuggestionWorker(root, composition=composition)
+        worker.moveToThread(thread)
+        worker.progress_changed.connect(self.label_fabrication_status.setText)
+        worker.succeeded.connect(self._handle_fabrication_load_success)
+        worker.failed.connect(self._handle_fabrication_load_failure)
+        worker.cancelled.connect(self._handle_fabrication_load_cancelled)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda thread=thread, worker=worker: self._finish_fabrication_thread(thread, worker))
+        thread.started.connect(worker.run)
+        self._fabrication_thread = thread
+        self._fabrication_worker = worker
+        thread.start()
+
+    def _cancel_fabrication_folder_load(self) -> None:
+        worker = self._fabrication_worker
+        if worker is not None:
+            worker.cancel()
+
+    def _finish_fabrication_thread(
+        self,
+        thread: QtCore.QThread,
+        worker: FabricationSuggestionWorker,
+    ) -> None:
+        if self._fabrication_thread is thread:
+            self._fabrication_thread = None
+            self._fabrication_worker = None
+            self._fabrication_loading_composition = None
+            self._set_fabrication_loading_ui(False)
+            QtCore.QTimer.singleShot(0, self._ensure_fabrication_composition_loaded)
+        thread.deleteLater()
+
+    def _handle_fabrication_load_success(
+        self,
+        root_obj: object,
+        records_obj: object,
+        file_count: int,
+        composition_obj: object,
+    ) -> None:
+        root = Path(root_obj)
+        if self._fabrication_folder_path != root:
+            return
+        records_by_composition = (
+            records_obj if isinstance(records_obj, dict) else {}
+        )
+        composition = str(composition_obj).strip() if composition_obj else None
+        if composition:
+            merged_records = dict(self._fabrication_records_by_composition)
+            for name, records in records_by_composition.items():
+                merged_records[name] = records
+                self._fabrication_loaded_compositions.add(_normalized_token(name))
+            if not records_by_composition:
+                self._fabrication_loaded_compositions.add(_normalized_token(composition))
+            self._fabrication_records_by_composition = dict(
+                sorted(merged_records.items(), key=lambda item: item[0].lower())
+            )
+            self._refresh_fabrication_completers()
+            sample_count = sum(len(records) for records in records_by_composition.values())
+            self.label_fabrication_status.setText(
+                f"Loaded {sample_count} {composition} microwire suggestion(s) from {file_count} fabrication workbook(s)."
+            )
+        else:
+            self._fabrication_records_by_composition = records_by_composition
+            self._fabrication_loaded_compositions = set()
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText(
+                f"Loaded {len(self._fabrication_records_by_composition)} composition suggestion(s). "
+                "Type/select a composition to load microwires."
+            )
+        self._apply_fabrication_sample_if_possible()
+        self._ensure_fabrication_composition_loaded()
+
+    def _handle_fabrication_load_failure(self, root_obj: object, message: str) -> None:
+        root = Path(root_obj)
+        if self._fabrication_folder_path != root:
+            return
+        if self._fabrication_loading_composition is None:
+            self._fabrication_records_by_composition = {}
+            self._fabrication_loaded_compositions = set()
+            self._refresh_fabrication_completers()
+        self.label_fabrication_status.setText(message)
+
+    def _handle_fabrication_load_cancelled(self, root_obj: object) -> None:
+        root = Path(root_obj)
+        if self._fabrication_folder_path == root:
+            self.label_fabrication_status.setText("Fabrication suggestion loading cancelled.")
+
+    def _load_fabrication_folder_sync(self, root: Path) -> bool:
+        self._fabrication_folder_path = root
+        self._fabrication_loaded_compositions = set()
+        self._fabrication_loading_composition = None
+        if not root.exists() or not root.is_dir():
+            self._fabrication_records_by_composition = {}
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText("Fabrication folder path is saved, but the folder was not found.")
+            return False
+        try:
+            files = [
+                path
+                for path in root.rglob("*.xlsx")
+                if path.is_file() and not path.name.startswith("~$")
+            ]
+        except Exception as exc:
+            self._fabrication_records_by_composition = {}
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText(f"Failed to scan fabrication folder: {exc}")
+            return False
+        if not files:
+            self._fabrication_records_by_composition = {}
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText("No fabrication Excel workbooks were found in that folder.")
+            return False
+        try:
+            from microwire_data_builder import core as builder_core
+
+            index = builder_core.build_fabrication_index(files)
+        except Exception as exc:
+            self._fabrication_records_by_composition = {}
+            self._refresh_fabrication_completers()
+            self.label_fabrication_status.setText(f"Failed to read fabrication workbooks: {exc}")
+            return False
+        self._fabrication_records_by_composition = _fabrication_records_from_index(index)
+        self._fabrication_loaded_compositions = {
+            _normalized_token(composition)
+            for composition, records in self._fabrication_records_by_composition.items()
+            if records
+        }
+        self._refresh_fabrication_completers()
+        sample_count = sum(len(records) for records in self._fabrication_records_by_composition.values())
+        self.label_fabrication_status.setText(
+            f"Loaded {sample_count} microwire suggestion(s) from {len(files)} fabrication workbook(s)."
+        )
+        self._apply_fabrication_sample_if_possible()
+        return True
+
+    def _refresh_fabrication_completers(self) -> None:
+        compositions = list(self._fabrication_records_by_composition)
+        composition_completer = QtWidgets.QCompleter(compositions, self.edit_name_composition)
+        composition_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+        composition_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+        self.edit_name_composition.setCompleter(composition_completer)
+        self._update_fabrication_microwire_completer()
+
+    def _update_fabrication_microwire_completer(self) -> None:
+        composition = self._matching_fabrication_composition()
+        labels = [
+            record.label
+            for record in self._fabrication_records_by_composition.get(composition or "", [])
+        ]
+        microwire_completer = QtWidgets.QCompleter(labels, self.edit_name_wire)
+        microwire_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+        microwire_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+        self.edit_name_wire.setCompleter(microwire_completer)
+        self._ensure_fabrication_composition_loaded()
+
+    def _ensure_fabrication_composition_loaded(self) -> None:
+        root = self._fabrication_folder_path
+        composition = self._matching_fabrication_composition()
+        if root is None or composition is None:
+            return
+        normalized = _normalized_token(composition)
+        if not normalized:
+            return
+        if normalized in self._fabrication_loaded_compositions:
+            return
+        if self._fabrication_loading_composition and _normalized_token(self._fabrication_loading_composition) == normalized:
+            return
+        if self._fabrication_load_active():
+            return
+        records = self._fabrication_records_by_composition.get(composition, [])
+        if records:
+            self._fabrication_loaded_compositions.add(normalized)
+            return
+        self._start_fabrication_folder_load(root, composition=composition)
+
+    def _matching_fabrication_composition(self) -> str | None:
+        current = _normalized_token(self.edit_name_composition.text())
+        if not current:
+            return None
+        for composition in self._fabrication_records_by_composition:
+            if _normalized_token(composition) == current:
+                return composition
+        return None
+
+    def _matching_fabrication_record(self) -> FabricationSampleRecord | None:
+        composition = self._matching_fabrication_composition()
+        if not composition:
+            return None
+        current_wire = _normalized_microwire_token(self.edit_name_wire.text())
+        if not current_wire:
+            return None
+        for record in self._fabrication_records_by_composition.get(composition, []):
+            if _normalized_microwire_token(record.label) == current_wire:
+                return record
+        return None
+
+    def _apply_fabrication_sample_if_possible(self) -> bool:
+        if self._diameter_imported:
+            return False
+        record = self._matching_fabrication_record()
+        if record is None or record.diameter_mm is None:
+            return False
+        self.spin_diameter.setValue(record.diameter_mm)
+        self._mark_diameter_imported(True)
+        self.label_fabrication_status.setText(
+            f"Using fabrication diameter {_format_compact_unit(record.diameter_mm * 1000.0, 'um', decimals=3)} "
+            f"for {record.composition} {record.label}."
+        )
+        return True
+
     def _refresh_diameter_import_state(self) -> None:
         self._mark_diameter_imported(self._diameter_imported)
 
@@ -7605,15 +8240,306 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self._diameter_imported:
             self.spin_diameter.setStyleSheet("")
-            self.spin_diameter.setToolTip("Wire diameter imported from the Microwire Data Builder project; manual edits are allowed.")
+            self.spin_diameter.setToolTip("Wire diameter imported from the Microwire Data Builder project or fabrication folder; manual edits are allowed.")
         else:
             self.spin_diameter.setStyleSheet(
                 "QDoubleSpinBox { border: 1px solid #dc2626; background-color: rgba(220, 38, 38, 0.10); }"
             )
-            self.spin_diameter.setToolTip("Wire diameter has not been imported from the Builder project; manual edits are allowed.")
+            self.spin_diameter.setToolTip("Wire diameter has not been imported from the Builder project or fabrication folder; manual edits are allowed.")
 
     def _read_builder_project_payload(self, path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _source_basename(source_path: str) -> str:
+        normalized = str(source_path).replace("\\", "/").strip()
+        if not normalized:
+            return ""
+        return Path(normalized).name
+
+    @staticmethod
+    def _annealing_setpoint_from_source(source_path: str) -> float | None:
+        stem = Path(str(source_path).replace("\\", "/")).stem
+        text = stem.replace(",", ".")
+        match = re.search(r"(\d+(?:\.\d+)?)\s*mA\b", text, flags=re.IGNORECASE)
+        if match is None:
+            return None
+        try:
+            return abs(float(match.group(1)))
+        except ValueError:
+            return None
+
+    @classmethod
+    def _extract_project_annealing_candidates(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        sections = payload.get("sections") if isinstance(payload, Mapping) else None
+        if not isinstance(sections, Mapping):
+            return []
+        annealing_payload = sections.get("annealing")
+        if not isinstance(annealing_payload, Mapping):
+            return []
+        rows = annealing_payload.get("rows")
+        if not isinstance(rows, (list, tuple)):
+            return []
+
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            raw_sources = row.get("_sources")
+            if not isinstance(raw_sources, (list, tuple)):
+                continue
+            sources = [str(source).strip() for source in raw_sources if str(source).strip()]
+            if not sources:
+                continue
+            composition = str(row.get("Composition") or row.get("composition") or "").strip()
+            microwire = str(row.get("Microwire") or row.get("microwire") or "").strip()
+            candidates.append(
+                {
+                    "composition": composition,
+                    "microwire": MicrowireLineEdit.to_display_text(microwire) or microwire,
+                    "sources": sources,
+                    "group_key": str(row.get("_group_key") or ""),
+                    "composition_norm": _normalized_token(composition),
+                    "microwire_norm": _normalized_microwire_token(microwire),
+                }
+            )
+        return candidates
+
+    @staticmethod
+    def _annealing_candidate_label(candidate: Mapping[str, Any]) -> str:
+        composition = str(candidate.get("composition", "")).strip() or "?"
+        microwire = str(candidate.get("microwire", "")).strip() or "?"
+        source_count = len(candidate.get("sources", []) or [])
+        return f"{composition} | {microwire} | {source_count} source file(s)"
+
+    def _choose_project_annealing_candidate(
+        self,
+        candidates: list[dict[str, Any]],
+    ) -> int | None:
+        composition = _normalized_token(self.edit_name_composition.text())
+        microwire = _normalized_microwire_token(self.edit_name_wire.text())
+
+        matches = [
+            index
+            for index, candidate in enumerate(candidates)
+            if (
+                (not composition or candidate.get("composition_norm") == composition)
+                and (not microwire or candidate.get("microwire_norm") == microwire)
+            )
+        ]
+        if matches:
+            return matches[0]
+
+        if composition:
+            matches = [
+                index
+                for index, candidate in enumerate(candidates)
+                if candidate.get("composition_norm") == composition
+            ]
+            if len(matches) == 1:
+                return matches[0]
+
+        if len(candidates) == 1:
+            return 0
+        return None
+
+    def _resolve_annealing_source_file(
+        self,
+        *,
+        project_path: Path,
+        source_path: str,
+    ) -> Path | None:
+        source_text = str(source_path).strip()
+        if not source_text:
+            return None
+        for direct in (Path(source_text), Path(source_text.replace("\\", "/"))):
+            try:
+                if direct.exists() and direct.is_file():
+                    return direct
+            except Exception:
+                pass
+
+        basename = self._source_basename(source_text)
+        if not basename:
+            return None
+        project_dir = project_path.resolve().parent if project_path else Path.cwd()
+        repo_root = Path(__file__).resolve().parents[2]
+        candidates = [
+            project_dir / basename,
+            project_dir / "current annealing data" / basename,
+            project_dir.parent / "current annealing data" / basename,
+            project_dir.parent.parent / "current annealing data" / basename,
+        ]
+        candidates.extend(repo_root / rel_dir / basename for rel_dir in ANNEALING_FALLBACK_DIRS)
+        for candidate in candidates:
+            try:
+                if candidate.exists() and candidate.is_file():
+                    return candidate
+            except Exception:
+                continue
+
+        for rel_dir in ANNEALING_FALLBACK_DIRS:
+            root = repo_root / rel_dir
+            try:
+                if not root.exists():
+                    continue
+                match = next(root.rglob(basename), None)
+                if match is not None and match.is_file():
+                    return match
+            except Exception:
+                continue
+        return None
+
+    def _load_annealing_preview_series(
+        self,
+        *,
+        project_path: Path,
+        sources: list[str],
+    ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+        try:
+            from plotting.plugins.current_annealing import core as annealing_core
+            from plotting.shared.toolkit import format_annealing_title
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                APP_NAME,
+                f"Failed to import current annealing parser:\n{exc}",
+            )
+            return [], [], []
+
+        loaded_series: list[dict[str, Any]] = []
+        missing_sources: list[str] = []
+        failed_sources: list[str] = []
+        for source in sources:
+            resolved = self._resolve_annealing_source_file(
+                project_path=project_path,
+                source_path=source,
+            )
+            if resolved is None:
+                missing_sources.append(source)
+                continue
+            try:
+                frame = annealing_core.load_file(str(resolved))
+                currents = frame["I_mA"].to_numpy(dtype=float)
+                resistances = frame["R_Ohm"].to_numpy(dtype=float)
+            except Exception as exc:
+                failed_sources.append(f"{self._source_basename(source)}: {exc}")
+                continue
+            if len(currents) == 0:
+                continue
+            setpoint_mA = self._annealing_setpoint_from_source(source)
+            if setpoint_mA is None:
+                try:
+                    setpoint_mA = max(abs(float(value)) for value in currents)
+                except Exception:
+                    setpoint_mA = None
+            label = format_annealing_title(Path(str(source).replace("\\", "/")).stem)
+            loaded_series.append(
+                {
+                    "label": label,
+                    "frame": frame,
+                    "currents": currents,
+                    "resistances": resistances,
+                    "path": str(resolved),
+                    "setpoint_mA": setpoint_mA,
+                }
+            )
+        return loaded_series, missing_sources, failed_sources
+
+    def show_project_annealing_graphs(self) -> None:
+        path_text = self.edit_project_path.text().strip()
+        if not path_text:
+            QtWidgets.QMessageBox.information(self, APP_NAME, "Connect a .pydpj project first.")
+            return
+        project_path = Path(path_text)
+        if not project_path.exists():
+            QtWidgets.QMessageBox.warning(self, APP_NAME, "Choose a valid .pydpj file first.")
+            return
+        try:
+            payload = self._read_builder_project_payload(project_path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to read project file: {exc}")
+            return
+        candidates = self._extract_project_annealing_candidates(payload)
+        if not candidates:
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "No annealing source files were found in this project.",
+            )
+            return
+
+        candidate_index = self._choose_project_annealing_candidate(candidates)
+        if candidate_index is None:
+            labels = [self._annealing_candidate_label(candidate) for candidate in candidates]
+            selected_label, confirmed = QtWidgets.QInputDialog.getItem(
+                self,
+                "Select annealing sample",
+                "Choose which project row to preview:",
+                labels,
+                0,
+                False,
+            )
+            if not confirmed:
+                return
+            try:
+                candidate_index = labels.index(selected_label)
+            except ValueError:
+                candidate_index = None
+        if candidate_index is None:
+            return
+
+        candidate = candidates[candidate_index]
+        sources = [str(source).strip() for source in candidate.get("sources", []) if str(source).strip()]
+        series, missing_sources, failed_sources = self._load_annealing_preview_series(
+            project_path=project_path,
+            sources=sources,
+        )
+        if not series:
+            details: list[str] = []
+            if missing_sources:
+                details.append("Missing source files:")
+                details.extend(f"  - {self._source_basename(path)}" for path in missing_sources[:12])
+            if failed_sources:
+                details.append("Failed to parse:")
+                details.extend(f"  - {item}" for item in failed_sources[:12])
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "\n".join(details) if details else "No valid annealing curves found.",
+            )
+            return
+
+        title = " ".join(
+            part
+            for part in (
+                str(candidate.get("composition", "")).strip(),
+                str(candidate.get("microwire", "")).strip(),
+            )
+            if part
+        ) or "Current annealing preview"
+        dialog = AnnealingPreviewDialog(self, title, series)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(
+            lambda _obj=None, dlg=dialog: self._annealing_preview_windows.remove(dlg)
+            if dlg in self._annealing_preview_windows
+            else None
+        )
+        self._annealing_preview_windows.append(dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+        if missing_sources or failed_sources:
+            message_lines: list[str] = []
+            if missing_sources:
+                message_lines.append(f"Some files were not found ({len(missing_sources)}).")
+            if failed_sources:
+                message_lines.append(f"Some files failed to parse ({len(failed_sources)}).")
+            QtWidgets.QMessageBox.information(self, APP_NAME, " ".join(message_lines))
 
     def _project_match_score(self, row: Mapping[str, Any]) -> int:
         score = 0
@@ -7726,9 +8652,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.spin_current_sweep_end_mA.setValue(match.current_mA)
         finally:
             self._builder_import_in_progress = False
+        if match.diameter_mm is None:
+            diameter_status = "no project diameter"
+        else:
+            diameter_status = _format_compact_unit(match.diameter_mm * 1000.0, "um", decimals=3)
         self.label_project_status.setText(
-            f"Imported {match.path.name} -> section {match.section}, diameter "
-            f"{'-' if match.diameter_mm is None else _format_compact_unit(match.diameter_mm * 1000.0, 'um', decimals=3)}"
+            f"Imported {match.path.name} -> section {match.section}, diameter {diameter_status}"
             f"{'' if match.current_mA is None else f', current {match.current_mA:.2f} mA'}."
         )
         if not quiet:
@@ -8122,7 +9051,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._last_auto_sample_name = built
             self._last_auto_log_name = safe_name
         self._refresh_recipe_sample_label()
+        self._update_fabrication_microwire_completer()
         self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+        self._apply_fabrication_sample_if_possible()
         self._persist_settings_if_enabled()
 
     def _sync_stale_log_name_from_sample(self) -> None:
@@ -15826,10 +16757,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _current_sweep_override_values_from_controls(self) -> dict[str, float | bool]:
         pause_factor = float(self.spin_current_sweep_hold_pause_factor.value())
         return {
+            "target_start": float(self.spin_current_sweep_target_start.value()),
+            "target_end": float(self.spin_current_sweep_target_end.value()),
+            "target_step": max(1e-9, abs(float(self.spin_current_sweep_target_step.value()))),
             "current_start_mA": self._recipe_current_setpoint_mA(float(self.spin_current_sweep_start_mA.value())),
             "current_end_mA": self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value())),
             "current_ramp_rate_mA_s": max(1e-9, abs(float(self.spin_current_sweep_step_mA.value()))),
             "target_ramp_rate_value_s": max(1e-9, abs(float(self.spin_current_sweep_target_ramp_rate.value()))),
+            "return_target": bool(self.check_current_sweep_return_target.isChecked()),
             "current_hold_enabled": bool(self.check_current_sweep_hold_on_error.isChecked()),
             "current_hold_pause_tolerance_factor": pause_factor,
             "current_hold_resume_tolerance_factor": min(
@@ -15856,6 +16791,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "note": step.note,
             "basis": step.basis,
             "target_value": step.target_value,
+            "target_start_value": step.target_start_value,
+            "target_end_value": step.target_end_value,
             "current_mA": step.current_mA,
             "current_start_mA": step.current_start_mA,
             "current_end_mA": step.current_end_mA,
@@ -15866,6 +16803,185 @@ class MainWindow(QtWidgets.QMainWindow):
             "current_hold_resume_tolerance_factor": step.current_hold_resume_tolerance_factor,
             "current_hold_resume_stable_s": step.current_hold_resume_stable_s,
         }
+
+    def _current_sweep_runtime_boundary_target(self, basis: str, active_index: int) -> float | None:
+        if self._automation_basis == basis and self._automation_target_value is not None:
+            return float(self._automation_target_value)
+        for index in range(min(active_index, len(self._automation_steps) - 1), -1, -1):
+            step = self._automation_steps[index]
+            if step.basis == basis and step.target_value is not None:
+                return float(step.target_value)
+        return None
+
+    def _current_sweep_runtime_basis(self, active_index: int) -> str:
+        if self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
+            return str(self._automation_basis)
+        for index in range(min(active_index, len(self._automation_steps) - 1), -1, -1):
+            basis = self._automation_steps[index].basis
+            if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
+                return str(basis)
+        if str(self._automation_name) in CURRENT_SWEEP_BASIS_BY_MODE:
+            return CURRENT_SWEEP_BASIS_BY_MODE[str(self._automation_name)]
+        return self._current_sweep_basis()
+
+    @staticmethod
+    def _target_values_close(left: float, right: float) -> bool:
+        return math.isclose(float(left), float(right), rel_tol=1e-9, abs_tol=1e-6)
+
+    def _current_sweep_future_targets_from_controls(
+        self,
+        values: Mapping[str, float | bool],
+        active_target: float,
+    ) -> list[float] | None:
+        targets = self._build_numeric_targets(
+            float(values["target_start"]),
+            float(values["target_end"]),
+            float(values["target_step"]),
+        )
+        for index, target in enumerate(targets):
+            if self._target_values_close(float(target), active_target):
+                return [float(value) for value in targets[index + 1 :]]
+
+        direction = math.copysign(1.0, float(values["target_end"]) - float(values["target_start"]))
+        future = [
+            float(target)
+            for target in targets
+            if (float(target) - active_target) * direction > 1e-6
+        ]
+        return future or None
+
+    def _build_runtime_current_sweep_tail(
+        self,
+        values: Mapping[str, float | bool],
+        *,
+        basis: str,
+        active_index: int,
+    ) -> list[AutomationStep] | None:
+        active_target = self._current_sweep_runtime_boundary_target(basis, active_index)
+        if active_target is None:
+            return None
+        future_targets = self._current_sweep_future_targets_from_controls(values, active_target)
+        if future_targets is None:
+            return None
+
+        tail: list[AutomationStep] = []
+        previous_target = active_target
+        current_start = float(values["current_start_mA"])
+        current_end = float(values["current_end_mA"])
+        current_ramp_rate = float(values["current_ramp_rate_mA_s"])
+        target_ramp_rate = float(values["target_ramp_rate_value_s"])
+
+        def _append_plateau(target: float, note: str) -> None:
+            nonlocal previous_target
+            tail.append(
+                AutomationStep(
+                    "set_current",
+                    target_value=target,
+                    basis=basis,
+                    current_mA=current_start,
+                    note=note,
+                )
+            )
+            tail.append(
+                AutomationStep(
+                    "ramp_target",
+                    target_value=target,
+                    target_start_value=previous_target,
+                    target_end_value=target,
+                    target_ramp_rate_value_s=target_ramp_rate,
+                    basis=basis,
+                    note=note,
+                )
+            )
+            previous_target = target
+            sweep_ranges = [(current_start, current_end)]
+            if abs(current_end - current_start) > 1e-12:
+                sweep_ranges.append((current_end, current_start))
+            for sweep_start_mA, sweep_end_mA in sweep_ranges:
+                tail.append(
+                    AutomationStep(
+                        "sweep_current",
+                        target_value=target,
+                        basis=basis,
+                        current_start_mA=sweep_start_mA,
+                        current_end_mA=sweep_end_mA,
+                        current_ramp_rate_mA_s=current_ramp_rate,
+                        current_hold_enabled=bool(values["current_hold_enabled"]),
+                        current_hold_pause_tolerance_factor=float(values["current_hold_pause_tolerance_factor"]),
+                        current_hold_resume_tolerance_factor=float(values["current_hold_resume_tolerance_factor"]),
+                        current_hold_resume_stable_s=float(values["current_hold_resume_stable_s"]),
+                        note=note,
+                    )
+                )
+
+        start_note = self._next_current_sweep_plateau_number_after(active_index)
+        for offset, target in enumerate(future_targets):
+            _append_plateau(float(target), str(start_note + offset))
+
+        if bool(values["return_target"]):
+            return_target = float(values["target_start"])
+            if not self._target_values_close(previous_target, return_target):
+                note = str(start_note + len(future_targets))
+                tail.append(
+                    AutomationStep(
+                        "set_current",
+                        target_value=return_target,
+                        basis=basis,
+                        current_mA=current_start,
+                        note=note,
+                    )
+                )
+                tail.append(
+                    AutomationStep(
+                        "ramp_target",
+                        target_value=return_target,
+                        target_start_value=previous_target,
+                        target_end_value=return_target,
+                        target_ramp_rate_value_s=target_ramp_rate,
+                        basis=basis,
+                        current_mA=current_start,
+                        note=note,
+                    )
+                )
+        return tail
+
+    def _next_current_sweep_plateau_number_after(self, active_index: int) -> int:
+        for index in range(min(active_index, len(self._automation_steps) - 1), -1, -1):
+            note = self._automation_steps[index].note
+            if str(note).isdigit():
+                return int(note) + 1
+        return 1
+
+    def _runtime_tail_change_summaries(
+        self,
+        old_tail: Sequence[AutomationStep],
+        new_tail: Sequence[AutomationStep],
+        *,
+        start_index: int,
+    ) -> list[dict[str, object]]:
+        changed_steps: list[dict[str, object]] = []
+        sentinel = object()
+        for offset, pair in enumerate(zip_longest(old_tail, new_tail, fillvalue=sentinel)):
+            old_step, new_step = pair
+            old_summary = (
+                None
+                if old_step is sentinel
+                else self._current_sweep_step_override_summary(old_step)  # type: ignore[arg-type]
+            )
+            new_summary = (
+                None
+                if new_step is sentinel
+                else self._current_sweep_step_override_summary(new_step)  # type: ignore[arg-type]
+            )
+            if old_summary != new_summary:
+                changed_steps.append(
+                    {
+                        "index": start_index + offset,
+                        "old": old_summary,
+                        "new": new_summary,
+                    }
+                )
+        return changed_steps
 
     def _apply_current_sweep_pending_overrides(
         self,
@@ -15886,53 +17002,72 @@ class MainWindow(QtWidgets.QMainWindow):
 
         values = self._current_sweep_override_values_from_controls()
         active_index = self._current_active_recipe_step_index()
-        changed_steps: list[dict[str, object]] = []
-        updated_steps = list(self._automation_steps)
-        for index, step in enumerate(self._automation_steps):
-            if index <= active_index:
-                continue
-            old_summary = self._current_sweep_step_override_summary(step)
-            new_step = step
-            if step.action == "set_current" and step.current_mA is not None:
-                new_step = replace(
-                    step,
-                    current_mA=float(values["current_start_mA"]),
-                )
-            elif step.action == "ramp_target" and step.target_ramp_rate_value_s is not None:
-                new_step = replace(
-                    step,
-                    target_ramp_rate_value_s=float(values["target_ramp_rate_value_s"]),
-                )
-            elif step.action == "sweep_current":
-                old_start = float(step.current_start_mA) if step.current_start_mA is not None else 0.0
-                old_end = float(step.current_end_mA) if step.current_end_mA is not None else old_start
-                if old_end >= old_start:
-                    new_start = float(values["current_start_mA"])
-                    new_end = float(values["current_end_mA"])
-                else:
-                    new_start = float(values["current_end_mA"])
-                    new_end = float(values["current_start_mA"])
-                new_step = replace(
-                    step,
-                    current_start_mA=new_start,
-                    current_end_mA=new_end,
-                    current_ramp_rate_mA_s=float(values["current_ramp_rate_mA_s"]),
-                    current_hold_enabled=bool(values["current_hold_enabled"]),
-                    current_hold_pause_tolerance_factor=float(values["current_hold_pause_tolerance_factor"]),
-                    current_hold_resume_tolerance_factor=float(values["current_hold_resume_tolerance_factor"]),
-                    current_hold_resume_stable_s=float(values["current_hold_resume_stable_s"]),
-                )
-            if new_step is not step:
-                new_summary = self._current_sweep_step_override_summary(new_step)
-                if new_summary != old_summary:
-                    updated_steps[index] = new_step
-                    changed_steps.append(
-                        {
-                            "index": index,
-                            "old": old_summary,
-                            "new": new_summary,
-                        }
+        basis = self._current_sweep_runtime_basis(active_index)
+        replacement_tail = self._build_runtime_current_sweep_tail(
+            values,
+            basis=basis,
+            active_index=active_index,
+        )
+        tail_replanned = replacement_tail is not None
+        if replacement_tail is not None:
+            old_tail = self._automation_steps[active_index + 1 :]
+            updated_steps = [
+                *self._automation_steps[: active_index + 1],
+                *replacement_tail,
+            ]
+            changed_steps = self._runtime_tail_change_summaries(
+                old_tail,
+                replacement_tail,
+                start_index=active_index + 1,
+            )
+        else:
+            changed_steps = []
+            updated_steps = list(self._automation_steps)
+            for index, step in enumerate(self._automation_steps):
+                if index <= active_index:
+                    continue
+                old_summary = self._current_sweep_step_override_summary(step)
+                new_step = step
+                if step.action == "set_current" and step.current_mA is not None:
+                    new_step = replace(
+                        step,
+                        current_mA=float(values["current_start_mA"]),
                     )
+                elif step.action == "ramp_target" and step.target_ramp_rate_value_s is not None:
+                    new_step = replace(
+                        step,
+                        target_ramp_rate_value_s=float(values["target_ramp_rate_value_s"]),
+                    )
+                elif step.action == "sweep_current":
+                    old_start = float(step.current_start_mA) if step.current_start_mA is not None else 0.0
+                    old_end = float(step.current_end_mA) if step.current_end_mA is not None else old_start
+                    if old_end >= old_start:
+                        new_start = float(values["current_start_mA"])
+                        new_end = float(values["current_end_mA"])
+                    else:
+                        new_start = float(values["current_end_mA"])
+                        new_end = float(values["current_start_mA"])
+                    new_step = replace(
+                        step,
+                        current_start_mA=new_start,
+                        current_end_mA=new_end,
+                        current_ramp_rate_mA_s=float(values["current_ramp_rate_mA_s"]),
+                        current_hold_enabled=bool(values["current_hold_enabled"]),
+                        current_hold_pause_tolerance_factor=float(values["current_hold_pause_tolerance_factor"]),
+                        current_hold_resume_tolerance_factor=float(values["current_hold_resume_tolerance_factor"]),
+                        current_hold_resume_stable_s=float(values["current_hold_resume_stable_s"]),
+                    )
+                if new_step is not step:
+                    new_summary = self._current_sweep_step_override_summary(new_step)
+                    if new_summary != old_summary:
+                        updated_steps[index] = new_step
+                        changed_steps.append(
+                            {
+                                "index": index,
+                                "old": old_summary,
+                                "new": new_summary,
+                            }
+                        )
 
         if not changed_steps:
             if show_message:
@@ -15956,6 +17091,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "timestamp_utc": _utc_timestamp(),
             "applied_after_step_index": active_index,
             "changed_step_count": len(changed_steps),
+            "tail_replanned": tail_replanned,
             "visible_values": values,
             "changes": changed_steps[:25],
             "truncated": len(changed_steps) > 25,
@@ -16163,7 +17299,70 @@ class MainWindow(QtWidgets.QMainWindow):
             self._automation_active and self._is_current_sweep_mode(self._automation_name)
         )
         self.button_apply_current_sweep_edits.setEnabled(can_update_current_sweep)
+        self._update_current_sweep_runtime_edit_state()
         self._update_length_setup_controls()
+
+    def _current_sweep_runtime_editable_widgets(self) -> tuple[QtWidgets.QWidget, ...]:
+        return (
+            self.spin_current_sweep_target_start,
+            self.spin_current_sweep_target_end,
+            self.spin_current_sweep_target_step,
+            self.spin_current_sweep_target_ramp_rate,
+            self.check_current_sweep_return_target,
+            self.spin_current_sweep_start_mA,
+            self.spin_current_sweep_end_mA,
+            self.spin_current_sweep_step_mA,
+            self.check_current_sweep_hold_on_error,
+            self.spin_current_sweep_hold_pause_factor,
+            self.spin_current_sweep_hold_resume_factor,
+            self.spin_current_sweep_hold_resume_stable_s,
+        )
+
+    def _current_sweep_runtime_locked_widgets(self) -> tuple[QtWidgets.QWidget, ...]:
+        return (
+            self.combo_current_sweep_basis,
+            self.check_current_sweep_first_overheating,
+            self.spin_current_sweep_first_overheating_target_mpa,
+            self.spin_current_sweep_target_speed_mm_s,
+            self.spin_current_sweep_max_correction_strain_pct,
+            self.spin_current_sweep_correction_rate_pct_s,
+            self.spin_current_sweep_max_correction_stress_mpa,
+            self.spin_current_sweep_hold_correction_stress_mpa,
+            self.spin_current_sweep_mid_correction_stress_mpa,
+            self.spin_current_sweep_near_correction_stress_mpa,
+            self.spin_current_sweep_hold_filter_window_s,
+            self.spin_current_sweep_hold_noise_sigma,
+            self.spin_current_sweep_hold_min_pause_stress_mpa,
+            self.spin_current_sweep_hold_min_resume_stress_mpa,
+            self.spin_current_sweep_tolerance,
+            self.spin_current_sweep_nudge_mm,
+            self.spin_current_sweep_balance_speed_mm_s,
+            self.spin_current_sweep_max_seek_mm,
+            self.spin_current_sweep_interval,
+            self.spin_current_sweep_log_interval,
+        )
+
+    def _set_current_sweep_runtime_locked(self, widget: QtWidgets.QWidget, locked: bool) -> None:
+        widget.setProperty("_mini_dma_runtime_locked", bool(locked))
+        if isinstance(widget, QtWidgets.QAbstractSpinBox):
+            widget.setReadOnly(bool(locked))
+            widget.setStyleSheet(RUNTIME_LOCKED_SPINBOX_STYLE if locked else "")
+            line_edit = widget.lineEdit()
+            line_edit.setReadOnly(bool(locked))
+            line_edit.setProperty("_mini_dma_runtime_locked", bool(locked))
+            line_edit.setStyleSheet("color: palette(text);" if locked else "")
+        elif isinstance(widget, (QtWidgets.QComboBox, QtWidgets.QAbstractButton)):
+            widget.setEnabled(not locked)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _update_current_sweep_runtime_edit_state(self) -> None:
+        runtime_active = self._automation_active and self._is_current_sweep_mode(self._automation_name)
+        editable_widgets = set(self._current_sweep_runtime_editable_widgets())
+        for widget in editable_widgets:
+            self._set_current_sweep_runtime_locked(widget, False)
+        for widget in self._current_sweep_runtime_locked_widgets():
+            self._set_current_sweep_runtime_locked(widget, runtime_active)
 
     def _update_length_setup_controls(self) -> None:
         if self._button_length_setup_pause is not None:
@@ -18910,6 +20109,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Length reference already captured; returning load to 0 g to compute l0.")
         return True
 
+    def _commit_length_setup_zero_load_reference(self, zero_position_mm: float) -> None:
+        if self._run_zero_load_scale_g is not None:
+            return
+        if self._setup_zero_fallback_raw_g is not None:
+            self._set_run_zero_load_scale_reference(
+                float(self._setup_zero_fallback_raw_g),
+                reason="length setup accepted zero-load plateau",
+            )
+            return
+        if self._latest_scale_value_g is None:
+            return
+        if abs(float(self._current_position_mm) - float(zero_position_mm)) > self._motor_step_mm() * 2.0:
+            self._log(
+                "Length setup kept the configured zero-load reference because the motor is not at "
+                "the accepted zero-load position."
+            )
+            return
+        self._set_run_zero_load_scale_reference(
+            float(self._latest_scale_value_g),
+            reason="length setup accepted current zero-load reading",
+        )
+
     def _handle_apply_length_setup_step(self) -> bool:
         if not self._is_ui_thread():
             return bool(self._call_on_ui_thread_sync(self._handle_apply_length_setup_step))
@@ -18929,6 +20150,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     zero_position_mm = float(self._current_position_mm)
                     self._setup_zero_position_mm = zero_position_mm
+            self._commit_length_setup_zero_load_reference(zero_position_mm)
             l0_mm = self._apply_preload_length_result(
                 measured_length_mm=self._setup_measured_length_mm,
                 preload_position_mm=self._setup_preload_position_mm,
@@ -19817,6 +21039,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("sample_name", self.edit_sample_name.text())
         self.settings.setValue("run_notes", self.edit_run_notes.toPlainText())
         self.settings.setValue("builder_project_path", self.edit_project_path.text())
+        self.settings.setValue("fabrication_folder_path", self.edit_fabrication_folder.text())
         log_dir_to_save = self.edit_log_dir.text()
         if self._provided_log_dir and log_dir_to_save == self._provided_log_dir:
             log_dir_to_save = self._restored_log_dir or log_dir_to_save
@@ -20206,6 +21429,13 @@ class MainWindow(QtWidgets.QMainWindow):
         builder_project_path = self.settings.value("builder_project_path", "", type=str)
         self.edit_project_path.setText(builder_project_path)
         self._builder_project_path = Path(builder_project_path) if builder_project_path else None
+        fabrication_folder_path = self.settings.value("fabrication_folder_path", "", type=str)
+        self.edit_fabrication_folder.setText(fabrication_folder_path)
+        if fabrication_folder_path:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda path=fabrication_folder_path: self._start_fabrication_folder_load(Path(path)),
+            )
         restored_log_dir = self.settings.value("log_dir", self.edit_log_dir.text(), type=str)
         self._restored_log_dir = restored_log_dir
         if self._provided_log_dir:
@@ -20679,6 +21909,7 @@ class MainWindow(QtWidgets.QMainWindow):
             stop_detail="Application window closed while automation was active.",
         )
         self._stop_tic_dispatcher()
+        self._cancel_fabrication_folder_load()
         self._disconnect_scale()
         self._stop_session(reason="app_closed", detail="Application window closed while session was active.")
         self._release_experiment_sleep_guard()

@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pandas as pd
 
 pytest.importorskip(
     "PyQt6.QtWidgets",
@@ -908,6 +909,29 @@ def test_apply_length_setup_uses_committed_slack_onset_baseline(tmp_path: Path, 
 
         assert window._position_reference_mm == pytest.approx(7.1125)
         assert window.spin_initial_length.value() == pytest.approx(61.678)
+    finally:
+        _close_test_window(window)
+
+
+def test_apply_length_setup_commits_current_zero_load_reference(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window._setup_measured_length_mm = 51.28
+    window._setup_preload_position_mm = -0.375
+    window._setup_zero_position_mm = -0.18125
+    window._current_position_mm = -0.18125
+    window._effective_position_mm = -0.18125
+    window._latest_scale_value_g = 21.075
+    window._latest_scale_timestamp = time.time()
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+
+    try:
+        assert window._handle_apply_length_setup_step() is True
+
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.075)
+        assert window._run_zero_load_scale_g == pytest.approx(21.075)
+        assert window._effective_load_from_raw_g(21.075) == pytest.approx(0.0)
     finally:
         _close_test_window(window)
 
@@ -3984,6 +4008,310 @@ def test_saved_sample_fields_and_builder_project_autoimport_diameter(tmp_path: P
         assert "border" not in window.spin_diameter.styleSheet()
     finally:
         _close_test_window(window)
+
+
+def test_fabrication_suggestions_fill_diameter_when_project_has_no_diameter(tmp_path: Path, qtbot) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            "Ni50Fe27Ga23": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=12,
+                    piece=2,
+                    label="12/2",
+                    diameter_mm=0.011,
+                ),
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=12,
+                    piece=3,
+                    label="12/3",
+                    diameter_mm=0.0125,
+                ),
+            ]
+        }
+        window._refresh_fabrication_completers()
+
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        window._sync_auto_name_fields()
+
+        assert window.spin_diameter.value() == pytest.approx(0.0125)
+        assert "no project diameter" in window.label_project_status.text()
+        assert "fabrication diameter 12.5 um" in window.label_fabrication_status.text()
+        assert "border" not in window.spin_diameter.styleSheet()
+        completer_model = window.edit_name_wire.completer().model()
+        suggestions = [
+            completer_model.data(completer_model.index(row, 0))
+            for row in range(completer_model.rowCount())
+        ]
+        assert suggestions == ["12/2", "12/3"]
+    finally:
+        _close_test_window(window)
+
+
+def test_loading_fabrication_folder_indexes_workbooks_without_blocking_ui(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    folder = tmp_path / "fabrication"
+    composition_folder = folder / "Ni50Fe27Ga23"
+    composition_folder.mkdir(parents=True)
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_fabrication_folder.setText(str(folder))
+        started_s = time.monotonic()
+        window._load_fabrication_folder_from_ui()
+        elapsed_s = time.monotonic() - started_s
+
+        assert elapsed_s < 0.05
+        assert window._fabrication_load_active()
+        assert window.button_load_fabrication.text() == "Cancel loading"
+        qtbot.waitUntil(lambda: not window._fabrication_load_active(), timeout=3000)
+        assert "Ni50Fe27Ga23" in window._fabrication_records_by_composition
+        assert "composition suggestion" in window.label_fabrication_status.text()
+    finally:
+        window._cancel_fabrication_folder_load()
+        _close_test_window(window)
+
+
+def test_fabrication_worker_indexes_real_builder_workbooks(qtbot) -> None:
+    root = Path("sample_data/database_builder/microwire data/Ni50Fe27Ga23")
+    if not root.exists():
+        pytest.skip("sample fabrication data is unavailable")
+    worker = mini_dma_mod.FabricationSuggestionWorker(root, composition="Ni50Fe27Ga23")
+    result: dict[str, object] = {}
+
+    worker.succeeded.connect(
+        lambda root_obj, records_obj, file_count, composition_obj: result.update(
+            root=root_obj,
+            records=records_obj,
+            file_count=file_count,
+            composition=composition_obj,
+        )
+    )
+    worker.failed.connect(lambda root_obj, message: result.update(error=message))
+    worker.cancelled.connect(lambda root_obj: result.update(cancelled=True))
+    worker.run()
+
+    assert "error" not in result
+    assert "cancelled" not in result
+    assert result["root"] == root
+    assert result["composition"] == "Ni50Fe27Ga23"
+    assert int(result["file_count"]) > 0
+    records = result["records"]
+    assert isinstance(records, dict)
+    assert "Ni50Fe27Ga23" in records
+    assert any(record.diameter_mm is not None for record in records["Ni50Fe27Ga23"])
+
+
+def test_project_diameter_is_preferred_over_fabrication_suggestion(tmp_path: Path, qtbot) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "d (um)": 19.1,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            "Ni50Fe27Ga23": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=12,
+                    piece=3,
+                    label="12/3",
+                    diameter_mm=0.011,
+                )
+            ]
+        }
+        window._refresh_fabrication_completers()
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+
+        window._sync_auto_name_fields()
+
+        assert window.spin_diameter.value() == pytest.approx(0.0191)
+        assert "Imported" in window.label_project_status.text()
+        assert "diameter 19.1 um" in window.label_project_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_wire_diameter_displays_micrometers_while_storing_mm(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_diameter.setValue(0.0149)
+
+        assert window.spin_diameter.value() == pytest.approx(0.0149)
+        assert window.spin_diameter.suffix().strip() == "um"
+        assert "14.9" in window.spin_diameter.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_project_row_uses_show_annealing_instead_of_manual_import_button(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        button_labels = {button.text() for button in window.findChildren(QtWidgets.QPushButton)}
+
+        assert "Show annealing" in button_labels
+        assert "Import sample info" not in button_labels
+    finally:
+        _close_test_window(window)
+
+
+def test_project_annealing_preview_loads_sources_for_current_sample(tmp_path: Path, qtbot) -> None:
+    annealing_path = tmp_path / "Ni50Fe27Ga23 12_3 1000mA.txt"
+    annealing_path.write_text(
+        "\n".join(
+            [
+                "0.001\t0.18\t180",
+                "0.002\t0.39\t195",
+                "0.003\t0.63\t210",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "annealing": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "_sources": [str(annealing_path)],
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        payload = window._read_builder_project_payload(project_path)
+        candidates = window._extract_project_annealing_candidates(payload)
+        candidate_index = window._choose_project_annealing_candidate(candidates)
+
+        assert candidate_index == 0
+        series, missing_sources, failed_sources = window._load_annealing_preview_series(
+            project_path=project_path,
+            sources=candidates[candidate_index]["sources"],
+        )
+
+        assert missing_sources == []
+        assert failed_sources == []
+        assert len(series) == 1
+        assert series[0]["setpoint_mA"] == pytest.approx(1000.0)
+        assert list(series[0]["currents"]) == pytest.approx([1.0, 2.0, 3.0])
+        assert list(series[0]["resistances"]) == pytest.approx([180.0, 195.0, 210.0])
+    finally:
+        _close_test_window(window)
+
+
+def test_annealing_preview_dialog_stacks_each_graph_in_scroll_area(qtbot) -> None:
+    if mini_dma_mod.FigureCanvas is None:
+        pytest.skip("Matplotlib Qt backend is unavailable")
+
+    dialog = mini_dma_mod.AnnealingPreviewDialog(
+        None,
+        "Ni50Fe27Ga23 12/3",
+        [
+            {
+                "label": "100 mA",
+                "frame": pd.DataFrame(
+                    {
+                        "I_mA": [1.0, 2.0, 3.0, 2.0, 1.0],
+                        "R_Ohm": [180.0, 190.0, 205.0, 198.0, 185.0],
+                    }
+                ),
+            },
+            {
+                "label": "1000 mA",
+                "frame": pd.DataFrame(
+                    {
+                        "I_mA": [1.0, 2.0, 3.0, 2.0, 1.0],
+                        "R_Ohm": [210.0, 225.0, 260.0, 245.0, 220.0],
+                    }
+                ),
+            },
+        ],
+    )
+    qtbot.addWidget(dialog)
+
+    try:
+        assert dialog.findChild(QtWidgets.QScrollArea) is not None
+        qtbot.waitUntil(
+            lambda: len(dialog.findChildren(mini_dma_mod.FigureCanvas)) == 2,
+            timeout=5000,
+        )
+        assert len(dialog.findChildren(mini_dma_mod.FigureCanvas)) == 2
+        first_canvas = dialog.findChildren(mini_dma_mod.FigureCanvas)[0]
+        first_axes = first_canvas.figure.axes[0]
+        assert first_axes.get_xlabel() == "Current [mA]"
+        assert first_axes.get_ylabel() == "Resistance [\u03a9]"
+        assert [text.get_text() for text in first_axes.get_legend().get_texts()] == [
+            "Increasing 1",
+            "Decreasing 1",
+        ]
+        dialog.resize(700, 520)
+        dialog.show()
+        qtbot.wait(50)
+        scroll_bar = dialog.findChild(QtWidgets.QScrollArea).verticalScrollBar()
+        assert scroll_bar.maximum() > 0
+        scroll_bar.setValue(0)
+        assert dialog._scroll_preview_by_wheel_delta(-120)
+        assert scroll_bar.value() > 0
+    finally:
+        dialog.close()
 
 
 def test_wire_diameter_is_marked_until_imported_but_manual_edits_still_work(tmp_path: Path, qtbot) -> None:
@@ -10610,6 +10938,144 @@ def test_current_sweep_runtime_update_changes_only_future_steps_and_logs_trace(
         metadata = json.loads((tmp_path / "runtime_recipe_update" / "metadata.json").read_text(encoding="utf-8"))
         overrides = metadata["controlled_current_sweep"]["runtime_overrides"]
         assert overrides[0]["changed_step_count"] == 4
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_current_sweep_runtime_update_replans_future_stress_targets(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_target_replan")
+
+    active_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=50.0,
+        current_ramp_rate_mA_s=1.0,
+        note="1",
+    )
+    old_future = [
+        mini_dma_mod.AutomationStep(
+            "set_current",
+            target_value=100.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_mA=1.0,
+            note="2",
+        ),
+        mini_dma_mod.AutomationStep(
+            "ramp_target",
+            target_value=100.0,
+            target_start_value=50.0,
+            target_end_value=100.0,
+            target_ramp_rate_value_s=5.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            note="2",
+        ),
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=100.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=1.0,
+            current_end_mA=50.0,
+            current_ramp_rate_mA_s=1.0,
+            note="2",
+        ),
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=100.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=50.0,
+            current_end_mA=1.0,
+            current_ramp_rate_mA_s=1.0,
+            note="2",
+        ),
+    ]
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [active_sweep, *old_future]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._automation_interval_ms = 250
+        window._recipe_estimated_points, window._automation_total_steps = window._estimate_recipe_points_and_ticks(
+            window._automation_steps,
+            window._automation_interval_ms,
+        )
+
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(150.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_target_ramp_rate.setValue(4.0)
+        window.check_current_sweep_return_target.setChecked(False)
+        window.spin_current_sweep_start_mA.setValue(2.0)
+        window.spin_current_sweep_end_mA.setValue(80.0)
+        window.spin_current_sweep_step_mA.setValue(0.5)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window._automation_steps[0] is active_sweep
+        future_targets = [
+            step.target_value
+            for step in window._automation_steps[1:]
+            if step.action == "sweep_current" and step.current_start_mA < step.current_end_mA
+        ]
+        assert future_targets == [pytest.approx(100.0), pytest.approx(150.0)]
+        future_ramps = [step for step in window._automation_steps[1:] if step.action == "ramp_target"]
+        assert [(step.target_start_value, step.target_end_value) for step in future_ramps] == [
+            (pytest.approx(50.0), pytest.approx(100.0)),
+            (pytest.approx(100.0), pytest.approx(150.0)),
+        ]
+        assert all(step.target_ramp_rate_value_s == pytest.approx(4.0) for step in future_ramps)
+        assert all(
+            step.current_ramp_rate_mA_s == pytest.approx(0.5)
+            for step in window._automation_steps[1:]
+            if step.action == "sweep_current"
+        )
+
+        window._stop_session()
+        metadata = json.loads((tmp_path / "runtime_target_replan" / "metadata.json").read_text(encoding="utf-8"))
+        override = metadata["controlled_current_sweep"]["runtime_overrides"][0]
+        assert override["tail_replanned"] is True
+        assert override["visible_values"]["target_end"] == pytest.approx(150.0)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_current_sweep_runtime_editability_marks_locked_controls(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._update_recipe_buttons()
+
+        assert window.spin_current_sweep_target_start.isReadOnly() is False
+        assert window.spin_current_sweep_target_end.isReadOnly() is False
+        assert window.spin_current_sweep_step_mA.isReadOnly() is False
+        assert window.spin_current_sweep_target_speed_mm_s.isReadOnly() is True
+        assert window.spin_current_sweep_first_overheating_target_mpa.isReadOnly() is True
+        assert window.combo_current_sweep_basis.isEnabled() is False
+        assert window.spin_current_sweep_target_speed_mm_s.property("_mini_dma_runtime_locked") is True
+
+        window._automation_active = False
+        window._update_recipe_buttons()
+
+        assert window.spin_current_sweep_target_speed_mm_s.isReadOnly() is False
+        assert window.spin_current_sweep_first_overheating_target_mpa.isReadOnly() is False
+        assert window.combo_current_sweep_basis.isEnabled() is True
+        assert window.spin_current_sweep_target_speed_mm_s.property("_mini_dma_runtime_locked") is False
     finally:
         window._automation_active = False
         _close_test_window(window)
