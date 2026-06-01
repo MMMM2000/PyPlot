@@ -11,7 +11,7 @@ from data_logging.shared_power_supply.broker import (
 )
 from data_logging.shared_power_supply.driver import HmpSerialDriver
 from data_logging.shared_power_supply.profiles import HMP4030_PROFILE, HMP4040_PROFILE, detect_hmp_profile
-from data_logging.shared_power_supply.protocol import start_broker_server
+from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
 
 
 class FakeHmpSerial:
@@ -193,3 +193,35 @@ def test_broker_json_protocol_snapshot_round_trip() -> None:
 
     assert '"ok": true' in raw
     assert '"channel_count": 4' in raw
+
+
+def test_broker_json_client_uses_configurable_request_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    class _Socket:
+        def __enter__(self) -> "_Socket":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def sendall(self, data: bytes) -> None:
+            seen["request"] = data
+
+        def recv(self, _size: int) -> bytes:
+            if seen.get("responded"):
+                return b""
+            seen["responded"] = True
+            return b'{"ok": true, "snapshot": {}}\n'
+
+    def _create_connection(address: tuple[str, int], timeout: float) -> _Socket:
+        seen["address"] = address
+        seen["timeout"] = timeout
+        return _Socket()
+
+    monkeypatch.setattr("data_logging.shared_power_supply.protocol.socket.create_connection", _create_connection)
+
+    client = BrokerJsonClient(host="127.0.0.1", port=8765, timeout_s=9.5)
+    assert client.snapshot() == {}
+    assert seen["address"] == ("127.0.0.1", 8765)
+    assert seen["timeout"] == pytest.approx(9.5)

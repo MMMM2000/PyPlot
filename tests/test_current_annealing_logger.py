@@ -117,6 +117,27 @@ def test_shared_broker_measurement_updates_live_values_without_raw_serial(qtbot)
     assert fake.calls == [("measure_channel", {"channel": 1})]
 
 
+def test_shared_broker_measurement_retries_transient_missing_readback(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeBrokerClient()
+    fake.readbacks = [
+        {"voltage_V": None, "current_mA": 0.0},
+        {"voltage_V": 2.0, "current_mA": 8.0},
+    ]
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+
+    assert window._read_shared_broker_sample() is True
+
+    assert window.current_voltage == pytest.approx(2.0)
+    assert window.current_current_read == pytest.approx(0.008)
+    measure_calls = [call for call in fake.calls if call[0] == "measure_channel"]
+    assert len(measure_calls) == 2
+
+
 def test_shared_broker_setpoint_and_stop_only_affect_leased_channel(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
