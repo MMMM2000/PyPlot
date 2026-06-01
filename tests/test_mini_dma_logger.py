@@ -75,6 +75,20 @@ def _restore_settings(snapshot: dict[str, object]) -> None:
     settings.sync()
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (800.0, "800 A/mm<sup>2</sup>"),
+        (750.0, "750 A/mm<sup>2</sup>"),
+        (80.0, "80 A/mm<sup>2</sup>"),
+        (75.0, "75 A/mm<sup>2</sup>"),
+        (8.0, "8 A/mm<sup>2</sup>"),
+    ],
+)
+def test_compact_unit_format_preserves_integer_zeros(value: float, expected: str) -> None:
+    assert mini_dma_mod._format_compact_unit(value, "A/mm<sup>2</sup>", decimals=0) == expected
+
+
 def test_automation_control_loop_ticks_without_qt_event_processing() -> None:
     ticks: list[float] = []
     loop = mini_dma_mod.AutomationControlLoop(lambda: ticks.append(time.monotonic()))
@@ -4190,6 +4204,7 @@ def test_sample_wire_change_from_project_to_fabrication_fallback_is_safe(
                                 "Composition": "Ni50Fe27Ga23",
                                 "Microwire": "10/1",
                                 "d (um)": 12.4,
+                                "Imax (mA)": 800.0,
                             }
                         ]
                     }
@@ -4219,6 +4234,7 @@ def test_sample_wire_change_from_project_to_fabrication_fallback_is_safe(
         qtbot.wait(20)
 
         assert window.spin_diameter.value() == pytest.approx(0.0124)
+        assert window.spin_current_sweep_end_mA.value() == pytest.approx(800.0)
         assert "Imported" in window.label_project_status.text()
 
         window.edit_name_wire.setText("10/4")
@@ -4271,6 +4287,67 @@ def test_sample_name_auto_import_failure_is_reported_without_crashing(
 
         assert window.edit_sample_name.text() == "Ni50Fe27Ga23 10/4"
         assert "Failed to apply saved project sample match" in window.label_project_status.text()
+        assert window._sync_name_fields_in_progress is False
+    finally:
+        _close_test_window(window)
+
+
+def test_microwire_field_ui_typing_reports_bad_fabrication_data_without_crashing(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            "Ni50Fe27Ga23": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=10,
+                    piece=4,
+                    label="10/4",
+                    diameter_mm="not-a-number",  # type: ignore[arg-type]
+                )
+            ]
+        }
+        window._refresh_fabrication_completers()
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setFocus()
+
+        assert window.edit_name_wire.completer() is not None
+        qtbot.keyClicks(window.edit_name_wire, "10/4")
+        qtbot.wait(20)
+
+        assert window.edit_sample_name.text() == "Ni50Fe27Ga23 10/4"
+        assert "Fabrication diameter import failed" in window.label_fabrication_status.text()
+        assert "border" in window.spin_diameter.styleSheet()
+    finally:
+        _close_test_window(window)
+
+
+def test_microwire_field_ui_typing_reports_project_match_errors_without_crashing(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(json.dumps({"sections": {"microscope": {"rows": []}}}), encoding="utf-8")
+    window = _build_window(tmp_path, qtbot)
+
+    def fail_match(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("simulated project match failure")
+
+    try:
+        monkeypatch.setattr(window, "_find_project_sample", fail_match)
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setFocus()
+
+        qtbot.keyClicks(window.edit_name_wire, "10/4")
+        qtbot.wait(20)
+
+        assert window.edit_sample_name.text() == "Ni50Fe27Ga23 10/4"
+        assert "simulated project match failure" in window.label_project_status.text()
         assert window._sync_name_fields_in_progress is False
     finally:
         _close_test_window(window)
@@ -4495,6 +4572,34 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
 
         assert window.label_current_target_start_equiv.text().endswith("MPa")
         assert float(window.label_current_target_start_equiv.text().split()[0]) == pytest.approx(10.0, rel=2e-4)
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    ("density", "expected"),
+    [
+        (800.0, "800 A/mm<sup>2</sup>"),
+        (750.0, "750 A/mm<sup>2</sup>"),
+        (80.0, "80 A/mm<sup>2</sup>"),
+        (75.0, "75 A/mm<sup>2</sup>"),
+        (8.0, "8 A/mm<sup>2</sup>"),
+    ],
+)
+def test_current_density_equivalent_preserves_significant_zeros(
+    tmp_path: Path,
+    qtbot,
+    density: float,
+    expected: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_diameter.setValue(0.03)
+        area_mm2 = math.pi * (window.spin_diameter.value() / 2.0) ** 2
+        current_mA = density * area_mm2 * 1000.0
+
+        assert window._current_density_text(current_mA) == expected
     finally:
         _close_test_window(window)
 

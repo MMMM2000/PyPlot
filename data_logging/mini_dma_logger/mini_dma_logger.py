@@ -500,6 +500,9 @@ PROJECT_ROW_CURRENT_KEYS = (
     "Stress/strain current (mA)",
     "Current (mA)",
     "Fracture stress/strain current (mA)",
+    "Imax (mA)",
+    "I max (mA)",
+    "Imax",
 )
 PROJECT_ROW_MICROWIRE_KEYS = ("Microwire", "Wire")
 PROJECT_ROW_SPECIMEN_KEYS = ("Specimen", "Sample", "Piece", "Sample name")
@@ -652,7 +655,9 @@ def _format_duration(seconds: float) -> str:
 
 
 def _format_compact_number(value: float, *, decimals: int = 4) -> str:
-    text = f"{float(value):.{decimals}f}".rstrip("0").rstrip(".")
+    text = f"{float(value):.{decimals}f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
     return "0" if text in {"", "-0"} else text
 
 
@@ -8238,15 +8243,27 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_fabrication_sample_if_possible(self) -> bool:
         if self._diameter_imported:
             return False
-        record = self._matching_fabrication_record()
+        try:
+            record = self._matching_fabrication_record()
+        except Exception as exc:
+            self.label_fabrication_status.setText(f"Fabrication sample lookup failed: {exc}")
+            return False
         if record is None or record.diameter_mm is None:
             return False
-        self.spin_diameter.setValue(record.diameter_mm)
-        self._mark_diameter_imported(True)
-        self.label_fabrication_status.setText(
-            f"Using fabrication diameter {_format_compact_unit(record.diameter_mm * 1000.0, 'um', decimals=3)} "
-            f"for {record.composition} {record.label}."
-        )
+        try:
+            diameter_mm = float(record.diameter_mm)
+            if not math.isfinite(diameter_mm) or diameter_mm <= 0.0:
+                raise ValueError(f"invalid diameter {record.diameter_mm!r}")
+            self.spin_diameter.setValue(diameter_mm)
+            self._mark_diameter_imported(True)
+            self.label_fabrication_status.setText(
+                f"Using fabrication diameter {_format_compact_unit(diameter_mm * 1000.0, 'um', decimals=3)} "
+                f"for {record.composition} {record.label}."
+            )
+        except Exception as exc:
+            self._mark_diameter_imported(False)
+            self.label_fabrication_status.setText(f"Fabrication diameter import failed: {exc}")
+            return False
         return True
 
     def _refresh_diameter_import_state(self) -> None:
@@ -8703,7 +8720,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._mark_diameter_imported(False)
             self.label_project_status.setText(f"Failed to read saved project file: {exc}")
             return False
-        match = self._find_project_sample(payload, path, require_current_sample_match=True)
+        try:
+            match = self._find_project_sample(payload, path, require_current_sample_match=True)
+        except Exception as exc:
+            self._mark_diameter_imported(False)
+            self.label_project_status.setText(f"Failed to match current sample in project file: {exc}")
+            return False
         if match is None:
             self._mark_diameter_imported(False)
             self.label_project_status.setText(
