@@ -13,12 +13,13 @@
 - A worker branch is ready for integration only after it reports:
   - branch and commit,
   - clean git status,
+  - behavioral guarantees it now claims to preserve,
   - focused tests/checks and results,
   - visual screenshots for visible UI or graph changes,
   - changelog/docs status,
   - known risks or unverified behavior.
 - Merge ready branches into an integration branch one at a time.
-- After each merge, run relevant combined checks. If a merge exposes integration failures, fix only small integration glue here or delegate the fix back out.
+- After each merge, run relevant combined checks, including recently accepted behavioral guarantees that touch overlapping areas. If a merge exposes integration failures, fix only small integration glue here or delegate the fix back out.
 - Keep integration branches named clearly, for example `codex/integration-mini-dma-ready-review`.
 - Create and merge final PRs from the master thread by default. Use a separate PR-finalization worker only if PR cleanup becomes substantial.
 - Check active worker status opportunistically when the user prompts the master thread.
@@ -31,6 +32,14 @@
 - For UI or graph work, verify with screenshots or generated-output evidence from the worker branch.
 - Report completion with branch, commit, tests/checks, screenshot paths when relevant, and integration notes.
 - If blocked, report the blocker, current branch, git status, and what was already verified.
+
+## Integration Regression Ledger
+- Treat accepted worker behavior as part of the integration contract, not just the code diff.
+- When a worker branch is accepted, record the user-visible behaviors it proved and the evidence that verified them, such as tests, screenshots, logs, or synthetic data.
+- Examples of useful guarantees: "setup graph is not cropped", "Task label stays stable during stress ramp", "Microwire 10/1 -> 10/4 does not crash", and "equivalent unit labels preserve significant zeros".
+- New worker branches should start from the latest integration branch whenever possible. If they start elsewhere, explicitly compare overlapping files and preserve accepted guarantees during forward-porting.
+- Before bringing worker changes into the master/integration branch, check whether touched files overlap with recent guarantees and plan verification for those guarantees.
+- After integration, rerun the relevant guarantee checks from recently accepted branches, especially for Mini DMA UI, graph layout, task summaries, and hardware-control state.
 
 ## Autonomous Operability
 - Build tools and workflows so Codex can operate them safely and repeatably without manual UI intervention.
