@@ -288,6 +288,20 @@ def _metadata_path(window: Any) -> str | None:
     return None if path is None else str(path)
 
 
+def _window_log_tail(window: Any, *, max_chars: int = 4000) -> str:
+    log_widget = getattr(window, "log_output", None)
+    text_method = getattr(log_widget, "toPlainText", None)
+    if not callable(text_method):
+        return ""
+    try:
+        text = str(text_method())
+    except Exception:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
 def _run_dir_from_metadata_path(metadata_path: str | None) -> Path | None:
     if metadata_path is None:
         return None
@@ -416,6 +430,7 @@ def _execute_run(
             "status": "completed" if _metadata_path(window) is not None else "not_started",
             "elapsed_s": max(0.0, time.monotonic() - start_s),
             "metadata_path": _metadata_path(window),
+            "startup_log_tail": _window_log_tail(window),
         }
 
     status = "completed"
