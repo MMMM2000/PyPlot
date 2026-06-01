@@ -93,6 +93,7 @@ CONTROL_LOGIC_FEATURES = [
     "fault_stop_metadata_preserved_on_app_close",
     "control_trace_row_local_task_text",
     "single_prompt_length_setup",
+    "length_setup_commits_run_zero_load_reference",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -18727,6 +18728,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Length reference already captured; returning load to 0 g to compute l0.")
         return True
 
+    def _commit_length_setup_zero_load_reference(self, zero_position_mm: float) -> None:
+        if self._run_zero_load_scale_g is not None:
+            return
+        if self._setup_zero_fallback_raw_g is not None:
+            self._set_run_zero_load_scale_reference(
+                float(self._setup_zero_fallback_raw_g),
+                reason="length setup accepted zero-load plateau",
+            )
+            return
+        if self._latest_scale_value_g is None:
+            return
+        if abs(float(self._current_position_mm) - float(zero_position_mm)) > self._motor_step_mm() * 2.0:
+            self._log(
+                "Length setup kept the configured zero-load reference because the motor is not at "
+                "the accepted zero-load position."
+            )
+            return
+        self._set_run_zero_load_scale_reference(
+            float(self._latest_scale_value_g),
+            reason="length setup accepted current zero-load reading",
+        )
+
     def _handle_apply_length_setup_step(self) -> bool:
         if not self._is_ui_thread():
             return bool(self._call_on_ui_thread_sync(self._handle_apply_length_setup_step))
@@ -18746,6 +18769,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     zero_position_mm = float(self._current_position_mm)
                     self._setup_zero_position_mm = zero_position_mm
+            self._commit_length_setup_zero_load_reference(zero_position_mm)
             l0_mm = self._apply_preload_length_result(
                 measured_length_mm=self._setup_measured_length_mm,
                 preload_position_mm=self._setup_preload_position_mm,

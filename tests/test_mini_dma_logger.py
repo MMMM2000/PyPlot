@@ -912,6 +912,29 @@ def test_apply_length_setup_uses_committed_slack_onset_baseline(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_apply_length_setup_commits_current_zero_load_reference(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window._setup_measured_length_mm = 51.28
+    window._setup_preload_position_mm = -0.375
+    window._setup_zero_position_mm = -0.18125
+    window._current_position_mm = -0.18125
+    window._effective_position_mm = -0.18125
+    window._latest_scale_value_g = 21.075
+    window._latest_scale_timestamp = time.time()
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+
+    try:
+        assert window._handle_apply_length_setup_step() is True
+
+        assert window._zero_load_scale_reference_g() == pytest.approx(21.075)
+        assert window._run_zero_load_scale_g == pytest.approx(21.075)
+        assert window._effective_load_from_raw_g(21.075) == pytest.approx(0.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_restore_cleans_chained_run_suffix_from_saved_log_name(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     settings = _test_settings()
