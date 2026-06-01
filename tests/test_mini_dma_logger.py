@@ -14686,6 +14686,7 @@ def test_recovery_position_start_restarts_ui_refresh_timer(tmp_path: Path, qtbot
     window._current_position_mm = 1.0
     window._effective_position_mm = 1.0
     window._position_reference_mm = 0.0
+    window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
 
     try:
         window._start_recovery_displacement_zero()
@@ -14716,6 +14717,7 @@ def test_recipe_completion_stops_session_logging(tmp_path: Path, qtbot) -> None:
     window._latest_scale_timestamp = time.time()
     window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
     window._preflight_recipe_hardware = lambda _steps: True  # type: ignore[method-assign]
+    window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
 
     try:
         window._start_session()
