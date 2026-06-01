@@ -7,6 +7,7 @@ import pytest
 from data_logging.shared_power_supply.bench_guard import (
     BenchLockBusy,
     acquire_bench_lock,
+    identify_hmp_with_blank_retry,
     probe_hmp_bench,
     read_lock_info,
 )
@@ -43,6 +44,46 @@ def test_bench_probe_reports_unavailable_when_driver_cannot_connect() -> None:
 
     assert result.available is False
     assert "port busy" in result.message
+
+
+def test_identify_hmp_retries_transient_blank_response() -> None:
+    class FakeDriver:
+        def __init__(self) -> None:
+            self.profile = None
+            self.calls = 0
+
+        def identify(self) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return ""
+            self.profile = object()
+            return "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62"
+
+    driver = FakeDriver()
+
+    idn = identify_hmp_with_blank_retry(driver, sleep_fn=lambda _seconds: None)
+
+    assert idn.startswith("ROHDE&SCHWARZ,HMP4040")
+    assert driver.calls == 2
+
+
+def test_identify_hmp_does_not_hide_unsupported_nonblank_response() -> None:
+    class FakeDriver:
+        def __init__(self) -> None:
+            self.profile = None
+            self.calls = 0
+
+        def identify(self) -> str:
+            self.calls += 1
+            return "OTHER,DEVICE"
+
+    driver = FakeDriver()
+
+    idn = identify_hmp_with_blank_retry(driver, sleep_fn=lambda _seconds: None)
+
+    assert idn == "OTHER,DEVICE"
+    assert driver.profile is None
+    assert driver.calls == 1
 
 
 def test_bench_probe_reads_requested_channels() -> None:
