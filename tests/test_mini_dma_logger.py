@@ -6436,6 +6436,40 @@ def test_current_sweep_always_returns_current_to_start(tmp_path: Path, qtbot) ->
         _close_test_window(window)
 
 
+def test_current_sweep_can_skip_final_target_return(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(100.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.check_current_sweep_return_target.setChecked(False)
+
+        steps, _summary, _interval_ms = window._build_automation_recipe()
+
+        target_ramps = [
+            step
+            for step in steps
+            if step.action == "ramp_target" and step.note != "setup_preload"
+        ]
+        set_current_steps = [step for step in steps if step.action == "set_current"]
+
+        assert [step.target_end_value for step in target_ramps] == [
+            pytest.approx(50.0),
+            pytest.approx(100.0),
+        ]
+        assert [step.target_value for step in set_current_steps] == [
+            pytest.approx(50.0),
+            pytest.approx(100.0),
+        ]
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_ramp_uses_elapsed_time_and_milliamp_resolution(
     tmp_path: Path,
     qtbot,
@@ -8069,6 +8103,84 @@ def test_voltage_limited_unwind_keeps_return_leg_without_high_current_restart(
         log_text = window.log_output.toPlainText()
         assert "keeping the unwind as the return leg" in log_text
         assert "Skipped paired nominal reverse current sweep" in log_text
+    finally:
+        _close_test_window(window)
+
+
+def test_voltage_limit_during_nominal_return_keeps_rate_limited_return(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 60.0
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=1.0,
+            current_end_mA=60.0,
+            current_ramp_rate_mA_s=1.0,
+            note="1",
+        ),
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=60.0,
+            current_end_mA=1.0,
+            current_ramp_rate_mA_s=1.0,
+            note="1",
+        ),
+    ]
+    window._seek_distribution_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._current_sweep_voltage_limit_step_index = 1
+    window._current_sweep_voltage_limit_started_s = 100.0
+    window._current_sweep_voltage_limit_start_mA = 60.0
+    ticks = iter([100.0, 100.4])
+
+    def _fake_monotonic() -> float:
+        try:
+            return next(ticks)
+        except StopIteration:
+            return 100.4
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    return_step = window._automation_steps[1]
+
+    try:
+        assert window._handle_current_sweep_step(return_step, 1) is False
+        assert supply.commands == pytest.approx([60.0, 59.6])
+
+        assert window._handle_current_sweep_step(return_step, 1) is False
+        assert supply.commands == pytest.approx([60.0, 59.6])
+        assert window._current_sweep_voltage_limit_step_index is None
+        assert "continuing the rate-limited return" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -10194,6 +10306,62 @@ def test_session_control_trace_logs_current_task_text(tmp_path: Path, qtbot) -> 
         _close_test_window(window)
 
 
+def test_session_control_trace_accepts_row_local_task_text(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("control_trace_task_override")
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep(
+                "sweep_current",
+                target_value=100.0,
+                basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                current_start_mA=60.0,
+                current_end_mA=1.0,
+                current_ramp_rate_mA_s=1.0,
+                note="1",
+            )
+        ]
+        window._automation_index = 0
+        window._set_automation_context(
+            phase="target_ramp",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=150.0,
+            plateau_index=2,
+        )
+        window._active_current_sweep_display_target_mA = 1.0
+        window._active_current_sweep_display_direction = -1.0
+        window._write_control_trace(
+            decision="correction",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=150.0,
+            current_value=5.0,
+            error_value=145.0,
+            tolerance=1.0,
+            result="move_sent",
+            task_text="Ramp up to 150 MPa",
+        )
+        window._stop_session()
+
+        rows = list(
+            csv.DictReader(
+                (tmp_path / "control_trace_task_override" / "control_trace.csv").open(
+                    encoding="utf-8",
+                    newline="",
+                )
+            )
+        )
+
+        assert len(rows) == 1
+        assert rows[0]["task_text"] == "Ramp up to 150 MPa"
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_setup_raw_scale_samples_are_logged_before_main_measurement_starts(
     tmp_path: Path,
     qtbot,
@@ -11872,6 +12040,87 @@ def test_current_sweep_hold_large_error_keeps_multi_step_correction_when_worseni
         _close_test_window(window)
 
 
+def test_current_sweep_hold_moving_away_keeps_multi_step_correction_when_worsening(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0125)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(82.567)
+    window.spin_backlash_mm.setValue(0.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window.spin_current_sweep_hold_correction_stress_mpa.setValue(40.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        690.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = -12.0
+    window._seek_last_value_by_key[seek_key] = 62.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.3
+    window._seek_last_effective_position_by_key[seek_key] = 0.0
+    window._seek_out_of_band_sign_by_key[seek_key] = -1.0
+    window._seek_out_of_band_since_by_key[seek_key] = time.time() - 2.0
+    window._current_position_mm = 0.0
+    window._effective_position_mm = 0.0
+    window._last_motion_command_time_s = time.time() - 1.0
+    window._last_motion_expected_complete_time_s = time.time() - 0.8
+    now_s = time.time()
+    for index, stress in enumerate([62.0, 64.0, 66.0, 68.0, 70.0]):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s - 1.0 + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+    window._seek_last_filtered_value_by_key[seek_key] = 62.0
+    window._seek_last_scale_timestamp_by_clock[(mini_dma_mod.HSW_BASIS_STRESS_MPA, 1)] = (
+        window._latest_scale_timestamp - 0.1
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert moves, window.log_output.toPlainText()
+        target_mm, effective_mm = moves[-1]
+        commanded_mm = abs(target_mm if effective_mm is None else effective_mm)
+        assert commanded_mm > window._motor_step_mm()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_reversal_uses_correction_step_without_predictive_backlash(
     tmp_path: Path,
     qtbot,
@@ -12436,6 +12685,114 @@ def test_current_sweep_hold_large_error_bypasses_persistent_gate(
     load_g = mini_dma_mod.load_g_from_stress_mpa(35.0, window.spin_diameter.value())
     assert load_g is not None
     for index in range(5):
+        timestamp_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert len(moves) == 1
+        assert "persist" not in window.log_output.toPlainText().lower()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_noisy_large_error_bypasses_persistent_gate(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.time()
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        500.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    for index, stress in enumerate([55.0, 95.0, 55.0, 95.0, 75.0, 75.0, 75.0]):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert len(moves) == 1
+        assert "persist" not in window.log_output.toPlainText().lower()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_moving_away_bypasses_persistent_gate(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    now_s = time.time()
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0125)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        690.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    for index, stress in enumerate([60.0, 64.0, 68.0, 72.0, 76.0]):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
+        assert load_g is not None
         timestamp_s = now_s + index * 0.25
         window._scale_signal_buffer.add_sample(
             timestamp_s=timestamp_s,
@@ -13846,6 +14203,59 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         _close_test_window(window)
 
 
+def test_current_sweep_recipe_round_trips_disabled_return_target(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    recipe_path = tmp_path / "current_sweep_no_return.recipe.json"
+    index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert index >= 0
+
+    try:
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window.check_current_sweep_return_target.setChecked(False)
+
+        window._save_recipe_to_path(recipe_path)
+        payload = json.loads(recipe_path.read_text(encoding="utf-8"))
+        assert payload["recipe"]["current_sweep"]["return_target"] is False
+
+        window.check_current_sweep_return_target.setChecked(True)
+        window._load_recipe_from_path(recipe_path)
+
+        assert window.check_current_sweep_return_target.isChecked() is False
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_settings_preserve_disabled_return_target(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert index >= 0
+
+    try:
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window.check_current_sweep_return_target.setChecked(False)
+
+        window._save_settings()
+
+        assert window.check_current_sweep_return_target.isChecked() is False
+        assert window.settings.value("current_sweep_return_target", True, type=bool) is False
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_settings_load_disabled_return_target(tmp_path: Path, qtbot) -> None:
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("current_sweep_return_target", False)
+    settings.sync()
+
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
+
+    try:
+        assert window.check_current_sweep_return_target.isChecked() is False
+    finally:
+        _close_test_window(window)
+
+
 def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -14449,6 +14859,28 @@ def test_session_metadata_records_recipe_completed_stop_reason(tmp_path: Path, q
         assert payload["stop"]["reason"] == "recipe_completed"
         assert payload["stop"]["category"] == "normal"
         assert payload["stop"]["detail"] == "Recipe completed."
+    finally:
+        _close_test_window(window)
+
+
+def test_session_metadata_does_not_replace_fault_stop_with_app_closed(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_fault_then_app_closed")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._mark_session_stop_reason(
+            "mechanical_load_loss",
+            detail="Current-sweep mechanical load loss detected.",
+        )
+        window._stop_session(reason="app_closed", detail="Application window closed while session was active.")
+
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "mechanical_load_loss"
+        assert payload["stop"]["detail"] == "Current-sweep mechanical load loss detected."
     finally:
         _close_test_window(window)
 

@@ -56,7 +56,7 @@ SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-28.1"
+CONTROL_LOGIC_VERSION = "2026-05-29.2"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
@@ -74,6 +74,9 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_waits_for_natural_target_return",
     "current_hold_response_requires_directional_motor_response",
     "current_hold_large_error_bypasses_persistence",
+    "current_hold_moving_away_bypasses_persistence",
+    "current_hold_moving_away_preserves_predictive_step",
+    "current_hold_large_error_not_masked_by_noise",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -81,8 +84,11 @@ CONTROL_LOGIC_FEATURES = [
     "voltage_limit_unwind_uses_measured_current_fallback",
     "voltage_limit_defers_to_current_hold",
     "voltage_limit_unwind_keeps_shortened_return_leg",
+    "voltage_limit_preserves_rate_limited_nominal_return",
     "wire_break_recovery_prompt_ui_thread",
     "current_sweep_mechanical_load_loss_guard",
+    "fault_stop_metadata_preserved_on_app_close",
+    "control_trace_row_local_task_text",
     "single_prompt_length_setup",
 ]
 CONTROL_TRACE_FIELDNAMES = [
@@ -5174,7 +5180,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_current_sweep_current_section.setFont(current_section_font)
         current_sweep_form.addRow("", self.label_current_sweep_current_section)
         self.check_current_sweep_return_target = QtWidgets.QCheckBox("Return to start target at the end", automation_box)
-        self.check_current_sweep_return_target.setChecked(True)
+        self.check_current_sweep_return_target.setChecked(
+            bool(self.settings.value("current_sweep_return_target", True, type=bool))
+        )
         self.check_current_sweep_return_target.setVisible(False)
         self.spin_current_sweep_start_mA = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_start_mA.setDecimals(2)
@@ -7254,6 +7262,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                     self._supply_voltage_limit_logged = True
                 return
+            if self._active_current_sweep_step_is_nominal_return():
+                if self._current_sweep_voltage_limit_step_index == self._active_current_sweep_step_index:
+                    self._clear_current_sweep_voltage_limit()
+                if not self._supply_voltage_limit_logged:
+                    self._log(
+                        f"Supply voltage remains near the configured limit ({measured_v:.3f} V / {limit_v:.3f} V) "
+                        "during the reverse current sweep; continuing the configured rate-limited return."
+                    )
+                    self._supply_voltage_limit_logged = True
+                return
             self._mark_current_sweep_voltage_limit(
                 measured_v=measured_v,
                 limit_v=limit_v,
@@ -7413,6 +7431,39 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Supply voltage reached the configured limit ({measured_v:.3f} V / {limit_v:.3f} V); "
             "reversing recipe current back to the sweep start current and continuing."
         )
+
+    def _current_sweep_step_is_nominal_return(self, step: AutomationStep | None) -> bool:
+        if step is None or step.action != "sweep_current":
+            return False
+        if step.current_start_mA is None or step.current_end_mA is None:
+            return False
+        return float(step.current_end_mA) < float(step.current_start_mA)
+
+    def _active_current_sweep_step_is_nominal_return(self) -> bool:
+        step_index = self._active_current_sweep_step_index
+        if step_index is None or step_index < 0 or step_index >= len(self._automation_steps):
+            return False
+        return self._current_sweep_step_is_nominal_return(self._automation_steps[step_index])
+
+    def _ignore_voltage_limit_on_nominal_current_return(self, step: AutomationStep, step_index: int) -> bool:
+        if self._current_sweep_voltage_limit_step_index != step_index:
+            return False
+        if not self._current_sweep_step_is_nominal_return(step):
+            return False
+        self._clear_current_sweep_voltage_limit()
+        self._write_control_trace(
+            decision="voltage_limit_return_continue",
+            basis=step.basis,
+            target_value=step.target_value,
+            result="continued",
+            reason="already_rate_limited_return",
+            task_text=self._current_sweep_step_task_summary(step),
+        )
+        self._log(
+            "Supply voltage limit is still active during the nominal reverse current sweep; "
+            "continuing the rate-limited return instead of skipping the step or changing current abruptly."
+        )
+        return True
 
     def _clear_current_sweep_voltage_limit(self) -> None:
         self._current_sweep_voltage_limit_step_index = None
@@ -10701,8 +10752,15 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if abs(slope) >= min_slope:
                 return False
+        moving_away_from_target = float(error_value) * slope < 0.0
+        if moving_away_from_target and remaining_error > 0.0:
+            min_slope = self._current_sweep_hold_min_slope_for_basis(basis)
+            if abs(slope) >= min_slope:
+                self._seek_out_of_band_since_by_key.pop(seek_key, None)
+                self._seek_out_of_band_sign_by_key.pop(seek_key, None)
+                return True
         large_error_band = max(
-            recovery_band,
+            out_of_band_floor,
             self._current_sweep_hold_entry_band_for_basis(effective_tolerance),
         ) * SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR
         if abs(float(error_value)) > large_error_band:
@@ -12022,7 +12080,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self._seek_no_response_count_by_key[seek_key] = 0
-        if protective_single_step and not self._current_sweep_hold_fast_recovery_needed(basis, delta_value):
+        current_hold_moving_away_fast = (
+            self._automation_phase == "current_hold"
+            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and filtered_signal is not None
+            and float(delta_value) * float(filtered_signal.slope_per_s) < 0.0
+            and abs(float(filtered_signal.slope_per_s)) >= self._current_sweep_hold_min_slope_for_basis(basis)
+        )
+        if (
+            protective_single_step
+            and not self._current_sweep_hold_fast_recovery_needed(basis, delta_value)
+            and not current_hold_moving_away_fast
+        ):
             nudge_mm = min(nudge_mm, self._motor_step_mm())
             self._log(
                 "Closed-loop response worsened after the previous correction; "
@@ -14092,7 +14161,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "correction_hold_max_stress_mpa": self._current_sweep_hold_correction_stress_mpa(),
                 "correction_mid_stress_mpa": self._current_sweep_mid_correction_stress_mpa(),
                 "correction_near_stress_mpa": self._current_sweep_near_correction_stress_mpa(),
-                "return_target": True,
+                "return_target": bool(self.check_current_sweep_return_target.isChecked()),
                 "current_start_mA": float(self.spin_current_sweep_start_mA.value()),
                 "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
                 "current_ramp_rate_mA_s": float(self.spin_current_sweep_step_mA.value()),
@@ -14406,7 +14475,7 @@ class MainWindow(QtWidgets.QMainWindow):
             stop_detail=detail,
         )
         if reason is not None:
-            self._mark_session_stop_reason(reason, detail=detail, force=True)
+            self._mark_session_stop_reason(reason, detail=detail, force=reason != "app_closed")
         elif self._session_stop_reason is None:
             self._mark_session_stop_reason(
                 "manual_session_stop",
@@ -14502,6 +14571,7 @@ class MainWindow(QtWidgets.QMainWindow):
         effective_target_mm: float | None = None,
         result: str = "",
         reason: str = "",
+        task_text: str | None = None,
     ) -> None:
         if (
             not self._session_active
@@ -14527,7 +14597,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "elapsed_s": f"{elapsed_s:.6f}",
                 "timestamp_utc": _utc_timestamp(),
                 "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
-                "task_text": self._current_task_summary(),
+                "task_text": self._current_task_summary() if task_text is None else task_text,
                 "automation_phase": self._automation_phase,
                 "automation_basis": "" if basis is None else basis,
                 "automation_target_value": _number(target_value),
@@ -15335,7 +15405,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "hold_correction_stress_mpa": float(self.spin_current_sweep_hold_correction_stress_mpa.value()),
                 "mid_correction_stress_mpa": float(self.spin_current_sweep_mid_correction_stress_mpa.value()),
                 "near_correction_stress_mpa": float(self.spin_current_sweep_near_correction_stress_mpa.value()),
-                "return_target": True,
+                "return_target": bool(self.check_current_sweep_return_target.isChecked()),
                 "first_overheating": bool(self.check_current_sweep_first_overheating.isChecked()),
                 "first_overheating_target_mpa": float(
                     self.spin_current_sweep_first_overheating_target_mpa.value()
@@ -15440,7 +15510,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_hold_correction_stress_mpa.setValue(float(current_sweep.get("hold_correction_stress_mpa", self.spin_current_sweep_hold_correction_stress_mpa.value())))
             self.spin_current_sweep_mid_correction_stress_mpa.setValue(float(current_sweep.get("mid_correction_stress_mpa", self.spin_current_sweep_mid_correction_stress_mpa.value())))
             self.spin_current_sweep_near_correction_stress_mpa.setValue(float(current_sweep.get("near_correction_stress_mpa", self.spin_current_sweep_near_correction_stress_mpa.value())))
-            self.check_current_sweep_return_target.setChecked(True)
+            self.check_current_sweep_return_target.setChecked(
+                bool(current_sweep.get("return_target", self.check_current_sweep_return_target.isChecked()))
+            )
             first_overheating_enabled = current_sweep.get(
                 "first_overheating",
                 current_sweep.get(
@@ -16893,7 +16965,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._automation_active:
             return
         if stop_reason is not None:
-            self._mark_session_stop_reason(stop_reason, detail=stop_detail, force=True)
+            self._mark_session_stop_reason(stop_reason, detail=stop_detail, force=stop_reason != "app_closed")
         elif user_initiated:
             self._mark_session_stop_reason(
                 "manual_recipe_stop",
@@ -17510,7 +17582,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 previous_target = target
                 _append_current_sweep_plateau(target=target, plateau_basis=basis, note=str(plateau_index))
-            if targets:
+            if targets and self.check_current_sweep_return_target.isChecked():
                 steps.append(
                     AutomationStep(
                         "set_current",
@@ -18190,6 +18262,7 @@ class MainWindow(QtWidgets.QMainWindow):
         direction = 1.0 if end_mA >= start_mA else -1.0
         self._active_current_sweep_display_target_mA = end_mA
         self._active_current_sweep_display_direction = direction
+        self._ignore_voltage_limit_on_nominal_current_return(step, step_index)
 
         if self._active_current_sweep_step_index != step_index:
             now_s = time.monotonic()
@@ -19586,8 +19659,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_near_correction_stress_mpa.value(),
         )
         self.settings.setValue("current_sweep_servo_defaults_version", SERVO_CURRENT_SWEEP_DEFAULTS_VERSION)
-        self.check_current_sweep_return_target.setChecked(True)
-        self.settings.setValue("current_sweep_return_target", True)
+        self.settings.setValue(
+            "current_sweep_return_target",
+            self.check_current_sweep_return_target.isChecked(),
+        )
         self.settings.setValue("current_sweep_start_mA", self.spin_current_sweep_start_mA.value())
         self.settings.setValue("current_sweep_end_mA", self.spin_current_sweep_end_mA.value())
         self.settings.setValue("current_sweep_step_mA", self.spin_current_sweep_step_mA.value())
@@ -20173,7 +20248,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 ),
             )
         )
-        self.check_current_sweep_return_target.setChecked(True)
+        self.check_current_sweep_return_target.setChecked(
+            bool(self.settings.value("current_sweep_return_target", True, type=bool))
+        )
         saved_current_start_mA = float(self.settings.value("current_sweep_start_mA", 1.0))
         self.spin_current_sweep_start_mA.setValue(saved_current_start_mA)
         self.spin_current_sweep_end_mA.setValue(float(self.settings.value("current_sweep_end_mA", 3.0)))
