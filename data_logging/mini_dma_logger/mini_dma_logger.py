@@ -20,8 +20,6 @@ from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
-from matplotlib.figure import Figure
-
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 except Exception:
@@ -1642,6 +1640,9 @@ class AnnealingPreviewDialog(QtWidgets.QDialog):
         self.setWindowTitle(f"Current Annealing Preview - {title}")
         self.resize(980, 820)
         self._canvases: list[Any] = []
+        self._scroll_area: QtWidgets.QScrollArea | None = None
+        self._annealing_core: Any = None
+        self._pending_preview_panels: deque[tuple[dict[str, Any], QtWidgets.QFrame, QtWidgets.QVBoxLayout, QtWidgets.QLabel]] = deque()
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -1653,6 +1654,16 @@ class AnnealingPreviewDialog(QtWidgets.QDialog):
             layout.addWidget(label, stretch=1)
             return
 
+        try:
+            from plotting.plugins.current_annealing import core as annealing_core
+        except Exception as exc:
+            label = QtWidgets.QLabel(f"Current annealing plotter is unavailable:\n{exc}", self)
+            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            label.setWordWrap(True)
+            layout.addWidget(label, stretch=1)
+            return
+        self._annealing_core = annealing_core
+
         summary = QtWidgets.QLabel(f"{len(series)} current annealing graph(s) for {title}", self)
         summary.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(summary)
@@ -1660,6 +1671,7 @@ class AnnealingPreviewDialog(QtWidgets.QDialog):
         scroll_area = QtWidgets.QScrollArea(self)
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self._scroll_area = scroll_area
         layout.addWidget(scroll_area, stretch=1)
 
         content = QtWidgets.QWidget(scroll_area)
@@ -1669,9 +1681,8 @@ class AnnealingPreviewDialog(QtWidgets.QDialog):
         scroll_area.setWidget(content)
 
         for entry in series:
-            currents = entry.get("currents")
-            resistances = entry.get("resistances")
-            if currents is None or resistances is None or len(resistances) == 0:
+            frame = entry.get("frame")
+            if frame is None or getattr(frame, "empty", False):
                 continue
 
             panel = QtWidgets.QFrame(content)
@@ -1681,31 +1692,63 @@ class AnnealingPreviewDialog(QtWidgets.QDialog):
             panel_layout.setContentsMargins(8, 8, 8, 8)
             panel_layout.setSpacing(4)
 
-            figure = Figure(figsize=(8.8, 2.7), tight_layout=True)
-            canvas = FigureCanvas(figure)
-            canvas.setMinimumHeight(250)
-            canvas.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
-                QtWidgets.QSizePolicy.Policy.Fixed,
-            )
-            axis = figure.add_subplot(111)
-            axis.plot(
-                currents,
-                resistances,
-                marker="o",
-                linewidth=1.2,
-                markersize=3.2,
-            )
-            axis.set_title(str(entry.get("label", "Current annealing")))
-            axis.set_xlabel("Current (mA)")
-            axis.set_ylabel("Resistance (Ohm)")
-            axis.grid(True, alpha=0.35)
-            panel_layout.addWidget(canvas)
+            placeholder = QtWidgets.QLabel(f"Rendering {entry.get('label', 'current annealing')}...", panel)
+            placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            placeholder.setMinimumHeight(480)
+            placeholder.setWordWrap(True)
+            panel_layout.addWidget(placeholder)
             content_layout.addWidget(panel)
-            self._canvases.append(canvas)
-            canvas.draw_idle()
+            self._pending_preview_panels.append((entry, panel, panel_layout, placeholder))
 
         content_layout.addStretch(1)
+        QtCore.QTimer.singleShot(0, self._render_next_preview_graph)
+
+    def _render_next_preview_graph(self) -> None:
+        if not self._pending_preview_panels:
+            return
+        entry, panel, panel_layout, placeholder = self._pending_preview_panels.popleft()
+        frame = entry.get("frame")
+        try:
+            figure, _filename = self._annealing_core.plot_one(
+                frame,
+                str(entry.get("label", "Current annealing")),
+            )
+        except Exception as exc:
+            placeholder.setText(f"Failed to plot {entry.get('label', 'current annealing')}:\n{exc}")
+            if self._pending_preview_panels:
+                QtCore.QTimer.singleShot(0, self._render_next_preview_graph)
+            return
+        canvas = FigureCanvas(figure)
+        canvas.setMinimumHeight(480)
+        canvas.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        panel_layout.replaceWidget(placeholder, canvas)
+        placeholder.deleteLater()
+        self._canvases.append(canvas)
+        canvas.installEventFilter(self)
+        canvas.draw_idle()
+        if self._pending_preview_panels:
+            QtCore.QTimer.singleShot(0, self._render_next_preview_graph)
+
+    def _scroll_preview_by_wheel_delta(self, delta: int) -> bool:
+        scroll_area = self._scroll_area
+        if scroll_area is None or not delta:
+            return False
+        bar = scroll_area.verticalScrollBar()
+        bar.setValue(bar.value() - int(delta))
+        return True
+
+    def eventFilter(self, watched: QtCore.QObject | None, event: QtCore.QEvent | None) -> bool:  # type: ignore[override]
+        if event is not None and event.type() == QtCore.QEvent.Type.Wheel and watched in self._canvases:
+            wheel_event = event
+            if isinstance(wheel_event, QtGui.QWheelEvent):
+                delta = wheel_event.pixelDelta().y() or wheel_event.angleDelta().y()
+                if self._scroll_preview_by_wheel_delta(delta):
+                    event.accept()
+                    return True
+        return super().eventFilter(watched, event)
 
 
 class CurrentPageStackedWidget(QtWidgets.QStackedWidget):
@@ -8182,6 +8225,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
         try:
             from plotting.plugins.current_annealing import core as annealing_core
+            from plotting.shared.toolkit import format_annealing_title
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
                 self,
@@ -8216,12 +8260,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     setpoint_mA = max(abs(float(value)) for value in currents)
                 except Exception:
                     setpoint_mA = None
-            label = Path(str(source).replace("\\", "/")).stem
-            if setpoint_mA is not None:
-                label = f"{label} ({_format_compact_number(setpoint_mA, decimals=3)} mA)"
+            label = format_annealing_title(Path(str(source).replace("\\", "/")).stem)
             loaded_series.append(
                 {
                     "label": label,
+                    "frame": frame,
                     "currents": currents,
                     "resistances": resistances,
                     "path": str(resolved),

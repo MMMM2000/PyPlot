@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pandas as pd
 
 pytest.importorskip(
     "PyQt6.QtWidgets",
@@ -4243,13 +4244,21 @@ def test_annealing_preview_dialog_stacks_each_graph_in_scroll_area(qtbot) -> Non
         [
             {
                 "label": "100 mA",
-                "currents": [1.0, 2.0, 3.0],
-                "resistances": [180.0, 190.0, 205.0],
+                "frame": pd.DataFrame(
+                    {
+                        "I_mA": [1.0, 2.0, 3.0, 2.0, 1.0],
+                        "R_Ohm": [180.0, 190.0, 205.0, 198.0, 185.0],
+                    }
+                ),
             },
             {
                 "label": "1000 mA",
-                "currents": [1.0, 2.0, 3.0],
-                "resistances": [210.0, 225.0, 260.0],
+                "frame": pd.DataFrame(
+                    {
+                        "I_mA": [1.0, 2.0, 3.0, 2.0, 1.0],
+                        "R_Ohm": [210.0, 225.0, 260.0, 245.0, 220.0],
+                    }
+                ),
             },
         ],
     )
@@ -4257,7 +4266,27 @@ def test_annealing_preview_dialog_stacks_each_graph_in_scroll_area(qtbot) -> Non
 
     try:
         assert dialog.findChild(QtWidgets.QScrollArea) is not None
+        qtbot.waitUntil(
+            lambda: len(dialog.findChildren(mini_dma_mod.FigureCanvas)) == 2,
+            timeout=5000,
+        )
         assert len(dialog.findChildren(mini_dma_mod.FigureCanvas)) == 2
+        first_canvas = dialog.findChildren(mini_dma_mod.FigureCanvas)[0]
+        first_axes = first_canvas.figure.axes[0]
+        assert first_axes.get_xlabel() == "Current [mA]"
+        assert first_axes.get_ylabel() == "Resistance [\u03a9]"
+        assert [text.get_text() for text in first_axes.get_legend().get_texts()] == [
+            "Increasing 1",
+            "Decreasing 1",
+        ]
+        dialog.resize(700, 520)
+        dialog.show()
+        qtbot.wait(50)
+        scroll_bar = dialog.findChild(QtWidgets.QScrollArea).verticalScrollBar()
+        assert scroll_bar.maximum() > 0
+        scroll_bar.setValue(0)
+        assert dialog._scroll_preview_by_wheel_delta(-120)
+        assert scroll_bar.value() > 0
     finally:
         dialog.close()
 
