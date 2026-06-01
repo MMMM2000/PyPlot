@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import socket
+import time
 
 import pytest
 
 from data_logging.shared_power_supply.broker import (
     ROLE_CURRENT_ANNEALING,
     ROLE_MINI_DMA_CURRENT,
+    ROLE_MINI_DMA_MOTOR,
     SharedPowerSupplyBroker,
 )
 from data_logging.shared_power_supply.driver import HmpSerialDriver
 from data_logging.shared_power_supply.profiles import HMP4030_PROFILE, HMP4040_PROFILE, detect_hmp_profile
-from data_logging.shared_power_supply.protocol import start_broker_server
+from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
 
 
 class FakeHmpSerial:
@@ -77,6 +79,13 @@ def test_hmp_idn_detection_maps_supported_models() -> None:
     assert detect_hmp_profile("OWON,SPE6102,serial,fw") is None
 
 
+def test_hmp_profile_current_normalization_matches_measured_floor() -> None:
+    assert HMP4040_PROFILE.normalize_current_mA(0.0) == pytest.approx(0.0)
+    assert HMP4040_PROFILE.normalize_current_mA(0.2) == pytest.approx(1.0)
+    assert HMP4040_PROFILE.normalize_current_mA(0.5) == pytest.approx(1.0)
+    assert HMP4040_PROFILE.normalize_current_mA(1.2) == pytest.approx(1.2)
+
+
 def test_broker_rejects_channel_four_for_hmp4030() -> None:
     broker = SharedPowerSupplyBroker(_driver(HMP4030_PROFILE), HMP4030_PROFILE)
 
@@ -91,6 +100,28 @@ def test_broker_accepts_channel_four_for_hmp4040() -> None:
 
     assert channel.role == ROLE_MINI_DMA_CURRENT
     assert channel.confirmed is True
+
+
+def test_broker_allows_float_roundoff_at_current_limit() -> None:
+    broker = SharedPowerSupplyBroker(_driver(HMP4040_PROFILE), HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.002)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="test", role=ROLE_CURRENT_ANNEALING)
+
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=2.0000000000000004,
+        rate_mA_s=0.2,
+    )
+
+    with pytest.raises(ValueError, match="current exceeds"):
+        broker.schedule_current_ramp(
+            channel=1,
+            lease_id=lease.lease_id,
+            target_mA=2.11,
+            rate_mA_s=0.2,
+        )
 
 
 def test_broker_prevents_two_owners_from_leasing_same_channel() -> None:
@@ -145,6 +176,75 @@ def test_broker_serializes_channel_selection_and_commands() -> None:
     ]
 
 
+def test_broker_allows_current_annealing_and_mini_dma_on_separate_channels() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(
+        channel=1,
+        role=ROLE_CURRENT_ANNEALING,
+        confirmed=True,
+        voltage_limit_v=32.05,
+        current_limit_a=0.1,
+    )
+    broker.assign_role(
+        channel=3,
+        role=ROLE_MINI_DMA_MOTOR,
+        confirmed=True,
+        voltage_limit_v=12.0,
+        current_limit_a=0.4,
+    )
+    broker.assign_role(
+        channel=4,
+        role=ROLE_MINI_DMA_CURRENT,
+        confirmed=True,
+        voltage_limit_v=32.05,
+        current_limit_a=0.06,
+    )
+    broker.confirm_profile()
+
+    anneal = broker.lease(channel=1, owner="current-annealing", role=ROLE_CURRENT_ANNEALING)
+    motor = broker.lease(channel=3, owner="mini-dma", role=ROLE_MINI_DMA_MOTOR)
+    current = broker.lease(channel=4, owner="mini-dma", role=ROLE_MINI_DMA_CURRENT)
+
+    broker.configure_channel(channel=1, lease_id=anneal.lease_id, voltage_v=2.0, current_a=0.001, output_on=True)
+    broker.configure_channel(channel=3, lease_id=motor.lease_id, voltage_v=12.0, current_a=0.4, output_on=True)
+    broker.configure_channel(channel=4, lease_id=current.lease_id, voltage_v=32.05, current_a=0.02, output_on=True)
+
+    snapshot = broker.snapshot()
+    assert set(snapshot["leases"]) == {"1", "3", "4"}
+    assert driver._serial.channels[1]["current"] == pytest.approx(0.001)  # type: ignore[union-attr]
+    assert driver._serial.channels[3]["voltage"] == pytest.approx(12.0)  # type: ignore[union-attr]
+    assert driver._serial.channels[4]["current"] == pytest.approx(0.02)  # type: ignore[union-attr]
+    with pytest.raises(PermissionError, match="assigned to"):
+        broker.lease(channel=1, owner="mini-dma", role=ROLE_MINI_DMA_CURRENT)
+
+
+def test_broker_sends_normalized_minimum_positive_current() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.002)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.0002, output_on=True)
+    broker.set_current(channel=1, lease_id=lease.lease_id, current_mA=0.2)
+
+    commands = driver.command_log()
+    assert commands.count("CURR 0.0010") == 2
+    assert driver._serial.channels[1]["current"] == pytest.approx(0.001)  # type: ignore[union-attr]
+    assert broker.snapshot()["scheduler"]["setpoint_currents_mA"]["1"] == pytest.approx(1.0)
+
+
+def test_broker_rejects_positive_current_that_quantizes_above_limit() -> None:
+    broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.0005)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+
+    with pytest.raises(ValueError, match="current exceeds"):
+        broker.set_current(channel=1, lease_id=lease.lease_id, current_mA=0.2)
+
+
 def test_broker_reports_channel_output_state() -> None:
     broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
     broker.assign_role(channel=3, role=ROLE_MINI_DMA_CURRENT, confirmed=True)
@@ -193,3 +293,363 @@ def test_broker_json_protocol_snapshot_round_trip() -> None:
 
     assert '"ok": true' in raw
     assert '"channel_count": 4' in raw
+
+
+def test_scheduler_polls_channels_and_returns_cached_readbacks() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True)
+    broker.assign_role(channel=4, role=ROLE_MINI_DMA_CURRENT, confirmed=True)
+    broker.confirm_profile()
+    anneal = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    mini = broker.lease(channel=4, owner="mini", role=ROLE_MINI_DMA_CURRENT)
+    broker.configure_channel(channel=1, lease_id=anneal.lease_id, voltage_v=1.0, current_a=0.002, output_on=True)
+    broker.configure_channel(channel=4, lease_id=mini.lease_id, voltage_v=1.0, current_a=0.003, output_on=True)
+
+    broker.configure_polling(channel=1, interval_s=1.0)
+    broker.configure_polling(channel=4, interval_s=1.0)
+    broker.process_scheduler_once(now_s=10.0)
+    cached = broker.latest_readback(channel=1, max_age_s=60.0, now_s=10.5)
+
+    assert cached["current_mA"] == pytest.approx(2.0)
+    assert cached["cached"] is True
+    assert cached["age_s"] == pytest.approx(0.5)
+    assert cached["timestamp_s"] == pytest.approx(10.0)
+    snapshot = broker.snapshot()
+    assert snapshot["scheduler"]["polling"]["1"]["interval_s"] == pytest.approx(1.0)
+    assert snapshot["readbacks"]["4"]["current_mA"] == pytest.approx(3.0)
+
+
+def test_scheduler_coalesces_current_setpoints_until_next_tick() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+
+    broker.configure_polling(channel=1, interval_s=1.0)
+    broker.schedule_current(channel=1, lease_id=lease.lease_id, current_mA=1.2)
+    broker.schedule_current(channel=1, lease_id=lease.lease_id, current_mA=1.4)
+    broker.process_scheduler_once(now_s=20.0)
+
+    commands = driver.command_log()
+    assert "CURR 0.0012" not in commands
+    assert commands.count("CURR 0.0014") == 1
+    assert driver._serial.channels[1]["current"] == pytest.approx(0.0014)  # type: ignore[union-attr]
+    cached = broker.latest_readback(channel=1, max_age_s=1.0, now_s=20.0)
+    assert cached["setpoint_current_mA"] == pytest.approx(1.4)
+    assert cached["pending_current_mA"] is None
+    assert broker.snapshot()["scheduler"]["metrics"]["coalesced_current_requests"] == 1
+
+
+def test_scheduler_rate_limited_ramp_sends_small_steps_without_catchup() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+    broker.configure_polling(channel=1, interval_s=10.0)
+
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=3.0,
+        rate_mA_s=1.0,
+        max_step_mA=0.2,
+        resolution_mA=0.2,
+        now_s=0.0,
+    )
+    broker.process_scheduler_once(now_s=0.1)
+    broker.process_scheduler_once(now_s=0.2)
+    broker.process_scheduler_once(now_s=1.2)
+
+    commands = driver.command_log()
+    assert "CURR 0.0020" not in commands
+    assert "CURR 0.0012" in commands
+    assert "CURR 0.0014" in commands
+    assert driver._serial.channels[1]["current"] == pytest.approx(0.0014)  # type: ignore[union-attr]
+    metrics = broker.snapshot()["scheduler"]["metrics"]
+    assert metrics["ramp_steps_sent"] == 2
+    assert metrics["current_commands_sent"] == 2
+
+
+def test_scheduler_direct_and_ramp_requests_override_each_other() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+
+    broker.schedule_current(channel=1, lease_id=lease.lease_id, current_mA=2.0)
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=3.0,
+        rate_mA_s=1.0,
+        max_step_mA=0.2,
+        resolution_mA=0.2,
+        now_s=0.0,
+    )
+    broker.process_scheduler_once(now_s=0.2)
+
+    commands = driver.command_log()
+    assert "CURR 0.0020" not in commands
+    assert "CURR 0.0012" in commands
+
+    broker.schedule_current(channel=1, lease_id=lease.lease_id, current_mA=1.0)
+    broker.process_scheduler_once(now_s=0.4)
+
+    commands = driver.command_log()
+    assert commands.count("CURR 0.0010") == 2
+    assert "CURR 0.0014" not in commands
+
+
+def test_repeated_lease_for_same_owner_returns_existing_lease() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=3.0,
+        rate_mA_s=1.0,
+        max_step_mA=0.2,
+        resolution_mA=0.2,
+        now_s=0.0,
+    )
+
+    repeated = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+
+    assert repeated.lease_id == lease.lease_id
+    broker.process_scheduler_once(now_s=0.2)
+    assert "CURR 0.0012" in driver.command_log()
+
+
+def test_output_off_cancels_pending_current_work_for_channel() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=3.0,
+        rate_mA_s=1.0,
+        max_step_mA=0.2,
+        resolution_mA=0.2,
+        now_s=0.0,
+    )
+    broker.schedule_current(channel=1, lease_id=lease.lease_id, current_mA=2.0)
+
+    broker.set_output(channel=1, lease_id=lease.lease_id, output_on=False)
+    broker.process_scheduler_once(now_s=0.5)
+
+    commands = driver.command_log()
+    assert "OUTP OFF" in commands
+    assert "CURR 0.0020" not in commands
+    assert "CURR 0.0012" not in commands
+    scheduler = broker.snapshot()["scheduler"]
+    assert "1" not in scheduler["current_ramps"]
+    assert "1" not in scheduler["pending_currents"]
+
+
+def test_release_clears_scheduler_state_for_channel() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+    broker.configure_polling(channel=1, interval_s=1.0)
+    broker.process_scheduler_once(now_s=1.0)
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=3.0,
+        rate_mA_s=1.0,
+        max_step_mA=0.2,
+        resolution_mA=0.2,
+        now_s=0.0,
+    )
+
+    assert "1" in broker.snapshot()["scheduler"]["current_ramps"]
+    assert "1" in broker.snapshot()["readbacks"]
+
+    broker.release(channel=1, lease_id=lease.lease_id)
+
+    snapshot = broker.snapshot()
+    assert "1" not in snapshot["readbacks"]
+    scheduler = snapshot["scheduler"]
+    assert "1" not in scheduler["current_ramps"]
+    assert "1" not in scheduler["pending_currents"]
+    assert "1" not in scheduler["polling"]
+    assert "1" not in scheduler["setpoint_currents_mA"]
+
+
+def test_scheduler_skips_ramp_snapshot_if_newer_request_arrives_before_write() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+    broker.schedule_current_ramp(
+        channel=1,
+        lease_id=lease.lease_id,
+        target_mA=3.0,
+        rate_mA_s=1.0,
+        max_step_mA=0.2,
+        resolution_mA=0.2,
+        now_s=0.0,
+    )
+
+    _lease_id, ramp = broker._current_ramps[1]  # type: ignore[attr-defined]
+    original_next_setpoint = ramp.next_setpoint
+
+    def _next_setpoint_with_direct_override(*, now_s: float) -> float | None:
+        next_mA = original_next_setpoint(now_s=now_s)
+        broker.schedule_current(channel=1, lease_id=lease.lease_id, current_mA=1.0)
+        return next_mA
+
+    ramp.next_setpoint = _next_setpoint_with_direct_override  # type: ignore[method-assign]
+
+    broker.process_scheduler_once(now_s=0.2)
+
+    assert "CURR 0.0012" not in driver.command_log()
+    assert broker.snapshot()["scheduler"]["pending_currents"]["1"]["current_mA"] == pytest.approx(1.0)
+
+    broker.process_scheduler_once(now_s=0.4)
+
+    assert driver.command_log().count("CURR 0.0010") == 2
+    assert "CURR 0.0012" not in driver.command_log()
+
+
+def test_scheduler_thread_keeps_cached_readbacks_fresh() -> None:
+    broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True)
+    broker.confirm_profile()
+    lease = broker.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+    broker.configure_channel(channel=1, lease_id=lease.lease_id, voltage_v=1.0, current_a=0.001, output_on=True)
+    broker.configure_polling(channel=1, interval_s=0.02)
+
+    broker.start_scheduler(tick_s=0.005)
+    try:
+        deadline = time.time() + 1.0
+        readback = None
+        while time.time() < deadline:
+            readback = broker.latest_readback(channel=1, max_age_s=1.0, fallback_to_measure=False)
+            if readback.get("cached"):
+                break
+            time.sleep(0.01)
+    finally:
+        broker.stop_scheduler()
+
+    assert readback is not None
+    assert readback["cached"] is True
+    assert readback["current_mA"] == pytest.approx(1.0)
+
+
+def test_broker_json_client_exposes_scheduler_cached_readbacks() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    server, thread = start_broker_server(broker)
+    try:
+        host, port = server.server_address
+        client = BrokerJsonClient(host=host, port=port)
+        lease = client.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+        client.configure_channel(channel=1, lease_id=lease["lease_id"], voltage_v=1.0, current_a=0.001, output_on=True)
+
+        client.configure_polling(channel=1, interval_s=0.05)
+        client.schedule_current(channel=1, lease_id=lease["lease_id"], current_mA=1.2)
+        client.schedule_current(channel=1, lease_id=lease["lease_id"], current_mA=1.4)
+        client.start_scheduler(tick_s=0.01)
+        deadline = time.time() + 1.0
+        readback = None
+        while time.time() < deadline:
+            readback = client.latest_readback(channel=1, max_age_s=1.0, fallback_to_measure=False)
+            if readback.get("cached") and readback.get("setpoint_current_mA") == pytest.approx(1.4):
+                break
+            time.sleep(0.02)
+        client.stop_scheduler()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert readback is not None
+    assert readback["cached"] is True
+    assert readback["current_mA"] == pytest.approx(1.4)
+    assert readback["pending_current_mA"] is None
+    assert "CURR 0.0012" not in driver.command_log()
+
+
+def test_broker_json_client_uses_configurable_request_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    class _Socket:
+        def __enter__(self) -> "_Socket":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def sendall(self, data: bytes) -> None:
+            seen["request"] = data
+
+        def recv(self, _size: int) -> bytes:
+            if seen.get("responded"):
+                return b""
+            seen["responded"] = True
+            return b'{"ok": true, "snapshot": {}}\n'
+
+    def _create_connection(address: tuple[str, int], timeout: float) -> _Socket:
+        seen["address"] = address
+        seen["timeout"] = timeout
+        return _Socket()
+
+    monkeypatch.setattr("data_logging.shared_power_supply.protocol.socket.create_connection", _create_connection)
+
+    client = BrokerJsonClient(host="127.0.0.1", port=8765, timeout_s=9.5)
+    assert client.snapshot() == {}
+    assert seen["address"] == ("127.0.0.1", 8765)
+    assert seen["timeout"] == pytest.approx(9.5)
+
+
+def test_broker_json_client_schedules_rate_limited_current_ramps() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True, current_limit_a=0.01)
+    broker.confirm_profile()
+    server, thread = start_broker_server(broker)
+    try:
+        host, port = server.server_address
+        client = BrokerJsonClient(host=host, port=port)
+        lease = client.lease(channel=1, owner="anneal", role=ROLE_CURRENT_ANNEALING)
+        client.configure_channel(channel=1, lease_id=lease["lease_id"], voltage_v=1.0, current_a=0.001, output_on=True)
+
+        client.schedule_current_ramp(
+            channel=1,
+            lease_id=lease["lease_id"],
+            target_mA=3.0,
+            rate_mA_s=1.0,
+            max_step_mA=0.2,
+            resolution_mA=0.2,
+        )
+        broker.process_scheduler_once(now_s=time.monotonic() + 0.2)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert "CURR 0.0012" in driver.command_log()

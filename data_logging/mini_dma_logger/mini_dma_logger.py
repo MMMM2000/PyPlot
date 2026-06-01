@@ -189,6 +189,7 @@ FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)
 RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
 WINDOWS: list[QtWidgets.QWidget] = []
 GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
+PREFERRED_SCALE_BAUD = 9600
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
@@ -268,6 +269,7 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": True,
         "voltage_first": False,
         "current_resolution_mA": 0.2,
+        "min_current_mA": 1.0,
     },
     "hmp4040": {
         "label": "HMP4040 (4-channel)",
@@ -281,6 +283,7 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": True,
         "voltage_first": False,
         "current_resolution_mA": 0.2,
+        "min_current_mA": 1.0,
     },
     "owon_spe6102": {
         "label": "Owon SPE6102",
@@ -294,6 +297,7 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": False,
         "voltage_first": True,
         "current_resolution_mA": 1.0,
+        "min_current_mA": 10.0,
     },
     "shared_hmp_broker": {
         "label": "Shared HMP broker",
@@ -307,6 +311,7 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": False,
         "voltage_first": False,
         "current_resolution_mA": 0.2,
+        "min_current_mA": 1.0,
         "shared_broker": True,
     },
 }
@@ -564,6 +569,11 @@ def _session_paths_exist(paths: Sequence[Path]) -> bool:
 
 def _session_setup_paths_for_measurement(txt_path: Path) -> tuple[Path, Path]:
     return txt_path.parent / SESSION_SETUP_TX, txt_path.parent / SESSION_SETUP_CSV
+
+
+def _session_metadata_sidecar_path(json_path: Path) -> Path:
+    run_dir = json_path.parent
+    return run_dir.parent / "metadata" / run_dir.name / SESSION_METADATA_JSON
 
 
 def _clean_session_basename(basename: str) -> str:
@@ -3035,9 +3045,15 @@ class PowerSupplyController:
     def current_resolution_mA(self) -> float:
         return max(0.001, float(self.profile.get("current_resolution_mA", 1.0)))
 
+    def min_current_mA(self) -> float:
+        return max(self.current_resolution_mA(), float(self.profile.get("min_current_mA", 0.0)))
+
     def quantize_current_mA(self, current_mA: float) -> float:
         resolution_mA = self.current_resolution_mA()
-        return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
+        quantized = max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
+        if quantized <= 0.0:
+            return 0.0
+        return max(self.min_current_mA(), quantized)
 
     def configure_channel(
         self,
@@ -3050,7 +3066,7 @@ class PowerSupplyController:
         with self._io_lock:
             self.select_channel(channel)
             self.command(f"VOLT {max(0.0, float(voltage_v)):.3f}")
-            self.command(f"CURR {max(0.0, float(current_a)):.3f}")
+            self.command(f"CURR {self.quantize_current_mA(float(current_a) * 1000.0) / 1000.0:.4f}")
             self.command("OUTP ON" if output_on else "OUTP OFF")
 
     def initialize_output(
@@ -3150,6 +3166,7 @@ class SharedBrokerSupplyController:
         self._leases: dict[int, str] = {}
         self._connected = False
         self._io_lock = RLock()
+        self._current_ramp_rate_mA_s: float | None = None
 
     def connect(self) -> None:
         if self._client is None:
@@ -3212,9 +3229,25 @@ class SharedBrokerSupplyController:
     def current_resolution_mA(self) -> float:
         return max(0.001, float(self.profile.get("current_resolution_mA", 1.0)))
 
+    def min_current_mA(self) -> float:
+        return max(self.current_resolution_mA(), float(self.profile.get("min_current_mA", 0.0)))
+
     def quantize_current_mA(self, current_mA: float) -> float:
         resolution_mA = self.current_resolution_mA()
-        return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
+        quantized = max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
+        if quantized <= 0.0:
+            return 0.0
+        return max(self.min_current_mA(), quantized)
+
+    def set_current_ramp_rate_mA_s(self, rate_mA_s: float | None) -> None:
+        if rate_mA_s is None:
+            self._current_ramp_rate_mA_s = None
+            return
+        try:
+            rate = abs(float(rate_mA_s))
+        except Exception:
+            rate = 0.0
+        self._current_ramp_rate_mA_s = None if rate <= 0.0 else max(self.current_resolution_mA(), rate)
 
     def configure_channel(
         self,
@@ -3234,6 +3267,18 @@ class SharedBrokerSupplyController:
                 output_on=bool(output_on),
             )
 
+    def _enable_current_channel_polling(self) -> None:
+        channel = self.selected_channel()
+        if channel <= 0:
+            return
+        client = self._require_client()
+        configure_polling = getattr(client, "configure_polling", None)
+        if callable(configure_polling):
+            configure_polling(channel=channel, interval_s=1.0)
+        start_scheduler = getattr(client, "start_scheduler", None)
+        if callable(start_scheduler):
+            start_scheduler(tick_s=0.05)
+
     def initialize_output(
         self,
         *,
@@ -3250,16 +3295,40 @@ class SharedBrokerSupplyController:
             current_a=self.quantize_current_mA(current_mA) / 1000.0,
             output_on=True,
         )
+        self._enable_current_channel_polling()
 
     def set_current_mA(self, current_mA: float) -> None:
         channel = self.selected_channel()
         if channel <= 0:
             raise RuntimeError("Select a shared HMP broker current-sweep channel first.")
         with self._io_lock:
-            self._require_client().set_current(
+            client = self._require_client()
+            target_mA = self.quantize_current_mA(current_mA)
+            ramp_rate_mA_s = self._current_ramp_rate_mA_s
+            schedule_current_ramp = getattr(client, "schedule_current_ramp", None)
+            if ramp_rate_mA_s is not None and callable(schedule_current_ramp):
+                resolution_mA = self.current_resolution_mA()
+                schedule_current_ramp(
+                    channel=channel,
+                    lease_id=self._lease_channel(channel),
+                    target_mA=target_mA,
+                    rate_mA_s=ramp_rate_mA_s,
+                    max_step_mA=resolution_mA,
+                    resolution_mA=resolution_mA,
+                )
+                return
+            schedule_current = getattr(client, "schedule_current", None)
+            if callable(schedule_current):
+                schedule_current(
+                    channel=channel,
+                    lease_id=self._lease_channel(channel),
+                    current_mA=target_mA,
+                )
+                return
+            client.set_current(
                 channel=channel,
                 lease_id=self._lease_channel(channel),
-                current_mA=self.quantize_current_mA(current_mA),
+                current_mA=target_mA,
             )
 
     def output_on(self) -> None:
@@ -3314,7 +3383,12 @@ class SharedBrokerSupplyController:
                 "resistance_ohm": None,
                 "power_W": None,
             }
-        readback = dict(self._require_client().measure_channel(channel=channel))
+        client = self._require_client()
+        latest_readback = getattr(client, "latest_readback", None)
+        if callable(latest_readback):
+            readback = dict(latest_readback(channel=channel, max_age_s=2.5, fallback_to_measure=True))
+        else:
+            readback = dict(client.measure_channel(channel=channel))
         voltage_v = readback.get("voltage_V")
         current_mA = readback.get("current_mA")
         current_a = None if current_mA is None else float(current_mA) / 1000.0
@@ -3423,6 +3497,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_base_path: Path | None = None
         self._session_csv_path: Path | None = None
         self._session_json_path: Path | None = None
+        self._session_metadata_sidecar_path: Path | None = None
         self._session_raw_scale_path: Path | None = None
         self._session_control_trace_path: Path | None = None
         self._session_ui_telemetry_path: Path | None = None
@@ -6847,7 +6922,33 @@ class MainWindow(QtWidgets.QMainWindow):
                 }
         return None
 
-    def _auto_detect_supply_port(self) -> bool:
+    def _set_supply_detection_match(self, match: Mapping[str, Any]) -> None:
+        index = self.combo_supply_port.findData(match["port"])
+        if index >= 0:
+            self.combo_supply_port.setCurrentIndex(index)
+        profile_index = self.combo_supply_profile.findData(str(match["profile_id"]))
+        if profile_index >= 0:
+            self.combo_supply_profile.setCurrentIndex(profile_index)
+        if self.combo_supply_baud.findText(str(match["baudrate"])) >= 0:
+            self.combo_supply_baud.setCurrentText(str(match["baudrate"]))
+
+    def _nonpreferred_supply_baud_message(self, match: Mapping[str, Any]) -> str:
+        profile_id = str(match.get("profile_id") or "")
+        profile = SUPPLY_PROFILES.get(profile_id, {})
+        preferred = int(profile.get("baudrate", 115200) or 115200)
+        label = str(profile.get("label") or profile_id or "power supply")
+        return (
+            f"Detected {label} on {match.get('port')} at {match.get('baudrate')} baud, "
+            f"but the preferred baud rate is {preferred}. Change the baud rate in the power supply settings "
+            f"to {preferred}, then retry auto-detect/connect."
+        )
+
+    def _show_hardware_detection_warning(self, title: str, message: str, *, show_errors: bool) -> None:
+        self._log(message)
+        if show_errors:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, message)
+
+    def _auto_detect_supply_port(self, *, show_errors: bool = True) -> bool:
         if list_ports is None:
             self._log("Supply auto-detect unavailable because pyserial is missing.")
             return False
@@ -6855,14 +6956,16 @@ class MainWindow(QtWidgets.QMainWindow):
             match = self._probe_supply_candidate(port.device)
             if match is None:
                 continue
-            index = self.combo_supply_port.findData(match["port"])
-            if index >= 0:
-                self.combo_supply_port.setCurrentIndex(index)
-            if self.combo_supply_baud.findText(str(match["baudrate"])) >= 0:
-                self.combo_supply_baud.setCurrentText(str(match["baudrate"]))
-            profile_index = self.combo_supply_profile.findData(str(match["profile_id"]))
-            if profile_index >= 0:
-                self.combo_supply_profile.setCurrentIndex(profile_index)
+            self._set_supply_detection_match(match)
+            profile = SUPPLY_PROFILES.get(str(match["profile_id"]), {})
+            preferred_baud = int(profile.get("baudrate", 115200) or 115200)
+            if int(match["baudrate"]) != preferred_baud:
+                self._show_hardware_detection_warning(
+                    "Power supply baud rate",
+                    self._nonpreferred_supply_baud_message(match),
+                    show_errors=show_errors,
+                )
+                return False
             self._log(
                 f"Auto-detected supply on {match['port']} at {match['baudrate']} baud "
                 f"({match['idn_text']})."
@@ -6937,7 +7040,23 @@ class MainWindow(QtWidgets.QMainWindow):
             }
         return None
 
-    def _auto_detect_scale_port(self) -> bool:
+    def _set_scale_detection_match(self, match: Mapping[str, Any]) -> None:
+        index = self.combo_scale_port.findData(match["port"])
+        if index >= 0:
+            self.combo_scale_port.setCurrentIndex(index)
+        if self.combo_scale_baud.findText(str(match["baudrate"])) >= 0:
+            self.combo_scale_baud.setCurrentText(str(match["baudrate"]))
+        self.edit_scale_request.setText(str(match["request_command"]))
+        self.edit_scale_terminator.setText(str(match["terminator"]))
+
+    def _nonpreferred_scale_baud_message(self, match: Mapping[str, Any]) -> str:
+        return (
+            f"Detected scale on {match.get('port')} at {match.get('baudrate')} baud, "
+            f"but the preferred baud rate is {PREFERRED_SCALE_BAUD}. Change the baud rate in the scale settings "
+            f"to {PREFERRED_SCALE_BAUD}, then retry auto-detect/connect."
+        )
+
+    def _auto_detect_scale_port(self, *, show_errors: bool = True) -> bool:
         if list_ports is None:
             self._log("Scale auto-detect unavailable because pyserial is missing.")
             return False
@@ -6945,13 +7064,14 @@ class MainWindow(QtWidgets.QMainWindow):
             match = self._probe_scale_candidate(port.device)
             if match is None:
                 continue
-            index = self.combo_scale_port.findData(match["port"])
-            if index >= 0:
-                self.combo_scale_port.setCurrentIndex(index)
-            if self.combo_scale_baud.findText(str(match["baudrate"])) >= 0:
-                self.combo_scale_baud.setCurrentText(str(match["baudrate"]))
-            self.edit_scale_request.setText(str(match["request_command"]))
-            self.edit_scale_terminator.setText(str(match["terminator"]))
+            self._set_scale_detection_match(match)
+            if int(match["baudrate"]) != PREFERRED_SCALE_BAUD:
+                self._show_hardware_detection_warning(
+                    "Scale baud rate",
+                    self._nonpreferred_scale_baud_message(match),
+                    show_errors=show_errors,
+                )
+                return False
             self._log(
                 f"Auto-detected scale on {match['port']} at {match['baudrate']} baud "
                 f"(sample reply: {match['raw_text']})."
@@ -7582,6 +7702,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(f"Recipe current update failed: {exc}")
             return False
         return True
+
+    def _set_supply_current_ramp_rate_mA_s(self, rate_mA_s: float | None) -> None:
+        controller = self._supply_controller
+        setter = getattr(controller, "set_current_ramp_rate_mA_s", None)
+        if callable(setter):
+            setter(rate_mA_s)
 
     def _continuity_monitor_enabled(self) -> bool:
         return hasattr(self, "check_continuity_monitor") and self.check_continuity_monitor.isChecked()
@@ -14964,6 +15090,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_detail = detail
         self._session_stop_recorded_utc = _utc_timestamp()
 
+    def _metadata_sidecar_relative_path(self) -> str | None:
+        if self._session_metadata_sidecar_path is None:
+            return None
+        if self._session_json_path is None:
+            return self._session_metadata_sidecar_path.as_posix()
+        try:
+            return self._session_metadata_sidecar_path.relative_to(
+                self._session_json_path.parent.parent
+            ).as_posix()
+        except ValueError:
+            return self._session_metadata_sidecar_path.as_posix()
+
     def _session_metadata(self) -> dict[str, Any]:
         calibration_metadata = {
             "baseline_s": float(self.spin_calibration_baseline_s.value()),
@@ -15023,6 +15161,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "scale": {
                 "port": str(self.combo_scale_port.currentData() or ""),
                 "baud": int(self.combo_scale_baud.currentText()),
+                "preferred_baud": PREFERRED_SCALE_BAUD,
+                "baud_is_preferred": int(self.combo_scale_baud.currentText()) == PREFERRED_SCALE_BAUD,
                 "poll_interval_ms": int(self.spin_scale_interval.value()),
                 "request_command": self.edit_scale_request.text(),
                 "line_ending": self.edit_scale_terminator.text(),
@@ -15033,6 +15173,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "measurement_txt": None if self._session_base_path is None else self._session_base_path.name,
                 "measurement_csv": None if self._session_csv_path is None else self._session_csv_path.name,
                 "metadata_json": None if self._session_json_path is None else self._session_json_path.name,
+                "metadata_sidecar_json": self._metadata_sidecar_relative_path(),
                 "log_interval_ms": self._log_interval_ms(),
                 "raw_scale_sidecar": None
                 if self._session_raw_scale_path is None
@@ -15063,6 +15204,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 "port": str(self.combo_supply_port.currentData() or ""),
                 "baud": int(self.combo_supply_baud.currentText()),
                 "profile": str(self.combo_supply_profile.currentData() or "hmp4030"),
+                "preferred_baud": int(
+                    SUPPLY_PROFILES.get(
+                        str(self.combo_supply_profile.currentData() or "hmp4030"),
+                        SUPPLY_PROFILES["hmp4030"],
+                    ).get("baudrate", 0)
+                    or 0
+                ),
+                "baud_is_preferred": (
+                    int(self.combo_supply_baud.currentText())
+                    == int(
+                        SUPPLY_PROFILES.get(
+                            str(self.combo_supply_profile.currentData() or "hmp4030"),
+                            SUPPLY_PROFILES["hmp4030"],
+                        ).get("baudrate", 0)
+                        or 0
+                    )
+                ),
+                "shared_broker": self._using_shared_broker_supply(),
+                "broker_host": self.edit_shared_broker_host.text().strip(),
+                "broker_port": int(self.spin_shared_broker_port.value()),
+                "broker_owned_by_app": bool(self._owned_shared_broker_server is not None),
+                "broker_source": "owned"
+                if self._owned_shared_broker_server is not None
+                else ("existing" if self._using_shared_broker_supply() else "direct"),
                 "current_sweep_channel": self._current_sweep_supply_channel(),
                 "voltage_limit_v": float(self.spin_supply_voltage_limit.value()),
                 "mode": HEATING_MODE_OFF,
@@ -15074,6 +15239,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 "motor_supply_channel": self._motor_supply_channel(),
                 "motor_supply_voltage_v": float(self.spin_motor_supply_voltage.value()),
                 "motor_supply_current_limit_a": float(self.spin_motor_supply_current_limit.value()),
+            },
+            "tic": {
+                "serial": self.edit_tic_serial.text().strip(),
+                "native_usb_preferred": bool(self.check_tic_native_usb.isChecked()),
+                "native_usb_required_for_recipes": True,
+                "ticcmd_path": self.edit_ticcmd_path.text().strip(),
+                "current_limit_mA": int(self.spin_tic_current_limit_mA.value()),
+                "step_mode": self._selected_tic_step_mode(),
+                "status_interval_ms": self._tic_status_interval_ms(),
+                "keepalive_interval_ms": self._tic_keepalive_interval_ms(),
             },
             "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
             "recipe_summary": self._last_recipe_summary,
@@ -15177,6 +15352,12 @@ class MainWindow(QtWidgets.QMainWindow):
             payload["finished_utc"] = finished_utc
         try:
             self._session_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            if self._session_metadata_sidecar_path is not None:
+                self._session_metadata_sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+                self._session_metadata_sidecar_path.write_text(
+                    json.dumps(payload, indent=2),
+                    encoding="utf-8",
+                )
         except OSError as exc:
             self._write_emergency_session_snapshot(
                 payload,
@@ -15215,7 +15396,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 "saved_utc": _utc_timestamp(),
             }
             metadata_path = self._session_recovery_path / SESSION_METADATA_JSON
+            recovery_sidecar_path = _session_metadata_sidecar_path(metadata_path)
+            try:
+                recovery_payload["logging"] = dict(recovery_payload.get("logging") or {})
+                recovery_payload["logging"]["metadata_sidecar_json"] = (
+                    recovery_sidecar_path.relative_to(metadata_path.parent.parent).as_posix()
+                )
+            except Exception:
+                pass
             metadata_path.write_text(json.dumps(recovery_payload, indent=2), encoding="utf-8")
+            recovery_sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+            recovery_sidecar_path.write_text(json.dumps(recovery_payload, indent=2), encoding="utf-8")
 
             txt_path = self._session_recovery_path / SESSION_MEASUREMENT_TX
             csv_path = self._session_recovery_path / SESSION_MEASUREMENT_CSV
@@ -15382,6 +15573,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_base_path = txt_path
         self._session_csv_path = csv_path
         self._session_json_path = json_path
+        self._session_metadata_sidecar_path = _session_metadata_sidecar_path(json_path)
         self._session_raw_scale_path = raw_scale_path
         self._session_control_trace_path = control_trace_path
         self._session_ui_telemetry_path = ui_telemetry_path
@@ -16088,7 +16280,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Preflight: scale is not connected, trying auto-detect/connect.")
         if not str(self.combo_scale_port.currentData() or "").strip():
             self._refresh_scale_ports()
-        self._auto_detect_scale_port()
+        self._auto_detect_scale_port(show_errors=False)
         return self._connect_scale(show_errors=False)
 
     def _ensure_supply_ready_for_recipe(self) -> bool:
@@ -16098,7 +16290,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._using_shared_broker_supply() and not str(self.combo_supply_port.currentData() or "").strip():
             self._refresh_supply_ports()
         if not self._using_shared_broker_supply():
-            self._auto_detect_supply_port()
+            self._auto_detect_supply_port(show_errors=False)
         return self._connect_supply(show_errors=False)
 
     def _ensure_tic_ready_for_recipe(self) -> bool:
@@ -17513,7 +17705,7 @@ class MainWindow(QtWidgets.QMainWindow):
         widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Ignored)
         widget.setMouseEnabled(x=True, y=True)
         plot_item = widget.getPlotItem()
-        plot_item.showGrid(x=True, y=True, alpha=0.28)
+        plot_item.showGrid(x=False, y=False)
         plot_item.setClipToView(True)
         plot_item.vb.setDefaultPadding(0.05)
         left_curve_kwargs: dict[str, Any] = {"pen": pg.mkPen(left_color, width=0.8)}
@@ -17988,6 +18180,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_last_setpoint_mA = None
         self._current_sweep_voltage_limited_return_steps.clear()
         self._clear_current_sweep_ramp_hold()
+        self._set_supply_current_ramp_rate_mA_s(None)
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
@@ -19135,6 +19328,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0
             self._clear_current_sweep_ramp_hold()
+            self._set_supply_current_ramp_rate_mA_s(None)
             return True
         return False
 
@@ -19314,6 +19508,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_post_hold_throttle_until_s = 0.0
             self._active_current_sweep_last_setpoint_mA = None
             self._clear_current_sweep_ramp_hold()
+            self._set_supply_current_ramp_rate_mA_s(ramp_rate_mA_s)
             if not self._set_recipe_current_mA(start_mA, measure_after=False):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return True
@@ -19395,6 +19590,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0
             self._clear_current_sweep_ramp_hold()
+            self._set_supply_current_ramp_rate_mA_s(None)
             return True
         return False
 

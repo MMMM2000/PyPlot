@@ -1772,7 +1772,7 @@ def test_dashboard_plot_viewboxes_keep_data_edge_padding(tmp_path: Path, qtbot) 
         _close_test_window(window)
 
 
-def test_dashboard_pyqtgraph_axes_match_curve_colors_and_use_major_grid_only(
+def test_dashboard_pyqtgraph_axes_match_curve_colors_and_disable_gridlines(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -1797,6 +1797,8 @@ def test_dashboard_pyqtgraph_axes_match_curve_colors_and_use_major_grid_only(
         assert right_axis.style["maxTickLevel"] == 0
         assert left_axis.grid is False
         assert right_axis.grid is False
+        assert bundle.plot_item.ctrl.xGridCheck.isChecked() is False
+        assert bundle.plot_item.ctrl.yGridCheck.isChecked() is False
         assert left_axis.autoSIPrefix is False
         assert right_axis.autoSIPrefix is False
         assert left_axis.autoSIPrefixScale == 1.0
@@ -5524,6 +5526,42 @@ def test_auto_detect_supply_port_identifies_hmp4040(tmp_path: Path, qtbot, monke
         _close_test_window(window)
 
 
+def test_auto_detect_supply_port_blocks_nonpreferred_hmp_baud(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        monkeypatch.setattr(
+            mini_dma_mod.list_ports,
+            "comports",
+            lambda: [SimpleNamespace(device="COM7", description="Rohde supply")],
+        )
+
+        def _probe_supply(port_name: str):
+            return {
+                "port": port_name,
+                "baudrate": 9600,
+                "profile_id": "hmp4040",
+                "idn_text": "Rohde&Schwarz,HMP4040,123456,HW1.0/SW3.0",
+            }
+
+        monkeypatch.setattr(window, "_probe_supply_candidate", _probe_supply)
+
+        window._refresh_supply_ports()
+        detected = window._auto_detect_supply_port(show_errors=False)
+
+        assert detected is False
+        assert window.combo_supply_port.currentData() == "COM7"
+        assert window.combo_supply_baud.currentText() == "9600"
+        assert "preferred baud rate is 115200" in window.log_output.toPlainText()
+        assert "power supply settings" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_supply_idn_parser_distinguishes_hmp4040_from_hmp4030() -> None:
     assert (
         mini_dma_mod._supply_profile_id_from_idn("Rohde&Schwarz,HMP4040,123456,HW1.0/SW3.0")
@@ -6903,6 +6941,69 @@ def test_current_sweep_ramp_uses_elapsed_time_and_milliamp_resolution(
 
         assert window._handle_current_sweep_step(step, 4) is True
         assert supply.commands == [1.0, 2.0, 3.0]
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_ramp_tells_shared_controller_the_recipe_ramp_rate(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+            self.ramp_rates: list[float | None] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def set_current_ramp_rate_mA_s(self, rate_mA_s: float | None) -> None:
+            self.ramp_rates.append(rate_mA_s)
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def initialize_output(self, *, current_mA: float, reset_on_start: bool) -> None:
+            self.commands.append(current_mA)
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._seek_distribution_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+    ticks = iter([100.0, 100.0, 100.25])
+
+    def _fake_monotonic() -> float:
+        try:
+            return next(ticks)
+        except StopIteration:
+            return 100.25
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=3.0,
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        current_start_mA=1.0,
+        current_end_mA=2.0,
+        current_ramp_rate_mA_s=1.0,
+    )
+
+    try:
+        assert window._handle_current_sweep_step(step, 4) is False
+        assert window._handle_current_sweep_step(step, 4) is False
+        assert supply.commands == pytest.approx([1.0, 1.2])
+        assert supply.ramp_rates == [1.0]
     finally:
         _close_test_window(window)
 
@@ -8316,6 +8417,7 @@ def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_
 
         def __init__(self) -> None:
             self.commands: list[float] = []
+            self.ramp_rates: list[float | None] = []
 
         def is_connected(self) -> bool:
             return True
@@ -8325,6 +8427,9 @@ def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_
 
         def set_current_mA(self, current_mA: float) -> None:
             self.commands.append(current_mA)
+
+        def set_current_ramp_rate_mA_s(self, rate_mA_s: float | None) -> None:
+            self.ramp_rates.append(rate_mA_s)
 
         def initialize_output(self, *, current_mA: float, reset_on_start: bool) -> None:
             self.commands.append(current_mA)
@@ -8379,6 +8484,7 @@ def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_
 
         assert window._handle_current_sweep_step(step, 4) is True
         assert supply.commands == [3.0, 2.0]
+        assert supply.ramp_rates == [None]
         assert window._supply_last_setpoint_mA == pytest.approx(2.0)
         assert "reversing recipe current back to the sweep start current" in window.log_output.toPlainText()
     finally:
@@ -8980,7 +9086,7 @@ def test_current_sweep_length_setup_starts_continuity_current(tmp_path: Path, qt
         _close_test_window(window)
 
 
-def test_hmp4030_initial_current_command_preserves_sub_milliamp_resolution() -> None:
+def test_hmp_initial_current_command_clamps_to_measured_positive_floor() -> None:
     written: list[bytes] = []
 
     class _FakePort:
@@ -9005,7 +9111,29 @@ def test_hmp4030_initial_current_command_preserves_sub_milliamp_resolution() -> 
 
     controller.initialize_output(current_mA=0.2, reset_on_start=False)
 
-    assert b"CURR 0.0002\n" in written
+    assert b"CURR 0.0010\n" in written
+
+
+def test_supply_controllers_quantize_zero_and_positive_current_floor() -> None:
+    direct = mini_dma_mod.PowerSupplyController(
+        port_name="COM3",
+        baudrate=115200,
+        profile_id="hmp4040",
+        max_voltage_v=5.0,
+    )
+    shared = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=5.0,
+        current_channel=4,
+        motor_channel=3,
+    )
+
+    assert direct.quantize_current_mA(0.0) == pytest.approx(0.0)
+    assert direct.quantize_current_mA(0.2) == pytest.approx(1.0)
+    assert direct.quantize_current_mA(1.2) == pytest.approx(1.2)
+    assert shared.quantize_current_mA(0.2) == pytest.approx(1.0)
+    assert shared.quantize_current_mA(1.2) == pytest.approx(1.2)
 
 
 def test_supply_shutdown_turns_output_off_and_resets_current_channel() -> None:
@@ -9185,6 +9313,209 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
         ("release", {"channel": 4, "lease_id": "lease-4"}),
         ("release", {"channel": 3, "lease_id": "lease-3"}),
     ]
+
+
+def test_shared_broker_supply_controller_uses_scheduler_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
+            return {"lease_id": f"lease-{channel}"}
+
+        def configure_channel(
+            self,
+            *,
+            channel: int,
+            lease_id: str,
+            voltage_v: float,
+            current_a: float,
+            output_on: bool,
+        ) -> None:
+            self.calls.append(
+                (
+                    "configure_channel",
+                    {
+                        "channel": channel,
+                        "lease_id": lease_id,
+                        "voltage_v": voltage_v,
+                        "current_a": current_a,
+                        "output_on": output_on,
+                    },
+                )
+            )
+
+        def configure_polling(self, *, channel: int, interval_s: float) -> None:
+            self.calls.append(("configure_polling", {"channel": channel, "interval_s": interval_s}))
+
+        def start_scheduler(self, *, tick_s: float = 0.05) -> None:
+            self.calls.append(("start_scheduler", {"tick_s": tick_s}))
+
+        def schedule_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+            self.calls.append(
+                ("schedule_current", {"channel": channel, "lease_id": lease_id, "current_mA": current_mA})
+            )
+
+        def latest_readback(
+            self,
+            *,
+            channel: int,
+            max_age_s: float | None = None,
+            fallback_to_measure: bool = True,
+        ) -> dict[str, float | None]:
+            self.calls.append(
+                (
+                    "latest_readback",
+                    {
+                        "channel": channel,
+                        "max_age_s": max_age_s,
+                        "fallback_to_measure": fallback_to_measure,
+                    },
+                )
+            )
+            return {"voltage_V": 0.5, "current_mA": 10.0}
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=1.0,
+        current_channel=4,
+        motor_channel=3,
+    )
+
+    controller.connect()
+    controller.initialize_output(current_mA=10.0, reset_on_start=True)
+    controller.set_current_mA(10.4)
+    readback = controller.measure()
+
+    assert readback["current_mA"] == pytest.approx(10.0)
+    assert ("configure_polling", {"channel": 4, "interval_s": 1.0}) in clients[0].calls
+    assert ("start_scheduler", {"tick_s": 0.05}) in clients[0].calls
+    assert ("schedule_current", {"channel": 4, "lease_id": "lease-4", "current_mA": 10.4}) in clients[0].calls
+    assert (
+        "latest_readback",
+        {"channel": 4, "max_age_s": 2.5, "fallback_to_measure": True},
+    ) in clients[0].calls
+
+
+def test_shared_broker_supply_controller_uses_rate_limited_ramp_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            return {"ok": True, "snapshot": {"model": "hmp4040"}}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
+            return {"lease_id": f"lease-{channel}"}
+
+        def configure_channel(
+            self,
+            *,
+            channel: int,
+            lease_id: str,
+            voltage_v: float,
+            current_a: float,
+            output_on: bool,
+        ) -> None:
+            self.calls.append(
+                (
+                    "configure_channel",
+                    {
+                        "channel": channel,
+                        "lease_id": lease_id,
+                        "voltage_v": voltage_v,
+                        "current_a": current_a,
+                        "output_on": output_on,
+                    },
+                )
+            )
+
+        def configure_polling(self, *, channel: int, interval_s: float) -> None:
+            self.calls.append(("configure_polling", {"channel": channel, "interval_s": interval_s}))
+
+        def start_scheduler(self, *, tick_s: float = 0.05) -> None:
+            self.calls.append(("start_scheduler", {"tick_s": tick_s}))
+
+        def schedule_current_ramp(
+            self,
+            *,
+            channel: int,
+            lease_id: str,
+            target_mA: float,
+            rate_mA_s: float,
+            max_step_mA: float,
+            resolution_mA: float,
+        ) -> None:
+            self.calls.append(
+                (
+                    "schedule_current_ramp",
+                    {
+                        "channel": channel,
+                        "lease_id": lease_id,
+                        "target_mA": target_mA,
+                        "rate_mA_s": rate_mA_s,
+                        "max_step_mA": max_step_mA,
+                        "resolution_mA": resolution_mA,
+                    },
+                )
+            )
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=1.0,
+        current_channel=4,
+        motor_channel=3,
+    )
+
+    controller.connect()
+    controller.initialize_output(current_mA=10.0, reset_on_start=True)
+    controller.set_current_ramp_rate_mA_s(1.0)
+    controller.set_current_mA(10.4)
+
+    assert (
+        "schedule_current_ramp",
+        {
+            "channel": 4,
+            "lease_id": "lease-4",
+            "target_mA": 10.4,
+            "rate_mA_s": 1.0,
+            "max_step_mA": 0.2,
+            "resolution_mA": 0.2,
+        },
+    ) in clients[0].calls
 
 
 def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, qtbot) -> None:
@@ -14451,12 +14782,16 @@ def test_manual_recipe_stop_turns_current_off_and_keeps_resume_state(tmp_path: P
     class _FakeSupply:
         def __init__(self) -> None:
             self.off_count = 0
+            self.ramp_rates: list[float | None] = []
 
         def is_connected(self) -> bool:
             return True
 
         def output_off(self) -> None:
             self.off_count += 1
+
+        def set_current_ramp_rate_mA_s(self, rate_mA_s: float | None) -> None:
+            self.ramp_rates.append(rate_mA_s)
 
         def disconnect(self) -> None:
             return None
@@ -14489,6 +14824,7 @@ def test_manual_recipe_stop_turns_current_off_and_keeps_resume_state(tmp_path: P
         window._stop_auto_ramp(user_initiated=True)
 
         assert supply.off_count == 1
+        assert supply.ramp_rates == [None]
         assert window._supply_output_enabled is False
         assert window._resume_recipe_state is not None
         assert window._resume_recipe_state.index == 1
@@ -15200,8 +15536,12 @@ def test_session_metadata_keeps_original_created_timestamp(
 
         window._write_session_metadata()
         second_payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert window._session_metadata_sidecar_path is not None
+        sidecar_payload = json.loads(window._session_metadata_sidecar_path.read_text(encoding="utf-8"))
 
         assert first_payload["created_utc"] == second_payload["created_utc"]
+        assert sidecar_payload == second_payload
+        assert second_payload["logging"]["metadata_sidecar_json"] == "metadata/metadata_smoke/metadata.json"
         window._stop_session()
     finally:
         _close_test_window(window)
@@ -15395,12 +15735,20 @@ def test_session_stop_recovers_metadata_when_output_folder_was_moved(
         recovery_dirs = list(recovery_root.glob("MiniDMA_recovered_*"))
         assert len(recovery_dirs) == 1
         recovered_metadata = json.loads((recovery_dirs[0] / "metadata.json").read_text(encoding="utf-8"))
+        recovery_sidecar_path = recovery_root / "metadata" / recovery_dirs[0].name / "metadata.json"
+        assert recovery_sidecar_path.exists()
+        recovered_sidecar_metadata = json.loads(recovery_sidecar_path.read_text(encoding="utf-8"))
         with (recovery_dirs[0] / "measurement.csv").open("r", encoding="utf-8", newline="") as handle:
             recovered_rows = list(csv.DictReader(handle))
         assert recovered_metadata["session_state"] == "finished"
+        assert recovered_sidecar_metadata == recovered_metadata
         assert recovered_metadata["point_count"] == 1
         assert recovered_metadata["stop"]["reason"] == "recipe_control_stop"
         assert recovered_metadata["recovery"]["reason"] == "metadata_write_failed"
+        assert (
+            recovered_metadata["logging"]["metadata_sidecar_json"]
+            == f"metadata/{recovery_dirs[0].name}/metadata.json"
+        )
         assert len(recovered_rows) == 1
         assert recovered_rows[0]["stress_mpa"] == "12.300000"
         assert "Emergency session recovery saved" in window.log_output.toPlainText()
@@ -15860,6 +16208,43 @@ def test_auto_detect_supply_port_applies_detected_settings(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_auto_detect_scale_port_blocks_nonpreferred_baud(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        monkeypatch.setattr(
+            mini_dma_mod.list_ports,
+            "comports",
+            lambda: [SimpleNamespace(device="COM6", description="G&G scale")],
+        )
+
+        def _probe_scale(port_name: str):
+            return {
+                "port": port_name,
+                "baudrate": 600,
+                "request_command": "\\x1bp",
+                "terminator": "",
+                "raw_text": "21.210 g",
+            }
+
+        monkeypatch.setattr(window, "_probe_scale_candidate", _probe_scale)
+
+        window._refresh_scale_ports()
+        detected = window._auto_detect_scale_port(show_errors=False)
+
+        assert detected is False
+        assert window.combo_scale_port.currentData() == "COM6"
+        assert window.combo_scale_baud.currentText() == "600"
+        assert "preferred baud rate is 9600" in window.log_output.toPlainText()
+        assert "scale settings" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_auto_detect_tic_sets_path_and_serial(tmp_path: Path, qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -15882,6 +16267,48 @@ def test_auto_detect_tic_sets_path_and_serial(tmp_path: Path, qtbot, monkeypatch
         assert detected is True
         assert window.edit_ticcmd_path.text() == r"C:\\tools\\ticcmd.exe"
         assert window.edit_tic_serial.text() == "00501366"
+    finally:
+        _close_test_window(window)
+
+
+def test_session_metadata_records_hardware_backend_details(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM6 - scale", "COM6")
+        window.combo_scale_port.setCurrentIndex(0)
+        window.combo_scale_baud.setCurrentText("9600")
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.combo_supply_port.clear()
+        window.combo_supply_port.addItem("COM3 - HMP4040", "COM3")
+        window.combo_supply_port.setCurrentIndex(0)
+        window.combo_supply_baud.setCurrentText("115200")
+        window.edit_shared_broker_host.setText("127.0.0.1")
+        window.spin_shared_broker_port.setValue(8765)
+        window._owned_shared_broker_server = object()
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.check_motor_supply_power.setChecked(True)
+        window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+        window.check_tic_native_usb.setChecked(True)
+        window.edit_tic_serial.setText("00501366")
+
+        payload = window._session_metadata()
+
+        assert payload["scale"]["preferred_baud"] == 9600
+        assert payload["scale"]["baud_is_preferred"] is True
+        assert payload["heating"]["shared_broker"] is True
+        assert payload["heating"]["broker_source"] == "owned"
+        assert payload["heating"]["broker_host"] == "127.0.0.1"
+        assert payload["heating"]["broker_port"] == 8765
+        assert payload["heating"]["current_sweep_channel"] == 4
+        assert payload["heating"]["motor_supply_channel"] == 3
+        assert payload["tic"]["native_usb_required_for_recipes"] is True
+        assert payload["tic"]["native_usb_preferred"] is True
+        assert payload["tic"]["serial"] == "00501366"
     finally:
         _close_test_window(window)
 

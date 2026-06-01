@@ -30,6 +30,12 @@ class BrokerTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         super().__init__(address, BrokerRequestHandler)
         self.broker = broker
 
+    def server_close(self) -> None:
+        try:
+            self.broker.stop_scheduler()
+        finally:
+            super().server_close()
+
     def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action") or "")
         broker = self.broker
@@ -87,6 +93,52 @@ class BrokerTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             return {"ok": True, "output_on": broker.output_state(channel=int(request["channel"]))}
         if action == "measure_channel":
             return {"ok": True, "readback": broker.measure_channel(channel=int(request["channel"]))}
+        if action == "configure_polling":
+            broker.configure_polling(
+                channel=int(request["channel"]),
+                interval_s=float(request["interval_s"]),
+            )
+            return {"ok": True}
+        if action == "disable_polling":
+            broker.disable_polling(channel=int(request["channel"]))
+            return {"ok": True}
+        if action == "schedule_current":
+            broker.schedule_current(
+                channel=int(request["channel"]),
+                lease_id=str(request["lease_id"]),
+                current_mA=float(request["current_mA"]),
+            )
+            return {"ok": True}
+        if action == "schedule_current_ramp":
+            broker.schedule_current_ramp(
+                channel=int(request["channel"]),
+                lease_id=str(request["lease_id"]),
+                target_mA=float(request["target_mA"]),
+                rate_mA_s=float(request["rate_mA_s"]),
+                max_step_mA=(
+                    None if request.get("max_step_mA") is None else float(request["max_step_mA"])
+                ),
+                resolution_mA=(
+                    None if request.get("resolution_mA") is None else float(request["resolution_mA"])
+                ),
+            )
+            return {"ok": True}
+        if action == "latest_readback":
+            max_age = request.get("max_age_s")
+            return {
+                "ok": True,
+                "readback": broker.latest_readback(
+                    channel=int(request["channel"]),
+                    max_age_s=None if max_age is None else float(max_age),
+                    fallback_to_measure=bool(request.get("fallback_to_measure", True)),
+                ),
+            }
+        if action == "start_scheduler":
+            broker.start_scheduler(tick_s=float(request.get("tick_s", 0.05)))
+            return {"ok": True}
+        if action == "stop_scheduler":
+            broker.stop_scheduler()
+            return {"ok": True}
         if action == "snapshot":
             return {"ok": True, "snapshot": broker.snapshot()}
         raise ValueError(f"Unsupported broker action: {action}")
@@ -107,13 +159,14 @@ def start_broker_server(
 class BrokerJsonClient:
     """Small JSON-line client for the local shared HMP broker."""
 
-    def __init__(self, *, host: str = "127.0.0.1", port: int) -> None:
+    def __init__(self, *, host: str = "127.0.0.1", port: int, timeout_s: float = 8.0) -> None:
         self.host = str(host or "127.0.0.1")
         self.port = int(port)
+        self.timeout_s = float(timeout_s)
 
     def request(self, action: str, **payload: Any) -> dict[str, Any]:
         request = {"action": action, **payload}
-        with socket.create_connection((self.host, self.port), timeout=2.0) as client:
+        with socket.create_connection((self.host, self.port), timeout=self.timeout_s) as client:
             client.sendall((json.dumps(request) + "\n").encode("utf-8"))
             chunks: list[bytes] = []
             while True:
@@ -164,3 +217,57 @@ class BrokerJsonClient:
 
     def measure_channel(self, *, channel: int) -> dict[str, float | None]:
         return dict(self.request("measure_channel", channel=channel)["readback"])
+
+    def configure_polling(self, *, channel: int, interval_s: float) -> None:
+        self.request("configure_polling", channel=channel, interval_s=interval_s)
+
+    def disable_polling(self, *, channel: int) -> None:
+        self.request("disable_polling", channel=channel)
+
+    def schedule_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+        self.request("schedule_current", channel=channel, lease_id=lease_id, current_mA=current_mA)
+
+    def schedule_current_ramp(
+        self,
+        *,
+        channel: int,
+        lease_id: str,
+        target_mA: float,
+        rate_mA_s: float,
+        max_step_mA: float | None = None,
+        resolution_mA: float | None = None,
+    ) -> None:
+        self.request(
+            "schedule_current_ramp",
+            channel=channel,
+            lease_id=lease_id,
+            target_mA=target_mA,
+            rate_mA_s=rate_mA_s,
+            max_step_mA=max_step_mA,
+            resolution_mA=resolution_mA,
+        )
+
+    def latest_readback(
+        self,
+        *,
+        channel: int,
+        max_age_s: float | None = None,
+        fallback_to_measure: bool = True,
+    ) -> dict[str, Any]:
+        return dict(
+            self.request(
+                "latest_readback",
+                channel=channel,
+                max_age_s=max_age_s,
+                fallback_to_measure=fallback_to_measure,
+            )["readback"]
+        )
+
+    def start_scheduler(self, *, tick_s: float = 0.05) -> None:
+        self.request("start_scheduler", tick_s=tick_s)
+
+    def stop_scheduler(self) -> None:
+        self.request("stop_scheduler")
+
+    def snapshot(self) -> dict[str, Any]:
+        return dict(self.request("snapshot")["snapshot"])

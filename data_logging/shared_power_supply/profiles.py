@@ -12,6 +12,7 @@ class SupplyProfile:
     channel_count: int
     max_voltage_v: float
     current_resolution_mA: float
+    min_current_mA: float = 1.0
     baudrate: int = 115200
 
     def validate_channel(self, channel: int) -> int:
@@ -22,6 +23,16 @@ class SupplyProfile:
                 f"valid channels are CH1-CH{self.channel_count}."
             )
         return channel
+
+    def normalize_current_mA(self, current_mA: float) -> float:
+        """Return the positive current setpoint this supply can actually accept."""
+
+        current = max(0.0, float(current_mA))
+        if current <= 0.0:
+            return 0.0
+        resolution = max(0.001, float(self.current_resolution_mA))
+        quantized = round(current / resolution) * resolution
+        return max(float(self.min_current_mA), quantized)
 
 
 HMP4030_PROFILE = SupplyProfile(

@@ -1,0 +1,18 @@
+2026-05-29 11:45
+- Current Annealing now reverses or stops immediately at the configured maximum current instead of running the legacy hidden hold-current phase.
+- Current Annealing voltage-limit handling now ignores obsolete saved `hold` actions and reverses to zero instead of holding current.
+- New Current Annealing metadata no longer writes the obsolete `hold_duration_s` field.
+- Removed the dormant Current Annealing hold-current timer and handlers so hidden legacy controls cannot affect runtime behavior.
+- Removed the obsolete hidden Current Annealing hold-current UI widgets instead of keeping invisible compatibility controls in the process panel.
+- Current Annealing metadata now preserves decimal current ramp rates such as `0.2 mA/s` instead of truncating them to integer `step_mA` values.
+- Current Annealing metadata now records a best-effort source-control snapshot so later run reviews can identify the branch, commit, dirty state, and origin URL.
+- Shared HMP output-off now cancels queued current and ramp work for that channel so no scheduled setpoints are applied after an app turns its output off.
+- Current Annealing and Mini DMA pyqtgraph dashboards now keep frame axes visible while disabling dashboard gridlines consistently.
+- Mini DMA now mirrors each run's `metadata.json` under `metadata/<run-folder>/metadata.json` beside the run folders, matching the metadata-only browsing layout used by Current Annealing while keeping the existing run-folder metadata file.
+- Mini DMA automation indexing now reads the mirrored `metadata/<run-folder>/metadata.json` tree, including metadata-only recovered runs, while deduplicating normal run folders.
+- Added a Current Annealing metadata indexer that scans `metadata/<data-file-stem>/metadata.json` sidecars and writes CSV/JSONL summaries for run review.
+- The launcher CLI now exposes Mini DMA and Current Annealing metadata indexing commands so run review indexes are discoverable through `launcher.py --help`.
+- A single launcher metadata-index command can now build Mini DMA and Current Annealing indexes together when both source flags are provided.
+- Current Annealing shared-broker mode now keeps broker endpoint and HMP COM/baud controls behind an advanced disclosure so the main hardware panel stays focused on supply, channel, and connect state.
+- Current Annealing shared-broker mode now hides the whole-instrument reset checkbox because broker startup only configures the leased channel.
+- Current Annealing start auto-connect now exposes a tested progress dialog while shared-broker hardware is being connected.

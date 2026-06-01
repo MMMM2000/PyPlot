@@ -17,6 +17,8 @@ Mini DMA intentionally has no profile-default output channel. Before using suppl
 ## Preconditions
 
 - Confirm no Mini DMA recipe or Current Annealing process is already running.
+- Coordinate Codex/hardware automation threads with the shared bench guard before touching the HMP. Use `python scripts/hmp_bench_guard.py status --probe` to inspect the default shared lock at `C:\tmp\pyplot_hmp_bench.lock`, the HMP readback state, and the `electrically_idle` flag. A free lock is not enough by itself: if any shared channel is already ON, or its output state is unknown, wait instead of taking over the bench. Use `python scripts/hmp_bench_guard.py acquire --owner <thread-or-user> --purpose "<test>" --timeout <seconds>` when a script needs a short exclusive hardware window. Mini DMA bench automation takes this lock automatically for execute-mode plans unless the plan explicitly sets `"bench_lock": {"enabled": false}`.
+- For a guarded no-motion shared-HMP smoke, use `python scripts/hmp_shared_live_smoke.py --wait-seconds 600`. If the Mini DMA motor rail is intentionally already powered, use `--allow-existing-motor-rail`; in that mode CH3 may already be ON as the motor-supply rail, while CH1 and CH4 must still be OFF before the smoke touches them. The script acquires the shared lock, briefly exercises CH1 low current and CH4 low current, checks or enables CH3 depending on its starting state, and preserves a pre-existing CH3 motor-rail ON state during cleanup.
 - Confirm HMP4040 is on `COM3` at `115200` baud.
 - Confirm the Current Annealing wire is connected to CH1 before any CH1 current test.
 - Confirm whether the Mini DMA current path is connected to CH4. If no wire/sample is connected, keep CH4 at a low voltage limit and treat the expected result as open-circuit behavior.
@@ -99,8 +101,8 @@ Expected no-wire behavior:
 
 Pass criteria:
 
-- `metadata.json` says `heating.profile == "shared_hmp_broker"`.
-- `metadata.json` says current-sweep channel `4`.
+- `metadata.json` says `supply.profile_id == "shared_hmp_broker"`.
+- `metadata.json` says `supply.channel == 4`.
 - `measurement.csv` contains rows with voltage/resistance/power fields present.
 - CH4 is off and lease-free after stop.
 
@@ -195,13 +197,16 @@ Current Annealing:
 
 - Output file path and row count.
 - Current, voltage, and resistance ranges.
+- `metadata/<data-file-stem>/metadata.json`: `supply.profile_id`, `supply.channel`, `supply.voltage_limit_v`, `supply.current_resolution_mA`, `supply.min_positive_current_mA`, `supply.broker_source`, and `recipe.current_ramp_rate_mA_s`.
+- Optional metadata index: run `launcher.py --current-annealing-index-source annealing=<output-root> --current-annealing-index-output-dir <review-folder>` to write `current_annealing_index.csv` and `.jsonl` from the metadata sidecar tree.
 
 Mini DMA:
 
-- `metadata.json`: `heating.profile`, current channel, motor channel, motor supply enabled flag, voltage limit, session state, point count.
+- `metadata.json`: shared-HMP heating/supply profile, current channel, motor channel, motor supply enabled flag, voltage limit, session state, point count.
 - `measurement.csv`: row count, current setpoint, measured current, voltage, resistance, power.
 - `control_trace.csv`: row count and any wait/correction/hold/fault phases.
 - Optional `ui_telemetry.csv`: session/plot heartbeat when diagnosing UI responsiveness.
+- Optional metadata index: run `launcher.py --mini-dma-index-source mini=<output-root> --mini-dma-index-output-dir <review-folder>` to write `runs_index.csv` and `.jsonl`.
 
 HMP final state:
 

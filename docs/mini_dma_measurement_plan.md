@@ -36,7 +36,7 @@ Use copper wire first, with conservative settings.
 6. Use tiny jogs to verify the load sign and motion direction. On the current rig, negative raw scale readings are treated as positive tensile load, so users should still type positive load targets.
 7. Let `Start recipe (auto-connect)` preflight the scale and supply. For iso-load, iso-stress, and iso-strain current sweeps, the recipe controls current directly.
 8. Run the current sweep below the copper-wire safety limit.
-9. If the same base filename already exists, use `Save as next run` to keep the prior run folder and write the next `_run02`, `_run03`, and later repeat folder. Each folder contains `measurement.txt`, `measurement.csv`, `metadata.json`, `scale_raw.csv`, `setup.txt`, and `setup.csv`.
+9. If the same base filename already exists, use `Save as next run` to keep the prior run folder and write the next `_run02`, `_run03`, and later repeat folder. Each folder contains `measurement.txt`, `measurement.csv`, `metadata.json`, `scale_raw.csv`, `setup.txt`, and `setup.csv`. A duplicate metadata sidecar is also written beside the run folders at `metadata/<run-folder>/metadata.json`.
 10. If the max-load safety limit is exceeded during setup, only tension-increasing moves are blocked; use the relaxing manual arrow to back away from the limit.
 11. Stop the session and inspect CSV columns before using a microwire.
 
