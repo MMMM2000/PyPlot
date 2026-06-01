@@ -85,6 +85,7 @@ CONTROL_LOGIC_FEATURES = [
     "voltage_limit_defers_to_current_hold",
     "voltage_limit_unwind_keeps_shortened_return_leg",
     "voltage_limit_preserves_rate_limited_nominal_return",
+    "voltage_limit_unwind_obeys_current_hold",
     "wire_break_recovery_prompt_ui_thread",
     "current_sweep_mechanical_load_loss_guard",
     "fault_stop_metadata_preserved_on_app_close",
@@ -17670,6 +17671,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _resume_current_sweep_ramp_from_hold(self, *, now_s: float, reason: str) -> None:
         held_s = max(0.0, float(now_s) - self._current_sweep_ramp_hold_started_s)
         self._active_current_sweep_started_s += held_s
+        if (
+            self._current_sweep_voltage_limit_step_index
+            == self._current_sweep_ramp_hold_step_index
+            and self._current_sweep_voltage_limit_started_s is not None
+        ):
+            self._current_sweep_voltage_limit_started_s += held_s
         self._active_current_sweep_last_schedule_update_s = float(now_s)
         if self._active_current_sweep_display_direction > 0.0:
             self._current_sweep_post_hold_throttle_until_s = float(now_s) + max(
@@ -18032,6 +18039,53 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_ramp_hold_in_band_since_s = None
         return True, False
 
+    def _handle_current_sweep_held_recovery(
+        self,
+        step: AutomationStep,
+        *,
+        plateau_index: int | None,
+        tolerance: float,
+    ) -> bool:
+        self._set_automation_context(
+            phase="current_hold",
+            basis=step.basis,
+            target_value=step.target_value,
+            plateau_index=plateau_index,
+        )
+        point_count_before_seek = len(self._session_points)
+        try:
+            target_recovered = self._seek_distribution_target(step.basis, step.target_value, tolerance)
+        except Exception as exc:
+            self._log(f"Recipe stopped: {exc}")
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return True
+        if target_recovered:
+            recovered_s = time.monotonic()
+            if self._current_sweep_ramp_hold_seek_accepted_since_s is None:
+                self._current_sweep_ramp_hold_seek_accepted_since_s = recovered_s
+            stable_s = self._current_sweep_hold_resume_stable_s(step)
+            if recovered_s - self._current_sweep_ramp_hold_seek_accepted_since_s >= stable_s:
+                self._resume_current_sweep_ramp_from_hold(
+                    now_s=recovered_s,
+                    reason=(
+                        "held-current recovery seek stayed accepted for "
+                        f"{stable_s:.2f} s"
+                    ),
+                )
+            else:
+                self._log_waiting_for_feedback(
+                    "Held-current recovery reached the target; confirming stable recovery before resuming current."
+                )
+        else:
+            self._current_sweep_ramp_hold_seek_accepted_since_s = None
+        if len(self._session_points) == point_count_before_seek:
+            self._maybe_record_scheduled_point(
+                quiet=True,
+                advance_heating=False,
+                require_fresh_after_move=step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA},
+            )
+        return False
+
     def _handle_current_sweep_voltage_unwind(
         self,
         step: AutomationStep,
@@ -18043,7 +18097,29 @@ class MainWindow(QtWidgets.QMainWindow):
         start_mA = max(target_mA, self._current_sweep_voltage_limit_start_mA)
         if self._current_sweep_voltage_limit_started_s is None:
             self._current_sweep_voltage_limit_started_s = time.monotonic()
-        elapsed_s = max(0.0, time.monotonic() - self._current_sweep_voltage_limit_started_s)
+        plateau_index = int(step.note) if step.note.isdigit() else None
+        self._set_automation_context(
+            phase="current_limit_unwind",
+            basis=step.basis,
+            target_value=step.target_value,
+            plateau_index=plateau_index,
+        )
+        now_s = time.monotonic()
+        holding_current, stopped_for_hold = self._update_current_sweep_ramp_hold(
+            step,
+            step_index,
+            now_s=now_s,
+        )
+        if stopped_for_hold:
+            return True
+        tolerance = self._automation_tolerance_for_step(step)
+        if holding_current:
+            return self._handle_current_sweep_held_recovery(
+                step,
+                plateau_index=plateau_index,
+                tolerance=tolerance,
+            )
+        elapsed_s = max(0.0, now_s - self._current_sweep_voltage_limit_started_s)
         desired_mA = max(target_mA, start_mA - ramp_rate_mA_s * elapsed_s)
         setpoint_mA = self._quantize_ramp_current_mA(desired_mA, -1.0, target_mA)
         if desired_mA <= target_mA:
@@ -18057,14 +18133,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
             self._active_current_sweep_last_setpoint_mA = setpoint_mA
 
-        plateau_index = int(step.note) if step.note.isdigit() else None
-        self._set_automation_context(
-            phase="current_limit_unwind",
-            basis=step.basis,
-            target_value=step.target_value,
-            plateau_index=plateau_index,
-        )
-        tolerance = self._automation_tolerance_for_step(step)
         try:
             self._seek_distribution_target(step.basis, step.target_value, tolerance)
         except Exception as exc:
@@ -18303,45 +18371,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         tolerance = self._automation_tolerance_for_step(step)
         if holding_current:
-            self._set_automation_context(
-                phase="current_hold",
-                basis=step.basis,
-                target_value=step.target_value,
+            return self._handle_current_sweep_held_recovery(
+                step,
                 plateau_index=plateau_index,
+                tolerance=tolerance,
             )
-            point_count_before_seek = len(self._session_points)
-            try:
-                target_recovered = self._seek_distribution_target(step.basis, step.target_value, tolerance)
-            except Exception as exc:
-                self._log(f"Recipe stopped: {exc}")
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-                return True
-            if target_recovered:
-                recovered_s = time.monotonic()
-                if self._current_sweep_ramp_hold_seek_accepted_since_s is None:
-                    self._current_sweep_ramp_hold_seek_accepted_since_s = recovered_s
-                stable_s = self._current_sweep_hold_resume_stable_s(step)
-                if recovered_s - self._current_sweep_ramp_hold_seek_accepted_since_s >= stable_s:
-                    self._resume_current_sweep_ramp_from_hold(
-                        now_s=recovered_s,
-                        reason=(
-                            "held-current recovery seek stayed accepted for "
-                            f"{stable_s:.2f} s"
-                        ),
-                    )
-                else:
-                    self._log_waiting_for_feedback(
-                        "Held-current recovery reached the target; confirming stable recovery before resuming current."
-                    )
-            else:
-                self._current_sweep_ramp_hold_seek_accepted_since_s = None
-            if len(self._session_points) == point_count_before_seek:
-                self._maybe_record_scheduled_point(
-                    quiet=True,
-                    advance_heating=False,
-                    require_fresh_after_move=step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA},
-                )
-            return False
 
         elapsed_s = max(0.0, now_s - self._active_current_sweep_started_s)
         self._apply_current_sweep_post_hold_ramp_throttle(now_s=now_s)

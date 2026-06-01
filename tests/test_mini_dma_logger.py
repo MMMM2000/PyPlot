@@ -8306,6 +8306,101 @@ def test_current_sweep_voltage_limit_keeps_current_hold_active(tmp_path: Path, q
         _close_test_window(window)
 
 
+def test_voltage_limit_unwind_holds_current_when_target_load_collapses(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(float(current_mA))
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    seeks: list[tuple[str | None, float | None, float]] = []
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._active_current_sweep_step_index = 4
+    window._active_current_sweep_started_s = 100.0
+    window._active_current_sweep_wall_started_s = 100.0
+    window._active_current_sweep_last_schedule_update_s = 100.0
+    window._active_current_sweep_last_setpoint_mA = 60.0
+    window._active_current_sweep_display_direction = -1.0
+    window._current_sweep_voltage_limit_step_index = 4
+    window._current_sweep_voltage_limit_started_s = 100.0
+    window._current_sweep_voltage_limit_start_mA = 60.0
+    window._current_sweep_target_error_and_tolerance = lambda *_args, **_kwargs: (-50.0, 50.0, 1.0, 0.0)  # type: ignore[method-assign]
+    window._current_sweep_hold_entry_confirmed = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._seek_distribution_target = lambda basis, target, tolerance: seeks.append((basis, target, tolerance)) or False  # type: ignore[method-assign]
+    window._maybe_record_scheduled_point = lambda **_kwargs: None  # type: ignore[method-assign]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 105.0)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=70.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=1.0,
+        current_hold_resume_tolerance_factor=0.5,
+        current_hold_resume_stable_s=0.0,
+        note="4",
+    )
+
+    try:
+        assert window._handle_current_sweep_step(step, 4) is False
+
+        assert supply.commands == []
+        assert window._current_sweep_ramp_hold_step_index == 4
+        assert window._current_sweep_voltage_limit_step_index == 4
+        assert seeks == [
+            (
+                mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                50.0,
+                pytest.approx(window._automation_tolerance_for_step(step)),
+            )
+        ]
+        assert "Holding current ramp at 60.000 mA" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_pauses_voltage_limit_unwind_schedule(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._active_current_sweep_started_s = 90.0
+        window._current_sweep_voltage_limit_step_index = 4
+        window._current_sweep_voltage_limit_started_s = 90.0
+        window._current_sweep_ramp_hold_step_index = 4
+        window._current_sweep_ramp_hold_started_s = 100.0
+
+        window._resume_current_sweep_ramp_from_hold(now_s=105.0, reason="test")
+
+        assert window._active_current_sweep_started_s == pytest.approx(95.0)
+        assert window._current_sweep_voltage_limit_started_s == pytest.approx(95.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_open_circuit_zero_current_stops_recipe_and_offers_recovery(
     tmp_path: Path,
     qtbot,
