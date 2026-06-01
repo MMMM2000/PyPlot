@@ -1459,6 +1459,117 @@ class ProjectImportResult:
     matched_row: dict[str, Any]
 
 
+def _project_match_score_for_sample(
+    row: Mapping[str, Any],
+    *,
+    composition: str,
+    microwire: str,
+    specimen: str,
+) -> int:
+    score = 0
+    normalized_composition = _normalized_token(composition)
+    normalized_microwire = _normalized_microwire_token(microwire)
+    normalized_specimen = _normalized_token(specimen)
+    row_composition = _normalized_token(row.get("Composition"))
+    row_microwire = _normalized_microwire_token(_project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS))
+    row_specimen = _normalized_token(_project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS))
+    if normalized_composition and row_composition == normalized_composition:
+        score += 5
+    if normalized_microwire and row_microwire == normalized_microwire:
+        score += 5
+    if normalized_specimen and row_specimen == normalized_specimen:
+        score += 3
+    diameter = _safe_float(_project_row_value(row, PROJECT_ROW_DIAMETER_KEYS))
+    if diameter and diameter > 0:
+        score += 2
+    return score
+
+
+def _project_row_matches_sample(
+    row: Mapping[str, Any],
+    *,
+    composition: str,
+    microwire: str,
+    specimen: str,
+) -> bool:
+    normalized_composition = _normalized_token(composition)
+    normalized_microwire = _normalized_microwire_token(microwire)
+    normalized_specimen = _normalized_token(specimen)
+    row_composition = _normalized_token(row.get("Composition"))
+    row_microwire = _normalized_microwire_token(_project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS))
+    row_specimen = _normalized_token(_project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS))
+    if normalized_microwire:
+        return row_microwire == normalized_microwire and (
+            not normalized_composition or row_composition == normalized_composition
+        )
+    if normalized_composition and normalized_specimen:
+        return row_composition == normalized_composition and row_specimen == normalized_specimen
+    return False
+
+
+def _find_project_sample_in_payload(
+    payload: Any,
+    path: Path,
+    *,
+    composition: str,
+    microwire: str,
+    specimen: str,
+    require_current_sample_match: bool = False,
+) -> ProjectImportResult | None:
+    rows_by_section: list[tuple[str, list[Any]]] = []
+    if isinstance(payload, Mapping):
+        sections = payload.get("sections", {})
+        if isinstance(sections, Mapping):
+            preferred_sections = ("microscope", "assemble", "shape_memory_stress_strain")
+            for section_name in preferred_sections:
+                section_payload = sections.get(section_name)
+                if not isinstance(section_payload, Mapping):
+                    continue
+                rows = section_payload.get("rows")
+                if isinstance(rows, list):
+                    rows_by_section.append((section_name, rows))
+        top_level_rows = payload.get("rows")
+        if isinstance(top_level_rows, list):
+            rows_by_section.append(("rows", top_level_rows))
+    elif isinstance(payload, list):
+        rows_by_section.append(("rows", payload))
+    if not rows_by_section:
+        return None
+    best_score = -1
+    best_match: ProjectImportResult | None = None
+    for section_name, rows in rows_by_section:
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            if require_current_sample_match and not _project_row_matches_sample(
+                row,
+                composition=composition,
+                microwire=microwire,
+                specimen=specimen,
+            ):
+                continue
+            score = _project_match_score_for_sample(
+                row,
+                composition=composition,
+                microwire=microwire,
+                specimen=specimen,
+            )
+            if score < 0:
+                continue
+            diameter_um = _safe_float(_project_row_value(row, PROJECT_ROW_DIAMETER_KEYS))
+            current_mA = _safe_float(_project_row_value(row, PROJECT_ROW_CURRENT_KEYS))
+            if score > best_score:
+                best_score = score
+                best_match = ProjectImportResult(
+                    path=path,
+                    section=section_name,
+                    diameter_mm=None if diameter_um is None else diameter_um / 1000.0,
+                    current_mA=current_mA,
+                    matched_row=dict(row),
+                )
+    return best_match if best_score >= 0 else None
+
+
 @dataclass
 class FabricationSampleRecord:
     composition: str
@@ -2077,6 +2188,60 @@ class FabricationSuggestionWorker(QtCore.QObject):
     @QtCore.pyqtSlot()
     def cancel(self) -> None:
         self._cancel_event.set()
+
+
+class BuilderProjectImportWorker(QtCore.QObject):
+    succeeded = QtCore.pyqtSignal(object, object, object)
+    failed = QtCore.pyqtSignal(object, object, str)
+    no_match = QtCore.pyqtSignal(object, object)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        composition: str,
+        microwire: str,
+        specimen: str,
+        request_key: tuple[str, str, str, str],
+    ) -> None:
+        super().__init__()
+        self.path = path
+        self.composition = composition
+        self.microwire = microwire
+        self.specimen = specimen
+        self.request_key = request_key
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            path = self.path
+            if not path.exists():
+                self.failed.emit(path, self.request_key, "Builder project path is saved, but the file was not found.")
+                return
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                self.failed.emit(path, self.request_key, f"Failed to read saved project file: {exc}")
+                return
+            try:
+                match = _find_project_sample_in_payload(
+                    payload,
+                    path,
+                    composition=self.composition,
+                    microwire=self.microwire,
+                    specimen=self.specimen,
+                    require_current_sample_match=True,
+                )
+            except Exception as exc:
+                self.failed.emit(path, self.request_key, f"Failed to match current sample in project file: {exc}")
+                return
+            if match is None:
+                self.no_match.emit(path, self.request_key)
+                return
+            self.succeeded.emit(path, self.request_key, match)
+        finally:
+            self.finished.emit()
 
 
 class AutomationControlLoop:
@@ -3463,6 +3628,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preload_trigger_elapsed_s: float | None = None
         self._builder_project_path: Path | None = None
         self._builder_project_match: ProjectImportResult | None = None
+        self._builder_project_import_thread: QtCore.QThread | None = None
+        self._builder_project_import_worker: BuilderProjectImportWorker | None = None
+        self._builder_project_import_request_key: tuple[str, str, str, str] | None = None
         self._fabrication_folder_path: Path | None = None
         self._fabrication_records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
         self._fabrication_loaded_compositions: set[str] = set()
@@ -8579,36 +8747,20 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, APP_NAME, " ".join(message_lines))
 
     def _project_match_score(self, row: Mapping[str, Any]) -> int:
-        score = 0
-        composition = _normalized_token(self.edit_name_composition.text())
-        microwire = _normalized_microwire_token(self.edit_name_wire.text())
-        specimen = _normalized_token(self.edit_name_specimen.text())
-        row_composition = _normalized_token(row.get("Composition"))
-        row_microwire = _normalized_microwire_token(_project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS))
-        row_specimen = _normalized_token(_project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS))
-        if composition and row_composition == composition:
-            score += 5
-        if microwire and row_microwire == microwire:
-            score += 5
-        if specimen and row_specimen == specimen:
-            score += 3
-        diameter = _safe_float(_project_row_value(row, PROJECT_ROW_DIAMETER_KEYS))
-        if diameter and diameter > 0:
-            score += 2
-        return score
+        return _project_match_score_for_sample(
+            row,
+            composition=self.edit_name_composition.text(),
+            microwire=self.edit_name_wire.text(),
+            specimen=self.edit_name_specimen.text(),
+        )
 
     def _project_row_matches_current_sample(self, row: Mapping[str, Any]) -> bool:
-        composition = _normalized_token(self.edit_name_composition.text())
-        microwire = _normalized_microwire_token(self.edit_name_wire.text())
-        specimen = _normalized_token(self.edit_name_specimen.text())
-        row_composition = _normalized_token(row.get("Composition"))
-        row_microwire = _normalized_microwire_token(_project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS))
-        row_specimen = _normalized_token(_project_row_value(row, PROJECT_ROW_SPECIMEN_KEYS))
-        if microwire:
-            return row_microwire == microwire and (not composition or row_composition == composition)
-        if composition and specimen:
-            return row_composition == composition and row_specimen == specimen
-        return False
+        return _project_row_matches_sample(
+            row,
+            composition=self.edit_name_composition.text(),
+            microwire=self.edit_name_wire.text(),
+            specimen=self.edit_name_specimen.text(),
+        )
 
     def _find_project_sample(
         self,
@@ -8617,48 +8769,14 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         require_current_sample_match: bool = False,
     ) -> ProjectImportResult | None:
-        rows_by_section: list[tuple[str, list[Any]]] = []
-        if isinstance(payload, Mapping):
-            sections = payload.get("sections", {})
-            if isinstance(sections, Mapping):
-                preferred_sections = ("microscope", "assemble", "shape_memory_stress_strain")
-                for section_name in preferred_sections:
-                    section_payload = sections.get(section_name)
-                    if not isinstance(section_payload, Mapping):
-                        continue
-                    rows = section_payload.get("rows")
-                    if isinstance(rows, list):
-                        rows_by_section.append((section_name, rows))
-            top_level_rows = payload.get("rows")
-            if isinstance(top_level_rows, list):
-                rows_by_section.append(("rows", top_level_rows))
-        elif isinstance(payload, list):
-            rows_by_section.append(("rows", payload))
-        if not rows_by_section:
-            return None
-        best_score = -1
-        best_match: ProjectImportResult | None = None
-        for section_name, rows in rows_by_section:
-            for row in rows:
-                if not isinstance(row, Mapping):
-                    continue
-                if require_current_sample_match and not self._project_row_matches_current_sample(row):
-                    continue
-                score = self._project_match_score(row)
-                if score < 0:
-                    continue
-                diameter_um = _safe_float(_project_row_value(row, PROJECT_ROW_DIAMETER_KEYS))
-                current_mA = _safe_float(_project_row_value(row, PROJECT_ROW_CURRENT_KEYS))
-                if score > best_score:
-                    best_score = score
-                    best_match = ProjectImportResult(
-                        path=path,
-                        section=section_name,
-                        diameter_mm=None if diameter_um is None else diameter_um / 1000.0,
-                        current_mA=current_mA,
-                        matched_row=dict(row),
-                    )
-        return best_match if best_score >= 0 else None
+        return _find_project_sample_in_payload(
+            payload,
+            path,
+            composition=self.edit_name_composition.text(),
+            microwire=self.edit_name_wire.text(),
+            specimen=self.edit_name_specimen.text(),
+            require_current_sample_match=require_current_sample_match,
+        )
 
     def _apply_project_match(
         self,
@@ -8703,7 +8821,131 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_recipe_sample_label()
             self._refresh_equivalent_labels()
 
-    def _auto_import_builder_project_if_possible(self, *, update_identity: bool = False, quiet: bool = True) -> bool:
+    def _project_import_request_key(self, path: Path) -> tuple[str, str, str, str]:
+        return (
+            str(path),
+            self.edit_name_composition.text(),
+            self.edit_name_wire.text(),
+            self.edit_name_specimen.text(),
+        )
+
+    def _start_saved_builder_project_auto_import(self, path: Path, *, quiet: bool = True) -> bool:
+        if self._builder_project_import_thread is not None:
+            return False
+        request_key = self._project_import_request_key(path)
+        self._builder_project_import_request_key = request_key
+        self._builder_import_in_progress = True
+        self.label_project_status.setText(f"Loading saved Builder project in the background: {path.name}")
+        thread = QtCore.QThread(self)
+        worker = BuilderProjectImportWorker(
+            path,
+            composition=request_key[1],
+            microwire=request_key[2],
+            specimen=request_key[3],
+            request_key=request_key,
+        )
+        worker.moveToThread(thread)
+        worker.succeeded.connect(
+            lambda path_obj, key_obj, match_obj, quiet=quiet: self._handle_builder_project_auto_import_success(
+                path_obj,
+                key_obj,
+                match_obj,
+                quiet=quiet,
+            )
+        )
+        worker.failed.connect(self._handle_builder_project_auto_import_failure)
+        worker.no_match.connect(self._handle_builder_project_auto_import_no_match)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda thread=thread, worker=worker: self._finish_builder_project_import_thread(thread, worker))
+        thread.started.connect(worker.run)
+        self._builder_project_import_thread = thread
+        self._builder_project_import_worker = worker
+        thread.start()
+        return True
+
+    def _finish_builder_project_import_thread(
+        self,
+        thread: QtCore.QThread,
+        worker: BuilderProjectImportWorker,
+    ) -> None:
+        if self._builder_project_import_thread is thread:
+            self._builder_project_import_thread = None
+            self._builder_project_import_worker = None
+            self._builder_project_import_request_key = None
+            self._builder_import_in_progress = False
+        thread.deleteLater()
+
+    def _stop_builder_project_import_thread(self) -> None:
+        thread = self._builder_project_import_thread
+        self._builder_project_import_thread = None
+        self._builder_project_import_worker = None
+        self._builder_project_import_request_key = None
+        self._builder_import_in_progress = False
+        if thread is not None:
+            thread.quit()
+            thread.wait(1500)
+
+    def _builder_project_auto_import_is_current(
+        self,
+        path_obj: object,
+        key_obj: object,
+    ) -> bool:
+        if not isinstance(key_obj, tuple):
+            return False
+        path = Path(path_obj)
+        return (
+            self._builder_project_import_request_key == key_obj
+            and self._builder_project_path == path
+            and self._project_import_request_key(path) == key_obj
+        )
+
+    def _handle_builder_project_auto_import_success(
+        self,
+        path_obj: object,
+        key_obj: object,
+        match_obj: object,
+        *,
+        quiet: bool,
+    ) -> None:
+        if not self._builder_project_auto_import_is_current(path_obj, key_obj):
+            return
+        if not isinstance(match_obj, ProjectImportResult):
+            self._mark_diameter_imported(False)
+            self.label_project_status.setText("Failed to apply saved project sample match: invalid result.")
+            return
+        try:
+            self._apply_project_match(match_obj, update_identity=False, quiet=quiet)
+        except Exception as exc:
+            self._mark_diameter_imported(False)
+            self.label_project_status.setText(f"Failed to apply saved project sample match: {exc}")
+
+    def _handle_builder_project_auto_import_failure(
+        self,
+        path_obj: object,
+        key_obj: object,
+        message: str,
+    ) -> None:
+        if not self._builder_project_auto_import_is_current(path_obj, key_obj):
+            return
+        self._mark_diameter_imported(False)
+        self.label_project_status.setText(message)
+
+    def _handle_builder_project_auto_import_no_match(self, path_obj: object, key_obj: object) -> None:
+        if not self._builder_project_auto_import_is_current(path_obj, key_obj):
+            return
+        self._mark_diameter_imported(False)
+        self.label_project_status.setText(
+            "Project loaded, but no matching sample row was found from the current naming fields."
+        )
+
+    def _auto_import_builder_project_if_possible(
+        self,
+        *,
+        update_identity: bool = False,
+        quiet: bool = True,
+        async_load: bool = False,
+    ) -> bool:
         if self._builder_import_in_progress:
             return False
         path_text = self.edit_project_path.text().strip()
@@ -8716,6 +8958,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._mark_diameter_imported(False)
             self.label_project_status.setText("Builder project path is saved, but the file was not found.")
             return False
+        if async_load and not update_identity:
+            return self._start_saved_builder_project_auto_import(path, quiet=quiet)
         try:
             payload = self._read_builder_project_payload(path)
         except Exception as exc:
@@ -16731,7 +16975,19 @@ class MainWindow(QtWidgets.QMainWindow):
             return "Manual mode"
         if not self._automation_steps:
             return "Starting recipe"
-        step_index = min(max(0, self._automation_index), len(self._automation_steps) - 1)
+        active_step_indices = [
+            index
+            for index in (
+                self._active_current_sweep_step_index,
+                self._active_target_ramp_step_index,
+                self._active_timed_step_index,
+            )
+            if index is not None
+        ]
+        if active_step_indices:
+            step_index = min(max(0, min(active_step_indices)), len(self._automation_steps) - 1)
+        else:
+            step_index = min(max(0, self._automation_index), len(self._automation_steps) - 1)
         step = self._automation_steps[step_index]
         target_text = self._automation_target_text(step.basis, step.target_value)
 
@@ -17083,6 +17339,48 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         return changed_steps
 
+    def _active_current_sweep_step_update(
+        self,
+        values: Mapping[str, float | bool],
+        active_index: int,
+    ) -> tuple[AutomationStep | None, str]:
+        if not (0 <= active_index < len(self._automation_steps)):
+            return None, "no active current-sweep step is running"
+        step = self._automation_steps[active_index]
+        if step.action != "sweep_current":
+            return None, "the active step is not a current ramp"
+        if (
+            step.current_start_mA is None
+            or step.current_end_mA is None
+            or step.current_ramp_rate_mA_s is None
+        ):
+            return None, "the active current ramp is incomplete"
+
+        old_start = self._recipe_current_setpoint_mA(float(step.current_start_mA))
+        old_end = self._recipe_current_setpoint_mA(float(step.current_end_mA))
+        old_direction = 1.0 if old_end >= old_start else -1.0
+        new_end = (
+            self._recipe_current_setpoint_mA(float(values["current_end_mA"]))
+            if old_direction >= 0.0
+            else self._recipe_current_setpoint_mA(float(values["current_start_mA"]))
+        )
+        if math.isclose(new_end, old_end, rel_tol=1e-9, abs_tol=1e-9):
+            return None, "the active current target is already current"
+        if (new_end - old_start) * old_direction < -1e-9:
+            return None, "the edited current target reverses the active ramp direction"
+
+        active_setpoint = self._active_current_sweep_last_setpoint_mA
+        if active_setpoint is None:
+            active_setpoint = old_start
+        active_setpoint = self._recipe_current_setpoint_mA(float(active_setpoint))
+        if (new_end - active_setpoint) * old_direction < -1e-9:
+            return None, (
+                f"the active setpoint {_format_compact_unit(active_setpoint, 'mA')} "
+                f"is already beyond {_format_compact_unit(new_end, 'mA')}"
+            )
+
+        return replace(step, current_end_mA=new_end), "active current target updated"
+
     def _apply_current_sweep_pending_overrides(
         self,
         _checked: bool = False,
@@ -17102,6 +17400,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         values = self._current_sweep_override_values_from_controls()
         active_index = self._current_active_recipe_step_index()
+        active_sweep_index = self._active_current_sweep_step_index
+        if active_sweep_index is not None and 0 <= active_sweep_index < len(self._automation_steps):
+            active_index = active_sweep_index
         basis = self._current_sweep_runtime_basis(active_index)
         replacement_tail = self._build_runtime_current_sweep_tail(
             values,
@@ -17169,6 +17470,24 @@ class MainWindow(QtWidgets.QMainWindow):
                             }
                         )
 
+        active_step_updated = False
+        active_step_message = "no active current-sweep step was eligible"
+        active_update, active_step_message = self._active_current_sweep_step_update(values, active_index)
+        if active_update is not None:
+            old_active_summary = self._current_sweep_step_override_summary(self._automation_steps[active_index])
+            new_active_summary = self._current_sweep_step_override_summary(active_update)
+            if old_active_summary != new_active_summary:
+                updated_steps[active_index] = active_update
+                changed_steps.insert(
+                    0,
+                    {
+                        "index": active_index,
+                        "old": old_active_summary,
+                        "new": new_active_summary,
+                    },
+                )
+                active_step_updated = True
+
         if not changed_steps:
             if show_message:
                 QtWidgets.QMessageBox.information(
@@ -17191,6 +17510,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "timestamp_utc": _utc_timestamp(),
             "applied_after_step_index": active_index,
             "changed_step_count": len(changed_steps),
+            "active_step_updated": active_step_updated,
+            "active_step_message": active_step_message,
             "tail_replanned": tail_replanned,
             "visible_values": values,
             "changes": changed_steps[:25],
@@ -17198,23 +17519,45 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         self._current_sweep_recipe_overrides.append(payload)
         reason = json.dumps(payload, separators=(",", ":"), default=str)
+        trace_task_text = (
+            "Updated active and remaining current sweeps"
+            if active_step_updated
+            else "Updated remaining current sweeps"
+        )
         self._write_control_trace(
             decision="recipe_update",
             result="applied_to_future_steps",
             reason=reason,
-            task_text="Updated remaining current sweeps",
+            task_text=trace_task_text,
         )
         self._write_session_metadata()
         self._update_recipe_progress()
+        future_change_count = sum(1 for change in changed_steps if int(change["index"]) != active_index)
+        if active_step_updated:
+            log_message = (
+                "Updated active current sweep from the visible recipe controls "
+                f"and {future_change_count} future step(s)."
+            )
+            dialog_message = (
+                f"Updated the active current sweep and {future_change_count} future current-sweep step(s)."
+            )
+        else:
+            log_message = (
+                "Updated remaining current sweeps from the visible recipe controls "
+                f"({future_change_count} future step(s)); active step was left unchanged: {active_step_message}."
+            )
+            dialog_message = (
+                f"Updated {future_change_count} future current-sweep step(s). "
+                f"The active step was left unchanged: {active_step_message}."
+            )
         self._log(
-            "Updated remaining current sweeps from the visible recipe controls "
-            f"({len(changed_steps)} future step(s)); active step was left unchanged."
+            log_message
         )
         if show_message:
             QtWidgets.QMessageBox.information(
                 self,
                 APP_NAME,
-                f"Updated {len(changed_steps)} future current-sweep step(s). The active step was not changed.",
+                dialog_message,
             )
         return True
 
@@ -18076,6 +18419,10 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_item.showGrid(x=True, y=True, alpha=0.28)
         plot_item.setClipToView(True)
         plot_item.vb.setDefaultPadding(0.05)
+        try:
+            plot_item.layout.setContentsMargins(6, 6, 12, 6)
+        except Exception:
+            pass
         left_curve_kwargs: dict[str, Any] = {"pen": pg.mkPen(left_color, width=0.8)}
         if symbols:
             left_curve_kwargs.update(
@@ -18103,8 +18450,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             right_curve = pg.PlotDataItem([], [], **right_curve_kwargs)
             plot_item.showAxis("right")
+            right_axis = plot_item.getAxis("right")
+            try:
+                right_axis.setWidth(max(58, int(right_axis.width())))
+            except Exception:
+                pass
             plot_item.scene().addItem(right_view)
-            plot_item.getAxis("right").linkToView(right_view)
+            right_axis.linkToView(right_view)
             right_view.setXLink(plot_item)
             right_view.addItem(right_curve)
 
@@ -21544,7 +21896,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_log_name.setText(cleaned_log_name)
         if cleaned_log_name != (saved_log_name or "").strip():
             self.settings.setValue("log_name", cleaned_log_name)
-        self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+        self._auto_import_builder_project_if_possible(update_identity=False, quiet=True, async_load=True)
         self.check_zero_position_on_start.setChecked(False)
         self.check_tare_on_start.setChecked(
             bool(self.settings.value("tare_on_start", False, type=bool))
@@ -22006,6 +22358,7 @@ class MainWindow(QtWidgets.QMainWindow):
             stop_detail="Application window closed while automation was active.",
         )
         self._stop_tic_dispatcher()
+        self._stop_builder_project_import_thread()
         self._cancel_fabrication_folder_load()
         self._disconnect_scale()
         self._stop_session(reason="app_closed", detail="Application window closed while session was active.")

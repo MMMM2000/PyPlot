@@ -3365,6 +3365,10 @@ def test_current_task_summary_shows_current_sweep_phase(tmp_path: Path, qtbot) -
         window._automation_phase = "target_ramp"
         window._automation_index = 3
         assert window._current_task_summary() == "Ramp up to 100 MPa"
+
+        window._active_target_ramp_step_index = 3
+        window._automation_index = 4
+        assert window._current_task_summary() == "Ramp up to 100 MPa"
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -4016,6 +4020,8 @@ def test_saved_sample_fields_and_builder_project_autoimport_diameter(tmp_path: P
         assert window.edit_log_name.text() == "Ni50Fe27Ga23 12_2 test"
         assert Path(window.edit_project_path.text()) == project_path
         assert window._builder_project_path == project_path
+        assert "background" in window.label_project_status.text()
+        qtbot.waitUntil(lambda: "Imported" in window.label_project_status.text(), timeout=3000)
         assert window.spin_diameter.value() == pytest.approx(0.0191)
         assert "Imported" in window.label_project_status.text()
         assert "diameter 19.1 um" in window.label_project_status.text()
@@ -5816,6 +5822,10 @@ def test_length_setup_dialog_contains_live_graph_and_records_setup_points(tmp_pa
         assert isinstance(window._length_setup_stress_plot_widget, mini_dma_mod.pg.PlotWidget)
         assert window._length_setup_displacement_plot_widget is not None
         assert isinstance(window._length_setup_displacement_plot_widget, mini_dma_mod.pg.PlotWidget)
+        assert window._length_setup_stress_plot is not None
+        assert window._length_setup_stress_plot.right_view is not None
+        right_axis = window._length_setup_stress_plot.plot_item.getAxis("right")
+        assert right_axis.width() >= 58
 
         window._latest_scale_value_g = 21.5
         window._latest_scale_timestamp = time.time()
@@ -11053,7 +11063,7 @@ def test_session_control_trace_accepts_row_local_task_text(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
-def test_current_sweep_runtime_update_changes_only_future_steps_and_logs_trace(
+def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -11123,6 +11133,10 @@ def test_current_sweep_runtime_update_changes_only_future_steps_and_logs_trace(
         window._automation_steps = [active_sweep, future_set_current, future_ramp, future_sweep, future_reverse]
         window._automation_index = 0
         window._active_current_sweep_step_index = 0
+        window._automation_phase = "current_hold"
+        window._active_current_sweep_last_setpoint_mA = 44.0
+        window._current_sweep_ramp_hold_step_index = 0
+        window._current_sweep_ramp_hold_started_s = 123.0
         window._automation_interval_ms = 250
         window._recipe_estimated_points, window._automation_total_steps = window._estimate_recipe_points_and_ticks(
             window._automation_steps,
@@ -11137,8 +11151,13 @@ def test_current_sweep_runtime_update_changes_only_future_steps_and_logs_trace(
 
         assert window._apply_current_sweep_pending_overrides(show_message=False) is True
 
-        assert window._automation_steps[0] is active_sweep
-        assert window._automation_steps[0].current_end_mA == pytest.approx(70.0)
+        assert window._automation_steps[0] is not active_sweep
+        assert window._automation_steps[0].current_start_mA == pytest.approx(1.0)
+        assert window._automation_steps[0].current_end_mA == pytest.approx(80.0)
+        assert window._automation_phase == "current_hold"
+        assert window._active_current_sweep_last_setpoint_mA == pytest.approx(44.0)
+        assert window._current_sweep_ramp_hold_step_index == 0
+        assert window._current_sweep_ramp_hold_started_s == pytest.approx(123.0)
         assert window._automation_steps[1].current_mA == pytest.approx(2.0)
         assert window._automation_steps[2].target_ramp_rate_value_s == pytest.approx(3.0)
         assert window._automation_steps[3].current_start_mA == pytest.approx(2.0)
@@ -11155,14 +11174,90 @@ def test_current_sweep_runtime_update_changes_only_future_steps_and_logs_trace(
         )
         assert len(rows) == 1
         assert rows[0]["decision"] == "recipe_update"
-        assert rows[0]["task_text"] == "Updated remaining current sweeps"
+        assert rows[0]["task_text"] == "Updated active and remaining current sweeps"
         reason = json.loads(rows[0]["reason"])
-        assert reason["changed_step_count"] == 4
+        assert reason["active_step_updated"] is True
+        assert reason["changed_step_count"] == 5
         assert reason["visible_values"]["current_end_mA"] == pytest.approx(80.0)
 
         metadata = json.loads((tmp_path / "runtime_recipe_update" / "metadata.json").read_text(encoding="utf-8"))
         overrides = metadata["controlled_current_sweep"]["runtime_overrides"]
-        assert overrides[0]["changed_step_count"] == 4
+        assert overrides[0]["active_step_updated"] is True
+        assert overrides[0]["changed_step_count"] == 5
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_current_sweep_runtime_update_leaves_active_step_when_setpoint_beyond_new_target(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_recipe_update_conservative")
+
+    active_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=60.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.5,
+        note="1",
+    )
+    future_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=100.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=60.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.5,
+        note="2",
+    )
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [active_sweep, future_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._automation_phase = "current_hold"
+        window._active_current_sweep_last_setpoint_mA = 56.0
+        window._automation_interval_ms = 250
+        window._recipe_estimated_points, window._automation_total_steps = window._estimate_recipe_points_and_ticks(
+            window._automation_steps,
+            window._automation_interval_ms,
+        )
+
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(55.0)
+        window.spin_current_sweep_step_mA.setValue(0.5)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window._automation_steps[0] is active_sweep
+        assert window._automation_steps[0].current_end_mA == pytest.approx(60.0)
+        assert window._active_current_sweep_last_setpoint_mA == pytest.approx(56.0)
+        assert window._automation_steps[1].current_end_mA == pytest.approx(55.0)
+        assert window._automation_steps[1].current_ramp_rate_mA_s == pytest.approx(0.5)
+
+        window._stop_session()
+        metadata = json.loads(
+            (tmp_path / "runtime_recipe_update_conservative" / "metadata.json").read_text(encoding="utf-8")
+        )
+        override = metadata["controlled_current_sweep"]["runtime_overrides"][0]
+        assert override["active_step_updated"] is False
+        assert "already beyond" in override["active_step_message"]
+        assert override["changed_step_count"] == 1
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -11245,7 +11340,8 @@ def test_current_sweep_runtime_update_replans_future_stress_targets(
 
         assert window._apply_current_sweep_pending_overrides(show_message=False) is True
 
-        assert window._automation_steps[0] is active_sweep
+        assert window._automation_steps[0] is not active_sweep
+        assert window._automation_steps[0].current_end_mA == pytest.approx(80.0)
         future_targets = [
             step.target_value
             for step in window._automation_steps[1:]
@@ -11267,6 +11363,7 @@ def test_current_sweep_runtime_update_replans_future_stress_targets(
         window._stop_session()
         metadata = json.loads((tmp_path / "runtime_target_replan" / "metadata.json").read_text(encoding="utf-8"))
         override = metadata["controlled_current_sweep"]["runtime_overrides"][0]
+        assert override["active_step_updated"] is True
         assert override["tail_replanned"] is True
         assert override["visible_values"]["target_end"] == pytest.approx(150.0)
     finally:
