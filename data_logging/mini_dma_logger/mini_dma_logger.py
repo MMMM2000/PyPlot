@@ -58,6 +58,8 @@ SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
 CONTROL_LOGIC_VERSION = "2026-05-29.2"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
+RECIPE_SPINBOX_WIDTH_PX = 340
+RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 112
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
     "setup_slack_stress_cap",
@@ -3602,15 +3604,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self,
         parent: QtWidgets.QWidget,
         spinbox: QtWidgets.QWidget,
+        *,
+        spinbox_width: int | None = None,
+        label_width: int | None = None,
     ) -> tuple[QtWidgets.QWidget, QtWidgets.QLabel]:
         row = QtWidgets.QWidget(parent)
         layout = QtWidgets.QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        spinbox.setMinimumWidth(max(spinbox.minimumWidth(), 130))
-        layout.addWidget(spinbox, stretch=1)
+        if spinbox_width is None:
+            spinbox.setMinimumWidth(max(spinbox.minimumWidth(), 130))
+            layout.addWidget(spinbox, stretch=1)
+        else:
+            spinbox.setFixedWidth(max(130, int(spinbox_width)))
+            layout.addWidget(spinbox)
         label = QtWidgets.QLabel("-", row)
-        label.setMinimumWidth(88)
+        if label_width is None:
+            label.setMinimumWidth(88)
+        else:
+            label.setFixedWidth(max(88, int(label_width)))
         label.setStyleSheet("color: palette(text);")
         layout.addWidget(label)
         return row, label
@@ -5031,6 +5043,8 @@ class MainWindow(QtWidgets.QMainWindow):
         ) = self._spin_with_equivalent_label(
             automation_box,
             self.spin_current_sweep_first_overheating_target_mpa,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         current_sweep_form.addRow("First-overheating stress", current_preheat_row)
 
@@ -5046,6 +5060,8 @@ class MainWindow(QtWidgets.QMainWindow):
         current_start_row, self.label_current_target_start_equiv = self._spin_with_equivalent_label(
             automation_box,
             self.spin_current_sweep_target_start,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         current_sweep_form.addRow("Start", current_start_row)
         self.spin_current_sweep_target_end = CompactDoubleSpinBox(automation_box)
@@ -5055,6 +5071,8 @@ class MainWindow(QtWidgets.QMainWindow):
         current_end_row, self.label_current_target_end_equiv = self._spin_with_equivalent_label(
             automation_box,
             self.spin_current_sweep_target_end,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         current_sweep_form.addRow("End", current_end_row)
         self.spin_current_sweep_target_step = CompactDoubleSpinBox(automation_box)
@@ -5064,6 +5082,8 @@ class MainWindow(QtWidgets.QMainWindow):
         current_step_row, self.label_current_target_step_equiv = self._spin_with_equivalent_label(
             automation_box,
             self.spin_current_sweep_target_step,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         current_sweep_form.addRow("Step", current_step_row)
         self.spin_current_sweep_target_ramp_rate = CompactDoubleSpinBox(automation_box)
@@ -5077,6 +5097,8 @@ class MainWindow(QtWidgets.QMainWindow):
         current_ramp_row, self.label_current_target_ramp_equiv = self._spin_with_equivalent_label(
             automation_box,
             self.spin_current_sweep_target_ramp_rate,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         current_sweep_form.addRow("Ramp rate", current_ramp_row)
         self.button_current_sweep_advanced_controls = QtWidgets.QToolButton(automation_box)
@@ -5193,6 +5215,8 @@ class MainWindow(QtWidgets.QMainWindow):
         current_start_mA_row, self.label_current_start_density = self._spin_with_equivalent_label(
             automation_box,
             self.spin_current_sweep_start_mA,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         self.label_current_start_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
         current_sweep_form.addRow("Start", current_start_mA_row)
@@ -5204,18 +5228,28 @@ class MainWindow(QtWidgets.QMainWindow):
         current_end_mA_row, self.label_current_end_density = self._spin_with_equivalent_label(
             automation_box,
             self.spin_current_sweep_end_mA,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         self.label_current_end_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
         current_sweep_form.addRow("End", current_end_mA_row)
         self.spin_current_sweep_step_mA = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_step_mA.setDecimals(2)
         self.spin_current_sweep_step_mA.setRange(0.01, 5000.0)
+        self.spin_current_sweep_step_mA.setSingleStep(0.2)
         self.spin_current_sweep_step_mA.setValue(1.0)
         self.spin_current_sweep_step_mA.setSuffix(" mA/s")
         self.spin_current_sweep_step_mA.setToolTip(
             "Current ramp rate. Mini DMA converts this to smaller setpoint updates using the control interval."
         )
-        current_sweep_form.addRow("Ramp rate", self.spin_current_sweep_step_mA)
+        current_rate_mA_row, self.label_current_rate_density = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_current_sweep_step_mA,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        self.label_current_rate_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        current_sweep_form.addRow("Ramp rate", current_rate_mA_row)
         self.check_current_sweep_hold_on_error = QtWidgets.QCheckBox(
             "Pause while target recovers",
             automation_box,
@@ -8147,7 +8181,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return "-"
         current_density_a_mm2 = (float(current_mA) / 1000.0) / area_mm2
         unit = "A/mm<sup>2</sup>/s" if per_second else "A/mm<sup>2</sup>"
-        return _format_compact_unit(current_density_a_mm2, unit, decimals=3)
+        abs_density = abs(current_density_a_mm2)
+        if abs_density < 10.0:
+            decimals = 2
+        elif abs_density < 100.0:
+            decimals = 1
+        else:
+            decimals = 0
+        return _format_compact_unit(current_density_a_mm2, unit, decimals=decimals)
 
     def _target_equivalent_text(self, basis: str, value: float, *, per_second: bool = False) -> str:
         if basis == HSW_BASIS_STRESS_MPA:
@@ -8277,6 +8318,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.label_current_end_density.setText(
             self._current_density_text(float(self.spin_current_sweep_end_mA.value()))
+        )
+        self.label_current_rate_density.setText(
+            self._current_density_text(float(self.spin_current_sweep_step_mA.value()), per_second=True)
         )
         constant_basis = self._constant_current_start_basis()
         self.label_constant_current_start_equiv.setText(

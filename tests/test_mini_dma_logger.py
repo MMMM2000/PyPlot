@@ -4014,6 +4014,7 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
         window.combo_recipe_mode.setCurrentIndex(mode_index)
         window.spin_current_sweep_target_start.setValue(10.0)
         window.spin_current_sweep_target_ramp_rate.setValue(1.0)
+        window.spin_current_sweep_step_mA.setValue(1.0)
         window.spin_current_sweep_end_mA.setValue(50.0)
         window._update_recipe_mode_ui()
 
@@ -4026,8 +4027,14 @@ def test_recipe_header_and_equivalent_labels_show_diameter_load_and_stress(tmp_p
         assert "0.721 g" in window.label_current_target_start_equiv.text()
         assert "0.072 g/s" in window.label_current_target_ramp_equiv.text()
         assert "1.442 g" in window.label_current_first_overheating_target_equiv.text()
-        assert "70.736 A/mm<sup>2</sup>" in window.label_current_end_density.text()
+        assert window.spin_current_sweep_step_mA.singleStep() == pytest.approx(0.2)
+        assert window.spin_current_sweep_target_start.width() == window.spin_current_sweep_target_end.width()
+        assert window.spin_current_sweep_target_end.width() == window.spin_current_sweep_step_mA.width()
+        assert window.label_current_target_start_equiv.width() == window.label_current_end_density.width()
+        assert "70.7 A/mm<sup>2</sup>" in window.label_current_end_density.text()
+        assert "1.41 A/mm<sup>2</sup>/s" in window.label_current_rate_density.text()
         assert window.label_current_end_density.textFormat() == QtCore.Qt.TextFormat.RichText
+        assert window.label_current_rate_density.textFormat() == QtCore.Qt.TextFormat.RichText
         assert "palette(mid)" not in window.label_current_target_start_equiv.styleSheet()
 
         mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
