@@ -33,6 +33,14 @@
 - Report completion with branch, commit, tests/checks, screenshot paths when relevant, and integration notes.
 - If blocked, report the blocker, current branch, git status, and what was already verified.
 
+## Delegation Strategy
+- Choose the split that gives the cleanest reasoning, least conflict, and fastest useful feedback; do not default to either one worker for everything or one worker per issue.
+- Keep tightly coupled issues in one worker when they share runtime state, safety logic, or the same focused verification loop.
+- Split work across multiple workers when failure modes are separable, can be verified independently, or can progress in parallel without constant conflict.
+- Use worker worktrees for durable implementation that needs commits, screenshots, GUI runs, branch review, or later merging.
+- Use subagents for temporary investigation, code archaeology, review, test planning, diff audits, or parallel diagnosis inside a master or worker thread.
+- Avoid endlessly appending scope to a running worker. Once a worker has a coherent batch, let it finish, integrate it, and start the next cluster from the updated integration branch.
+
 ## Integration Regression Ledger
 - Treat accepted worker behavior as part of the integration contract, not just the code diff.
 - When a worker branch is accepted, record the user-visible behaviors it proved and the evidence that verified them, such as tests, screenshots, logs, or synthetic data.
