@@ -267,6 +267,119 @@ def test_mini_dma_bench_plan_records_startup_log_when_not_started(tmp_path: Path
     written = json.loads(summary_path.read_text(encoding="utf-8"))
     assert "Scale port is unavailable" in written["runs"][0]["startup_log_tail"]
 
+
+def test_mini_dma_bench_plan_stops_session_when_recipe_automation_stops(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "default_max_run_duration_s": 10,
+                "bench_lock": {"enabled": False},
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "logs" / "run01"
+    run_dir.mkdir(parents=True)
+    (run_dir / "control_trace.csv").write_text(
+        "\n".join(
+            [
+                "elapsed_s,timestamp_utc,recipe_mode,task_text,automation_phase,automation_basis,automation_target_value,plateau_index,decision,current_value,error_value,tolerance,sensitivity_per_mm,motor_step_mm,correction_mm,backlash_mm,command_speed_mm_s,required_fresh_samples,post_move_sample_count,target_mm,effective_target_mm,result,reason",
+                "12.5,2026-06-01 20:00:00,current_sweep_stress,Manual mode,idle,stress_mpa,50,,wait,104.0,-54.0,0.17,124.0,0.00125,0.08,0,,,,,,stopped,correction_travel_limit",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    events: list[tuple[str, object]] = []
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            events.append(("process", None))
+
+    class _FakeLabel:
+        def text(self) -> str:
+            return "Manual mode"
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = False
+            self._session_active = False
+            self._session_json_path = run_dir / "metadata.json"
+            self.label_task_status = _FakeLabel()
+            self._session_stop_reason = "recipe_control_stop"
+            self._session_stop_detail = "Recipe stopped before completion and recovery was offered."
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            return
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            return
+
+        def _start_auto_ramp(self) -> None:
+            self._automation_active = True
+            self._session_active = True
+
+        def _stop_session(self, *, reason: str, detail: str) -> None:
+            events.append(("stop_session", (reason, detail)))
+            self._session_active = False
+            self._session_stop_reason = reason
+            self._session_stop_detail = detail
+
+        def _session_stop_metadata(self) -> dict[str, object]:
+            return {
+                "reason": self._session_stop_reason,
+                "category": "fault",
+                "label": "Recipe stopped by control/error condition",
+                "detail": self._session_stop_detail,
+                "recorded_utc": "2026-06-01 20:00:00",
+            }
+
+        def close(self) -> None:
+            self._automation_active = False
+            self._session_active = False
+
+    window = _FakeWindow()
+
+    def _window_factory(**_kwargs: object) -> _FakeWindow:
+        return window
+
+    def _sleep(_seconds: float) -> None:
+        window._automation_active = False
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_window_factory,
+        sleep_fn=_sleep,
+    )
+
+    assert summary["runs"][0]["status"] == "stopped"
+    stop_events = [event for event in events if event[0] == "stop_session"]
+    assert stop_events
+    assert stop_events[-1][1][0] == "recipe_control_stop"
+    run_summary = summary["runs"][0]
+    assert run_summary["task_text"] == "Manual mode"
+    assert run_summary["stop_metadata"]["reason"] == "recipe_control_stop"
+    assert run_summary["control_trace_stop"]["reason"] == "correction_travel_limit"
+
+
 def test_mini_dma_bench_plan_writes_control_trace_replay_after_run(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)
