@@ -3384,6 +3384,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_move_target_mm = 0.0
         self._effective_position_mm = 0.0
         self._last_effective_move_target_mm = 0.0
+        self._effective_speed_sample_position_mm: float | None = None
+        self._effective_speed_sample_time_s: float | None = None
+        self._effective_average_speed_mm_s: float | None = None
         self._last_commanded_position_steps: int | None = 0
         self._last_tic_vin_v: float | None = None
         self._last_tic_status_error: str | None = None
@@ -3645,8 +3648,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ui_heartbeat_fps: float | None = None
         self._window_closing = False
         self.action_timing_settings: QtGui.QAction | None = None
+        self.action_current_sweep_advanced_settings: QtGui.QAction | None = None
         self.action_show_recipe_file_controls: QtGui.QAction | None = None
         self.action_mirror_run_log: QtGui.QAction | None = None
+        self._current_sweep_advanced_dialog: QtWidgets.QDialog | None = None
         self._manual_jog_timer = QtCore.QTimer(self)
         self._manual_jog_timer.setInterval(50)
         self._manual_jog_timer.timeout.connect(self._handle_manual_jog_timer)
@@ -3696,6 +3701,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.action_timing_settings = settings_menu.addAction("Timing...")
         if self.action_timing_settings is not None:
             self.action_timing_settings.triggered.connect(self._show_timing_settings_dialog)
+        self.action_current_sweep_advanced_settings = settings_menu.addAction("Current sweep advanced...")
+        if self.action_current_sweep_advanced_settings is not None:
+            self.action_current_sweep_advanced_settings.triggered.connect(
+                self._show_current_sweep_advanced_settings_dialog
+            )
         self.action_show_recipe_file_controls = settings_menu.addAction("Show recipe save/load")
         if self.action_show_recipe_file_controls is not None:
             self.action_show_recipe_file_controls.setCheckable(True)
@@ -3936,6 +3946,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_ui_refresh_interval()
         self._apply_hardware_timer_intervals()
         self._update_recipe_mode_ui()
+
+    def _show_current_sweep_advanced_settings_dialog(self) -> None:
+        if self._current_sweep_advanced_dialog is None:
+            dialog = QtWidgets.QDialog(self)
+            dialog.setWindowTitle("Current Sweep Advanced Settings")
+            dialog.setModal(False)
+            dialog.resize(420, 520)
+            layout = QtWidgets.QVBoxLayout(dialog)
+            layout.setContentsMargins(12, 12, 12, 12)
+            layout.setSpacing(10)
+            self.current_sweep_advanced_panel.setParent(dialog)
+            self.current_sweep_advanced_panel.setVisible(True)
+            layout.addWidget(self.current_sweep_advanced_panel)
+            buttons = QtWidgets.QDialogButtonBox(
+                QtWidgets.QDialogButtonBox.StandardButton.Close,
+                parent=dialog,
+            )
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            self._current_sweep_advanced_dialog = dialog
+        for advanced_widget in self._current_sweep_advanced_control_widgets:
+            advanced_widget.setVisible(True)
+        self.current_sweep_advanced_panel.setVisible(True)
+        self._current_sweep_advanced_dialog.show()
+        self._current_sweep_advanced_dialog.raise_()
+        self._current_sweep_advanced_dialog.activateWindow()
 
     def _set_run_log_mirror_enabled(self, enabled: bool) -> None:
         self._run_log_mirror_enabled = bool(enabled)
@@ -5479,32 +5515,14 @@ class MainWindow(QtWidgets.QMainWindow):
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         current_sweep_form.addRow("Ramp rate", current_ramp_row)
-        self.button_current_sweep_advanced_controls = QtWidgets.QToolButton(automation_box)
-        self.button_current_sweep_advanced_controls.setText("Advanced speeds/caps")
-        self.button_current_sweep_advanced_controls.setToolTip(
-            "Show or hide advanced current-sweep speed, correction-cap, and hold-band settings."
-        )
-        self.button_current_sweep_advanced_controls.setToolButtonStyle(
-            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-        )
-        self.button_current_sweep_advanced_controls.setCheckable(True)
-        self.button_current_sweep_advanced_controls.setChecked(False)
-        self.button_current_sweep_advanced_controls.setArrowType(QtCore.Qt.ArrowType.RightArrow)
-        self.button_current_sweep_advanced_controls.setMinimumWidth(240)
-        self.button_current_sweep_advanced_controls.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
-        current_sweep_form.addRow(self.button_current_sweep_advanced_controls)
-        self.current_sweep_advanced_panel = QtWidgets.QWidget(automation_box)
+        self.current_sweep_advanced_panel = QtWidgets.QWidget(self)
         current_sweep_advanced_form = QtWidgets.QFormLayout(self.current_sweep_advanced_panel)
-        current_sweep_advanced_form.setContentsMargins(8, 2, 0, 2)
+        current_sweep_advanced_form.setContentsMargins(0, 0, 0, 0)
         current_sweep_advanced_form.setHorizontalSpacing(8)
-        current_sweep_advanced_form.setVerticalSpacing(4)
+        current_sweep_advanced_form.setVerticalSpacing(6)
         current_sweep_advanced_form.setFieldGrowthPolicy(
             QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
-        current_sweep_form.addRow(self.current_sweep_advanced_panel)
         self.spin_current_sweep_target_speed_mm_s = CompactDoubleSpinBox(self.current_sweep_advanced_panel)
         self.spin_current_sweep_target_speed_mm_s.setDecimals(3)
         self.spin_current_sweep_target_speed_mm_s.setRange(0.001, 50.0)
@@ -5724,26 +5742,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_hold_min_resume_stress_mpa,
             self.button_restore_current_sweep_advanced_defaults,
         ]
+        for advanced_widget in self._current_sweep_advanced_control_widgets:
+            advanced_widget.setVisible(False)
 
-        def _toggle_current_sweep_advanced_controls(checked: bool) -> None:
-            self.button_current_sweep_advanced_controls.setArrowType(
-                QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow
-            )
-            self.button_current_sweep_advanced_controls.setText(
-                "Hide advanced speeds/caps" if checked else "Advanced speeds/caps"
-            )
-            for advanced_widget in self._current_sweep_advanced_control_widgets:
-                self._set_form_row_visible(current_sweep_advanced_form, advanced_widget, checked)
-            self.current_sweep_advanced_panel.setVisible(checked)
-            if hasattr(self, "recipe_stack"):
-                self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
-            if hasattr(self, "_control_scroll_area") and self._control_scroll_area.widget() is not None:
-                self._control_scroll_area.widget().adjustSize()
-
-        self.button_current_sweep_advanced_controls.toggled.connect(
-            _toggle_current_sweep_advanced_controls
-        )
-        _toggle_current_sweep_advanced_controls(False)
+        self.current_sweep_advanced_panel.setVisible(False)
         self.check_current_sweep_reverse_current = QtWidgets.QCheckBox("Sweep current back to start at each target", automation_box)
         self.check_current_sweep_reverse_current.setChecked(True)
         self.check_current_sweep_reverse_current.setVisible(False)
@@ -11001,14 +11003,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return scaled * scaled * (3.0 - 2.0 * scaled)
 
     def _live_speed_values(self) -> dict[str, float | None]:
-        speed_mm_s = abs(float(self._last_commanded_speed_mm_s))
-        if speed_mm_s <= 0.0:
+        speed_mm_s = self._effective_average_speed_mm_s
+        command_speed_mm_s = abs(float(self._last_commanded_speed_mm_s))
+        command_speed_value = command_speed_mm_s if command_speed_mm_s > 0.0 else None
+        if speed_mm_s is None or not math.isfinite(float(speed_mm_s)) or float(speed_mm_s) < 0.0:
             return {
                 "speed_mm_s": None,
+                "command_speed_mm_s": command_speed_value,
                 "load_rate_g_s": None,
                 "stress_rate_mpa_s": None,
                 "strain_rate_pct_s": None,
             }
+        speed_mm_s = abs(float(speed_mm_s))
         stiffness = self._seek_live_stiffness_g_per_mm
         if stiffness is None or not math.isfinite(float(stiffness)) or float(stiffness) <= 0.0:
             stiffness = self._stored_calibration_stiffness_g_per_mm()
@@ -11022,24 +11028,61 @@ class MainWindow(QtWidgets.QMainWindow):
         strain_rate_pct_s = abs(speed_mm_s * 100.0 / length_mm)
         return {
             "speed_mm_s": speed_mm_s,
+            "command_speed_mm_s": command_speed_value,
             "load_rate_g_s": load_rate_g_s,
             "stress_rate_mpa_s": stress_rate_mpa_s,
             "strain_rate_pct_s": strain_rate_pct_s,
         }
 
+    def _sample_effective_linear_speed(self, now_s: float | None = None) -> None:
+        now = time.monotonic() if now_s is None else float(now_s)
+        position_mm = float(self._measurement_effective_position_mm())
+        if (
+            self._effective_speed_sample_time_s is None
+            or self._effective_speed_sample_position_mm is None
+            or not math.isfinite(float(self._effective_speed_sample_time_s))
+            or not math.isfinite(float(self._effective_speed_sample_position_mm))
+        ):
+            self._effective_speed_sample_time_s = now
+            self._effective_speed_sample_position_mm = position_mm
+            self._effective_average_speed_mm_s = 0.0
+            return
+        elapsed_s = now - float(self._effective_speed_sample_time_s)
+        if elapsed_s <= 0.0 or not math.isfinite(elapsed_s):
+            return
+        distance_mm = abs(position_mm - float(self._effective_speed_sample_position_mm))
+        self._effective_average_speed_mm_s = distance_mm / elapsed_s
+        self._effective_speed_sample_time_s = now
+        self._effective_speed_sample_position_mm = position_mm
+
+    def _reset_effective_linear_speed_sample(self, now_s: float | None = None) -> None:
+        self._effective_speed_sample_time_s = time.monotonic() if now_s is None else float(now_s)
+        self._effective_speed_sample_position_mm = float(self._measurement_effective_position_mm())
+        self._effective_average_speed_mm_s = 0.0
+
+    def _live_linear_speed_text(self, speed_mm_s: float | None) -> str:
+        if speed_mm_s is None or not math.isfinite(float(speed_mm_s)):
+            return "-"
+        return _format_compact_unit(abs(float(speed_mm_s)) * 1000.0, "um/s", decimals=1)
+
     def _live_speed_summary_text(self) -> str:
         speed_values = self._live_speed_values()
         speed_mm_s = speed_values["speed_mm_s"]
-        if speed_mm_s is None:
-            return "Command speed: -"
+        command_speed_mm_s = speed_values["command_speed_mm_s"]
 
         def _rate_text(value: float | None, unit: str) -> str:
             if value is None or not math.isfinite(float(value)):
                 return f"- {unit}"
             return f"{_format_compact_number(float(value))} {unit}"
 
+        command_text = (
+            "-"
+            if command_speed_mm_s is None or not math.isfinite(float(command_speed_mm_s))
+            else f"{_format_compact_number(float(command_speed_mm_s))} mm/s"
+        )
         return (
-            f"Command speed: {_format_compact_number(speed_mm_s)} mm/s | "
+            f"Average speed: {self._live_linear_speed_text(speed_mm_s)} | "
+            f"Command cap: {command_text} | "
             f"{_rate_text(speed_values['load_rate_g_s'], 'g/s')} | "
             f"{_rate_text(speed_values['stress_rate_mpa_s'], 'MPa/s')} | "
             f"{_rate_text(speed_values['strain_rate_pct_s'], '%/s')}"
@@ -13984,6 +14027,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_commanded_position_steps = 0
         self._effective_position_mm = 0.0
         self._last_effective_move_target_mm = 0.0
+        self._reset_effective_linear_speed_sample()
         self._position_reference_mm = 0.0
         self._last_move_target_mm = 0.0
         self._manual_jog_uses_last_target = False
@@ -14042,6 +14086,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_move_target_mm = self._current_position_mm
         self._effective_position_mm = self._current_position_mm
         self._last_effective_move_target_mm = self._effective_position_mm
+        self._reset_effective_linear_speed_sample()
 
     def _jog_relative(self, direction: float, *, force_step: bool = False) -> bool:
         direction = -1.0 if direction < 0.0 else 1.0
@@ -17598,6 +17643,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_move_target_mm = self._current_position_mm
         self._effective_position_mm = self._current_position_mm
         self._last_effective_move_target_mm = self._effective_position_mm
+        self._reset_effective_linear_speed_sample()
         self._last_move_direction = 0.0
         self._last_motion_command_time_s = None
         self._last_motion_expected_complete_time_s = None
@@ -20767,6 +20813,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Live stress: {'-' if stress is None else f'{stress:.4f} MPa'}"
             f" | Heating: {'off' if not self._supply_output_enabled else f'{self._supply_last_setpoint_mA or 0.0:.2f} mA'}"
         )
+        self._sample_effective_linear_speed()
         live_speed_text = self._live_speed_summary_text()
         self.label_live_speed.setText(live_speed_text)
         session_value = "Running" if self._session_active else "Idle"
@@ -20781,12 +20828,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         speed_values = self._live_speed_values()
 
-        def _dashboard_rate_text(value: float | None, unit: str) -> str:
-            if value is None or not math.isfinite(float(value)):
-                return "-"
-            return f"{float(value):.3g} {unit}"
-
-        self._set_dashboard_value("speed_mm_s", _dashboard_rate_text(speed_values["speed_mm_s"], "mm/s"))
+        self._set_dashboard_value("speed_mm_s", self._live_linear_speed_text(speed_values["speed_mm_s"]))
         self.label_card_session.setText(
             f"{session_value} | {len(self._session_points)} point(s)"
         )

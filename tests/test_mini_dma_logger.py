@@ -6624,15 +6624,16 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
 
         assert window.spin_current_sweep_nudge_mm.isHidden() is True
         assert window.spin_current_sweep_balance_speed_mm_s.isHidden() is True
-        assert window.button_current_sweep_advanced_controls.isHidden() is False
-        assert window.button_current_sweep_advanced_controls.text() == "Advanced speeds/caps"
-        assert window.button_current_sweep_advanced_controls.minimumWidth() >= 220
+        assert window.action_current_sweep_advanced_settings is not None
+        assert window.action_current_sweep_advanced_settings.text() == "Current sweep advanced..."
+        assert window.current_sweep_advanced_panel.isHidden() is True
         assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is True
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is True
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is True
-        window.button_current_sweep_advanced_controls.setChecked(True)
-        assert window.button_current_sweep_advanced_controls.text() == "Hide advanced speeds/caps"
-        assert window.button_current_sweep_advanced_controls.isHidden() is False
+        window.action_current_sweep_advanced_settings.trigger()
+        qtbot.waitUntil(lambda: window._current_sweep_advanced_dialog is not None)
+        assert window._current_sweep_advanced_dialog is not None
+        assert window._current_sweep_advanced_dialog.isVisible() is True
         assert window.spin_current_sweep_max_correction_stress_mpa.minimumWidth() >= 130
         assert window.spin_current_sweep_hold_filter_window_s.minimumWidth() >= 130
         assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is False
@@ -12429,14 +12430,56 @@ def test_live_speed_summary_reports_equivalent_rates(tmp_path: Path, qtbot) -> N
     window._calibrated_stiffness_g_per_mm = 2.0
     window._calibrated_stiffness_length_mm = 25.0
     window._last_commanded_speed_mm_s = 0.5
+    window._effective_average_speed_mm_s = 0.5
 
     try:
         text = window._live_speed_summary_text()
 
-        assert "0.5 mm/s" in text
+        assert "Average speed: 500 um/s" in text
+        assert "Command cap: 0.5 mm/s" in text
         assert "1 g/s" in text
         assert "MPa/s" in text
         assert "2 %/s" in text
+    finally:
+        _close_test_window(window)
+
+
+def test_dashboard_speed_reports_effective_average_um_per_s(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._last_commanded_speed_mm_s = 5.0
+        window._current_position_mm = 0.0
+        window._effective_position_mm = 0.0
+        window._reset_effective_linear_speed_sample(now_s=100.0)
+        window._current_position_mm = 0.010
+        window._effective_position_mm = 0.010
+
+        window._sample_effective_linear_speed(now_s=101.0)
+        speed_values = window._live_speed_values()
+        window._set_dashboard_value(
+            "speed_mm_s",
+            window._live_linear_speed_text(speed_values["speed_mm_s"]),
+        )
+
+        assert speed_values["speed_mm_s"] == pytest.approx(0.010)
+        assert window._dashboard_value_labels["speed_mm_s"].text() == "10 um/s"
+        assert "5 mm/s" not in window._dashboard_value_labels["speed_mm_s"].text()
+    finally:
+        _close_test_window(window)
+
+
+def test_live_speed_summary_marks_command_cap_as_secondary(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._last_commanded_speed_mm_s = 5.0
+        window._effective_average_speed_mm_s = 0.010
+
+        text = window._live_speed_summary_text()
+
+        assert "Average speed: 10 um/s" in text
+        assert "Command cap: 5 mm/s" in text
     finally:
         _close_test_window(window)
 
