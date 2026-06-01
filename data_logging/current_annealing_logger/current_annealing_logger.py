@@ -1791,11 +1791,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def _read_shared_broker_sample(self) -> bool:
         channel = self._shared_broker_channel()
         client = self._get_shared_broker_client()
-        latest_readback = getattr(client, "latest_readback", None)
-        if callable(latest_readback):
-            readback = latest_readback(channel=channel, max_age_s=2.5, fallback_to_measure=True)
+        readback = None
+        for attempt in range(2):
+            try:
+                latest_readback = getattr(client, "latest_readback", None)
+                if callable(latest_readback):
+                    readback = latest_readback(channel=channel, max_age_s=2.5, fallback_to_measure=True)
+                else:
+                    readback = client.measure_channel(channel=channel)
+            except Exception:
+                if attempt == 0:
+                    continue
+                return False
+            voltage = readback.get("voltage_V")
+            current_mA = readback.get("current_mA")
+            if voltage is not None and current_mA is not None:
+                break
         else:
-            readback = client.measure_channel(channel=channel)
+            return False
         voltage = readback.get("voltage_V")
         current_mA = readback.get("current_mA")
         if voltage is None or current_mA is None:

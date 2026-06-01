@@ -159,13 +159,14 @@ def start_broker_server(
 class BrokerJsonClient:
     """Small JSON-line client for the local shared HMP broker."""
 
-    def __init__(self, *, host: str = "127.0.0.1", port: int) -> None:
+    def __init__(self, *, host: str = "127.0.0.1", port: int, timeout_s: float = 8.0) -> None:
         self.host = str(host or "127.0.0.1")
         self.port = int(port)
+        self.timeout_s = float(timeout_s)
 
     def request(self, action: str, **payload: Any) -> dict[str, Any]:
         request = {"action": action, **payload}
-        with socket.create_connection((self.host, self.port), timeout=2.0) as client:
+        with socket.create_connection((self.host, self.port), timeout=self.timeout_s) as client:
             client.sendall((json.dumps(request) + "\n").encode("utf-8"))
             chunks: list[bytes] = []
             while True:

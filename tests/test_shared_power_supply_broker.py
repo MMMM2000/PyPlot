@@ -594,6 +594,38 @@ def test_broker_json_client_exposes_scheduler_cached_readbacks() -> None:
     assert "CURR 0.0012" not in driver.command_log()
 
 
+def test_broker_json_client_uses_configurable_request_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    class _Socket:
+        def __enter__(self) -> "_Socket":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def sendall(self, data: bytes) -> None:
+            seen["request"] = data
+
+        def recv(self, _size: int) -> bytes:
+            if seen.get("responded"):
+                return b""
+            seen["responded"] = True
+            return b'{"ok": true, "snapshot": {}}\n'
+
+    def _create_connection(address: tuple[str, int], timeout: float) -> _Socket:
+        seen["address"] = address
+        seen["timeout"] = timeout
+        return _Socket()
+
+    monkeypatch.setattr("data_logging.shared_power_supply.protocol.socket.create_connection", _create_connection)
+
+    client = BrokerJsonClient(host="127.0.0.1", port=8765, timeout_s=9.5)
+    assert client.snapshot() == {}
+    assert seen["address"] == ("127.0.0.1", 8765)
+    assert seen["timeout"] == pytest.approx(9.5)
+
+
 def test_broker_json_client_schedules_rate_limited_current_ramps() -> None:
     driver = _driver()
     broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
