@@ -9874,13 +9874,18 @@ def test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down(
             self.port_name = port_name
             self.baudrate = baudrate
             self.timeout_s = timeout_s
-            self.profile = HMP4040_PROFILE
+            self.profile = None
             self.closed = False
+            self.identify_calls = 0
 
         def connect(self) -> None:
             return None
 
         def identify(self) -> str:
+            self.identify_calls += 1
+            if self.identify_calls == 1:
+                return ""
+            self.profile = HMP4040_PROFILE
             return "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62"
 
         def close(self) -> None:
@@ -9949,6 +9954,7 @@ def test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down(
         assert broker_started is True
         assert started["host"] == "127.0.0.1"
         assert started["port"] == 8765
+        assert getattr(started["broker"], "driver").identify_calls == 2
         assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
         assert "Started shared HMP broker" in window.log_output.toPlainText()
         assert "Supply connected through shared HMP broker" in window.log_output.toPlainText()
