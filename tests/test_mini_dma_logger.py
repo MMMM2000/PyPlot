@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pandas as pd
 
 pytest.importorskip(
     "PyQt6.QtWidgets",
@@ -4007,6 +4008,310 @@ def test_saved_sample_fields_and_builder_project_autoimport_diameter(tmp_path: P
         assert "border" not in window.spin_diameter.styleSheet()
     finally:
         _close_test_window(window)
+
+
+def test_fabrication_suggestions_fill_diameter_when_project_has_no_diameter(tmp_path: Path, qtbot) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            "Ni50Fe27Ga23": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=12,
+                    piece=2,
+                    label="12/2",
+                    diameter_mm=0.011,
+                ),
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=12,
+                    piece=3,
+                    label="12/3",
+                    diameter_mm=0.0125,
+                ),
+            ]
+        }
+        window._refresh_fabrication_completers()
+
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        window._sync_auto_name_fields()
+
+        assert window.spin_diameter.value() == pytest.approx(0.0125)
+        assert "no project diameter" in window.label_project_status.text()
+        assert "fabrication diameter 12.5 um" in window.label_fabrication_status.text()
+        assert "border" not in window.spin_diameter.styleSheet()
+        completer_model = window.edit_name_wire.completer().model()
+        suggestions = [
+            completer_model.data(completer_model.index(row, 0))
+            for row in range(completer_model.rowCount())
+        ]
+        assert suggestions == ["12/2", "12/3"]
+    finally:
+        _close_test_window(window)
+
+
+def test_loading_fabrication_folder_indexes_workbooks_without_blocking_ui(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    folder = tmp_path / "fabrication"
+    composition_folder = folder / "Ni50Fe27Ga23"
+    composition_folder.mkdir(parents=True)
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_fabrication_folder.setText(str(folder))
+        started_s = time.monotonic()
+        window._load_fabrication_folder_from_ui()
+        elapsed_s = time.monotonic() - started_s
+
+        assert elapsed_s < 0.05
+        assert window._fabrication_load_active()
+        assert window.button_load_fabrication.text() == "Cancel loading"
+        qtbot.waitUntil(lambda: not window._fabrication_load_active(), timeout=3000)
+        assert "Ni50Fe27Ga23" in window._fabrication_records_by_composition
+        assert "composition suggestion" in window.label_fabrication_status.text()
+    finally:
+        window._cancel_fabrication_folder_load()
+        _close_test_window(window)
+
+
+def test_fabrication_worker_indexes_real_builder_workbooks(qtbot) -> None:
+    root = Path("sample_data/database_builder/microwire data/Ni50Fe27Ga23")
+    if not root.exists():
+        pytest.skip("sample fabrication data is unavailable")
+    worker = mini_dma_mod.FabricationSuggestionWorker(root, composition="Ni50Fe27Ga23")
+    result: dict[str, object] = {}
+
+    worker.succeeded.connect(
+        lambda root_obj, records_obj, file_count, composition_obj: result.update(
+            root=root_obj,
+            records=records_obj,
+            file_count=file_count,
+            composition=composition_obj,
+        )
+    )
+    worker.failed.connect(lambda root_obj, message: result.update(error=message))
+    worker.cancelled.connect(lambda root_obj: result.update(cancelled=True))
+    worker.run()
+
+    assert "error" not in result
+    assert "cancelled" not in result
+    assert result["root"] == root
+    assert result["composition"] == "Ni50Fe27Ga23"
+    assert int(result["file_count"]) > 0
+    records = result["records"]
+    assert isinstance(records, dict)
+    assert "Ni50Fe27Ga23" in records
+    assert any(record.diameter_mm is not None for record in records["Ni50Fe27Ga23"])
+
+
+def test_project_diameter_is_preferred_over_fabrication_suggestion(tmp_path: Path, qtbot) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "d (um)": 19.1,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            "Ni50Fe27Ga23": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=12,
+                    piece=3,
+                    label="12/3",
+                    diameter_mm=0.011,
+                )
+            ]
+        }
+        window._refresh_fabrication_completers()
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+
+        window._sync_auto_name_fields()
+
+        assert window.spin_diameter.value() == pytest.approx(0.0191)
+        assert "Imported" in window.label_project_status.text()
+        assert "diameter 19.1 um" in window.label_project_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_wire_diameter_displays_micrometers_while_storing_mm(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_diameter.setValue(0.0149)
+
+        assert window.spin_diameter.value() == pytest.approx(0.0149)
+        assert window.spin_diameter.suffix().strip() == "um"
+        assert "14.9" in window.spin_diameter.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_project_row_uses_show_annealing_instead_of_manual_import_button(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        button_labels = {button.text() for button in window.findChildren(QtWidgets.QPushButton)}
+
+        assert "Show annealing" in button_labels
+        assert "Import sample info" not in button_labels
+    finally:
+        _close_test_window(window)
+
+
+def test_project_annealing_preview_loads_sources_for_current_sample(tmp_path: Path, qtbot) -> None:
+    annealing_path = tmp_path / "Ni50Fe27Ga23 12_3 1000mA.txt"
+    annealing_path.write_text(
+        "\n".join(
+            [
+                "0.001\t0.18\t180",
+                "0.002\t0.39\t195",
+                "0.003\t0.63\t210",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "annealing": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "_sources": [str(annealing_path)],
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        payload = window._read_builder_project_payload(project_path)
+        candidates = window._extract_project_annealing_candidates(payload)
+        candidate_index = window._choose_project_annealing_candidate(candidates)
+
+        assert candidate_index == 0
+        series, missing_sources, failed_sources = window._load_annealing_preview_series(
+            project_path=project_path,
+            sources=candidates[candidate_index]["sources"],
+        )
+
+        assert missing_sources == []
+        assert failed_sources == []
+        assert len(series) == 1
+        assert series[0]["setpoint_mA"] == pytest.approx(1000.0)
+        assert list(series[0]["currents"]) == pytest.approx([1.0, 2.0, 3.0])
+        assert list(series[0]["resistances"]) == pytest.approx([180.0, 195.0, 210.0])
+    finally:
+        _close_test_window(window)
+
+
+def test_annealing_preview_dialog_stacks_each_graph_in_scroll_area(qtbot) -> None:
+    if mini_dma_mod.FigureCanvas is None:
+        pytest.skip("Matplotlib Qt backend is unavailable")
+
+    dialog = mini_dma_mod.AnnealingPreviewDialog(
+        None,
+        "Ni50Fe27Ga23 12/3",
+        [
+            {
+                "label": "100 mA",
+                "frame": pd.DataFrame(
+                    {
+                        "I_mA": [1.0, 2.0, 3.0, 2.0, 1.0],
+                        "R_Ohm": [180.0, 190.0, 205.0, 198.0, 185.0],
+                    }
+                ),
+            },
+            {
+                "label": "1000 mA",
+                "frame": pd.DataFrame(
+                    {
+                        "I_mA": [1.0, 2.0, 3.0, 2.0, 1.0],
+                        "R_Ohm": [210.0, 225.0, 260.0, 245.0, 220.0],
+                    }
+                ),
+            },
+        ],
+    )
+    qtbot.addWidget(dialog)
+
+    try:
+        assert dialog.findChild(QtWidgets.QScrollArea) is not None
+        qtbot.waitUntil(
+            lambda: len(dialog.findChildren(mini_dma_mod.FigureCanvas)) == 2,
+            timeout=5000,
+        )
+        assert len(dialog.findChildren(mini_dma_mod.FigureCanvas)) == 2
+        first_canvas = dialog.findChildren(mini_dma_mod.FigureCanvas)[0]
+        first_axes = first_canvas.figure.axes[0]
+        assert first_axes.get_xlabel() == "Current [mA]"
+        assert first_axes.get_ylabel() == "Resistance [\u03a9]"
+        assert [text.get_text() for text in first_axes.get_legend().get_texts()] == [
+            "Increasing 1",
+            "Decreasing 1",
+        ]
+        dialog.resize(700, 520)
+        dialog.show()
+        qtbot.wait(50)
+        scroll_bar = dialog.findChild(QtWidgets.QScrollArea).verticalScrollBar()
+        assert scroll_bar.maximum() > 0
+        scroll_bar.setValue(0)
+        assert dialog._scroll_preview_by_wheel_delta(-120)
+        assert scroll_bar.value() > 0
+    finally:
+        dialog.close()
 
 
 def test_wire_diameter_is_marked_until_imported_but_manual_edits_still_work(tmp_path: Path, qtbot) -> None:

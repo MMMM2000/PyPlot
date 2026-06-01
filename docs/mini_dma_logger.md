@@ -178,7 +178,10 @@ Current intended hardware stack:
 
 - unloaded gauge length `l0` is computed by the mandatory recipe-start preload/return setup instead of being typed in the Sample tab
 - pre-contact / straightening phase is handled before normal recipe logging starts
-- `.pydpj` import support for sample naming and diameter; the last project path and naming fields are restored, matching rows auto-import the wire diameter, and the diameter control is marked red until the value has been imported from the Builder project
+- `.pydpj` import support for sample naming and diameter; the last project path and naming fields are restored, matching rows auto-import the wire diameter, and the diameter control is marked red until the value has been imported from the Builder project or fabrication data
+- a fabrication-folder connector on the Sample tab indexes fabrication data without blocking the UI: selecting a large database folder first loads the top-level composition folders for composition autocomplete, then Mini DMA reads only the matching composition subtree to suggest microwire draw/piece values and fill the diameter when the `.pydpj` project does not provide one
+- the Sample tab can open a current-annealing preview from the connected `.pydpj`, selecting the matching sample automatically when possible and showing every source curve as a vertically stacked graph in a scrollable Matplotlib window
+- the wire diameter control stores millimeters internally for recipe math but displays and edits the operator-facing value in micrometers
 - stress calculation from imported diameter when available
 
 ### Plotting / UI
