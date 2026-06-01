@@ -11371,6 +11371,227 @@ def test_current_sweep_runtime_update_replans_future_stress_targets(
         _close_test_window(window)
 
 
+def test_current_sweep_runtime_update_button_waits_for_pending_changes(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_pending_ui")
+
+    active_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=70.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.5,
+        note="1",
+    )
+    future_set_current = mini_dma_mod.AutomationStep(
+        "set_current",
+        target_value=100.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_mA=1.0,
+        note="2",
+    )
+    future_ramp = mini_dma_mod.AutomationStep(
+        "ramp_target",
+        target_value=100.0,
+        target_start_value=50.0,
+        target_end_value=100.0,
+        target_ramp_rate_value_s=5.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        note="2",
+    )
+    future_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=100.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=70.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.5,
+        note="2",
+    )
+    future_reverse = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=100.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=70.0,
+        current_end_mA=1.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.5,
+        note="2",
+    )
+
+    try:
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(100.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_target_ramp_rate.setValue(5.0)
+        window.check_current_sweep_return_target.setChecked(False)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(70.0)
+        window.spin_current_sweep_step_mA.setValue(1.0)
+        window.check_current_sweep_hold_on_error.setChecked(True)
+        window.spin_current_sweep_hold_pause_factor.setValue(2.0)
+        window.spin_current_sweep_hold_resume_factor.setValue(1.0)
+        window.spin_current_sweep_hold_resume_stable_s.setValue(0.5)
+
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [active_sweep, future_set_current, future_ramp, future_sweep, future_reverse]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 44.0
+        window._automation_interval_ms = 250
+        window._recipe_estimated_points, window._automation_total_steps = window._estimate_recipe_points_and_ticks(
+            window._automation_steps,
+            window._automation_interval_ms,
+        )
+        window._current_sweep_runtime_applied_values = window._current_sweep_visible_runtime_values_from_controls()
+        window._update_recipe_buttons()
+
+        assert window._current_sweep_pending_update_preview()["changed_steps"] == []
+        assert window.button_apply_current_sweep_edits.isHidden() is True
+        assert window.button_apply_current_sweep_edits.isEnabled() is False
+        assert window.spin_current_sweep_end_mA.property("_mini_dma_runtime_pending") is False
+
+        window.spin_current_sweep_end_mA.setValue(80.0)
+        window._update_recipe_buttons()
+
+        preview = window._current_sweep_pending_update_preview()
+        assert preview["changed_steps"]
+        assert window.button_apply_current_sweep_edits.isHidden() is False
+        assert window.button_apply_current_sweep_edits.isEnabled() is True
+        assert window.spin_current_sweep_end_mA.property("_mini_dma_runtime_pending") is True
+        assert window.spin_current_sweep_start_mA.property("_mini_dma_runtime_pending") is False
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window.spin_current_sweep_end_mA.property("_mini_dma_runtime_pending") is False
+        assert window.button_apply_current_sweep_edits.isHidden() is True
+        assert window.button_apply_current_sweep_edits.isEnabled() is False
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_current_sweep_runtime_pending_highlight_tracks_target_replan_fields(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    active_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=50.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.5,
+        note="1",
+    )
+    old_future = [
+        mini_dma_mod.AutomationStep(
+            "set_current",
+            target_value=100.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_mA=1.0,
+            note="2",
+        ),
+        mini_dma_mod.AutomationStep(
+            "ramp_target",
+            target_value=100.0,
+            target_start_value=50.0,
+            target_end_value=100.0,
+            target_ramp_rate_value_s=5.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            note="2",
+        ),
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=100.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=1.0,
+            current_end_mA=50.0,
+            current_ramp_rate_mA_s=1.0,
+            current_hold_enabled=True,
+            current_hold_pause_tolerance_factor=2.0,
+            current_hold_resume_tolerance_factor=1.0,
+            current_hold_resume_stable_s=0.5,
+            note="2",
+        ),
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=100.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=50.0,
+            current_end_mA=1.0,
+            current_ramp_rate_mA_s=1.0,
+            current_hold_enabled=True,
+            current_hold_pause_tolerance_factor=2.0,
+            current_hold_resume_tolerance_factor=1.0,
+            current_hold_resume_stable_s=0.5,
+            note="2",
+        ),
+    ]
+
+    try:
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(100.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_target_ramp_rate.setValue(5.0)
+        window.check_current_sweep_return_target.setChecked(False)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(50.0)
+        window.spin_current_sweep_step_mA.setValue(1.0)
+        window.check_current_sweep_hold_on_error.setChecked(True)
+        window.spin_current_sweep_hold_pause_factor.setValue(2.0)
+        window.spin_current_sweep_hold_resume_factor.setValue(1.0)
+        window.spin_current_sweep_hold_resume_stable_s.setValue(0.5)
+
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [active_sweep, *old_future]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+        window._automation_target_value = 50.0
+        window._current_sweep_runtime_applied_values = window._current_sweep_visible_runtime_values_from_controls()
+        window._update_recipe_buttons()
+
+        assert window.button_apply_current_sweep_edits.isHidden() is True
+
+        window.spin_current_sweep_target_end.setValue(150.0)
+        window._update_recipe_buttons()
+
+        assert window.button_apply_current_sweep_edits.isHidden() is False
+        assert window.spin_current_sweep_target_end.property("_mini_dma_runtime_pending") is True
+        assert window.spin_current_sweep_target_start.property("_mini_dma_runtime_pending") is False
+        assert window.spin_current_sweep_step_mA.property("_mini_dma_runtime_pending") is False
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_current_sweep_runtime_editability_marks_locked_controls(
     tmp_path: Path,
     qtbot,
