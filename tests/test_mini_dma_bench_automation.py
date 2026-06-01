@@ -292,6 +292,78 @@ def test_mini_dma_bench_plan_acquires_shared_hmp_lock_for_execution(tmp_path: Pa
     assert ("start", None) in events
 
 
+def test_mini_dma_bench_plan_records_startup_log_when_not_started(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    summary_path = tmp_path / "summary.json"
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "summary_path": str(summary_path),
+                "default_max_run_duration_s": 1,
+                "bench_lock": {"enabled": False},
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            pass
+
+    class _FakeLog:
+        def toPlainText(self) -> str:
+            return "Scale port is unavailable; recipe did not start."
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = False
+            self._session_active = False
+            self._session_json_path = None
+            self.log_output = _FakeLog()
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            return
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            return
+
+        def _start_auto_ramp(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    run = summary["runs"][0]
+    assert run["status"] == "not_started"
+    assert "Scale port is unavailable" in run["startup_log_tail"]
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert "Scale port is unavailable" in written["runs"][0]["startup_log_tail"]
+
+
 def test_mini_dma_bench_plan_writes_control_trace_replay_after_run(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)
