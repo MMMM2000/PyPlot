@@ -4489,33 +4489,37 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        self._make_layout_width_friendly(root.layout())
-        for widget in root.findChildren(QtWidgets.QWidget):
-            widget.setMinimumWidth(0)
-            policy = widget.sizePolicy()
-            if isinstance(widget, QtWidgets.QLabel):
-                widget.setWordWrap(True)
-            if isinstance(widget, QtWidgets.QComboBox):
-                widget.setMinimumContentsLength(0)
-                widget.setSizeAdjustPolicy(
-                    QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-                )
-            if isinstance(
-                widget,
-                (
-                    QtWidgets.QAbstractSpinBox,
-                    QtWidgets.QComboBox,
-                    QtWidgets.QLineEdit,
-                    QtWidgets.QPlainTextEdit,
-                    QtWidgets.QTextEdit,
-                ),
-            ):
-                widget.setSizePolicy(
-                    QtWidgets.QSizePolicy.Policy.Expanding,
-                    policy.verticalPolicy(),
-                )
-            if isinstance(widget, QtWidgets.QAbstractScrollArea):
-                widget.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout = root.layout()
+        self._make_layout_width_friendly(layout)
+        for widget in self._iter_layout_widgets(layout):
+            self._make_control_widget_width_friendly(widget)
+
+    def _make_control_widget_width_friendly(self, widget: QtWidgets.QWidget) -> None:
+        widget.setMinimumWidth(0)
+        policy = widget.sizePolicy()
+        if isinstance(widget, QtWidgets.QLabel):
+            widget.setWordWrap(True)
+        if isinstance(widget, QtWidgets.QComboBox):
+            widget.setMinimumContentsLength(0)
+            widget.setSizeAdjustPolicy(
+                QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+        if isinstance(
+            widget,
+            (
+                QtWidgets.QAbstractSpinBox,
+                QtWidgets.QComboBox,
+                QtWidgets.QLineEdit,
+                QtWidgets.QPlainTextEdit,
+                QtWidgets.QTextEdit,
+            ),
+        ):
+            widget.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                policy.verticalPolicy(),
+            )
+        if isinstance(widget, QtWidgets.QAbstractScrollArea):
+            widget.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def _make_layout_width_friendly(self, layout: QtWidgets.QLayout | None) -> None:
         if layout is None:
@@ -4531,6 +4535,28 @@ class MainWindow(QtWidgets.QMainWindow):
             widget = item.widget()
             if widget is not None:
                 self._make_layout_width_friendly(widget.layout())
+
+    def _iter_layout_widgets(
+        self,
+        layout: QtWidgets.QLayout | None,
+        seen: set[int] | None = None,
+    ) -> Iterable[QtWidgets.QWidget]:
+        if layout is None:
+            return
+        if seen is None:
+            seen = set()
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                identity = id(widget)
+                if identity not in seen:
+                    seen.add(identity)
+                    yield widget
+                    yield from self._iter_layout_widgets(widget.layout(), seen)
+            yield from self._iter_layout_widgets(item.layout(), seen)
 
     def _install_settings_wheel_guard(self) -> None:
         control_root = self._control_scroll_area.widget() if self._control_scroll_area is not None else None
