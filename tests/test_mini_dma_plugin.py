@@ -234,6 +234,25 @@ def test_summarize_current_sweep_reports_per_target_strain_with_per_curve_l0() -
     assert core.format_current_sweep_break_summary(summary) == ""
 
 
+def test_strain_summary_reports_strain_at_max_current_not_absolute_max() -> None:
+    summary = core.CurrentSweepSummary(
+        targets=(
+            core.CurrentSweepTargetSummary(
+                stress_mpa=50.0,
+                load_g=1.56,
+                l0_mm=60.0,
+                max_current_mA=80.0,
+                max_strain_pct=2.5,
+                strain_at_max_current_pct=1.25,
+            ),
+        ),
+    )
+
+    assert core.format_current_sweep_strain_summary(summary) == [
+        "50 MPa / 1.56 g: 1.25% @ 80 mA"
+    ]
+
+
 def test_summarize_current_sweep_estimates_transition_currents_from_up_down_legs() -> None:
     heating_current = np.linspace(1.0, 100.0, 120)
     cooling_current = np.linspace(100.0, 1.0, 120)

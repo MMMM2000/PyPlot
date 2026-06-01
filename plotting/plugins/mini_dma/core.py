@@ -356,7 +356,7 @@ def summarize_current_sweep(
 def format_current_sweep_strain_summary(summary: CurrentSweepSummary) -> list[str]:
     lines: list[str] = []
     for target in summary.targets:
-        strain = target.max_strain_pct
+        strain = target.strain_at_max_current_pct
         current = target.max_current_mA
         if strain is None or current is None:
             continue
