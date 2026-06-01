@@ -95,6 +95,13 @@ class HmpSerialDriver:
             return [str(command) for command in commands]
         return []
 
+    def reset_io_buffers(self) -> None:
+        port = self._port()
+        for name in ("reset_input_buffer", "reset_output_buffer"):
+            method = getattr(port, name, None)
+            if callable(method):
+                method()
+
     def _write_command(self, command: str, *, settle_s: float = 0.03) -> None:
         wire = command.strip()
         if not wire:

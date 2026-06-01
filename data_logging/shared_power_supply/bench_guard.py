@@ -164,13 +164,16 @@ def wait_for_bench_lock(
 def identify_hmp_with_blank_retry(
     driver: HmpSerialDriver,
     *,
-    attempts: int = 3,
-    delay_s: float = 0.2,
+    attempts: int = 6,
+    delay_s: float = 0.35,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> str:
     tries = max(1, int(attempts))
     last_idn = ""
     for index in range(tries):
+        reset = getattr(driver, "reset_io_buffers", None)
+        if callable(reset):
+            reset()
         last_idn = str(driver.identify() or "")
         if getattr(driver, "profile", None) is not None or last_idn.strip():
             return last_idn

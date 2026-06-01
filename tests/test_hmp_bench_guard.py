@@ -51,10 +51,14 @@ def test_identify_hmp_retries_transient_blank_response() -> None:
         def __init__(self) -> None:
             self.profile = None
             self.calls = 0
+            self.reset_calls = 0
+
+        def reset_io_buffers(self) -> None:
+            self.reset_calls += 1
 
         def identify(self) -> str:
             self.calls += 1
-            if self.calls == 1:
+            if self.calls < 4:
                 return ""
             self.profile = object()
             return "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62"
@@ -64,7 +68,8 @@ def test_identify_hmp_retries_transient_blank_response() -> None:
     idn = identify_hmp_with_blank_retry(driver, sleep_fn=lambda _seconds: None)
 
     assert idn.startswith("ROHDE&SCHWARZ,HMP4040")
-    assert driver.calls == 2
+    assert driver.calls == 4
+    assert driver.reset_calls == 4
 
 
 def test_identify_hmp_does_not_hide_unsupported_nonblank_response() -> None:
@@ -84,6 +89,39 @@ def test_identify_hmp_does_not_hide_unsupported_nonblank_response() -> None:
     assert idn == "OTHER,DEVICE"
     assert driver.profile is None
     assert driver.calls == 1
+
+
+def test_hmp_driver_reset_io_buffers_uses_serial_reset_methods() -> None:
+    from data_logging.shared_power_supply.driver import HmpSerialDriver
+
+    class FakeSerial:
+        is_open = True
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def write(self, data: bytes) -> int:
+            return len(data)
+
+        def readline(self) -> bytes:
+            return b""
+
+        def reset_input_buffer(self) -> None:
+            self.calls.append("input")
+
+        def reset_output_buffer(self) -> None:
+            self.calls.append("output")
+
+        def close(self) -> None:
+            self.is_open = False
+
+    port = FakeSerial()
+    driver = HmpSerialDriver(port_name="COM3", serial_factory=lambda *_args, **_kwargs: port)
+    driver.connect()
+
+    driver.reset_io_buffers()
+
+    assert port.calls == ["input", "output"]
 
 
 def test_bench_probe_reads_requested_channels() -> None:
