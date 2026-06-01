@@ -310,8 +310,13 @@ def run_smoke(
             client.configure_channel(channel=4, lease_id=lease_map[4], voltage_v=1.0, current_a=0.001, output_on=False)
             client.set_output(channel=4, lease_id=lease_map[4], output_on=True)
             output_cleanup_channels.add(4)
-            time.sleep(0.45)
-            result["ch4_low_current_rows"] = [{"setpoint_mA": 1.0, **_measure(client, 4)}]
+            ch4_rows = []
+            elapsed_s = 0.0
+            for wait_s in (0.45, 0.55, 1.0):
+                time.sleep(wait_s)
+                elapsed_s += wait_s
+                ch4_rows.append({"setpoint_mA": 1.0, "settled_for_s": elapsed_s, **_measure(client, 4)})
+            result["ch4_low_current_rows"] = ch4_rows
             client.set_output(channel=4, lease_id=lease_map[4], output_on=False)
 
             if ch3_already_leased:
