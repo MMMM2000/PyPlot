@@ -5820,7 +5820,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_step_mA.setDecimals(2)
         self.spin_current_sweep_step_mA.setRange(0.01, 5000.0)
         self.spin_current_sweep_step_mA.setSingleStep(0.2)
-        self.spin_current_sweep_step_mA.setValue(1.0)
+        self.spin_current_sweep_step_mA.setValue(0.8)
         self.spin_current_sweep_step_mA.setSuffix(" mA/s")
         self.spin_current_sweep_step_mA.setToolTip(
             "Current ramp rate. Mini DMA converts this to smaller setpoint updates using the control interval."

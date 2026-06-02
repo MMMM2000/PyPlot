@@ -54,13 +54,13 @@ run_plan:
     target_mpa: 20.0
     current_end_mA: 100.0
   stages:
-    - id: baseline_1p0
-      recipe_path: plans/recipes/iso-stress-50mpa-1-to-100-to-1ma-1p0ma-s.recipe.json
-      current_ramp_rate_mA_s: 1.0
-      repeat: 1
-    - id: speed_0p8
+    - id: baseline_0p8
       recipe_path: plans/recipes/iso-stress-50mpa-1-to-100-to-1ma-0p8ma-s.recipe.json
       current_ramp_rate_mA_s: 0.8
+      repeat: 1
+    - id: speed_1p0
+      recipe_path: plans/recipes/iso-stress-50mpa-1-to-100-to-1ma-1p0ma-s.recipe.json
+      current_ramp_rate_mA_s: 1.0
       repeat: 1
     - id: speed_0p6
       recipe_path: plans/recipes/iso-stress-50mpa-1-to-100-to-1ma-0p6ma-s.recipe.json
@@ -71,7 +71,7 @@ run_plan:
       current_ramp_policy: dynamic
       repeat: 1
   comparison_policy:
-    baseline_stage: baseline_1p0
+    baseline_stage: baseline_0p8
     slower_ramps_must_justify_time_cost: true
     example_threshold_question: check whether 0.2 mA/s improves precision enough to justify the much longer run time
     dynamic_ramp_goal: match or improve slower-ramp precision while keeping measurement time closer to faster fixed ramps
