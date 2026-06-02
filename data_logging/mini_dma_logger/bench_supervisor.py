@@ -331,7 +331,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:
         print(f"[mini-dma-supervisor] {type(exc).__name__}: {exc}")
         return 1
-    print(json.dumps(summary, ensure_ascii=False))
+    print(json.dumps(summary, ensure_ascii=True))
     return int(summary.get("child_returncode") or 0)
 
 

@@ -144,3 +144,21 @@ def test_normalize_windows_path_env_keeps_one_path_key() -> None:
     assert path_keys == ["Path"]
     assert env["Path"] == "A"
     assert env["OTHER"] == "C"
+
+
+def test_supervisor_main_prints_ascii_json_for_windows_console(monkeypatch, capsys) -> None:
+    def _fake_run(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "state": "completed",
+            "child_returncode": 0,
+            "path": "C:/Users/Martin Eliáš/PyPlot",
+            "tail": "bad char \ufffd",
+        }
+
+    monkeypatch.setattr(bench_supervisor, "run_supervised_mini_dma_bench", _fake_run)
+
+    assert bench_supervisor.main(["bench-plan.json"]) == 0
+
+    out = capsys.readouterr().out
+    assert "\\u00e1" in out
+    assert "\\ufffd" in out
