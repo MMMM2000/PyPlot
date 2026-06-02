@@ -51,6 +51,7 @@ Keep only reusable tools, templates, schemas, recipes, and report generators in 
 
 A worker must not start live Mini DMA optimization if any of these are unknown:
 
+- the optimization objective and success metrics
 - sample composition, microwire, gauge length, and diameter source
 - required base branch or integration branch
 - actual git branch and commit
@@ -61,6 +62,40 @@ A worker must not start live Mini DMA optimization if any of these are unknown:
 - report output path
 
 The checker is intentionally conservative. If the manifest does not say what “latest approved control logic” means, the worker should stop and ask the master coordination thread to update the campaign rather than guessing.
+
+## Optimization Objective
+
+The control objective must be explicit before a live campaign starts. For current-sweep optimization, the usual goal is:
+
+- minimize stress/load fluctuation during current ramps
+- minimize RMS, p95, and maximum stress error
+- recover quickly after transformation-driven stress changes
+- preserve a clean strain-current curve
+- find the useful precision/time tradeoff
+
+The run is not automatically better because it is slower. A `0.2 mA/s` ramp may be useful for a reference curve, or it may waste time if `0.6 mA/s` gives essentially the same stress stability and curve quality. The report should make that tradeoff visible instead of relying on impressions.
+
+Dynamic current-ramp control should be judged by the same standard: it should approach the precision of slower fixed ramps while keeping measurement time closer to faster fixed ramps.
+
+## Generalization Rule
+
+Do not optimize permanent control logic only for one sample, one length, or one composition. Different microwires can have different diameter, gauge length, stiffness, resistance, transformation behavior, and current compliance. Control changes should therefore be based on measured or declared quantities such as:
+
+- diameter and gauge length
+- load-path stiffness or calibration results
+- noise floor and scale cadence
+- motor step size and backlash
+- live stress/load error and trend
+- current-ramp rate and measured compliance
+
+Hard-coded MPa, mm, mA, or time constants are acceptable only when they are:
+
+- safety guardrails,
+- derived from sample geometry or calibration,
+- declared in the campaign manifest for that campaign only, or
+- temporary experimental probes that are not promoted into permanent control logic without generalization.
+
+If a worker proposes a fixed cap or magic value, it must explain why a physically derived or adaptive rule is not sufficient.
 
 ## Standard Report Contract
 

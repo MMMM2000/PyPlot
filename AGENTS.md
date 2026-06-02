@@ -62,6 +62,7 @@
 
 ## Mini DMA Optimization Campaigns
 - Treat Mini DMA optimization as a repeatable campaign, not an ad hoc run.
+- Make the optimization objective explicit before live work: minimize stress/load fluctuation, minimize stress error, recover quickly after transformation-driven stress changes, preserve useful strain-current curves, and quantify the measurement-time versus precision tradeoff.
 - Keep raw run history and reports in `G:\My Drive\1 Projects\Praha\mini DMA\automation_history`; keep reusable templates, recipes, schemas, scripts, and docs in the repo.
 - Every optimization campaign should have a `campaign.yaml` based on `docs/automation_templates/mini_dma_campaign.yaml`.
 - Before live optimization hardware, run:
@@ -69,10 +70,12 @@
 - The campaign manifest must define sample identity, length, diameter source, approved control source, hardware channels, voltage/current limits, safety rails, run stages, and reporting outputs.
 - Optimization workers must start from the latest approved control logic named by the campaign, normally latest `main` or the current Mini DMA integration branch. Do not use a random stale worker branch just because it has local artifacts.
 - If the campaign checker says the branch is dirty, behind the approved base, missing control source, or missing report paths, stop and ask the master thread to fix the campaign or integration state before running hardware.
+- Do not tune permanent Mini DMA control logic to one sample with hard-coded magic values. Prefer adaptive or physically derived rules based on diameter, length, stiffness/calibration, noise, motor step size, stress/load trend, current ramp rate, and measured compliance. Hard caps are acceptable for safety or campaign-local experiments, but they must be clearly labeled as such.
 - After campaign runs, generate the standard report with:
   - `uv run python scripts/mini_dma_report.py <campaign.yaml>`
 - Standard reports must include stress vs time, strain vs current, and current-hold highlighting. Exploratory plots may be added, but do not replace the core plot pair.
 - For temperature/current-ramp optimization, encode fixed ramp speeds and dynamic-ramp candidates as explicit campaign stages so precision/time comparisons are repeatable.
+- Slower current ramps must justify their extra time with measurable precision or curve-quality gains; for example, check whether `0.2 mA/s` is actually worth the much longer measurement compared with `0.6` or `0.8 mA/s`.
 
 ## Environment
 - Use `uv` for project Python commands and environment sync by default.

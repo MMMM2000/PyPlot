@@ -153,6 +153,7 @@ def validate_campaign(
         ("kind",),
         ("campaign", "id"),
         ("campaign", "root"),
+        ("objective", "primary"),
         ("sample", "composition"),
         ("sample", "microwire"),
         ("sample", "length_mm"),

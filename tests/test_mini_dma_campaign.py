@@ -17,6 +17,11 @@ def _write_manifest(path: Path, root: Path, run_dir: Path | None = None) -> None
             "title": "Test campaign",
             "root": str(root),
         },
+        "objective": {
+            "primary": "minimize stress error and recovery time while balancing measurement time",
+            "optimize_for_generalization": True,
+            "avoid_sample_specific_magic_values": True,
+        },
         "sample": {
             "composition": "Ni50Fe27Ga23",
             "microwire": "12/2",
