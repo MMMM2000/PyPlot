@@ -173,7 +173,7 @@ def test_supervisor_terminates_child_after_finished_metadata(tmp_path: Path, mon
         ),
         encoding="utf-8",
     )
-    old_time = bench_supervisor.time.time() - 30.0
+    old_time = bench_supervisor.time.time()
     os.utime(metadata_path, (old_time, old_time))
 
     def _fake_safe_off(**kwargs: Any) -> dict[str, Any]:
@@ -184,6 +184,7 @@ def test_supervisor_terminates_child_after_finished_metadata(tmp_path: Path, mon
         }
 
     monkeypatch.setattr(bench_supervisor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(bench_supervisor, "FINISHED_METADATA_CHILD_GRACE_S", 0.0)
     _FakePopen.instances.clear()
 
     result = bench_supervisor.run_supervised_mini_dma_bench(
