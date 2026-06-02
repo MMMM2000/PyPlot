@@ -3643,6 +3643,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fabrication_records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
         self._fabrication_loaded_compositions: set[str] = set()
         self._fabrication_loading_composition: str | None = None
+        self._fabrication_composition_completer: QtWidgets.QCompleter | None = None
+        self._fabrication_composition_model: QtCore.QStringListModel | None = None
+        self._fabrication_composition_labels_key: tuple[str, ...] = ()
+        self._fabrication_microwire_completer: QtWidgets.QCompleter | None = None
+        self._fabrication_microwire_model: QtCore.QStringListModel | None = None
+        self._fabrication_microwire_composition_key: str | None = None
+        self._fabrication_microwire_labels_key: tuple[str, ...] = ()
         self._fabrication_thread: QtCore.QThread | None = None
         self._fabrication_worker: FabricationSuggestionWorker | None = None
         self._annealing_preview_windows: list[QtWidgets.QWidget] = []
@@ -3851,6 +3858,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_hint_timer = QtCore.QTimer(self)
         self._scale_hint_timer.setSingleShot(True)
         self._scale_hint_timer.timeout.connect(self._warn_if_scale_is_silent)
+        self._sample_autofill_timer = QtCore.QTimer(self)
+        self._sample_autofill_timer.setSingleShot(True)
+        self._sample_autofill_timer.setInterval(10)
+        self._sample_autofill_timer.timeout.connect(self._apply_sample_autofill_from_current_fields)
         self._restore_settings()
         self._refresh_scale_ports()
         self._refresh_live_labels()
@@ -8359,24 +8370,80 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _refresh_fabrication_completers(self) -> None:
-        compositions = list(self._fabrication_records_by_composition)
-        composition_completer = QtWidgets.QCompleter(compositions, self.edit_name_composition)
-        composition_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
-        composition_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
-        self.edit_name_composition.setCompleter(composition_completer)
+        compositions = tuple(self._fabrication_records_by_composition)
+        if self._fabrication_composition_model is None:
+            self._fabrication_composition_model = QtCore.QStringListModel(self.edit_name_composition)
+        if compositions != self._fabrication_composition_labels_key:
+            self._fabrication_composition_model.setStringList(list(compositions))
+            self._fabrication_composition_labels_key = compositions
+        if self._fabrication_composition_completer is None:
+            composition_completer = QtWidgets.QCompleter(self._fabrication_composition_model, self.edit_name_composition)
+            composition_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+            composition_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+            composition_completer.activated[str].connect(self._handle_fabrication_composition_activated)
+            self._fabrication_composition_completer = composition_completer
+            self.edit_name_composition.setCompleter(composition_completer)
         self._update_fabrication_microwire_completer()
 
     def _update_fabrication_microwire_completer(self) -> None:
         composition = self._matching_fabrication_composition()
-        labels = [
+        labels = tuple(
             record.label
             for record in self._fabrication_records_by_composition.get(composition or "", [])
-        ]
-        microwire_completer = QtWidgets.QCompleter(labels, self.edit_name_wire)
-        microwire_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
-        microwire_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
-        self.edit_name_wire.setCompleter(microwire_completer)
-        self._ensure_fabrication_composition_loaded()
+        )
+        composition_key = _normalized_token(composition or "")
+        if self._fabrication_microwire_model is None:
+            self._fabrication_microwire_model = QtCore.QStringListModel(self.edit_name_wire)
+        if (
+            composition_key != self._fabrication_microwire_composition_key
+            or labels != self._fabrication_microwire_labels_key
+        ):
+            self._fabrication_microwire_model.setStringList(list(labels))
+            self._fabrication_microwire_composition_key = composition_key
+            self._fabrication_microwire_labels_key = labels
+        if self._fabrication_microwire_completer is None:
+            microwire_completer = QtWidgets.QCompleter(self._fabrication_microwire_model, self.edit_name_wire)
+            microwire_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+            microwire_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+            microwire_completer.activated[str].connect(self._handle_fabrication_microwire_activated)
+            self._fabrication_microwire_completer = microwire_completer
+            self.edit_name_wire.setCompleter(microwire_completer)
+        if composition_key:
+            self._ensure_fabrication_composition_loaded()
+
+    def _handle_fabrication_composition_activated(self, text: str) -> None:
+        self._set_sample_field_from_completer(self.edit_name_composition, text)
+        self._update_fabrication_microwire_completer()
+        self._schedule_sample_autofill()
+
+    def _handle_fabrication_microwire_activated(self, text: str) -> None:
+        display_text = MicrowireLineEdit.to_display_text(text) or str(text).strip()
+        self._set_sample_field_from_completer(self.edit_name_wire, display_text)
+        self._schedule_sample_autofill()
+
+    def _set_sample_field_from_completer(self, field: QtWidgets.QLineEdit, text: str) -> None:
+        blocker = QtCore.QSignalBlocker(field)
+        try:
+            field.setText(str(text).strip())
+            field.setCursorPosition(len(field.text()))
+        finally:
+            del blocker
+        self._sync_auto_name_fields(text)
+
+    def _schedule_sample_autofill(self) -> None:
+        if not hasattr(self, "_sample_autofill_timer"):
+            self._apply_sample_autofill_from_current_fields()
+            return
+        self._sample_autofill_timer.start()
+
+    def _apply_sample_autofill_from_current_fields(self) -> None:
+        self._update_fabrication_microwire_completer()
+        self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+        try:
+            self._apply_fabrication_sample_if_possible()
+        except Exception as exc:
+            self._mark_diameter_imported(False)
+            self.label_fabrication_status.setText(f"Failed to apply fabrication sample suggestion: {exc}")
 
     def _ensure_fabrication_composition_loaded(self) -> None:
         root = self._fabrication_folder_path
@@ -9330,7 +9397,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
             self._log(f"Applied naming fields: {built}")
 
-    def _sync_auto_name_fields(self) -> None:
+    def _sync_auto_name_fields(self, *_signal_args: object) -> None:
         if self._sync_name_fields_in_progress:
             return
         self._sync_name_fields_in_progress = True
@@ -9355,13 +9422,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_auto_sample_name = built
                 self._last_auto_log_name = safe_name
             self._refresh_recipe_sample_label()
-            self._update_fabrication_microwire_completer()
-            self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
-            try:
-                self._apply_fabrication_sample_if_possible()
-            except Exception as exc:
-                self._mark_diameter_imported(False)
-                self.label_fabrication_status.setText(f"Failed to apply fabrication sample suggestion: {exc}")
+            if _signal_args:
+                self._schedule_sample_autofill()
+            else:
+                self._apply_sample_autofill_from_current_fields()
             self._persist_settings_if_enabled()
         finally:
             self._sync_name_fields_in_progress = False

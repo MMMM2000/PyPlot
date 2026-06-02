@@ -4359,6 +4359,96 @@ def test_microwire_field_ui_typing_reports_project_match_errors_without_crashing
         _close_test_window(window)
 
 
+def test_fabrication_completer_activation_updates_sample_once(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            "Ni50Fe27Ga23": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=10,
+                    piece=4,
+                    label="10/4",
+                    diameter_mm=0.0136,
+                )
+            ]
+        }
+        window._refresh_fabrication_completers()
+
+        composition_completer = window.edit_name_composition.completer()
+        assert composition_completer is not None
+        composition_completer.activated[str].emit("Ni50Fe27Ga23")
+        qtbot.waitUntil(
+            lambda: window.edit_name_composition.text() == "Ni50Fe27Ga23",
+            timeout=1000,
+        )
+
+        microwire_completer = window.edit_name_wire.completer()
+        assert microwire_completer is not None
+        microwire_completer.activated[str].emit("10/4")
+        qtbot.waitUntil(
+            lambda: window.spin_diameter.value() == pytest.approx(0.0136),
+            timeout=1000,
+        )
+
+        assert window.edit_sample_name.text() == "Ni50Fe27Ga23 10/4"
+        assert window.edit_log_name.text() == "Ni50Fe27Ga23 10_4"
+        assert "fabrication diameter 13.6 um" in window.label_fabrication_status.text()
+        assert "border" not in window.spin_diameter.styleSheet()
+    finally:
+        _close_test_window(window)
+
+
+def test_fabrication_microwire_completer_is_stable_during_rapid_selection_changes(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            "Ni50Fe27Ga23": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni50Fe27Ga23",
+                    draw=10,
+                    piece=piece,
+                    label=f"10/{piece}",
+                    diameter_mm=0.010 + piece / 100000,
+                )
+                for piece in range(1, 501)
+            ]
+        }
+        window._refresh_fabrication_completers()
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        qtbot.wait(120)
+
+        original_completer = window.edit_name_wire.completer()
+        assert original_completer is not None
+        original_model = original_completer.model()
+
+        started_s = time.monotonic()
+        for text in ("10/1", "10/4", "10/40", "10/400", "10/4", "10/401"):
+            window.edit_name_wire.setText(text)
+        qtbot.waitUntil(
+            lambda: window.spin_diameter.value() == pytest.approx(0.010 + 401 / 100000),
+            timeout=1000,
+        )
+        elapsed_s = time.monotonic() - started_s
+
+        assert window.edit_name_wire.completer() is original_completer
+        assert window.edit_name_wire.completer().model() is original_model
+        assert original_model.rowCount() == 500
+        assert elapsed_s < 0.5
+        assert window.edit_sample_name.text() == "Ni50Fe27Ga23 10/401"
+        assert window.spin_diameter.value() == pytest.approx(0.010 + 401 / 100000)
+    finally:
+        _close_test_window(window)
+
+
 def test_wire_diameter_displays_micrometers_while_storing_mm(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
