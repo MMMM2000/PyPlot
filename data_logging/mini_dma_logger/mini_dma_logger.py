@@ -3641,6 +3641,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_import_request_key: tuple[str, str, str, str] | None = None
         self._fabrication_folder_path: Path | None = None
         self._fabrication_records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
+        self._fabrication_composition_lookup: dict[str, str] = {}
+        self._fabrication_record_lookup: dict[tuple[str, str], FabricationSampleRecord] = {}
+        self._fabrication_completer_compositions: tuple[str, ...] = ()
+        self._fabrication_microwire_completer_key: tuple[str, tuple[str, ...]] | None = None
+        self._fabrication_composition_model: QtCore.QStringListModel | None = None
+        self._fabrication_microwire_model: QtCore.QStringListModel | None = None
+        self._fabrication_composition_completer: QtWidgets.QCompleter | None = None
+        self._fabrication_microwire_completer: QtWidgets.QCompleter | None = None
         self._fabrication_loaded_compositions: set[str] = set()
         self._fabrication_loading_composition: str | None = None
         self._fabrication_thread: QtCore.QThread | None = None
@@ -8359,24 +8367,90 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _refresh_fabrication_completers(self) -> None:
-        compositions = list(self._fabrication_records_by_composition)
-        composition_completer = QtWidgets.QCompleter(compositions, self.edit_name_composition)
-        composition_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
-        composition_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
-        self.edit_name_composition.setCompleter(composition_completer)
+        self._rebuild_fabrication_lookup_cache()
+        compositions = tuple(self._fabrication_records_by_composition)
+        if self._fabrication_composition_model is None:
+            self._fabrication_composition_model = QtCore.QStringListModel(self.edit_name_composition)
+        if self._fabrication_composition_completer is None:
+            composition_completer = QtWidgets.QCompleter(
+                self._fabrication_composition_model,
+                self.edit_name_composition,
+            )
+            composition_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+            composition_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+            composition_completer.activated.connect(self._handle_fabrication_composition_activated)
+            self._fabrication_composition_completer = composition_completer
+            self.edit_name_composition.setCompleter(composition_completer)
+        if compositions != self._fabrication_completer_compositions:
+            self._fabrication_composition_model.setStringList(list(compositions))
+            self._fabrication_completer_compositions = compositions
+            self._fabrication_microwire_completer_key = None
         self._update_fabrication_microwire_completer()
 
     def _update_fabrication_microwire_completer(self) -> None:
         composition = self._matching_fabrication_composition()
-        labels = [
+        labels_tuple = tuple(
             record.label
             for record in self._fabrication_records_by_composition.get(composition or "", [])
-        ]
-        microwire_completer = QtWidgets.QCompleter(labels, self.edit_name_wire)
-        microwire_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
-        microwire_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
-        self.edit_name_wire.setCompleter(microwire_completer)
+        )
+        composition_key = _normalized_token(composition)
+        completer_key = (composition_key, labels_tuple)
+        if self._fabrication_microwire_model is None:
+            self._fabrication_microwire_model = QtCore.QStringListModel(self.edit_name_wire)
+        if self._fabrication_microwire_completer is None:
+            microwire_completer = QtWidgets.QCompleter(
+                self._fabrication_microwire_model,
+                self.edit_name_wire,
+            )
+            microwire_completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+            microwire_completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+            microwire_completer.activated.connect(self._handle_fabrication_microwire_activated)
+            self._fabrication_microwire_completer = microwire_completer
+            self.edit_name_wire.setCompleter(microwire_completer)
+        if completer_key != self._fabrication_microwire_completer_key:
+            self._fabrication_microwire_model.setStringList(list(labels_tuple))
+            self._fabrication_microwire_completer_key = completer_key
         self._ensure_fabrication_composition_loaded()
+
+    def _rebuild_fabrication_lookup_cache(self) -> None:
+        self._fabrication_composition_lookup = {
+            normalized: composition
+            for composition in self._fabrication_records_by_composition
+            if (normalized := _normalized_token(composition))
+        }
+        record_lookup: dict[tuple[str, str], FabricationSampleRecord] = {}
+        for composition, records in self._fabrication_records_by_composition.items():
+            composition_key = _normalized_token(composition)
+            if not composition_key:
+                continue
+            for record in records:
+                wire_key = _normalized_microwire_token(record.label)
+                if wire_key:
+                    record_lookup[(composition_key, wire_key)] = record
+        self._fabrication_record_lookup = record_lookup
+
+    def _completion_text_from_value(self, value: object) -> str:
+        if isinstance(value, QtCore.QModelIndex):
+            data = value.data()
+            return "" if data is None else str(data)
+        return str(value or "")
+
+    def _handle_fabrication_composition_activated(self, value: object) -> None:
+        text = self._completion_text_from_value(value).strip()
+        if not text:
+            return
+        with QtCore.QSignalBlocker(self.edit_name_composition):
+            self.edit_name_composition.setText(text)
+        self._sync_auto_name_fields()
+
+    def _handle_fabrication_microwire_activated(self, value: object) -> None:
+        text = self._completion_text_from_value(value)
+        display_text = MicrowireLineEdit.to_display_text(text) or text.strip()
+        if not display_text:
+            return
+        with QtCore.QSignalBlocker(self.edit_name_wire):
+            self.edit_name_wire.setText(display_text)
+        self._sync_auto_name_fields()
 
     def _ensure_fabrication_composition_loaded(self) -> None:
         root = self._fabrication_folder_path
@@ -8402,10 +8476,7 @@ class MainWindow(QtWidgets.QMainWindow):
         current = _normalized_token(self.edit_name_composition.text())
         if not current:
             return None
-        for composition in self._fabrication_records_by_composition:
-            if _normalized_token(composition) == current:
-                return composition
-        return None
+        return self._fabrication_composition_lookup.get(current)
 
     def _matching_fabrication_record(self) -> FabricationSampleRecord | None:
         composition = self._matching_fabrication_composition()
@@ -8414,10 +8485,7 @@ class MainWindow(QtWidgets.QMainWindow):
         current_wire = _normalized_microwire_token(self.edit_name_wire.text())
         if not current_wire:
             return None
-        for record in self._fabrication_records_by_composition.get(composition, []):
-            if _normalized_microwire_token(record.label) == current_wire:
-                return record
-        return None
+        return self._fabrication_record_lookup.get((_normalized_token(composition), current_wire))
 
     def _apply_fabrication_sample_if_possible(self) -> bool:
         if self._diameter_imported:
